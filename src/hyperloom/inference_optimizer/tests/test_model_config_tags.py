@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import _load_model_config_tags
+from hyperloom.inference_optimizer.cli.model_gate import _load_model_config_tags
 from hyperloom.orchestrator.knowledge.cortex_t0 import run_t0_anchor
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,

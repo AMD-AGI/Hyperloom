@@ -9,7 +9,7 @@ decisions that bypassed Critic via programmatic paths (``integrate`` executor,
 
 Severity: HIGH + escalate/prune — G1 empty patch KEEP, G3 dispatch bypassed,
 G4 negative-delta kernel kept, G5 ci_metrics baseline=0 without
-``status=baseline_failed``, G7 OOB expected-only. MEDIUM + alert — G2 sub-threshold
+``status=baseline_failed``, G7 legacy backend expected-only. MEDIUM + alert — G2 sub-threshold
 KEEP, G6 ci_metrics schema drift. These are audit, not recovery: no auto-delegate(report).
 """
 
@@ -69,7 +69,7 @@ def evaluate_decision_audit_signals(
 ) -> list[Symptom]:
     """Run the G1-G7 reverse-audit rules over persisted decision artefacts.
 
-    Inspects integrate result entries, ci_metrics, and OOB attempts collected
+    Inspects integrate result entries, ci_metrics, and kernel attempts collected
     into :attr:`SourceData.local_decision_audit` and aggregates any symptoms.
 
     Args:

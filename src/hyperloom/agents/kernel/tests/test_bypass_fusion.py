@@ -85,9 +85,12 @@ def test_fusable_time_and_count_cover_all_clusters_not_just_top_k():
     seq = []
     ts = 0.0
     for i in range(3):
-        seq.append({"name": f"mm{i}", "category": "GEMM", "ts": ts, "dur": 5.0}); ts += 5
-        seq.append({"name": f"a{i}", "category": "Elementwise", "ts": ts, "dur": 1.0 + i}); ts += 1 + i
-        seq.append({"name": f"b{i}", "category": "Elementwise", "ts": ts, "dur": 1.0 + i}); ts += 1 + i
+        seq.append({"name": f"mm{i}", "category": "GEMM", "ts": ts, "dur": 5.0})
+        ts += 5
+        seq.append({"name": f"a{i}", "category": "Elementwise", "ts": ts, "dur": 1.0 + i})
+        ts += 1 + i
+        seq.append({"name": f"b{i}", "category": "Elementwise", "ts": ts, "dur": 1.0 + i})
+        ts += 1 + i
     out = analyze_fusion(seq, top_k_clusters=1)
     assert out["fusable_cluster_count"] == 3          # total, not truncated
     assert len(out["fusable_clusters"]) == 1          # list capped to top_k

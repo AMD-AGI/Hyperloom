@@ -175,56 +175,7 @@ def test_coordinator_intervention_hook_records_integrate_attempts():
     assert c.shared_state.consecutive_config_only_rounds == 0
 
 
-# 5. Derived intervention-mix summary
-def test_get_intervention_mix_empty_ledger():
-    s = SharedState()
-    mix = s.get_intervention_mix()
-    assert mix == {
-        "total_config": 0,
-        "total_code_patch": 0,
-        "total_code_patch_attempt": 0,
-        "recent_config": 0,
-        "recent_code_patch": 0,
-        "recent_code_patch_attempt": 0,
-        "consecutive_config_only": 0,
-        "config_heavy": False,
-    }
-
-
-def test_get_intervention_mix_counts_and_consecutive_tail():
-    s = SharedState()
-    for _ in range(3):
-        s.record_intervention(change_type="config", action="explore")
-    s.record_intervention(change_type="code_patch", action="integrate_patch")
-    s.record_intervention(change_type="config", action="explore")
-    s.record_intervention(change_type="config", action="explore")
-    mix = s.get_intervention_mix()
-    assert mix["total_config"] == 5
-    assert mix["total_code_patch"] == 1
-    assert mix["consecutive_config_only"] == 2
-    assert mix["config_heavy"] is False
-
-
-def test_get_intervention_mix_config_heavy_flag():
-    s = SharedState()
-    for _ in range(5):
-        s.record_intervention(change_type="config", action="explore")
-    mix = s.get_intervention_mix()
-    assert mix["config_heavy"] is True
-    assert mix["consecutive_config_only"] == 5
-
-
-def test_get_intervention_mix_unknown_breaks_consecutive_run():
-    s = SharedState()
-    s.record_intervention(change_type="config", action="explore")
-    s.record_intervention(change_type="other", action="recover")
-    mix = s.get_intervention_mix()
-    assert mix["consecutive_config_only"] == 0
-    assert mix["total_config"] == 1
-    assert mix["total_code_patch"] == 0
-
-
-# 6. Advisory intervention-mix prompt summary
+# 5. Advisory intervention-mix prompt summary
 def test_intervention_mix_summary_no_escalation_when_balanced():
     s = SharedState()
     s.record_intervention(change_type="config", action="explore")

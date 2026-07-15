@@ -10,7 +10,6 @@ import pytest
 
 from hyperloom.agents.robustness.role.envelope import (
     ALERT_SEVERITIES,
-    BackendTurnResult,
     IntentType,
     KILL_TASK_ALLOWED_SCOPES,
     PAYLOAD_REQUIRED,
@@ -227,13 +226,6 @@ def test_intent_to_envelope_item_makes_a_copy_of_payload():
     item = intent.to_envelope_item()
     item["payload"]["k"] = 2
     assert intent.payload["detail"]["k"] == 1
-
-
-def test_backend_turn_result_default_fields():
-    res = BackendTurnResult()
-    assert res.intents == []
-    assert res.raw_text == ""
-    assert res.metadata == {}
 
 
 # ---------------------------------------------------------------------------

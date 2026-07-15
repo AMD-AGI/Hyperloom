@@ -19,10 +19,11 @@ is to keep appending here reliably.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 from pathlib import Path
+
+from hyperloom.common.io import append_jsonl
 
 
 #: Default KB root for framework-PR lessons; override via
@@ -157,10 +158,8 @@ def _append_record_sync(record: dict) -> Path:
         Path: The on-disk path of the ``lessons.jsonl`` file so callers
             can log / surface it.
     """
-    KB_ROOT.mkdir(parents=True, exist_ok=True)
     path = KB_ROOT / LESSONS_FILE
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, sort_keys=True) + "\n")
+    append_jsonl(path, record, make_parents=True, sort_keys=True)
     return path
 
 

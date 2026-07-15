@@ -52,15 +52,6 @@ def test_asset_root_override_missing_raises(tmp_path, monkeypatch):
         paths.asset_root()
 
 
-def test_agent_session_dir_returns_path(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    sd = paths.make_session_dir()
-    ad = paths.agent_session_dir(sd, "orchestration")
-    assert ad == sd / "agents" / "orchestration"
-    # make_session_dir() pre-creates the lower-cased role subdirs.
-    assert ad.is_dir()
-
-
 # storage / schema
 def _new_db(tmp_path) -> Path:
     return tmp_path / "test.db"

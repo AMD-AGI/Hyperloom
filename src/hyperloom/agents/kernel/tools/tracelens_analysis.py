@@ -55,19 +55,16 @@ from tracelens_skill_runner import (
     run_tracelens_skill,
 )
 
-from _io_utils import append_log, atomic_write_json, read_last_lines, utc_now
+from _io_utils import append_log, atomic_write_json, read_last_lines, safe_float, utc_now
 
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
 from _paths import workspace_root
 
 # Idle-gate threshold + high-idle warning: shared single source of truth so the
-# TraceLens and bypass routes gate on identical semantics (kept as private
-# aliases to preserve existing references/tests in this module).
+# TraceLens and bypass routes gate on identical semantics.
 from _idle_gate import (
-    HIGH_IDLE_PCT_THRESHOLD_DEFAULT,
-    HIGH_IDLE_PCT_THRESHOLD_ENV,
     build_high_idle_warning as _build_high_idle_warning,
-    resolve_idle_pct_threshold as _resolve_idle_pct_threshold,
+    resolve_idle_pct_threshold,
 )
 
 # Canonical roofline_source provenance enum, shared with the bypass route so both
@@ -79,7 +76,7 @@ from _roofline_source import (
 
 # Shared canonical analysis.md renderer so the deterministic route emits the same
 # section structure + table schemas as the bypass route.
-from _analysis_md import render_report as _render_canonical_report
+from _analysis_md import render_report
 
 
 # Candidate building keeps a broad pool; dispatch grouping owns the real budget gate.
@@ -713,11 +710,11 @@ def _resolve_arch_benchmark_timeout_s() -> int:
 def _evaluate_high_idle_gate(idle_pct: float | None, report_path: Path) -> tuple[float, dict[str, Any] | None]:
     """Return the idle threshold plus a warning when the gate is exceeded.
 
-    ``_build_high_idle_warning`` and ``_resolve_idle_pct_threshold`` are the
-    shared ``_idle_gate`` helpers (imported as private aliases at module top), so
-    the threshold, gate semantics, and warning shape stay unified across routes.
+    ``_build_high_idle_warning`` and ``resolve_idle_pct_threshold`` are the
+    shared ``_idle_gate`` helpers imported at module top, so the threshold, gate
+    semantics, and warning shape stay unified across routes.
     """
-    threshold = _resolve_idle_pct_threshold()
+    threshold = resolve_idle_pct_threshold()
     if idle_pct is None or idle_pct <= threshold:
         return threshold, None
     return threshold, _build_high_idle_warning(
@@ -2921,7 +2918,7 @@ def _expand_op_fanout(
 # moe_fused category metric (and the LLM-rendered analysis.md ``Args`` column)
 # emit the candidate with ``shapes: []``. Hyperloom's dispatch gate
 # (``_validate_kernel_shape_and_paths`` → ``empty_kernel_shape``) then rejects the
-# whole geak→claude→codex ladder before any harness is built.
+# whole backend ladder before any harness is built.
 #
 # TraceLens DOES still capture the operands for this kernel: the per-shape rows in
 # ``perf_report_csvs/ops_unique_args.csv`` carries trace-recorded ``Input Dims``
@@ -3224,30 +3221,6 @@ _RANK_PCT_KEYS = (
 )
 
 
-def _coerce_float(value: Any) -> float | None:
-    """Parse a CSV/JSON cell into a float.
-
-    Strips a trailing ``%`` and comma thousands separators.
-
-    Args:
-        value: The raw cell value.
-
-    Returns:
-        The parsed float, or ``None`` when not numeric.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value or "").strip().rstrip("%").replace(",", "")
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
 def _lower_keyed(row: dict) -> dict[str, Any]:
     """Return a copy of ``row`` with keys trimmed and lower-cased.
 
@@ -3314,12 +3287,12 @@ def _record_gpu_us(low: dict[str, Any]) -> float | None:
     """
     for k in _RANK_TIME_MS_KEYS:
         if k in low:
-            val = _coerce_float(low[k])
+            val = safe_float(low[k], default=None, strip_percent=True, strip_commas=True)
             if val is not None:
                 return val * 1000.0
     for k in _RANK_TIME_US_KEYS:
         if k in low:
-            val = _coerce_float(low[k])
+            val = safe_float(low[k], default=None, strip_percent=True, strip_commas=True)
             if val is not None:
                 return val
     return None
@@ -3336,7 +3309,7 @@ def _record_gpu_pct(low: dict[str, Any]) -> float | None:
     """
     for k in _RANK_PCT_KEYS:
         if k in low:
-            val = _coerce_float(low[k])
+            val = safe_float(low[k], default=None, strip_percent=True, strip_commas=True)
             if val is not None:
                 return val
     return None
@@ -3484,7 +3457,7 @@ def _resolve_other_bucket_min_gpu_pct() -> float:
     """
     raw = os.environ.get(_OTHER_BUCKET_MIN_GPU_PCT_ENV, "").strip()
     if raw:
-        val = _coerce_float(raw)
+        val = safe_float(raw, default=None, strip_percent=True, strip_commas=True)
         if val is not None and val >= 0:
             return val
     return _DEFAULT_OTHER_BUCKET_MIN_GPU_PCT
@@ -3753,7 +3726,7 @@ def _finalize_candidates(
 def recommend_backends(candidate: dict[str, Any]) -> list[str]:
     """Recommend a backend ladder for a reusable native kernel.
 
-    Orders forge first, then the per-kernel GEAK backend (geak_v3).
+    Recommends the forge backend.
 
     Args:
         candidate: The hot-kernel candidate dict.
@@ -3771,10 +3744,7 @@ def recommend_backends(candidate: dict[str, Any]) -> list[str]:
         return []
     if source_type == "runtime_generated":
         return []
-    # forge then the per-kernel GEAK backend (geak_v3). Uses ``geak_v3`` (not
-    # ``geak``) because parse_backends/choose_backends reject bare ``geak`` on
-    # the per-kernel path.
-    return ["forge", "geak_v3"]
+    return ["forge"]
 
 
 def build_notes(candidate: dict[str, Any]) -> str:
@@ -4566,13 +4536,13 @@ def generate_minimal_analysis_md(
         ]
         p_items.append({"rank": rank, "category": cat, "rows": rows})
 
-    body = _render_canonical_report(
+    body = render_report(
         route="deterministic",
         model_name=model_name,
         provenance_detail="Deterministic hot-kernel extraction from structured *_metrics.json / priority_data.json.",
         exec_summary=exec_summary,
         system_signals=system_signals,
-        idle_threshold=_resolve_idle_pct_threshold(),
+        idle_threshold=resolve_idle_pct_threshold(),
         hot_kernels=hot_rows,
         p_items=p_items,
     )
@@ -4677,9 +4647,8 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
     double-check under the lock, then clone into a temp sibling and atomically
     rename into place so a partial clone is never observed.
 
-    Keep this temp-clone+pin+atomic-rename in lockstep with the twin
-    implementations: src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens) and
-    src/hyperloom/inference_optimizer/assets/local_setup.sh (clone_or_update "atomic").
+    Keep this temp-clone+pin+atomic-rename in lockstep with
+    src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens).
     """
     tl_root = Path(tl_root)
     if _tracelens_checkout_complete(tl_root):
@@ -5538,33 +5507,6 @@ def write_reports(
         candidates=candidates,
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload)
-
-    # Batch rocprof-compute enrichment is opt-in because it can profile many kernels.
-    # Kernel-opt still profiles the selected kernel on demand.
-    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
-    if enrich_value in {"1", "true", "yes", "on"}:
-        try:
-            tools_dir = str(Path(__file__).resolve().parent)
-            if tools_dir not in sys.path:
-                sys.path.insert(0, tools_dir)
-            from rocprof_roofline import enrich_kernel_roofline_sidecar  # noqa: WPS433
-
-            enrich_summary = enrich_kernel_roofline_sidecar(
-                sidecar_path=str(kernel_roofline_path),
-                candidates_path=str(kernel_candidates_path),
-                workdir=str(run_dir),
-                timeout_sec_per_kernel=int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800),
-                log_fn=None,
-            )
-            print(
-                "[rocprof_enrich] "
-                f"matched={enrich_summary.get('matched', 0)} "
-                f"skipped={enrich_summary.get('skipped', 0)} "
-                f"failed={enrich_summary.get('failed', 0)} "
-                f"rows={enrich_summary.get('rows', 0)}"
-            )
-        except Exception as exc:  # pragma: no cover - guard against import cycles
-            print(f"[rocprof_enrich] skipped: {type(exc).__name__}: {exc}")
 
     # Diffusion / scriptable workload-level roofline. TraceLens produces a
     # *per-kernel* roofline (each op vs its dtype ceiling); for diffusion we also

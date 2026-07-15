@@ -112,21 +112,6 @@ _DEFAULT_VERDICT_CLASS: dict[str, str] = {
 _DEFAULT_VERDICT_CLASS_FALLBACK: str = "exploration"
 
 
-def default_verdict_class_for(action_name: str) -> str:
-    """Look up the default ``verdict_class``; falls back to ``"exploration"``.
-
-    Args:
-        action_name: The action name to look up.
-
-    Returns:
-        The mapped verdict class, or ``"exploration"`` when unmapped.
-    """
-    return _DEFAULT_VERDICT_CLASS.get(
-        action_name,
-        _DEFAULT_VERDICT_CLASS_FALLBACK,
-    )
-
-
 _REQUIRED_FIELDS: tuple[str, ...] = (
     "name",
     "family",
@@ -242,7 +227,10 @@ class ActionMetadata:
             .lower()
         )
         if not verdict_class:
-            verdict_class = default_verdict_class_for(expected_name)
+            verdict_class = _DEFAULT_VERDICT_CLASS.get(
+                expected_name,
+                _DEFAULT_VERDICT_CLASS_FALLBACK,
+            )
         _require_vocab(expected_name, "verdict_class", verdict_class, VALID_VERDICT_CLASSES)
         return cls(
             name=str(data["name"]),
@@ -342,40 +330,11 @@ class ActionRegistry:
             self.load()
         return list(self._cache.values())
 
-    def names(self) -> list[str]:
-        """Return the sorted names of all loaded actions.
-
-        Returns:
-            list[str]: Action names in sorted order.
-        """
-        if not self._loaded:
-            self.load()
-        return sorted(self._cache.keys())
-
-    def by_family(self, family: str) -> list[ActionMetadata]:
-        """Return all loaded actions belonging to ``family``.
-
-        Args:
-            family (str): Family name; must be in :data:`VALID_FAMILIES`.
-
-        Returns:
-            list[ActionMetadata]: Actions whose ``family`` matches.
-
-        Raises:
-            ActionRegistryError: If ``family`` is not a known family.
-        """
-        if family not in VALID_FAMILIES:
-            raise ActionRegistryError(f"family={family!r} not in {sorted(VALID_FAMILIES)!r}")
-        return [a for a in self.all() if a.family == family]
-
 
 __all__ = [
     "ActionMetadata",
     "ActionRegistry",
     "ActionRegistryError",
-    "VALID_BACKENDS",
     "VALID_FAMILIES",
     "VALID_PIPELINE_PHASES",
-    "VALID_VERDICT_CLASSES",
-    "default_verdict_class_for",
 ]

@@ -15,7 +15,6 @@ from __future__ import annotations
 import enum
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1516,25 +1515,7 @@ class SpecialistRunner:
             "max_turns": max_turns,
             "status": status,
         }
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
-
-    @staticmethod
-    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-        """Atomically write ``payload`` as pretty JSON to ``path``.
-
-        Writes to a sibling ``.tmp`` then ``os.replace``-s it into place so a
-        concurrent reader (or a high-frequency incremental rewrite)
-        never observes a half-written file.
-
-        Delegates to :func:`hyperloom.common.io.atomic_write_json`.
-
-        Args:
-            path (Path): Destination file path.
-            payload (dict[str, Any]): JSON-serialisable payload to persist.
-        """
-        _common_io.atomic_write_json(path, payload, make_parents=False)
+        _common_io.atomic_write_json(path, payload, indent=None, sort_keys=True, make_parents=False)
 
     def _write_specialist_done(
         self,
@@ -1553,7 +1534,7 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        self._atomic_write_json(path, {"ts": _now_iso(), **payload})
+        _common_io.atomic_write_json(path, {"ts": _now_iso(), **payload}, make_parents=False)
 
     def _write_specialist_done_partial(
         self,
@@ -1573,9 +1554,10 @@ class SpecialistRunner:
         path = self._partial_done_path(workspace)
         if path is None:
             return
-        self._atomic_write_json(
+        _common_io.atomic_write_json(
             path,
             {"ts": _now_iso(), "_recovered_from_partial": True, **payload},
+            make_parents=False,
         )
 
 

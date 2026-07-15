@@ -142,23 +142,22 @@ def test_baseline_params_fingerprint_bad_envs():
 # ---- _resolve_roofline_watermark_ratio ----
 
 
-def test_watermark_ratio_default(monkeypatch):
-    monkeypatch.delenv(ch._ROOFLINE_WATERMARK_RATIO_ENV, raising=False)
+def test_watermark_ratio_default():
     assert ch._resolve_roofline_watermark_ratio() == 1.10
 
 
-def test_watermark_ratio_valid(monkeypatch):
-    monkeypatch.setenv(ch._ROOFLINE_WATERMARK_RATIO_ENV, "1.5")
-    assert ch._resolve_roofline_watermark_ratio() == 1.5
-
-
-def test_watermark_ratio_below_one(monkeypatch):
-    monkeypatch.setenv(ch._ROOFLINE_WATERMARK_RATIO_ENV, "0.5")
+def test_watermark_ratio_env_is_ignored(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "1.5")
     assert ch._resolve_roofline_watermark_ratio() == 1.10
 
 
-def test_watermark_ratio_invalid(monkeypatch):
-    monkeypatch.setenv(ch._ROOFLINE_WATERMARK_RATIO_ENV, "abc")
+def test_watermark_ratio_below_one_env_is_ignored(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "0.5")
+    assert ch._resolve_roofline_watermark_ratio() == 1.10
+
+
+def test_watermark_ratio_invalid_env_is_ignored(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "abc")
     assert ch._resolve_roofline_watermark_ratio() == 1.10
 
 
@@ -198,9 +197,9 @@ def test_dedupe_leaves_json_arg_untouched():
     assert ch._dedupe_extra_server_args(args) == args
 
 
-# ---- _merge_cumulative_extra_*_args (name built to dodge the rename guard) ----
+# ---- _merge_cumulative_extra_server_args ----
 
-_merge = getattr(ch, "_merge_cumulative_extra_" + "sglang_args")
+_merge = ch._merge_cumulative_extra_server_args
 
 
 def test_merge_prefers_full():

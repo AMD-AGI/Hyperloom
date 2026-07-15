@@ -743,14 +743,14 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
     session_dir: Path,
     baseline_yaml: Path,
 ):
-    """When the wall-clock budget runs out, remaining variants are skipped."""
+    """When remaining budget cannot cover another variant, the tail is skipped."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     calls = {"n": 0}
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         import time as _t
 
-        _t.sleep(0.6)
+        _t.sleep(1.2)
         calls["n"] += 1
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
@@ -774,7 +774,8 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
                 state,
                 session_dir,
                 concs=[1, 4, 16, 64],
-                total_budget_sec=1,
+                variant_timeout_sec=1,
+                total_budget_sec=2,
             )
         )
 
@@ -786,7 +787,9 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
     for p in skipped_pts:
         assert p["error_class"] == "budget_exhausted"
     assert payload["budget_exhausted"] is True
-    assert payload["total_budget_sec"] == 1
+    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
+    assert payload["budget_remaining_sec"] < 1
+    assert payload["total_budget_sec"] == 2
     assert calls["n"] < 8
 
 
@@ -829,16 +832,14 @@ def test_run_conc_sweep_zero_budget_disables_gate(
     assert mock_run.call_count == 4  # 2 arms × 2 concs
 
 
-def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
+def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
     session_dir: Path,
     baseline_yaml: Path,
 ):
-    """Per-variant timeout is clamped to the remaining budget."""
+    """A too-small budget is reported as skipped instead of a timeout-prone run."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
-    recorded_timeouts: list[int] = []
 
-    async def _fake_run_grid(*, grid: list[GridVariant], variant_timeout_sec: int, **_kw):
-        recorded_timeouts.append(variant_timeout_sec)
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     def _fake_materialize(src, out_dir, **_kw):
@@ -856,7 +857,7 @@ def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
             side_effect=_fake_materialize,
         ),
     ):
-        asyncio.run(
+        payload = asyncio.run(
             run_conc_sweep(
                 state,
                 session_dir,
@@ -866,8 +867,14 @@ def test_run_conc_sweep_per_variant_timeout_clamped_to_remaining_budget(
             )
         )
 
-    assert all(t <= 120 for t in recorded_timeouts)
-    assert all(t >= 1 for t in recorded_timeouts)
+    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
+    assert {p["status"] for p in all_points} == {"skipped"}
+    assert {p["error_class"] for p in all_points} == {"budget_exhausted"}
+    assert payload["status"] == "skipped"
+    assert payload["was_skipped"] is True
+    assert payload["skip_reason"] == "budget_exhausted_no_successful_pairs"
+    assert payload["budget_exhausted"] is True
+    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
 
 
 # ActionExecutor integration (SWEEP-phase dispatch)
@@ -934,6 +941,75 @@ def test_conc_sweep_executor_missing_session_dir_yields_failure():
     assert result["error_class"] == "missing_session_dir"
 
 
+def test_conc_sweep_executor_state_load_failure_yields_failure(monkeypatch):
+    from hyperloom.orchestrator.actions.executors.conc_sweep import (
+        ConcSweepExecutor,
+    )
+
+    class _Task:
+        params = {}
+
+    class _Ctx:
+        task = _Task()
+        extra = {"session_dir": "/tmp/does-not-matter"}
+
+    def _boom(_session_dir):
+        raise RuntimeError("state is unreadable")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.conc_sweep.SharedState.load_or_init",
+        _boom,
+    )
+
+    result = asyncio.run(ConcSweepExecutor()(_Ctx()))
+    assert result["status"] == "failed"
+    assert result["error_class"] == "shared_state_load_failed"
+    assert "state is unreadable" in result["error"]
+
+
+def test_conc_sweep_executor_task_params_override_state(
+    session_dir: Path,
+    baseline_yaml: Path,
+):
+    from hyperloom.orchestrator.actions.executors.conc_sweep import (
+        ConcSweepExecutor,
+    )
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    state.conc_sweep_concs = [1]
+    state.conc_sweep_total_budget_sec = 60
+    state.conc_sweep_variant_timeout_sec = 30
+    state.save(session_dir)
+
+    class _Task:
+        params = {
+            "concs": ["2", "8"],
+            "variant_timeout_sec": "45",
+            "total_budget_sec": "120",
+        }
+
+    class _Ctx:
+        task = _Task()
+        extra = {"session_dir": str(session_dir)}
+
+    captured: dict = {}
+
+    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+        captured["concs"] = list(concs)
+        captured["timeout"] = variant_timeout_sec
+        captured["budget"] = total_budget_sec
+        return {"status": "succeeded", "summary": {"successful_pairs": 1}}
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.conc_sweep.run_conc_sweep",
+        side_effect=_fake_run,
+    ):
+        result = asyncio.run(ConcSweepExecutor()(_Ctx()))
+
+    assert result["status"] == "succeeded"
+    assert captured == {"concs": [2, 8], "timeout": 45, "budget": 120}
+
+
 def test_conc_sweep_executor_remaps_skip_to_succeeded(
     session_dir: Path,
     baseline_yaml: Path,
@@ -970,6 +1046,8 @@ def test_conc_sweep_executor_remaps_skip_to_succeeded(
 def test_record_conc_sweep_writes_last_conc_sweep():
     s = SharedState()
     assert s.last_conc_sweep == {}
+    assert s.last_conc_sweep_watermark == {}
+    s.cumulative_gain_validated = 3.25
     s.record_conc_sweep(
         {
             "status": "succeeded",
@@ -983,6 +1061,9 @@ def test_record_conc_sweep_writes_last_conc_sweep():
     assert s.last_conc_sweep.get("status") == "succeeded"
     assert s.last_conc_sweep.get("summary", {}).get("successful_pairs") == 8
     assert s.last_conc_sweep.get("ts")
+    assert s.last_conc_sweep_watermark.get("status") == "succeeded"
+    assert s.last_conc_sweep_watermark.get("cumulative_gain_validated_at_record") == 3.25
+    watermark = dict(s.last_conc_sweep_watermark)
     # Skip cases also recorded so SWEEP exits cleanly even on skip.
     s.record_conc_sweep(
         {
@@ -994,6 +1075,7 @@ def test_record_conc_sweep_writes_last_conc_sweep():
     assert s.last_conc_sweep.get("status") == "skipped"
     assert s.last_conc_sweep.get("skip_reason") == "no_optimization_to_compare"
     assert s.last_conc_sweep.get("was_skipped") is True
+    assert s.last_conc_sweep_watermark == watermark
 
 
 def test_exit_normal_sweep_returns_conc_sweep_done():
@@ -1018,15 +1100,22 @@ def test_exit_normal_sweep_returns_conc_sweep_done():
     assert reason == "conc_sweep_done", reason
     assert evidence.get("conc_sweep_status") == "succeeded"
 
-    # Skipped also counts as "done" (action ran to its terminal decision).
+    # Skipped also counts as "done" (action reached a terminal decision).
     for terminal in ("partial", "completed", "skipped"):
         _State.last_conc_sweep = {"status": terminal}
         result = exit_normal_sweep(_State())
         assert result is not None and result[0] == "conc_sweep_done", terminal
 
+    _State.last_conc_sweep = {"status": "failed"}
+    result = exit_normal_sweep(_State())
+    assert result is not None
+    reason, evidence = result
+    assert reason == "conc_sweep_failed"
+    assert evidence.get("conc_sweep_status") == "failed"
+
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
-    """Bug #7: KERNEL→SWEEP must drain pending KEEP integrates before enqueuing sweep."""
+    """Bug #7: KERNEL→SWEEP must drain pending KEEP integrates before closeout."""
     from unittest.mock import AsyncMock, MagicMock
     from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
 

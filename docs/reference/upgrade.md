@@ -132,8 +132,7 @@ The `--compat-report-path` argument was removed.
 There is no `HYPERLOOM_ENABLE_PMC_ROOFLINE` environment variable. Roofline
 analysis (the composite `profile` + `trace_analyze` + `analysis.md` path) is
 controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
-`--no-enable-roofline` for a profile-only run, or set
-`INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0` for the same effect. See
+`--no-enable-roofline` for a profile-only run. See
 [Environment variables](environment-variables.md).
 
 ### Schema compatibility

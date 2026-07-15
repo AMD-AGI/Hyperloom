@@ -29,12 +29,12 @@ run* rather than *is it faster*:
    (`missing_model_arch` / `unsupported_dtype` / `hip_kernel_missing` /
    `import_error` / `shape_mismatch` / `not_implemented` /
    `capability_disabled`) with the offending file/symbol and a `bridge_layer`.
-2. **Discover** — `hyperloom.agents.framework.enablement_discovery.build_search_plan(...)`
+2. **Discover** — `hyperloom.agents.framework.enablement_ops.build_search_plan(...)`
    picks the repos to scout (the framework repo, plus ROCm/HIP/aiter via
    `repo_map.bridge_repo_urls` for the failure's bridge layer) and ranks
    candidate PR titles for *enablement* intent (`enable` / `support` / `add` /
    `fix` / `port`).
-3. **Author** — `hyperloom.agents.framework.enablement_authoring.build_mandate(...)`
+3. **Author** — `hyperloom.agents.framework.enablement_ops.build_mandate(...)`
    produces the `EnablementMandate` (allowed source roots + task description +
    patch invariants) handed to Hyperloom's `enablement_specialist` /
    `SpecialistRunner`, which writes the patch into an isolated worktree.

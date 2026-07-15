@@ -97,7 +97,7 @@ def agent_of(row: dict[str, Any]) -> str:
     """The agent that produced a row: its ``component`` (role fallback).
 
     ``component`` is the closed producer vocabulary (orchestration / kernel /
-    specialist / critic / geak / oob / robustness / proposal_scorer /
+    specialist / critic / geak / forge / robustness / proposal_scorer /
     tracelens / breakdown); it is the "which agent did this" axis used for the
     per-agent span layer.
 
@@ -120,18 +120,6 @@ def phase_of(row: dict[str, Any]) -> str:
         The phase name, or ``UNPHASED`` when absent.
     """
     return str(row.get("phase") or UNPHASED)
-
-
-def span_key(row: dict[str, Any]) -> tuple[str, str]:
-    """(phase, agent) key identifying which agent-span a Generation nests in.
-
-    Args:
-        row: A trace row dict.
-
-    Returns:
-        A ``(phase, agent)`` tuple.
-    """
-    return (phase_of(row), agent_of(row))
 
 
 def derive_trace_id(seed: str) -> str:
@@ -520,7 +508,6 @@ __all__ = [
     "phase_of",
     "redact_env",
     "session_start_payload",
-    "span_key",
     "trace_metadata",
     "usage_details",
     "utc_second_key",

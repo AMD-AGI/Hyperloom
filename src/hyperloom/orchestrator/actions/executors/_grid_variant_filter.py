@@ -14,7 +14,8 @@ import logging
 import os
 import re
 import subprocess
-from typing import Any
+
+from hyperloom.common.env import is_truthy
 
 from ._grid_base import (
     GridVariant,
@@ -250,17 +251,6 @@ _XDIT_ENV_COMBO_BLACKLIST: tuple[tuple[tuple[str, ...], str], ...] = (
     ),
 )
 
-def _is_truthy_env(value: Any) -> bool:
-    """Return whether an env-string value is truthy (set and not 0/false/off).
-
-    Args:
-        value (Any): Candidate env value.
-
-    Returns:
-        bool: ``True`` when the value is set to a non-falsey token.
-    """
-    return str(value).strip().lower() not in ("", "0", "false", "off", "no")
-
 def xdit_blacklist_reason(
     extra_envs: dict[str, str] | None,
 ) -> str | None:
@@ -278,12 +268,12 @@ def xdit_blacklist_reason(
             continue
         val = envs[key]
         if "*" in bad_values:
-            if _is_truthy_env(val):
+            if is_truthy(val, default=True):
                 return f"{key}={val}: {reason}"
         elif val.strip().lower() in {b.lower() for b in bad_values}:
             return f"{key}={val}: {reason}"
     for keys, reason in _XDIT_ENV_COMBO_BLACKLIST:
-        if all(k in envs and _is_truthy_env(envs[k]) for k in keys):
+        if all(k in envs and is_truthy(envs[k], default=True) for k in keys):
             return reason
     return None
 
@@ -350,17 +340,6 @@ def _probe_server_help_text(framework: str) -> str:
     if out:
         _HELP_TEXT_CACHE[fw] = out
     return out
-
-def _probe_sglang_help_text() -> str:
-    """Back-compat shim — defer to the framework-keyed probe.
-
-    Kept so tests that monkey-patch this exact name still work; new call
-    sites should use ``_probe_server_help_text("sglang")``.
-
-    Returns:
-        str: The sglang ``--help`` text, or ``""`` on failure.
-    """
-    return _probe_server_help_text("sglang")
 
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     """Heuristic detect of (is_mla_model, is_moe_model) from model path.

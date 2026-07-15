@@ -8,7 +8,6 @@ that just need the JSON-IO surface.
 """
 
 from .envelope import (
-    BackendTurnResult,
     Intent,
     IntentType,
     build_alert,
@@ -26,7 +25,6 @@ from .prompt_inputs import (
 )
 
 __all__ = [
-    "BackendTurnResult",
     "InboxItem",
     "Intent",
     "IntentType",

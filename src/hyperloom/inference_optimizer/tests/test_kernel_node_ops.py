@@ -52,6 +52,7 @@ def _bundle_kernel_node_ops() -> str:
 
 def _load(unique_name: str):
     mod = types.ModuleType(unique_name)
+    mod.__dict__["__file__"] = str(_repo_root() / "multi_node" / "scripts" / "kernel_node_ops.py")
     exec(compile(_bundle_kernel_node_ops(), "kernel_node_ops_bundle.py", "exec"), mod.__dict__)
     sys.modules[unique_name] = mod
     return mod

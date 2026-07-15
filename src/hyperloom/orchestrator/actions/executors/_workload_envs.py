@@ -245,15 +245,25 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
         values = [int(tok.strip()) for tok in text.split(",") if tok.strip()]
         if not values or any(v <= 0 for v in values):
             raise ValueError(f"{env_key}={raw!r} must contain positive integers")
-        os.environ.setdefault(
-            "INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS",
-            ",".join(str(v) for v in values),
-        )
         return values[0]
     value = int(text)
     if value <= 0:
         raise ValueError(f"{env_key}={raw!r} must be positive")
     return value
+
+
+# ``$FRAMEWORK`` (lowercased) -> shipped Magpie YAML, relative to
+# ``asset_root()``. Unknown / unset frameworks fall back to
+# ``_DEFAULT_BASELINE_CONFIG`` (sglang) so existing sglang-default tests keep
+# passing. Values are relative so ``asset_root()`` is still resolved at call
+# time (honoring the ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` override).
+_BASELINE_CONFIG_BY_FRAMEWORK: dict[str, Path] = {
+    "atom": Path("assets/configs/baseline_atom.yaml"),
+    "vllm": Path("assets/configs/baseline_vllm.yaml"),
+    "xdit": Path("assets/configs/baseline_xdit.yaml"),
+    "hunyuan_image3": Path("assets/configs/baseline_hunyuan_image3.yaml"),
+}
+_DEFAULT_BASELINE_CONFIG = Path("assets/configs/baseline_sglang.yaml")
 
 
 def default_baseline_config() -> Path:
@@ -266,17 +276,8 @@ def default_baseline_config() -> Path:
         Path: The shipped Magpie YAML config path for the resolved framework.
     """
     fw = os.environ.get("FRAMEWORK", "sglang").strip().lower()
-    if fw == "atom":
-        name = "baseline_atom.yaml"
-    elif fw == "vllm":
-        name = "baseline_vllm.yaml"
-    elif fw == "xdit":
-        name = "baseline_xdit.yaml"
-    elif fw == "hunyuan_image3":
-        name = "baseline_hunyuan_image3.yaml"
-    else:
-        name = "baseline_sglang.yaml"
-    return asset_root() / "assets" / "configs" / name
+    rel = _BASELINE_CONFIG_BY_FRAMEWORK.get(fw, _DEFAULT_BASELINE_CONFIG)
+    return asset_root() / rel
 
 
 def materialize_config_with_envs(
@@ -1087,7 +1088,7 @@ def materialize_config_with_envs(
     # Hyperloom, strictly scoped to sglang + fp8 + gfx942 + that exact quant
     # scheme so per-tensor and block-scale FP8 are never touched. setdefault so
     # an operator-set value (YAML / extra_envs) always wins.
-    from hyperloom.inference_optimizer.cli import _resolve_amd_gpu_type
+    from hyperloom.inference_optimizer.cli.model_gate import _resolve_amd_gpu_type
 
     _model_for_quant = str(model_path or os.environ.get("MODEL_PATH", ""))
     if (

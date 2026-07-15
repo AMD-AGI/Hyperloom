@@ -108,29 +108,12 @@ def test_summarize_tool_input_non_dict_values():
     assert pu._summarize_tool_input(123) == "123"
 
 
-# ---- parse_usage: oob + forge marker edge paths ----
-
-
-def test_oob_usage_line_by_line_skips_blank(tmp_path):
-    # Whole-document parse fails, then the JSONL scan skips a blank line.
-    stdout = 'preamble not json\n\n{"usage": {"input_tokens": 3}}\n'
-    out = pu.parse_oob_json_usage(stdout)
-    assert out["input_tokens"] == 3
-
-
 def test_forge_usage_marker_with_empty_blob_is_none():
     assert pu.parse_forge_usage("FORGE_LLM_USAGE") is None
 
 
 def test_forge_steps_marker_with_empty_blob_is_none():
     assert pu.parse_forge_steps("FORGE_STEPS") is None
-
-
-# ---- langfuse_mapping: pure helper edge paths ----
-
-
-def test_span_key():
-    assert lm.span_key({"phase": "EXPLORE", "component": "critic"}) == ("EXPLORE", "critic")
 
 
 def test_parse_ts_missing_and_unparseable():

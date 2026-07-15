@@ -19,12 +19,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Sibling import works whether run as a standalone script or loaded via
+# importlib; the kernel-agent tools cannot rely on the ``hyperloom`` import root.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _io_utils import truthy  # noqa: E402
 
-def _truthy(val: Any) -> bool:
-    """Interpret common truthy spellings from JSON or env strings."""
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() in ("1", "true", "yes", "on")
+sys.path.pop(0)
 
 
 def _load_input_json(path: str) -> dict[str, Any]:
@@ -91,20 +91,20 @@ def _add_kb_read_opts(cmd: list[str], args: dict[str, Any]) -> None:
     kb_read = args.get("kb_read")
     if kb_read is None:
         kb_read = os.environ.get("FORGE_GEMM_TUNE_KB_READ", "")
-    if not _truthy(kb_read):
+    if not truthy(kb_read):
         return
     cmd.append("--kb-read")
 
     accept = args.get("kb_accept_candidate")
     if accept is None:
         accept = os.environ.get("FORGE_GEMM_TUNE_KB_ACCEPT_CANDIDATE", "")
-    if _truthy(accept):
+    if truthy(accept):
         cmd.append("--kb-accept-candidate")
 
     strict = args.get("kb_strict_lib")
     if strict is None:
         strict = os.environ.get("FORGE_GEMM_TUNE_KB_STRICT_LIB", "")
-    if _truthy(strict):
+    if truthy(strict):
         cmd.append("--kb-strict-lib")
 
     cur_lib = args.get("kb_current_lib")

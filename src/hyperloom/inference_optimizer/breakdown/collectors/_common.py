@@ -10,10 +10,12 @@ recorded in ``warnings`` and the section returns a best-effort partial.
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+
+from hyperloom.common.coerce import to_float
+from hyperloom.common.jsonio import read_json, read_jsonl
 
 
 
@@ -32,13 +34,9 @@ def _load_json_safe(path: Path | None, warnings: list[str]) -> Any | None:
     """
     if path is None:
         return None
-    try:
-        if not path.exists():
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"failed to parse {path}: {exc!r}")
+    if not path.exists():
         return None
+    return read_json(path, default=None, on_error=lambda exc: warnings.append(f"failed to parse {path}: {exc!r}"))
 
 
 def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, Any]]:
@@ -57,22 +55,12 @@ def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, A
     """
     if path is None or not path.exists():
         return []
-    out: list[dict[str, Any]] = []
-    try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError as exc:
-                warnings.append(f"malformed jsonl line in {path}: {exc!r}")
-                continue
-            if isinstance(entry, dict):
-                out.append(entry)
-    except OSError as exc:
-        warnings.append(f"failed to read {path}: {exc!r}")
-    return out
+
+    def _warn(exc: BaseException) -> None:
+        prefix = "failed to read" if isinstance(exc, OSError) else "malformed jsonl line in"
+        warnings.append(f"{prefix} {path}: {exc!r}")
+
+    return read_jsonl(path, require_dict=True, skip_malformed=True, on_error=_warn)
 
 
 def _to_float(value: Any) -> float | None:
@@ -90,19 +78,12 @@ def _to_float(value: Any) -> float | None:
         float | None: The parsed float, or ``None`` when the value is missing,
         a bool, or not numeric.
     """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text or text.upper() == "SKIPPED":
-        return None
-    try:
-        return float(text.replace(",", ""))
-    except ValueError:
-        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.upper() == "SKIPPED":
+            return None
+        return to_float(text.replace(",", ""))
+    return to_float(value)
 
 
 def _to_int(value: Any) -> int | None:
@@ -338,35 +319,6 @@ def _parse_iso_unix(ts: Any) -> float | None:
         return datetime.fromisoformat(s).timestamp()
     except ValueError:
         return None
-
-
-def _iso_z(ts: Any) -> str:
-    """Normalise any ISO-8601 timestamp to canonical second-precision ``...Z`` UTC.
-
-    The journal and ``state.phase_history`` use different suffixes;
-    collapsing both keeps display and ``[entered_ts, exit_ts)`` matching
-    consistent. Returns the input unchanged when empty/unparseable.
-
-    Args:
-        ts (Any): An ISO-8601 timestamp value (any suffix), or ``None``.
-
-    Returns:
-        str: The canonical ``...Z`` UTC string, ``""`` for empty input, or the
-        original string when it cannot be parsed.
-    """
-    if ts is None:
-        return ""
-    s = str(ts).strip()
-    if not s:
-        return ""
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
-        return s
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    dt = dt.astimezone(timezone.utc)
-    return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _load_optimization_journal(
