@@ -404,9 +404,12 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
+    compose_start = script_text.index("_compose_pythonpath() {")
+    compose_end = script_text.index("\n# Keep REPO_ROOT on PYTHONPATH")
     env_start = script_text.index("write_env_file() {")
     env_end = script_text.index("\nensure_geak() {")
     dotenv_helpers = script_text[upsert_start:upsert_end]
+    compose_pythonpath = script_text[compose_start:compose_end]
     write_env_file = script_text[env_start:env_end]
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
@@ -453,6 +456,7 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
                 "log() { :; }",
                 "warn() { :; }",
                 dotenv_helpers,
+                compose_pythonpath,
                 write_env_file,
                 "write_env_file",
             ]
