@@ -84,23 +84,27 @@ Required optimize CLI flags:
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
-If `MODEL_PATH` is unset, ask the user whether they want to provide an existing local model path. If they provide one, set `MODEL_PATH` to that path and verify it contains `config.json`. If they do not provide a path, download `Qwen/Qwen3-8B` automatically. Do not assume the Hugging Face CLI exists; download the model with Python:
+If `MODEL_PATH` is set, inspect that path first: use it when it already contains `config.json`; otherwise download `Qwen/Qwen3-8B` into that exact directory. If `MODEL_PATH` is unset, ask the user whether they want to provide a target model path. If they provide one, export `MODEL_PATH` to that path; if not, use `.cache/hyperloom-models/Qwen3-8B`. Do not assume the Hugging Face CLI exists; resolve or download the model with Python:
 
 ```bash
 python -m pip install -U huggingface_hub
+export MODEL_PATH="${MODEL_PATH:-$(pwd)/.cache/hyperloom-models/Qwen3-8B}"
 python - <<'PY'
+import os
 from pathlib import Path
 from huggingface_hub import snapshot_download
 
-target = Path.cwd() / ".cache" / "hyperloom-models" / "Qwen3-8B"
-snapshot_download(
-    repo_id="Qwen/Qwen3-8B",
-    local_dir=str(target),
-    local_dir_use_symlinks=False,
-)
+target = Path(os.environ["MODEL_PATH"]).expanduser()
+if (target / "config.json").is_file():
+    print(f"Using existing model at {target.resolve()}")
+else:
+    snapshot_download(
+        repo_id="Qwen/Qwen3-8B",
+        local_dir=str(target),
+        local_dir_use_symlinks=False,
+    )
 print(target.resolve())
 PY
-export MODEL_PATH="$(pwd)/.cache/hyperloom-models/Qwen3-8B"
 ```
 
 ## Launch Requirements
