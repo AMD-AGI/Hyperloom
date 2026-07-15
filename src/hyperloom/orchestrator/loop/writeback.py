@@ -2277,7 +2277,10 @@ class WritebackCollaborator:
             # ``resume_pending_revalidation`` flag from the measured tput — but
             # ONLY when the rebench actually produced a valid measurement, so a
             # failed/empty rebench leaves the flag set and reports keep warning.
-            if task is not None and str((task.params or {}).get("source") or "") == "resume_stack_revalidate":
+            if task is not None and str((task.params or {}).get("source") or "") in {
+                "resume_stack_revalidate",
+                "resume_reverify_best",
+            }:
                 measured = result.get("output_throughput")
                 measured_ok = isinstance(measured, (int, float)) and measured > 0
                 # A GEAK revalidation (2b) must not blindly stamp validated
