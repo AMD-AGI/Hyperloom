@@ -34,7 +34,7 @@ DEFAULT_VOLUME = "/wekafs"
 # "Read-only file system" errors on first session. OOB/TraceLens are opt-in too.
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
-DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
+DEFAULT_KERNEL_BACKENDS = ["GEAK"]
 DEFAULT_MAX_HOURS = 6.0
 DEFAULT_TARGET_GAIN = 500.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
