@@ -98,12 +98,32 @@ _resolve_magpie_python() {
   printf '%s' "${candidate:-/opt/venv/bin/python}"
 }
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
+# Join PYTHONPATH-style entries in order, dropping empties and duplicates so
+# repeated composition stays idempotent. Earlier arguments win their position.
+_compose_pythonpath() {
+  local out="" entry part
+  for entry in "$@"; do
+    [ -n "$entry" ] || continue
+    # Split each argument on ':' so a passed-in PYTHONPATH is de-duplicated too.
+    local _ifs="$IFS"
+    IFS=':'
+    for part in $entry; do
+      [ -n "$part" ] || continue
+      case ":${out}:" in
+        *":${part}:"*) ;;
+        *) out="${out:+${out}:}${part}" ;;
+      esac
+    done
+    IFS="$_ifs"
+  done
+  printf '%s' "$out"
+}
 # Keep REPO_ROOT on PYTHONPATH so subprocesses can ``import hyperloom`` under a
 # ``pip install --target $REPO_ROOT`` layout (the target dir is not on the
-# default sys.path). Append rather than replace so any pre-existing PYTHONPATH
-# and MAGPIE_PATH survive; this file is sourced last, so dropping REPO_ROOT here
-# cannot be recovered by an operator export.
-PYTHONPATH="${REPO_ROOT}:${MAGPIE_PATH}:${PYTHONPATH:-}"
+# default sys.path). Put REPO_ROOT first, then MAGPIE_PATH, then any pre-existing
+# PYTHONPATH; write_env_file recomposes this the same way just before persisting
+# it, so a stale .env sourced later cannot drop REPO_ROOT.
+PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "${MAGPIE_PATH:-}" "${PYTHONPATH:-}")"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
@@ -870,6 +890,15 @@ write_env_file() {
   if [ -z "${_openai_url:-}" ] && [ -z "${_anthropic_url:-}" ]; then
     warn "LLM gateway URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
   fi
+  # Recompute PYTHONPATH just before persisting it. Sourcing an existing
+  # $REPO_ROOT/.env (credentials fallback above) can re-import a stale
+  # PYTHONPATH that lacks REPO_ROOT, silently overwriting the value composed at
+  # the top of this script. Under a ``pip install --target $REPO_ROOT`` layout
+  # that dir holds the hyperloom package and is not on the default sys.path, so
+  # subprocesses would fail to ``import hyperloom`` on re-install. Rebuild here
+  # (REPO_ROOT first, then MAGPIE_PATH, then any remaining entries) and drop
+  # duplicates so repeated installs stay idempotent.
+  PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "${MAGPIE_PATH:-}" "${PYTHONPATH:-}")"
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
   {

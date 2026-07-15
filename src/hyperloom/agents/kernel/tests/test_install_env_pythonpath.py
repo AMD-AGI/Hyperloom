@@ -58,8 +58,16 @@ class WriteEnvFilePythonPathTest(unittest.TestCase):
         repo_root: Path,
         magpie_path: str,
         preexisting_pythonpath: str | None = None,
+        preexisting_dotenv_pythonpath: str | None = None,
     ) -> tuple[str, str]:
         """Source the installer and invoke ``write_env_file`` in isolation.
+
+        Args:
+            preexisting_pythonpath: A PYTHONPATH exported before sourcing
+                (simulates an operator's shell env).
+            preexisting_dotenv_pythonpath: A PYTHONPATH already persisted in
+                ``$REPO_ROOT/.env`` (simulates a re-install where the installer
+                sources a stale .env that lacks REPO_ROOT).
 
         Returns:
             tuple[str, str]: The generated ``kernel-agent.env.sh`` contents and
@@ -71,6 +79,16 @@ class WriteEnvFilePythonPathTest(unittest.TestCase):
         # The installer persists .env at ``$REPO_ROOT/.env`` (single .env
         # source), so read it back from there.
         dotenv = repo_root / ".env"
+
+        # Seed a stale .env so the installer's credentials-fallback sourcing
+        # re-imports a PYTHONPATH that lacks REPO_ROOT (the re-install bug).
+        if preexisting_dotenv_pythonpath is not None:
+            dotenv.write_text(
+                "SAFE_API_KEY=ak-from-dotenv\n"
+                "OPENAI_BASE_URL=https://gateway.example.com/v1\n"
+                f"PYTHONPATH={preexisting_dotenv_pythonpath}\n",
+                encoding="utf-8",
+            )
 
         # Set only the globals write_env_file reads; keep everything else empty
         # so the assertion isolates the PYTHONPATH composition behavior.
@@ -159,6 +177,43 @@ write_env_file
         self.assertIn("/opt/hyperloom/open-source-repos/Magpie", pythonpath_line)
         # A previously-set PYTHONPATH entry must not be clobbered.
         self.assertIn("/pre/existing/entry", pythonpath_line)
+
+    def test_reinstall_stale_dotenv_pythonpath_does_not_drop_repo_root(self) -> None:
+        """A re-install must not lose REPO_ROOT to a stale .env PYTHONPATH.
+
+        The installer sources ``$REPO_ROOT/.env`` for credential fallback. A
+        previously-written .env carries a PYTHONPATH that lacks REPO_ROOT; that
+        sourcing must not become the persisted value, or subprocesses under a
+        ``--target`` layout regress to ModuleNotFoundError on every re-install.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            repo_root = work / "target-install"
+            repo_root.mkdir()
+            env_text, dotenv_text = self._run_write_env_file(
+                work,
+                repo_root=repo_root,
+                magpie_path="/opt/hyperloom/open-source-repos/Magpie",
+                preexisting_dotenv_pythonpath="/opt/hyperloom/open-source-repos/Magpie:",
+            )
+
+        pythonpath_line = next(
+            (ln for ln in env_text.splitlines() if "export PYTHONPATH=" in ln),
+            "",
+        )
+        self.assertIn(
+            str(repo_root),
+            pythonpath_line,
+            f"re-install dropped REPO_ROOT to stale .env PYTHONPATH: {pythonpath_line}",
+        )
+        self.assertIn("/opt/hyperloom/open-source-repos/Magpie", pythonpath_line)
+        self.assertIn(str(repo_root), dotenv_text)
+        # No duplicate Magpie entry after recomposition.
+        self.assertEqual(
+            pythonpath_line.count("/opt/hyperloom/open-source-repos/Magpie"),
+            1,
+            f"duplicate MAGPIE_PATH entry in PYTHONPATH: {pythonpath_line}",
+        )
 
 
 if __name__ == "__main__":
