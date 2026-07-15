@@ -27,7 +27,7 @@ It is advisory only; skip rather than guessing.
 ## Launch Flags
 
 ```bash
-inference_optimizer optimize \
+python3 -m hyperloom.inference_optimizer.cli optimize \
   --model "$MODEL_PATH" \
   --framework vllm \
   --gpu-type MI300X \
@@ -93,7 +93,7 @@ export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
 export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 mkdir -p "$RUN_DIR"
 
-setsid nohup inference_optimizer --verbose optimize \
+setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \
@@ -121,7 +121,7 @@ read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get
 # Real optimizer PID (NOT the setsid wrapper in $!): take it from launch-info
 # and rewrite $PID_FILE so the monitor watches the right process.
 REAL_PID="$(read_json "$LAUNCH_INFO_FILE" pid)"
-[ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'inference_optimizer .*optimize' | head -1)"
+[ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' | head -1)"
 [ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
 test -d "/proc/$REAL_PID" && echo "optimizer_alive=true pid=$REAL_PID"
 

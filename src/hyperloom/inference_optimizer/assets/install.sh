@@ -28,7 +28,7 @@
 # are composable: kernel-agent works standalone; inference_optimizer
 # drags kernel-agent in via this script.
 #
-# Open-source deps (Magpie / InferenceX / TraceLens) are cloned here or by the
+# Open-source deps (InferenceX / TraceLens) are cloned here or by the
 # chained kernel-agent installer.
 
 set -euo pipefail
@@ -130,13 +130,18 @@ FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/fram
 # package (still overridable) and the old chain_framework_agent() delegation
 # below is a no-op.
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
-# Pin Magpie to a release commit instead of the default branch. Operators can
+# Pin Magpie to a release commit/tag instead of the default branch. Operators can
 # re-pin with MAGPIE_REF=<tag|sha>.
 MAGPIE_REF="${MAGPIE_REF:-0171222c532db6fc5cb174667db66e34f1d9dd98}"
+MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
-# _grid_runner.py / manifest.py) at the same Magpie checkout. A single var keeps
-# the installer and runtime in lockstep; setting it never silently falls back to
-# cloning upstream Magpie.
+# _grid_runner.py / manifest.py) at Magpie's import root. When unset by the
+# operator, ensure_magpie resolves it from the pip-installed package; explicit
+# overrides remain supported for local source checkouts / debugging.
+MAGPIE_PATH_EXPLICIT=0
+if [ -n "${MAGPIE_PATH:-}" ]; then
+  MAGPIE_PATH_EXPLICIT=1
+fi
 MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
 # Pin InferenceX to a current default-branch HEAD *commit SHA* so the
@@ -157,7 +162,7 @@ Installs:
   - inference_optimizer Python package (with claude_agent_sdk via [test])
   - langfuse SDK, but ONLY when HYPERLOOM_LANGFUSE_ENABLE is on in the
     environment / .env (opt-in live trace push; skipped otherwise)
-  - Magpie (cloned under the pod-local open-source repo tree by default)
+  - Magpie (pip-installed from MAGPIE_PACKAGE_SPEC)
   - Detects/exports INFERENCEX_PATH
   - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
     TraceLens, GEAK, and LLM gateway env.
@@ -175,9 +180,9 @@ Options:
 
 Env overrides:
   REPO_ROOT, KERNEL_AGENT_ROOT, FRAMEWORK_AGENT_ROOT, MAGPIE_REPO,
-  MAGPIE_REF (commit SHA / tag / branch the Magpie clone is pinned to;
+  MAGPIE_REF (commit SHA / tag / branch the Magpie package is pinned to;
     default is a commit that already copies benchmark scripts atomically),
-  MAGPIE_PATH, INFERENCEX_REPO,
+  MAGPIE_PACKAGE_SPEC, MAGPIE_PATH, INFERENCEX_REPO,
   INFERENCEX_REF (commit SHA / tag / branch the InferenceX clone is pinned
     to; default is a current upstream HEAD SHA),
   INFERENCEX_DEFAULT_DIR, INFERENCEX_PATH,
@@ -632,52 +637,46 @@ ensure_forge_gemm_tune() {
 }
 
 # --- 2. Magpie ---
-# The install state is the checkout under $MAGPIE_PATH (default:
-# the pod-local open-source repo tree), not whatever `import Magpie` resolves
-# from the driver Python. Editable installs from older sessions can stay
-# importable and otherwise mask a missing per-workspace checkout.
+# The install state is the pip-installed package specified by
+# $MAGPIE_PACKAGE_SPEC. $MAGPIE_PATH remains exported for runtime code that
+# needs to inspect Magpie's package files (patcher / manifest / InferenceX
+# discovery); when not explicitly set, it resolves to the installed package
+# root after import.
 ensure_magpie() {
-  log "ensuring Magpie at ${MAGPIE_PATH}"
+  log "ensuring Magpie package ${MAGPIE_PACKAGE_SPEC}"
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    if [ -f "$MAGPIE_PATH/setup.py" ] || [ -f "$MAGPIE_PATH/pyproject.toml" ]; then
-      log "Magpie checkout present at ${MAGPIE_PATH}"
+    if "$PYTHON" -c "import Magpie" >/dev/null 2>&1; then
+      log "Magpie importable"
     else
-      warn "Magpie checkout missing at ${MAGPIE_PATH} (check-only mode, skipping clone/install)"
+      warn "Magpie not importable (check-only mode, skipping pip install)"
     fi
     return 0
   fi
-  if [ "$DRY_RUN" -eq 0 ]; then
-    mkdir -p "$(dirname "$MAGPIE_PATH")"
-  fi
-  if [ ! -f "$MAGPIE_PATH/setup.py" ] && [ ! -f "$MAGPIE_PATH/pyproject.toml" ]; then
-    log "cloning Magpie from $MAGPIE_REPO pinned to ${MAGPIE_REF}"
-    git_fetch_pinned "$MAGPIE_REPO" "$MAGPIE_PATH" "$MAGPIE_REF" "Magpie"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would pip install Magpie package: ${MAGPIE_PACKAGE_SPEC}"
+    return 0
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    # Idempotent reinstall guard. Magpie is editable-installed into the
-    # pod-level /opt/venv, which concurrent sessions on the same Claw pod
-    # SHARE. An unconditional `pip install -e` briefly tears the egg-link
-    # down/up; a sibling session mid-`python -m Magpie` benchmark then hits
-    # the gap and dies with "No module named Magpie" (intermittent, can
-    # follow an earlier successful run). The install lock lives under
-    # $HYPERLOOM_RUNTIME_DIR and does NOT cover the shared /opt/venv, so it
-    # cannot serialize this. Mirror ensure_inferencex (preserve existing) +
-    # ensure_bench_serving_deps (import-probe before pip): skip the reinstall
-    # only when the checkout exists under $MAGPIE_PATH AND `import Magpie`
-    # already resolves into it. The path check (not just import success)
-    # preserves the original guard against a stale editable from an older
-    # session masking a missing per-workspace checkout.
-    local magpie_real resolved
-    magpie_real="$(realpath "$MAGPIE_PATH" 2>/dev/null || echo "$MAGPIE_PATH")"
-    resolved="$("$PYTHON" -c 'import Magpie, os; print(os.path.realpath(os.path.dirname(Magpie.__file__)))' 2>/dev/null || true)"
-    if { [ -f "$MAGPIE_PATH/setup.py" ] || [ -f "$MAGPIE_PATH/pyproject.toml" ]; } \
-       && [ -n "$resolved" ] \
-       && case "$resolved" in "$magpie_real" | "$magpie_real"/*) true ;; *) false ;; esac; then
-      log "Magpie already installed from ${MAGPIE_PATH}; skipping editable reinstall (idempotent; avoids racing a shared /opt/venv reinstall)"
+    if "$PYTHON" -c "import Magpie" >/dev/null 2>&1; then
+      log "Magpie already importable; skipping pip install"
     else
-      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$MAGPIE_PATH"
+      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "$MAGPIE_PACKAGE_SPEC"
       "$PYTHON" -c "import Magpie" >/dev/null
-      log "Magpie installed OK from ${MAGPIE_PATH}"
+      log "Magpie installed OK from ${MAGPIE_PACKAGE_SPEC}"
+    fi
+    local installed_root
+    installed_root="$("$PYTHON" - <<'PY'
+from pathlib import Path
+import Magpie
+print(Path(Magpie.__file__).resolve().parent.parent)
+PY
+)"
+    if [ "$MAGPIE_PATH_EXPLICIT" -eq 0 ]; then
+      MAGPIE_PATH="$installed_root"
+      export MAGPIE_PATH
+      log "MAGPIE_PATH resolved from installed package: ${MAGPIE_PATH}"
+    else
+      log "MAGPIE_PATH override preserved: ${MAGPIE_PATH}"
     fi
   fi
 }
@@ -838,7 +837,7 @@ ensure_inferencex() {
 # --- 4. InferenceX bench_serving runtime deps ---
 #
 # `benchmark_serving.py` lives under InferenceX (not under Magpie's
-# pyproject.toml), so `pip install -e Magpie` does NOT pull its client-side
+# pyproject.toml), so installing Magpie does NOT pull its client-side
 # dependencies. Without these, every Magpie variant launch dies with
 # `ModuleNotFoundError: No module named 'aiohttp'` (or transformers,
 # huggingface_hub, datasets, ...) BEFORE the sglang server is even hit.
@@ -1031,7 +1030,7 @@ ensure_langfuse_when_enabled
 acquire_install_lock
 # Magpie is only needed when the Magpie benchmark backend is active. The
 # bypass backend drives InferenceX directly (see benchmark_backend.py), so
-# skip the Magpie clone/install and its script-patch when bypass is selected.
+# skip the Magpie install/import and its script-patch when bypass is selected.
 # Default (unset/blank) stays magpie, preserving existing behavior.
 # Mirror Python's resolve_backend_name() normalization (strip THEN lower):
 # sed trims ONLY leading/trailing whitespace (like str.strip()), so " bypass" /

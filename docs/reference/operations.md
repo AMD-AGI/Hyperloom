@@ -123,7 +123,7 @@ The following table describes the key lifecycle events for a Hyperloom session.
 | Phase           | Trigger                                            | Action                                                  |
 |-----------------|----------------------------------------------------|---------------------------------------------------------|
 | Session start   | API call / Job creation                            | Coordinator creates `$SESSION_DIR` and writes `manifest.json`, `state.json`. |
-| Heartbeat       | Every Coordinator tick (`--tick-interval-sec`, default `0` = no sleep) | Coordinator atomically rewrites `state.json` (temp `.state-*.json` + `os.replace`) inside `$SESSION_DIR`. |
+| Heartbeat       | Every Coordinator tick (`--tick-interval-sec`, default `0` = no sleep) | Coordinator atomically rewrites `state.json` (temp `.state.json.*.tmp` + `os.replace`) inside `$SESSION_DIR`. |
 | Session end     | `target_reached` / `time_exhausted` / `global_converged` | Coordinator writes `session_breakdown.json`, exits 0. |
 | Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume` / `--resume-from`; reads `manifest.json` + `state.json`. |
 
@@ -210,7 +210,7 @@ ingest it whole on session end.
    `ls "$SESSION_DIR/state.json"`.
 2. Relaunch with `--resume`:
    ```bash
-   inference_optimizer optimize --resume --resume-from "$SESSION_DIR"
+   python3 -m hyperloom.inference_optimizer.cli optimize --resume --resume-from "$SESSION_DIR"
    ```
 3. Coordinator reads `manifest.json` + `state.json`, re-enters the
    loop at the last completed action. The current in-flight action
@@ -222,7 +222,7 @@ ingest it whole on session end.
 > that exited abnormally — without re-running the optimization loop — use the
 > dedicated subcommand instead of `--resume`:
 > ```bash
-> inference_optimizer recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
+> python3 -m hyperloom.inference_optimizer.cli recover-session --session-dir "$SESSION_DIR" [--force] [--backfill-trace]
 > ```
 > `--force` re-runs even when the session already looks complete;
 > `--backfill-trace` replays `reports/trace/llm_calls.jsonl` as Langfuse
