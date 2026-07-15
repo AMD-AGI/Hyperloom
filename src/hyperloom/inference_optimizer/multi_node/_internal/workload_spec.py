@@ -25,6 +25,8 @@ from __future__ import annotations
 import base64
 from typing import Any
 
+from . import infera_support
+
 # Hard-coded per design (Brain TS impl + SKILL.md contract).
 _INFERENCE_SERVER_PORT = 8888
 _HEAD_ROLE_LABEL = "primus-safe.amd.com/ray-role"
@@ -213,27 +215,40 @@ def build_rayjob_workload_body(
 
 
 # ---------------------------------------------------------------------------
-# Dynamo (DynamoDeployment) idle-pod body: worker pods deployed IDLE
-# (mn-idle.sh starts sshd then blocks) so the optimizer can SSH in and relaunch
-# sglang/vllm with per-round flags without redeploying the workload.
+# Infera (InferaDeployment) idle-pod body
+#
+# The Infera backend reuses the RayJob "long-lived pod + external server
+# restart" pattern, but with a SaFE InferaDeployment (LeaderWorkerSet-backed
+# multi-node worker) instead of a RayJob, and SSH instead of the Ray Dashboard
+# control plane. The worker pods are deployed IDLE (entryPoint =
+# ``/usr/local/bin/mn-idle.sh``, which starts sshd then blocks) so the
+# optimizer can SSH in and (re)launch infera.engine.sglang/vllm with per-round
+# flags without redeploying the workload (preserving the aiter JIT cache across
+# restarts).
+#
+# See multi_node/SKILL.md (Infera section).
 
-# Frontend HTTP port — dynamo.frontend listens here; benchmarks target this
-# (NOT sglang rank-0 :8888) so the OpenAI-compatible router fronts every worker.
-_DYNAMO_FRONTEND_PORT = 8000
+# Frontend HTTP port — infera.server listens here; benchmarks target this
+# (NOT sglang rank-0 :8888) so the OpenAI-compatible router fronts every
+# worker registration. Matches the SaFE Infera fixtures.
+_INFERA_FRONTEND_PORT = 8000
 
-# Idle worker entrypoint (starts the SSH control plane then blocks); ignores
-# positional args so appended sglang multi-node flags are inert in idle mode.
-_DYNAMO_IDLE_WORKER_ENTRYPOINT = "/usr/local/bin/mn-idle.sh"
+# Idle worker entryPoint: role-scoped MN_SSH_PORT (see infera_support.idle_worker_entrypoint).
 
-# Frontend launch command (role 0); benchmarks hit this OpenAI-compatible endpoint.
-_DYNAMO_FRONTEND_ENTRYPOINT_TMPL = "python3 -m dynamo.frontend --http-port {port} --router-mode round-robin"
+# Frontend launch command (role 0). round-robin router is the simplest mode;
+# --enable-profiling lets the controller drive torch profiling via the
+# frontend /v1/admin/profile/* fan-out API.
+_INFERA_FRONTEND_ENTRYPOINT_TMPL = (
+    "python3 -m infera.server --host 0.0.0.0 --port {port} "
+    "--router-policy round-robin --router-tokenizer-path {model} --enable-profiling"
+)
 
-# Valid enum values mirrored from the webhook (validateDynamoDeployment).
-_DYNAMO_BACKENDS = frozenset({"sglang", "vllm", "trtllm"})
-_DYNAMO_KV_BACKENDS = frozenset({"nixl", "mori", "mooncake"})
+# Valid enum values mirrored from the SaFE Infera webhook.
+_INFERA_BACKENDS = frozenset({"sglang", "vllm"})
+_INFERA_KV_BACKENDS = frozenset({"nixl", "mori", "mooncake"})
 
 
-def build_dynamo_workload_body(
+def build_infera_workload_body(
     *,
     workspace: str,
     display_name: str,
@@ -244,14 +259,15 @@ def build_dynamo_workload_body(
     mem_gi_per_node: int,
     ephemeral_gi_per_node: int,
     ssh_authorized_key: str,
+    model: str,
     backend_framework: str = "sglang",
-    kv_transfer_backend: str = "nixl",
+    kv_transfer_backend: str = "mori",
     ssh_port: int = 2222,
     shared_mem_gi: int = 200,
     rdma_resource: str = "1",
     frontend_cpu: int = 4,
     frontend_mem_gi: int = 16,
-    frontend_port: int = _DYNAMO_FRONTEND_PORT,
+    frontend_port: int = _INFERA_FRONTEND_PORT,
     pd_mode: str = "aggregated",
     pd_prefill_nodes: int = 0,
     pd_decode_nodes: int = 0,
@@ -263,7 +279,68 @@ def build_dynamo_workload_body(
     extra_env: dict[str, str] | None = None,
     extra_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Build a SaFE CreateWorkloadRequest for an idle multi-node Dynamo deployment."""
+    """Build a SaFE CreateWorkloadRequest body for an IDLE multi-node Infera
+    deployment (frontend + LeaderWorkerSet worker).
+
+    Topology: ``resources = [frontend, worker]`` with
+    ``inferaOptions.serviceRoles = ["frontend", "worker"]``. When ``nodes >= 2``
+    the worker is listed in ``multinodeRoles`` and ``worker.replica = nodes`` so
+    the dispatcher sets ``multinode.numberOfNodes = nodes`` and the operator
+    materialises one LeaderWorkerSet group of ``nodes`` pods (a single
+    tensor-parallel model spanning nodes). ``worker.replica`` IS the node count
+    per the new API — NOT a Deployment replica count.
+
+    The worker entryPoint is the idle ``mn-idle.sh`` (sshd + block), so no
+    inference server starts at deploy time; the optimizer SSHes in to launch
+    sglang/vllm per round. ``ssh_authorized_key`` is injected as
+    ``MN_SSH_AUTHORIZED_KEY`` so ``mn-sshd-init.sh`` can authorise the
+    controller's key at container start.
+
+    ``entryPoints`` are base64-encoded per the SaFE contract (the apiserver
+    stores them verbatim; the dispatcher decodes/append/re-encodes the
+    launcher payload).
+
+    Args:
+        workspace: SaFE workspace id the workload belongs to.
+        display_name: Human-readable name for the workload.
+        image: Container image used for the frontend and worker roles.
+        nodes: Total node count for the aggregated worker role.
+        gpus_per_node: GPUs requested per GPU pod.
+        cpus_per_node: CPUs requested per GPU pod.
+        mem_gi_per_node: Memory in GiB requested per GPU pod.
+        ephemeral_gi_per_node: Ephemeral storage in GiB requested per GPU pod.
+        ssh_authorized_key: Public key injected as ``MN_SSH_AUTHORIZED_KEY``
+            for the idle-pod control plane.
+        model: Model path or HF id for the frontend ``--router-tokenizer-path``.
+        backend_framework: Infera backend (``sglang`` / ``vllm``).
+        kv_transfer_backend: KV transfer backend (``nixl`` / ``mori`` /
+            ``mooncake``).
+        ssh_port: SSH port exported as ``MN_SSH_PORT``.
+        shared_mem_gi: Shared memory in GiB requested per GPU pod.
+        rdma_resource: RDMA resource quantity for multinode / PD roles.
+        frontend_cpu: CPUs requested for the frontend pod.
+        frontend_mem_gi: Memory in GiB for the frontend pod.
+        frontend_port: Frontend HTTP port (benchmark target).
+        pd_mode: ``aggregated`` or ``disaggregated`` prefill/decode topology.
+        pd_prefill_nodes: Prefill group node count (disaggregated).
+        pd_decode_nodes: Decode group node count (disaggregated).
+        pd_prefill_tp: Prefill group tensor-parallel size (disaggregated).
+        pd_decode_tp: Decode group tensor-parallel size (disaggregated).
+        description: Optional workload description.
+        owner_id: Optional owner id to attach to the workload.
+        session_id: Optional session id injected as ``primus-claw/session-id``.
+        extra_env: Optional user environment variables (reserved keys stripped).
+        extra_labels: Optional user labels (Brain-managed prefixes stripped).
+
+    Returns:
+        A json.dumps-safe CreateWorkloadRequest body for the Infera deployment.
+
+    Raises:
+        ValueError: If ``nodes`` / ``gpus_per_node`` is below 1; if
+            ``workspace`` / ``display_name`` / ``image`` / ``model`` /
+            ``ssh_authorized_key`` is empty; or if ``backend_framework`` /
+            ``kv_transfer_backend`` is not a supported enum value.
+    """
     if nodes < 1:
         raise ValueError(f"nodes must be >= 1, got {nodes}")
     if gpus_per_node < 1:
@@ -274,17 +351,19 @@ def build_dynamo_workload_body(
         raise ValueError("display_name is required")
     if not image:
         raise ValueError("image is required")
+    if not model or not model.strip():
+        raise ValueError("model is required (frontend --router-tokenizer-path)")
     if not ssh_authorized_key or not ssh_authorized_key.strip():
         raise ValueError(
-            "ssh_authorized_key is required for the Dynamo idle-pod control "
+            "ssh_authorized_key is required for the Infera idle-pod control "
             "plane (injected as MN_SSH_AUTHORIZED_KEY for mn-sshd-init.sh)"
         )
     bf = (backend_framework or "sglang").lower()
-    if bf not in _DYNAMO_BACKENDS:
-        raise ValueError(f"backend_framework must be one of {sorted(_DYNAMO_BACKENDS)}, got {bf!r}")
-    kvb = (kv_transfer_backend or "nixl").lower()
-    if kvb not in _DYNAMO_KV_BACKENDS:
-        raise ValueError(f"kv_transfer_backend must be one of {sorted(_DYNAMO_KV_BACKENDS)}, got {kvb!r}")
+    if bf not in _INFERA_BACKENDS:
+        raise ValueError(f"backend_framework must be one of {sorted(_INFERA_BACKENDS)}, got {bf!r}")
+    kvb = (kv_transfer_backend or "mori").lower()
+    if kvb not in _INFERA_KV_BACKENDS:
+        raise ValueError(f"kv_transfer_backend must be one of {sorted(_INFERA_KV_BACKENDS)}, got {kvb!r}")
 
     # Frontend (role 0): CPU-only OpenAI-compatible router/HTTP server.
     frontend_resource = {
@@ -317,12 +396,20 @@ def build_dynamo_workload_body(
             res["rdmaResource"] = rdma_resource
         return res
 
-    frontend_ep = _b64(_DYNAMO_FRONTEND_ENTRYPOINT_TMPL.format(port=frontend_port))
-    idle_ep = _b64(_DYNAMO_IDLE_WORKER_ENTRYPOINT)
+    frontend_ep = _b64(
+        _INFERA_FRONTEND_ENTRYPOINT_TMPL.format(port=frontend_port, model=model.strip())
+    )
+    worker_idle_ep = _b64(infera_support.idle_worker_entrypoint(role="worker", ssh_port_base=ssh_port))
+    prefill_idle_ep = _b64(infera_support.idle_worker_entrypoint(role="prefill", ssh_port_base=ssh_port))
+    decode_idle_ep = _b64(infera_support.idle_worker_entrypoint(role="decode", ssh_port_base=ssh_port))
 
     is_pd = (pd_mode or "aggregated").lower() == "disaggregated"
     if is_pd:
-        # PD disaggregation: roles = [frontend, prefill, decode].
+        # PD disaggregation: roles = [frontend, prefill, decode]. A role spans
+        # nodes (LeaderWorkerSet) when its TP exceeds one pod's GPUs; otherwise
+        # its replica is an independent single-node instance count. Both pod
+        # roles deploy IDLE (mn-idle.sh) — restart-server SSH-launches
+        # infera.engine.sglang with --disaggregation-mode prefill/decode per group.
         pn = max(1, int(pd_prefill_nodes or 0))
         dn = max(1, int(pd_decode_nodes or 0))
         ptp = int(pd_prefill_tp or 0)
@@ -340,14 +427,14 @@ def build_dynamo_workload_body(
         decode_res["rdmaResource"] = pd_rdma
         resources = [frontend_resource, prefill_res, decode_res]
         images = [image, image, image]
-        entry_points = [frontend_ep, idle_ep, idle_ep]
+        entry_points = [frontend_ep, prefill_idle_ep, decode_idle_ep]
         service_roles = ["frontend", "prefill", "decode"]
         multinode_roles = (["prefill"] if prefill_mn else []) + (["decode"] if decode_mn else [])
     else:
         # Aggregated: [frontend, worker]; worker.replica == node count.
         resources = [frontend_resource, _gpu_resource(nodes, multinode=nodes > 1)]
         images = [image, image]
-        entry_points = [frontend_ep, idle_ep]
+        entry_points = [frontend_ep, worker_idle_ep]
         service_roles = ["frontend", "worker"]
         multinode_roles = ["worker"] if nodes > 1 else []
 
@@ -355,28 +442,24 @@ def build_dynamo_workload_body(
     env: dict[str, str] = _sanitize_extra_env(extra_env)
     env["MN_SSH_AUTHORIZED_KEY"] = ssh_authorized_key.strip()
     env["MN_SSH_PORT"] = str(ssh_port)
-    # Enable the Dynamo system status server (hosts /engine/start_profile) on
-    # every worker so the controller can trigger torch profiling. User extra_env
-    # may override via DYN_SYSTEM_PORT.
-    env.setdefault("DYN_SYSTEM_PORT", "9090")
 
     labels = _sanitize_extra_labels(extra_labels)
     if session_id:
         labels["primus-claw/session-id"] = session_id
 
-    dynamo_options: dict[str, Any] = {
+    infera_options: dict[str, Any] = {
         "backendFramework": bf,
         "kvTransferBackend": kvb,
         "serviceRoles": service_roles,
     }
     if multinode_roles:
-        dynamo_options["multinodeRoles"] = multinode_roles
+        infera_options["multinodeRoles"] = multinode_roles
 
     body: dict[str, Any] = {
         "displayName": display_name,
         "workspaceId": workspace,
         "groupVersionKind": {
-            "kind": "DynamoDeployment",
+            "kind": "InferaDeployment",
             "version": "v1",
         },
         "priority": 1,
@@ -393,7 +476,7 @@ def build_dynamo_workload_body(
         "entryPoints": entry_points,
         "env": env,
         "labels": labels,
-        "dynamoOptions": dynamo_options,
+        "inferaOptions": infera_options,
         "service": {
             "protocol": "TCP",
             "port": frontend_port,
