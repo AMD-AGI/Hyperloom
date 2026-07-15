@@ -2,41 +2,28 @@
 
 """Arbor-aligned data shapes for the local recipe-snapshot KB.
 
-The on-disk JSON layout for ``recipe.json`` follows the arbor
-``Recipe`` dataclass (see ``Arbor/src/arbor/recipes.py``) so an
-operator who knows arbor can open one of our local files and read
-it without translation. Specifically:
+The on-disk ``recipe.json`` layout follows the arbor ``Recipe`` dataclass so
+an operator who knows arbor can read our local files without translation:
 
-* ``model`` / ``hardware`` / ``best_config`` / ``best_throughput``
-  / ``stack_fingerprint`` / ``last_profiled`` / ``sessions`` /
-  ``prs_tested`` are all top-level fields, not buried inside
-  ``body`` like the v2 wire spec puts them.
-* The four experience arrays use arbor's names —
-  ``what_worked`` / ``what_failed`` / ``remaining_gaps`` /
-  ``pitfalls`` (NOT v2's ``findings`` / ``failures`` / ``gaps``).
-* Each row has the same nested sub-shapes arbor uses
-  (``Finding{description, measured_impact}`` etc.).
+* ``model`` / ``hardware`` / ``best_config`` / ``best_throughput`` /
+  ``stack_fingerprint`` / ``last_profiled`` / ``sessions`` / ``prs_tested``
+  are all top-level fields.
+* The four experience arrays use arbor's names — ``what_worked`` /
+  ``what_failed`` / ``remaining_gaps`` / ``pitfalls``.
+* Each row has the same nested sub-shapes arbor uses.
 
 We keep a small superset of arbor fields:
 
-* ``canonical_id`` / ``version`` / ``created_at`` /
-  ``updated_at`` — store-managed metadata for the atomic-archive
-  contract (arbor has no version concept; we need it for
-  ``history/v{N}.json`` rollbacks).
-* ``framework_name`` / ``framework_version`` / ``precision`` — the
-  three identity dimensions arbor doesn't have (it's a 2-tuple
-  ``model``+``hardware`` while we're a 5-tuple).
+* ``canonical_id`` / ``version`` / ``created_at`` / ``updated_at`` —
+  store-managed metadata for the atomic-archive contract.
+* ``framework_name`` / ``framework_version`` / ``precision`` — the three
+  identity dimensions arbor lacks (arbor is a 2-tuple model+hardware).
 * ``lessons`` / ``authority`` / ``confidence`` / ``evidence_refs`` /
   ``provenance`` — v2-spec fields the central kb-service expects.
-  The dispatcher uses them to round-trip rows back to ``/v1`` /
-  audit.
 
-Schema translation from the v2 wire shape (central kb-service) to
-this arbor shape lives in :mod:`recipe_kb.dispatcher`
-(``_v2_to_arbor``), applied on read. There is intentionally no
-reverse ``_arbor_to_v2``: writes are local-only and are never
-marshalled back to the v2 wire shape. The local store NEVER speaks
-v2 directly.
+Schema translation from the v2 wire shape to this arbor shape lives in
+:mod:`recipe_kb.dispatcher`, applied on read. Writes are local-only and
+never marshalled back to v2.
 """
 
 from __future__ import annotations
@@ -45,9 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-# ---------------------------------------------------------------------------
 # Arbor-aligned sub-shapes
-# ---------------------------------------------------------------------------
 @dataclass
 class Finding:
     """An "X helped" insight — what worked + the measured impact."""
@@ -86,9 +71,9 @@ class PRResult:
 class Pitfall:
     """A "watch out for X" — operator-readable description.
 
-    ``severity`` (e.g. ``crash`` / ``regress``) is a hyperloom superset
-    field the Coordinator stamps so the warm-start prompt can rank
-    pitfalls by disruption; arbor consumers simply ignore it.
+    ``severity`` (e.g. ``crash`` / ``regress``) is a hyperloom superset field
+    the Coordinator stamps so the warm-start prompt can rank pitfalls by
+    disruption; arbor consumers ignore it.
     """
 
     description: str
@@ -99,15 +84,10 @@ class Pitfall:
 class Lesson:
     """A "X is the lesson" insight — statement + optional impact.
 
-    arbor has no separate ``Lesson`` shape (it stores everything
-    under ``what_worked``); we keep ``Lesson`` because the v2 wire
-    contract has a dedicated ``lessons`` array and the optimizer's
-    Coordinator emits these distinct from ``what_worked``.
-
-    ``measured_impact`` is free-form: the Coordinator writes a
-    structured dict (``gain_pct`` / ``throughput_after`` / ...), but a
-    plain string is also accepted for arbor-compat — it is preserved
-    verbatim (never str()-ed) so the structured payload round-trips.
+    We keep ``Lesson`` (arbor stores everything under ``what_worked``)
+    because the v2 wire contract has a dedicated ``lessons`` array and the
+    Coordinator emits these distinct from ``what_worked``. ``measured_impact``
+    is free-form (a structured dict or plain string) and preserved verbatim.
     """
 
     statement: str
@@ -118,12 +98,8 @@ class Lesson:
 class StackFingerprint:
     """Software-stack identity — used to detect "is this recipe stale?"
 
-    Mirrors arbor's ``StackFingerprint`` exactly; we don't add new
-    fields here even though sglang / atom would benefit, because
-    the goal is binary readability between arbor and our local KB.
-    Operators who need extra-stack info should put it in
-    ``stack_fingerprint_extras`` (a free-form sibling field is
-    coordinated separately).
+    Mirrors arbor's ``StackFingerprint`` exactly to keep binary readability
+    between arbor and our local KB.
     """
 
     vllm_version: str = ""
@@ -167,21 +143,15 @@ class StackFingerprint:
 class KernelOptimization:
     """One KEEP'd kernel-optimization outcome — micro result + E2E verdict.
 
-    Hyperloom superset (arbor has no kernel-level concept). Captures a
-    kernel the GEAK/Kernel-agent produced and KEEP'd at the micro layer,
-    together with the end-to-end integrate verification result when the
-    optimizer actually integrated + re-benchmarked it. The point is that a
-    kernel can be a genuine micro win (``micro_speedup`` > 1) yet show no
-    end-to-end gain (``e2e_gain_pct`` ~ 0) because its share of total GPU
-    time is tiny — that whole conclusion is valuable warm-start signal
-    ("tried k006 rmsnorm: 1.32x micro, but E2E flat — skip it"), and used
-    to be dropped on the floor because ``what_worked`` only records
-    E2E-validated stack entries.
+    Hyperloom superset (arbor has no kernel-level concept). Captures a kernel
+    KEEP'd at the micro layer plus its end-to-end integrate verification
+    result. A kernel can be a genuine micro win yet show no end-to-end gain
+    because its share of total GPU time is tiny — that conclusion is valuable
+    warm-start signal.
 
-    ``e2e_gain_pct`` / ``e2e_tput`` default to 0.0 and ``integrated``
-    to False for a kernel that was KEEP'd at the micro layer but never
-    integrated (so warm-start can tell "micro-only, E2E unknown" apart
-    from "E2E-verified, no gain").
+    ``e2e_gain_pct`` / ``e2e_tput`` default to 0.0 and ``integrated`` to False
+    for a kernel KEEP'd at the micro layer but never integrated (so warm-start
+    can tell "micro-only, E2E unknown" apart from "E2E-verified, no gain").
     """
 
     kernel_id: str = ""
@@ -191,9 +161,8 @@ class KernelOptimization:
     decision: str = ""
     e2e_gain_pct: float = 0.0
     e2e_tput: float = 0.0
-    # Integrate-layer verdict (KEEP / REVERT / NEEDS_REVIEW). ``decision``
-    # above stays the micro-layer KEEP; this carries the E2E outcome so
-    # warm-start can skip a kernel whose patch was reverted at integrate.
+    # Integrate-layer verdict (KEEP / REVERT / NEEDS_REVIEW); ``decision``
+    # above stays the micro-layer KEEP.
     e2e_decision: str = ""
     integrated: bool = False
     ts: str = ""
@@ -250,13 +219,10 @@ class KernelOptimization:
 class SessionSummary:
     """One optimisation-session entry — one row per CLOSE.
 
-    Superset of arbor's session log. The Coordinator's CLOSE finalize
-    writes ``session_id`` / ``gain_pct`` / ``stack_len`` — ``session_id``
-    is REQUIRED for the per-session dedup on rewrite (two finalises of
-    the same session must not double-append) and ``gain_pct`` feeds
-    warm-replay. arbor's ``date`` / ``throughput_before`` /
-    ``throughput_after`` / ``actions_taken`` stay available for arbor
-    consumers (all default to empty so a hyperloom-only write is valid).
+    Superset of arbor's session log. ``session_id`` is required for
+    per-session dedup on rewrite and ``gain_pct`` feeds warm-replay. arbor's
+    ``date`` / ``throughput_before`` / ``throughput_after`` / ``actions_taken``
+    stay available (all default to empty so a hyperloom-only write is valid).
     """
 
     date: str = ""
@@ -268,19 +234,16 @@ class SessionSummary:
     stack_len: int = 0
 
 
-# ---------------------------------------------------------------------------
 # Recipe — arbor superset
-# ---------------------------------------------------------------------------
 @dataclass
 class Recipe:
-    """One on-disk recipe row, isomorphic to arbor's ``Recipe`` plus
-    the version + provenance metadata our atomic-archive needs.
+    """One on-disk recipe row, isomorphic to arbor's ``Recipe`` plus the
+    version + provenance metadata our atomic-archive needs.
 
-    The ``to_dict`` output is what lands in ``recipe.json``. An
-    arbor consumer pointing ``ARBOR_RECIPES_DIR`` at our store
-    would only see two extra keys (``canonical_id`` / ``version``
-    / ``framework_version`` / ``precision`` / ``provenance``) —
-    everything else is byte-compatible.
+    The ``to_dict`` output is what lands in ``recipe.json``. An arbor consumer
+    pointing ``ARBOR_RECIPES_DIR`` at our store sees only a few extra keys
+    (``canonical_id`` / ``version`` / ``framework_version`` / ``precision`` /
+    ``provenance``); everything else is byte-compatible.
     """
 
     # ----- store-managed metadata -----
@@ -310,22 +273,17 @@ class Recipe:
     sessions: list[SessionSummary] = field(default_factory=list)
 
     # ----- hyperloom superset: KEEP'd kernel optimizations -----
-    # Records kernel-level wins (micro_speedup) + their end-to-end
-    # verification outcome. arbor consumers ignore the extra top-level
-    # key (same as framework_version / lessons). Warm-start reads it to
-    # skip re-optimizing kernels already proven to have no E2E payoff.
+    # Kernel-level wins + their E2E verification outcome. Warm-start reads it
+    # to skip re-optimizing kernels already proven to have no E2E payoff.
     kernel_optimizations: list[KernelOptimization] = field(default_factory=list)
 
-    # ----- v2 audit / wire-compat fields (kept so dispatcher can
-    # round-trip to the central server) -----
+    # ----- v2 audit / wire-compat fields -----
     authority: str = "EXPERIENTIAL"
     confidence: float = 0.85
     evidence_refs: list[Any] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
 
-    # ----- free-form extras (forward-compat: arbor's existing
-    # recipes carry e.g. ``session_20260515_findings`` keys that
-    # ``Recipe.from_dict`` doesn't parse but should preserve) -----
+    # ----- free-form extras (unrecognised top-level keys, preserved verbatim) -----
     extras: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -382,10 +340,8 @@ class Recipe:
             "evidence_refs": list(self.evidence_refs),
             "provenance": dict(self.provenance),
         }
-        # Splat the free-form extras at the top level so they look
-        # exactly the way arbor stores them (no nested ``extras`` key
-        # on disk). Reserved keys above always win — we don't let an
-        # arbitrary extras entry shadow a well-known field.
+        # Splat extras at the top level (no nested ``extras`` key on disk);
+        # reserved keys above always win.
         for key, val in self.extras.items():
             if key not in out:
                 out[key] = val
@@ -406,9 +362,7 @@ class Recipe:
         Returns:
             Recipe: The reconstructed recipe row.
         """
-        # Stripped set of well-known top-level keys we parse — anything
-        # else gets bucketed into ``extras`` so a future read by a
-        # newer (or older) writer doesn't lose data.
+        # Well-known top-level keys we parse; anything else goes into ``extras``.
         well_known = {
             "canonical_id",
             "version",
@@ -417,8 +371,8 @@ class Recipe:
             "model",
             "hardware",
             "framework_name",
-            # Legacy framework-identity key (pre framework_name rename); consumed
-            # into framework_name below, listed here so it never leaks into extras.
+            # Legacy framework-identity key; consumed into framework_name below,
+            # listed here so it never leaks into extras.
             "framework",
             "framework_version",
             "precision",
@@ -447,8 +401,7 @@ class Recipe:
             updated_at=str(d.get("updated_at") or ""),
             model=str(d.get("model") or ""),
             hardware=str(d.get("hardware") or ""),
-            # Back-compat: rows persisted before the framework_name rename stored
-            # the serving framework under the legacy ``framework`` key.
+            # Fall back to the legacy ``framework`` key.
             framework_name=str(d.get("framework_name") or d.get("framework") or ""),
             framework_version=str(d.get("framework_version") or ""),
             precision=str(d.get("precision") or ""),
@@ -532,16 +485,13 @@ class Recipe:
         )
 
 
-# ---------------------------------------------------------------------------
 # Attempt — append-only optimization-attempt record
-# ---------------------------------------------------------------------------
 @dataclass
 class Attempt:
     """One append-only evolutionary attempt against a recipe.
 
-    Same shape as before — attempts are not arbor-defined; this
-    layer is identical to the v2 wire ``Attempt`` shape because
-    the central server speaks the same shape on read-side too.
+    Attempts are not arbor-defined; this layer is identical to the v2 wire
+    ``Attempt`` shape, which the central server speaks on read too.
     """
 
     id: int = 0

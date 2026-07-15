@@ -3,11 +3,10 @@
 """Deterministic trajectory review — synthesise candidate directions from the
 whole optimization lineage when the search stalls.
 
-Reads the optimization journal (KEEP / REVERT / no_promote lineage), the
-``explore_search`` winners history, and the roofline snapshots already kept on
-:class:`SharedState`, then renders an advisory block that names exhausted
-directions to avoid and an under-exploited bottleneck to push. Read-only and
-fail-soft; never raises and never gates phase advance.
+Reads the optimization journal, the ``explore_search`` winners history, and the
+roofline snapshots on :class:`SharedState`, then renders an advisory block
+naming exhausted directions to avoid and an under-exploited bottleneck to push.
+Read-only and fail-soft; never raises and never gates phase advance.
 """
 
 from __future__ import annotations

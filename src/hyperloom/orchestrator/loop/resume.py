@@ -55,7 +55,7 @@ class ResumeCollaborator:
             "is_resume": events_present or state_path.exists(),
             "event_count": int(ev_count["c"]) if ev_count else 0,
             "state_json_present": state_path.exists(),
-            "rebuilt": False,  # set by replay_for_resume()
+            "rebuilt": False,
         }
 
     async def replay_for_resume(self) -> dict[str, Any]:
@@ -125,21 +125,15 @@ class ResumeCollaborator:
             if isinstance(raw_envs, Mapping):
                 for k, v in raw_envs.items():
                     ks = str(k)
-                    # A flag mis-stored under extra_envs (e.g. a ``--compilation-config``
-                    # key from an integrate_patch entry) is a SERVER ARG, not an env
-                    # var — the grid runner would otherwise inject it verbatim as an
-                    # env the backend ignores, silently dropping it from the rebuilt
-                    # config. Route any ``-``-prefixed key back into extra_server_args
-                    # so the materialized stack reproduces the real launch. General:
-                    # keyed on the ``-`` prefix, never on a specific flag name.
+                    # A ``-``-prefixed key mis-stored under extra_envs is a server
+                    # arg, not an env var; route it back into extra_server_args.
                     if ks.startswith("-"):
                         tok = ks if v in ("", None) else f"{ks}={v}"
                         args = _merge_cumulative_extra_server_args(args, "", tok)
                     else:
                         envs[ks] = str(v)
             # Carry the authored-kernel overlay (PYTHONPATH prefix) so a native
-            # rebuild of an overlay winner actually loads the built kernels
-            # instead of measuring the un-optimized stack. Last non-empty wins.
+            # rebuild loads the built kernels. Last non-empty wins.
             entry_overlay = str(entry.get("final_overlay") or "").strip()
             if entry_overlay:
                 overlay = entry_overlay
@@ -173,9 +167,8 @@ class ResumeCollaborator:
           * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
           * ``launch_recipe`` — the baseline Magpie recipe to launch from.
 
-        This is the single source of truth the GEAK handoff forwards so the
-        baseline ref is materialized from the SAME layers as ``current_best``
-        (not just its flags/env), closing the cross-harness baseline gap.
+        The single source of truth the GEAK handoff forwards so the baseline ref
+        is materialized from the same layers as ``current_best``.
         """
         materialized = self._materialize_stack_config_for_resume()
         stack = [
@@ -189,9 +182,8 @@ class ResumeCollaborator:
                 continue
             snap = str(entry.get("source_snapshot") or "").strip()
             if not snap:
-                # A source_patch with no durable snapshot (e.g. a pre-fix legacy
-                # KEEP) is surfaced so the consumer can flag an unreproducible
-                # baseline rather than silently launch a weaker stock tree.
+                # A source_patch with no durable snapshot is surfaced so the
+                # consumer can flag an unreproducible baseline.
                 source_snapshots.append(
                     {
                         "id": str(entry.get("variant_name") or entry.get("name") or ""),
@@ -212,12 +204,9 @@ class ResumeCollaborator:
                 }
             )
         # FULL resolved engine config (not just the current_best delta): the
-        # complete server-launch flag set the orchestrator actually ran, scraped
-        # from the authoritative launched argv. This is what closes the CONFIG
-        # layer of the cross-harness baseline gap — mem-fraction, radix cache,
-        # chunked-prefill and every other engine knob the recipe/delta never
-        # carried. ``extra_server_args``/``extra_envs`` remain the current_best
-        # DELTA (a consumer merges the delta on top, delta winning on conflict).
+        # complete server-launch flag set the orchestrator ran, scraped from the
+        # launched argv. ``extra_server_args``/``extra_envs`` remain the
+        # current_best delta (a consumer merges the delta on top, delta wins).
         server_launch_flags = ""
         try:
             cb_now = getattr(self.shared_state, "current_best", None)
@@ -231,15 +220,14 @@ class ResumeCollaborator:
                 str(os.environ.get("FRAMEWORK", "") or "sglang"),
                 target_tput=_target_tput,
             )
-        except Exception:  # noqa: BLE001 — additive; never block env_spec
+        except Exception:  # noqa: BLE001
             server_launch_flags = ""
         return {
             "schema_version": 1,
             "config": {
                 "extra_server_args": materialized.get("extra_server_args") or "",
                 "extra_envs": dict(materialized.get("extra_envs") or {}),
-                # Authoritative, COMPLETE engine flags (run-specific stripped);
-                # empty => consumer keeps its own adapter defaults (prior behavior).
+                # Complete engine flags (run-specific stripped); empty => consumer keeps its defaults.
                 "server_launch_flags": server_launch_flags,
             },
             "source_snapshots": source_snapshots,
@@ -264,12 +252,11 @@ class ResumeCollaborator:
             "fixes": [],
             "warnings": [],
         }
-        # (1) Half-applied integrate window: replay the
-        # missing stack append or roll back the partial patch BEFORE anything
-        # reads the stack, so the rest of the pass sees the recovered truth.
+        # (1) Half-applied integrate window: replay the missing stack append or
+        # roll back the partial patch before anything reads the stack.
         await self._resume_recover_pending_integrate(report)
-        # (2) Orphaned KEEPs: replay integrate_patch KEEPs
-        # that crashed before the append landed; surface ambiguous ones loudly.
+        # (2) Orphaned KEEPs: replay integrate_patch KEEPs that crashed before
+        # the append landed; surface ambiguous ones.
         await self._resume_recover_orphaned_keeps(report)
 
         # (3) current_best <-> stack reconcile (after 1/2 may have grown stack).
@@ -281,8 +268,7 @@ class ResumeCollaborator:
             cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()} if isinstance(cb.get("extra_envs"), Mapping) else {}
             if cb_args != rebuilt["extra_server_args"] or cb_envs != rebuilt["extra_envs"]:
                 # The append-only stack is authoritative; a disagreeing
-                # current_best is the inconsistency, recorded distinctly from the
-                # rebuild fix so operators can see a stale best was detected.
+                # current_best is the inconsistency.
                 report["warnings"].append(
                     {
                         "kind": "resume_inconsistent_current_best",
@@ -308,8 +294,8 @@ class ResumeCollaborator:
                 state.current_best = new_cb
                 report["fixes"].append("rebuilt_current_best_config_from_stack")
         elif cb:
-            # Legacy sessions before the append-only stack existed are still
-            # recoverable; seed once instead of dropping a possibly valid best.
+            # Legacy sessions without an append-only stack: seed once instead of
+            # dropping a possibly valid best.
             before = len(getattr(state, "optimization_stack", []) or [])
             state.seed_stack_from_current_best()
             after = len(getattr(state, "optimization_stack", []) or [])
@@ -318,10 +304,8 @@ class ResumeCollaborator:
             else:
                 report["warnings"].append({"kind": "current_best_without_stack"})
 
-        # (4) Validation-watermark compensation: unvalidated
-        # KEEPs (claimed gain not yet end-to-end confirmed) → flag + enqueue ONE
-        # full-stack rebench. The flag + watermark are reconciled from the
-        # measured tput when that rebench promotes (see _promote_to_shared_state).
+        # (4) Validation-watermark compensation: unvalidated KEEPs → flag +
+        # enqueue one full-stack rebench (reconciled on promote).
         stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
         vlen = int(getattr(state, "cumulative_gain_validated_stack_len", 0) or 0)
         if vlen < len(stack):
@@ -386,9 +370,8 @@ class ResumeCollaborator:
                 "workspace": result.get("workspace"),
                 "provenance": "integrate_patch",
                 "scope": "source_patch",
-                # Same durable source-layer handles as the primary KEEP lift so a
-                # source_patch recovered on THIS path is equally reproducible in
-                # the GEAK baseline (no path is left snapshot-less).
+                # Durable source-layer handles so a source_patch recovered here
+                # is equally reproducible in the GEAK baseline.
                 "source_snapshot": result.get("source_snapshot") or "",
                 "framework_root": result.get("framework_root") or "",
                 "base_sha": result.get("base_sha") or "",
@@ -457,10 +440,8 @@ class ResumeCollaborator:
                 if task_id and str(payload.get("task_id") or "") != task_id:
                     continue
                 res = payload.get("result") or {}
-                # Require an explicit integrate_patch kind: an empty-kind wildcard
-                # could misclassify a non-integrate event that happens to share
-                # this task_id as a kept integrate result, skipping rollback of a
-                # half-applied patch.
+                # Require an explicit integrate_patch kind so a non-integrate
+                # event sharing this task_id is not misclassified as a kept patch.
                 if (
                     isinstance(res, dict)
                     and str(res.get("kind") or payload.get("kind") or "") == "integrate_patch"
@@ -568,8 +549,7 @@ class ResumeCollaborator:
                             {"kind": "orphaned_keep_replay_noop", "orphan_kind": kind, "variant": variant}
                         )
                 else:
-                    # explore / framework: ambiguous vs eviction — never
-                    # resurrect; surface for the operator.
+                    # explore / framework: ambiguous vs eviction — never resurrect.
                     report["warnings"].append(
                         {
                             "kind": "orphaned_keep",
@@ -608,14 +588,10 @@ class ResumeCollaborator:
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
         """
-        # fix-point 7 (2b) — when the win is a GEAK e2e result, source the
-        # revalidation config from result.json (the SINGLE source of truth), NOT
-        # from stack materialization. This guarantees the same-harness rebench
-        # launches byte-for-byte the config GEAK optimized (flags + parsed env +
-        # authored overlay), independent of whether the optimization is a MoE
-        # tuned-config / kernel / flag winner — no case-by-case markers. The
-        # consumer (_promote_to_shared_state) asserts config identity + effect
-        # before stamping validated, and falls back to 2a (GEAK harness) on miss.
+        # When the win is a GEAK e2e result, source the revalidation config from
+        # result.json (not stack materialization) so the same-harness rebench
+        # launches byte-for-byte the config GEAK optimized. The consumer asserts
+        # config identity + effect before stamping validated, falling back to 2a.
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = str(ps.get("final_overlay") or "").strip()
@@ -627,11 +603,9 @@ class ResumeCollaborator:
             if _ps_extra_flags:
                 ps_flags = (ps_flags + " " + _ps_extra_flags).strip()
             if ps_flags or ps_envs or ps_overlay:
-                # Identity hash uses the SAME (args, envs) contract the grid
-                # executor fingerprints with (overlay is NOT part of the hash,
-                # matching canonical_fingerprint) so expected == the
-                # ran variant's fingerprint by construction, and any executor-side
-                # drop/alter of config is caught downstream.
+                # Identity hash uses the same (args, envs) contract the grid
+                # executor fingerprints with (overlay excluded), so expected ==
+                # the ran variant's fingerprint by construction.
                 expected_cfg_hash = canonical_fingerprint(ps_flags, ps_envs)
                 params_ps: dict[str, Any] = {
                     "source": "resume_stack_revalidate",
@@ -674,8 +648,7 @@ class ResumeCollaborator:
                     "name": "resume_stack_revalidate",
                     "extra_args": args,
                     "extra_envs": dict(envs),
-                    # Carry the overlay so an authored-kernel native stack rebuild
-                    # loads the built kernels (inert when empty).
+                    # Carry the overlay so a native stack rebuild loads the built kernels.
                     "overlay_pythonpath": overlay,
                     "provenance": "resume_stack_revalidate",
                     "note": "post-resume full-stack end-to-end revalidation",
@@ -694,16 +667,11 @@ class ResumeCollaborator:
         return {"task_id": task.task_id, "existing": bool(existing)}
 
     async def _validate_geak_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
-        """2a fallback - validate the geak win by REPLAYING it through
-        GEAK's own ``bench_e2e.sh`` (the harness that produced the headline
-        result), so the optimized config engages BY CONSTRUCTION regardless of
-        winner kind (tuned-config / kernel / overlay / flag). Because the replay
-        reproduces the optimized config from ``result.json`` directly, a
-        ``succeeded`` status is itself the engagement proof. The validated gain
-        is the SAME-harness A/B ``hot_geak_speedup`` (numerator + denominator
-        both measured by GEAK), which is harness-internal and clean - recorded
-        under a distinct provenance because it is a same-harness MARGINAL, not an
-        over-raw total. Used only when 2b (orchestrator harness) is inconclusive.
+        """2a fallback - validate the geak win by replaying it through GEAK's own
+        ``bench_e2e.sh``, so the optimized config engages by construction. A
+        ``succeeded`` status is itself the engagement proof; the validated gain
+        is the same-harness A/B ``hot_geak_speedup``. Used only when 2b
+        (orchestrator harness) is inconclusive.
 
         Args:
             reason: Human-readable reason stamped in logs/return.
@@ -715,14 +683,9 @@ class ResumeCollaborator:
         if str(ps.get("status") or "") != "ok":
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
         am = ps.get("alignment_metrics") or {}
-        # Use GEAK's OWN within-harness speedup on the SAME basis it promoted
-        # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
-        # else the hot within-GEAK ratio; see run_e2e final-basis selection). This
-        # makes Hyperloom's same-harness validated gain EQUAL to GEAK's headline
-        # number - using the raw hot A/B instead would report a higher figure than
-        # GEAK itself claims and reopen the alignment gap this path exists to close.
-        # Falls back to the explicit within-GEAK ratios when throughput_speedup is
-        # missing (older result.json), preferring the promoted basis.
+        # Use GEAK's own within-harness speedup on the same basis it promoted, so
+        # the validated gain equals GEAK's headline number. Falls back to the
+        # explicit within-GEAK ratios when throughput_speedup is missing.
         try:
             geak_sp = float(ps.get("throughput_speedup") or 0.0)
         except (TypeError, ValueError):
@@ -756,15 +719,12 @@ class ResumeCollaborator:
             output_root=runs_dir(self.session_dir, "sweep", "revalidate_geak"),
             variant_timeout_sec=timeout,
             repeats=3,
-            # Single-point validated replay pins the headline protocol (num_prompts
-            # etc.) so it is protocol-identical to the reported result.
+            # Pin the headline protocol so the replay is protocol-identical to the reported result.
             pin_num_prompts=True,
         )
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
-            # Rebench-first: write the headline from the GEAK-harness MEASURED
-            # throughput (engages by construction via the launch-script replay),
-            # keeping the leaderboard number a same-harness total rather than a
-            # self-reported speedup.
+            # Write the headline from the GEAK-harness measured throughput,
+            # keeping the leaderboard number a same-harness total.
             measured = _geak_sweep_measured_tput(res)
             if measured is None:
                 log.warning(
@@ -781,7 +741,7 @@ class ResumeCollaborator:
             gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 - defensive
+            except Exception:  # noqa: BLE001
                 log.exception("geak 2a: SharedState.save failed")
             return {"validated": True, "gain": gain_out, "reason": reason}
         log.warning(
@@ -794,26 +754,20 @@ class ResumeCollaborator:
         """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
 
         Phase-entry side effects (the GEAK delegation + its ``result.json``
-        crash-recovery) are bound to a phase *transition* via
-        ``_on_phase_entered``; a resume only restores ``phase`` from state.json
-        and never re-enters the current phase. Without this, a session that
-        crashed mid ``KERNEL_AGENT`` sits idle until the phase budget cap fires,
-        then hands SWEEP an empty result — the whole delegation is silently lost.
+        crash-recovery) are bound to a phase transition; a resume only restores
+        ``phase`` and never re-enters the current phase, so without this a session
+        that crashed mid ``KERNEL_AGENT`` sits idle until the budget cap fires.
 
-        General across every crash timing (not case-by-case): the decision is
-        driven purely by whether THIS KERNEL phase's history row already carries
-        a ``geak`` completion record, so it self-classifies:
+        Keyed on whether this KERNEL phase's history row already carries a
+        ``geak`` completion record:
 
           * completed-this-phase -> only re-arm (+persist) the ``skip_to_sweep``
-            hint the delegation sets, so the phase machine winds down to SWEEP
-            with no e2e re-run;
-          * not-completed -> re-enter ``_on_enter_kernel``; its own entry guard
-            promotes an existing OK ``result.json`` (crash-before-handback) and
-            re-runs the e2e only when there is genuinely nothing to recover
-            (run_e2e itself then continues from the pinned eval_dir on disk).
+            hint so the phase machine winds down to SWEEP with no e2e re-run;
+          * not-completed -> re-enter ``_on_enter_kernel``; its entry guard
+            promotes an existing OK ``result.json`` and re-runs the e2e only when
+            there is nothing to recover.
 
-        No-op unless resumed while parked in ``KERNEL_AGENT`` with the GEAK
-        backend selected.
+        No-op unless resumed while parked in ``KERNEL_AGENT`` with GEAK selected.
         """
         from ..phases.machine_state import (
             ESCALATE_HINT_SKIP_TO_SWEEP,
@@ -834,15 +788,14 @@ class ResumeCollaborator:
             evidence.get("geak"), dict
         )
         if completed_this_phase:
-            # The delegation landed during this phase but the SWEEP transition
-            # never persisted (crash between the hook and the next tick). Re-arm
-            # the wind-down hint + persist so the phase machine advances.
+            # The delegation landed but the SWEEP transition never persisted.
+            # Re-arm the wind-down hint + persist so the phase machine advances.
             cur = str(getattr(state, "pending_escalate_hint", "") or "").strip()
             if cur != ESCALATE_HINT_SKIP_TO_SWEEP:
                 state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
                 try:
                     state.save(self.session_dir)
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:  # noqa: BLE001
                     log.exception(
                         "resume: save after re-arming skip_to_sweep failed"
                     )
@@ -857,7 +810,7 @@ class ResumeCollaborator:
         )
         try:
             await self._on_enter_kernel(from_phase="resume")
-        except Exception:  # noqa: BLE001 — resume re-entry must never kill the session
+        except Exception:  # noqa: BLE001
             log.exception("resume: KERNEL re-entry hook failed")
 
     @property
@@ -877,7 +830,6 @@ class ResumeCollaborator:
             return
         await self.replay_for_resume()
         await self._resume_consistency_pass()
-        # Re-fire the KERNEL delegation hook when resuming parked in KERNEL_AGENT
-        # (phase-entry side effects are bound to transitions, not resume). Runs
+        # Re-fire the KERNEL delegation hook when resuming parked in KERNEL_AGENT,
         # after the consistency pass so current_best/stack are already rebuilt.
         await self._resume_reenter_kernel_if_needed()

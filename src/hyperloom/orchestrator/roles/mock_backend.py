@@ -126,7 +126,7 @@ class MockBackend:
             return self.plan.turns[-1]
         if self.plan.default_intent is not None:
             return MockTurn(intents=[self.plan.default_intent])
-        # Out of script and no fallback → emit a heartbeat so the reactor keeps ticking.
+        # Out of script and no fallback: emit a heartbeat to keep ticking.
         from hyperloom.inference_optimizer.protocol.intent import Intent as _Intent
         from hyperloom.inference_optimizer.protocol.intent import IntentType as _IT
 

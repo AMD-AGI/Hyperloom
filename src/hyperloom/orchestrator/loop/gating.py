@@ -122,11 +122,8 @@ class GatingCollaborator:
         backend = _resolve_gemm_tuning_backend({})
 
         if backend == "forge":
-            # forge-gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
-            # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
-            # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
-            # precision/MoE here, or a category that can optimize gets silently
-            # blocked. Gate only on a supported framework and let forge itself
+            # forge-gemm-tune handles any precision, dense or MoE, on
+            # sglang/vllm. Gate only on a supported framework and let forge
             # return no_improvement when a shape can't be beaten.
             eligible = framework in ("sglang", "vllm", "vllm-aiter")
         else:

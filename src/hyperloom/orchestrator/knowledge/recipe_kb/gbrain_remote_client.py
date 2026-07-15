@@ -5,27 +5,22 @@
 The sole read-side remote for the recipe KB. It exposes ``get_recipe``,
 ``search``, ``close``, and the ``enabled`` attribute so
 :class:`recipe_kb.RecipeKB` can hold it in the ``remote`` slot. The corpus is
-the gbrain page store (JSON-RPC MCP over HTTP).
-
-Design fit: this honours the recipe_kb local-first contract verbatim —
-writes still go local-only through the dispatcher; gbrain is consulted
-for READS only.
+the gbrain page store (JSON-RPC MCP over HTTP). Honours the recipe_kb
+local-first contract: writes go local-only through the dispatcher; gbrain is
+consulted for READS only.
 
 Schema adaptation (read-time): gbrain stores recipes under
 ``hyperloom-recipe-kb/`` by default (overridable via
 ``GBRAIN_RECIPE_SLUG_PREFIX``) as better-landing pages (``type: recipe`` +
-``tags: model:/gpu:/framework_name:`` + flat ``attrs``). On read we
-re-derive the 7-tuple identity from the page attrs, fall back to the
-``unknown_*`` default slugs for dimensions gbrain never recorded, and
-project the page into the unified nested KB-interface envelope. ``search``
-lists the ``recipe`` type and filters client-side, restricted to the
-configured slug prefix so the legacy mirror corpus is ignored.
+``tags: model:/gpu:/framework_name:`` + flat ``attrs``). On read we re-derive
+the 7-tuple identity from the page attrs, fall back to the ``unknown_*``
+default slugs for missing dimensions, and project the page into the unified
+nested KB-interface envelope. ``search`` lists the ``recipe`` type and filters
+client-side, restricted to the configured slug prefix.
 
-Wire shape returned by every read is the unified nested KB-interface
-envelope (``labels`` / ``body`` / ``metrics`` / ``findings`` /
-``failures`` / ``gaps`` / ``lessons`` / ``pitfalls``), so the
-:class:`recipe_kb.RecipeKB` dispatcher runs a single ``_v2_to_arbor``
-translation. The gbrain page store is the adapter's private storage detail.
+Every read returns the unified nested KB-interface envelope (``labels`` /
+``body`` / ``metrics`` / ``findings`` / ``failures`` / ``gaps`` / ``lessons``
+/ ``pitfalls``), so the dispatcher runs a single ``_v2_to_arbor`` translation.
 """
 
 from __future__ import annotations
@@ -44,16 +39,13 @@ from .remote_client import RemoteRecipeClientError
 
 log = logging.getLogger(__name__)
 
-# Nested env-map key used across the warm-start consumers
-# (``coordinator._maybe_enqueue_warm_replay`` / ``_inject_warm_recipe_history``)
-# and the authoritative local recipe shape (``_build_recipe_payload``). The
-# gbrain read surface mirrors this shape so a round-tripped champion config is
-# consumable verbatim by warm-replay.
+# Nested env-map key mirroring the warm-start consumers and the local recipe
+# shape, so a round-tripped champion config is consumable verbatim.
 _ENVS_KEY = "extra_envs"
 
-# Listing the whole recipe type is a fallback path; prefer exact slug reads for
-# get_recipe and cache broad scans so one warm-start tick does not issue
-# thousands of MCP get_page calls repeatedly.
+# Listing the whole recipe type is a fallback path; prefer exact slug reads and
+# cache broad scans so one warm-start tick does not issue thousands of MCP
+# get_page calls.
 _RECIPE_SCAN_CAP = 25000
 _LIST_PAGE_SIZE = 100
 _SCAN_CACHE_TTL_SEC = 60.0
@@ -61,25 +53,19 @@ _DEFAULT_RECIPE_SLUG_PREFIX = "hyperloom-recipe-kb"
 _RECIPE_SLUG_PREFIX_ENV = "GBRAIN_RECIPE_SLUG_PREFIX"
 _EXTRA_SERVER_ARGS_KEY = "extra_server_args"
 
-# Wall-clock budget for one full ``_scan_recipes`` pass. ``search`` fetches the
-# whole recipe corpus (list_pages + a get_page per slug) and filters
-# client-side, so on a slow / SSE-quirky gateway that scan can dominate the
-# Coordinator boot (the T0 warm-start anchor). gbrain is a READ side-channel and
-# the local store is always available, so the scan is best-effort: when the
-# budget is exceeded it returns whatever it has gathered so far rather than
-# blocking the foreground loop. Override via ``GBRAIN_RECIPE_SCAN_BUDGET_SEC``.
+# Wall-clock budget for one full ``_scan_recipes`` pass. The scan is
+# best-effort: when the budget is exceeded it returns whatever it has gathered
+# rather than blocking the foreground loop. Override via
+# ``GBRAIN_RECIPE_SCAN_BUDGET_SEC``.
 _RECIPE_SCAN_BUDGET_SEC = 20.0
 
 
 class GbrainRemoteError(RemoteRecipeClientError):
     """Raised on an unrecoverable gbrain MCP interaction.
 
-    Subclasses :class:`RemoteRecipeClientError` so the ``RecipeKB``
-    dispatcher's existing ``except RemoteRecipeClientError`` fall-through
-    catches a gbrain transport / bad-envelope / JSON-RPC error and
-    degrades to the local store — without it, a gbrain network blip would
-    bubble straight up the warm-start path and could lose the local
-    recipe a fall-through would have surfaced.
+    Subclasses :class:`RemoteRecipeClientError` so the dispatcher's
+    ``except RemoteRecipeClientError`` fall-through catches a gbrain transport /
+    bad-envelope / JSON-RPC error and degrades to the local store.
     """
 
     def __init__(self, message: str, *, category: str = "transport", **kwargs: Any) -> None:
@@ -102,15 +88,12 @@ def _iter_sse_objects(raw: str):
     * A single ``text/event-stream`` event whose ``data`` field is split
       across multiple ``data:`` lines (joined with ``\\n`` per the SSE spec,
       one optional leading space after the colon stripped).
-    * **Multiple** SSE events in one response (e.g. a heartbeat / notification
-      event before the JSON-RPC result event). Each event is decoded
-      independently so a non-result event can never corrupt the result parse
-      (the previous parser concatenated every ``data:`` line in the whole body
-      into one string, so two events produced invalid JSON -> "bad envelope",
-      seen on large ``get_backlinks`` responses from gbrain >= 0.42).
+    * Multiple SSE events in one response (e.g. a heartbeat before the result
+      event). Each event is decoded independently so a non-result event can
+      never corrupt the result parse.
 
     Malformed / incomplete events are skipped, so this is safe to call on a
-    partially-read buffer (used by ``_read_body`` to detect arrival).
+    partially-read buffer.
     """
     import re
 
@@ -119,7 +102,6 @@ def _iter_sse_objects(raw: str):
         try:
             yield json.loads(text)
         except json.JSONDecodeError:
-            # Skip malformed JSON lines in the stream.
             pass
         return
     for block in re.split(r"\r?\n\r?\n", raw):
@@ -171,8 +153,8 @@ def _select_mcp_response(raw: str, want_id: Any = None, *, allow_bare_result: bo
 class _GbrainMcp:
     """Minimal JSON-RPC-over-HTTP MCP client (list_pages / get_page)."""
 
-    # Request id stamped on every JSON-RPC envelope; used to select the
-    # matching response event out of a multi-event SSE stream.
+    # Request id stamped on every envelope; used to select the matching
+    # response event out of a multi-event SSE stream.
     _RPC_ID = "1"
 
     def __init__(self, base_url: str, token: str, timeout_sec: float) -> None:
@@ -190,21 +172,13 @@ class _GbrainMcp:
     def _read_body(self, resp: Any, *, allow_bare_result: bool = False) -> str:
         """Read the MCP response body without blocking on a non-closing stream.
 
-        gbrain's ``/mcp`` endpoint answers with ``text/event-stream`` framing
-        (``event: message`` + a single ``data: {json}`` line). Some gateway /
-        proxy configurations keep the TCP connection open after emitting that
-        line instead of sending EOF, so a plain ``resp.read()`` (read-to-EOF)
-        blocks in ``socket.readinto`` for the whole session — the per-socket
-        timeout never fires because the connection is merely idle, not closed.
-        That froze the Coordinator boot at the T0 recipe warm-start anchor even
-        though that step is meant to be best-effort and non-blocking.
-
-        This reads incrementally under a hard wall-clock deadline and returns as
-        soon as a complete SSE ``data:`` line (terminated by a blank line or a
-        newline) is available, so a non-terminating stream can no longer hang
-        the foreground loop. JSON (non-SSE) bodies with a ``Content-Length`` are
-        still read whole; the deadline only caps the pathological open-stream
-        case.
+        gbrain's ``/mcp`` endpoint answers with ``text/event-stream`` framing.
+        Some proxies keep the TCP connection open after the final line instead
+        of sending EOF, so a plain read-to-EOF would block indefinitely. This
+        reads incrementally under a hard wall-clock deadline and returns as soon
+        as a complete SSE ``data:`` line is available. Non-SSE JSON bodies with
+        a ``Content-Length`` are still read whole; the deadline only caps the
+        pathological open-stream case.
 
         Args:
             resp: The open ``http.client.HTTPResponse`` from ``urlopen``.
@@ -215,8 +189,7 @@ class _GbrainMcp:
         deadline = time.monotonic() + max(0.5, float(self._timeout))
         chunks: list[bytes] = []
         buf = b""
-        # Non-SSE JSON with a declared length: read it whole (bounded by the
-        # socket timeout already applied by urlopen).
+        # Non-SSE JSON with a declared length: read it whole.
         ctype = ""
         clen = ""
         try:
@@ -268,17 +241,9 @@ class _GbrainMcp:
                 break
             chunks.append(piece)
             buf += piece
-            # Stop as soon as the buffer holds a complete JSON-RPC response that
-            # matches our request id. ``_select_mcp_response`` parses each SSE event
-            # independently (and the non-SSE ``{...}`` case), so:
-            #   * a short socket read landing on a nested ``}`` keeps reading
-            #     (the partial event fails json.loads -> not selected);
-            #   * a heartbeat / notification event before the result event does
-            #     not satisfy the id match, so we keep reading until the real
-            #     result arrives instead of breaking at the first ``\n\n``;
-            #   * once the matching response is complete we return immediately,
-            #     so a non-closing stream never hangs (EOF + deadline still bound
-            #     the pathological case).
+            # Stop as soon as the buffer holds a complete JSON-RPC response
+            # matching our request id (partial/heartbeat events keep reading;
+            # a non-closing stream never hangs).
             if (
                 _select_mcp_response(
                     buf.decode("utf-8", "replace"),
@@ -326,9 +291,7 @@ class _GbrainMcp:
                 raw = self._read_body(resp, allow_bare_result=tool in _BARE_RESULT_TOOLS)
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise GbrainRemoteError(f"gbrain {tool} transport error: {exc!r}") from exc
-        # Select the JSON-RPC response event matching our request id. This
-        # tolerates plain-JSON bodies, single multi-line SSE events, and
-        # multi-event SSE streams (heartbeat / notification before the result).
+        # Select the JSON-RPC response event matching our request id.
         obj = _select_mcp_response(raw, self._RPC_ID, allow_bare_result=tool in _BARE_RESULT_TOOLS)
         if obj is None:
             prefix = raw[:300].replace("\n", "\\n").replace("\r", "\\r")
@@ -339,10 +302,8 @@ class _GbrainMcp:
             return obj
         if tool in _BARE_RESULT_TOOLS and "result" not in obj and "error" not in obj:
             return obj
-        # JSON-RPC transport-level error envelope. Without surfacing this a
-        # failed put_page / list_pages would parse as an empty success —
-        # ingest/mirror would over-count "ingested" and health() would
-        # falsely report healthy.
+        # JSON-RPC transport-level error envelope; surfacing it prevents a
+        # failed call from parsing as an empty success.
         if obj.get("error") is not None:
             raise GbrainRemoteError(f"gbrain {tool} JSON-RPC error: {obj.get('error')!r}")
         result = obj.get("result") or {}
@@ -377,12 +338,9 @@ def _as_float(value: Any) -> float:
 def _json_list(value: Any) -> list[Any]:
     """Decode a recipe-page list field stored as a JSON string.
 
-    The mirror writer (``gbrain_ingest.recipe_to_page``) encodes
-    structured list-of-dict fields (``what_failed`` / ``pitfalls`` /
-    ``lessons`` / ...) as JSON strings because the minimal YAML emitter
-    only renders scalar lists. Tolerates an already-decoded list (in case
-    a future page stores them natively) and degrades to ``[]`` on absence
-    or malformed content so a bad page never breaks warm-start.
+    The mirror writer encodes structured list-of-dict fields as JSON strings
+    because the minimal YAML emitter only renders scalar lists. Tolerates an
+    already-decoded list and degrades to ``[]`` on absence or malformed content.
 
     Args:
         value: A list, a JSON-encoded list string, or anything else.
@@ -404,16 +362,12 @@ def _json_list(value: Any) -> list[Any]:
 def _best_config_from_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     """Project gbrain recipe attrs into the canonical ``best_config`` dict.
 
-    gbrain recipe pages carry the champion config as a flat
-    ``best_config_args`` string (+ optional ``best_config_envs`` dict).
-    We surface it in the SAME shape the authoritative local recipe
-    (``coordinator._build_recipe_payload``) and the warm-start consumers
-    (``_maybe_enqueue_warm_replay``) use: the launch args under the
+    gbrain recipe pages carry the champion config as a flat ``best_config_args``
+    string (+ optional ``best_config_envs`` dict). We surface it in the shape
+    the local recipe and warm-start consumers use: launch args under the
     canonical ``extra_server_args`` key and the env map NESTED under
-    ``extra_envs`` (not flattened as sibling keys). A flat env map would
-    be invisible to the consumer's nested ``best_config["extra_envs"]``
-    read and the high-confidence warm recipe would be skipped as
-    ``best_config_empty``.
+    ``extra_envs`` (a flat env map would be invisible to the consumer's nested
+    read).
 
     Args:
         attrs: The flat gbrain recipe page attrs mapping.
@@ -471,15 +425,10 @@ def _provenance_from_attrs(frontmatter: Mapping[str, Any], attrs: Mapping[str, A
 def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
     """Adapt a gbrain recipe page's frontmatter to the unified KB shape.
 
-    Returns the nested KB-interface envelope (``labels`` / ``body`` /
-    ``metrics`` / ``findings`` / ``failures`` / ``gaps`` / ``lessons`` /
-    ``pitfalls``) so the ``RecipeKB`` dispatcher runs the single
-    :func:`recipe_kb.dispatcher._v2_to_arbor` translation on it — exactly
-    like the cortex kb-service. gbrain's page store is the adapter's
-    private storage detail; the dispatcher never sees the flat page shape.
-
-    Returns ``None`` when the page lacks the minimum identity (model /
-    hardware) needed to build a canonical id.
+    Returns the nested KB-interface envelope so the dispatcher runs the single
+    :func:`recipe_kb.dispatcher._v2_to_arbor` translation on it. Returns
+    ``None`` when the page lacks the minimum identity (model / hardware) needed
+    to build a canonical id.
 
     Args:
         frontmatter: The gbrain recipe page frontmatter mapping.
@@ -493,8 +442,7 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
     hardware = str(attrs.get("hardware") or "").strip()
     if not model or not hardware:
         return None
-    # Back-compat: pages authored before the framework_name rename carry the
-    # serving framework under the legacy ``framework`` attr.
+    # Back-compat: pages predating the framework_name rename use ``framework``.
     framework_name = str(attrs.get("framework_name") or attrs.get("framework") or "").strip()
     framework_version = str(attrs.get("framework_version") or "").strip()
     precision = str(attrs.get("precision") or "").strip()
@@ -516,10 +464,8 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
         C.F_VERSION: 1,
         "created_at": str(frontmatter.get("created_at") or ""),
         "updated_at": str(frontmatter.get("updated_at") or ""),
-        # Slug-clean 7-tuple identity. ``_labels_match`` runs both sides
-        # through ``canonical_labels`` so the raw page model string and
-        # the slugged label converge; we surface the canonical labels so
-        # the dispatcher's ``_v2_to_arbor`` reads identity from one place.
+        # Slug-clean 7-tuple identity; ``_labels_match`` normalizes both sides
+        # so the dispatcher's ``_v2_to_arbor`` reads identity from one place.
         "labels": C.canonical_labels(
             model=model,
             hardware=hardware,
@@ -539,7 +485,6 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
         },
         "metrics": {
             "throughput": throughput,
-            # gbrain-only signal surfaced for consumers that want it.
             "validated_gain_pct": validated_gain_pct,
         },
         "findings": _json_list(attrs.get("what_worked")),
@@ -557,15 +502,9 @@ def _page_to_recipe(frontmatter: Mapping[str, Any]) -> dict[str, Any] | None:
 def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> bool:
     """True when every provided label matches the recipe's value.
 
-    For scalar labels (model, hardware, framework_name, framework_version,
-    precision, model_type) equality is required. For ``architectures``
-    the semantics are *contains*: the recipe's architectures list must
-    include all queried architecture(s).
-
-    The recipe carries already-slugged identity under ``labels`` (set by
-    :func:`_page_to_recipe`); the caller's ``label_match`` may be a raw or
-    slugged value, so we re-run it through ``canonical_labels`` to make
-    the comparison slug-normalized (``Qwen/Qwen3`` vs ``qwen3`` converge).
+    Scalar labels require equality; ``architectures`` uses *contains* semantics
+    (the recipe's list must include all queried architectures). Both sides are
+    run through ``canonical_labels`` so raw and slugged values converge.
 
     Args:
         recipe: The candidate recipe carrying slugged ``labels``.
@@ -597,12 +536,10 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
     # Only compare the dimensions the caller actually constrained.
     for key in label_match:
         if key == C.F_LABEL_ARCHITECTURES:
-            # Contains semantics: recipe architectures must include all
-            # queried architecture slugs.
+            # Contains: recipe architectures must include all queried slugs.
             recipe_arch = str(recipe_labels.get(key, "")).lower()
             query_arch = str(want.get(key, "")).lower()
             if query_arch and query_arch not in ("unknown_arch", ""):
-                # architectures slug uses "+" join; split and check containment
                 query_parts = set(query_arch.split("+"))
                 recipe_parts = set(recipe_arch.split("+"))
                 if not query_parts.issubset(recipe_parts):
@@ -631,10 +568,9 @@ def _slug_for_canonical(canonical_id: str) -> str:
 class GbrainRemoteRecipeClient:
     """Read-only recipe-snapshot client backed by gbrain.
 
-    The read-side ``remote`` for :class:`recipe_kb.RecipeKB`, constructed by
-    ``cli._build_recipe_kb_dispatcher`` when ``GBRAIN_*`` is configured.
-    Every read returns the unified nested KB-interface envelope so the
-    ``RecipeKB`` dispatcher runs a single translation.
+    The read-side ``remote`` for :class:`recipe_kb.RecipeKB`, constructed when
+    ``GBRAIN_*`` is configured. Every read returns the unified nested
+    KB-interface envelope so the dispatcher runs a single translation.
     """
 
     def __init__(
@@ -656,9 +592,8 @@ class GbrainRemoteRecipeClient:
         """
         self.base_url = (base_url or "").strip()
         self.token = (token or "").strip()
-        # Foreground-friendly default: gbrain is a read side-channel, so
-        # never block the main loop longer than the recipe_kb foreground
-        # budget.
+        # Foreground-friendly default: never block the main loop longer than
+        # the recipe_kb foreground budget.
         self.timeout_sec = float(timeout_sec) if timeout_sec is not None else C.FOREGROUND_HTTP_TIMEOUT_SEC
         self.enabled = bool(enabled and self.base_url and self.token)
         self._mcp = _GbrainMcp(self.base_url, self.token, self.timeout_sec) if self.enabled else None
@@ -666,12 +601,10 @@ class GbrainRemoteRecipeClient:
         self._scan_cache_ts = 0.0
         self._scan_cache_complete = False
 
-    # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
         """Release the underlying MCP client."""
         self._mcp = None
 
-    # -- internal scan -----------------------------------------------------
     def _scan_cache_ttl(self) -> float:
         """Return the recipe-scan cache TTL in seconds.
 
@@ -726,11 +659,8 @@ class GbrainRemoteRecipeClient:
     def _search_recipe_candidates(self, label_match: Mapping[str, Any], *, limit: int) -> list[dict[str, Any]]:
         """Use gbrain page search to preselect recipe candidates by labels.
 
-        Full recipe scans can exceed the foreground warm-start budget on the
-        global gbrain endpoint. The page-search index is cheaper and often
-        narrows same-architecture donor lookups enough that we can avoid a
-        corpus scan entirely. Results are still verified with ``_labels_match``;
-        the search query is only a prefilter.
+        Cheaper than a full corpus scan; results are still verified with
+        ``_labels_match`` (the search query is only a prefilter).
         """
         if not self.enabled or self._mcp is None or not label_match:
             return []
@@ -786,11 +716,10 @@ class GbrainRemoteRecipeClient:
     def _scan_recipes(self, *, limit: int) -> list[dict[str, Any]]:
         """List recipe pages and project each to a Recipe dict.
 
-        Use forward pagination (``updated_asc`` + ``updated_after``). The
-        reverse cursor (``updated_desc`` + ``updated_before``) can terminate
-        early when many pages share the same ``updated_at``, hiding older
-        recipes from client-side search. Dedup by slug across page boundaries
-        and return newest-first to preserve the previous caller contract.
+        Uses forward pagination (``updated_asc`` + ``updated_after``) since the
+        reverse cursor can terminate early when many pages share the same
+        ``updated_at``. Dedups by slug across page boundaries and returns
+        newest-first.
 
         Args:
             limit: Maximum number of recipes to return (capped at the internal
@@ -804,10 +733,8 @@ class GbrainRemoteRecipeClient:
         now = time.monotonic()
         ttl = self._scan_cache_ttl()
         if self._scan_cache is not None and ttl > 0.0 and now - self._scan_cache_ts <= ttl:
-            # Complete scans and non-empty partial scans are both useful within
-            # the short TTL: they prevent one warm-start tick from repeating the
-            # same slow first-page scan several times. Empty partial scans are
-            # not cached, so a transient gateway stall can be retried.
+            # Complete and non-empty partial scans are cached within the TTL to
+            # avoid repeating the slow first-page scan; empty partials are not.
             if self._scan_cache_complete or self._scan_cache:
                 return list(self._scan_cache[: int(limit) if limit and limit > 0 else len(self._scan_cache)])
         out: list[dict[str, Any]] = []
@@ -815,11 +742,9 @@ class GbrainRemoteRecipeClient:
         seen_slugs: set[str] = set()
         cap = min(int(limit) if limit and limit > 0 else _RECIPE_SCAN_CAP, _RECIPE_SCAN_CAP)
         pages = 0
-        # Best-effort wall-clock budget: gbrain is a read side-channel and the
-        # local store is always available, so a full corpus scan must not
-        # dominate the foreground (T0 boot) loop. When the budget is exceeded we
-        # return what we have rather than blocking. A budget hit is NOT cached so
-        # a later tick can complete the scan when the gateway is responsive.
+        # Best-effort wall-clock budget: when exceeded, return what we have
+        # rather than blocking the foreground loop. A budget hit is not cached
+        # so a later tick can complete the scan.
         budget = self._scan_budget()
         deadline = time.monotonic() + budget if budget > 0.0 else None
         budget_hit = False
@@ -881,7 +806,6 @@ class GbrainRemoteRecipeClient:
             self._scan_cache_complete = True
         return out
 
-    # -- read surface ------------------------------------------------------
     def get_recipe(
         self,
         *,
@@ -927,16 +851,14 @@ class GbrainRemoteRecipeClient:
             C.F_LABEL_MODEL_TYPE: model_type,
             C.F_LABEL_ARCHITECTURES: architectures,
         }
-        # Fast path: session-sourced gbrain recipe slugs are the canonical id
-        # with ':' as path separators, so exact 7-tuple reads do not need a
-        # full corpus scan.
+        # Fast path: recipe slugs are the canonical id with ':' as path
+        # separators, so exact reads skip the full corpus scan.
         direct = self._get_page_recipe(_slug_for_canonical(canonical_id))
         if direct is not None and direct.get(C.F_CANONICAL_ID) == canonical_id:
             return direct
         if framework_version != C.DEFAULT_FRAMEWORK_VERSION_SLUG:
-            # Older raw sessions may not carry framework_version. The session
-            # mirror writes those pages under unknown_version; fall back there
-            # directly before paying for a corpus scan.
+            # Older sessions lacking framework_version were mirrored under
+            # unknown_version; fall back there before a corpus scan.
             unknown_version_id = recipe_canonical_id(
                 model=model,
                 hardware=hardware,
@@ -972,10 +894,9 @@ class GbrainRemoteRecipeClient:
     ) -> list[dict[str, Any]]:
         """Client-side filtered recipe search over the gbrain corpus.
 
-        ``prefer`` (workload-similarity hints) is accepted for the
-        unified KB-interface signature; the dispatcher applies the
-        client-side rerank over the normalized rows, so this adapter
-        only honours the ``required`` (``label_match`` / metric) filter.
+        ``prefer`` is accepted for signature parity; the dispatcher applies the
+        rerank, so this adapter only honours the ``required`` (``label_match`` /
+        metric) filter.
 
         Args:
             label_match: Identity labels to filter on (empty matches all).
@@ -1015,7 +936,7 @@ class GbrainRemoteRecipeClient:
             rows = [r for r in rows if str(r.get("updated_at") or "") >= str(updated_since)]
         if metric_filters:
             rows = [r for r in rows if _passes_metric_filters(r, metric_filters)]
-        # _scan_recipes already returns updated_desc; honour the ASC asks.
+        # _scan_recipes returns updated_desc; reverse for ASC asks.
         if order_by in (C.ORDER_BY_UPDATED_AT_ASC, C.ORDER_BY_CREATED_AT_ASC):
             rows = list(reversed(rows))
         return rows[: int(limit)] if limit and limit > 0 else rows
@@ -1023,9 +944,8 @@ class GbrainRemoteRecipeClient:
 def _passes_metric_filters(recipe: Mapping[str, Any], metric_filters: Mapping[str, Any]) -> bool:
     """Apply ``{metric: {min,max}}`` filters against the recipe's metrics.
 
-    The recipe is the nested KB-interface envelope, so throughput lives
-    under ``metrics.throughput`` / ``body.best_throughput``. We accept
-    both the ``throughput`` and the ``best_throughput`` filter aliases.
+    Throughput lives under ``metrics.throughput`` / ``body.best_throughput``;
+    both the ``throughput`` and ``best_throughput`` filter aliases are accepted.
 
     Args:
         recipe: The nested KB-interface recipe envelope.

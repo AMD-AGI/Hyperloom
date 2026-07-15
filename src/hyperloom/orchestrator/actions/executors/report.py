@@ -53,9 +53,7 @@ def _safe_call(state: Any, method: str, default: Any) -> Any:
 
 
 # Benign upstream WARN fragments that must never be promoted as the
-# ``baseline_failed`` headline: they do not correlate with the terminal
-# failure (the model still resolves / runs). Suppression is Hyperloom-side
-# only — the full text still appears in the per-attempt logs. See issue #465.
+# ``baseline_failed`` headline; the full text still appears in the per-attempt logs.
 _BENIGN_FAILURE_PATTERNS: tuple[str, ...] = ("modeling_cohere2.py",)
 
 
@@ -75,11 +73,9 @@ def _is_benign_failure_text(text: str) -> bool:
 def _highlight_is_benign(highlight: dict[str, Any]) -> bool:
     """Return True when a highlight's *headline* is only a benign upstream WARN.
 
-    Judges the one-line ``summary`` (the text that would surface as the
-    headline) exclusively. Payload-buried mentions are intentionally ignored so
-    a highlight whose summary describes a real fault (e.g. ``EngineCore failed
-    to start``) is never suppressed even if its payload also references a benign
-    file (#465).
+    Judges the one-line ``summary`` exclusively; payload-buried mentions are
+    ignored so a highlight whose summary describes a real fault is never
+    suppressed.
 
     Args:
         highlight: A highlight record whose one-line ``summary`` is judged.
@@ -95,8 +91,7 @@ def _partition_benign_lines(text: str) -> tuple[list[str], list[str]]:
     """Split an error blob into ``(kept_lines, suppressed_benign_lines)``.
 
     Drops only the lines matching a benign upstream WARN pattern and preserves
-    every other line, so a mixed blob (benign WARN + real HIP OOM) keeps its
-    real root cause instead of being wiped wholesale (#465).
+    every other line, so a mixed blob keeps its real root cause.
 
     Args:
         text: The raw error blob to partition line-by-line.
@@ -244,7 +239,7 @@ def _build_failure_summary(
     state: SharedState,
     session_dir: Path | None = None,
 ) -> dict[str, Any] | None:
-    """Surface the real terminal error on ``baseline_failed`` (issue #465).
+    """Surface the real terminal error on ``baseline_failed``.
 
     Sources the last *failed* baseline attempt from ``SharedState`` (see
     :func:`_last_failed_baseline_attempt`) and lifts its ``error_excerpt`` /
@@ -279,8 +274,8 @@ def _build_failure_summary(
         error_text = "\n".join(kept_lines).strip()
 
         server_log_abs = _resolve_attempt_server_log(attempt)
-        # Only the benign WARN (or nothing) survived → dig the real terminal
-        # marker out of server.log when one is available.
+        # Only the benign WARN (or nothing) survived: dig the real terminal
+        # marker out of server.log when available.
         if not error_text and server_log_abs is not None:
             try:
                 from ._subprocess_kill import server_log_death_excerpt
@@ -326,7 +321,7 @@ def _build_failure_summary(
 
 
 _STOP_REASON_EXPLANATIONS: dict[str, str] = {
-    # Terminal reasons the coordinator loop sets directly (DESIGN 9.1).
+    # Terminal reasons the coordinator loop sets directly.
     "target_reached": "Target reached: the requested --target-gain / --target-tput was met.",
     "time_exhausted": "Wall-clock budget (--max-hours) was exhausted; the best validated result was kept.",
     "max_ticks": "The coordinator hit its max-ticks safety cap; the best validated result was kept.",
@@ -427,14 +422,13 @@ def _build_summary_dict(
         "remaining_gaps_assessments_history": list(state.remaining_gaps_assessments or []),
         "current_best": state.current_best,
         "cumulative_gain": state.cumulative_gain,
-        # Per-round-sum gain vs the validated gain (what the
-        # run actually delivered).
+        # Validated gain (what the run actually delivered).
         "cumulative_gain_validated": state.cumulative_gain_validated,
         "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,
         "cumulative_gain_validated_stack_len": state.cumulative_gain_validated_stack_len,
         "optimization_stack_len": len(state.optimization_stack or []),
-        # Honesty annotations: surface unfinished/unvalidated work instead of
-        # blocking the report; read defensively for partial-state stubs.
+        # Honesty annotations: surface unfinished/unvalidated work; read
+        # defensively for partial-state stubs.
         "has_unvalidated_keeps": _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
         "untried_hot_reusable_kernels": list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
         "pending_keep_kernels": list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
@@ -444,25 +438,20 @@ def _build_summary_dict(
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         "event_counts_by_topic": ev_counts,
         "highlights": highlights,
-        # Degraded-mode advisory: surfaces a multimodal-text-fallback run so the
-        # reader knows benchmark numbers reflect the text path only.
+        # Degraded-mode advisory: benchmark numbers reflect the text path only.
         "degraded_mode": bool(getattr(state, "degraded_mode", False)),
         "model_warnings": list(getattr(state, "model_warnings", None) or []),
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
-    # Roofline Comparison: walk the append-only
-    # ``state.roofline_snapshots`` (entry[0] baseline, entry[-1] latest);
-    # emit only when at least one snapshot exists.
+    # Roofline comparison: emit only when at least one snapshot exists.
     from ...kernel.roofline_snapshot import build_roofline_comparison_from_history
 
     cmp = build_roofline_comparison_from_history(getattr(state, "roofline_snapshots", None))
     if cmp:
         summary["roofline_comparison"] = cmp
-    # Real terminal root cause on baseline_failed (#465): promote the last
-    # failed baseline attempt's engine/worker fault over benign upstream WARNs.
-    # Sourced from SharedState (not the filesystem); session_dir only renders a
-    # relative server.log path.
+    # Real terminal root cause on baseline_failed: promote the last failed
+    # baseline attempt's engine/worker fault over benign upstream WARNs.
     failure_summary = _build_failure_summary(state, session_dir)
     if failure_summary:
         summary["failure_summary"] = failure_summary
@@ -509,8 +498,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
     # Per-framework primary metric: serving reports throughput (tok/s/GPU),
-    # scriptable xDiT reports per-image latency (e2el_mean_ms) instead of a
-    # reciprocal-of-latency value mislabeled as tok/s/GPU.
+    # scriptable xDiT reports per-image latency (e2el_mean_ms).
     from hyperloom.inference_optimizer import framework_registry
 
     _fw = summary.get("framework")
@@ -526,8 +514,7 @@ def _format_md(summary: dict[str, Any]) -> str:
         )
     # Per-round sum — informational, not end-to-end deliverable.
     lines.append(f"- cumulative_gain     : `{summary['cumulative_gain']:.2f}%`  *(per-round sum — informational only)*")
-    # Validated gain — always printed so the report never quotes only the
-    # (often inflated) raw sum.
+    # Validated gain — always printed so the report never quotes only the raw sum.
     val_gain = summary.get("cumulative_gain_validated", 0.0) or 0.0
     val_ts = summary.get("cumulative_gain_validated_ts") or ""
     val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
@@ -574,7 +561,6 @@ def _format_md(summary: dict[str, Any]) -> str:
 
     lines.extend(_format_degraded_mode_section(summary))
 
-    # steward verdict transcript.
     lines.extend(_format_steward_section(summary))
 
     roofline_cmp = summary.get("roofline_comparison")
@@ -656,8 +642,7 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
 def _format_steward_section(summary: dict[str, Any]) -> list[str]:
     """Render the remaining-gaps assessment verdict + history when present.
 
-    Reads ``last_remaining_gaps_assessment`` from older state.json files that
-    carry a populated assessment.
+    Reads ``last_remaining_gaps_assessment`` from state.json.
 
     Args:
         summary: The summary payload built by :func:`_build_summary_dict`.
@@ -731,7 +716,7 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
     if start is None:
         return "(analysis.md does not contain a `## Executive Summary` block)"
     block = "\n".join(lines[start:end]).strip()
-    # Cap at ~2KB (full analysis.md remains on disk via ``analysis_md_path``).
+    # Cap at ~2KB.
     if len(block) > 2048:
         block = block[:2045] + "..."
     return block
@@ -986,7 +971,7 @@ def _write_kernel_opt_summary(
         out_path = output_dir / "kernel_optimization_summary.json"
         with out_path.open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
-        # Author-time breakdown capture: mirror the summary into the recorder.
+        # Mirror the summary into the breakdown recorder.
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -1153,11 +1138,10 @@ class ReportExecutor:
         highlight_topics = params.get("highlight_topics") or self.DEFAULT_HIGHLIGHT_TOPICS
 
         state = SharedState.load_or_init(session_dir)
-        # Only demote benign upstream WARNs from highlights on a baseline
-        # failure (#465); other runs keep every highlight untouched.
+        # Only demote benign upstream WARNs from highlights on a baseline failure.
         suppress_benign_highlights = str(getattr(state, "stop_reason", "") or "") == "baseline_failed"
 
-        # Pull bus stats over a fresh connection (SQLite WAL shares cleanly).
+        # Pull bus stats over a fresh connection.
         db = SqliteConnection(db_path_for(session_dir))
         try:
             bus = MessageBus(db)
@@ -1167,9 +1151,8 @@ class ReportExecutor:
             for m in ev_rows:
                 if m.topic in highlight_topics:
                     h = _highlight(m.payload or {}, m.topic, m.from_agent)
-                    # On baseline_failed, suppress benign upstream WARN
-                    # headlines so they never become the top-level highlight
-                    # (#465); the full text still lives in the per-attempt logs.
+                    # On baseline_failed, suppress benign upstream WARN headlines
+                    # so they never become the top-level highlight.
                     if suppress_benign_highlights and _highlight_is_benign(h):
                         continue
                     highlights.append(h)
@@ -1186,8 +1169,8 @@ class ReportExecutor:
             session_dir=session_dir,
         )
 
-        # Kernel-optimization forensic summary in a separate file (pointer
-        # added to final.json for discoverability).
+        # Kernel-optimization forensic summary in a separate file (pointer added
+        # to final.json).
         ko_summary_path = _write_kernel_opt_summary(state, session_dir, output_dir)
         if ko_summary_path is not None:
             try:
@@ -1202,17 +1185,15 @@ class ReportExecutor:
                     "totals": _read_ko_summary_totals(ko_summary_path),
                 }
 
-        # Post-sweep concurrency comparison pointer (conc_sweep writes its
-        # own JSON/CSV; surface a compact summary for discoverability).
+        # Post-sweep concurrency comparison pointer.
         cs_pointer = _read_conc_sweep_pointer(session_dir)
         if cs_pointer is not None:
             summary["conc_sweep_summary"] = cs_pointer
 
         json_path = output_dir / "final.json"
         md_path = output_dir / "final.md"
-        # Atomic write: a kill mid-flush must never leave a non-empty but
-        # invalid final.json on disk (issue #464 — downstream keys off it, and
-        # the crash-safe fallback would otherwise see garbled JSON).
+        # Atomic write: a kill mid-flush must never leave an invalid final.json
+        # on disk (downstream keys off it).
         atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
         md_path.write_text(_format_md(summary), encoding="utf-8")
 

@@ -15,9 +15,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
-# ---------------------------------------------------------------------------
 # Errors
-# ---------------------------------------------------------------------------
 class RemoteRecipeClientError(RuntimeError):
     """Raised on any unrecoverable interaction with a remote recipe KB.
 

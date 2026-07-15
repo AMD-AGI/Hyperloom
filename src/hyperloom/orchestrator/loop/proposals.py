@@ -42,7 +42,7 @@ class ProposalsCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _workload_canonical_id(self) -> str:
-        """Canonical 5-tuple recipe id for the current workload. MUST match cortex_t0.run_t0_anchor's derivation so warm-start and KEEP/REVERT/CLOSE writes target the same row.
+        """Canonical 5-tuple recipe id for the current workload. Must match cortex_t0.run_t0_anchor's derivation so warm-start and KEEP/REVERT/CLOSE writes target the same row.
 
         Returns:
             The canonical recipe id derived from model, hardware, framework,
@@ -86,7 +86,7 @@ class ProposalsCollaborator:
                 )
                 or {}
             )
-        except Exception:  # noqa: BLE001 — best-effort read
+        except Exception:  # noqa: BLE001
             row = {}
         self._coord._local_recipe_cache = (tick, row)
         return row
@@ -148,7 +148,6 @@ class ProposalsCollaborator:
         except (TypeError, ValueError):
             new_tput = 0.0
 
-        # Stamp when live has no replayable config, or this measurement beats live.
         if not live_has_config or (new_tput > 0.0 and new_tput >= live_tput):
             overrides: dict[str, Any] = {
                 "best_config": dict(best_config_candidate),
@@ -166,7 +165,7 @@ class ProposalsCollaborator:
         recipe_overrides: dict[str, Any] | None = None,
         provenance_details: dict[str, Any] | None = None,
     ) -> None:
-        """Read-modify-write helper for the v2 recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup.
+        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup.
 
         Args:
             append_lesson: Optional lesson dict appended to the recipe.
@@ -180,7 +179,7 @@ class ProposalsCollaborator:
             return
         try:
             cid = self._workload_canonical_id()
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:  # noqa: BLE001
             log.exception("_kb_amend_recipe: cid derivation failed")
             return
 
@@ -194,7 +193,7 @@ class ProposalsCollaborator:
         # Read the LOCAL authoritative row (bypass remote-first read; else a central row clobbers this session's lessons/pitfalls).
         try:
             live = self.cortex_kb.local.get_recipe(canonical_id=cid) or {}
-        except Exception as exc:  # noqa: BLE001 — best-effort read
+        except Exception as exc:  # noqa: BLE001
             log.info(
                 "_kb_amend_recipe: local get_recipe failed (%s); proceeding with empty live",
                 exc,
@@ -210,7 +209,6 @@ class ProposalsCollaborator:
 
         # Build put_recipe kwargs, preserving live fields the caller didn't override.
         overrides = dict(recipe_overrides or {})
-        # Preserve T0-stamped top-level extras across the amend (caller's extras win).
         _reserved = {
             "canonical_id",
             "version",
@@ -239,7 +237,7 @@ class ProposalsCollaborator:
         }
         prior_extras = {k: v for k, v in live.items() if k not in _reserved}
         merged_extras = {**prior_extras, **(overrides.get("extras") or {})}
-        # Re-stamp config.json architecture-identity tags (architectures/model_type); skipped when unset.
+        # Re-stamp config.json architecture-identity tags; skipped when unset.
         _arch = getattr(ss, "model_architectures", None) or []
         if isinstance(_arch, list):
             _arch_list = [str(a).strip() for a in _arch if str(a or "").strip()]
@@ -305,14 +303,14 @@ class ProposalsCollaborator:
         try:
             self.cortex_kb.put_recipe(**put_kwargs)
             self._coord._local_recipe_cache = None
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:  # noqa: BLE001
             log.exception(
                 "_kb_amend_recipe: put_recipe failed for cid=%s",
                 cid,
             )
 
     def _inject_explore_runtime_params(self, params: dict) -> None:
-        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides. Knobs: baseline_runtime_sec + explore_overtime_kill_ratio (soft_deadline), variant_timeout_sec, variant_timeout_safety_margin.
+        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides.
 
         Args:
             params: The explore-task params dict mutated in place; existing keys
@@ -357,7 +355,7 @@ class ProposalsCollaborator:
                 "variant_timeout_safety_margin",
                 safety_margin_override,
             )
-        # Thread the persisted explore_search ledger so ExploreExecutor's canonical_fingerprint dedup has cross-turn memory; setdefault keeps an explicit override.
+        # Thread the persisted explore_search ledger so ExploreExecutor's dedup has cross-turn memory.
         es = getattr(self.shared_state, "explore_search", None)
         if isinstance(es, dict) and es.get("tested"):
             params.setdefault("explore_search", es)
@@ -370,9 +368,8 @@ class ProposalsCollaborator:
         """Per-cycle KEEP threshold to inject, or ``None`` to keep executor defaults.
 
         Only active in cyclic mode: the bar shrinks along the shared decaying
-        curve as macro-cycles accrue. Returns ``None`` off cyclic mode so short /
-        non-cyclic runs fall back to the executor's fixed default (no regression);
-        first cycle (N=1) reproduces that same default value anyway.
+        curve as macro-cycles accrue. Returns ``None`` off cyclic mode so
+        non-cyclic runs fall back to the executor's fixed default.
 
         Returns:
             The decayed per-cycle KEEP threshold percentage, or ``None`` off
@@ -401,15 +398,12 @@ class ProposalsCollaborator:
             approved_variant_names: When set, restricts an explore grid to these
                 Critic-approved variant names; ``None`` keeps the full grid.
         """
-        # Route the approved candidate to raw-diff/authoring tracks by its
-        # stamped audit route; the shared tail below cannot express that.
+        # Route framework_agent candidates to their own materializer.
         if pending.action_name == "framework_agent":
             await self._materialize_framework_agent_candidate(pending)
             return
         params = dict(pending.payload.get("params") or {})
-        # Carry the proposer's predicted gain onto the task so the post-run
-        # journal write can persist predicted-vs-realized for calibration.
-        # setdefault keeps an explicit per-variant prediction intact.
+        # Carry the proposer's predicted gain onto the task for predicted-vs-realized calibration.
         if pending.predicted_gain_pct:
             params.setdefault(
                 "predicted_gain_pct", float(pending.predicted_gain_pct),
@@ -424,12 +418,12 @@ class ProposalsCollaborator:
                         stamped_grid.append(variant)
                     continue
                 vname = str(variant.get("name") or "").strip()
-                # drop variants the Critic rejected before they hit the executor.
+                # Drop variants the Critic rejected before they hit the executor.
                 if approved_variant_names is not None and vname not in approved_variant_names:
                     continue
                 stamped_grid.append(dict(variant))
             params["grid"] = stamped_grid
-            # Audit hint: how many variants the Critic filtered (surfaced as critic_filtered_count).
+            # Audit hint: how many variants the Critic filtered.
             if approved_variant_names is not None:
                 original_grid_len = len(
                     [v for v in (pending.payload.get("params") or {}).get("grid", []) if isinstance(v, dict)]
@@ -441,7 +435,7 @@ class ProposalsCollaborator:
         cb = self.shared_state.current_best or {}
         cb_args = str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else ""
         if pending.action_name == "profile":
-            # Stamp base_extra_args so post-task promotion records the server config that produced this trace.
+            # Stamp the server config that produced this trace.
             params.setdefault("base_extra_args", cb_args)
         if pending.action_name == "sweep":
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
@@ -452,8 +446,7 @@ class ProposalsCollaborator:
                 params.setdefault("config_path", self.shared_state.baseline_config_path)
         if pending.action_name == "explore":
             self._inject_explore_runtime_params(params)
-            # Inject base_tput/base_extra_args tied to current_best (or baseline_tput); else _gain_pct
-            # returns None and every variant lands FAILED. Explicit operator value wins via setdefault.
+            # Inject base_tput/base_extra_args tied to current_best (or baseline_tput) so _gain_pct resolves.
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
             base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
@@ -463,11 +456,8 @@ class ProposalsCollaborator:
             if keep is not None:
                 params.setdefault("keep_threshold_pct", keep)
             # Seed the patched-eval server with the same base args/config every
-            # other eval server uses (current-best stack ∪ reference recipe).
-            # Without this the patched server launches on bare framework defaults
-            # (e.g. vLLM block_size=16) and crashes at startup regardless of the
-            # patch — so every integrate_patch falsely REVERTs with "no
-            # measurable throughput". Mirrors the sweep/explore branches above.
+            # other eval server uses, else it launches on bare framework defaults
+            # and crashes at startup regardless of the patch.
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
             base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
                 else self.shared_state.baseline_tput
@@ -486,7 +476,7 @@ class ProposalsCollaborator:
             lease_ttl_sec=ttl,
         )
         if was_existing:
-            # Key is unique per proposal; only a resume/replay collides. Record an observation, not a fresh decision.
+            # Key is unique per proposal; only a resume/replay collides.
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -501,8 +491,7 @@ class ProposalsCollaborator:
                 },
             )
             return
-        # proposal_msg_id is the resume contract for the deferred queue (see replay_for_resume): pairs a
-        # materialize_blocked observation with a later approved_proposal decision as "drained".
+        # proposal_msg_id is the resume contract for the deferred queue (see replay_for_resume).
         await self.bus.append_and_seq(
             Message.new(
                 "coordinator",
@@ -517,9 +506,7 @@ class ProposalsCollaborator:
                 },
             )
         )
-        # Trace attribution: record proposal_msg_id -> task_id so the
-        # decision-trace collector can attribute the Critic review call (which
-        # only knows the msg_id) to this decision. Best-effort; never blocks.
+        # Trace attribution: record proposal_msg_id -> task_id for the decision-trace collector.
         self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
 
     def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:
@@ -542,7 +529,7 @@ class ProposalsCollaborator:
             }
             with path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, sort_keys=True) + "\n")
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:  # noqa: BLE001
             log.debug(
                 "full-trace: proposal_task_map append failed for "
                 "msg_id=%s task_id=%s", proposal_msg_id, task_id, exc_info=True,

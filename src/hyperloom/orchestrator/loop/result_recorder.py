@@ -1,27 +1,15 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Result recording / fact synthesis collaborator extracted from Coordinator.
+"""Result recording / fact synthesis collaborator for the Coordinator.
 
-This is the MEASURE/REASON bookkeeping layer of the orchestrator. These methods
-read SharedState + a finished task/result and emit derived artifacts: specialist
-result records, per-task / per-variant journal facts, workload tags, recipe
-attributes, the cortex recipe+journal finalization, and research-evidence
-aggregation/harvest. They were moved verbatim out of the Coordinator God-object.
+The MEASURE/REASON bookkeeping layer of the orchestrator: reads SharedState +
+a finished task/result and emits derived artifacts (specialist result records,
+per-task / per-variant journal facts, workload tags, recipe attributes, the
+cortex recipe+journal finalization, and research-evidence aggregation/harvest).
 
-Design (transitional collaborator)
-----------------------------------
-Identical pattern to :class:`IntentRouter`: ``ResultRecorder`` holds a
-back-reference to its owning ``Coordinator`` and delegates unknown attributes to
-it via ``__getattr__``. The moved bodies keep using ``self.shared_state`` /
-``self.tasks`` / ``self._journal_entry_phase()`` etc., which resolve back onto
-the coordinator. Safe because the extracted methods do **no** ``self.<attr> = ``
-rebinding (AST-verified). Calls between moved methods are routed through
-``self._coord.<method>`` so they remain overridable by tests that monkeypatch
-the coordinator (e.g. ``_harvest_research_scout``).
-
-Coordinator keeps thin forwarding shims so existing tests that call
-``coord._record_specialist_result(...)`` / ``coord._record_fact_per_*`` etc.
-keep working unchanged.
+``ResultRecorder`` holds a back-reference to its owning ``Coordinator`` and
+delegates unknown attributes to it via ``__getattr__``. Calls between methods
+route through ``self._coord.<method>`` so tests can monkeypatch the coordinator.
 """
 
 from __future__ import annotations
@@ -43,11 +31,9 @@ from ..state.optimization_journal import (
 )
 from ..state.task_registry import Task
 
-# NOTE: ``Coordinator`` is intentionally NOT imported (not even under
-# TYPE_CHECKING) to avoid a module-level import cycle with coordinator.py,
-# which imports this module at runtime. The owning coordinator is held as a
-# back-reference; the ``"Coordinator"`` annotation below is a deferred string
-# (``from __future__ import annotations``) that is never evaluated at runtime.
+# ``Coordinator`` is intentionally NOT imported (avoids a module-level import
+# cycle with coordinator.py); it is held as a back-reference and the
+# ``"Coordinator"`` annotation is a deferred string never evaluated at runtime.
 
 log = __import__("logging").getLogger(__name__)
 
@@ -55,7 +41,7 @@ log = __import__("logging").getLogger(__name__)
 class ResultRecorder:
     """Synthesizes result records and journal facts on behalf of a Coordinator."""
 
-    def __init__(self, coordinator: "Coordinator") -> None:  # noqa: F821 - deferred ref, not imported to avoid an import cycle (see note above)
+    def __init__(self, coordinator: "Coordinator") -> None:  # noqa: F821
         self._coord = coordinator
 
     def __getattr__(self, name: str) -> Any:
@@ -85,7 +71,7 @@ class ResultRecorder:
         round_entry = self._build_specialist_round_entry(
             task=task, done_payload=done_payload, source=source,
         )
-        # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
+        # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
         _scorer = getattr(self, "_proposal_scorer", None)
         if _scorer is not None and proposals:
             try:
@@ -129,9 +115,8 @@ class ResultRecorder:
                 "failed for task=%s", task.task_id,
             )
 
-        # Per-anchor coverage ledger: every specialist completion is
-        # one "round" — tick all anchors, then zero the one that just ran so a
-        # long-idle domain's counter climbs until the hard-trigger forces it.
+        # Per-anchor coverage ledger: tick all anchors, then zero the one that
+        # just ran so an idle domain's counter climbs until the hard-trigger fires.
         try:
             self.shared_state.bump_domain_round_counters()
             self.shared_state.note_specialist_dispatched(domain)
@@ -182,10 +167,8 @@ class ResultRecorder:
             },
         )
 
-        # Multi-node only: auto-materialise the proposal_set into a
-        # benchmarked explore task. No-op single-node (LLM drives explore
-        # directly there) and no-op when the proposal_set is empty / has
-        # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
+        # Multi-node only: auto-materialise the proposal_set into a benchmarked
+        # explore task. No-op single-node and no-op when the proposal_set is empty.
         try:
             await self._maybe_materialize_mn_explore(
                 task=task, domain=domain, proposals=proposals,
@@ -196,12 +179,8 @@ class ResultRecorder:
                 task.task_id,
             )
 
-        # route session_steward_specialist verdicts. Done payload
-        # carries extra fields beyond the standard schema; see
-        # ``actions/assess_remaining_gaps.md`` and the prompt builder
-        # focus template. Coerce out-of-vocab recommendations to
-        # ``stop_session`` (defense in depth — the LLM is allowed to
-        # write any string but we only honour the closed enum).
+        # Route session_steward_specialist verdicts (out-of-vocab recommendations
+        # are coerced to ``stop_session`` downstream).
         if domain == "session_steward_specialist":
             try:
                 await self._route_steward_verdict(
@@ -215,7 +194,7 @@ class ResultRecorder:
                     task.task_id,
                 )
 
-        # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup). Fail-soft.
+        # Harvest research-scout output (hints, competitor target, gap seeds, PR dedup).
         if domain == "research_scout_specialist":
             try:
                 self._coord._harvest_research_scout(done_payload)
@@ -224,8 +203,7 @@ class ResultRecorder:
                     "research-scout harvest failed for task=%s", task.task_id,
                 )
 
-        # Consume static-recon bridge candidates into gaps[] so the EXPLORE
-        # freeform specialist picks them up with a precise mandate. Fail-soft.
+        # Consume static-recon bridge candidates into gaps[] for the EXPLORE specialist.
         if domain == "static_recon_specialist":
             try:
                 self._coord._consume_static_recon(done_payload)
@@ -234,10 +212,8 @@ class ResultRecorder:
                     "static-recon consume failed for task=%s", task.task_id,
                 )
 
-        # Aggregate research evidence from any domain (e.g. pr_intel) that
-        # self-reports a ``research`` block, so FRAMEWORK / explore lanes
-        # reuse the session-wide seen-set. Idempotent for research_scout
-        # (already harvested above). Fail-soft.
+        # Aggregate research evidence from any domain that self-reports a
+        # ``research`` block, so FRAMEWORK / explore lanes reuse the seen-set.
         try:
             self._coord._aggregate_research_evidence(done_payload)
         except Exception:  # noqa: BLE001 — defensive
@@ -278,9 +254,8 @@ class ResultRecorder:
                 "B3: specialist patch autosubmit failed for task=%s",
                 task.task_id,
             )
-        # Relaxed FRAMEWORK rule: a config-lever deliverable (no source patch,
-        # but a proposal_set of serving flags / env vars) is routed through the
-        # same integrate_patch gate via its config_changes channel.
+        # A config-lever deliverable (serving flags / env vars, no source patch)
+        # is routed through the same integrate_patch gate via config_changes.
         try:
             await self._maybe_autosubmit_framework_config(
                 task=task, done_payload=done_payload,
@@ -364,19 +339,16 @@ class ResultRecorder:
                 pitfall/REVERT).
         """
         journal = self._ensure_journal()
-        # integrate_patch / framework_agent report their delta under ``delta_pct``;
-        # fall back to it so a reverted/kept patch shows its REAL measured delta
-        # in the journal instead of a null gain.
+        # integrate_patch / framework_agent report their delta under ``delta_pct``; fall back to it.
         gain_pct = _coerce_metric(result_dict.get("gain_pct"))
         if gain_pct is None:
             gain_pct = _coerce_metric(result_dict.get("delta_pct"))
         throughput_after = _coerce_metric(result_dict.get("output_throughput"))
         kind = classify_change_kind(task.kind, None)
         change = summarize_change(task.kind, None, result_dict)
-        # Journal outcome follows the executor's per-status verdict for source-
-        # patch kinds (a ``reverted`` patch is promotable but NOT a KEEP); other
-        # kinds keep the binary promotable→KEEP behaviour. See
-        # ``derive_journal_outcome`` (fixes the "fake KEEP" bug).
+        # Journal outcome follows the executor's per-status verdict for source-patch
+        # kinds (a ``reverted`` patch is promotable but NOT a KEEP); other kinds keep
+        # the binary promotable→KEEP behaviour.
         outcome = derive_journal_outcome(task.kind, result_dict, promotable=kept)
         is_keep = outcome == OUTCOME_KEEP
         if is_keep:
@@ -407,9 +379,9 @@ class ResultRecorder:
 
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
         hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        # evidence_refs (log:task-...) gives traceability since source_session_id lands in attrs.
+        # evidence_refs give traceability since source_session_id lands in attrs.
         evidence_refs = [f"log:task-{task.task_id}"]
-        # Workload-shape tags for lesson/pitfall attrs so the warm-start reader filters cross-framework noise.
+        # Workload-shape tags so the warm-start reader filters cross-framework noise.
         workload_tags = self._coord._collect_workload_tags()
         extra = workload_tags if workload_tags else None
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -433,7 +405,7 @@ class ResultRecorder:
                 best_config_candidate=best_config_candidate,
                 throughput_after=throughput_after,
             )
-            # v2: append onto the recipe's lessons[] (no cross-recipe dedup).
+            # Append onto the recipe's lessons[] (no cross-recipe dedup).
             self._kb_amend_recipe(
                 append_lesson={
                     "statement":       statement,
@@ -509,7 +481,7 @@ class ResultRecorder:
         kind = classify_change_kind(
             task.kind, variant_attrs if isinstance(variant_attrs, dict) else None,
         )
-        # Ensure the change summary is variant-specific (else every explore variant writes an identical row).
+        # Ensure the change summary is variant-specific.
         change_attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
         if not (
             change_attrs.get("extra_server_args")
@@ -523,9 +495,8 @@ class ResultRecorder:
         if outcome == OUTCOME_REVERT:
             error_class = (str(variant_outcome.get("error_class") or "") or None)
             reason = (str(variant_outcome.get("reason") or "") or None)
-        # Proposer attribution + per-variant measurement detail, carried from the
-        # explore executor's per_variant_outcomes so the decision row records who
-        # proposed the change and how it measured (beyond headline gain/tput).
+        # Proposer attribution + per-variant measurement detail from the explore
+        # executor's per_variant_outcomes (beyond headline gain/tput).
         detail_metrics = {
             k: metrics[k]
             for k in (
@@ -592,8 +563,7 @@ class ResultRecorder:
                 best_config_candidate=best_config_candidate,
                 throughput_after=throughput_after,
             )
-            # v2: per-variant lesson append onto recipe.lessons[]
-            # (no cross-recipe dedup, see _record_fact_per_task).
+            # Per-variant lesson append onto recipe.lessons[] (no cross-recipe dedup).
             self._kb_amend_recipe(
                 append_lesson={
                     "statement":       statement,
@@ -644,10 +614,10 @@ class ResultRecorder:
         *,
         change: str,
         kind: str,
-        gain_pct: float | None = None,  # kept for backward call-signature compat
+        gain_pct: float | None = None,
         severity: str | None = None,
     ) -> str:
-        """Build the lesson statement / pitfall description hashed into the KB canonical_id; MUST exclude volatile fields (e.g. gain_pct) so N sessions merge instead of producing N rows. Identity = framework + change + model/hw.
+        """Build the lesson statement / pitfall description hashed into the KB canonical_id; excludes volatile fields (e.g. gain_pct) so N sessions merge instead of producing N rows. Identity = framework + change + model/hw.
 
         Args:
             change: The summarized change description.
@@ -678,7 +648,7 @@ class ResultRecorder:
         stack_depth: int,
         measured_at: str,
     ) -> dict[str, Any]:
-        """Structured ``measured_impact`` payload (dict not legacy string so consumers parse without regex); stack_depth = stack length before this lesson lands.
+        """Structured ``measured_impact`` payload; stack_depth = stack length before this lesson lands.
 
         Args:
             gain_pct: The measured gain percent, or ``None``.
@@ -715,7 +685,6 @@ class ResultRecorder:
         model_class = str(getattr(ss, "model_class", "") or "").strip()
         if model_class:
             out["model_class"] = model_class
-        # model_family (v1 fallback) no longer stamped: v2 uses the exact 5-tuple canonical_id.
         model_name = str(getattr(ss, "model_name", "") or "").strip()
         if model_name:
             out["model_name"] = model_name
@@ -748,7 +717,7 @@ class ResultRecorder:
             pp_n = 0
         if pp_n > 0:
             out["pp"] = pp_n
-        # runtime version tags from stack_fingerprint_meta (cli writes at boot, resume reads verbatim).
+        # runtime version tags from stack_fingerprint_meta.
         fp_meta = getattr(ss, "stack_fingerprint_meta", None) or {}
         if isinstance(fp_meta, dict):
             # framework_version is whichever of sglang/vllm is active.
@@ -765,7 +734,7 @@ class ResultRecorder:
                 v = str(fp_meta.get(src_key) or "").strip()
                 if v and v != "unknown":
                     out[dst_key] = v
-        # per-baseline workload extras from materialized YAML; keep bool False (don't drop an "explicitly disabled" signal).
+        # per-baseline workload extras from materialized YAML; keep bool False.
         wl_extra = getattr(ss, "baseline_workload_extra", None) or {}
         if isinstance(wl_extra, dict):
             for k in ("max_running_requests", "max_num_seqs"):
@@ -783,7 +752,7 @@ class ResultRecorder:
         return out
 
     def _build_kernel_optimizations_from_state(self) -> list[dict[str, Any]]:
-        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts.
+        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False.
 
         Returns:
             A list of KernelOptimization-shaped dicts for each KEEP'd kernel,
@@ -795,7 +764,7 @@ class ResultRecorder:
         if not isinstance(opt_attempts, dict):
             return []
 
-        # Index integrate results by kernel_id (last write wins; entry carries rolled-up best_gain_pct).
+        # Index integrate results by kernel_id (last write wins).
         integ_by_kid: dict[str, dict[str, Any]] = {}
         if isinstance(integ_attempts, dict):
             for entry in integ_attempts.values():
@@ -822,7 +791,7 @@ class ResultRecorder:
             integrated = False
             if isinstance(integ, dict):
                 integrated = True
-                # Integrate-layer verdict (E2E); lets warm-start skip a micro-win/E2E-loss kernel.
+                # Integrate-layer verdict (E2E).
                 e2e_decision = str(integ.get("last_decision") or "").upper()
                 try:
                     e2e_gain = float(integ.get("best_gain_pct") or 0.0)
@@ -838,7 +807,6 @@ class ResultRecorder:
                         break
             out.append({
                 "kernel_id":     str(kid),
-                # source persisted under last_source_file; source_file is a legacy fallback.
                 "source_file":   str(
                     e.get("last_source_file") or e.get("source_file") or ""
                 ),
@@ -875,7 +843,7 @@ class ResultRecorder:
             for key in ("extra_envs", "args", "envs", "name", "tput", "accuracy"):
                 if key in current_best:
                     best_config[key] = current_best[key]
-        # Prefer the last validated stack layer for launch args (current_best may carry a corrupted string).
+        # Prefer the last validated stack layer for launch args.
         if opt_stack:
             last_entry = opt_stack[-1]
             if isinstance(last_entry, dict):
@@ -912,7 +880,7 @@ class ResultRecorder:
                 "extra_envs":        dict(entry.get("extra_envs") or {}),
                 "gain_pct":          gain_per,
             }
-            # Prefer the entry's gap-id provenance (naming-independent); fall back to name/kernel_id match.
+            # Prefer the entry's gap-id provenance; fall back to name/kernel_id match.
             entry_gap = str(entry.get("gap_canonical_id") or "").strip()
             src = (
                 (kept_by_gap.get(entry_gap) if entry_gap else None)
@@ -938,9 +906,9 @@ class ResultRecorder:
             getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0
         )
         stack_fingerprint = getattr(ss, "stack_fingerprint", "") or ""
-        # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
+        # Workload-shape tags for shape-filtered warm-start queries.
         workload_tags = self._coord._collect_workload_tags()
-        # framework_version left unset here (manifest-derived); the T0 backfill writes it.
+        # framework_version left unset here; the T0 backfill writes it.
         return {
             "best_config":       best_config,
             "best_throughput":   float(current_best.get("tput", 0.0))
@@ -956,7 +924,7 @@ class ResultRecorder:
                                     or self.session_dir.name),
                 "gain_pct":     cumulative_validated or cumulative_total,
                 "stack_len":    validated_stack_len or len(opt_stack),
-                # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
+                # before/after tput so the session row is self-describing.
                 "throughput_before": float(getattr(ss, "baseline_tput", 0.0) or 0.0),
                 "throughput_after":  (
                     float(current_best.get("tput", 0.0))
@@ -1008,16 +976,16 @@ class ResultRecorder:
             return
         try:
             attrs = self._coord._build_recipe_attrs_from_state()
-            # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
+            # Hoist workload tags flat into top-level recipe attrs for warm-start filters.
             workload_tags = attrs.get("workload") or {}
 
-            # sessions[] read-modify-write: read anchor, drop prior entry with our session_id (resume safety), append ours, write back.
+            # sessions[] read-modify-write: read anchor, drop prior entry with our session_id, append ours.
             my_sessions = list(attrs["sessions"] or [])
             my_session_ids = {
                 str((s or {}).get("session_id") or "")
                 for s in my_sessions if isinstance(s, dict)
             }
-            # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
+            # Read-modify-write the recipe row; sessions[] merged in-process under the cid flock.
             merged_sessions: list[dict[str, Any]] = list(my_sessions)
             existing_row: dict[str, Any] = {}
             if self.cortex_kb is not None:
@@ -1030,7 +998,7 @@ class ResultRecorder:
                         if not isinstance(row, dict):
                             continue
                         if str(row.get("session_id") or "") in my_session_ids:
-                            # Resume/retry of the same session — our new entry supersedes the prior one.
+                            # Our new entry supersedes a prior one for the same session.
                             continue
                         existing_sessions.append(dict(row))
                     merged_sessions = existing_sessions + my_sessions
@@ -1067,7 +1035,7 @@ class ResultRecorder:
                 "sessions":      merged_sessions,
                 "extras":        extras_payload,
             }
-            # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
+            # Overwrite best_config/best_throughput only on a real improvement (has_validated_win AND my_tput > live_tput).
             my_tput = float(attrs.get("best_throughput") or 0.0)
             cb_now = getattr(ss, "current_best", {}) or {}
             cb_args_now = (
@@ -1089,7 +1057,7 @@ class ResultRecorder:
             if has_validated_win and my_tput > live_tput:
                 overrides["best_config"] = attrs["best_config"]
                 overrides["best_throughput"] = my_tput
-            # Merge stack_fingerprint rather than replace (CLOSE only has the sha; T0 stamps version keys).
+            # Merge stack_fingerprint rather than replace (CLOSE only has the sha).
             merged_fp = dict(existing_row.get("stack_fingerprint") or {})
             for fp_key, fp_val in (attrs.get("stack_fingerprint") or {}).items():
                 if fp_val not in (None, "", {}):
@@ -1114,11 +1082,9 @@ class ResultRecorder:
         """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the
         session-wide seen-set, de-duped across the session.
 
-        Applies to every domain that self-reports a ``research`` block
-        (``pr_intel`` + ``research_scout``), so FRAMEWORK / explore lanes do
-        not re-fetch the same references. Fail-soft: never raises (the caller
-        also guards, but keep this self-contained so partial payloads degrade
-        gracefully).
+        Applies to every domain that self-reports a ``research`` block so
+        FRAMEWORK / explore lanes do not re-fetch the same references.
+        Fail-soft: never raises.
         """
         block = done_payload.get("research")
         if not isinstance(block, dict):
@@ -1132,7 +1098,7 @@ class ResultRecorder:
             return
         try:
             added = self.shared_state.register_seen_pr_ids(pr_ids)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:  # noqa: BLE001
             log.exception(
                 "depth: register_seen_pr_ids failed during research aggregation",
             )

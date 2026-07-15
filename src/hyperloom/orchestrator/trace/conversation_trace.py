@@ -2,26 +2,21 @@
 
 """Append-only writer for ``reports/trace/conversations.jsonl``.
 
-Sibling of :mod:`.llm_trace`. Where that module owns the per-call *token*
-account (deliberately small, no prompt text), this one owns the
-*conversation*: the full, redacted prompt + completion for every
-in-process LLM call. Both share the same identity / join keys
-(``session_id`` / ``component`` / ``role`` / ``tick`` / ``phase`` /
-``turn``) so the two streams line up against ``decision_trace``.
+Sibling of :mod:`.llm_trace`; this module owns the full, redacted prompt +
+completion for every in-process LLM call, sharing the same identity / join keys
+(``session_id`` / ``component`` / ``role`` / ``tick`` / ``phase`` / ``turn``)
+so the two streams line up against ``decision_trace``.
 
 Design contract:
 
-* **Best-effort I/O**: disk failures while appending are logged and
-  swallowed; a conversation write must never break the optimization loop
-  (mirrors :func:`.llm_trace.append_llm_call`).
-* **Full text, redacted**: ``prompt`` and ``response`` are stored in
-  full (no truncation) but passed through :func:`redact_secrets` first so
-  an accidentally-logged credential value never lands on disk. The full
-  text is the whole point — Langfuse export / replay needs it intact.
-* **Self-contained redaction**: the redactor strips secret *values*
-  (Bearer tokens, ``ak-`` / ``sk-`` / ``pk-`` keys, ``ghp_`` GitHub
-  tokens, ``KEY=value`` / ``token: value`` shapes), not just env-var
-  names, because the model's raw text is persisted to disk.
+* **Best-effort I/O**: disk failures while appending are logged and swallowed;
+  a conversation write must never break the optimization loop.
+* **Full text, redacted**: ``prompt`` / ``response`` are stored in full but
+  passed through :func:`redact_secrets` first so a credential value never lands
+  on disk.
+* **Self-contained redaction**: the redactor strips secret *values* (Bearer
+  tokens, ``ak-`` / ``sk-`` / ``pk-`` keys, ``ghp_`` GitHub tokens,
+  ``KEY=value`` shapes), not just env-var names.
 """
 
 from __future__ import annotations
@@ -68,10 +63,7 @@ class ConversationRowError(ValueError):
     """Raised when a conversation row violates the closed schema."""
 
 
-# ---------------------------------------------------------------------------
-# Secret redaction
-# ---------------------------------------------------------------------------
-# Each pattern captures a leading "label" group (kept) and replaces the
+# Secret redaction. Each pattern keeps a leading "label" group and replaces the
 # trailing secret value with a placeholder. Ordered most-specific first.
 _REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Authorization: Bearer <token>
@@ -223,8 +215,8 @@ def append_conversation(
             exc,
         )
 
-    # Second sink (opt-in): mirror in-process conversation text to Langfuse
-    # live. Skipped for ext/ shards (target set). Best-effort; never raises.
+    # Second sink (opt-in): mirror conversation text to Langfuse live. Skipped
+    # for ext/ shards. Best-effort; never raises.
     if target is None:
         try:
             from .langfuse_emitter import get_emitter

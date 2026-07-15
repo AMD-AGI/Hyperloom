@@ -64,18 +64,14 @@ from .benchmark_result import (
 log = logging.getLogger(__name__)
 
 
-# Markers that identify an InferenceX ``run_eval`` (lm-eval) failure as the
-# root cause of a benchmark non-zero exit. ``run_eval`` echoes the first marker
-# on ANY eval failure (benchmark_lib.sh), so it is the most general signal; the
-# others catch the specific redundant-flag breakage even when the generic
-# message scrolled out of a truncated tail.
+# Markers identifying an InferenceX ``run_eval`` (lm-eval) failure as the root
+# cause of a benchmark non-zero exit.
 _EVAL_FAILURE_MARKERS = (
     "run_eval failed with exit code",
     "ERROR: run_eval failed",
     "Unknown parameter: --concurrent-requests",
 )
-# Bounded per-file read so scanning a failed run's logs for eval markers never
-# slurps a multi-GB server.log.
+# Bounded per-file read so log scanning never slurps a multi-GB server.log.
 _EVAL_SCAN_MAX_BYTES = 262_144
 
 
@@ -96,8 +92,7 @@ def _is_truthy(value: Any) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-# Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
-# should not consume the slow-baseline retry budget.
+# Fast-exit arg errors should not consume the slow-baseline retry budget.
 FAST_EXIT_THRESHOLD_SEC = 30.0
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
@@ -117,11 +112,10 @@ _ARG_ERROR_CONTEXT_PATTERNS = (
     "unknown",
 )
 
-# KV-cache OOM: weights loaded but no room left for the KV cache. Kept
-# distinct from a generic nonzero exit so the loop/report attributes it to an
-# over-aggressive --mem-fraction-static (raise it) rather than a hard crash.
-# This surfaces AFTER weight load (often minutes in), so it must be matched
-# regardless of the fast-exit elapsed threshold.
+# KV-cache OOM: weights loaded but no room left for the KV cache. Kept distinct
+# from a generic nonzero exit so it's attributed to an over-aggressive
+# --mem-fraction-static. Surfaces after weight load, so matched regardless of
+# the fast-exit elapsed threshold.
 _KV_CACHE_OOM_MARKERS = (
     "no gpu memory for the kv cache",
     "leave no gpu memory",
@@ -130,22 +124,18 @@ _KV_CACHE_OOM_MARKERS = (
 
 
 # Strong cuda-graph capture markers: stream-capture incompatibility, reliably
-# recoverable by disabling cuda-graph. Markers live in server.log, not the
-# Magpie stdout/stderr tail.
+# recoverable by disabling cuda-graph.
 _CUDA_GRAPH_STRONG_MARKERS = (
     "operation not permitted when stream is capturing",
     "hiperrorstreamcaptureunsupported",
 )
-# Weak marker: bare "Capture cuda graph failed" carries no root cause. Trust it
-# only when the nearby context is neither OOM nor a compile/lowering error,
-# both of which disabling cuda-graph cannot recover.
+# Weak marker: bare "Capture cuda graph failed" carries no root cause. Trusted
+# only when the nearby context is neither OOM nor a compile/lowering error.
 _CUDA_GRAPH_WEAK_MARKER = "capture cuda graph failed"
 
-# Profile-cuda-graph shape discovery feeds a device seq_lens into sglang's
-# get_num_new_pages (which asserts CPU) -> AssertionError -> SIGQUIT. Disabling
-# cuda-graph skips that path, so this specific assert IS recoverable and must
-# win over the generic assertionerror non-recoverable gate below. Both markers
-# are required so a generic AssertionError never matches.
+# Profile-cuda-graph shape discovery triggers a recoverable AssertionError that
+# must win over the generic assertionerror non-recoverable gate below. Both
+# markers are required so a generic AssertionError never matches.
 _CUDA_GRAPH_PROFILE_ASSERT_MARKERS = (
     "get_num_new_pages",
     "seq_lens.device == cpu_device",
@@ -162,11 +152,9 @@ _NON_RECOVERABLE_MARKERS = (
     "assertionerror",
     "compilationerror",
 )
-# Strong markers are high-confidence stream-capture incompatibilities, so OOM
-# exclusion is scoped tight (±1 line): only an OOM on/adjacent to the marker
-# line demotes it, an unrelated startup OOM warning nearby does not (false
-# negative guard). The bare weak marker is unreliable, so it keeps the
-# whole-blob OOM/compile exclusion to avoid wasting the one-shot retry.
+# Strong markers are high-confidence, so OOM exclusion is scoped tight (±1
+# line): only an OOM on/adjacent to the marker line demotes it. The bare weak
+# marker keeps the whole-blob OOM/compile exclusion.
 _STRONG_OOM_CONTEXT_RADIUS = 1
 
 
@@ -190,7 +178,7 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     lines = "\n".join(t for t in texts if t).splitlines()
     lowered = [ln.lower() for ln in lines]
     blob = "\n".join(lowered)
-    # Specific profile-cuda-graph assert wins over the assertionerror gate.
+    # Profile-cuda-graph assert wins over the assertionerror gate.
     if all(m in blob for m in _CUDA_GRAPH_PROFILE_ASSERT_MARKERS):
         return True
     blob_has_oom = any(m in blob for m in _OOM_MARKERS)
@@ -211,8 +199,8 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     return False
 
 
-# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph
-# (it rejects vLLM's --enforce-eager), vllm uses --enforce-eager.
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph,
+# vllm uses --enforce-eager.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
     "vllm": "--enforce-eager",
@@ -272,8 +260,8 @@ def _classify_subprocess_error(
         validation, else ``"subprocess_nonzero"``.
     """
     tail = (stderr_tail or "").lower()
-    # KV-cache OOM can surface long after weight load, so it is matched before
-    # the fast-exit elapsed gate below.
+    # KV-cache OOM can surface long after weight load; match before the
+    # fast-exit elapsed gate below.
     if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
@@ -285,11 +273,10 @@ def _classify_subprocess_error(
     return "subprocess_nonzero"
 
 
-BASELINE_DEFAULT_TIMEOUT_SEC = 7800           # WARM-start cap, 130 min (raised for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 ~82 min workload)
+BASELINE_DEFAULT_TIMEOUT_SEC = 7800           # WARM-start cap, 130 min
 BASELINE_COLD_START_TIMEOUT_SEC = 9000        # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
-# COLD_START_KERNEL_THRESHOLD and AITER_JIT_PROBE_PATHS now live in
-# ``_aiter_jit`` (shared with cli.py's startup sweep); re-exported below for
-# callers/tests that import them from this module.
+# COLD_START_KERNEL_THRESHOLD and AITER_JIT_PROBE_PATHS live in ``_aiter_jit``;
+# re-exported below for callers/tests that import them from this module.
 
 
 # Underscore-prefixed aliases re-exported for callers/tests; canonical
@@ -321,24 +308,20 @@ def _resolve_reference_base(
 ) -> tuple[str, dict[str, str]]:
     """Read the model-gated reference base server args/envs from SharedState.
 
-    Baseline is the single choke point every run funnels through (initial /
-    restart / stack-rebaseline), so reading the reference here makes it seed
-    EVERY baseline — including resume restarts (the reference is a persisted
-    fact-layer field). Model-gated: a recipe captured for a different model is
-    skipped (a near-name mismatch could apply flags that break this model).
+    Baseline is the single choke point every run funnels through, so reading the
+    reference here seeds every baseline (including resume restarts). Model-gated:
+    a recipe captured for a different model is skipped.
 
     Returns ``("", {})`` on any failure or when no reference is set — the
-    caller then materializes exactly as before (0 degrade).
+    caller then materializes exactly as before.
     """
     try:
         from ...state.shared_state import SharedState
         from hyperloom.inference_optimizer.reference_script import models_compatible
-        # The baseline executor is a module-level singleton instantiated at
-        # import time — before $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR is
-        # pinned — so its cached session_dir can resolve to the workspace root
-        # instead of the live session dir whose state.json carries the
-        # reference_* fields. Prefer the live pin when present; otherwise honor
-        # the caller-supplied path (direct-instantiation tests, explicit calls).
+        # The baseline executor is a module-level singleton instantiated before
+        # $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR is pinned, so its cached
+        # session_dir can point at the workspace root. Prefer the live pin when
+        # present; otherwise honor the caller-supplied path.
         from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
         _pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
         if _pinned:
@@ -349,7 +332,6 @@ def _resolve_reference_base(
         if not ref_args and not ref_envs:
             return ("", {})
         ref_model = str(getattr(state, "reference_model", "") or "").strip()
-        # Same normalized, version-aware gate discovery uses (no drift).
         if not models_compatible(ref_model, str(model_path or "")):
             log.warning(
                 "reference recipe is for model %r but run model is %r; "
@@ -363,17 +345,10 @@ def _resolve_reference_base(
         return ("", {})
 
 
-# Filesystem types that can be revoked / unmounted mid-run (e.g. a
-# wekafs/NFS mount flap). A process whose cwd lives on such a mount sees its
-# working directory "vanish underneath it" and any RELATIVE-path write hits
-# ``FileNotFoundError``. SGLang's cuda-graph profiling
-# (``--enable-profile-cuda-graph``, injected by profile_sglang.yaml) dumps
-# ``cuda_graph_runner_memory_usage.pickle`` to a bare relative path, and
-# Magpie launches the server via ``cd <inferencex> && bash <script>`` — so
-# the server's cwd IS the InferenceX checkout. When that checkout is on
-# wekafs and the mount flaps, the dump ENOENTs and the scheduler sigquits
-# before any ``.trace.json.gz`` is produced. Such FS types trigger local
-# mirroring.
+# Filesystem types that can be revoked / unmounted mid-run (e.g. a wekafs/NFS
+# mount flap), where a process whose cwd lives on such a mount sees relative-path
+# writes ENOENT. Such FS types trigger local mirroring of the InferenceX
+# checkout (the server's cwd for its cuda-graph pickle dump).
 _NETWORK_FS_TYPES = frozenset(
     {
         "nfs",
@@ -420,7 +395,7 @@ def _path_fstype(path: str) -> str:
                 parts = line.split()
                 if len(parts) < 3:
                     continue
-                # /proc/mounts octal-escapes spaces etc. in the mountpoint.
+                # /proc/mounts octal-escapes spaces in the mountpoint.
                 try:
                     mp = parts[1].encode("latin-1").decode("unicode_escape")
                 except (UnicodeDecodeError, UnicodeEncodeError):
@@ -454,28 +429,23 @@ def _is_network_fs(path: str) -> bool:
 def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     """Mirror an InferenceX checkout onto stable local disk.
 
-    #523: returns a local-disk path Magpie can ``cd`` into so the sglang
-    server's relative-path cuda-graph snapshot dump survives a network-mount
-    (wekafs/NFS) flap. No-op (returns ``src`` unchanged) when:
+    Returns a local-disk path Magpie can ``cd`` into so the sglang server's
+    relative-path cuda-graph snapshot dump survives a network-mount flap. No-op
+    (returns ``src`` unchanged) when:
 
     * relocation is disabled via
       ``INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX=1``,
     * ``src`` already lives on a local filesystem, or
     * the copy fails for any reason.
 
-    Best-effort — never raises; on failure it falls back to ``src`` so the
-    run proceeds (degraded to the pre-fix behaviour) rather than aborting.
-    ``mirror_key`` lets callers isolate long-running tasks that share the same
-    source checkout: Baseline/Profile pass their task output dir, so a later
-    overlapping task cannot ``rmtree`` a mirror another server is still
-    ``cd``-ed into.
+    Best-effort — never raises; on failure it falls back to ``src``.
+    ``mirror_key`` isolates long-running tasks that share the same source
+    checkout so a later overlapping task cannot ``rmtree`` a mirror another
+    server is still ``cd``-ed into.
 
-    Ordering: the caller relocates BEFORE config materialization and passes
-    the returned path explicitly into materialization, so the subsequent
-    ProfileExecutor patch step (``_after_materialize_config`` reads the
-    materialized YAML first) patches the LOCAL mirror in place — the mirror
-    therefore ends up carrying the NUM_PROMPTS / PROFILE_EXTRA_BODY patches,
-    and Magpie ``cd``-s into the patched local copy.
+    The caller relocates BEFORE config materialization and passes the returned
+    path explicitly into materialization, so the ProfileExecutor patch step
+    patches the local mirror in place.
 
     Args:
         src: Source InferenceX checkout path (typically on a network mount).
@@ -525,18 +495,16 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
         )
         return src
     # Lock keyed on dest so concurrent tasks mirroring the same source
-    # serialize their rmtree/replace instead of racing (see _mirror_lock).
+    # serialize their rmtree/replace instead of racing.
     lock_path = str(local_root / f".{dest.name}.lock")
     staging: Path | None = None
     try:
         with best_effort_file_lock(lock_path, label="baseline_executor: InferenceX mirror lock"):
             staging = Path(tempfile.mkdtemp(dir=str(local_root)))
             staged_ix = staging / "InferenceX"
-            # Copy the tree fresh; re-copy every run because the per-task
-            # patch step (_after_materialize_config) rewrites the mirror in
-            # place. 8-9 MB onto local disk is sub-second. Holding the lock
-            # across rmtree+replace stops a concurrent task swapping ``dest``
-            # out from under this copy.
+            # Copy the tree fresh every run because the per-task patch step
+            # rewrites the mirror in place. Holding the lock across
+            # rmtree+replace stops a concurrent task swapping ``dest`` out.
             shutil.copytree(real_src, staged_ix, symlinks=True)
             if dest.exists():
                 shutil.rmtree(dest, ignore_errors=True)
@@ -551,9 +519,7 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
         )
         return src
     finally:
-        # Always clear the staging dir: empty after a successful os.replace,
-        # or holding a half-finished copy after a failure. Either way it must
-        # not accumulate under local_root across runs.
+        # Always clear the staging dir so it doesn't accumulate across runs.
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
 
@@ -941,11 +907,9 @@ class BaselineExecutor:
             )
         )
         if cache["probe_status"] == "found" and cache["is_cold"]:
-            # Before paying the cold-start compile, reap aiter JIT locks left
-            # by a killed hipcc (else this build spins forever in FileBaton's
-            # untimed wait). Gated on "no live compiler" so a concurrent
-            # benchmark's in-flight compile on the node-global jit dir is never
-            # disturbed; ninja resumes incrementally from any surviving .o.
+            # Before paying the cold-start compile, reap aiter JIT locks left by
+            # a killed hipcc. Gated on "no live compiler" so a concurrent
+            # benchmark's in-flight compile is never disturbed.
             sweep = sweep_stale_aiter_locks_if_dead()
             if sweep.get("skipped_live"):
                 log.info(
@@ -1043,10 +1007,8 @@ class BaselineExecutor:
         if not out_dir:
             return False
         root = Path(out_dir)
-        # Double-run: the returned result is the measure round, but the eval
-        # failure (and its markers) live in the sibling warmup round. Climb to
-        # the shared task root so the scan covers both rounds — bounded to the
-        # named round subdirs so we never scan a sibling baseline task.
+        # Double-run: the eval failure markers may live in the sibling warmup
+        # round, so climb to the shared task root to scan both rounds.
         if root.name in ("warmup_round", "measure_round"):
             root = root.parent
         if not root.exists():
@@ -1077,17 +1039,11 @@ class BaselineExecutor:
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the Magpie baseline, with a one-shot eval-failure fallback.
 
-        Delegates to :meth:`_run_once`. When the run fails for an
-        eval-rooted reason (InferenceX ``run_eval`` aborted the benchmark even
-        though throughput was healthy — e.g. the redundant
-        ``--concurrent-requests`` flag, or any lm-eval breakage) AND accuracy
-        eval was active, it re-runs **once** with ``RUN_EVAL=false`` so the
-        throughput baseline is salvaged. The retried result is tagged
-        ``accuracy_source="eval_unavailable"`` and carries a
-        ``eval_failed_fallback_no_accuracy`` warning. This is the in-executor
-        complement to the install-time flag strip in ``_magpie_patcher.py``:
-        even if the upstream script breaks again, the run degrades gracefully
-        instead of terminating after 3 baseline attempts.
+        Delegates to :meth:`_run_once`. When the run fails for an eval-rooted
+        reason AND accuracy eval was active, it re-runs **once** with
+        ``RUN_EVAL=false`` so the throughput baseline is salvaged. The retried
+        result is tagged ``accuracy_source="eval_unavailable"`` and carries a
+        ``eval_failed_fallback_no_accuracy`` warning.
 
         Args:
             ctx (RunnerContext): The runner context carrying ``task.params``
@@ -1103,8 +1059,7 @@ class BaselineExecutor:
         params = ctx.task.params or {}
         # "Already off" only when the operator explicitly disabled eval — via
         # the param, or an extra_envs RUN_EVAL that is PRESENT and falsey. An
-        # absent RUN_EVAL must NOT count (the empty string is in
-        # _RUN_EVAL_FALSE_VALUES for the materialize-time default, not here).
+        # absent RUN_EVAL must NOT count.
         _extra_envs = params.get("extra_envs") or {}
         _explicit_run_eval = "RUN_EVAL" in _extra_envs and str(
             _extra_envs["RUN_EVAL"]
@@ -1162,22 +1117,18 @@ class BaselineExecutor:
         """
         params = ctx.task.params or {}
         # Only a genuine ``baseline`` task may establish/overwrite the quality
-        # reference image. ``replay_warm_recipe`` reuses this executor but is an
-        # optimization candidate, so it must compare against the pure baseline
-        # reference rather than redefine it (otherwise the gate would mask the
-        # warm recipe's own deviation from the baseline output).
+        # reference; ``replay_warm_recipe`` reuses this executor but must compare
+        # against the pure baseline reference rather than redefine it.
         is_genuine_baseline = _should_establish_quality_ref(getattr(ctx.task, "kind", ""))
         config_path = Path(params.get("config_path") or self.default_config_path or self._resolve_default_config())
         if not config_path.exists():
             raise FileNotFoundError(f"baseline config not found: {config_path}")
 
-        # One-shot cuda-graph eager fallback: a prior baseline hit a cuda-graph
-        # capture failure and armed state.baseline_eager_fallback. Inject the
-        # framework-correct disable-cuda-graph flag for this retry and consume
-        # the flag so it fires once. Resolve framework FIRST: an unknown
-        # framework cannot pick a safe flag, so we leave the flag armed (do not
-        # consume) and let a later baseline with a known framework apply it,
-        # instead of burning the one-shot on a no-op retry.
+        # One-shot cuda-graph eager fallback: a prior baseline armed
+        # state.baseline_eager_fallback. Inject the framework-correct
+        # disable-cuda-graph flag and consume the flag so it fires once. Resolve
+        # framework FIRST: an unknown framework leaves the flag armed (not
+        # consumed) for a later baseline instead of burning the one-shot.
         effective_extra_server_args = str(params.get("extra_server_args") or "")
         extra = getattr(ctx, "extra", None) or {}
         live_shared_state = extra.get("shared_state") or self.shared_state
@@ -1203,21 +1154,12 @@ class BaselineExecutor:
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # #523: keep the InferenceX checkout Magpie will ``cd`` into on stable
-        # local disk. Magpie launches the server via ``cd <inferencex> && bash
-        # <script>`` (see Magpie ``_build_local_command``), so that checkout is
-        # the server's cwd — and SGLang's cuda-graph profiling dumps
-        # ``cuda_graph_runner_memory_usage.pickle`` there via a RELATIVE path.
-        # On wekafs/NFS a mid-run mount flap makes the cwd vanish and the dump
-        # ENOENTs (scheduler sigquit, no trace). Relocate BEFORE materialize so
-        # the rendered ``benchmark.inferencex_path`` (which Magpie actually
-        # honours — the MAGPIE_INFERENCEX_PATH env is only a fallback), the
-        # ProfileExecutor patch step, and Magpie all use the local mirror.
-        #
-        # Keep this value task-local. Mutating process-wide $INFERENCEX_PATH
-        # would let two overlapping asyncio tasks race between relocation,
-        # materialization and Magpie env export. Passing the same explicit path
-        # through all three call sites also documents the invariant directly.
+        # Keep the InferenceX checkout Magpie ``cd``s into on stable local disk
+        # so SGLang's relative-path cuda-graph dump survives a wekafs/NFS flap.
+        # Relocate BEFORE materialize so the rendered ``benchmark.inferencex_path``,
+        # the ProfileExecutor patch step, and Magpie all use the local mirror.
+        # Kept task-local (not process-wide $INFERENCEX_PATH) to avoid races
+        # between overlapping asyncio tasks.
         ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
         effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
 
@@ -1237,11 +1179,8 @@ class BaselineExecutor:
         timeout_sec = self._resolve_timeout(params)
         # Model path: task.params['model_path'] > $MODEL_PATH > SharedState;
         # if none, leave the YAML's hardcoded `model:` for fixture-based tests.
-        # Read live state from ctx.extra (Coordinator path: the executor is a
-        # module-level singleton with self.shared_state=None), mirroring the
-        # eager-fallback resolution above; the fallback stops a real run (params
-        # + env both unset) from leaking the YAML bare model name into
-        # --model-path, which sglang treats as an HF repo id.
+        # Live state is read from ctx.extra (the executor is a module-level
+        # singleton with self.shared_state=None on the Coordinator path).
         resolved_model = (
             str(params.get("model_path") or "").strip()
             or os.environ.get("MODEL_PATH", "").strip()
@@ -1251,8 +1190,7 @@ class BaselineExecutor:
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         )
-        # Orchestration-supplied script + result_dir overrides (route around
-        # scripts that hardcode ``--result-dir /workspace/``). Sanitization
+        # Orchestration-supplied script + result_dir overrides. Sanitization
         # turns a malformed override into ``error_class=bad_param``.
         try:
             override_script = sanitize_script_name(params.get("benchmark_script"))
@@ -1264,20 +1202,16 @@ class BaselineExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
-        # Reference recipe base (lowest priority): seeds every baseline incl.
-        # resume restarts. Task params may also pass it through explicitly;
-        # prefer the explicit param, else read the model-gated SharedState value.
+        # Reference recipe base (lowest priority): prefer the explicit param,
+        # else read the model-gated SharedState value.
         ref_args = str(params.get("reference_server_args") or "").strip()
         ref_envs = dict(params.get("reference_envs") or {})
         if not ref_args and not ref_envs:
             ref_args, ref_envs = _resolve_reference_base(
                 self.session_dir, model_path=resolved_model,
             )
-        # Accuracy eval (GSM8K) opt-out: the ``disable_run_eval`` task param
-        # (documented to the LLM + fingerprinted) and the in-executor
-        # eval-failure fallback both force ``RUN_EVAL=false`` via extra_envs,
-        # which materialize honors over the default-true. An explicit
-        # extra_envs RUN_EVAL still loses to the deliberate disable.
+        # Accuracy eval (GSM8K) opt-out: the ``disable_run_eval`` param and the
+        # in-executor eval-failure fallback both force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
         if force_disable_eval or _is_truthy(params.get("disable_run_eval")):
             base_extra_envs["RUN_EVAL"] = "false"
@@ -1296,16 +1230,14 @@ class BaselineExecutor:
                 establish_quality_ref=is_genuine_baseline,
             )
         except FrameworkScriptMismatchError as exc:
-            # Cross-framework script override (e.g. sglang_*.sh on a vllm run):
-            # return a structured failure instead of bubbling to coordinator.
+            # Cross-framework script override: return a structured failure.
             return {
                 "status": "failed",
                 "error_class": "framework_script_mismatch",
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
-        # Stash for the result so Coordinator can reuse it downstream
-        # (workload-contract reuse).
+        # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
         hook_result = self._after_materialize_config(config_path, output_dir)
         if hook_result is not None:
@@ -1313,16 +1245,13 @@ class BaselineExecutor:
             hook_result.setdefault("output_dir", str(output_dir))
             return hook_result
 
-        # Cold-start "warmup artifact" guard: the freshly-booted server's
-        # first benchmark window pays one-time cold costs (JIT, graph
-        # capture, KV alloc, clock warmup) that the client-side warmups
-        # can't absorb, inflating later gains into fictitious "improvements".
-        # Fix: run TWICE against the SAME persistent server via Magpie's
-        # ``server_lifecycle`` reuse — round 1 boots + pays cold costs,
-        # round 2 re-attaches to the hot server and is the clean baseline.
-        # Eligibility (else single round): double-run requested by the session
-        # default/task params, single-node, benchmark script is a Magpie
-        # built-in, profiler off.
+        # Cold-start "warmup artifact" guard: the freshly-booted server's first
+        # benchmark window pays one-time cold costs that inflate later gains into
+        # fictitious "improvements". Run TWICE against the same persistent server
+        # via ``server_lifecycle`` reuse — round 1 pays cold costs, round 2
+        # re-attaches to the hot server and is the clean baseline. Eligibility
+        # (else single round): double-run requested, single-node, built-in
+        # benchmark script, profiler off.
         lifecycle = self._resolve_lifecycle_params(materialized_config_path)
         double_run_requested = self._double_run_enabled(
             params=params,
@@ -1355,21 +1284,19 @@ class BaselineExecutor:
 
         framework = lifecycle["framework"]
         port = lifecycle["port"]
-        # pid_dir is SHARED across both rounds (Magpie keys the persistent
-        # server by ``<pid_dir>/<framework>_<port>.{pid,json}``) so round 2
-        # discovers round 1's server. Task root keeps it per-task isolated.
+        # pid_dir is shared across both rounds so round 2 discovers round 1's
+        # server; task root keeps it per-task isolated.
         pid_dir = output_dir
         try:
-            # Deep-clean zombie listeners + stale pid/meta BEFORE round 1
-            # boots its server. Runs once here (not per round) so round 1's
-            # persistent server survives for round 2's re-attach.
+            # Deep-clean zombie listeners + stale pid/meta BEFORE round 1 boots.
+            # Runs once here so round 1's server survives for round 2's re-attach.
             self._pre_start_cleanup(
                 pid_dir=pid_dir,
                 framework=framework,
                 port=port,
             )
-            # Round 1 (warmup): boot + run, leave running (cleanup=false) so
-            # round 2 can re-attach. Throughput discarded (cold-contaminated).
+            # Round 1 (warmup): boot + run, leave running so round 2 can
+            # re-attach. Throughput discarded (cold-contaminated).
             warmup_dir = output_dir / "warmup_round"
             warmup_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -1389,7 +1316,7 @@ class BaselineExecutor:
             )
             if warmup_result.get("status") != "succeeded":
                 # Warmup failure almost certainly recurs, so skip the
-                # measured round; the finally block tears down any leak.
+                # measured round.
                 warmup_result.setdefault("nonfatal_warnings", [])
                 warmup_result["nonfatal_warnings"].append(
                     "baseline_warmup_round_failed",
@@ -1403,7 +1330,6 @@ class BaselineExecutor:
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
 
             # Round 2 (measured): re-attach to the hot server (client only).
-            # cleanup=true tears it down on the happy path; finally is the net.
             measure_dir = output_dir / "measure_round"
             measure_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -1430,12 +1356,10 @@ class BaselineExecutor:
                     "baseline_double_run_discarded_first",
                 )
                 result["warmup_round_tput"] = warmup_tput
-                # Overtime-kill anchor fix: the Coordinator promotes
-                # ``subprocess_runtime_sec`` into baseline_runtime_sec, the
-                # explore soft-kill anchor. Explore variants restart the
-                # server, so report round 1's FULL boot+client wall-clock
-                # (matches their profile); round 2's client-only time stays
-                # under a separate key.
+                # The Coordinator promotes ``subprocess_runtime_sec`` into the
+                # explore soft-kill anchor. Explore variants restart the server,
+                # so report round 1's full boot+client wall-clock; round 2's
+                # client-only time stays under a separate key.
                 if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
                     result["measure_round_runtime_sec"] = result.get(
                         "subprocess_runtime_sec",
@@ -1456,8 +1380,7 @@ class BaselineExecutor:
                 )
             return result
         finally:
-            # Defensive teardown so no persistent server leaks regardless of
-            # which round failed. Idempotent (no-op on the happy path).
+            # Defensive teardown so no persistent server leaks. Idempotent.
             self._teardown_lifecycle_server(
                 pid_dir=pid_dir,
                 framework=framework,
@@ -1621,20 +1544,18 @@ class BaselineExecutor:
             port_healthy = False
         if meta_exists and port_healthy:
             # A healthy reuse target with metadata is not a zombie; keep the
-            # files so Magpie can reattach instead of creating a mismatch.
+            # files so Magpie can reattach.
             return
-        # Unlink stale metadata/pid files only (no signal to possibly-
-        # recycled PIDs — _teardown_lifecycle_server is too aggressive here).
+        # Unlink stale metadata/pid files only (no signal to possibly-recycled
+        # PIDs).
         for p in (pid_file, meta_file):
             try:
                 if p.exists():
                     p.unlink()
             except OSError:
-                # Best-effort cleanup; a filesystem error here is non-fatal.
                 pass
-        # Narrow trigger: only deep-clean when the port is occupied by a
-        # zombie (healthy endpoint, no metadata). Avoids killing unrelated
-        # servers sharing the pod.
+        # Only deep-clean when the port is occupied by a zombie (healthy
+        # endpoint, no metadata), to avoid killing unrelated servers.
         try:
             if not meta_exists and port_healthy:
                 _kill_stale_servers()
@@ -1729,13 +1650,11 @@ class BaselineExecutor:
         # explicit value avoids cross-task races on $INFERENCEX_PATH.
         if inferencex_path:
             env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-        # Always-on ``$RESULT_DIR`` default for scripts that respect it
-        # (else they fall back to ``/workspace/``); scripts that ignore it
-        # are caught by the ``extract_benchmark_measurement`` salvage pass.
+        # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts
+        # that ignore it are caught by the salvage pass.
         env["RESULT_DIR"] = override_result_dir or str(output_dir)
-        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into
-        # the task workspace instead of leaking to ``/workspace/``;
-        # ``harvest_leaked_artifacts`` below is the defense-in-depth net.
+        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the
+        # task workspace; ``harvest_leaked_artifacts`` is the defense-in-depth net.
         env["SERVER_LOG"] = str(output_dir / "server.log")
         env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
 
@@ -1746,10 +1665,9 @@ class BaselineExecutor:
 
         env.update(magpie_remote_env())
 
-        # Multi-node only: restart sglang/vllm per round for a fresh server
-        # (parity with single-node PHASE=all). No-op in single-node. Profile
-        # rounds set ctx.extra["mn_round_restarted"] to claim the restart so
-        # each Magpie spawn maps to exactly one server boot.
+        # Multi-node only: restart sglang/vllm per round for a fresh server.
+        # No-op in single-node. Profile rounds set
+        # ctx.extra["mn_round_restarted"] to claim the restart.
         from ._multi_node_server_lifecycle import (
             ServerRestartFailed,
             restart_server_for_round,
@@ -1758,12 +1676,10 @@ class BaselineExecutor:
         ctx_extra = getattr(ctx, "extra", None) or {}
         if not ctx_extra.get("mn_round_restarted"):
             try:
-                # Merge the reference base UNDER the per-task args (lowest
-                # priority, last-wins) so a multi-node per-round restart carries
-                # the same reference flags the single-node materialized YAML
-                # does — else exotic-arch models re-fail on every MN round.
-                # Resolve here (separate method from __call__): prefer explicit
-                # params, else the model-gated SharedState value.
+                # Merge the reference base UNDER the per-task args (last-wins) so
+                # a multi-node per-round restart carries the same reference flags
+                # the single-node materialized YAML does. Prefer explicit params,
+                # else the model-gated SharedState value.
                 from ._grid_runner import merge_server_args
                 _mn_ref_args = str(params.get("reference_server_args") or "").strip()
                 _mn_ref_envs = dict(params.get("reference_envs") or {})
@@ -1772,17 +1688,16 @@ class BaselineExecutor:
                         self.session_dir, model_path=resolved_model,
                     )
                 # Base on effective_extra_server_args (carries the one-shot
-                # cuda-graph eager-fallback flag when armed) rather than raw
-                # params, so the MN per-round restart keeps that fallback too.
+                # cuda-graph eager-fallback flag when armed) so the MN per-round
+                # restart keeps that fallback too.
                 _mn_task_args = effective_extra_server_args
                 _mn_server_args = (
                     merge_server_args(_mn_ref_args, _mn_task_args)
                     if _mn_ref_args else _mn_task_args
                 )
                 _mn_env = {str(k): str(v) for k, v in _mn_ref_envs.items()}
-                # PD knobs auto-resolved by the helper from $PD_* env (set
-                # by cli.py), falling back to state.json — call site is
-                # identical between colocated and disaggregated runs.
+                # PD knobs auto-resolved by the helper from $PD_* env, falling
+                # back to state.json.
                 await restart_server_for_round(
                     extra_server_args=_mn_server_args,
                     extra_env=_mn_env or None,
@@ -1804,33 +1719,23 @@ class BaselineExecutor:
         log_mn_banner("baseline_executor", log, output_dir=str(output_dir))
         log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s", cmd, output_dir)
 
-        # Magpie launched via ``run_with_session_kill`` (subprocess.run-like
-        # but tears down the whole descendant tree on every exit path).
-        # Plain subprocess.run leaks daemonized server processes. See
-        # ``_subprocess_kill.py``.
+        # Magpie launched via ``run_with_session_kill`` so the whole descendant
+        # tree is torn down on every exit path (plain subprocess.run leaks
+        # daemonized server processes).
         subprocess_started_unix = time.time()
-        # Anchor the Magpie *parent* process cwd to the stable per-task
-        # output_dir instead of the default ``/tmp`` (defence-in-depth for any
-        # relative-path writes Magpie itself makes). NOTE: this does NOT keep
-        # the server's cuda-graph dump safe on its own — Magpie re-roots the
-        # actual server via ``cd <inferencex>`` (see ``_build_local_command``
-        # in Magpie), so the server's cwd (where SGLang dumps the cuda-graph
-        # pickle) is the InferenceX checkout, not this output_dir.
-        # ``_ensure_local_inferencex`` above keeps that checkout on stable
-        # local disk.
+        # Anchor the Magpie parent process cwd to the per-task output_dir. NOTE:
+        # this does NOT keep the server's cuda-graph dump safe on its own —
+        # Magpie re-roots the actual server via ``cd <inferencex>``;
+        # ``_ensure_local_inferencex`` above keeps that checkout on local disk.
         output_dir.mkdir(parents=True, exist_ok=True)
-        # A reused output_dir (explicit ``params['output_dir']``
-        # on a retry, or a re-run of the same task slot) may still hold a
-        # PRIOR attempt's server.log. Its terminal engine/worker-init markers
-        # would otherwise misclassify THIS attempt as ``server_init_dead`` even
-        # when the current server booted fine — the post-run scan
-        # (``server_log_death_excerpt`` below) can't tell a stale marker from a
-        # fresh one. Clear it so classification only sees this attempt's log.
+        # A reused output_dir may still hold a prior attempt's server.log, whose
+        # terminal init markers would misclassify THIS attempt as
+        # ``server_init_dead``. Clear it so classification only sees this
+        # attempt's log.
         stale_server_log = output_dir / "server.log"
         try:
             stale_server_log.unlink()
         except FileNotFoundError:
-            # Stale log already absent; nothing to remove.
             pass
         except OSError as exc:
             log.warning(
@@ -1871,14 +1776,10 @@ class BaselineExecutor:
         proc_stdout = proc.stdout
         proc_stderr = proc.stderr
 
-        # Detokenizer-stall watchdog reap: the server came up healthy (ready
-        # marker logged) but then went completely silent for the stall grace
-        # window — a hung engine / wedged detokenizer. The clock runs from the
-        # ready marker, so a long cold start never trips it. Short-circuit here:
-        # a stall reap leaves no benchmark_* workspace, so without this it would
-        # misclassify as ``no_workspace``. Distinct ``error_class`` lets the
-        # coordinator fast-fail this baseline / variant instead of burning the
-        # full hard timeout. Harvest whatever the wrapper wrote first.
+        # Detokenizer-stall watchdog reap: the server came up healthy but went
+        # silent for the stall grace window (hung engine / wedged detokenizer).
+        # A stall reap leaves no benchmark_* workspace; a distinct error_class
+        # lets the coordinator fast-fail instead of burning the full timeout.
         if proc_returncode == DETOKENIZER_STALL_RETURNCODE:
             stall_candidates = sorted(output_dir.glob("benchmark_*"))
             stall_destination = stall_candidates[-1] if stall_candidates else output_dir
@@ -1905,23 +1806,18 @@ class BaselineExecutor:
                 "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in stall_harvested],
             }
 
-        # When the inference server's engine/worker bootstrap dies (e.g.
-        # vLLM ``RuntimeError: Engine core initialization failed``), the real
-        # root cause is in server.log, not in Magpie's stdout/stderr tail — and
-        # the liveness watchdog may have reaped the hung parent with
-        # ``SERVER_DEAD_RETURNCODE``. Detect that once here and reuse it across
-        # the failure branches below so the failure is classified
-        # ``server_init_dead`` and the operator sees the actual server fault
-        # instead of a generic ``subprocess_nonzero``. Backend-agnostic: the
-        # markers cover both vLLM and SGLang engine/worker init failures.
+        # When the server's engine/worker bootstrap dies, the root cause is in
+        # server.log, not Magpie's stdout/stderr tail, and the liveness watchdog
+        # may have reaped the hung parent with ``SERVER_DEAD_RETURNCODE``. Detect
+        # that once here and reuse it across the failure branches so the failure
+        # is classified ``server_init_dead``. Backend-agnostic (vLLM + SGLang).
         server_death_excerpt = server_log_death_excerpt(str(output_dir / "server.log"))
         server_init_dead = server_death_excerpt is not None or proc_returncode == SERVER_DEAD_RETURNCODE
         server_init_dead_error = server_death_excerpt or (
             "server engine/worker init failed (reaped by liveness watchdog); see server.log"
         )
 
-        # Detect cuda-graph capture failures (recoverable by disabling
-        # cuda-graph capture; OOM-rooted ones are excluded).
+        # Detect cuda-graph capture failures (OOM-rooted ones excluded).
         # Markers live in server.log; read a bounded tail for classification.
         server_log_tail = ""
         try:
@@ -1942,10 +1838,9 @@ class BaselineExecutor:
 
         # Locate the workspace Magpie created (benchmark_<framework>_<ts>/).
         candidates = sorted(output_dir.glob("benchmark_*"))
-        # Always-on artifact harvest: copy wrapper-side leaks hardcoded
-        # under ``/workspace/`` into the task workspace (see
-        # ``harvest_leaked_artifacts``). Runs unconditionally so failure-path
-        # diagnostics survive; mtime gating rejects stale prior-run leaks.
+        # Always-on artifact harvest: copy wrapper-side leaks into the task
+        # workspace so failure-path diagnostics survive; mtime gating rejects
+        # stale prior-run leaks.
         harvest_destination = candidates[-1] if candidates else output_dir
         harvested = harvest_leaked_artifacts(
             harvest_destination,
@@ -1962,10 +1857,9 @@ class BaselineExecutor:
                 "output_dir": str(output_dir),
                 "harvested_artifacts": [str(dst) for _, dst in harvested],
             }
-            # Magpie never created a benchmark_* workspace, so the wrapper
-            # never wrote server.log. Persist the captured stderr/stdout to
-            # a file so the failure survives the NFS clone and S3 archive
-            # (without this, no_workspace failures leave zero on-disk logs).
+            # Magpie never created a benchmark_* workspace, so the wrapper never
+            # wrote server.log. Persist captured stderr/stdout so the failure
+            # survives the NFS clone and S3 archive.
             captured = (proc_stderr or "") + (proc_stdout or "")
             stderr_log_path: str | None = None
             if captured.strip():
@@ -1981,8 +1875,7 @@ class BaselineExecutor:
             if stderr_log_path:
                 failure_extras["stderr_log_path"] = stderr_log_path
             # cuda-graph capture failures take priority over server_init_dead:
-            # the marker may co-occur with a server-death marker, but only this
-            # class arms the one-shot disable-cuda-graph retry.
+            # only this class arms the one-shot disable-cuda-graph retry.
             if cuda_graph_capture_failed:
                 return {
                     "status": "failed",
@@ -2043,8 +1936,7 @@ class BaselineExecutor:
 
         if not measurement.get("valid_measurement"):
             # cuda-graph capture failure wins over server_init_dead so the
-            # one-shot disable-cuda-graph retry is armed even when both markers
-            # co-occur (see the no_workspace branch above).
+            # one-shot disable-cuda-graph retry is armed even when both co-occur.
             if cuda_graph_capture_failed:
                 error_class = "cuda_graph_capture_failed"
                 error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
@@ -2084,22 +1976,19 @@ class BaselineExecutor:
             "returncode": proc_returncode,
             "report_path": str(report_path) if report_path.exists() else None,
             "workspace": str(workspace),
-            # Materialized YAML for THIS baseline. Coordinator promotes it
-            # into SharedState.baseline_config_path so downstream tasks reuse
-            # it as `config_path` (else variants render from the YAML's smoke
-            # defaults and produce ~10x lower throughput). See `_workload_envs.py`.
+            # Materialized YAML for THIS baseline. Coordinator promotes it into
+            # SharedState.baseline_config_path so downstream tasks reuse it as
+            # `config_path` (else variants render from smoke defaults).
             "materialized_config": str(materialized_config_path),
             # Magpie subprocess wall-clock (success path only). Coordinator
             # promotes into ``SharedState.baseline_runtime_sec``, the explore
-            # overtime-kill anchor. Omitted on failure paths so a botched
-            # baseline can't seed a bad deadline.
+            # overtime-kill anchor. Omitted on failure paths.
             "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
         }
 
         # Parse accuracy eval results (GSM8K for serving, or the image-quality
-        # gate for scriptable frameworks); RUN_EVAL=true ran lm-eval while the
-        # server was up. Pass the framework so scriptable runs (xDiT) fail
-        # closed on a missing quality gate instead of falling back to GSM8K.
+        # gate for scriptable frameworks). Pass the framework so scriptable runs
+        # fail closed on a missing quality gate instead of falling back to GSM8K.
         from ._accuracy_gate import parse_eval_results
 
         eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
@@ -2124,7 +2013,6 @@ class BaselineExecutor:
         return result
 
 
-# Module-level callable for ``register_executor("baseline", baseline_executor)``.
 baseline_executor = BaselineExecutor()
 
 

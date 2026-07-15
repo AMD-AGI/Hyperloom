@@ -20,7 +20,7 @@ class AdvisoryCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _plateau_advisory_block(self) -> str:
-        """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK). Returns "" when no plateau signal is active.
+        """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK).
 
         KERNEL / FRAMEWORK plateaus are advisory only (never auto-exit the
         phase). An EXPLORE plateau is advisory in non-cyclic mode, but in cyclic
