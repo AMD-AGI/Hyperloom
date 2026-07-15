@@ -47,6 +47,9 @@ Open `~/hyperloom` in the user's agent and run:
 In Cursor and Claude Code, use `/hyperloom-setup`; in Codex, use
 `$hyperloom-setup`.
 
+That command runs the setup skill installed from
+[`src/hyperloom/skills/hyperloom-setup/SKILL.md`](../src/hyperloom/skills/hyperloom-setup/SKILL.md).
+
 The setup skill is interactive. It creates `.env`, records the selected run
 scenario, and stops before launching an optimization.
 

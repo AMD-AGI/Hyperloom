@@ -59,9 +59,16 @@ value.
    Present exactly those two option labels. Do not add parenthetical
    descriptions, vendor examples, or base URLs to this first question.
 
-2. Ask the base URL as a structured follow-up after the mode is chosen: two
-   options `Use default (<provider default URL>)` and `Custom`; if `Custom`,
-   ask a plain-text follow-up for the URL.
+2. Ask the base URL as a structured follow-up after the mode is chosen.
+   - For `Anthropic`, offer three options:
+     - `Use default (https://api.anthropic.com)` — this remains the recommended
+       default.
+     - `Use AMD gateway (https://llm-api.amd.com/anthropic)`.
+     - `Custom`.
+   - For `DeepSeek`, offer two options:
+     - `Use default (https://api.deepseek.com/anthropic)`.
+     - `Custom`.
+   - If the user picks `Custom`, ask a plain-text follow-up for the URL.
 
 3. Explain that secrets must be edited in `.env`, not pasted into chat.
    - Never ask the user to paste API keys into the conversation.
@@ -77,7 +84,8 @@ value.
 
    For `Anthropic`:
    - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask `ANTHROPIC_BASE_URL`: options `Use default (https://api.anthropic.com)` / `Custom`.
+   - Ask `ANTHROPIC_BASE_URL`: options `Use default (https://api.anthropic.com)` /
+     `Use AMD gateway (https://llm-api.amd.com/anthropic)` / `Custom`.
    - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-4-8)` / `Custom`.
 
    For `DeepSeek`:
