@@ -943,13 +943,19 @@ class DispatcherCollaborator:
             A frozenset of action names eligible for inline execution; empty
             when no action registry is loaded.
         """
-        reg = getattr(self, "action_registry", None)
+        coord = object.__getattribute__(self, "_coord")
+        reg = getattr(coord, "action_registry", None)
         if reg is None:
             return frozenset()
-        executors = getattr(self.sub, "executor_registry", {}) or {}
+        executors = getattr(coord.sub, "executor_registry", {}) or {}
         names_fn = getattr(reg, "names", None)
         try:
-            names = list(names_fn()) if callable(names_fn) else []
+            if callable(names_fn):
+                names = list(names_fn())
+            else:
+                all_fn = getattr(reg, "all", None)
+                metas = list(all_fn()) if callable(all_fn) else []
+                names = [str(getattr(meta, "name", "") or "") for meta in metas]
         except Exception:  # noqa: BLE001 — defensive
             names = []
         allowed: set[str] = set()
