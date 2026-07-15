@@ -832,7 +832,7 @@ rocm_profiler_hotfix_applied() {
 }
 
 rocm_profiler_hotfix_compatible() {
-  local py hip framework_versions
+  local py hip
   py="$(resolve_python 2>/dev/null)" || { warn "cannot resolve Python; skipping ROCm profiler hotfix"; return 1; }
   hip="$("$py" - <<'PY' 2>/dev/null || true
 try:
@@ -848,21 +848,17 @@ PY
     *) warn "torch.version.hip=${hip}; ROCm profiler hotfix is validated for ROCm 7.2 stacks, skipping" ; return 1 ;;
   esac
 
-  framework_versions="$("$py" - <<'PY' 2>/dev/null || true
-import importlib
-
-found = []
-for name in ("sglang", "vllm"):
-    try:
-        module = importlib.import_module(name)
-    except Exception:
-        continue
-    found.append(f"{name}={getattr(module, '__version__', 'unknown')}")
-print(" ".join(found))
-PY
-)"
-  [ -n "$framework_versions" ] || { warn "neither sglang nor vllm is importable; skipping ROCm profiler hotfix"; return 1; }
-  log "framework imports: ${framework_versions}"
+  # Probe vLLM in the isolated venv when FRAMEWORK_ENV=isolated, mirroring
+  # resolve_installed_framework, so an isolated vLLM install still qualifies.
+  local vllm_py="$py"
+  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
+    vllm_py="${VLLM_VENV_ROOT}/bin/python"
+  fi
+  local found=""
+  _py_has "$py" sglang && found="sglang"
+  _py_has "$vllm_py" vllm && found="${found:+${found} }vllm"
+  [ -n "$found" ] || { warn "neither sglang nor vllm is importable; skipping ROCm profiler hotfix"; return 1; }
+  log "framework imports: ${found}"
 }
 
 download_rocm_profiler_hotfix_libs() {
@@ -1026,7 +1022,9 @@ apply_rocm_profiler_hotfix() {
 read_dotenv_var() {
   local name="$1"
   [ -f "$DOTENV" ] || return 0
-  grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$DOTENV" 2>/dev/null | tail -n 1 \
+  # `|| true` keeps a no-match grep from tripping pipefail/set -e when this is
+  # used inside a ${VAR:-$(read_dotenv_var ...)} default expansion.
+  { grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$DOTENV" 2>/dev/null || true; } | tail -n 1 \
     | sed -E "s/^[[:space:]]*(export[[:space:]]+)?${name}=//; s/^[\"']//; s/[\"']$//"
 }
 
@@ -1306,7 +1304,10 @@ main() {
   fi
 
   local user_data
-  user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-/workspace/hyperloom}}"
+  # Precedence: --user-data-path > process env > .env > default. The .env value
+  # is honored so the setup skill's written USER_DATA_PATH is not silently lost.
+  user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$(read_dotenv_var USER_DATA_PATH)}}"
+  user_data="${user_data:-/workspace/hyperloom}"
   export USER_DATA_PATH="$user_data"
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
 
