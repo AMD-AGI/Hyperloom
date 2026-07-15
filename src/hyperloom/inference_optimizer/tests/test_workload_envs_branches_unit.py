@@ -6,6 +6,7 @@ sizing."""
 
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 
@@ -259,6 +260,81 @@ def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     src = _write(tmp_path / "cfg.yaml")
     bench = _materialize(src, tmp_path / "out", model_path="/wekafs/models/MiMo-V2-7B")
     assert "attention-backend triton" in bench["envs"]["EXTRA_SGLANG_ARGS"]
+
+
+def _write_sparse_model_dir(tmp_path, *, sparse_block_size=128, nested=False, name="model"):
+    """Write a minimal model dir whose config.json declares a sparse block size.
+
+    ``nested`` places ``sparse_attention_config`` under ``text_config`` (the
+    multimodal-wrapper layout) to exercise the merged-scope read path.
+    """
+    d = tmp_path / name
+    d.mkdir(exist_ok=True)
+    sparse = {"sparse_attention_config": {"sparse_block_size": sparse_block_size}}
+    cfg: dict = {"model_type": "minimax_m3"}
+    cfg.update({"text_config": sparse} if nested else sparse)
+    (d / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+    return str(d)
+
+
+def test_sparse_model_injects_block_size_from_config_vllm(monkeypatch, tmp_path):
+    # Config-derived: any model declaring sparse_attention_config.sparse_block_size
+    # gets that value as vLLM --block-size (default 16 aborts KV-cache init).
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
+    src = _write(tmp_path / "cfg.yaml", framework="vllm")
+    bench = _materialize(src, tmp_path / "out", model_path=model_dir)
+    assert "--block-size 128" in bench["envs"]["EXTRA_VLLM_ARGS"]
+
+
+def test_sparse_block_size_read_from_nested_text_config(monkeypatch, tmp_path):
+    # sparse_attention_config nested under text_config (multimodal wrapper); the
+    # value is model-derived, not hardcoded (here 64 to prove it is read).
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=64, nested=True)
+    src = _write(tmp_path / "cfg.yaml", framework="vllm")
+    bench = _materialize(src, tmp_path / "out", model_path=model_dir)
+    assert "--block-size 64" in bench["envs"]["EXTRA_VLLM_ARGS"]
+
+
+def test_dense_model_no_block_size_injection(monkeypatch, tmp_path):
+    # No sparse_attention_config -> nothing injected (dense models untouched).
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    d = tmp_path / "dense"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
+    src = _write(tmp_path / "cfg.yaml", framework="vllm")
+    bench = _materialize(src, tmp_path / "out", model_path=str(d))
+    assert "block-size" not in bench["envs"].get("EXTRA_VLLM_ARGS", "")
+
+
+def test_sparse_model_block_size_not_injected_for_sglang(monkeypatch, tmp_path):
+    # --block-size is a vLLM flag; sglang rejects it, so the injection is
+    # vLLM-scoped and must never touch a sglang run.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
+    src = _write(tmp_path / "cfg.yaml", framework="sglang")
+    bench = _materialize(src, tmp_path / "out", model_path=model_dir)
+    assert "block-size" not in bench["envs"].get("EXTRA_SGLANG_ARGS", "")
+    assert "block-size" not in bench["envs"].get("EXTRA_VLLM_ARGS", "")
+
+
+def test_sparse_model_respects_operator_pinned_block_size(monkeypatch, tmp_path):
+    # An explicit operator/explore --block-size wins; we must not append a
+    # second conflicting --block-size.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
+    src = _write(tmp_path / "cfg.yaml", framework="vllm")
+    bench = _materialize(
+        src, tmp_path / "out", model_path=model_dir, extra_server_args="--block-size 64"
+    )
+    assert "--block-size 64" in bench["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--block-size 128" not in bench["envs"]["EXTRA_VLLM_ARGS"]
 
 
 def test_run_eval_from_env(monkeypatch, tmp_path):
