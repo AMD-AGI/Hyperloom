@@ -9,31 +9,11 @@ log = logging.getLogger(__name__)
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# Match credential-like name segments without false positives (e.g. ``TOKENS``).
-_SENSITIVE_NAME_RE = re.compile(
-    r"(?:^|_)(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)(?:_|$)",
-    re.IGNORECASE,
-)
-
-_FORWARD_ALLOW_PREFIXES: tuple[str, ...] = (
-    "MORI_",
-    "SGLANG_MORI_",
-    "SGLANG_DISAGGREGATION_",
-    "SGLANG_",
-    "VLLM_",
-    "AITER_",
-    "TRITON_",
-    "FLYDSL_",
-    "HIPBLASLT_",
-    "PYTORCH_TUNABLEOP_",
-)
-
-_FORWARD_ALLOW_KEYS: frozenset[str] = frozenset(
-    {
-        "SGLANG_TORCH_PROFILER_DIR",
-    }
-)
-
+# Exact-match denylist of the only env keys unsafe to forward into a shell-launched
+# pod process: dynamic-loader hijack (LD_*), python import hijack (PYTHON*), binary
+# hijack (PATH), and shell-startup / field-splitting injection (BASH_ENV/ENV/IFS).
+# Everything else (tuning knobs like NCCL_*/MC_*/SGLANG_*/PYTORCH_CUDA_ALLOC_CONF,
+# etc.) is forwarded verbatim. No prefix/substring matching.
 _DENY_KEYS: frozenset[str] = frozenset(
     {
         "LD_PRELOAD",
@@ -45,10 +25,6 @@ _DENY_KEYS: frozenset[str] = frozenset(
         "BASH_ENV",
         "ENV",
         "IFS",
-        "HOME",
-        "SHELL",
-        "PWD",
-        "OLDPWD",
     }
 )
 
@@ -68,6 +44,10 @@ def is_valid_env_key(key: str) -> bool:
 def is_forward_env_key_allowed(key: str) -> bool:
     """Return True when ``key`` may be forwarded over SSH to pod processes.
 
+    Default-allow: any POSIX-shaped key is forwarded unless it is an exact
+    member of :data:`_DENY_KEYS` (the loader / python / PATH / shell injection
+    vectors). No prefix or substring matching, so tuning knobs are never dropped.
+
     Args:
         key: Environment variable name to evaluate.
 
@@ -76,13 +56,7 @@ def is_forward_env_key_allowed(key: str) -> bool:
     """
     if not is_valid_env_key(key):
         return False
-    if key in _DENY_KEYS:
-        return False
-    if _SENSITIVE_NAME_RE.search(key):
-        return False
-    if key in _FORWARD_ALLOW_KEYS:
-        return True
-    return any(key.startswith(prefix) for prefix in _FORWARD_ALLOW_PREFIXES)
+    return key not in _DENY_KEYS
 
 
 def filter_forward_env(

@@ -6,7 +6,7 @@ Subcommands (``python3 -m hyperloom.inference_optimizer.multi_node <sub>``):
 ``create-rayjob`` (create via SaFE + wait for Running, checkpointing
 ``rayjob_id`` so retries don't leak a second workload), ``bootstrap``,
 ``verify``, ``restart-server`` (kill + relaunch nohup'd server,
-idempotent), ``kill-inference``, ``stop-rayjob``.
+idempotent), ``kill-inference``, ``stop-multi-job``.
 
 State lives in ``$MULTI_NODE_STATE_FILE`` (default:
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
