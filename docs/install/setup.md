@@ -1,31 +1,37 @@
 # Quickstart - Local Setup
 
-Setup runs on an AMD GPU host that already has a ROCm base installed (ROCm
-runtime + ROCm torch); Hyperloom does not install ROCm itself. It supports two
-run modes:
+Setup runs on an AMD GPU host. It supports two run modes:
 
-- `baremetal`: run directly on the host. Setup can optionally install the
-  SGLang or vLLM framework layer.
-- `docker`: run inside a ROCm container that ships the serving framework. Setup
-  only records the mode in `.env`; the container is generated later by the demo
-  (workload) skill, so setup installs no framework here.
-
-Setup then configures runtime dependencies, credentials, and `.env`.
+- `baremetal`: setup runs `install_baremetal.sh` on the host (full runtime install).
+  The host needs ROCm runtime and ROCm torch; Hyperloom does not install ROCm itself.
+  Setup can optionally install the SGLang or vLLM framework layer.
+- `docker`: setup skill writes `.env` only; runtime install happens inside the
+  container when the demo/workload skill runs. The host does not need ROCm or a
+  serving framework.
 
 The recommended customer flow is:
 
 1. Install the Hyperloom wheel into a target workspace.
 2. Open that workspace in an agent and run `/hyperloom-setup`.
-3. Let the setup skill create `.env`, then run the packaged setup backend.
+3. In `baremetal` mode, let the setup skill create `.env` and run the packaged
+   setup backend. In `docker` mode, the setup skill writes `.env` only; the demo
+   skill runs setup inside the container later.
 
 The installer stops before launching an optimization.
 
 ## Prerequisites
 
-- An AMD GPU host with ROCm runtime and ROCm torch already installed.
 - Python 3.10+ and `pip`.
-- `git` for dependency checkouts performed by setup.
 - Access to one LLM provider: Anthropic or DeepSeek.
+
+For `baremetal` mode:
+- An AMD GPU host with ROCm runtime and ROCm torch already installed.
+- `git` for dependency checkouts performed by setup.
+
+For `docker` mode:
+- Docker with GPU access (`/dev/kfd`, `/dev/dri`).
+- A ROCm container image that ships the serving framework (SGLang or vLLM).
+- The host does **not** need ROCm torch or a serving framework installed.
 
 For private Hyperloom releases, the default path is to download the wheel from
 GitHub Releases with `gh` first. When Hyperloom is published publicly, this can
@@ -72,7 +78,10 @@ The setup skill is interactive. It:
 - asks for `USER_DATA_PATH` (defaults to `<workspace>/session`);
 - in `baremetal` mode, asks whether to install a serving framework: `none`,
   `sglang`, or `vllm`;
-- runs the backend with `PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup`.
+- in `baremetal` mode, runs the backend with
+  `PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup`;
+- in `docker` mode, writes `.env` only and skips host setup; the demo skill
+  runs setup inside the container later.
 
 LLM defaults:
 
@@ -83,11 +92,12 @@ LLM defaults:
 
 During setup, Hyperloom also updates `.env` with runtime paths (`MAGPIE_PATH`,
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`, `FRAMEWORK`) and the resolved
-`HYPERLOOM_RUN_MODE`.
+`HYPERLOOM_RUN_MODE`. In `docker` mode, runtime paths and `FRAMEWORK` are written
+when the demo skill runs setup inside the container.
 
 ## 3. What Setup Does
 
-The packaged setup backend runs the bare-metal setup phases:
+In `baremetal` mode, the packaged setup backend runs the bare-metal setup phases:
 
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
@@ -99,13 +109,18 @@ The packaged setup backend runs the bare-metal setup phases:
 6. **Combined env**: writes `runtime/hyperloom.env.sh` and updates `.env`.
 7. **Verify**: runs `install.sh --check-only` and prints next steps.
 
+In `docker` mode, the setup skill only writes credentials and run mode to `.env`.
+The demo (workload) skill starts a ROCm container and runs the same backend
+inside it (`--install-framework none --yes`).
+
 The setup backend no longer downloads or installs the Hyperloom wheel; that is
 already done by the `pip install --target` step.
 
 ## 4. Run a Demo
 
-When setup finishes and `FRAMEWORK` is set, the setup skill offers a Qwen3-8B
-demo run and hands off to the matching demo skill. Pick a length:
+When setup finishes in `baremetal` mode (and `FRAMEWORK` is set), or when `.env`
+is written in `docker` mode, the setup skill offers a Qwen3-8B demo run and hands
+off to the matching demo skill. Pick a length:
 
 - `3h` — short, no-kernel run; best for a first end-to-end check.
 - `8h` — medium-length run.

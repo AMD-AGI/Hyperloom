@@ -1,6 +1,6 @@
 ---
 name: hyperloom-setup
-description: Configure Hyperloom after pip install --target by collecting LLM settings, choosing a bare-metal or Docker run mode, writing .env, and running the setup backend.
+description: Configure Hyperloom after pip install --target by collecting LLM settings, choosing a bare-metal or Docker run mode, writing .env, and running the setup backend on baremetal hosts only.
 ---
 
 # Hyperloom Setup
@@ -14,12 +14,14 @@ pip install your_package.whl --target .
 The current directory should be the Hyperloom target directory, for example `~/hyperloom`. It is normal for this directory to contain many Python package folders; users do not need to inspect them.
 
 This skill resolves a run mode into `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`)
-for this session and runs the setup backend. It does **not** start any container.
+for this session. In `baremetal` mode it runs the setup backend on the host; in
+`docker` mode it writes `.env` only. It does **not** start any container.
 Whether to generate or run a Docker container is decided later by the example
 (workload) skill based on `HYPERLOOM_RUN_MODE`.
 
 - `baremetal`: the host provides ROCm, and setup can optionally install the SGLang or vLLM framework layer.
-- `docker`: the container (and its serving framework) is provided later by the example when it runs the workload, so setup installs no framework in this mode.
+- `docker`: writes `.env` and records the run mode; the example (workload) skill
+  starts the container and runs setup inside it.
 
 ## Run Mode Resolution
 
@@ -168,10 +170,9 @@ If any required secret is missing or still a placeholder, stop and ask the user 
 
 ## Step 4: Run Setup Backend
 
-Run the backend based on `HYPERLOOM_RUN_MODE`. The `--install-framework` value
-differs by mode: in `baremetal` mode use the framework the user chose in Step 2
-(`none` / `sglang` / `vllm`); in `docker` mode always use `none` because the
-container the example generates provides the framework.
+In `baremetal` mode, run the backend on the host. The `--install-framework` value
+is the framework the user chose in Step 2 (`none` / `sglang` / `vllm`). In
+`docker` mode, skip the backend on the host (see below).
 
 ### `baremetal`
 
@@ -198,13 +199,13 @@ PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-fr
 
 ### `docker`
 
-Run the backend with `--install-framework none` and `--skip-base-check`. The
-host does not need ROCm or a serving framework yet; the container the example
-generates later provides both:
+Do **not** run `hyperloom.inference_optimizer.setup` on the host.
+The example (workload) skill will start the container and run setup inside it.
 
-```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --skip-base-check --install-framework none --yes
-```
+After writing `.env`, tell the user:
+- setup on the host is skipped in docker mode;
+- the demo skill will `docker run` + `docker exec` setup inside the ROCm container;
+- `FRAMEWORK` being unset after this skill is expected.
 
 This skill does not start a container. `HYPERLOOM_RUN_MODE` is recorded so the
 example (workload) skill can decide whether to generate a Docker container when
@@ -212,8 +213,10 @@ it runs the optimization.
 
 ## Step 5: Confirm Detected Framework
 
-After setup completes, the backend writes the detected serving framework to
-`FRAMEWORK` in `.env` (`sglang` or `vllm`). Read `.env` back and check it:
+In `baremetal` mode, after setup completes, the backend writes the detected
+serving framework to `FRAMEWORK` in `.env` (`sglang` or `vllm`). In `docker`
+mode, skip this until the demo skill runs setup inside the container. Read
+`.env` back and check it:
 
 - If `FRAMEWORK` is set, report it. Downstream demo skills read this value.
 - If `HYPERLOOM_RUN_MODE` is `docker`, an unset `FRAMEWORK` is expected: the
@@ -233,8 +236,8 @@ After setup completes, the backend writes the detected serving framework to
 Report:
 - The `.env` path.
 - The run mode (`baremetal` or `docker`).
-- The setup command that was run.
-- Whether setup completed or failed.
+- The setup command that was run (or that host setup was skipped in `docker` mode).
+- Whether setup completed or failed (in `docker` mode, report that host setup was skipped).
 - The detected `FRAMEWORK` value (or that it is unset).
 - The last relevant error lines on failure.
 
@@ -242,15 +245,17 @@ Do not print secret values back to the user.
 
 ## Step 7: Hand Off to a Demo Skill
 
-Only when setup completed and `FRAMEWORK` is set, ask the user whether they want
-to run a demo optimization now, and if so which length:
+When setup completed in `baremetal` mode, or when `.env` is written in `docker`
+mode, ask the user whether they want to run a demo optimization now, and if so
+which length:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
 - `8h` — medium-length run.
 - `24h` — long-horizon cyclic run.
 
-If the user declines, stop here. If `FRAMEWORK` is unset, do not offer a demo;
-tell the user to install a serving framework first (see Step 5).
+If the user declines, stop here. If `HYPERLOOM_RUN_MODE` is `baremetal` and
+`FRAMEWORK` is unset, do not offer a demo; tell the user to install a serving
+framework first (see Step 5).
 
 When the user picks a length, load the matching demo skill and follow it — you
 stop acting on this setup skill and run the demo skill's instructions instead:

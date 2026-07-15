@@ -14,6 +14,14 @@ Resolve the run mode before launching Hyperloom:
 1. If `HYPERLOOM_RUN_MODE=baremetal` or it is unset, run this demo directly on the host.
 2. If `HYPERLOOM_RUN_MODE=docker`, this skill owns the Docker setup. Ask the user whether they want a `vllm` or `sglang` Docker image unless `HYPERLOOM_IMAGE` is already set. Use a ROCm image that already contains the selected framework; do not install the framework inside Docker.
 
+In docker mode:
+- If `hyperloom-setup` already ran, do **not** re-run setup on the host.
+- Always run setup **inside the container** after `docker run`.
+- Pass `--install-framework none --yes` in the container (ROCm/framework comes from
+  the image). Do **not** use `--skip-base-check` — let Phase 1 preflight validate
+  the container environment.
+- Do not run `inference_optimizer optimize` on the host.
+
 Suggested Docker images:
 
 - `vllm`: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
