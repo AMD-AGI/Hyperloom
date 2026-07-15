@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Per-architecture analytic FLOPs / compute-ceiling estimator for the xDiT
 text-to-image models Hyperloom optimizes.
 
@@ -33,6 +35,8 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from _io_utils import read_json
 
 # ---------------------------------------------------------------------------
 # Hardware matrix-core peak TFLOPS (self-contained; mirrors
@@ -175,21 +179,14 @@ _BASENAME_HINTS: dict[str, dict[str, Any]] = {
 }
 
 
-def _read_json(p: Path) -> dict[str, Any] | None:
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
 def _denoiser_config(model_dir: Path) -> tuple[dict[str, Any] | None, str]:
     """Return ``(config, subdir)`` for the transformer or unet denoiser."""
     for sub in ("transformer", "unet"):
-        c = _read_json(model_dir / sub / "config.json")
+        c = read_json(model_dir / sub / "config.json")
         if c:
             return c, sub
     # single-file / top-level config
-    c = _read_json(model_dir / "config.json")
+    c = read_json(model_dir / "config.json")
     return c, ""
 
 

@@ -3,7 +3,7 @@
 """Recover token ``usage`` from out-of-process LLM-client output.
 
 In-process backends hand us a ``BackendTurnResult.metadata`` dict directly,
-but the production-critical paths (the specialist subprocess, GEAK / OOB
+but the production-critical paths (the specialist subprocess, forge
 kernel candidates, robustness RCA) run in *child processes* whose token
 counts only survive as text in a log / stdout / result JSON. These parsers
 let the parent fold those counts into the same ledger.
@@ -33,7 +33,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ._row_utils import coerce_optional_int as _coerce_optional_int
+from ._row_utils import coerce_optional_int
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | Non
     """
     if not isinstance(usage, dict) or not usage:
         return None
-    projected: dict[str, int | None] = {k: _coerce_optional_int(usage.get(k)) for k in _TOKEN_KEYS}
+    projected: dict[str, int | None] = {k: coerce_optional_int(usage.get(k)) for k in _TOKEN_KEYS}
     if all(v is None for v in projected.values()):
         return None
     return projected
@@ -328,53 +328,6 @@ def _summarize_tool_input(value: Any, *, limit: int = 240) -> str:
     else:
         s = "" if value is None else str(value)
     return s if len(s) <= limit else (s[:limit] + "…")
-
-
-def parse_oob_json_usage(stdout: str) -> dict[str, int | None] | None:
-    """Extract usage from historical ``oob run --json`` stdout.
-
-    Retained for old traces that still contain OOB JSON envelopes. The exact
-    envelope can vary, so we search defensively:
-
-    1. parse the whole stdout as one JSON object and look for a top-level
-       or nested ``usage`` (common keys: ``usage``, ``token_usage``);
-    2. failing that, scan line-by-line for the last JSON object carrying a
-       ``usage`` block (covers JSONL-style streamed output).
-
-    Historical OpenAI-style OOB has no prompt-cache split, so ``cache_*`` stay
-    ``None``. Returns ``None`` when nothing parseable is found.
-
-    Args:
-        stdout: Captured ``oob run --json`` stdout text.
-
-    Returns:
-        The canonical token dict, or ``None`` when nothing parseable.
-    """
-    if not stdout or not stdout.strip():
-        return None
-    # Attempt 1: whole-document parse.
-    try:
-        obj = json.loads(stdout)
-        found = _find_usage_in_obj(obj)
-        if found is not None:
-            return normalize_usage(found)
-    except (json.JSONDecodeError, ValueError):
-        # Not valid JSON; fall through to line-by-line parsing.
-        pass
-    # Attempt 2: line-by-line (JSONL / mixed log output).
-    last_usage: dict[str, Any] | None = None
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        found = _find_usage_in_obj(obj)
-        if found is not None:
-            last_usage = found
-    return normalize_usage(last_usage)
 
 
 def parse_forge_usage(stdout: str) -> dict[str, int | None] | None:

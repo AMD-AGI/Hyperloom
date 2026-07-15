@@ -96,7 +96,7 @@ def _build_args(**overrides) -> argparse.Namespace:
 
 
 def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
-    from hyperloom.inference_optimizer.cli import _bootstrap_knowledge_plane
+    from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane
     from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
 
     args = _build_args(pr_monitor_enabled=False)
@@ -109,7 +109,7 @@ def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
 
 
 def test_bootstrap_marker_records_ir3_auto_degrade(tmp_path: Path, monkeypatch):
-    from hyperloom.inference_optimizer.cli import _bootstrap_knowledge_plane
+    from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane
     from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
     from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
@@ -209,7 +209,7 @@ def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
 # CLI flag plumbing reaches _bootstrap_knowledge_plane.
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
     """Pin the dest-name + default contract the bootstrap reads."""
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     return parser.parse_args(["optimize", "--degraded-kb", *extra])
@@ -251,6 +251,29 @@ def test_cli_pr_monitor_mcp_url_override_reaches_namespace():
     assert args.pr_monitor_mcp_url == "https://localhost:8080/mcp/"
 
 
+def test_cli_pr_monitor_url_defaults_to_primus_cortex_pr_api_env(monkeypatch):
+    """--pr-monitor-url default resolves from the canonical $PRIMUS_CORTEX_PR_API
+    env (the legacy $PR_MONITOR_URL env is removed)."""
+    monkeypatch.setenv("PRIMUS_CORTEX_PR_API", "https://global.example/pr-monitor")
+    monkeypatch.delenv("PR_MONITOR_URL", raising=False)
+    args = _parse_optimize_args([])
+    assert args.pr_monitor_url == "https://global.example/pr-monitor"
+
+
+def test_cli_pr_monitor_url_ignores_legacy_pr_monitor_url_env(monkeypatch):
+    """The removed legacy $PR_MONITOR_URL env no longer feeds --pr-monitor-url."""
+    monkeypatch.delenv("PRIMUS_CORTEX_PR_API", raising=False)
+    monkeypatch.setenv("PR_MONITOR_URL", "https://legacy.example/pr-monitor/v1")
+    args = _parse_optimize_args([])
+    assert args.pr_monitor_url is None
+
+
+def test_cli_pr_monitor_url_flag_wins_over_primus_cortex_pr_api_env(monkeypatch):
+    monkeypatch.setenv("PRIMUS_CORTEX_PR_API", "https://env.example/pr-monitor")
+    args = _parse_optimize_args(["--pr-monitor-url", "https://flag.example/pr-monitor"])
+    assert args.pr_monitor_url == "https://flag.example/pr-monitor"
+
+
 def test_cli_pr_feed_window_days_override_reaches_namespace():
     args = _parse_optimize_args(["--pr-feed-window-days", "7"])
     assert args.pr_feed_window_days == 7
@@ -261,7 +284,7 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
     monkeypatch,
 ):
     """Argparse ``args`` values propagate into the KnowledgePlane."""
-    from hyperloom.inference_optimizer.cli import _bootstrap_knowledge_plane
+    from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane
     from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
     constructed_urls: list[str] = []

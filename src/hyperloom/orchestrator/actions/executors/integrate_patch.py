@@ -1,66 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""IntegratePatchExecutor.
-
-Serving-lane-locked patch integration: consumes a specialist's worktree
-patches, applies them to the live framework source roots, runs a
-throughput + optional accuracy gate, then KEEPs (advances the stack) or
-REVERTs (rolls back the tree).
-
-Deterministic Python executor (no LLM). This is the single
-allowed ``git apply`` channel against framework_source_roots (specialists
-author patches into their isolated worktree only).
-
-Inputs (``ctx.task.params``)::
-
-    specialist_task_id (str, required) — completed specialist task
-        whose worktree under ``runs/specialist/<task_id>/`` carries
-        the patches.
-    patches (list[str], optional) — explicit patch paths. Defaults to
-        ``specialist_done.patches_written``.
-    config_changes (dict[str, str], optional) — env vars layered on
-        the variant's launch env. Reverted with the patches on REVERT.
-    keep_threshold_pct (float, optional) — first-pass KEEP threshold;
-        defaults to DEFAULT_KEEP_THRESHOLD_PCT (1.0), the grid noise floor.
-        A KEEP is then re-confirmed by a full-stack rebench unless
-        ``enable_stack_rebench`` is False.
-    accuracy_baseline (float, optional) — baseline accuracy for the gate.
-        With a positive baseline the measured drop is enforced; without one,
-        the gate skips with a warning.
-    enable_stack_rebench (bool, optional) — when True (default) a KEEP
-        is confirmed by a second full-stack rebench (stability floor +
-        accuracy) before it is committed.
-    rebench_stable_threshold_pct (float, optional) — stability floor for
-        the confirmation rebench, as a percentage above ``base_tput``
-        (default 0.0).
-    base_tput (float, optional) — baseline throughput to compare
-        against. Falls back to ``SharedState.baseline_tput`` if zero.
-    benchmark_script / result_dir / variant_timeout_sec — same
-        semantics as the explore executor's params.
-    framework_source_root (str, optional) — explicit override for the
-        ``git apply`` target. Defaults to the first existing entry of
-        ``resolve_source_file_allowlist()``.
-    apply_only (bool, optional) — when True, skip the benchmark step
-        entirely (used by tests + a future smoke-only mode). The
-        executor still applies the patches but returns
-        ``status='applied_no_bench'`` so downstream bookkeeping can
-        differentiate from a genuine KEEP/REVERT.
-
-Outputs (dict, returned to the bus as ``delegated_result.result``)::
-
-    status: "kept" | "reverted" | "apply_failed" | "no_patches" |
-            "applied_no_bench" | "failed"
-    output_throughput: float | None
-    delta_pct: float | None
-    accuracy_pass: bool | None
-    patches_applied: list[str]
-    patches_reverted: list[str]
-    config_changes_applied: dict[str, str]
-    reason: str
-    specialist_task_id: str
-    workspace: str
-    bench_result: dict | None
-"""
+"""Apply specialist patches to live framework roots and KEEP or REVERT by benchmark."""
 
 from __future__ import annotations
 
@@ -80,6 +20,7 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_source_file_allowlist
 from ...specialists.patch_safety import patch_file_targets, patch_targets_missing
 from ._accuracy_gate import accuracy_keep_block, accuracy_passed, parse_eval_results
+from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
 from ._nogit_patch import (
     _P_LEVELS,
@@ -384,6 +325,19 @@ def _run_git_apply(
     return cp.returncode == 0, cp.stderr.strip()
 
 
+def _derive_lane(params: dict[str, Any]) -> str:
+    """Derive the retry lane name from integrate_patch params.
+
+    Returns:
+        ``"enablement"``, ``"perf_framework"``, or ``"perf_explore"``.
+    """
+    if params.get("enablement"):
+        return "enablement"
+    if params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"):
+        return "perf_framework"
+    return "perf_explore"
+
+
 def _preflight_missing_targets(
     framework_root: Path,
     patch_paths: list[Path],
@@ -487,6 +441,85 @@ def _git_apply(
         three_way=three_way,
         check_only=False,
     )
+
+
+def _git_apply_collect_feedback(
+    framework_root: Path,
+    patch_path: Path,
+    *,
+    three_way: bool = False,
+) -> "tuple[bool, str, ApplyFeedback | None]":
+    """Like :func:`_git_apply` but also returns an :class:`ApplyFeedback` on failure.
+
+    On success returns ``(True, "", None)``.  On failure returns
+    ``(False, stderr, ApplyFeedback)`` where *ApplyFeedback* carries the
+    combined stderr from both the initial and ``-3`` attempt, the list of
+    tried ``-p`` levels, and a source-context snippet.
+
+    Args:
+        framework_root: The git checkout to apply into.
+        patch_path: The patch file to apply.
+        three_way: Whether to fall back to ``-3`` on first failure.
+
+    Returns:
+        ``(ok, err, feedback)`` — feedback is ``None`` on success.
+    """
+    from ._nogit_patch import _P_LEVELS
+
+    # Collect per-level check stderr for the feedback record.
+    tried_levels: list[int] = []
+    level_stderrs: list[str] = []
+    for lvl in _P_LEVELS:
+        ok_check, stderr_check = _run_git_apply(
+            framework_root, patch_path, p_level=lvl, three_way=three_way, check_only=True
+        )
+        tried_levels.append(lvl)
+        if stderr_check:
+            level_stderrs.append(f"-p{lvl}: {stderr_check}")
+        if ok_check:
+            # Level works; now apply for real.
+            ok_apply, stderr_apply = _run_git_apply(
+                framework_root, patch_path, p_level=lvl, three_way=three_way, check_only=False
+            )
+            if ok_apply:
+                return True, "", None
+            # Unlikely but possible: real apply failed after check passed.
+            feedback = build_apply_feedback(
+                patch_path,
+                channel="git",
+                tried_levels=tried_levels,
+                stderr=stderr_apply,
+                framework_root=framework_root,
+            )
+            return False, stderr_apply, feedback
+
+    # All levels failed.  If three_way=False retry with -3.
+    if not three_way:
+        ok3, err3, fb3 = _git_apply_collect_feedback(framework_root, patch_path, three_way=True)
+        if ok3:
+            return True, "", None
+        # Merge both sets of stderrs for a complete picture.
+        all_stderrs = "\n".join(level_stderrs)
+        if err3:
+            all_stderrs = all_stderrs + "\n-3 retry: " + err3 if all_stderrs else "-3 retry: " + err3
+        feedback = build_apply_feedback(
+            patch_path,
+            channel="git",
+            tried_levels=tried_levels,
+            stderr=all_stderrs,
+            framework_root=framework_root,
+        )
+        return False, all_stderrs, feedback
+
+    all_stderrs = "\n".join(level_stderrs)
+    feedback = build_apply_feedback(
+        patch_path,
+        channel="git",
+        tried_levels=tried_levels,
+        stderr=all_stderrs,
+        framework_root=framework_root,
+    )
+    return False, all_stderrs, feedback
 
 
 def _git_apply_reverse(
@@ -1332,7 +1365,8 @@ class IntegratePatchExecutor:
         )
         # Pure config_changes path works without a framework root.
         if patch_paths and framework_root is None:
-            return {
+            _lane_early = _derive_lane(params)
+            _early: dict[str, Any] = {
                 "status": "apply_failed",
                 "error_class": "no_framework_agent_root",
                 "error": (
@@ -1344,7 +1378,13 @@ class IntegratePatchExecutor:
                 "patches_applied": [],
                 "patches_reverted": [],
                 "config_changes_applied": {},
+                "lane": _lane_early,
+                "retry_feedback": [],
+                "prior_patches": [str(p) for p in patch_paths],
             }
+            if params.get("enablement"):
+                _early["enablement"] = True
+            return _early
 
         # Preflight: reject patches whose modify/delete targets do not exist in
         # the framework tree before spending a benchmark on a doomed apply.
@@ -1357,7 +1397,8 @@ class IntegratePatchExecutor:
                     tps_delta_pct=0.0,
                     extra=extra,
                 )
-                return {
+                _lane_missing = _derive_lane(params)
+                _missing_result: dict[str, Any] = {
                     "status": "apply_failed",
                     "error_class": "patch_target_missing",
                     "error": missing_records,
@@ -1371,7 +1412,13 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [],
                     "config_changes_applied": {},
+                    "lane": _lane_missing,
+                    "retry_feedback": [],
+                    "prior_patches": [str(p) for p in patch_paths],
                 }
+                if params.get("enablement"):
+                    _missing_result["enablement"] = True
+                return _missing_result
 
         # Per-action workspace under runs/integrate_patch/<task_id>/.
         output_root = Path(
@@ -1433,23 +1480,18 @@ class IntegratePatchExecutor:
         applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
         apply_errors: list[dict[str, str]] = []
+        apply_feedbacks: list[ApplyFeedback] = []
         for patch in patch_paths:
             if git_tree:
-                ok, err = _git_apply(framework_root, patch, three_way=False)
+                ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
                 if not ok:
-                    ok2, err2 = _git_apply(framework_root, patch, three_way=True)
-                    if not ok2:
-                        apply_errors.append(
-                            {
-                                "patch": str(patch),
-                                "stderr": err + " | -3 retry: " + err2,
-                            }
-                        )
-                        break
-                    err = err2
+                    apply_errors.append({"patch": str(patch), "stderr": err})
+                    if fb is not None:
+                        apply_feedbacks.append(fb)
+                    break
             else:
                 nogit_backup_root = output_root / "patch_backups"
-                ok, err, backups = _apply_patch_no_git(
+                ok, err, backups, fb = _apply_patch_no_git(
                     framework_root,
                     patch,
                     nogit_backup_root,
@@ -1458,6 +1500,8 @@ class IntegratePatchExecutor:
                 self._nogit_patch_backups.extend(backups)
                 if not ok:
                     apply_errors.append({"patch": str(patch), "stderr": err})
+                    if fb is not None:
+                        apply_feedbacks.append(fb)
                     break
             applied.append(patch)
         if apply_errors:
@@ -1469,7 +1513,9 @@ class IntegratePatchExecutor:
                 tps_delta_pct=0.0,
                 extra=extra,
             )
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
+            lane = _derive_lane(params)
+            is_enablement = bool(params.get("enablement"))
+            base_result: dict[str, Any] = {
                 "status": "apply_failed",
                 "error_class": "git_apply_failed",
                 "error": apply_errors,
@@ -1478,7 +1524,13 @@ class IntegratePatchExecutor:
                 "patches_reverted": [str(p) for p in reverted],
                 "config_changes_applied": {},
                 "workspace": str(output_root),
-            })
+                "lane": lane,
+                "retry_feedback": [fb.to_dict() for fb in apply_feedbacks],
+                "prior_patches": [str(p) for p in patch_paths],
+            }
+            if is_enablement:
+                base_result["enablement"] = True
+            return _with_stash_restore(framework_root, stash_state, stash_note, base_result)
 
         # Install non-diff tuned artifacts (after patches, before
         # config_changes). On any artifact error, roll back artifacts + patches

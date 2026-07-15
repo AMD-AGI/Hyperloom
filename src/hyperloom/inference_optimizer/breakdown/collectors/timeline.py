@@ -13,13 +13,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.timeutil import iso_z
 from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
 )
 
 from ._common import (
-    _iso_z,
     _load_optimization_journal,
     _parse_iso_unix,
     _to_float,
@@ -84,7 +84,7 @@ def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
         if v
     }
     return {
-        "ts": _iso_z(e.get("ts")),
+        "ts": iso_z(e.get("ts")),
         "action": action,
         "task_id": str(e.get("task_id") or ""),
         "kernel_id": None,
@@ -222,7 +222,7 @@ def collect_phase_timeline(
 
     # Canonicalise every ts to ``...Z`` so mixed-suffix rows dedup and sort consistently.
     for ev in events:
-        ev["ts"] = _iso_z(ev.get("ts"))
+        ev["ts"] = iso_z(ev.get("ts"))
 
     # De-dup: journal rows are appended first and win on collision.
     seen: set[tuple[str, str, str]] = set()
@@ -287,7 +287,6 @@ def _capability_for_action(
 def collect_capability_summary(
     state: dict[str, Any],
     geak_invocations: list[dict[str, Any]],
-    oob_invocations: list[dict[str, Any]],
     warnings: list[str],
     forge_invocations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -296,7 +295,6 @@ def collect_capability_summary(
     Args:
         state: Session state mapping.
         geak_invocations: GEAK backend invocation records.
-        oob_invocations: Out-of-box backend invocation records.
         warnings: Mutable list that collected warnings are appended to.
         forge_invocations: Forge backend invocation records (own lane).
 
@@ -305,7 +303,7 @@ def collect_capability_summary(
     """
     forge_invocations = forge_invocations or []
     # Integrate (e2e) outcome per kernel: a kernel-opt KEEP REVERTED at
-    # integrate is not a real adoption, so don't inflate the geak/oob tally.
+    # integrate is not a real adoption, so don't inflate the backend tally.
     integ = state.get("kernel_integrate_attempts") or {}
     integ_by_kid: dict[str, dict[str, Any]] = {}
     if isinstance(integ, dict):
@@ -320,7 +318,7 @@ def collect_capability_summary(
                 "e2e_gain_pct": _to_float(ent.get("best_gain_pct")),
             }
 
-    # GEAK / OOB from on-disk invocations, reconciled against the integrate verdict.
+    # Kernel backends from on-disk invocations, reconciled against the integrate verdict.
     def _from_invocations(invs: list[dict[str, Any]]) -> dict[str, Any]:
         """Reduce one lane's invocations to a capability row.
 
@@ -365,7 +363,6 @@ def collect_capability_summary(
         return row
 
     geak_cap = _from_invocations(geak_invocations)
-    oob_cap = _from_invocations(oob_invocations)
     forge_cap = _from_invocations(forge_invocations)
 
     # Legacy capability rows for archived (pre-merge) sessions; current
@@ -428,7 +425,6 @@ def collect_capability_summary(
     specialist_row = _specialist_capability_row(state)
     return {
         "geak": geak_cap,
-        "oob": oob_cap,
         "forge": forge_cap,
         # primary post-merge row; backends/params/validate_stack are compat rows.
         "explore": explore,
@@ -630,14 +626,14 @@ def collect_phase_segments(
     segments: list[dict[str, Any]] = []
     proxy_seen = False
     for idx, row in enumerate(transitions):
-        entered_ts = _iso_z(row.get("ts"))
+        entered_ts = iso_z(row.get("ts"))
         entered_unix = _unix(row)
         exit_ts = ""
         exit_unix: float | None = None
         exit_reason = ""
         if idx + 1 < len(transitions):
             nxt = transitions[idx + 1]
-            exit_ts = _iso_z(nxt.get("ts"))
+            exit_ts = iso_z(nxt.get("ts"))
             exit_reason = str(nxt.get("reason") or "")
             exit_unix = _unix(nxt)
         elapsed: float | None = None
@@ -687,7 +683,7 @@ def collect_phase_segments(
         ev_evidence = dict(ev.get("evidence") or {})
         if ev_evidence.get("r09_provisional") or (str(ev_evidence.get("evidence") or "") == "m2_proxy"):
             proxy_seen = True
-        ev_ts = _iso_z(ev.get("ts"))
+        ev_ts = iso_z(ev.get("ts"))
         s = _owner_by_window(ev_ts)
         if s is not None:
             s["events"].append(

@@ -218,7 +218,7 @@ def test_free_mb_threshold_fires_when_util_mem_pct_missing():
 
 def test_classifier_includes_gpu_leak_rule():
     classifier = Classifier(
-        gpu_leak_config=GpuLeakConfig(min_consecutive_ticks=1),
+        configs={"gpu_leak": GpuLeakConfig(min_consecutive_ticks=1)},
     )
     out = classifier.classify(_data(_full_gpus()), _ctx())
     names = {s.name for s in out}
@@ -227,7 +227,7 @@ def test_classifier_includes_gpu_leak_rule():
 
 def test_classifier_state_persists_across_ticks():
     classifier = Classifier(
-        gpu_leak_config=GpuLeakConfig(min_consecutive_ticks=2),
+        configs={"gpu_leak": GpuLeakConfig(min_consecutive_ticks=2)},
     )
     first = classifier.classify(_data(_full_gpus()), _ctx(0))
     assert all(s.name != "gpu_memory_leaked" for s in first)

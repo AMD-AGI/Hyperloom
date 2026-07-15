@@ -91,18 +91,6 @@ class ProgressDetector:
             }
         )
 
-    @property
-    def gain_history(self) -> list[float]:
-        """Snapshot of the rolling validated-gain history.
-
-        Visible for tests; production code should not rely on this.
-
-        Returns:
-            list[float]: A copy of the recorded ``cumulative_gain_validated``
-                samples.
-        """
-        return list(self._gain_history)
-
     def evaluate(
         self,
         ctx: ReactorContext,
@@ -256,27 +244,7 @@ class ProgressDetector:
             ),
         )
 
-
-def evaluate_progress_signals(
-    detector: ProgressDetector,
-    ctx: ReactorContext,
-    data: SourceData,
-) -> list[Symptom]:
-    """Module-level helper mirroring the other signal rule entry points.
-
-    Args:
-        detector (ProgressDetector): The stateful detector owned by the caller.
-        ctx (ReactorContext): Reactor context for the current tick.
-        data (SourceData): Collected source data.
-
-    Returns:
-        list[Symptom]: The detector's symptoms for this tick, possibly empty.
-    """
-    return detector.evaluate(ctx, data)
-
-
 __all__ = [
     "ProgressConfig",
     "ProgressDetector",
-    "evaluate_progress_signals",
 ]

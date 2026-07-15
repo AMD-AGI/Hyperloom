@@ -58,7 +58,7 @@ _MAGPIE_CWD_DEFAULT = "/tmp"
 
 _VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 workload
 
-@dataclass(init=False)
+@dataclass
 class GridVariant:
     """One row of the grid we're going to test.
 
@@ -155,7 +155,7 @@ class GridVariant:
         """Content fingerprint used as dedup-ledger key. See module doc.
 
         Returns:
-            str: :func:`variant_fingerprint` of this variant's
+            str: :func:`canonical_fingerprint` of this variant's
             ``extra_server_args`` and ``extra_envs``.
         """
         return variant_fingerprint(
@@ -300,10 +300,10 @@ class VariantResult:
         """Same fingerprint scheme as :class:`GridVariant`.
 
         Returns:
-            str: :func:`variant_fingerprint` of this result's
+            str: :func:`canonical_fingerprint` of this result's
             ``extra_server_args`` and ``extra_envs``.
         """
-        return variant_fingerprint(self.extra_server_args, self.extra_envs)
+        return canonical_fingerprint(self.extra_server_args, self.extra_envs)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this result to a plain JSON-friendly dict.

@@ -27,112 +27,44 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from hyperloom.common.llm_config import parse_custom_headers
-from .executors import (  # noqa: F401 - re-exported for callers/tests
-    _NOOP_KINDS_KERNEL_ONLY,
-    _REAL_EXECUTORS_FULL,
+from .executors import (
     _build_specialist_executor,
-    _noop_prep,
     _register_executors,
 )
-from .kb import (  # noqa: F401 - re-exported for callers/tests
+from .kb import (
     _bootstrap_cortex_kb,
     _bootstrap_knowledge_plane,
-    _build_recipe_kb_dispatcher,
-    _resolve_local_kb_root,
 )
-from .backends import (  # noqa: F401 - re-exported for callers/tests
-    _MULTI_NODE_WORKLOAD_UID_ENV_KEYS,
+from .backends import (
     _build_backends,
     _build_proposal_scorer,
     _build_robustness_options,
     _robustness_server_configured,
 )
-from .model_gate import (  # noqa: F401 - re-exported for callers/tests
-    _AMD_GPU_TYPES,
-    _AMD_UNSUPPORTED_ARCHITECTURES,
-    _AMD_UNSUPPORTED_MODEL_TYPES,
-    _AMD_UNSUPPORTED_QUANT_ALGOS,
-    _AMD_UNSUPPORTED_QUANT_METHODS,
-    _CONTEXT_HEADROOM_DEFAULT,
-    _CONTEXT_HEADROOM_ENV,
-    _GEMMA2_ARCHITECTURES,
-    _GFX_TO_RUNNER,
-    _MAX_MODEL_LEN_HEADROOM,
-    _MAXPOS_CONFIG_KEYS,
-    _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES,
-    _PHI3_ROPE_TYPES,
-    _ROPE_CONFIG_KEYS,
-    _SAFETENSORS_HEADER_LIMIT,
-    _SUPPORTED_ARCH_MARKERS,
-    _SUPPORTED_MODEL_TYPES,
-    _TEXT_COERCIBLE_MODEL_TYPES,
-    _TEXT_DECODER_CONFIG_KEYS,
-    _TOKENIZER_ARTIFACT_FILES,
-    _UNRECOGNIZED_ARCHITECTURES,
-    _UNRECOGNIZED_MODEL_TYPES,
-    _UNREGISTERED_CUSTOM_CONFIG_TYPES,
-    _UNSUPPORTED_ARCHITECTURES,
-    _UNSUPPORTED_CONFIG_KEYS,
-    _UNSUPPORTED_MODEL_TYPES,
-    _VERDICT_TEXT_COERCIBLE,
-    _VERDICT_VISION_ONLY,
-    _VOCAB_WEIGHT_NAMES,
-    _arch_is_supported_text_generation,
+from .model_gate import (
     _autodetect_gpu_type,
-    _config_architectures,
-    _config_declares_text_decoder,
-    _context_headroom_tokens,
-    _detect_amd_unsupported_quant,
-    _detect_gemma2_missing_hidden_act,
-    _detect_incompatible_model_config,
-    _detect_missing_tokenizer_files,
-    _detect_phi3_rope_scaling_incompatible,
-    _detect_unrecognized_architecture,
-    _detect_unsupported_model,
-    _detect_vocab_weight_shape_mismatch,
     _gpu_runner_type,
-    _load_model_arch,
-    _load_model_config_dict,
-    _load_model_config_tags,
-    _load_model_max_position_embeddings,
-    _model_has_dual_chunk_attention,
-    _model_is_moe,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
-    _read_safetensors_header,
-    _resolve_amd_gpu_type,
     _resolve_gpu_type,
     _resolve_max_model_len,
 )
-from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
-    _model_is_gemma2,
+from ..model_config_utils import (
     summarize_model_config,
 )
-from .bootstrap import (  # noqa: F401 - re-exported for callers/tests
-    _default_target_summary,
-    _parse_conc_sweep_concs,
+from .bootstrap import (
     _print_final_summary,
-    _print_kernel_opt_summary_line,
     _print_session_skeleton,
-    _read_failure_summary,
     _reconcile_crash_count,
-    _resolve_reference_recipe,
-    _resolve_session_dir_for_summary,
     _seed_shared_state,
     _snapshot_system_prompts,
     resolve_model_display_name,
 )
-from hyperloom.orchestrator.actions.executors._aiter_jit import (
-    AITER_LOCK_STALE_MINUTES,
-    clean_stale_aiter_locks as _clean_stale_aiter_locks_impl,
-)
+from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
 
-# Cohesive clusters live in sibling modules; re-exported here so the module
-# namespace + monkeypatch surface is intact.
 from .credentials import (
     _CLAUDE_PREFERRED_MODEL as _CLAUDE_PREFERRED_MODEL,
     _CLAUDE_FALLBACK_MODEL as _CLAUDE_FALLBACK_MODEL,
@@ -144,78 +76,19 @@ from .credentials import (
     _ROBUSTNESS_AGENT_ROOT_ENV as _ROBUSTNESS_AGENT_ROOT_ENV,
     _resolve_robustness_agent_root as _resolve_robustness_agent_root,
     _validate_robustness_agent_runtime as _validate_robustness_agent_runtime,
-    _GEAK_BASE_URL_RE as _GEAK_BASE_URL_RE,
-    _is_stale_proxy_url as _is_stale_proxy_url,
-    _sync_geak_config_base_url as _sync_geak_config_base_url,
-    _derive_anthropic_base_url as _derive_anthropic_base_url,
-    _resolve_llm_endpoints as _resolve_llm_endpoints,
-    _reset_claude_config_to_upstream as _reset_claude_config_to_upstream,
-    _validate_credentials as _validate_credentials,
 )
 from .multi_node import (
-    _gc_old_profile_traces as _gc_old_profile_traces,
-    _resolve_mn_backend as _resolve_mn_backend,
-    _provision_multi_node_dynamo_stack as _provision_multi_node_dynamo_stack,
     _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
-    _replay_kernel_patches_for_multi_node as _replay_kernel_patches_for_multi_node,
 )
 from .quantization import (
-    _quantization_enabled_via_env as _quantization_enabled_via_env,
     _run_quantization_prelude as _run_quantization_prelude,
 )
 from .recover import (
-    _session_recovery_status as _session_recovery_status,
     _run_recover_session as _run_recover_session,
 )
 
 
-# Backward-compat re-exports: these helpers were extracted into cli_executors /
-# cli_kb / cli_backends / cli_model_gate / model_config_utils / cli_bootstrap
-# during the CLI decomposition, but callers and tests still import them from
-# ``hyperloom.inference_optimizer.cli`` (e.g. _grid_runner, test_reference_script). Listing
-# them in ``__all__`` keeps the re-export intentional (and silences the unused-
-# import lint for a re-export-only binding).
-__all__ = [
-    # from .cli_executors
-    "_NOOP_KINDS_KERNEL_ONLY", "_REAL_EXECUTORS_FULL", "_build_specialist_executor",
-    "_noop_prep", "_register_executors",
-    # from .cli_kb
-    "_bootstrap_cortex_kb", "_bootstrap_knowledge_plane", "_build_recipe_kb_dispatcher",
-    "_resolve_local_kb_root",
-    # from .cli_backends
-    "_MULTI_NODE_WORKLOAD_UID_ENV_KEYS", "_build_backends", "_build_proposal_scorer",
-    "_build_robustness_options", "_robustness_server_configured",
-    # from .cli_model_gate
-    "_AMD_GPU_TYPES", "_AMD_UNSUPPORTED_ARCHITECTURES", "_AMD_UNSUPPORTED_MODEL_TYPES",
-    "_AMD_UNSUPPORTED_QUANT_ALGOS", "_AMD_UNSUPPORTED_QUANT_METHODS",
-    "_CONTEXT_HEADROOM_DEFAULT", "_CONTEXT_HEADROOM_ENV", "_GEMMA2_ARCHITECTURES",
-    "_GFX_TO_RUNNER", "_MAX_MODEL_LEN_HEADROOM", "_MAXPOS_CONFIG_KEYS",
-    "_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES", "_PHI3_ROPE_TYPES", "_ROPE_CONFIG_KEYS",
-    "_SAFETENSORS_HEADER_LIMIT", "_SUPPORTED_ARCH_MARKERS", "_SUPPORTED_MODEL_TYPES",
-    "_TEXT_COERCIBLE_MODEL_TYPES", "_TEXT_DECODER_CONFIG_KEYS", "_TOKENIZER_ARTIFACT_FILES",
-    "_UNRECOGNIZED_ARCHITECTURES", "_UNRECOGNIZED_MODEL_TYPES",
-    "_UNREGISTERED_CUSTOM_CONFIG_TYPES", "_UNSUPPORTED_ARCHITECTURES",
-    "_UNSUPPORTED_CONFIG_KEYS", "_UNSUPPORTED_MODEL_TYPES", "_VERDICT_TEXT_COERCIBLE",
-    "_VERDICT_VISION_ONLY", "_VOCAB_WEIGHT_NAMES", "_arch_is_supported_text_generation",
-    "_autodetect_gpu_type", "_config_architectures", "_config_declares_text_decoder",
-    "_context_headroom_tokens", "_detect_amd_unsupported_quant",
-    "_detect_gemma2_missing_hidden_act", "_detect_incompatible_model_config",
-    "_detect_missing_tokenizer_files", "_detect_phi3_rope_scaling_incompatible",
-    "_detect_unrecognized_architecture", "_detect_unsupported_model",
-    "_detect_vocab_weight_shape_mismatch", "_gpu_runner_type", "_load_model_arch",
-    "_load_model_config_dict", "_load_model_config_tags",
-    "_load_model_max_position_embeddings", "_model_has_dual_chunk_attention",
-    "_model_is_moe", "_preflight_context_window", "_preflight_model_config_compat",
-    "_preflight_unsupported_model_arch", "_read_safetensors_header",
-    "_resolve_amd_gpu_type", "_resolve_gpu_type", "_resolve_max_model_len",
-    # from .model_config_utils
-    "_model_is_gemma2",
-    # from .cli_bootstrap
-    "_default_target_summary", "_parse_conc_sweep_concs", "_print_final_summary",
-    "_print_kernel_opt_summary_line", "_print_session_skeleton", "_read_failure_summary",
-    "_reconcile_crash_count", "_resolve_reference_recipe", "_resolve_session_dir_for_summary",
-    "_seed_shared_state", "_snapshot_system_prompts", "resolve_model_display_name",
-]
+__all__ = ["main"]
 from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from hyperloom.orchestrator.actions.registry import ActionRegistry
@@ -236,44 +109,12 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
-# _RetiredFlag / _build_parser (+ its purely computational helpers) live in
-# .parser; re-exported here so the module namespace is unchanged for
-# callers/tests.
-from .parser import (  # noqa: F401 - re-exported for callers/tests
-    _RetiredFlag as _RetiredFlag,
+from .parser import (
     _build_parser as _build_parser,
-    _default_gpu_specialist_capacity as _default_gpu_specialist_capacity,
-    _default_research_lane_capacity as _default_research_lane_capacity,
-    _parse_conc_env_default as _parse_conc_env_default,
-    _parse_conc_sweep_default as _parse_conc_sweep_default,
-    _parse_conc_values as _parse_conc_values,
     _positive_int_arg as _positive_int_arg,
 )
-# The _preflight cluster (env-hygiene / SDK install / TraceLens-CLI gate /
-# diagnostics) lives in .preflight; re-exported here so the module namespace +
-# monkeypatch surface is intact. See
-# preflight.py's module docstring for why _load_dotenv_fallback /
-# _load_kernel_agent_env_fallback / _clone_inferencex use lazy
-# package-qualified lookups internally instead of bare-name calls.
-from .preflight import (  # noqa: F401 - re-exported for callers/tests
-    _check_gpu_visibility as _check_gpu_visibility,
-    _check_node_claude_cli as _check_node_claude_cli,
-    _check_shm_disk as _check_shm_disk,
-    _check_tracelens_cli as _check_tracelens_cli,
-    _check_tracelens_root_exists as _check_tracelens_root_exists,
-    _clone_inferencex as _clone_inferencex,
-    _emit_preflight_diagnostics as _emit_preflight_diagnostics,
-    _ensure_python_sdks as _ensure_python_sdks,
-    _inferencex_checkout_ok as _inferencex_checkout_ok,
-    _is_placeholder_tracelens_path as _is_placeholder_tracelens_path,
-    _load_dotenv_fallback as _load_dotenv_fallback,
-    _load_kernel_agent_env_fallback as _load_kernel_agent_env_fallback,
+from .preflight import (
     _preflight as _preflight,
-    _print_cortex_kb_queue_status as _print_cortex_kb_queue_status,
-    _run_ir3_preflight as _run_ir3_preflight,
-    _tracelens_required_at_preflight as _tracelens_required_at_preflight,
-    _unset_hip_visible_devices as _unset_hip_visible_devices,
-    _TRACELENS_REQUIRED_CLIS as _TRACELENS_REQUIRED_CLIS,
 )
 
 
@@ -485,12 +326,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
     return auto_disabled
 
 
-# Forward-looking alias for _apply_atom_auto_tighten (old name kept for tests/SKILL refs; same callable).
-_assert_atom_single_node = _apply_atom_auto_tighten
-
-
-
-
 def _emit_launch_info(
     *,
     pid: int,
@@ -577,24 +412,6 @@ def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
         )
         sys.exit(SESSION_BUSY_EXIT_CODE)
     return lock
-
-
-def _clean_stale_aiter_locks(
-    aiter_jit_dir: Path | None = None,
-    stale_minutes: int = AITER_LOCK_STALE_MINUTES,
-) -> dict[str, Any]:
-    """Startup sweep of stale aiter JIT locks; delegates to the shared helper.
-
-    Thin shim preserving the historical signature / stats-dict contract for the
-    startup call site and tests. The canonical implementation (plus the
-    liveness-gated per-cold-start variant) lives in
-    ``orchestrator/action_executors/_aiter_jit.py``.
-    """
-    return _clean_stale_aiter_locks_impl(
-        aiter_jit_dir, stale_minutes=stale_minutes,
-    )
-
-
 
 
 # AMD/ROCm runner types (gfx9). dual_chunk_flash_attn (sm90+) is unsupported
@@ -838,22 +655,22 @@ def _probe_llm_catalog(
 
 
 def _catalog_probe_headers(*, base_url: str, api_key: str) -> dict[str, str]:
-    """Build headers for direct ``/models`` probes.
+    """Build headers for a direct ``<base_url>/models`` probe.
 
-    The Anthropic SDK supports ``ANTHROPIC_CUSTOM_HEADERS`` for gateways that
-    require subscription headers; the preflight catalog probe is a direct httpx
-    request, so it must apply the same env-specified headers itself.
+    Applies the operator's custom headers for the side being probed: the OpenAI
+    base uses ``OPENAI_CUSTOM_HEADERS``; the Anthropic base and any manual probe
+    override use ``ANTHROPIC_CUSTOM_HEADERS`` (Anthropic is the primary catalog
+    target, so it is the default). Gateway-specific headers (e.g. an AMD
+    ``Ocp-Apim-Subscription-Key``) must be supplied via those env vars — no
+    host-specific auto-injection.
     """
-    headers = parse_custom_headers(os.environ.get("OPENAI_CUSTOM_HEADERS")) or parse_custom_headers(
-        os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
-    )
-    lower_names = {name.lower() for name in headers}
-    if api_key and "authorization" not in lower_names:
+    openai_base = (os.environ.get("OPENAI_BASE_URL") or "").strip().rstrip("/")
+    probe = (base_url or "").strip().rstrip("/")
+    probing_openai = bool(openai_base) and (probe == openai_base or probe.startswith(openai_base + "/"))
+    env_name = "OPENAI_CUSTOM_HEADERS" if probing_openai else "ANTHROPIC_CUSTOM_HEADERS"
+    headers = parse_custom_headers(os.environ.get(env_name))
+    if api_key and not any(name.lower() == "authorization" for name in headers):
         headers["Authorization"] = f"Bearer {api_key}"
-    if api_key and "ocp-apim-subscription-key" not in lower_names:
-        parts = urlsplit(base_url)
-        if parts.hostname == "llm-api.amd.com":
-            headers["Ocp-Apim-Subscription-Key"] = api_key
     return headers
 
 
@@ -868,20 +685,67 @@ def _catalog_compare_model_id(model_id: str) -> str:
 
 def _codex_model_should_follow_claude() -> bool:
     """True when the operator supplied only Anthropic config."""
-    return bool(
+    has_anthropic = bool(
         (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-        and not (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     )
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    return has_anthropic and not has_openai
 
 
 def _claude_model_should_follow_codex() -> bool:
     """True when the operator supplied only OpenAI-compatible config."""
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return True
-    return bool(
+    has_openai = bool(
         (os.environ.get("OPENAI_BASE_URL") or "").strip()
-        and not (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
     )
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    return has_openai and not has_anthropic
+
+
+def _custom_orch_model_allowed() -> bool:
+    """Whether orchestration may use a model outside the AMD Claude allowlist.
+
+    Custom orchestration models are enabled by default so provider-specific
+    model IDs (for example DeepSeek) can run when they are present in the
+    configured gateway catalog. Operators can set
+    ``INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`` (or false/no/off) to
+    restore the stricter AMD Claude allowlist.
+    """
+    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _critic_agent_runtime_needed(
+    critic_choice: str,
+    *,
+    codex_follows_claude: bool = False,
+) -> bool:
+    """Whether the selected critic path will actually instantiate critic-agent.
+
+    Provider-only setups (including Anthropic-only) still run the full
+    critic-agent — its KB two-phase runtime is protocol-independent, and the
+    review inference is driven over the native provider endpoint. The runtime is
+    only skipped when the caller explicitly signals a plain Claude fallback via
+    ``codex_follows_claude``.
+    """
+    return critic_choice == "agent" and not codex_follows_claude
 
 
 def _validate_and_resolve_claude_model(
@@ -890,7 +754,7 @@ def _validate_and_resolve_claude_model(
 ) -> set[str] | None:
     """Hard-gate Claude model selection (must be in _CLAUDE_ALLOWED_MODELS); mutates ``args.claude_model``.
 
-    Probes the gateway catalog (retries); falls back 4-7→4-6 with a WARN, else sys.exit(2). Returns the
+    Probes the gateway catalog (retries); falls back to a known-good model with a WARN, else sys.exit(2). Returns the
     catalog id set on success (reused by the codex smoke-test).
 
     Args:
@@ -909,15 +773,12 @@ def _validate_and_resolve_claude_model(
     """
     chosen = (args.claude_model or "").strip()
     # #340: non-AMD deployments (Vultr / TensorWave / self-hosted gateways)
-    # may not serve the AMD-blessed opus-4-7/4-6 ids. The static allowlist is
-    # an AMD-network safety default; an operator can opt out via
-    # INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1, after which the gateway
-    # catalog probe below is the sole gate (a typo still fails because the id
-    # won't be in the catalog). Default behavior is unchanged.
-    allow_custom = os.environ.get(
-        "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL",
-        "",
-    ).strip().lower() in ("1", "true", "yes", "on") or _claude_model_should_follow_codex()
+    # may not serve the AMD-blessed opus ids. Custom orchestration models are
+    # enabled by default; the gateway catalog probe below is the sole gate (a
+    # typo still fails because the id won't be in the catalog). Operators can
+    # set INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0 to restore the stricter
+    # AMD Claude allowlist.
+    allow_custom = _custom_orch_model_allowed() or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
@@ -933,8 +794,8 @@ def _validate_and_resolve_claude_model(
     if allow_custom and not chosen:
         print(
             "ERROR: --claude-model is empty but "
-            "INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; pass an explicit "
-            "orchestration model id. Refusing to start.",
+            "custom orchestration model support is enabled; pass an explicit "
+            "model id. Refusing to start.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -950,6 +811,7 @@ def _validate_and_resolve_claude_model(
         api_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("DEEPSEEK_API_KEY", "")
             or os.environ.get("SAFE_API_KEY", "")
             or os.environ.get("OPENAI_API_KEY", "")
         )
@@ -964,6 +826,7 @@ def _validate_and_resolve_claude_model(
         anthropic_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("DEEPSEEK_API_KEY", "")
             or os.environ.get("SAFE_API_KEY", "")
         )
         openai_key = (
@@ -1018,8 +881,8 @@ def _validate_and_resolve_claude_model(
         if allow_custom:
             print(
                 f"Preflight: WARNING — gateway catalog unreachable; cannot verify "
-                f"--claude-model={chosen!r}. Proceeding under "
-                f"INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1 (trusting the operator id)."
+                f"--claude-model={chosen!r}. Proceeding with custom orchestration "
+                f"model support enabled (trusting the operator id)."
             )
             return None
         print(
@@ -1033,14 +896,15 @@ def _validate_and_resolve_claude_model(
         print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
         return catalog_ids
 
-    # #340: under the custom-model opt-out the AMD opus-4-6 fallback is
-    # meaningless (a non-AMD catalog won't carry it); fail clearly on a
-    # catalog miss so the operator fixes the id rather than silently running a
-    # model their gateway doesn't serve.
-    if allow_custom:
+    # #340: for non-allowlisted custom ids the AMD opus-4-6 fallback is
+    # meaningless (a non-AMD catalog won't carry it); fail clearly on a catalog
+    # miss so the operator fixes the id rather than silently running a model
+    # their gateway doesn't serve. Preserve the legacy fallback path for
+    # allowlisted Claude ids below.
+    if allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} not present in gateway catalog "
-            f"(INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=1; catalog has "
+            f"(custom orchestration model support enabled; catalog has "
             f"{sorted(catalog_ids)[:20]}). Refusing to start.",
             file=sys.stderr,
         )
@@ -1052,8 +916,8 @@ def _validate_and_resolve_claude_model(
         return catalog_ids
 
     print(
-        f"ERROR: neither {_CLAUDE_PREFERRED_MODEL!r} nor "
-        f"{_CLAUDE_FALLBACK_MODEL!r} present in gateway catalog "
+        f"ERROR: none of the allowed Claude models {list(_CLAUDE_ALLOWED_MODELS)!r} "
+        f"present in gateway catalog "
         f"(catalog has {sorted(m for m in catalog_ids if m.startswith('claude-'))}). "
         f"Refusing to start.",
         file=sys.stderr,
@@ -1079,6 +943,8 @@ def _smoke_test_codex_model(
             from preflight; the OpenAI side is probed for the Codex catalog.
     """
     # Codex is needed by the Kernel-agent (kernel-codex on) and the critic-agent review path.
+    if _codex_model_should_follow_claude():
+        return
     critic_uses_codex = args.critic_backend == "agent"
     needs_codex = critic_uses_codex or (args.kernel_codex and not getattr(args, "no_kernel", False))
     if not needs_codex:
@@ -1405,17 +1271,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     nodes_resolved = max(1, int(args.nodes))
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
-    # Resolve gpus_per_node with the same CLI > env > 8 chain _provision_multi_node_rayjob_stack uses.
+    # Resolve gpus_per_node from the explicit CLI flag or the policy default.
     gpn_attr = getattr(args, "rayjob_gpus_per_node", None)
     if gpn_attr is not None:
         gpus_per_node_resolved = int(gpn_attr)
     else:
-        try:
-            gpus_per_node_resolved = int(
-                os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8,
-            )
-        except ValueError:
-            gpus_per_node_resolved = 8
+        gpus_per_node_resolved = 8
     total_gpus = nodes_resolved * gpus_per_node_resolved
 
     # Topology sanity gates — multi-node only (nodes>=2); fail fast vs a cryptic launcher crash mid-cold-start.
@@ -1488,7 +1349,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 os.environ[env_key] = v
 
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
-    aiter_sweep = _clean_stale_aiter_locks()
+    aiter_sweep = clean_stale_aiter_locks()
     if aiter_sweep["dir"] and aiter_sweep["deleted"]:
         print(
             f"Stale aiter locks cleared: "
@@ -1505,12 +1366,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", None)
 
+    # Capture provider intent before _preflight() fills missing endpoints. A
+    # single Anthropic-compatible gateway may cause preflight to populate
+    # OPENAI_BASE_URL from ANTHROPIC_BASE_URL, but the user's original intent
+    # was still "Codex-style roles follow Claude".
+    codex_follows_claude = _codex_model_should_follow_claude()
     resolved_urls = _preflight(args)
 
     # Hard-gate Claude model before any session work (mutates args.claude_model on fallback; sys.exit(2) on failure).
     if claude_follows_codex:
         args.claude_model = args.codex_model
-    codex_follows_claude = _codex_model_should_follow_claude()
     _validate_and_resolve_claude_model(args, resolved_urls)
     if codex_follows_claude:
         args.codex_model = args.claude_model
@@ -1589,7 +1454,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-        state = SharedState.load_or_init(session_dir)
+        legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
+        migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
+        state = SharedState.load_or_init(
+            session_dir,
+            legacy_action_scores=legacy_mode,
+            migration_mode=migration_mode,
+        )
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1997,11 +1868,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print("Recipe sediment : ENABLED (KEEP/REVERT provenance written to persistent recipe)")
     else:
         print("Recipe sediment : DISABLED (--no-recipe-sediment)")
-    if bool(getattr(args, "allow_empty_kernel_shape", False)):
-        os.environ["HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE"] = "1"
+    from hyperloom.orchestrator.kernel.request_handlers import set_allow_empty_kernel_shape
+
+    allow_empty_kernel_shape = bool(getattr(args, "allow_empty_kernel_shape", False))
+    set_allow_empty_kernel_shape(allow_empty_kernel_shape)
+    if allow_empty_kernel_shape:
         print("Kernel shape    : empty-shape dispatch ALLOWED (--allow-empty-kernel-shape)")
     else:
-        os.environ.pop("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", None)
         print("Kernel shape    : non-empty trace shape REQUIRED for kernel-opt dispatch")
 
     # Resolve critic backend + runtime root before _build_backends; abort rc=2 if --critic-agent runtime unreachable.
@@ -2014,7 +1887,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         sys.exit(2)
-    if critic_choice == "agent":
+    if _critic_agent_runtime_needed(
+        critic_choice,
+        codex_follows_claude=codex_follows_claude,
+    ):
         critic_agent_root = _resolve_critic_agent_root()
         if critic_agent_root is None:
             print(
@@ -2071,6 +1947,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         robustness_agent_root=robustness_agent_root,
         robustness_options=robustness_options,
         no_kernel=no_kernel,
+        codex_follows_claude=codex_follows_claude,
     )
     # Expose active session_dir to in-process executors via the canonical
     # pin env var (read by paths.session_dir() -> report.py, sweep.py, etc.).
@@ -2087,49 +1964,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         os.environ["INFERENCE_OPTIMIZER_STRICT_PHASE"] = "1"
     else:
         os.environ.pop("INFERENCE_OPTIMIZER_STRICT_PHASE", None)
-    # Propagate --legacy-action-scores so SharedState.from_dict handles drop/warn uniformly (default drop).
-    legacy_mode = (
-        str(
-            getattr(args, "legacy_action_scores", "drop") or "drop",
-        )
-        .strip()
-        .lower()
-    )
-    if legacy_mode == "warn":
-        os.environ["INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES"] = "warn"
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES", None)
-    # Propagate --migration-mode: SharedState.from_dict treats fact-layer discrepancy as fatal (strict) or WARN (lenient).
-    migration_mode = (
-        str(
-            getattr(args, "migration_mode", "strict") or "strict",
-        )
-        .strip()
-        .lower()
-    )
-    if migration_mode == "lenient":
-        os.environ["INFERENCE_OPTIMIZER_MIGRATION_MODE"] = "lenient"
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_MIGRATION_MODE", None)
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir)
-    # Propagate --breakdown-include-transcripts (inline / path-only choice) to end-of-session breakdown.
-    transcripts_flag = (
-        str(
-            getattr(args, "breakdown_include_transcripts", "false") or "false",
-        )
-        .strip()
-        .lower()
-    )
-    if transcripts_flag == "true":
-        os.environ["INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS"] = "1"
-    else:
-        os.environ.pop(
-            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS",
-            None,
-        )
+    from hyperloom.inference_optimizer.breakdown.exporter import set_default_include_transcripts
 
+    legacy_mode = str(getattr(args, "legacy_action_scores", "drop") or "drop").strip().lower()
+    migration_mode = str(getattr(args, "migration_mode", "strict") or "strict").strip().lower()
+    transcripts_flag = str(getattr(args, "breakdown_include_transcripts", "false") or "false").strip().lower()
+    set_default_include_transcripts(transcripts_flag == "true")
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
 
@@ -2148,14 +1991,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
         cortex_kb=cortex_client,
         phase_budget_pct=phase_budget_pct or None,
+        legacy_action_scores=legacy_mode,
+        migration_mode=migration_mode,
         # KnowledgePlane facade (None when --degraded-kb).
         knowledge_plane=knowledge_plane,
-        # Advisory multi-model specialist-proposal scorer. ``None`` when
-        # --no-proposal-scoring or an empty model list; otherwise scores
+        # Advisory multi-model specialist-proposal scorer. Disabled by
+        # default: ``None`` unless --proposal-scoring is passed (--no-proposal-
+        # scoring is the explicit off form), and still ``None`` in Anthropic-
+        # only deployments or with an empty model list. When active it scores
         # each proposal_set and surfaces the results to Orchestration as
-        # one reference among many (never gates anything). ``session_dir``
-        # is forwarded so the scorer can append its per-model token usage
-        # to the full-trace ledger (component=proposal_scorer).
+        # one reference among many (never gates anything). Not persisted
+        # across --resume (re-pass the flag). ``session_dir`` is forwarded
+        # so the scorer can append its per-model token usage to the
+        # full-trace ledger (component=proposal_scorer).
         proposal_scorer=_build_proposal_scorer(args, session_dir),
         # Warm-recipe replay controls. Default ON, fires when
         # warm_start_recipe.confidence >= min_confidence and the
@@ -2228,11 +2076,32 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Persist effective system prompts for resume / drift inspection.
     _snapshot_system_prompts(session_dir, prompts=prompts)
 
-    kernel_str = "DISABLED" if no_kernel else (f"{'Codex' if args.kernel_codex else 'Claude'}")
+    def _backend_kind(role: str) -> str:
+        backend = backends.get(role)
+        name = str(getattr(backend, "name", "") or "").strip().lower()
+        if name == "claude":
+            return "Claude"
+        if name == "codex":
+            return "Codex"
+        if backend is None:
+            return "DISABLED"
+        return backend.__class__.__name__
+
+    orchestration_str = (
+        f"Claude({args.claude_model})"
+        if _backend_kind("orchestration") == "Claude"
+        else f"{_backend_kind('orchestration')}({args.codex_model})"
+    )
+    kernel_str = "DISABLED" if no_kernel else _backend_kind("kernel_agent")
     if critic_choice == "mock":
         critic_str = "mock"
+    elif _backend_kind("critic") == "Claude":
+        critic_str = f"Claude({args.claude_model})"
     else:  # "agent"
-        critic_str = f"critic-agent(kb={critic_kb_mode}, codex={args.codex_model}, root={critic_agent_root})"
+        # Provider-only (Anthropic / DeepSeek) drives the review over the Claude
+        # model; an OpenAI-compatible gateway drives it over Codex.
+        _review_model = args.claude_model if _codex_model_should_follow_claude() else args.codex_model
+        critic_str = f"critic-agent(kb={critic_kb_mode}, model={_review_model}, root={critic_agent_root})"
     if robustness_choice == "mock":
         robustness_str = "mock"
     else:
@@ -2242,7 +2111,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             robustness_str += f"[{kvs}]"
     print(
         f"Backends        : "
-        f"orchestration=Claude({args.claude_model}), "
+        f"orchestration={orchestration_str}, "
         f"kernel={kernel_str}, "
         f"critic={critic_str}, "
         f"robustness={robustness_str}"

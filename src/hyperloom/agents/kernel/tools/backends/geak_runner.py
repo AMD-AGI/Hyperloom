@@ -3,8 +3,8 @@
 
 """GEAK e2e optimizer submission (whole-pipeline; GEAK@GEAK main).
 
-This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like the legacy
-per-kernel GEAK single-kernel loop, now ``geak_v3``). Its code lives in GEAK
+This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like
+``forge``). Its code lives in GEAK
 (``interface/run_e2e.py`` + ``e2e_workflow/``). Hyperloom invokes it ONCE at the
 KERNEL_AGENT phase via the stable ``interface/run_e2e.py`` contract: we write a
 ``handoff.json`` (Hyperloom best config + workload), call the runner, and read
@@ -33,14 +33,22 @@ def _resolve_runner() -> str:
     runner = os.environ.get("GEAK_E2E_RUNNER", "").strip()
     if runner and Path(runner).is_file():
         return runner
+    roots: list[str] = []
     root = os.environ.get("GEAK_ROOT", "").strip()
     if root:
+        roots.append(root)
+    open_source_root = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT", "").strip()
+    if open_source_root:
+        roots.append(str(Path(open_source_root) / "GEAK"))
+    roots.append("/opt/hyperloom/open-source-repos/GEAK")
+    for root in dict.fromkeys(roots):
         cand = Path(root) / "interface" / "run_e2e.py"
         if cand.is_file():
             return str(cand)
     raise FileNotFoundError(
         "e2e runner not found. Set GEAK_E2E_RUNNER to "
-        "<GEAK checkout>/interface/run_e2e.py (the installer exports it)."
+        "<GEAK checkout>/interface/run_e2e.py (the installer exports it), "
+        "or set GEAK_ROOT/HYPERLOOM_OPEN_SOURCE_ROOT."
     )
 
 

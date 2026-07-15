@@ -12,37 +12,37 @@ import pytest
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 
 
-# ---- _load_state / _load_manifest ----
+# ---- _load_session_json ----
 
 
 def test_load_state_missing(tmp_path):
     warnings = []
-    assert ex._load_state(tmp_path, warnings) == {}
+    assert ex._load_session_json(tmp_path / "state.json", "state.json", warnings) == {}
     assert any("state.json missing" in w for w in warnings)
 
 
 def test_load_state_valid(tmp_path):
     (tmp_path / "state.json").write_text('{"session_id": "s"}', encoding="utf-8")
-    assert ex._load_state(tmp_path, [])["session_id"] == "s"
+    assert ex._load_session_json(tmp_path / "state.json", "state.json", [])["session_id"] == "s"
 
 
 def test_load_state_parse_error(tmp_path):
     (tmp_path / "state.json").write_text("{bad", encoding="utf-8")
     warnings = []
-    assert ex._load_state(tmp_path, warnings) == {}
+    assert ex._load_session_json(tmp_path / "state.json", "state.json", warnings) == {}
     assert any("failed to parse state.json" in w for w in warnings)
 
 
 def test_load_manifest_missing(tmp_path):
     warnings = []
-    assert ex._load_manifest(tmp_path, warnings) == {}
+    assert ex._load_session_json(tmp_path / "manifest.json", "manifest.json", warnings) == {}
     assert any("manifest.json missing" in w for w in warnings)
 
 
 def test_load_manifest_parse_error(tmp_path):
     (tmp_path / "manifest.json").write_text("{bad", encoding="utf-8")
     warnings = []
-    assert ex._load_manifest(tmp_path, warnings) == {}
+    assert ex._load_session_json(tmp_path / "manifest.json", "manifest.json", warnings) == {}
     assert any("failed to parse manifest.json" in w for w in warnings)
 
 
@@ -95,10 +95,13 @@ def test_build_empty_session(tmp_path):
     assert any("missing" in w for w in out["warnings"])
 
 
-def test_build_include_transcripts_via_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS", "1")
-    out = ex.build(tmp_path)
-    assert out["schema_version"] is not None
+def test_build_include_transcripts_process_default(tmp_path):
+    ex.set_default_include_transcripts(True)
+    try:
+        out = ex.build(tmp_path)
+        assert out["schema_version"] is not None
+    finally:
+        ex.set_default_include_transcripts(False)
 
 
 # ---- write_breakdown_json ----

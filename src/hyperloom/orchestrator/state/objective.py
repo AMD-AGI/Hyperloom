@@ -56,17 +56,6 @@ class Objective(ABC):
         """
 
     @abstractmethod
-    def remaining_gap(self, state: "SharedState") -> float:
-        """Compute how far we still need to move to reach the goal.
-
-        Args:
-            state (SharedState): Current shared optimization state to evaluate.
-
-        Returns:
-            float: Remaining distance to the target; units depend on the objective kind.
-        """
-
-    @abstractmethod
     def reached(self, state: "SharedState") -> bool:
         """Report whether the goal has been met.
 
@@ -75,17 +64,6 @@ class Objective(ABC):
 
         Returns:
             bool: ``True`` if the objective is satisfied, otherwise ``False``.
-        """
-
-    @abstractmethod
-    def pressure_input(self, state: "SharedState") -> float:
-        """Feed to scheduler.pressure(): 0.0 = relaxed, 1.0 = max urgency.
-
-        Args:
-            state: Current shared optimization state to evaluate.
-
-        Returns:
-            Urgency in the range 0.0 (relaxed) → 1.0 (maximum urgency).
         """
 
     @abstractmethod
@@ -132,17 +110,6 @@ class TargetGainObjective(Objective):
         """
         return min(1.0, max(0.0, state.cumulative_gain / self.target_gain_pct))
 
-    def remaining_gap(self, state: "SharedState") -> float:
-        """Compute the remaining percentage gain needed to hit the target.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Non-negative percentage points still required to reach the target.
-        """
-        return max(0.0, self.target_gain_pct - state.cumulative_gain)
-
     def reached(self, state: "SharedState") -> bool:
         """Report whether the cumulative gain has met or exceeded the target.
 
@@ -153,21 +120,6 @@ class TargetGainObjective(Objective):
             bool: ``True`` once ``cumulative_gain >= target_gain_pct``.
         """
         return state.cumulative_gain >= self.target_gain_pct
-
-    def pressure_input(self, state: "SharedState") -> float:
-        """Compute normalized progress toward the gain target.
-
-        Args:
-            state: Current shared state.
-
-        Returns:
-            Progress in ``[0.0, 1.0]``; stays ``0.0`` until the baseline
-            throughput has been measured.
-        """
-        # Stays 0 until baseline finishes.
-        if state.baseline_tput <= 0:
-            return 0.0
-        return min(1.0, state.cumulative_gain / self.target_gain_pct)
 
     def describe(self) -> str:
         """Return a one-line summary of the configured gain target.
@@ -225,18 +177,6 @@ class TargetTputObjective(Objective):
             return 0.0
         return min(1.0, cur / self.target_tput_per_gpu)
 
-    def remaining_gap(self, state: "SharedState") -> float:
-        """Compute the remaining throughput needed to hit the target.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Non-negative per-GPU throughput still required to reach the
-            target (tok/s for serving, img/s for scriptable xDiT).
-        """
-        return max(0.0, self.target_tput_per_gpu - self._current_tput(state))
-
     def reached(self, state: "SharedState") -> bool:
         """Report whether the current throughput has met or exceeded the target.
 
@@ -247,17 +187,6 @@ class TargetTputObjective(Objective):
             bool: ``True`` once current throughput ``>= target_tput_per_gpu``.
         """
         return self._current_tput(state) >= self.target_tput_per_gpu
-
-    def pressure_input(self, state: "SharedState") -> float:
-        """Compute urgency, equal to current progress toward the target.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Urgency in the range 0.0 → 1.0.
-        """
-        return self.progress(state)
 
     def describe(self) -> str:
         """Return a one-line summary of the configured throughput target.
@@ -325,17 +254,6 @@ class TargetBaselineObjective(Objective):
             return 0.0
         return min(1.0, cur / self._ref_tput)
 
-    def remaining_gap(self, state: "SharedState") -> float:
-        """Compute the remaining throughput needed to match the reference baseline.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Non-negative throughput still required to reach the reference.
-        """
-        return max(0.0, self._ref_tput - self._cur(state))
-
     def reached(self, state: "SharedState") -> bool:
         """Report whether the current throughput matches or beats the reference.
 
@@ -346,17 +264,6 @@ class TargetBaselineObjective(Objective):
             bool: ``True`` once current throughput ``>= _ref_tput``.
         """
         return self._cur(state) >= self._ref_tput
-
-    def pressure_input(self, state: "SharedState") -> float:
-        """Compute urgency, equal to current progress toward the reference.
-
-        Args:
-            state (SharedState): Current shared optimization state.
-
-        Returns:
-            float: Urgency in the range 0.0 → 1.0.
-        """
-        return self.progress(state)
 
     def describe(self) -> str:
         """Return a one-line summary of the configured baseline target.
@@ -394,17 +301,6 @@ class TimeOnlyObjective(Objective):
         """
         return 0.0
 
-    def remaining_gap(self, state: "SharedState") -> float:
-        """Report the remaining gap, which is unbounded since there is no target.
-
-        Args:
-            state (SharedState): Current shared optimization state (unused).
-
-        Returns:
-            float: Always positive infinity.
-        """
-        return float("inf")
-
     def reached(self, state: "SharedState") -> bool:
         """Report whether the goal is met, which is never for this objective.
 
@@ -415,17 +311,6 @@ class TimeOnlyObjective(Objective):
             bool: Always ``False``.
         """
         return False
-
-    def pressure_input(self, state: "SharedState") -> float:
-        """Report urgency, which is always relaxed since there is no target.
-
-        Args:
-            state (SharedState): Current shared optimization state (unused).
-
-        Returns:
-            float: Always 0.0.
-        """
-        return 0.0
 
     def describe(self) -> str:
         """Return a one-line summary indicating no target is configured.

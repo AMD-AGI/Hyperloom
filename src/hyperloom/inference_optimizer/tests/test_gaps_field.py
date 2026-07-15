@@ -168,26 +168,6 @@ def test_upsert_gap_enforces_global_entries_cap():
     assert s.find_gap(f"issue.cap.{_GAPS_MAX_ENTRIES + 4}") is not None
 
 
-def test_replace_gaps_dedups_and_caps_attempts():
-    s = SharedState()
-    s.replace_gaps(
-        [
-            {
-                "canonical_id": "issue.a",
-                "symptom": "first",
-                "attempts": [{"action": "a", "outcome": "REVERT"}] * (_GAPS_ATTEMPTS_HISTORY + 3),
-            },
-            # Duplicate canonical_id — the second wins (last-write wins).
-            {"canonical_id": "issue.a", "symptom": "second"},
-            {"canonical_id": "issue.b", "symptom": "b"},
-        ]
-    )
-    assert len(s.gaps) == 2
-    assert s.find_gap("issue.a")["symptom"] == "second"
-    assert len(s.find_gap("issue.a")["attempts"]) == 0  # second had none
-    assert s.find_gap("issue.b") is not None
-
-
 # 4. Prompt rendering (to_gaps_summary)
 def test_to_gaps_summary_empty_returns_empty_string():
     """Cold-start sessions skip the whole block; the header is added only when the body is non-empty."""
@@ -383,7 +363,7 @@ async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
             ]
         },
     )
-    anchor = coord._gap_anchor_canonical_id()
+    anchor = coord._workload_canonical_id()
     gap = s.find_gap(anchor)
     assert gap is not None
     assert any(a["variant_name"] == "v1" for a in gap["attempts"])

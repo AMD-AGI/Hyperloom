@@ -47,7 +47,7 @@ def _attempt(report: Path | None = None, artifact: Path | None = None):
     return {
         "status": "completed",
         "attempt_id": "a1",
-        "backend": "geak_v3",
+        "backend": "forge",
         "optimized_path": str(artifact or "/tmp/optimized.hip"),
         "backend_paths": paths,
     }
@@ -183,7 +183,7 @@ def test_build_prompt_includes_structured_shape_contract():
         "input_shapes": [{"call_num": 48, "shape": shape}],
     }
 
-    prompt = ko.build_prompt(candidate, _args(), backend="geak_v3")
+    prompt = ko.build_prompt(candidate, _args(), backend="forge")
 
     assert "when `benchmark_shape_cases` is present" in prompt
     assert '"benchmark_shape_cases"' in prompt
@@ -207,7 +207,7 @@ def test_build_prompt_omits_structured_shape_cases_without_program_output():
         "shapes": [{"call_num": 48, "shape": "(15360,8,768) bf16"}],
     }
 
-    prompt = ko.build_prompt(candidate, _args(), backend="geak_v3")
+    prompt = ko.build_prompt(candidate, _args(), backend="forge")
     metadata_json = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
     metadata = json.loads(metadata_json)
 
@@ -262,176 +262,6 @@ def test_report_correctness_passes_with_machine_marker(tmp_path):
     assert verification["correctness_passed"] is True
     assert verification["correctness_source"] == "report_scan"
     assert verification["micro_speedup"] == 1.28
-
-
-def _geak_attempt(tmp_path: Path, *, status: str = "complete", speedup: float = 1.3):
-    """Build a GEAK-shaped attempt with a final_report.json on disk."""
-    final = tmp_path / "geak_final_report.json"
-    final.write_text(
-        json.dumps(
-            {
-                "status": status,
-                "best_patch": str(tmp_path / "patch_1.patch"),
-                "best_speedup": speedup,
-                "summary": "import-only harness, no kernel exercised",
-            }
-        ),
-        encoding="utf-8",
-    )
-    artifact = tmp_path / "worktree" / "moe_op.py"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text("import torch\ndef ck_moe_stage1_fwd(*a, **k): pass\n", encoding="utf-8")
-    return {
-        "status": "completed",
-        "attempt_id": "geak-aaa",
-        "backend": "geak_v3",
-        "optimized_path": str(artifact),
-        "backend_paths": {
-            "geak_final_report": str(final),
-            "geak_per_task_best_speedup": str(speedup),
-            "geak_per_task_best_patch": str(tmp_path / "patch_1.patch"),
-            "geak_per_task_best_worktree": str(artifact.parent.parent),
-        },
-    }
-
-
-def test_geak_correctness_trusted_by_default(tmp_path):
-    """PR-E default ON: GEAK status=complete + measured-speedup auto-promotes to KEEP (Qwen3-30B-A3B-Base ran GEAK 0/4 KEEP without it)."""
-    verification = ko.build_verification(
-        _args(source_file="/tmp/moe_op.py"),
-        [_geak_attempt(tmp_path, status="complete", speedup=1.3)],
-        benchmark_available=True,
-    )
-    assert verification["micro_speedup"] == 1.3
-    assert verification["correctness_passed"] is True
-    assert verification["correctness_source"] == "geak_assumed_pass"
-    proposal = ko.make_proposal(verification)
-    assert proposal["decision"] == "KEEP", proposal
-
-
-def test_geak_correctness_can_be_disabled_via_env(tmp_path, monkeypatch):
-    """HYPERLOOM_TRUST_GEAK_CORRECTNESS=0 restores pre-PR-E conservative NEEDS_REVIEW behaviour."""
-    monkeypatch.setenv("HYPERLOOM_TRUST_GEAK_CORRECTNESS", "0")
-    verification = ko.build_verification(
-        _args(source_file="/tmp/moe_op.py"),
-        [_geak_attempt(tmp_path, status="complete", speedup=1.3)],
-        benchmark_available=True,
-    )
-    assert verification["micro_speedup"] == 1.3
-    assert verification["correctness_passed"] is False
-    assert verification["correctness_source"] == "missing"
-    proposal = ko.make_proposal(verification)
-    assert proposal["decision"] == "NEEDS_REVIEW"
-
-
-def test_geak_correctness_trust_requires_nonzero_speedup(tmp_path):
-    """Trust gate requires geak_per_task_best_speedup > 0, else a no-op patch would be silently KEPT."""
-    attempt = _geak_attempt(tmp_path, status="complete", speedup=0.0)
-    attempt["backend_paths"]["geak_per_task_best_speedup"] = "0"
-    verification = ko.build_verification(
-        _args(),
-        [attempt],
-        benchmark_available=True,
-    )
-    assert verification["correctness_passed"] is False
-    assert verification["correctness_source"] == "missing"
-
-
-def test_geak_correctness_trust_requires_complete_status(tmp_path):
-    """Trust default must not promote status='complete_no_patch' (select_patch found nothing) to KEEP."""
-    verification = ko.build_verification(
-        _args(),
-        [_geak_attempt(tmp_path, status="complete_no_patch", speedup=1.3)],
-        benchmark_available=True,
-    )
-    assert verification["correctness_passed"] is False
-    assert verification["correctness_source"] == "missing"
-
-
-def _geak_partial_attempt(
-    tmp_path: Path,
-    *,
-    status: str = "incremental_after_round_1",
-    speedup: float = 2.6,
-    round_correctness: dict | None = None,
-):
-    """GEAK attempt whose run was SIGTERM'd mid-round: status=incremental_after_round_N,
-    final_report carries an explicit round_evaluation.correctness record."""
-    final = tmp_path / "geak_final_report.json"
-    report: dict = {
-        "status": status,
-        "best_patch": str(tmp_path / "patch_0.patch"),
-        "best_speedup": speedup,
-        "best_task": "tilelang-fp8-blockscale-rewrite",
-    }
-    if round_correctness is not None:
-        report["round_evaluation"] = {"round": 1, "correctness": round_correctness}
-    final.write_text(json.dumps(report), encoding="utf-8")
-    artifact = tmp_path / "worktree" / "gemm_op.py"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text("import torch\ndef run_gemm(*a, **k): pass\n", encoding="utf-8")
-    return {
-        "status": "partial",
-        "attempt_id": "geak-partial",
-        "backend": "geak_v3",
-        "optimized_path": str(artifact),
-        "backend_paths": {
-            "geak_final_report": str(final),
-            "geak_per_task_best_speedup": str(speedup),
-            "geak_per_task_best_patch": str(tmp_path / "patch_0.patch"),
-            "geak_per_task_best_worktree": str(artifact.parent.parent),
-        },
-    }
-
-
-def test_geak_partial_with_verified_round_correctness_keeps(tmp_path):
-    """A SIGTERM'd GEAK run (status=incremental_after_round_1) whose
-    round_evaluation shows correctness.success=True + a verified speedup must be
-    trusted and routed to KEEP — not discarded as NEEDS_REVIEW (which never reaches
-    integrate/E2E). This is the exact DeepSeek-R1 2.6x case."""
-    verification = ko.build_verification(
-        _args(source_file="/tmp/gemm_op.py"),
-        [_geak_partial_attempt(tmp_path, speedup=2.6, round_correctness={"returncode": 0, "success": True})],
-        benchmark_available=True,
-    )
-    assert verification["micro_speedup"] == 2.6
-    assert verification["correctness_passed"] is True
-    assert verification["correctness_source"] == "geak_partial_round_verified"
-    proposal = ko.make_proposal(verification)
-    assert proposal["decision"] == "KEEP", proposal
-
-
-def test_geak_partial_without_round_correctness_stays_review(tmp_path):
-    """A partial GEAK run with NO explicit verified-correctness record must NOT be
-    trusted — stays conservative (NEEDS_REVIEW), preserving the safety gate."""
-    verification = ko.build_verification(
-        _args(source_file="/tmp/gemm_op.py"),
-        [_geak_partial_attempt(tmp_path, speedup=2.6, round_correctness=None)],
-        benchmark_available=True,
-    )
-    assert verification["correctness_passed"] is False
-    proposal = ko.make_proposal(verification)
-    assert proposal["decision"] == "NEEDS_REVIEW"
-
-
-def test_geak_partial_with_failed_round_correctness_not_trusted(tmp_path):
-    """A partial GEAK run whose round correctness FAILED must never be trusted."""
-    verification = ko.build_verification(
-        _args(source_file="/tmp/gemm_op.py"),
-        [_geak_partial_attempt(tmp_path, speedup=2.6, round_correctness={"returncode": 1, "success": False})],
-        benchmark_available=True,
-    )
-    assert verification["correctness_passed"] is False
-
-
-def test_geak_round_correctness_passed_helper():
-    """Unit-cover the nested-record reader directly."""
-    assert ko._geak_round_correctness_passed({"round_evaluation": {"correctness": {"returncode": 0, "success": True}}})
-    assert ko._geak_round_correctness_passed({"best_round_evaluation": {"correctness": {"success": True}}})
-    assert not ko._geak_round_correctness_passed({"round_evaluation": {"correctness": {"success": False}}})
-    assert not ko._geak_round_correctness_passed({"round_evaluation": {"correctness": {"returncode": 1, "success": True}}})
-    assert not ko._geak_round_correctness_passed({"status": "incremental_after_round_1"})
-    assert not ko._geak_round_correctness_passed({})
 
 
 def test_report_correctness_passes_with_reference_language(tmp_path):
@@ -541,226 +371,6 @@ def test_speedup_below_gate_needs_review(tmp_path):
     proposal = ko.make_proposal(verification)
     assert proposal["decision"] == "NEEDS_REVIEW"
     assert any("below KEEP" in r for r in proposal["reasons"])
-
-
-# GEAK worktree artifact recovery: rewritten source lives in the worktree slot dir, not the binary-laden .patch.
-
-
-def test_geak_best_worktree_maps_parallel_slot(tmp_path):
-    """``parallel_<M>/patch.patch`` resolves to ``worktrees/slot_<M>/`` under the same round dir."""
-    round_dir = tmp_path / "results" / "round_1"
-    slot_dir = round_dir / "worktrees" / "slot_3"
-    slot_dir.mkdir(parents=True)
-    patch = round_dir / "parallel_3" / "patch_1.patch"
-    patch.parent.mkdir(parents=True)
-    patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
-
-    assert ko._geak_best_worktree(str(patch)) == slot_dir
-
-
-def test_geak_best_worktree_returns_none_for_unexpected_layout(tmp_path):
-    """Non-``parallel_<M>`` layouts fail soft so the caller falls back to ``.patch``-based recovery."""
-    other = tmp_path / "results" / "round_1" / "weird_dir" / "patch.patch"
-    other.parent.mkdir(parents=True)
-    other.write_text("", encoding="utf-8")
-    assert ko._geak_best_worktree(str(other)) is None
-    assert ko._geak_best_worktree("") is None
-
-
-def test_geak_best_worktree_returns_none_when_slot_dir_missing(tmp_path):
-    """Missing ``worktrees/slot_<M>/`` on disk → helper refuses to return a non-existent path."""
-    parallel = tmp_path / "results" / "round_1" / "parallel_0"
-    parallel.mkdir(parents=True)
-    patch = parallel / "patch_0.patch"
-    patch.write_text("", encoding="utf-8")
-    assert ko._geak_best_worktree(str(patch)) is None
-
-
-def test_worktree_source_paths_prefers_repo_relative_join(tmp_path):
-    """With ``kernel_repo`` set, resolve via ``source_file - kernel_repo`` first (before basename rglob) to avoid same-named stub collisions."""
-    repo = tmp_path / "repo"
-    src = repo / "aiter" / "ops" / "rmsnorm.py"
-    src.parent.mkdir(parents=True)
-    src.write_text("def f(): pass\n", encoding="utf-8")
-
-    worktree = tmp_path / "worktree"
-    canonical = worktree / "aiter" / "ops" / "rmsnorm.py"
-    decoy = worktree / "aiter" / "ops" / "triton" / "normalization" / "rmsnorm.py"
-    canonical.parent.mkdir(parents=True)
-    decoy.parent.mkdir(parents=True)
-    canonical.write_text("def f(): return 'canonical'\n", encoding="utf-8")
-    decoy.write_text("def f(): return 'decoy'\n", encoding="utf-8")
-
-    paths = ko._worktree_source_paths(
-        worktree,
-        source_file=str(src),
-        kernel_repo=str(repo),
-    )
-    assert paths
-    # Canonical mapping fires first; decoy collected but never primary.
-    assert paths[0] == canonical
-
-
-def test_worktree_source_paths_falls_back_to_basename_when_no_repo(tmp_path):
-    """Empty ``kernel_repo`` → fall back to bounded ``worktree.rglob(basename)`` for legacy CSV-only fixtures."""
-    worktree = tmp_path / "worktree"
-    hit = worktree / "deep" / "nested" / "rmsnorm.py"
-    hit.parent.mkdir(parents=True)
-    hit.write_text("def f(): pass\n", encoding="utf-8")
-
-    paths = ko._worktree_source_paths(
-        worktree,
-        source_file="/anywhere/rmsnorm.py",
-        kernel_repo="",
-    )
-    assert paths == [hit]
-
-
-def test_candidate_artifact_paths_prefers_worktree_over_patch(tmp_path):
-    """Worktree ``.py`` must precede ``.patch`` so suffix check picks it up before fence extraction on a binary-laden diff."""
-    repo = tmp_path / "repo"
-    src = repo / "aiter" / "ops" / "rmsnorm.py"
-    src.parent.mkdir(parents=True)
-    src.write_text("def f(): pass\n", encoding="utf-8")
-
-    worktree = tmp_path / "results" / "round_1" / "worktrees" / "slot_0"
-    wt_file = worktree / "aiter" / "ops" / "rmsnorm.py"
-    wt_file.parent.mkdir(parents=True)
-    wt_file.write_text("def f(): return 'patched'\n", encoding="utf-8")
-
-    patch = tmp_path / "results" / "round_1" / "parallel_0" / "patch_0.patch"
-    patch.parent.mkdir(parents=True)
-    patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
-
-    attempt = {
-        "status": "completed",
-        "attempt_id": "geak0",
-        "backend": "geak_v3",
-        "optimized_path": str(patch),
-        "backend_paths": {
-            "geak_per_task_best_patch": str(patch),
-            "geak_per_task_best_worktree": str(worktree),
-        },
-    }
-    paths = ko._candidate_artifact_paths(
-        attempt,
-        ".py",
-        source_file=str(src),
-        kernel_repo=str(repo),
-    )
-    assert paths
-    assert paths[0] == wt_file
-    # Patch stays in the list as a fallback, just not first.
-    assert any(p == patch for p in paths)
-
-
-def test_build_verification_recovers_py_from_worktree(tmp_path):
-    """End-to-end: GEAK ``.patch`` + worktree ``.py`` yields artifact_valid=True, artifact_source='source_file' (not 'missing')."""
-    repo = tmp_path / "repo"
-    src = repo / "aiter" / "ops" / "rmsnorm.py"
-    src.parent.mkdir(parents=True)
-    src.write_text("def rmsnorm2d_fwd():\n    pass\n", encoding="utf-8")
-
-    worktree = tmp_path / "results" / "round_1" / "worktrees" / "slot_0"
-    wt_file = worktree / "aiter" / "ops" / "rmsnorm.py"
-    wt_file.parent.mkdir(parents=True)
-    wt_file.write_text(
-        "def rmsnorm2d_fwd():\n    return 'optimized'\n",
-        encoding="utf-8",
-    )
-
-    patch = tmp_path / "results" / "round_1" / "parallel_0" / "patch_1.patch"
-    patch.parent.mkdir(parents=True)
-    patch.write_text(
-        "diff --git a/aiter/ops/rmsnorm.py b/aiter/ops/rmsnorm.py\n",
-        encoding="utf-8",
-    )
-
-    attempt = {
-        "status": "completed",
-        "attempt_id": "geak0",
-        "backend": "geak_v3",
-        "optimized_path": str(patch),
-        "backend_paths": {
-            "geak_per_task_best_patch": str(patch),
-            "geak_per_task_best_worktree": str(worktree),
-        },
-    }
-    verification = ko.build_verification(
-        _args(source_file=str(src), kernel_repo=str(repo)),
-        [attempt],
-        benchmark_available=True,
-    )
-    assert verification["artifact_valid"] is True
-    assert verification["artifact_source"] == "source_file"
-    assert verification["best_artifact_path"] == str(wt_file)
-
-
-def test_build_verification_records_multi_file_artifact_bundle(tmp_path):
-    """A GEAK multi-file patch exposes the complete deploy snapshot as metadata."""
-    repo = tmp_path / "repo"
-    src = repo / "aiter" / "ops" / "moe.py"
-    bench = repo / "benchmarks" / "bench_moe.py"
-    src.parent.mkdir(parents=True)
-    bench.parent.mkdir(parents=True)
-    src.write_text("def kernel():\n    return 'base'\n", encoding="utf-8")
-    bench.write_text("CASE = 'base'\n", encoding="utf-8")
-
-    worktree = tmp_path / "results" / "round_1" / "worktrees" / "slot_0"
-    wt_src = worktree / "aiter" / "ops" / "moe.py"
-    wt_bench = worktree / "benchmarks" / "bench_moe.py"
-    wt_src.parent.mkdir(parents=True)
-    wt_bench.parent.mkdir(parents=True)
-    wt_src.write_text("def kernel():\n    return 'optimized'\n", encoding="utf-8")
-    wt_bench.write_text("CASE = 'optimized'\n", encoding="utf-8")
-
-    patch = tmp_path / "results" / "round_1" / "parallel_0" / "patch_1.patch"
-    patch.parent.mkdir(parents=True)
-    patch.write_text(
-        "diff --git a/aiter/ops/moe.py b/aiter/ops/moe.py\n"
-        "--- a/aiter/ops/moe.py\n"
-        "+++ b/aiter/ops/moe.py\n"
-        "@@ -1,2 +1,2 @@\n"
-        " def kernel():\n"
-        "-    return 'base'\n"
-        "+    return 'optimized'\n"
-        "diff --git a/benchmarks/bench_moe.py b/benchmarks/bench_moe.py\n"
-        "--- a/benchmarks/bench_moe.py\n"
-        "+++ b/benchmarks/bench_moe.py\n"
-        "@@ -1 +1 @@\n"
-        "-CASE = 'base'\n"
-        "+CASE = 'optimized'\n",
-        encoding="utf-8",
-    )
-
-    attempt = {
-        "status": "completed",
-        "attempt_id": "geak0",
-        "backend": "geak_v3",
-        "optimized_path": str(patch),
-        "backend_paths": {
-            "geak_per_task_best_patch": str(patch),
-            "geak_per_task_best_worktree": str(worktree),
-        },
-    }
-    verification = ko.build_verification(
-        _args(source_file=str(src), kernel_repo=str(repo)),
-        [attempt],
-        benchmark_available=True,
-    )
-
-    bundle = verification["best_artifact_bundle"]
-    assert verification["deploy_snapshot_dir"]
-    assert bundle["type"] == "patch_snapshot"
-    assert bundle["patch_path"] == str(patch)
-    assert bundle["repo_root"] == str(repo)
-    assert set(bundle["write_paths"]) == {"aiter/ops/moe.py", "benchmarks/bench_moe.py"}
-    assert Path(bundle["snapshot_dir"], "aiter", "ops", "moe.py").read_text(encoding="utf-8") == (
-        "def kernel():\n    return 'optimized'\n"
-    )
-    assert Path(bundle["snapshot_dir"], "benchmarks", "bench_moe.py").read_text(encoding="utf-8") == (
-        "CASE = 'optimized'\n"
-    )
 
 
 # GEAK prompt yaml patcher: rewrites a misleading task_runner.py example to placeholders; pin idempotency + fail-soft.
@@ -904,7 +514,7 @@ def test_geak_stdout_log_must_not_false_positive_as_source_file(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak-deadbeef",
-        "backend": "geak_v3",
+        "backend": "forge",
         "optimized_path": str(log_path),
         "backend_paths": {},
     }
@@ -922,7 +532,7 @@ def test_geak_stdout_log_must_not_false_positive_as_source_file(tmp_path):
 
 def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
     """Fenced CU in stdout log is surfaced via the `.log` route, labelled ``extracted_code_block`` (not ``source_file``)."""
-    log_path = tmp_path / "geak_v3-c0ffee_stdout.log"
+    log_path = tmp_path / "forge-c0ffee_stdout.log"
     log_path.write_text(
         "Here is the final optimized kernel:\n"
         "```cuda\n"
@@ -937,8 +547,8 @@ def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
     )
     attempt = {
         "status": "completed",
-        "attempt_id": "geak_v3-c0ffee",
-        "backend": "geak_v3",
+        "attempt_id": "forge-c0ffee",
+        "backend": "forge",
         "optimized_path": str(log_path),
         "backend_paths": {},
     }
@@ -973,11 +583,10 @@ def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak-cafebabe",
-        "backend": "geak_v3",
+        "backend": "forge",
         "optimized_path": str(log_path),
         "backend_paths": {
-            "geak_per_task_best_patch": str(patch_path),
-            "geak_latest_patch": str(patch_path),
+            "partial_latest_optimized": str(patch_path),
         },
     }
 
@@ -1028,8 +637,8 @@ def test_patch_only_winner_reconstructs_full_source(tmp_path):
     attempt = {
         "status": "completed",
         "attempt_id": "geak-asm",
-        "backend": "geak_v3",
-        "backend_paths": {"geak_per_task_best_patch": str(patch_path)},
+        "backend": "forge",
+        "backend_paths": {"partial_latest_optimized": str(patch_path)},
     }
 
     artifact_path, source, error = ko._select_source_artifact(
@@ -1064,8 +673,8 @@ def test_patch_with_absolute_path_header_is_rejected(tmp_path):
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-evil", "backend": "geak_v3",
-        "backend_paths": {"geak_per_task_best_patch": str(evil)},
+        "status": "completed", "attempt_id": "geak-evil", "backend": "forge",
+        "backend_paths": {"partial_latest_optimized": str(evil)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
         attempt, target_file=str(original), run_dir=tmp_path,
@@ -1088,8 +697,8 @@ def test_patch_with_parent_traversal_header_is_rejected(tmp_path):
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-evil2", "backend": "geak_v3",
-        "backend_paths": {"geak_per_task_best_patch": str(evil)},
+        "status": "completed", "attempt_id": "geak-evil2", "backend": "forge",
+        "backend_paths": {"partial_latest_optimized": str(evil)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
         attempt, target_file=str(original), run_dir=tmp_path,
@@ -1108,8 +717,8 @@ def test_patch_targeting_other_basename_is_rejected(tmp_path):
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-other", "backend": "geak_v3",
-        "backend_paths": {"geak_per_task_best_patch": str(other)},
+        "status": "completed", "attempt_id": "geak-other", "backend": "forge",
+        "backend_paths": {"partial_latest_optimized": str(other)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
         attempt, target_file=str(original), run_dir=tmp_path,
@@ -1376,10 +985,7 @@ def test_run_attempt_dry_run_emits_optimized_suffix_file(tmp_path):
         dry_run=True,
         source_file="/tmp/k.cu",
         session_id="sess001",
-        geak_budget_min=120,
         budget_minutes=60,
-        disable_rag=False,
-        disable_xs_memory=False,
         num_gpus=1,
         target_platform="",
         test_command="",
@@ -1389,7 +995,7 @@ def test_run_attempt_dry_run_emits_optimized_suffix_file(tmp_path):
     log_path.write_text("", encoding="utf-8")
 
     result = ko.run_attempt(
-        "geak_v3",
+        "forge",
         args=args,
         candidate={"kernel_id": "k001", "name": "k", "source_file": "/tmp/k.cu"},
         run_dir=run_dir,

@@ -123,47 +123,6 @@ class RobustnessServerClient:
 
     # -- public methods --------------------------------------------------
 
-    async def health(self) -> bool:
-        """Probe ``GET /healthz`` for server liveness.
-
-        Returns:
-            bool: ``True`` when the server responds 200; ``False`` on a
-            non-200 status or any transport error.
-        """
-        try:
-            resp = await self._client.get("/healthz")
-        except httpx.RequestError:
-            return False
-        return resp.status_code == 200
-
-    async def list_sessions(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """List known sessions via ``GET /api/v1/sessions``.
-
-        Args:
-            limit (int): Maximum number of sessions to request.
-
-        Returns:
-            list[dict[str, Any]]: The session rows, or ``[]`` when the
-            response is not a list.
-        """
-        body = await self._get_json("/api/v1/sessions", params={"limit": limit})
-        if isinstance(body, list):
-            return body
-        return []
-
-    async def get_session(self, session_id: str) -> dict[str, Any] | None:
-        """Fetch one session via ``GET /api/v1/sessions/{id}``.
-
-        Args:
-            session_id (str): Identifier of the session to fetch.
-
-        Returns:
-            dict[str, Any] | None: The session object, or ``None`` when
-            absent / not a dict.
-        """
-        body = await self._get_json(f"/api/v1/sessions/{session_id}")
-        return body if isinstance(body, dict) else None
-
     async def list_session_pods(
         self,
         session_id: str,
@@ -256,42 +215,6 @@ class RobustnessServerClient:
         )
         return body if isinstance(body, dict) else {}
 
-    async def get_session_metrics(
-        self,
-        session_id: str,
-        window: _MetricsWindow,
-        *,
-        categories: list[str] | None = None,
-        step: str | None = None,
-    ) -> dict[str, Any]:
-        """Fetch session metrics via ``GET .../{id}/metrics``.
-
-        Args:
-            session_id (str): Identifier of the session.
-            window (_MetricsWindow): Explicit ``start`` / ``end`` Unix
-                second bounds for the query.
-            categories (list[str] | None): Optional metric categories;
-                joined comma-separated into the ``categories`` query.
-            step (str | None): Optional sampling step passed through.
-
-        Returns:
-            dict[str, Any]: The metrics object, or ``{}`` when the
-            response is not a dict.
-        """
-        params: dict[str, Any] = {
-            "start": str(window.start_unix),
-            "end": str(window.end_unix),
-        }
-        if categories:
-            params["categories"] = ",".join(categories)
-        if step:
-            params["step"] = step
-        body = await self._get_json(
-            f"/api/v1/sessions/{session_id}/metrics",
-            params=params,
-        )
-        return body if isinstance(body, dict) else {}
-
     # -- cluster-physical proxies ---------------------------------------
 
     async def get_cluster_pod_metrics(
@@ -335,46 +258,6 @@ class RobustnessServerClient:
             params=params,
         )
         return body if isinstance(body, dict) else {}
-
-    async def list_cluster_pod_metric_categories(
-        self,
-        namespace: str,
-        name: str,
-        window: _MetricsWindow,
-        *,
-        categories: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        """GET ``/api/v1/cluster/pods/{ns}/{name}/metrics/list``.
-
-        Args:
-            namespace (str): Kubernetes namespace of the pod.
-            name (str): Pod name.
-            window (_MetricsWindow): Explicit ``start`` / ``end`` Unix
-                second bounds for the query.
-            categories (list[str] | None): Optional metric categories;
-                joined comma-separated into the ``categories`` query.
-
-        Returns:
-            list[dict[str, Any]]: The ``available`` array verbatim so
-            callers can pick which categories to query, or ``[]`` when
-            absent.
-        """
-
-        params: dict[str, Any] = {
-            "start": str(window.start_unix),
-            "end": str(window.end_unix),
-        }
-        if categories:
-            params["categories"] = ",".join(categories)
-        body = await self._get_json(
-            f"/api/v1/cluster/pods/{namespace}/{name}/metrics/list",
-            params=params,
-        )
-        if isinstance(body, dict):
-            available = body.get("available")
-            if isinstance(available, list):
-                return available
-        return []
 
     async def get_cluster_workload_hierarchy(
         self,

@@ -2,8 +2,9 @@
 
 """Shared model-config helpers (config.json parsing + arch/type detection).
 
-Leaf module: depends only on the standard library so both ``cli`` and the
-orchestrator executors can import it without a circular dependency.
+Leaf module: depends only on the standard library (and the stdlib-only
+``hyperloom.common`` base) so both ``cli`` and the orchestrator executors can
+import it without a circular dependency.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import logging
 import re
 import struct
 from pathlib import Path
+
+from hyperloom.common.coerce import to_int
 
 
 def _load_model_config_dict(model_path: str) -> dict | None:
@@ -339,16 +342,6 @@ _TEXT_SCOPE_KEYS = ("text_config", "llm_config", "language_config")
 _FAMILY_TOKENS = ("qwen3", "qwen2", "deepseek", "llama", "gemma", "mistral", "phi", "glm")
 
 
-def _to_int(val: object) -> int | None:
-    """Best-effort int coercion; returns None on any malformed value."""
-    if val is None or isinstance(val, bool):
-        return None
-    try:
-        return int(val)
-    except (TypeError, ValueError):
-        return None
-
-
 def _merge_config_scopes(data: dict) -> dict:
     """Flatten nested text-tower config(s) over the top level (nested wins).
 
@@ -377,9 +370,9 @@ def _derive_attention_type(cfg: dict) -> str:
     """Infer attention variant (MLA/MQA/GQA/MHA) from head/lora config fields."""
     if any(cfg.get(k) for k in _MLA_KEYS):
         return "MLA"
-    heads = _to_int(cfg.get("num_attention_heads")) or 0
+    heads = to_int(cfg.get("num_attention_heads")) or 0
     kv_raw = cfg.get("num_key_value_heads")
-    kv = _to_int(kv_raw) if kv_raw is not None else heads
+    kv = to_int(kv_raw) if kv_raw is not None else heads
     kv = kv or 0
     if heads <= 0 or kv <= 0:
         return ""
@@ -496,11 +489,11 @@ def summarize_model_config(model_path: str) -> dict:
     if family:
         out["model_family"] = family
 
-    heads = _to_int(cfg.get("num_attention_heads")) or 0
+    heads = to_int(cfg.get("num_attention_heads")) or 0
     kv_raw = cfg.get("num_key_value_heads")
-    kv = (_to_int(kv_raw) if kv_raw is not None else heads) or 0
-    head_dim = _to_int(cfg.get("head_dim"))
-    hidden = _to_int(cfg.get("hidden_size"))
+    kv = (to_int(kv_raw) if kv_raw is not None else heads) or 0
+    head_dim = to_int(cfg.get("head_dim"))
+    hidden = to_int(cfg.get("hidden_size"))
     if not head_dim and hidden and heads:
         head_dim = hidden // heads
 
@@ -515,17 +508,17 @@ def summarize_model_config(model_path: str) -> dict:
         out["head_dim"] = head_dim
 
     for key in ("hidden_size", "intermediate_size", "num_hidden_layers", "vocab_size", "max_position_embeddings"):
-        val = _to_int(cfg.get(key))
+        val = to_int(cfg.get(key))
         if val is not None:
             out[key] = val
 
     num_experts = 0
     for k in _MOE_EXPERT_KEYS:
-        ne = _to_int(cfg.get(k))
+        ne = to_int(cfg.get(k))
         if ne:
             num_experts = ne
             break
-    experts_per_tok = _to_int(cfg.get("num_experts_per_tok")) or 0
+    experts_per_tok = to_int(cfg.get("num_experts_per_tok")) or 0
     out["is_moe"] = num_experts > 0
     if num_experts > 0:
         out["num_experts"] = num_experts
@@ -537,7 +530,7 @@ def summarize_model_config(model_path: str) -> dict:
     if out["is_moe"]:
         num_shared = 0
         for k in _SHARED_EXPERT_KEYS:
-            ns = _to_int(cfg.get(k))
+            ns = to_int(cfg.get(k))
             if ns:
                 num_shared = ns
                 break

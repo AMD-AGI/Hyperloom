@@ -145,7 +145,7 @@ async def test_sub_agent_runner_acquires_lane(tmp_path):
     res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert "benchmark_lane" in seen_lease["lanes"]
-    assert "benchmark_lane" not in await locks.active_lanes()
+    assert "benchmark_lane" not in await locks.lane_holders()
     db.close()
 
 

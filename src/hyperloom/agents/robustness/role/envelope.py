@@ -7,13 +7,18 @@ reactor can build intents the Coordinator's ``PolicyGate`` accepts unchanged.
 Transport-agnostic; avoids importing inference_optimizer to stay independent.
 A contract test cross-checks ``IntentType`` / ``_PAYLOAD_REQUIRED`` against the
 upstream module when both packages are importable.
+
+The per-intent contract (required fields, builder, local validator) lives in a
+single :data:`INTENT_SPEC` table. :data:`PAYLOAD_REQUIRED` is derived from it so
+the required-field map and the validator dispatch cannot drift apart;
+``decision.policy_aware`` reads the same table rather than re-listing the rules.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 class IntentType(str, Enum):
@@ -36,35 +41,6 @@ class IntentType(str, Enum):
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
     # Robustness never emits this; kept in the mirror for the upstream-contract test.
     SPECIALIST_DONE = "specialist_done"
-
-
-# Per-intent required payload fields. Identical to upstream
-# ``policy._PAYLOAD_REQUIRED``; ``decision.policy_aware`` reuses it to validate.
-PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
-    IntentType.SEND_MESSAGE: ("topic",),
-    IntentType.DELEGATE: ("action_name",),
-    IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
-    IntentType.UPDATE_STATE: ("changes",),
-    IntentType.ALERT: ("severity", "summary"),
-    IntentType.REQUEST: ("target_agent", "kind"),
-    IntentType.RESPONSE: ("in_reply_to", "kind"),
-    # Only the structural ``target_proposal_msg_id`` is enforced here; the
-    # verdict/verdict_map mutual exclusion lives in
-    # ``policy._validate_review_verdict_payload``.
-    IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
-    IntentType.KILL_TASK: ("task_id", "reason"),
-    IntentType.PRUNE_BRANCH: ("family", "reason"),
-    IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
-    # specialist exit envelope; payload validated by
-    # PolicyGate R3 (``policy._validate_specialist_done``).
-    IntentType.SPECIALIST_DONE: (
-        "gap_canonical_id",
-        "domain",
-        "proposal_set",
-        "empty",
-        "summary",
-    ),
-}
 
 
 # Intents PolicyGate restricts to ``source == "robustness"``; guarded locally
@@ -257,17 +233,32 @@ class Intent:
         return {"intent_type": self.type.value, "payload": dict(self.payload)}
 
 
-@dataclass
-class BackendTurnResult:
-    """Mirror of upstream ``backends.base.BackendTurnResult``.
+class PolicyViolation(ValueError):
+    """Raised when an intent fails the local PolicyGate-equivalent checks.
 
-    The Coordinator inspects ``intents`` and ignores the rest.
-    ``raw_text`` is recorded for debugging only.
+    Defined alongside the intent contract so the per-intent validators in
+    :data:`INTENT_SPEC` and the :class:`decision.policy_aware.PolicyAware`
+    orchestrator raise a single error type.
+
+    Attributes:
+        rule: short identifier matching upstream ``PolicyDenied.rule``
+            (``role`` / ``payload`` / ``state_field`` / ``kill_scope`` /
+            ``robustness_only_source`` / ``delegate_action``).
+        hint: optional one-line corrective suggestion.
     """
 
-    intents: list[Intent] = field(default_factory=list)
-    raw_text: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
+    def __init__(self, reason: str, *, rule: str, hint: str | None = None):
+        """Initialise the violation with a reason, rule id, and optional hint.
+
+        Args:
+            reason (str): Human-readable description of the violation.
+            rule (str): Short rule identifier mirroring upstream
+                ``PolicyDenied.rule``.
+            hint (str | None): Optional one-line corrective suggestion.
+        """
+        super().__init__(reason)
+        self.rule = rule
+        self.hint = hint
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +502,273 @@ def build_update_state(changes: Mapping[str, Any]) -> Intent:
             f"{illegal!r}; allowed: {sorted(ROBUSTNESS_STATE_FIELDS)!r}"
         )
     return Intent(type=IntentType.UPDATE_STATE, payload={"changes": dict(changes)})
+
+
+# ---------------------------------------------------------------------------
+# Per-intent payload validators (mirror upstream ``PolicyGate.validate_intent``)
+# ---------------------------------------------------------------------------
+
+
+def _validate_alert_payload(payload: dict[str, Any]) -> None:
+    """Validate an ``alert`` payload's severity and summary.
+
+    Args:
+        payload (dict[str, Any]): The alert intent payload.
+
+    Raises:
+        PolicyViolation: If the severity is unknown or the summary empty.
+    """
+    severity = str(payload.get("severity", "")).strip()
+    if severity not in ALERT_SEVERITIES:
+        raise PolicyViolation(
+            f"alert.severity={severity!r} not in {sorted(ALERT_SEVERITIES)!r}",
+            rule="payload",
+        )
+    summary = str(payload.get("summary", "")).strip()
+    if not summary:
+        raise PolicyViolation(
+            "alert.summary must be a non-empty string",
+            rule="payload",
+        )
+
+
+def _validate_escalate_payload(payload: dict[str, Any]) -> None:
+    """Validate an ``escalate_strategy_change`` payload.
+
+    Args:
+        payload (dict[str, Any]): The escalate intent payload.
+
+    Raises:
+        PolicyViolation: If reason or next_action_hint is empty, or the
+            optional severity is invalid.
+    """
+    reason = str(payload.get("reason", "")).strip()
+    if not reason:
+        raise PolicyViolation(
+            "escalate_strategy_change.reason must be non-empty",
+            rule="payload",
+        )
+    hint = str(payload.get("next_action_hint", "")).strip()
+    if not hint:
+        raise PolicyViolation(
+            "escalate_strategy_change.next_action_hint must be non-empty",
+            rule="payload",
+        )
+    severity = payload.get("severity")
+    if severity is not None and severity not in ALERT_SEVERITIES:
+        raise PolicyViolation(
+            f"escalate severity={severity!r} not in {sorted(ALERT_SEVERITIES)!r}",
+            rule="payload",
+        )
+
+
+def _validate_kill_task_payload(payload: dict[str, Any]) -> None:
+    """Validate a ``kill_task`` payload, including its scope.
+
+    Args:
+        payload (dict[str, Any]): The kill_task intent payload.
+
+    Raises:
+        PolicyViolation: If task_id/reason is empty or the scope is not in
+            the robustness-allowed scope set.
+    """
+    task_id = str(payload.get("task_id", "")).strip()
+    if not task_id:
+        raise PolicyViolation("kill_task.task_id must be non-empty", rule="payload")
+    reason = str(payload.get("reason", "")).strip()
+    if not reason:
+        raise PolicyViolation("kill_task.reason must be non-empty", rule="payload")
+    scope = str(payload.get("scope", "task")).strip()
+    if scope not in KILL_TASK_ALLOWED_SCOPES:
+        raise PolicyViolation(
+            f"kill_task.scope={scope!r} not in {sorted(KILL_TASK_ALLOWED_SCOPES)!r}",
+            rule="kill_scope",
+            hint="upstream v0.6 keeps server / process kills out per IR-5",
+        )
+
+
+def _validate_prune_branch_payload(payload: dict[str, Any]) -> None:
+    """Validate a ``prune_branch`` payload.
+
+    Args:
+        payload (dict[str, Any]): The prune_branch intent payload.
+
+    Raises:
+        PolicyViolation: If family or reason is empty.
+    """
+    family = str(payload.get("family", "")).strip()
+    if not family:
+        raise PolicyViolation("prune_branch.family must be non-empty", rule="payload")
+    reason = str(payload.get("reason", "")).strip()
+    if not reason:
+        raise PolicyViolation("prune_branch.reason must be non-empty", rule="payload")
+
+
+def _validate_delegate_payload(payload: dict[str, Any]) -> None:
+    """Validate a ``delegate`` payload's action name against the allowlist.
+
+    Args:
+        payload (dict[str, Any]): The delegate intent payload.
+
+    Raises:
+        PolicyViolation: If action_name is empty or not allowed for the
+            robustness role.
+    """
+    action_name = str(payload.get("action_name", "")).strip()
+    if not action_name:
+        raise PolicyViolation("delegate.action_name must be non-empty", rule="payload")
+    if action_name not in ROBUSTNESS_DELEGATE_ACTIONS:
+        raise PolicyViolation(
+            f"delegate.action_name={action_name!r} not allowed for "
+            f"robustness; allowed: "
+            f"{sorted(ROBUSTNESS_DELEGATE_ACTIONS)!r}",
+            rule="delegate_action",
+            hint="kernel_agent-owned actions go via REQUEST(target_agent='kernel_agent')",
+        )
+
+
+def _validate_update_state_payload(payload: dict[str, Any]) -> None:
+    """Validate an ``update_state`` payload's field allowlist.
+
+    Args:
+        payload (dict[str, Any]): The update_state intent payload.
+
+    Raises:
+        PolicyViolation: If changes is not a non-empty dict, touches core
+            state fields, or includes fields outside the robustness
+            allowlist.
+    """
+    changes = payload.get("changes")
+    if not isinstance(changes, dict) or not changes:
+        raise PolicyViolation(
+            "update_state.changes must be a non-empty dict",
+            rule="payload",
+        )
+    core_fields = sorted(set(changes.keys()) & CORE_STATE_FIELDS)
+    if core_fields:
+        raise PolicyViolation(
+            f"update_state cannot mutate core state fields: {core_fields!r}",
+            rule="state_field",
+        )
+    non_robust = sorted(set(changes.keys()) - ROBUSTNESS_STATE_FIELDS)
+    if non_robust:
+        raise PolicyViolation(
+            f"update_state contains fields outside robustness allowlist: {non_robust!r}",
+            rule="state_field",
+            hint=f"allowed: {sorted(ROBUSTNESS_STATE_FIELDS)!r}",
+        )
+
+
+def _validate_send_message_payload(payload: dict[str, Any]) -> None:
+    """Validate a ``send_message`` payload's topic.
+
+    Unknown topics are not rejected (upstream soft-degrades them to
+    ``observation``), only an empty topic is a violation.
+
+    Args:
+        payload (dict[str, Any]): The send_message intent payload.
+
+    Raises:
+        PolicyViolation: If the topic is empty.
+    """
+    topic = str(payload.get("topic", "")).strip()
+    if not topic:
+        raise PolicyViolation("send_message.topic must be non-empty", rule="payload")
+    # Unknown topics are not rejected (upstream soft-degrades to observation).
+
+
+# ---------------------------------------------------------------------------
+# Intent spec table — single source for required fields + builder + validator
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IntentSpec:
+    """Contract for one robustness-emittable intent type.
+
+    Bundles the three things that used to live in parallel tables: the
+    required payload fields, the builder that constructs a well-formed
+    intent, and the local validator mirroring the upstream PolicyGate
+    per-intent rules.
+    """
+
+    required: tuple[str, ...]
+    builder: Callable[..., Intent]
+    validator: Callable[[dict[str, Any]], None]
+
+
+# The 7 intents the robustness role may actually emit; each carries its
+# builder + validator so the required-field map and the validator dispatch
+# stay in lock-step. Insertion order is irrelevant — ``PAYLOAD_REQUIRED`` is
+# rebuilt in ``IntentType`` declaration order below.
+INTENT_SPEC: Mapping[IntentType, IntentSpec] = {
+    IntentType.SEND_MESSAGE: IntentSpec(
+        required=("topic",),
+        builder=build_send_message,
+        validator=_validate_send_message_payload,
+    ),
+    IntentType.DELEGATE: IntentSpec(
+        required=("action_name",),
+        builder=build_delegate,
+        validator=_validate_delegate_payload,
+    ),
+    IntentType.UPDATE_STATE: IntentSpec(
+        required=("changes",),
+        builder=build_update_state,
+        validator=_validate_update_state_payload,
+    ),
+    IntentType.ALERT: IntentSpec(
+        required=("severity", "summary"),
+        builder=build_alert,
+        validator=_validate_alert_payload,
+    ),
+    IntentType.KILL_TASK: IntentSpec(
+        required=("task_id", "reason"),
+        builder=build_kill_task,
+        validator=_validate_kill_task_payload,
+    ),
+    IntentType.PRUNE_BRANCH: IntentSpec(
+        required=("family", "reason"),
+        builder=build_prune_branch,
+        validator=_validate_prune_branch_payload,
+    ),
+    IntentType.ESCALATE_STRATEGY_CHANGE: IntentSpec(
+        required=("reason", "next_action_hint"),
+        builder=build_escalate,
+        validator=_validate_escalate_payload,
+    ),
+}
+
+
+# Required-field map for intents robustness never emits but the upstream
+# contract test still diffs against. No builder/validator: they are here only
+# to keep :data:`PAYLOAD_REQUIRED` byte-equal with upstream ``_PAYLOAD_REQUIRED``.
+# ``SPECIALIST_DONE`` is the specialist exit envelope (PolicyGate R3 validates
+# it); ``REVIEW_VERDICT`` enforces only the structural ``target_proposal_msg_id``
+# here (verdict/verdict_map mutual exclusion lives in upstream policy).
+_REQUIRED_ONLY: Mapping[IntentType, tuple[str, ...]] = {
+    IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
+    IntentType.REQUEST: ("target_agent", "kind"),
+    IntentType.RESPONSE: ("in_reply_to", "kind"),
+    IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
+    IntentType.SPECIALIST_DONE: (
+        "gap_canonical_id",
+        "domain",
+        "proposal_set",
+        "empty",
+        "summary",
+    ),
+}
+
+
+# Per-intent required payload fields, derived from the single spec table so it
+# cannot drift from the validator dispatch. Identical to upstream
+# ``policy._PAYLOAD_REQUIRED``; built in ``IntentType`` declaration order to
+# stay value-equal with it. ``decision.policy_aware`` reuses it to validate.
+PAYLOAD_REQUIRED: Mapping[IntentType, tuple[str, ...]] = {
+    intent_type: (INTENT_SPEC[intent_type].required if intent_type in INTENT_SPEC else _REQUIRED_ONLY[intent_type])
+    for intent_type in IntentType
+}
 
 
 # ---------------------------------------------------------------------------

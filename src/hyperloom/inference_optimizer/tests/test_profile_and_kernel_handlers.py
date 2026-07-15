@@ -14,7 +14,9 @@ from unittest.mock import patch
 
 import pytest
 
-from hyperloom.inference_optimizer import cli as optimizer_cli
+from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
+from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
+from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
@@ -84,10 +86,10 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         target_tput=None,
     )
 
-    assert optimizer_cli._gpu_runner_type("mi325x") == "mi300x"
-    assert optimizer_cli._GFX_TO_RUNNER.get("gfx1100") is None
+    assert cli_model_gate._gpu_runner_type("mi325x") == "mi300x"
+    assert cli_model_gate._GFX_TO_RUNNER.get("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
-    state = optimizer_cli._seed_shared_state(
+    state = cli_bootstrap._seed_shared_state(
         tmp_path,
         args,
         session_id="mi325x-session",
@@ -114,9 +116,9 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         target_tput=None,
     )
 
-    assert optimizer_cli._gpu_runner_type("mi308x") == "mi300x"
+    assert cli_model_gate._gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
-    state = optimizer_cli._seed_shared_state(
+    state = cli_bootstrap._seed_shared_state(
         tmp_path,
         args,
         session_id="mi308x-session",
@@ -129,7 +131,7 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
 
 
 def test_cli_parser_accepts_mi308x():
-    parser = optimizer_cli._build_parser()
+    parser = cli_parser._build_parser()
     args = parser.parse_args(
         [
             "optimize",
@@ -1178,7 +1180,6 @@ def test_profile_executor_sanitizes_current_best_args(monkeypatch, tmp_path):
 
     assert result["status"] == "succeeded"
     merged = captured["extra_server_args"]
-    assert "extra_sglang_args" not in captured
     assert "--enable-torch-compile" not in merged
     assert "--torch-compile-max-bs" not in merged
     assert "--quantization fp8" in merged
@@ -1199,7 +1200,6 @@ def test_profile_executor_sanitizes_canonical_extra_server_args(monkeypatch, tmp
         params={
             "base_extra_args": "--attention-backend AITER",
             "extra_server_args": ("--enable-torch-compile --torch-compile-max-bs 32 --quantization fp8"),
-            "extra_sglang_args": "--enable-torch-compile",
         },
         task_id="t-profile-canonical-sanitize",
     )
@@ -1209,7 +1209,6 @@ def test_profile_executor_sanitizes_canonical_extra_server_args(monkeypatch, tmp
 
     assert result["status"] == "succeeded"
     merged = captured["extra_server_args"]
-    assert "extra_sglang_args" not in captured
     assert "--enable-torch-compile" not in merged
     assert "--torch-compile-max-bs" not in merged
     assert "--attention-backend AITER" in merged
@@ -2649,7 +2648,7 @@ def test_format_last_trace_analyze_renders_idle_warning_inline(session_dir):
             ],
         },
     )
-    rendered = state._format_last_trace_analyze()
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
     assert "high_gpu_idle_pct" in rendered
     assert "60.5%" in rendered
     assert "20.0%" in rendered
@@ -2677,7 +2676,7 @@ def test_format_last_trace_analyze_renders_failure_warning_with_rc(session_dir):
             ],
         },
     )
-    rendered = state._format_last_trace_analyze()
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
     assert "tracelens_analysis_failed" in rendered
     assert "rc=1" in rendered
 
@@ -2694,7 +2693,7 @@ def test_format_last_trace_analyze_omits_warnings_suffix_in_steady_state(session
             "hot_kernels": [{"kernel_id": "k1", "reusable_native_kernel": True}],
         },
     )
-    rendered = state._format_last_trace_analyze()
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
     assert "warnings=" not in rendered, "no warnings → no warnings= suffix; this keeps existing prompt snapshots stable"
 
 
@@ -2738,7 +2737,7 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
     assert state.last_trace_analyze["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
 
     # Prompt rendering surfaces it.
-    rendered = state._format_last_trace_analyze()
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
     assert "high_gpu_idle_pct" in rendered
     assert "42.0%" in rendered
 
@@ -2768,7 +2767,7 @@ async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
     )
     state = SharedState.load_or_init(session_dir)
     state.record_trace_analyze({"trace_input": str(session_dir)}, res)
-    rendered = state._format_last_trace_analyze()
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
     assert "tracelens_analysis_failed" in rendered
     assert "rc=1" in rendered
 
@@ -2809,24 +2808,6 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert len(warnings) == 2, "must preserve pre-existing + append failure"
     assert warnings[0] == pre_existing
     assert warnings[1]["code"] == "tracelens_analysis_failed"
-
-
-def test_optimization_wrapper_timeout_sec_geak_default_full_mode_180min(monkeypatch):
-    # Default tracks ``$GEAK_RUN_MODE`` (full -> 180 min / 3 h) to match the kernel-agent defaults.
-    monkeypatch.delenv("GEAK_RUN_MODE", raising=False)
-    monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
-    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 180 * 60 + 180
-
-
-def test_optimization_wrapper_timeout_sec_geak_quick_mode_70min(monkeypatch):
-    monkeypatch.setenv("GEAK_RUN_MODE", "quick")
-    monkeypatch.delenv("HYPERLOOM_GEAK_BUDGET_MIN", raising=False)
-    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 70 * 60 + 180
-
-
-def test_optimization_wrapper_timeout_sec_geak_env_override(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_GEAK_BUDGET_MIN", "120")
-    assert krh._optimization_wrapper_timeout_sec({"backends": "geak"}) == 120 * 60 + 180
 
 
 @pytest.mark.asyncio
@@ -2884,7 +2865,7 @@ async def test_run_optimization_handler_dry_run(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
+async def test_run_optimization_handler_forwards_extra_server_args(session_dir):
     captured: dict[str, object] = {}
 
     async def fake_run(cmd, *, timeout_sec):
@@ -2896,7 +2877,7 @@ async def test_run_optimization_handler_forwards_extra_sglang_args(session_dir):
         "kernel_id": "fake_kernel_1",
         "session_id": session_dir.name,
         "source_file": "/sgl-workspace/sglang/python/sglang/fake.py",
-        "extra_sglang_args": "--kv-cache-dtype fp8 --page-size 16",
+        "extra_server_args": "--kv-cache-dtype fp8 --page-size 16",
         "dry_run": True,
         "_single_kernel": True,
     }
@@ -3311,7 +3292,9 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
         await krh._run_optimization_batch(
             payload={
                 "candidates_path": "/dummy",
-                "backend_order": "geak_v3,claude,codex",
+                # Synthetic order avoids the forge batch serialization path; the
+                # monkeypatched sequence below is what this test exercises.
+                "backend_order": "synthetic",
                 "max_parallel": 3,
                 "parallel_backends": False,
             },
@@ -3327,71 +3310,14 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
 
 
 @pytest.mark.asyncio
-async def test_backend_ladder_prefers_keep_over_higher_micro_non_keep(
-    session_dir,
-):
-    """The backend ladder must prefer a real KEEP over a higher-speed NEEDS_REVIEW.
-
-    A non-KEEP attempt with the highest micro_speedup must not mask a lower-speed
-    KEEP that can safely integrate. Mirror the batch handler's tuple key.
-    """
+async def test_backend_ladder_breaks_on_first_keep(session_dir):
+    """When forge already KEEPs, the ladder short-circuits."""
     calls: list[str] = []
 
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
         backend = child["backends"]
         calls.append(backend)
         if backend == "forge":
-            return {
-                "status": "ok",
-                "kernel_id": child["kernel_id"],
-                "proposal": {"decision": "NEEDS_REVIEW", "reasons": ["correctness missing"]},
-                "verification": {
-                    "micro_speedup": 1.30,
-                    "correctness_passed": False,
-                    "best_artifact_path": "/tmp/forge.py",
-                },
-            }
-        if backend == "geak_v3":
-            return {
-                "status": "ok",
-                "kernel_id": child["kernel_id"],
-                "proposal": {"decision": "KEEP", "reasons": ["ready for integrate"]},
-                "verification": {
-                    "micro_speedup": 1.17,
-                    "correctness_passed": True,
-                    "best_artifact_path": "/tmp/geak_v3.py",
-                },
-            }
-        raise AssertionError(f"unexpected backend {backend!r}")
-
-    candidate = {
-        "kernel_id": "k004",
-        "source_file": "/p/moe_op.py",
-        "reusable_native_kernel": True,
-    }
-    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
-        best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "forge,geak_v3"},
-            candidate,
-            session_dir=session_dir,
-        )
-
-    # Ladder walks past forge NEEDS_REVIEW, then breaks on geak_v3 KEEP.
-    assert calls == ["forge", "geak_v3"], calls
-    assert (best.get("proposal") or {}).get("decision") == "KEEP", best
-    assert (best.get("verification") or {}).get("micro_speedup") == 1.17
-    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/geak_v3.py"
-
-
-@pytest.mark.asyncio
-async def test_backend_ladder_breaks_on_first_keep(session_dir):
-    """When GEAK already KEEPs, the ladder short-circuits (no Claude/Codex)."""
-    calls: list[str] = []
-
-    async def fake_single(child, *, session_dir, timeout_override_sec=None):
-        backend = child["backends"]
-        calls.append(backend)
-        if backend == "geak_v3":
             return {
                 "status": "ok",
                 "kernel_id": child["kernel_id"],
@@ -3399,63 +3325,21 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
                 "verification": {
                     "micro_speedup": 1.50,
                     "correctness_passed": True,
-                    "best_artifact_path": "/tmp/geak_v3.py",
+                    "best_artifact_path": "/tmp/forge.py",
                 },
             }
-        raise AssertionError(f"ladder must NOT run {backend!r} after GEAK KEEP")
+        raise AssertionError(f"ladder must NOT run {backend!r} after forge KEEP")
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "geak_v3,claude,codex"},
+            {"candidates_path": "/dummy", "backend_order": "forge"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
         )
 
-    assert calls == ["geak_v3"]
+    assert calls == ["forge"]
     assert (best.get("proposal") or {}).get("decision") == "KEEP"
     assert (best.get("verification") or {}).get("micro_speedup") == 1.50
-
-
-@pytest.mark.asyncio
-async def test_backend_ladder_forge_non_keep_yields_to_geak(
-    session_dir,
-):
-    """A forge non-KEEP does not short-circuit; geak_v3's result is used.
-
-    forge edits the repo in-place and only short-circuits on a KEEP. On a
-    non-KEEP forge result the remaining ladder (geak_v3) runs and its result
-    becomes best.
-    """
-
-    async def fake_single(child, *, session_dir, timeout_override_sec=None):
-        backend = child["backends"]
-        if backend == "forge":
-            return {
-                "status": "ok",
-                "kernel_id": child["kernel_id"],
-                "proposal": {"decision": "NEEDS_REVIEW", "reasons": []},
-                "verification": {"micro_speedup": 1.45, "best_artifact_path": "/tmp/forge.py"},
-            }
-        if backend == "geak_v3":
-            return {
-                "status": "ok",
-                "kernel_id": child["kernel_id"],
-                "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.20, "best_artifact_path": "/tmp/geak_v3.py"},
-            }
-        raise AssertionError(backend)
-
-    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
-        best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "forge,geak_v3"},
-            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
-            session_dir=session_dir,
-        )
-
-    # forge NEEDS_REVIEW does not short-circuit -> geak_v3 KEEP wins.
-    assert (best.get("proposal") or {}).get("decision") == "KEEP"
-    assert (best.get("verification") or {}).get("micro_speedup") == 1.20
-    assert (best.get("verification") or {}).get("best_artifact_path") == "/tmp/geak_v3.py"
 
 
 @pytest.mark.asyncio
@@ -3482,7 +3366,7 @@ async def test_backend_sequence_forge_keep_short_circuits(session_dir):
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "forge,geak_v3"},
+            {"candidates_path": "/dummy", "backend_order": "forge"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
             parallel_backends=True,
@@ -3523,7 +3407,7 @@ async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
     monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
 
     out = await krh._run_optimization_batch(
-        {"candidates_path": "/dummy", "backend_order": "forge,geak_v3", "max_parallel": 8},
+        {"candidates_path": "/dummy", "backend_order": "forge", "max_parallel": 8},
         [
             {"kernel_id": "k001", "source_file": "/p/a.py"},
             {"kernel_id": "k002", "source_file": "/p/b.py"},
@@ -3904,7 +3788,7 @@ def test_batch_candidates_skips_in_flight_kernels(
                 "state": "running",
                 "current_step": "run_backends",
                 "pid": 123456,
-                "last_lines": ["kernel_id=k004", "selected_backends=geak_v3"],
+                "last_lines": ["kernel_id=k004", "selected_backends=forge"],
             }
         )
     )

@@ -368,25 +368,21 @@ def test_exit_normal_framework_agent_plateau_routes_to_explore():
     assert reason == "framework_agent_plateau"
 
 
-def test_exit_normal_framework_agent_plateau_streak_env_override(monkeypatch):
-    """INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK overrides the threshold."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK", "2")
+def test_exit_normal_framework_agent_plateau_uses_default_threshold():
+    """The framework plateau threshold is fixed at the default."""
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
         {"candidate_id": "c2", "status": "reverted", "kept": False},
+        {"candidate_id": "c3", "status": "reverted", "kept": False},
     ]
     state = _State(framework_agent_phase_progress=progress)
     out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
-    assert out[1]["threshold"] == 2
+    assert out[1]["threshold"] == 3
 
 
-def test_framework_agent_plateau_streak_env_invalid_uses_default(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK", "invalid")
-    assert phase_state._framework_agent_plateau_streak_threshold() == 3  # noqa: SLF001
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK", "0")
+def test_framework_agent_plateau_streak_threshold_is_default():
     assert phase_state._framework_agent_plateau_streak_threshold() == 3  # noqa: SLF001
 
 

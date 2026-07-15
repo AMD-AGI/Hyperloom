@@ -14,13 +14,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.timeutil import iso_z
 from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
 )
 
 from ._common import (
-    _iso_z,
     _load_jsonl_safe,
     _load_optimization_journal,
     _parse_iso_unix,
@@ -138,6 +138,22 @@ def _load_llm_calls(
         for shard in shards:
             rows.extend(_load_jsonl_safe(shard, warnings))
     return [r for r in rows if isinstance(r, dict)]
+
+
+def aggregate_session_cache_tokens(
+    session_dir: Path,
+    warnings: list[str] | None = None,
+) -> tuple[int, int]:
+    """Sum (cache_creation, cache_read) over ``reports/trace/llm_calls.jsonl``.
+
+    Reuses the same ledger read + fold as the token rollup, so the figures match
+    ``session_breakdown.json``. Best-effort: missing trace files yield ``(0, 0)``.
+    """
+    warns = warnings if warnings is not None else []
+    bucket = _empty_token_bucket()
+    for call in _load_llm_calls(session_dir, warns):
+        _fold_call_into_bucket(bucket, call)
+    return bucket["total_cache_creation"], bucket["total_cache_read"]
 
 
 def _load_proposal_task_map(
@@ -334,7 +350,7 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
     return None
 
 
-def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
+def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
     """Copy a token bucket and add ``total_in_out`` + ``grand_total``.
 
     Handles both bucket shapes: the rollup view (split
@@ -360,6 +376,9 @@ def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
     )
     b["total_in_out"] = ti + to
     b["grand_total"] = ti + to + cache
+    cc = int(b.get("total_cache_creation", 0) or 0)
+    cr = int(b.get("total_cache_read", 0) or 0)
+    b["cache_hit_rate"] = round(cr / (cc + cr), 4) if (cc + cr) else 0.0
     return b
 
 
@@ -656,7 +675,7 @@ def collect_decision_trace(
             continue
         task_id = str(e.get("task_id") or "")
         key = _decision_key(task_id, "")
-        ts = _iso_z(e.get("ts"))
+        ts = iso_z(e.get("ts"))
         phase = str(e.get("phase") or "").strip() or _phase_at(ts, phase_windows)
         provenance = str(e.get("provenance") or "")
         change_kind = str(e.get("kind") or "")
@@ -710,7 +729,7 @@ def collect_decision_trace(
     for row in _load_dispatch_history_all(session_dir, warnings):
         dyn_id = str(row.get("dyn_id") or "")
         key = _decision_key(str(row.get("task_id") or ""), dyn_id)
-        ts = _iso_z(row.get("ts"))
+        ts = iso_z(row.get("ts"))
         phase = _phase_at(ts, phase_windows)
         decisions.append(
             {
