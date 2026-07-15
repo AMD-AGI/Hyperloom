@@ -2274,13 +2274,14 @@ class WritebackCollaborator:
             best_winner = result.get("best_variant")
             best_tput = result.get("output_throughput")
             promoted = False
-            # A post-resume stack revalidation task confirms the EXISTING
-            # cumulative stack rather than adding a variant, so it never
-            # "promotes". Reconcile the validation watermark + clear the
+            # A post-resume revalidation task confirms the EXISTING stack/current
+            # best rather than adding a variant, so it never "promotes".
+            # Reconcile the validation watermark + clear the
             # ``resume_pending_revalidation`` flag from the measured tput — but
             # ONLY when the rebench actually produced a valid measurement, so a
             # failed/empty rebench leaves the flag set and reports keep warning.
-            if task is not None and str((task.params or {}).get("source") or "") == "resume_stack_revalidate":
+            revalidation_source = str((task.params or {}).get("source") or "") if task is not None else ""
+            if revalidation_source in {"resume_stack_revalidate", "resume_reverify_best"}:
                 measured = result.get("output_throughput")
                 measured_ok = isinstance(measured, (int, float)) and measured > 0
                 # A GEAK revalidation (2b) must not blindly stamp validated
