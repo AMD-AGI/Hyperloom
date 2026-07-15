@@ -29,7 +29,6 @@ from .inferencex_client import (
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_TIMEOUT_SEC,
     InferenceXFetchError,
-    fetch_rows,
 )
 from .name_mapping import KNOWN_INFERENCEX_MODELS, to_inferencex_name
 from .target_analyzer import analyze
@@ -42,6 +41,5 @@ __all__ = [
     "InferenceXFetchError",
     "KNOWN_INFERENCEX_MODELS",
     "analyze",
-    "fetch_rows",
     "to_inferencex_name",
 ]

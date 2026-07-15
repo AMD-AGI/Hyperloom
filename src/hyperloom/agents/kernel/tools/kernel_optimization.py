@@ -25,7 +25,6 @@ from _io_utils import (  # noqa: E402
     append_jsonl,
     append_log,
     atomic_write_json,
-    kernel_row_matches,
     read_last_lines,
     safe_float,
     source_text_looks_complete,

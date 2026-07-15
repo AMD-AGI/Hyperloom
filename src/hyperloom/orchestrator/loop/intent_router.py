@@ -286,11 +286,7 @@ class IntentRouter:
             ).strip()
         elif pending.action_name == "specialist":
             # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
-            # PendingProposal has no task_id field, so fall back to the params
-            # payload and use getattr defensively rather than raising AttributeError.
-            sid_candidate = str(
-                getattr(pending, "task_id", None) or pa_params.get("task_id") or ""
-            ).strip()
+            sid_candidate = str(pa_params.get("task_id") or "").strip()
         if sid_candidate and verdict:
             try:
                 self.shared_state.record_specialist_patch_verdict(
