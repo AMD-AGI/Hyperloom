@@ -838,7 +838,7 @@ class ProfileExecutor(BaselineExecutor):
         # ``ensure_benchmark_serving_patched``) happens in the
         # ``_after_materialize_config`` hook, which covers the exact InferenceX
         # checkout Magpie will execute.
-        # Multi-node dynamo only: the Dynamo frontend does not propagate
+        # Multi-node infera only: the Infera frontend does not propagate
         # /start_profile to the SSH-launched disagg workers, so torch
         # profiling must be triggered directly on each worker's system
         # server (/engine/start_profile). Bracket the Magpie benchmark with
@@ -846,7 +846,7 @@ class ProfileExecutor(BaselineExecutor):
         # TraceLens. The helper no-ops for RayJob / single-node and is
         # fail-soft per worker. ``PROFILE_EXTRA_BODY`` (start_step/num_steps
         # computed by _workload_envs) is the start_profile payload.
-        from ._multi_node_server_lifecycle import trigger_dynamo_engine_profile
+        from ._multi_node_server_lifecycle import trigger_infera_engine_profile
 
         prof_body: dict[str, Any] = {}
         try:
@@ -865,7 +865,7 @@ class ProfileExecutor(BaselineExecutor):
         # (``profile_by_stage`` / ``merge_profiles`` / ``num_steps`` /
         # ``start_step``). Isolated reproduction: ``output_dir``-only =
         # 8 traces written cleanly; any of the step/stage params = scheduler
-        # crash. So the dynamo engine-route path forwards ONLY ``output_dir``
+        # crash. So the infera engine-route path forwards ONLY ``output_dir``
         # and bounds the trace by the start/stop wall-clock window instead.
         _SAFE_PROFILE_KEYS = ("output_dir",)
         prof_body = {k: v for k, v in prof_body.items() if k in _SAFE_PROFILE_KEYS}
@@ -886,8 +886,8 @@ class ProfileExecutor(BaselineExecutor):
         # disagg scheduler too. So bound by WALL-CLOCK: after a warmup delay
         # (let load reach steady state) profile a short fixed window
         # concurrently with the full Magpie run (which still produces the
-        # throughput number), then stop. ``trigger_dynamo_engine_profile``
-        # no-ops for RayJob / single-node, so this is multi-node-dynamo only.
+        # throughput number), then stop. ``trigger_infera_engine_profile``
+        # no-ops for RayJob / single-node, so this is multi-node-infera only.
         import asyncio as _asyncio
 
         warmup_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WARMUP_S", "60") or 60)
@@ -902,10 +902,10 @@ class ProfileExecutor(BaselineExecutor):
             ``_prof_started`` flag around the active window.
             """
             await _asyncio.sleep(warmup_s)
-            await trigger_dynamo_engine_profile("start", prof_body)
+            await trigger_infera_engine_profile("start", prof_body)
             _prof_started["v"] = True
             await _asyncio.sleep(window_s)
-            await trigger_dynamo_engine_profile("stop")
+            await trigger_infera_engine_profile("stop")
             _prof_started["v"] = False
 
         prof_task = _asyncio.create_task(_bounded_profile_window())
@@ -923,7 +923,7 @@ class ProfileExecutor(BaselineExecutor):
             if _prof_started.get("v"):
                 # start fired but stop didn't (window task cancelled mid-run
                 # because Magpie finished first) -> ensure a matching stop.
-                await trigger_dynamo_engine_profile("stop")
+                await trigger_infera_engine_profile("stop")
 
         # Augment with trace_dir. Multi-node: traces live at the round-scoped
         # wekafs dir we restarted with (not $HYPERLOOM_MN_PROFILE_TRACE_DIR,

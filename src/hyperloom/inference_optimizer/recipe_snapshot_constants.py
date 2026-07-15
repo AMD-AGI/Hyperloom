@@ -146,6 +146,81 @@ def recipe_canonical_id(
     )
 
 
+def kb_hardware_slug(
+    gpu_type: str,
+    *,
+    nodes: int = 1,
+    gpus_per_node: int = 8,
+    pd_mode: str = "aggregated",
+    pd_prefill_nodes: int = 0,
+    pd_decode_nodes: int = 0,
+) -> str:
+    """Topology-aware hardware dimension for the recipe ``canonical_id``.
+
+    Single-node (``nodes < 2``) returns ``gpu_type`` UNCHANGED, so existing
+    single-node recipe keys and their KB data are byte-for-byte preserved.
+
+    Multi-node (``nodes >= 2``) encodes the deployment topology so structurally
+    different formations never share a key (and never overwrite each other's
+    ``best_config``):
+
+    * ``_ws{world_size}`` (``world_size = nodes * gpus_per_node``) — physical
+      scale, always present multi-node.
+    * ``_pd{pn}p{dn}d`` — appended ONLY for prefill/decode disaggregation
+      (``pd_mode == "disaggregated"``), since a disaggregated config carries
+      disagg flags absent from an aggregated one and different prefill/decode
+      splits (1P1D vs 3P1D) have different optima. Aggregated keeps just
+      ``_ws{N}``.
+
+    Tuning knobs (kv_transfer_backend, per-role tp/ep, server flags) are
+    deliberately NOT encoded here — they are the ``best_config`` the KB exists
+    to accumulate within one topology.
+
+    The result feeds BOTH :func:`recipe_canonical_id`'s ``hardware=`` segment
+    AND the top-level ``hardware`` label used by ``/recipes/search``, so callers
+    must apply it to the ``hw`` value ONCE and reuse that result for every KB
+    read/write in the session (else read/write keys diverge).
+
+    Args:
+        gpu_type: Bare GPU identifier (e.g. ``"MI300X"``). Only the KB identity
+            dimension is suffixed; non-KB consumers (Magpie runner / KG) keep
+            the raw type.
+        nodes: Cluster node count (``>= 2`` selects the multi-node suffix).
+        gpus_per_node: GPUs per node, for the ``world_size`` product.
+        pd_mode: ``"aggregated"`` or ``"disaggregated"``.
+        pd_prefill_nodes: Prefill-group node count (disaggregated only).
+        pd_decode_nodes: Decode-group node count (disaggregated only).
+
+    Returns:
+        ``gpu_type`` unchanged for single-node; ``{gpu_type}_ws{world_size}``
+        (aggregated) or ``{gpu_type}_ws{world_size}_pd{pn}p{dn}d``
+        (disaggregated) for multi-node.
+    """
+    base = (gpu_type or "").strip()
+    try:
+        n = int(nodes)
+    except (TypeError, ValueError):
+        return base
+    if n < 2:
+        return base
+    try:
+        ws = n * int(gpus_per_node)
+    except (TypeError, ValueError):
+        return base
+    if ws <= 0:
+        return base
+    slug = f"{base}_ws{ws}"
+    if str(pd_mode or "").strip().lower() == "disaggregated":
+        try:
+            pn = int(pd_prefill_nodes)
+            dn = int(pd_decode_nodes)
+        except (TypeError, ValueError):
+            pn = dn = 0
+        if pn > 0 and dn > 0:
+            slug = f"{slug}_pd{pn}p{dn}d"
+    return slug
+
+
 def canonical_labels(
     *,
     model: str,
@@ -257,6 +332,7 @@ __all__ = [
     "DEFAULT_FRAMEWORK_VERSION_SLUG",
     "DEFAULT_PRECISION_SLUG",
     "recipe_canonical_id",
+    "kb_hardware_slug",
     "canonical_labels",
     "detect_framework_version",
 ]

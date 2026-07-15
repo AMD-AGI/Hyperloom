@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from ..session.paths import (
     mn_profile_trace_root,
@@ -95,7 +96,7 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
             ``mn_backend``).
 
     Returns:
-        str: The resolved multi-node backend (``rayjob`` or ``dynamo``).
+        str: The resolved multi-node backend (``rayjob`` or ``infera``).
 
     Raises:
         SystemExit: With code 2 when the resolved backend is invalid.
@@ -106,38 +107,38 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
         or os.environ.get("MN_BACKEND", "").strip()
         or "rayjob"
     ).lower()
-    if backend not in ("rayjob", "dynamo"):
+    if backend not in ("rayjob", "infera"):
         print(
-            f"ERROR: --mn-backend must be 'rayjob' or 'dynamo', got {backend!r}",
+            f"ERROR: --mn-backend must be 'rayjob' or 'infera', got {backend!r}",
             file=sys.stderr,
         )
         sys.exit(2)
     return backend
 
-def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
-    """When ``--nodes >= 2`` and ``--mn-backend dynamo``, create an idle
-    DynamoDeployment and export the frontend service_url for benchmarks.
+def _provision_multi_node_infera_stack(args: argparse.Namespace) -> None:
+    """When ``--nodes >= 2`` and ``--mn-backend infera``, create an idle
+    InferaDeployment and export the frontend service_url for benchmarks.
 
     No Ray head / bootstrap / RAY_ADDRESS: the worker pods are idle (sshd),
-    and ``restart-server`` (routed by ``state.backend == 'dynamo'``) SSHes in
-    to launch ``dynamo.sglang``/``dynamo.vllm``. Benchmarks target the Dynamo
-    frontend (:8000) via ``state.service_url`` — picked up automatically by
-    ``_multi_node_env.benchmark_env_for_subprocess``.
+    and ``restart-server`` (routed by ``state.backend == 'infera'``) SSHes in
+    to launch ``infera.engine.sglang``/``infera.engine.vllm``. Benchmarks
+    target the Infera frontend (:8000) via ``state.service_url`` — picked up
+    automatically by ``_multi_node_env.benchmark_env_for_subprocess``.
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads ``nodes``,
-            ``rayjob_image``, ``rayjob_gpus_per_node``, and PD flags).
+            ``model``, ``mn_image``, ``gpus_per_node``, and PD flags).
 
     Raises:
-        SystemExit: With code 2 when a required Dynamo image is not resolvable.
+        SystemExit: With code 2 when a required Infera image is not resolvable.
     """
     nodes = max(1, int(args.nodes))
-    from ..multi_node.cli import cmd_create_dynamo, _load_state
+    from ..multi_node.cli import cmd_create_infera, _load_state
     from ..multi_node.state_paths import resolve_state_file
 
     state_path = resolve_state_file()
-    image = (getattr(args, "rayjob_image", None) or "").strip() or os.environ.get(
-        "INFERENCE_OPTIMIZER_RAYJOB_IMAGE", ""
+    image = (getattr(args, "mn_image", None) or "").strip() or os.environ.get(
+        "INFERENCE_OPTIMIZER_MN_IMAGE", ""
     ).strip()
     if not image and state_path.is_file():
         try:
@@ -147,14 +148,24 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
             image = ""
     if not image:
         print(
-            "ERROR: --nodes >= 2 --mn-backend dynamo requires a Dynamo image "
-            "WITH the sshd layer (mn-idle.sh). Pass --rayjob-image <harbor/...> "
-            "or set INFERENCE_OPTIMIZER_RAYJOB_IMAGE.",
+            "ERROR: --nodes >= 2 --mn-backend infera requires an Infera image "
+            "WITH the sshd layer (mn-idle.sh). Pass --mn-image <harbor/...> "
+            "or set INFERENCE_OPTIMIZER_MN_IMAGE.",
             file=sys.stderr,
         )
         sys.exit(2)
 
-    gpn = getattr(args, "rayjob_gpus_per_node", None)
+    # The Infera frontend needs the model path for --router-tokenizer-path.
+    model = (str(getattr(args, "model", None) or "").strip()) or os.environ.get("MODEL_PATH", "").strip()
+    if not model:
+        print(
+            "ERROR: --nodes >= 2 --mn-backend infera requires --model (or "
+            "$MODEL_PATH) for the Infera frontend --router-tokenizer-path.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    gpn = getattr(args, "gpus_per_node", None)
     if gpn is None:
         try:
             gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
@@ -163,18 +174,19 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
 
     poll_timeout = int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110)
     # Hyperloom patch (operator-local): forward --pd-* flags so the auto-created
-    # DGD honours the operator's PD topology AND so cmd_create_dynamo's reuse
+    # IDEP honours the operator's PD topology AND so cmd_create_infera's reuse
     # path classifies pods under the correct prefill/decode roles when writing
     # /tmp/multi_node_state.json. Without these forwards the helper defaults
     # pd_mode to 'aggregated' regardless of the optimize CLI, and downstream
     # restart_server_for_round finds zero prefill/decode pods → no SSH launch →
     # baseline gets 0 completed requests → baseline_failed after 3 attempts.
     _pd_kv_backend = (getattr(args, "pd_transfer_backend", "") or "").strip() or os.environ.get(
-        "INFERENCE_OPTIMIZER_DYNAMO_KV_BACKEND", "nixl"
+        "INFERENCE_OPTIMIZER_INFERA_KV_BACKEND", "mori"
     )
     ns_create = argparse.Namespace(
         workspace=None,
         image=image,
+        model=model,
         nodes=nodes,
         gpus_per_node=int(gpn),
         cpus_per_node=96,
@@ -200,7 +212,7 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
         pd_prefill_tp=int(getattr(args, "pd_prefill_tp", 0) or 0),
         pd_decode_tp=int(getattr(args, "pd_decode_tp", 0) or 0),
     )
-    rc = cmd_create_dynamo(ns_create)
+    rc = cmd_create_infera(ns_create)
     if rc != 0:
         sys.exit(rc)
 
@@ -212,12 +224,12 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
         # visible to any early shell-level Magpie call too.
         os.environ["BENCHMARK_BASE_URL"] = su
         os.environ["MAGPIE_RUN_PHASE"] = "client"
-        print(f"multi-node(dynamo): BENCHMARK_BASE_URL={su} (frontend :8000)")
+        print(f"multi-node(infera): BENCHMARK_BASE_URL={su} (frontend :8000)")
 
     # Install GEAK kernel tooling on the GPU pods (SSH-installed so the
     # kernel-agent finds `geak` on PATH). Skipped when the run opted out of
     # the kernel phase. Best-effort (failures surface later as clear pod-side
-    # errors) and Dynamo-only (the helper no-ops for other backends).
+    # errors) and Infera-only (the helper no-ops for other backends).
     from ..multi_node.cli import install_geak_on_pods_best_effort
 
     if not getattr(args, "no_kernel", False):
@@ -226,8 +238,8 @@ def _provision_multi_node_dynamo_stack(args: argparse.Namespace) -> None:
 def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS.
 
-    For ``--mn-backend dynamo`` this delegates to
-    :func:`_provision_multi_node_dynamo_stack` (idle DynamoDeployment + SSH).
+    For ``--mn-backend infera`` this delegates to
+    :func:`_provision_multi_node_infera_stack` (idle InferaDeployment + SSH).
 
     No-op when ``--nodes < 2``. The RayJob path resolves the container image
     (CLI flag → env → prior state file), creates or reuses the RayJob, runs the
@@ -245,8 +257,8 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     if nodes < 2:
         return
 
-    if _resolve_mn_backend(args) == "dynamo":
-        _provision_multi_node_dynamo_stack(args)
+    if _resolve_mn_backend(args) == "infera":
+        _provision_multi_node_infera_stack(args)
         return
 
     from ..multi_node.cli import cmd_bootstrap, cmd_create_rayjob, _load_state
@@ -254,8 +266,8 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
 
     state_path = resolve_state_file()
-    image = (getattr(args, "rayjob_image", None) or "").strip() or os.environ.get(
-        "INFERENCE_OPTIMIZER_RAYJOB_IMAGE", ""
+    image = (getattr(args, "mn_image", None) or "").strip() or os.environ.get(
+        "INFERENCE_OPTIMIZER_MN_IMAGE", ""
     ).strip()
     if not image and state_path.is_file():
         try:
@@ -266,12 +278,12 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     if not image:
         print(
             "ERROR: --nodes >= 2 requires a RayJob container image. Pass "
-            "--rayjob-image <harbor/...> or set INFERENCE_OPTIMIZER_RAYJOB_IMAGE.",
+            "--mn-image <harbor/...> or set INFERENCE_OPTIMIZER_MN_IMAGE.",
             file=sys.stderr,
         )
         sys.exit(2)
 
-    gpn = getattr(args, "rayjob_gpus_per_node", None)
+    gpn = getattr(args, "gpus_per_node", None)
     if gpn is None:
         try:
             gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
@@ -433,3 +445,70 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
             f"skipped={skipped} failed={failed} "
             f"(scanned {len(manifests)} manifest(s) under {workspace_root})"
         )
+
+
+def _dump_mn_input_params(args: argparse.Namespace, nodes_resolved: int) -> None:
+    """Dump resolved multi-node input params (CLI args + relevant env) to
+    ``$USER_DATA_PATH/optimizer_runs`` for tracing the env->CLI migration.
+
+    Many knobs moved from env vars to CLI flags; this snapshot records both
+    the parsed CLI namespace and the multi-node-relevant env at launch so a
+    mismatch (e.g. a flag not picking up its old env, or a stale env still
+    leaking) is auditable post-hoc. Secrets are redacted; best-effort and
+    never raises.
+
+    Args:
+        args: The parsed optimize CLI namespace.
+        nodes_resolved: The resolved node count (>=2 for multi-node).
+    """
+    try:
+        import datetime as _dt
+
+        base = os.path.expandvars("$USER_DATA_PATH/optimizer_runs")
+        if "$" in base or not base.startswith("/"):
+            base = "/tmp/optimizer_runs"
+        os.makedirs(base, exist_ok=True)
+        ts = _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+        def _redact(key: str, val: Any) -> Any:
+            kl = str(key).lower()
+            if any(tok in kl for tok in ("api_key", "secret", "token", "password")):
+                return "***REDACTED***"
+            return val
+
+        cli: dict[str, Any] = {}
+        for k, v in sorted(vars(args).items()):
+            try:
+                json.dumps(v)
+                cli[k] = _redact(k, v)
+            except (TypeError, ValueError):
+                cli[k] = _redact(k, repr(v))
+
+        env_prefixes = (
+            "INFERENCE_OPTIMIZER_", "HYPERLOOM_MN_", "PD_", "SAFE_", "MAGPIE_",
+            "SGLANG_", "NCCL_", "MC_", "MORI_", "AITER_",
+        )
+        env_exact = (
+            "MODEL_PATH", "FRAMEWORK", "TP", "EP", "NODES", "MN_BACKEND",
+            "MODEL_CLASS", "PRECISION", "USER_DATA_PATH", "SAFE_WORKSPACE",
+            "BENCHMARK_BASE_URL", "SKIP_VARIANTS", "RUN_EVAL",
+            "GPU_TYPE", "ISL", "OSL", "CONC", "RANDOM_RANGE_RATIO",
+            "INFERENCEX_PATH", "TRACELENS_ROOT", "NODE_TLS_REJECT_UNAUTHORIZED",
+        )
+        env: dict[str, str] = {}
+        for k, v in sorted(os.environ.items()):
+            if k.startswith(env_prefixes) or k in env_exact:
+                env[k] = _redact(k, v)
+
+        out = os.path.join(base, "mn_input_params_" + ts + ".json")
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(
+                {"ts": ts, "nodes_resolved": nodes_resolved, "cli_args": cli, "env": env},
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+        print("multi-node input params dumped -> " + out)
+        log.info("multi-node input params (nodes=%d) dumped to %s", nodes_resolved, out)
+    except Exception as exc:  # noqa: BLE001 - tracing aid must never break the run
+        log.warning("failed to dump multi-node input params: %r", exc)

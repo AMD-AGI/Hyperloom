@@ -3,8 +3,8 @@
 """Regression: the ``optimize --mn-backend`` flag must be registered.
 
 ``_resolve_mn_backend`` reads ``getattr(args, "mn_backend", ...)`` and SKILL.md /
-error messages advertise ``optimize --mn-backend dynamo`` as the primary way to
-select the Dynamo backend, but the flag was never ``add_argument``-ed — so the
+error messages advertise ``optimize --mn-backend infera`` as the primary way to
+select the Infera backend, but the flag was never ``add_argument``-ed — so the
 documented command died with ``error: unrecognized arguments`` and only the
 ``INFERENCE_OPTIMIZER_MN_BACKEND`` env var worked. These lock the flag in and
 pin the resolution precedence (flag > env > rayjob).
@@ -22,11 +22,11 @@ def _args(*extra: str) -> list[str]:
     return ["optimize", "--model", "/tmp/no-such-model", *extra]
 
 
-def test_mn_backend_flag_is_registered_and_parses_dynamo():
+def test_mn_backend_flag_is_registered_and_parses_infera():
     parser = _build_parser()
-    ns = parser.parse_args(_args("--mn-backend", "dynamo"))
-    assert ns.mn_backend == "dynamo"
-    assert _resolve_mn_backend(ns) == "dynamo"
+    ns = parser.parse_args(_args("--mn-backend", "infera"))
+    assert ns.mn_backend == "infera"
+    assert _resolve_mn_backend(ns) == "infera"
 
 
 def test_mn_backend_flag_parses_rayjob():
@@ -49,16 +49,16 @@ def test_mn_backend_flag_overrides_env(monkeypatch):
     # Flag wins over env (precedence: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND).
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     parser = _build_parser()
-    ns = parser.parse_args(_args("--mn-backend", "dynamo"))
-    assert _resolve_mn_backend(ns) == "dynamo"
+    ns = parser.parse_args(_args("--mn-backend", "infera"))
+    assert _resolve_mn_backend(ns) == "infera"
 
 
 def test_mn_backend_env_used_when_flag_absent(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "dynamo")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "infera")
     parser = _build_parser()
     ns = parser.parse_args(_args())
     assert ns.mn_backend is None
-    assert _resolve_mn_backend(ns) == "dynamo"
+    assert _resolve_mn_backend(ns) == "infera"
 
 
 def test_mn_backend_rejects_invalid_choice():

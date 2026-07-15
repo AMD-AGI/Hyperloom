@@ -31,10 +31,33 @@ from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 from ...loop.sub_agent_runner import RunnerContext
+from ._multi_node_env import is_multi_node
 
 log = logging.getLogger(__name__)
 
 _PROFILE_MAX_ATTEMPTS = 3
+
+# Env switch for the multi-node compute-bound auto re-profile (default on; set to
+# "0" to disable). Only ever consulted on multi-node runs.
+_AUTO_COMPUTE_BOUND_ENV = "HYPERLOOM_PROFILE_AUTO_COMPUTE_BOUND"
+
+
+def _trace_is_high_idle(ta_result: dict[str, Any]) -> bool:
+    """Whether trace_analyze flagged the profiled step as host-bound (high GPU
+    idle), i.e. carries a ``high_gpu_idle_pct`` trace-health warning.
+
+    Args:
+        ta_result: The trace_analyze result dict.
+
+    Returns:
+        bool: True when a high-GPU-idle warning is present.
+    """
+    if not isinstance(ta_result, dict):
+        return False
+    for w in ta_result.get("trace_health_warnings") or []:
+        if isinstance(w, dict) and w.get("code") == "high_gpu_idle_pct":
+            return True
+    return False
 
 # seconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = functools.partial(now_iso, "seconds")
@@ -622,6 +645,70 @@ class RooflineExecutor:
             health = list(ta_result.get("trace_health_warnings") or [])
             health.append(warning)
             ta_result["trace_health_warnings"] = health
+
+        # Multi-node compute-bound auto re-profile: a host-bound (high-idle)
+        # trace under PD-disagg + DP yields zero kernel candidates because the
+        # per-rank per-step batch is tiny. Re-profile ONCE with DP-attention /
+        # dp-size stripped (single DP rank at full per-step batch => compute-
+        # bound) so kernel candidates can surface. Candidates are still validated
+        # on the real served config downstream. Multi-node only, single-shot,
+        # fail-soft (any error keeps the original host-bound result).
+        if (
+            not hot
+            and is_multi_node()
+            and os.environ.get(_AUTO_COMPUTE_BOUND_ENV, "1").strip() != "0"
+            and _trace_is_high_idle(ta_result)
+        ):
+            from ._multi_node_server_lifecycle import _COMPUTE_BOUND_PROFILE_ENV
+
+            log.info(
+                "roofline: host-bound trace (0 hot kernels + high GPU idle); "
+                "attempting one compute-bound re-profile (DP-attention stripped)"
+            )
+            _prev_cb = os.environ.get(_COMPUTE_BOUND_PROFILE_ENV)
+            os.environ[_COMPUTE_BOUND_PROFILE_ENV] = "1"
+            try:
+                cb_ctx = self._wrap_profile_ctx(ctx, framework=framework)
+                cb_profile = await profile_executor(cb_ctx)
+                cb_trace = (
+                    _extract_trace_path(cb_profile) if isinstance(cb_profile, dict) else ""
+                )
+                if cb_trace:
+                    cb_payload: dict[str, Any] = {"trace_input": str(cb_trace)}
+                    if roofline_arm:
+                        cb_payload["roofline_arm"] = roofline_arm
+                    if roofline_output_name:
+                        cb_payload["roofline_output_name"] = roofline_output_name
+                    cb_ta = await trace_analyze_handler(cb_payload, session_dir=session_dir)
+                    if isinstance(cb_ta, dict) and cb_ta.get("status") == "ok":
+                        cb_hot = (
+                            cb_ta.get("hot_kernels_top15") or cb_ta.get("hot_kernels") or []
+                        )
+                        if cb_hot:
+                            log.info(
+                                "roofline: compute-bound re-profile surfaced %d hot "
+                                "kernel(s); adopting it for candidate dispatch",
+                                len(cb_hot),
+                            )
+                            ta_result = cb_ta
+                            ta_payload = cb_payload
+                            hot = cb_hot
+                            trace_path = cb_trace
+                        else:
+                            log.info(
+                                "roofline: compute-bound re-profile still host-bound "
+                                "/ no hot kernels; keeping original result"
+                            )
+            except Exception as exc:  # noqa: BLE001 — fail-soft
+                log.warning(
+                    "roofline: compute-bound re-profile failed (%s); keeping original",
+                    exc,
+                )
+            finally:
+                if _prev_cb is None:
+                    os.environ.pop(_COMPUTE_BOUND_PROFILE_ENV, None)
+                else:
+                    os.environ[_COMPUTE_BOUND_PROFILE_ENV] = _prev_cb
 
         # Cache via the C1 recorder (bumps roofline_snapshot_id by one, writes analysis_md_text / analysis_md_path).
         self.shared_state.record_trace_analyze(ta_payload, ta_result)
