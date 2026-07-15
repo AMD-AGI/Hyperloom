@@ -1239,8 +1239,8 @@ class FrameworkPhase(PhaseHandler):
         + opted-in ROCm/HIP/aiter bridge repos) via the ``sources`` layer, then
         ranks each :class:`framework_agent.models.Candidate` with
         ``score_enablement_title`` (per-Candidate so the ref/html_url is
-        preserved — ``rank_titles`` only scores bare strings) and returns the
-        top ``req.max_search_candidates`` refs (``html_url`` preferred).
+        preserved) and returns the top ``req.max_search_candidates`` refs
+        (``html_url`` preferred).
 
         Network + git; **fully exception-guarded**: any failure degrades to an
         empty tuple so the mandate falls back to repos-only.

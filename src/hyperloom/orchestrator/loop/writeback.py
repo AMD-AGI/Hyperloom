@@ -3372,34 +3372,24 @@ class WritebackCollaborator:
             pin_num_prompts=True,
         )
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
-            if self._geak_legacy_promote():
-                # Legacy: current_best/stack were written up front; stamp the
-                # same-harness validated watermark from GEAK's OWN headline speedup.
-                self.shared_state.cumulative_gain_validated = (geak_sp - 1.0) * 100.0
-                self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
-                self.shared_state.cumulative_gain_provenance = "geak_same_harness_geak"
-                self.shared_state.resume_pending_revalidation = False
-                gain_out = (geak_sp - 1.0) * 100.0
-            else:
-                # Rebench-first: write the headline from the GEAK-harness MEASURED
-                # throughput (engages by construction via the launch-script replay),
-                # keeping the leaderboard number a same-harness total rather than a
-                # self-reported speedup.
-                measured = _geak_sweep_measured_tput(res)
-                if measured is None:
-                    log.warning(
-                        "geak 2a: succeeded sweep but no measurable throughput; "
-                        "candidate stays pending"
-                    )
-                    return {"validated": False, "status": res.get("status"), "reason": reason}
-                self._promote_geak_from_candidate(
-                    ps,
-                    measured_tput=measured,
-                    provenance="geak_same_harness_geak",
+            # Rebench-first: write the headline from the GEAK-harness MEASURED
+            # throughput (engages by construction via the launch-script replay),
+            # keeping the leaderboard number a same-harness total rather than a
+            # self-reported speedup.
+            measured = _geak_sweep_measured_tput(res)
+            if measured is None:
+                log.warning(
+                    "geak 2a: succeeded sweep but no measurable throughput; "
+                    "candidate stays pending"
                 )
-                base = float(self.shared_state.baseline_tput or 0.0)
-                gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
+                return {"validated": False, "status": res.get("status"), "reason": reason}
+            self._promote_geak_from_candidate(
+                ps,
+                measured_tput=measured,
+                provenance="geak_same_harness_geak",
+            )
+            base = float(self.shared_state.baseline_tput or 0.0)
+            gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 - defensive
