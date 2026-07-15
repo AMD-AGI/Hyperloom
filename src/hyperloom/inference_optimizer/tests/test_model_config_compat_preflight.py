@@ -60,6 +60,44 @@ def _default_non_amd_gpu(monkeypatch):
 # ---------------------------------------------------------------------------
 # _detect_incompatible_model_config
 # ---------------------------------------------------------------------------
+def test_compat_detector_registry_order_is_pinned():
+    """The waterfall order is a behavioral contract (first match wins).
+
+    Steps 1 (diffusers) and 2 (config absent/corrupt) are the inline prologue in
+    ``_detect_incompatible_model_config``; this registry is steps 3-15. Pin the
+    exact order + the amd_only / skip_when_scriptable flags so an accidental
+    reorder (which would silently change which reason wins) is caught.
+    """
+    specs = cli_model_gate._COMPAT_DETECTORS
+    assert [s.name for s in specs] == [
+        "amd_unsupported_quant",  # 3
+        "amd_unsupported_architecture",  # 4
+        "null_strict_bool",  # 5
+        "rope_without_max_position",  # 6
+        "phi3_rope_scaling",  # 7
+        "gemma2_hidden_act",  # 8
+        "unrecognized_architecture",  # 9
+        "private_quant",  # 10
+        "peft_adapter_only",  # 11
+        "vocab_weight_shape",  # 12
+        "tokenizer_artifacts",  # 13
+        "unregistered_custom_autoconfig",  # 14
+        "amd_dual_chunk_attention",  # 15
+    ]
+    assert {s.name for s in specs if s.amd_only} == {
+        "amd_unsupported_quant",
+        "amd_unsupported_architecture",
+        "amd_dual_chunk_attention",
+    }
+    assert {s.name for s in specs if s.skip_when_scriptable} == {
+        "tokenizer_artifacts",
+    }
+    # Step 13 is a 3-detector short-circuiting sub-chain.
+    tok = next(s for s in specs if s.name == "tokenizer_artifacts")
+    assert isinstance(tok.fn, tuple)
+    assert len(tok.fn) == 3
+
+
 def test_detect_healthy_config_returns_none(tmp_path):
     m = tmp_path / "ok"
     _write_config(m, model_type="llama", max_position_embeddings=4096)

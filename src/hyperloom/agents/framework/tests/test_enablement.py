@@ -159,7 +159,7 @@ def test_enablement_no_progress_clean_boot_unknown_signature() -> None:
 def test_enablement_setup_guidance_in_mandate() -> None:
     """Q3: the authored mandate authorizes env setup and asks to record setup_commands."""
     from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_authoring import ENABLEMENT_SETUP_GUIDANCE, build_mandate
+    from hyperloom.agents.framework.enablement_ops import ENABLEMENT_SETUP_GUIDANCE, build_mandate
 
     req = EnablementRequest(
         framework="vllm",

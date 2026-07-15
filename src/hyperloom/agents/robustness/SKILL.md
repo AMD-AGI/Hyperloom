@@ -205,7 +205,7 @@ local-only.
 ## Session-end postmortem (L1 + L2)
 
 When the Coordinator sets `state.json::stop_reason` (run wind-down)
-the reactor fires :class:`hyperloom.agents.robustness.finalize.postmortem.PostmortemFinalizer`
+the reactor fires :class:`hyperloom.agents.robustness.role.postmortem.PostmortemFinalizer`
 exactly once. It aggregates the in-session findings + per-task
 `runs/<action>/<task_id>/result.json` into:
 
@@ -217,7 +217,7 @@ exactly once. It aggregates the in-session findings + per-task
 
 Disable via `Config.finalize_enabled=False`. Operators can re-run the
 finalizer post-hoc via
-`hyperloom.agents.robustness.finalize.postmortem.finalize_session(session_dir, session_id=...)`
+`hyperloom.agents.robustness.role.postmortem.finalize_session(session_dir, session_id=...)`
 (noop when the marker exists).
 
 ## Critic feedback loop (L4)

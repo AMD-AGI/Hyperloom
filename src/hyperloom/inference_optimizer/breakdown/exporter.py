@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_json
+from hyperloom.common.timeutil import iso_z
 
 from . import collectors
 from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3
@@ -44,7 +45,7 @@ def _phase_event_key(ev: dict[str, Any]) -> tuple[str, str, str]:
     """
     return (
         str(ev.get("action") or ""),
-        collectors._iso_z(ev.get("ts"))[:19],
+        iso_z(ev.get("ts"))[:19],
         str(ev.get("change") or ev.get("task_id") or ""),
     )
 

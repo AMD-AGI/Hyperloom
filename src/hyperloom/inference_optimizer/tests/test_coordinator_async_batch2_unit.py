@@ -213,7 +213,7 @@ async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinato
         "patches": ["/tmp/p.diff"],
     }
     monkeypatch.setattr(
-        coord.resume_helper,
+        coord.writeback,
         "_resume_rollback_pending_integrate",
         lambda pending: {"reversed": list(pending["patches"]), "failed": []},
     )
@@ -1012,9 +1012,9 @@ async def test_compose_prompt_orchestration_all_advisory_blocks(
     monkeypatch.setattr(ss, "to_gaps_summary", lambda: "GAPS-BLOCK")
     monkeypatch.setattr(ss, "to_proposal_scores_summary", lambda: "SCORES-BLOCK")
     monkeypatch.setattr(ss, "to_intervention_mix_summary", lambda: "MIX-BLOCK")
-    monkeypatch.setattr(coord.advisory, "_target_gap_advisory_block", lambda: "GAP-BLOCK")
-    monkeypatch.setattr(coord.advisory, "_priors_match_advisory_block", lambda: "PRIORS-BLOCK")
-    monkeypatch.setattr(coord.advisory, "_plateau_advisory_block", lambda: "PLATEAU-BLOCK")
+    monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", lambda: "GAP-BLOCK")
+    monkeypatch.setattr(coord.conversation, "_priors_match_advisory_block", lambda: "PRIORS-BLOCK")
+    monkeypatch.setattr(coord.conversation, "_plateau_advisory_block", lambda: "PLATEAU-BLOCK")
     from hyperloom.orchestrator.knowledge import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-BLOCK")
@@ -1049,9 +1049,9 @@ async def test_compose_prompt_orchestration_advisory_blocks_raise(
     monkeypatch.setattr(ss, "to_gaps_summary", _boom)
     monkeypatch.setattr(ss, "to_proposal_scores_summary", _boom)
     monkeypatch.setattr(ss, "to_intervention_mix_summary", _boom)
-    monkeypatch.setattr(coord.advisory, "_target_gap_advisory_block", _boom)
-    monkeypatch.setattr(coord.advisory, "_priors_match_advisory_block", _boom)
-    monkeypatch.setattr(coord.advisory, "_plateau_advisory_block", _boom)
+    monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", _boom)
+    monkeypatch.setattr(coord.conversation, "_priors_match_advisory_block", _boom)
+    monkeypatch.setattr(coord.conversation, "_plateau_advisory_block", _boom)
     from hyperloom.orchestrator.knowledge import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", _boom)
@@ -1390,7 +1390,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
             "attempts": [{"r": 1}],
         },
     )
-    monkeypatch.setattr(coord.advisory, "_target_gap_advisory_block", lambda: "GAP-NOTES")
+    monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", lambda: "GAP-NOTES")
     from hyperloom.orchestrator.knowledge import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
@@ -1616,14 +1616,14 @@ def test_run_action_now_sync_requires_name(coord: Coordinator) -> None:
 
 def test_run_action_now_sync_not_whitelisted(coord: Coordinator, monkeypatch) -> None:
     coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.inline_actions, "_inline_action_whitelist", lambda: {"report"})
+    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
     out = coord._run_action_now_sync("explore")
     assert "not inline-eligible" in out
 
 
 def test_run_action_now_sync_no_loop(coord: Coordinator, monkeypatch) -> None:
     coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.inline_actions, "_inline_action_whitelist", lambda: {"report"})
+    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
     coord._coordinator_loop = None
     out = coord._run_action_now_sync("report")
     assert "coordinator loop not running" in out
@@ -1800,7 +1800,7 @@ def _delegate(action_name: str, key: str, params=None) -> Intent:
 async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
-    monkeypatch.setattr(coord.gating, "_sequence_denial_for_action", lambda a: None)
+    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-pruned"))
     # advisory observation recorded but the task is still queued
     assert await coord.tasks.queued()
@@ -1811,7 +1811,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
     from hyperloom.orchestrator.policy.gate import PolicyDenied
 
     monkeypatch.setattr(
-        coord.gating,
+        coord.dispatcher,
         "_sequence_denial_for_action",
         lambda a: PolicyDenied(
             "blocked",
@@ -1832,7 +1832,7 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 @pytest.mark.asyncio
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord.gating, "_sequence_denial_for_action", lambda a: None)
+    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
     await coord._handle_delegate("orchestration", _delegate("explore", "d-same"))
     recorded: list = []
 

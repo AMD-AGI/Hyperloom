@@ -30,7 +30,62 @@ from the local store or a central GET.
 
 from __future__ import annotations
 
-from .canonical_id import (
+from typing import Any, Mapping
+
+
+# ---------------------------------------------------------------------------
+# Shared error type for the recipe-snapshot KB remote clients.
+# ---------------------------------------------------------------------------
+# Writes are local-only by design (:class:`LocalRecipeStore` is the source of
+# truth); the read-side remote is the gbrain page store
+# (:class:`gbrain_remote_client.GbrainRemoteRecipeClient`). That client raises
+# :class:`RemoteRecipeClientError` (via its ``GbrainRemoteError`` subclass) on
+# any unrecoverable interaction so the :class:`RecipeKB` dispatcher can degrade
+# to the local store with a single ``except``.
+#
+# Defined here (before the relative imports below) because ``dispatcher`` and
+# ``gbrain_remote_client`` import this class back from the package root; putting
+# it above ``from .dispatcher import RecipeKB`` keeps that partial-init cycle
+# safe.
+class RemoteRecipeClientError(RuntimeError):
+    """Raised on any unrecoverable interaction with a remote recipe KB.
+
+    The dispatcher catches this and degrades to the local store. Carries
+    a ``category`` discriminator (``transport`` / ``business`` /
+    ``validation`` / ``unknown``) so a future smarter dispatcher can
+    decide between "retry with backoff" and "fall through immediately".
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str = "unknown",
+        code: str = "",
+        status: int | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Build the error with a category discriminator and context.
+
+        Args:
+            message (str): Human-readable error description.
+            category (str): Failure class — one of ``transport`` /
+                ``business`` / ``validation`` / ``unknown``.
+            code (str): Machine-readable error code from the server
+                envelope, if any.
+            status (int | None): HTTP status code, if a response was
+                received.
+            details (Mapping[str, Any] | None): Extra structured error
+                context; copied into ``self.details``.
+        """
+        super().__init__(message)
+        self.category = category
+        self.code = code
+        self.status = status
+        self.details = dict(details or {})
+
+
+from .canonical_id import (  # noqa: E402
     CANONICAL_ID_DIMENSIONS,
     CANONICAL_ID_PREFIX,
     DEFAULT_FRAMEWORK_SLUG,
@@ -46,8 +101,8 @@ from .canonical_id import (
     detect_framework_version,
     recipe_canonical_id,
 )
-from .dispatcher import RecipeKB
-from .local_store import (
+from .dispatcher import RecipeKB  # noqa: E402
+from .local_store import (  # noqa: E402
     ATTEMPTS_FILENAME,
     HISTORY_DIRNAME,
     LOCK_FILENAME,
@@ -55,8 +110,7 @@ from .local_store import (
     LocalRecipeStoreError,
     RECIPE_FILENAME,
 )
-from .remote_client import RemoteRecipeClientError
-from .schema import Attempt, Recipe
+from .schema import Attempt, Recipe  # noqa: E402
 
 
 __all__ = [
