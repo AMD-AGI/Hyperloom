@@ -81,7 +81,7 @@ advance gates are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit,
 the per-phase budget cap, or a terminal `stop_reason` exit
 EXPLORE / KERNEL_AGENT / SWEEP; the wall-clock deadline routes to CLOSE.
 
-**Cyclic macro-cycles (default on; `INFERENCE_OPTIMIZER_CYCLIC_PHASES`).**
+**Cyclic macro-cycles (default on).**
 On long / unbounded runs the chain is *not* a single one-way pass: after
 SWEEP the Coordinator **loops back** to FRAMEWORK / EXPLORE to open a
 **new macro-cycle** (`reason=cycle_reloop`) while session budget and
@@ -118,17 +118,10 @@ sweep cannot run at all — where `robustness_escalated` is the truthful
 label. `skip_to_kernel` / `skip_to_sweep` are unaffected (non-terminal
 lever switches); this caveat applies only to `skip_to_close`.
 
-Phase interleave is **on by default** (set
-`INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=0` to disable): EXPLORE may
-additionally REQUEST kernel_agent-owned kinds and KERNEL may additionally
-propose / delegate explore / specialist / integrate_patch so kernel
-insights and config refinements can be interleaved within a single
-phase. The phase chain stays monotonic; only the per-phase action
-contract is widened. Caveat: in KERNEL, do not interleave to
-`explore` / `specialist` while `has_keep_pending_integrate=true`
-(kernel KEEP queue not yet drained) — `integrate` the pending KEEPs first so their e2e gain is validated
-before any explore round measures `current_best` (see the KERNEL
-phase entry below).
+Phase interleave is disabled by policy: EXPLORE and KERNEL_AGENT keep
+strict per-phase action contracts. Cross-phase ideas should be recorded as
+gaps or requested through explicit phase advancement rather than widened
+in-place action sets.
 
 Every tick the per-tick prompt includes a `=== Phase ===` block with:
 
@@ -267,10 +260,7 @@ grid-runner entry):
     deterministically advances EXPLORE → KERNEL_AGENT (a non-terminal lever
     switch, `reason=explore_no_more_leverage`) so the run pivots to the
     kernel lever instead of spinning further exploration rounds. It never
-    ends the run on its own. (With `INFERENCE_OPTIMIZER_CYCLIC_PHASES=0`
-    the plateau is advisory only, and EXPLORE moves forward solely via the
-    HARD force-exit gate, the EXPLORE phase budget, or an explicit
-    `escalate_strategy_change` hint.) You may still request an earlier
+    ends the run on its own. You may still request an earlier
     advance with an `escalate_strategy_change` hint
     (`skip_to_kernel` / `skip_to_sweep` / `skip_to_close`). KERNEL and
     FRAMEWORK plateaus remain advisory only.

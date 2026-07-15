@@ -36,10 +36,10 @@ The Coordinator advances through the live phase chain:
 PRELUDE -> FRAMEWORK_AGENT -> EXPLORE -> KERNEL_AGENT -> SWEEP -> CLOSE
 ```
 
-For a normal single-pass run (`--max-hours <= 24`) the chain is traversed
+For a normal single-pass run (`--max-hours < 24`) the chain is traversed
 once. Cyclic macro-cycling is enabled by default
 (`INFERENCE_OPTIMIZER_CYCLIC_PHASES`): with a large or unbounded budget
-(`--max-hours > 24`), SWEEP can `cycle_reloop` back to `FRAMEWORK_AGENT` /
+(`--max-hours >= 24`), SWEEP can `cycle_reloop` back to `FRAMEWORK_AGENT` /
 `EXPLORE` for another pass instead of closing.
 
 `machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which

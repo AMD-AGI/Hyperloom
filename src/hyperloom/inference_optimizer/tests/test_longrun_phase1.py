@@ -4,11 +4,11 @@
 
 Covers:
 * ``compute_next_phase`` SWEEP back-edge branches (reloop / converged / no
-  budget / cyclic-off).
+  budget / short-run close).
 * per-cycle budget window.
 * Coordinator loopback application (macro_cycle bump, marker reset, streak).
 * PolicyGate re-entry after a loopback is not falsely denied.
-* 12h single-cycle regression: cyclic-off behaviour byte-for-byte unchanged.
+* 12h single-cycle regression: short-run behaviour stays single-pass.
 
 All deterministic + offline.
 """
@@ -22,9 +22,6 @@ import pytest
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-
-
-CYCLIC_ENV = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"
 
 
 def _sweep_state(
@@ -55,8 +52,7 @@ def _sweep_state(
 # ==========================================================================
 # R1/R7 — compute_next_phase SWEEP back-edge
 # ==========================================================================
-def test_sweep_reloops_to_explore_when_budget_and_leverage(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_sweep_reloops_to_explore_when_budget_and_leverage():
     st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
     nxt = ps.compute_next_phase(st, max_hours=96.0)
     assert nxt is not None
@@ -67,8 +63,7 @@ def test_sweep_reloops_to_explore_when_budget_and_leverage(monkeypatch):
     assert evidence["next_cycle"] == 1
 
 
-def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available():
     st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
     st.last_sweep = {}
     st.last_conc_sweep = {"status": "failed"}
@@ -79,8 +74,7 @@ def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available(monkeypatc
     assert "loopback" not in evidence
 
 
-def test_sweep_closes_when_globally_converged(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_sweep_closes_when_globally_converged():
     # No gain this cycle + streak already at 2 → effective 3 ≥ threshold.
     st = _sweep_state(
         macro_cycle=2,
@@ -95,8 +89,7 @@ def test_sweep_closes_when_globally_converged(monkeypatch):
     assert evidence["reloop_blocked"] == "global_converged"
 
 
-def test_sweep_closes_when_insufficient_remaining(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_sweep_closes_when_insufficient_remaining():
     # Long run (48h) but only ~10min remain → below the 30-min reloop floor.
     st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
     target, reason, evidence = ps.compute_next_phase(st, max_hours=48.0)
@@ -105,8 +98,7 @@ def test_sweep_closes_when_insufficient_remaining(monkeypatch):
     assert evidence["reloop_blocked"] == "insufficient_remaining"
 
 
-def test_short_bounded_run_never_reloops(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_short_bounded_run_never_reloops():
     # 12h bounded run with plenty of budget + gain: legacy single-pass chain
     # must wind down to CLOSE, never open a macro-cycle.
     st = _sweep_state(
@@ -125,34 +117,26 @@ def test_short_bounded_run_never_reloops(monkeypatch):
     assert "loopback" not in evidence
 
 
-def test_exactly_24h_is_short_run(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_exactly_24h_is_long_run(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "1")
     st = _sweep_state(max_minutes=24 * 60, started_hours_ago=1.0)
-    assert ps.is_long_run(st) is False
+    assert ps.is_long_run(st) is True
     reloop, ev = ps.should_reloop_to_explore(st)
-    assert reloop is False
-    assert ev["reloop_blocked"] == "short_run_single_pass"
+    assert reloop is True
+    assert ev["reloop"] is True
+    assert ev["next_cycle"] == 1
 
 
 def test_long_and_unbounded_runs_are_long():
-    # > 24h bounded → long.
-    st_long = _sweep_state(max_minutes=24 * 60 + 1, started_hours_ago=1.0)
+    # >= 24h bounded → long.
+    st_long = _sweep_state(max_minutes=24 * 60, started_hours_ago=1.0)
     assert ps.is_long_run(st_long) is True
     # Unbounded (max_minutes == 0) → long (14-day ceiling).
     st_unbounded = _sweep_state(max_minutes=0, started_hours_ago=1.0)
     assert ps.is_long_run(st_unbounded) is True
 
 
-def test_sweep_closes_when_cyclic_disabled(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "0")
-    st = _sweep_state()
-    target, reason, _ = ps.compute_next_phase(st, max_hours=96.0)
-    assert target == ps.PHASE_CLOSE
-    assert reason == "sweep_done"
-
-
-def test_should_reloop_respects_max_cycles(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_should_reloop_respects_max_cycles():
     st = _sweep_state(macro_cycle=5)
     reloop, ev = ps.should_reloop_to_explore(st, max_cycles=6)
     assert reloop is False
@@ -200,7 +184,7 @@ def test_budget_minutes_falls_back_to_max_minutes_when_disabled():
 
 
 def test_budget_minutes_ignores_cycle_window_for_short_run():
-    # Short bounded run (10h ≤ 24h): the per-cycle window must NOT apply, so
+    # Short bounded run (10h < 24h): the per-cycle window must NOT apply, so
     # phase budgets stay anchored on the whole session (legacy behaviour) even
     # if cycle_minutes was pinned.
     st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=600, cycle_minutes=360.0)
@@ -213,7 +197,6 @@ def test_budget_minutes_ignores_cycle_window_for_short_run():
 @pytest.fixture
 def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv(CYCLIC_ENV, "1")
     from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import (
@@ -327,12 +310,11 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
 
 
 # ==========================================================================
-# Regression — cyclic-off path unchanged (12h single-cycle behaviour)
+# Regression — short-run path unchanged (12h single-cycle behaviour)
 # ==========================================================================
-def test_regression_sweep_to_close_evidence_carries_no_loopback(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "0")
-    st = _sweep_state()
+def test_regression_sweep_to_close_evidence_carries_no_loopback():
+    st = _sweep_state(max_minutes=12 * 60)
     target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
     assert (target, reason) == (ps.PHASE_CLOSE, "sweep_done")
     assert "loopback" not in evidence
-    assert evidence.get("cyclic") is False
+    assert evidence.get("reloop_blocked") == "short_run_single_pass"

@@ -2274,15 +2274,13 @@ class WritebackCollaborator:
             best_winner = result.get("best_variant")
             best_tput = result.get("output_throughput")
             promoted = False
-            # A post-resume revalidation task (full-stack ``resume_stack_revalidate``
-            # or env-gated current_best ``resume_reverify_best``) confirms the
-            # EXISTING cumulative stack rather than adding a variant, so it never
+            # A post-resume stack revalidation task confirms the EXISTING
+            # cumulative stack rather than adding a variant, so it never
             # "promotes". Reconcile the validation watermark + clear the
             # ``resume_pending_revalidation`` flag from the measured tput — but
             # ONLY when the rebench actually produced a valid measurement, so a
             # failed/empty rebench leaves the flag set and reports keep warning.
-            _revalidate_sources = {"resume_stack_revalidate", "resume_reverify_best"}
-            if task is not None and str((task.params or {}).get("source") or "") in _revalidate_sources:
+            if task is not None and str((task.params or {}).get("source") or "") == "resume_stack_revalidate":
                 measured = result.get("output_throughput")
                 measured_ok = isinstance(measured, (int, float)) and measured > 0
                 # A GEAK revalidation (2b) must not blindly stamp validated
@@ -2349,13 +2347,7 @@ class WritebackCollaborator:
                         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
                         cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                         recorded = cb_rec.get("tput")
-                        try:
-                            floor = float(
-                                os.environ.get("INFERENCE_OPTIMIZER_RESUME_DRIFT_FLOOR", "").strip()
-                                or _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-                            )
-                        except (TypeError, ValueError):
-                            floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
+                        floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
                         if (
                             isinstance(recorded, (int, float))
                             and recorded > 0
@@ -2962,52 +2954,6 @@ class WritebackCollaborator:
                 log.exception("Coordinator: failed to enqueue resume stack rebench")
                 report["warnings"].append({"kind": "resume_stack_rebench_enqueue_failed"})
 
-        if os.environ.get("INFERENCE_OPTIMIZER_RESUME_REVERIFY_BEST", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
-            cb_now = state.current_best if isinstance(state.current_best, dict) else {}
-            cb_args = str(cb_now.get("extra_server_args") or "").strip()
-            cb_envs = cb_now.get("extra_envs") if isinstance(cb_now.get("extra_envs"), Mapping) else {}
-            if cb_args or cb_envs:
-                try:
-                    tput = cb_now.get("tput")
-                    params: dict[str, Any] = {
-                        "source": "resume_reverify_best",
-                        "reason": "resume_reverify_best",
-                        "grid": [
-                            {
-                                "name": "resume_current_best",
-                                "extra_args": cb_args,
-                                "extra_envs": dict(cb_envs),
-                                "provenance": "resume_reverify_best",
-                                "note": "env-requested post-resume current_best recheck",
-                            }
-                        ],
-                        "base_tput": float(tput) if isinstance(tput, (int, float)) and tput > 0 else 0.0,
-                        "enable_stack_rebench": False,
-                    }
-                    if state.baseline_config_path:
-                        params["config_path"] = state.baseline_config_path
-                    task, existing = await self.tasks.create_or_return_existing(
-                        kind="explore",
-                        params=params,
-                        idempotency_key="resume-reverify-current-best",
-                    )
-                    report["fixes"].append(
-                        {
-                            "kind": "queued_resume_reverify_best",
-                            "task_id": task.task_id,
-                            "existing": bool(existing),
-                        }
-                    )
-                except Exception:  # noqa: BLE001
-                    log.exception("Coordinator: failed to queue resume current_best reverify")
-                    report["warnings"].append({"kind": "resume_reverify_best_enqueue_failed"})
-            else:
-                report["warnings"].append({"kind": "resume_reverify_best_no_config"})
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001

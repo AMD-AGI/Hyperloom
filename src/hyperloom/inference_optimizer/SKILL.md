@@ -258,7 +258,7 @@ Critic-gated, then `git apply`d against the live framework_source_roots
 and benchmarked; KEEP commits to the live tree (next candidate stacks on
 top), REVERT does `git reset --hard`. Exits on low budget
 (<0.6 × max_hours), **plateau (3 consecutive benchmarked candidate tests
-with no KEEP** — env `INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK`),
+with no KEEP**),
 or an empty discovery batch. Resume skips completed candidates by
 idempotency key. The launcher only chooses whether the phase runs
 (`--no-framework-agent`).
@@ -447,16 +447,16 @@ inference_optimizer optimize \
 
 **Caller responsibility (post-classify-removal)**: the in-loop `setup` /
 `classify` actions were deleted; the SKILL caller is now expected to
-supply session metadata directly via CLI flags / env vars:
+supply session metadata directly via CLI flags:
 
-| Surface | CLI flag | Env var | Notes |
-|---|---|---|---|
-| Model path | `--model` | — | required |
-| Framework | `--framework` | `FRAMEWORK` | `sglang` (default) / `vllm` / `atom` / `xdit` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server) |
-| GPU type | `--gpu-type` | `GPU_TYPE` | rocm-smi auto-detect when unset |
-| Model class | `--model-class` | `MODEL_CLASS` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
-| External reference GPU | `--compare-against-gpu` | — | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
-| Quantization prelude | `--quantize` | — | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
+| Surface | CLI flag | Notes |
+|---|---|---|
+| Model path | `--model` | required |
+| Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server) |
+| GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
+| Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
+| External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
+| Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
 
@@ -692,8 +692,8 @@ Operator server flags have one supported CLI entry point:
 `EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` for baseline,
 profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
-`4,16,128` is treated as a sweep ladder: baseline uses the first value and the
-ladder is forwarded to `INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS`.
+`4,16,128` is accepted for compatibility; baseline uses the first value.
+Use `--conc-sweep-concs` for the explicit sweep ladder.
 
 ### Workload-contract reuse (baseline → explore/sweep)
 
@@ -1124,12 +1124,14 @@ Transient SDK errors retry/resume up to the Coordinator emergency threshold.
 
 ### Model-gate errors (preflight #10)
 
-Allowlist: `claude-opus-4-7` (preferred) → `claude-opus-4-6` (fallback). The
-gate is intentional — opus-4-5 / haiku silently degraded prior runs.
+Custom orchestration models are enabled by default and are validated against the
+configured gateway catalog. Set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`
+only when you intentionally want the strict AMD Claude allowlist
+(`claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
 
 | Symptom | Fix |
 |---|---|
-| `--claude-model=... is not allowed` | Drop `--claude-model` / `$CLAUDE_MODEL`. Update `_CLAUDE_ALLOWED_MODELS` in `cli.py` only when a successor is blessed. |
+| `--claude-model=... is not allowed` | You likely set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`; unset it or set it to `1`, then ensure the model appears in the gateway `/models` catalog. |
 | `gateway catalog unreachable after retries` (4 probes at 0/1/3/5s) | Reproduce: `curl -k -H "Authorization: Bearer $SAFE_API_KEY" "$OPENAI_BASE_URL/models" \| jq '.data[].id'`. Gateway answers → proxy/SSL is wrong; gateway down → fix gateway. Fail-fast is intentional vs. 401 mid-baseline. |
 
 ### Critic-agent runtime errors

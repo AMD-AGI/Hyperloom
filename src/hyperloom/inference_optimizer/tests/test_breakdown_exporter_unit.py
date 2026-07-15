@@ -95,10 +95,13 @@ def test_build_empty_session(tmp_path):
     assert any("missing" in w for w in out["warnings"])
 
 
-def test_build_include_transcripts_via_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS", "1")
-    out = ex.build(tmp_path)
-    assert out["schema_version"] is not None
+def test_build_include_transcripts_process_default(tmp_path):
+    ex.set_default_include_transcripts(True)
+    try:
+        out = ex.build(tmp_path)
+        assert out["schema_version"] is not None
+    finally:
+        ex.set_default_include_transcripts(False)
 
 
 # ---- write_breakdown_json ----

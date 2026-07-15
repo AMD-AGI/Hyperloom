@@ -5,7 +5,6 @@ the initial baseline/roofline internal-analysis task enqueue."""
 
 from __future__ import annotations
 import logging as _logging
-import os
 from datetime import datetime, timezone
 from typing import Any
 from . import machine_state as _phase_state
@@ -161,10 +160,7 @@ class PreludePhase(PhaseHandler):
         """
         if not patches:
             return patches
-        try:
-            threshold = float(os.environ.get("WARM_REPLAY_ADVISORY_CONFIDENCE", "0.75"))
-        except (TypeError, ValueError):
-            threshold = 0.75
+        threshold = 0.75
 
         def _norm(value: Any) -> str:
             return str(value or "").strip().replace(" ", "_").replace("/", "_").lower()

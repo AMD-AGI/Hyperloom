@@ -4,8 +4,7 @@
 
 Extracted from ``cli/__init__.py`` (tree-reform.MD P2.4 follow-up). None of
 ``_RetiredFlag`` / ``_default_research_lane_capacity`` /
-``_default_gpu_specialist_capacity`` / ``_parse_conc_env_default`` /
-``_parse_conc_sweep_default`` / ``_positive_int_arg`` / ``_build_parser`` is
+``_default_gpu_specialist_capacity`` / ``_positive_int_arg`` / ``_build_parser`` is
 monkeypatched by name anywhere in the test suite (verified via a repo-wide
 grep for ``setattr(cli, "<name>"`` and fully-qualified
 ``"hyperloom.inference_optimizer.cli.<name>"`` string patches before this
@@ -16,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
 from .. import framework_registry
@@ -129,87 +127,26 @@ def _default_codex_model_env() -> str:
     return DEFAULT_CODEX_MODEL
 
 
-def _parse_conc_values(raw: str, *, source: str = "CONC") -> list[int]:
-    """Parse a positive integer or comma ladder without mutating env."""
-    text = str(raw or "").strip()
-    if not text:
-        return []
-    tokens = [tok.strip() for tok in text.split(",") if tok.strip()]
-    try:
-        values = [int(tok) for tok in tokens]
-    except ValueError:
-        print(
-            f"ERROR: {source}={text!r} is not an integer or comma-separated integer ladder. "
-            "Use --conc N for one baseline concurrency, or "
-            "--conc-sweep-concs 4,16,128 for a ladder.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-    if not values or any(v <= 0 for v in values):
-        print(
-            f"ERROR: {source}={text!r} must contain positive integer value(s).",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-    return values
-
-
-def _parse_conc_env_default() -> int:
-    """Resolve ``$CONC`` for argparse; comma ladders use first value as baseline."""
-    values = _parse_conc_values(os.environ.get("CONC", ""), source="CONC")
-    return values[0] if values else 8
-
-
-def _parse_conc_sweep_default() -> str:
-    """Resolve the sweep ladder, defaulting a comma ``$CONC`` into the sweep."""
-    explicit = os.environ.get("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", "").strip()
-    if explicit:
-        return explicit
-    raw = os.environ.get("CONC", "").strip()
-    if not raw:
-        return "1,2,4,8,16,32,64,128"
-    values = _parse_conc_values(raw, source="CONC")
-    if len(values) > 1:
-        return ",".join(str(v) for v in values)
-    return "1,2,4,8,16,32,64,128"
-
-
 def _default_research_lane_capacity() -> int:
-    """Default ``--research-lane-capacity``: $INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY else the GPU ceiling (2×GPU).
+    """Default ``--research-lane-capacity`` to the GPU ceiling (2×GPU).
 
     Returns:
-        int: The resolved research-lane capacity (env value when set and
-            parseable, otherwise the policy GPU ceiling).
+        int: The policy GPU ceiling.
     """
-    env = os.environ.get("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY")
-    if env:
-        try:
-            return int(env)
-        except ValueError:
-            pass
     from hyperloom.orchestrator.policy.gate import research_lane_ceiling
 
     return research_lane_ceiling()
 
 
 def _default_gpu_specialist_capacity() -> int:
-    """Default ``--gpu-specialist-capacity``: $INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY else the whole machine.
+    """Default ``--gpu-specialist-capacity`` to the whole visible machine.
 
     WS2 turns GPU specialists on by default at whole-machine capacity. When the
-    env var is set (including ``0`` as an explicit disable escape hatch) it
-    wins; otherwise the default is the visible GPU count probed on the launch
-    host (``detect_gpu_count()``), or ``0`` when nothing can be probed.
+    operator needs a different value, pass ``--gpu-specialist-capacity``.
 
     Returns:
-        int: The resolved GPU specialist capacity (env value when set and
-            parseable, otherwise the detected whole-machine GPU count).
+        int: The detected whole-machine GPU count, or ``0`` when nothing can be probed.
     """
-    env = os.environ.get("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY")
-    if env is not None and env.strip() != "":
-        try:
-            return max(0, int(env))
-        except ValueError:
-            pass
     from hyperloom.orchestrator.policy.gate import detect_gpu_count
 
     return detect_gpu_count()
@@ -284,7 +221,7 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=list(framework_registry.names()),
         default=None,
         help="Inference framework to benchmark / optimize. Resolution order: "
-        "--framework > $FRAMEWORK env > sglang (default). Selection is "
+        "--framework > sglang (default). Selection is "
         "session-wide; mixing frameworks in a single session is not "
         "supported. NOTE: --framework atom is single-node-only "
         "(``--nodes>=2`` fails fast); profile / roofline, "
@@ -297,8 +234,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--nodes",
         type=int,
-        # Resolution: --nodes > $INFERENCE_OPTIMIZER_NODES > $NODES > 1 ($NODES fallback for SaFE optimizer.env).
-        default=int(os.environ.get("INFERENCE_OPTIMIZER_NODES") or os.environ.get("NODES") or "1"),
+        default=1,
         help="Total number of GPU nodes for the inference RayJob. "
         "1 (default) keeps the legacy single-pod path. "
         ">=2: `optimize` provisions the SaFE RayJob before preflight "
@@ -307,7 +243,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "RayJob on exit; run `python3 -m hyperloom.inference_optimizer.multi_node "
         "stop-rayjob` when you want to release it. Requires "
         "--rayjob-image or INFERENCE_OPTIMIZER_RAYJOB_IMAGE. "
-        "Resolution: --nodes > $INFERENCE_OPTIMIZER_NODES > $NODES > 1.",
+        "Default: 1.",
     )
     opt.add_argument(
         "--mn-backend",
@@ -329,8 +265,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rayjob-gpus-per-node",
         type=int,
         default=None,
-        help="GPUs per RayJob pod (default: INFERENCE_OPTIMIZER_GPUS_PER_NODE "
-        "or 8). Passed to multi_node create-rayjob.",
+        help="GPUs per RayJob pod (default: 8). Passed to multi_node create-rayjob.",
     )
     # --rayjob-extra-env is a prompt-driven pass-through forwarded verbatim to workload_spec.env; the CLI
     # invents no keys. Reserved RAY_JOB_ENTRYPOINT stripped downstream; credential keys auto-injected elsewhere.
@@ -351,23 +286,17 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--tp",
         type=int,
-        default=int(os.environ.get("TP", "1") or 1),
-        help="Tensor parallel size. Resolution: --tp > $TP env > 1. "
-        "Symmetric with --ep — historically TP only flowed in via "
-        "$TP env (read by _workload_envs); the CLI flag was added "
-        "so the agent can pass `--tp N` directly from the prompt's "
-        "Environment block instead of having to `export TP=N` "
-        "first. Either path still works.",
+        default=1,
+        help="Tensor parallel size. Pass `--tp N` directly from the prompt's "
+        "Environment block. Default: 1.",
     )
     opt.add_argument(
         "--conc",
         type=_positive_int_arg,
-        default=_parse_conc_env_default(),
+        default=8,
         help="Magpie client concurrency cap (max in-flight requests). "
-        "Resolution: --conc > $CONC env > 8. Symmetric with --tp; "
-        "agent can pass `--conc N` directly from the prompt. If $CONC is "
-        "a comma ladder (e.g. 4,16,128), Hyperloom uses the first value as "
-        "the baseline cap and forwards the ladder to --conc-sweep-concs.",
+        "Pass `--conc N` directly from the prompt. Use "
+        "--conc-sweep-concs for a concurrency ladder. Default: 8.",
     )
     opt.add_argument(
         "--max-model-len",
@@ -375,7 +304,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_int_arg,
         default=None,
         help="Explicit server-facing MAX_MODEL_LEN. Resolution: "
-        "--max-model-len > $MAX_MODEL_LEN > auto(ISL+OSL+headroom, "
+        "--max-model-len > auto(ISL+OSL+headroom, "
         "clamped to native context). Explicit values are preserved and "
         "exported into the materialized Magpie YAML.",
     )
@@ -383,7 +312,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--server-args",
         dest="server_args",
         type=str,
-        default=os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", ""),
+        default="",
         help="Framework server args to apply in every phase. Routed through "
         "the framework-specific EXTRA_*_ARGS env in Magpie YAMLs "
         "(EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS / EXTRA_ATOM_ARGS). "
@@ -393,12 +322,12 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--ep",
         type=int,
-        default=int(os.environ.get("EP", "1") or 1),
+        default=1,
         help="Expert-parallel size for MoE inference. 1 (default) keeps "
         "experts sharded by TP (legacy behaviour). >=2 enables true "
         "expert parallelism: sglang adds `--expert-parallel-size N`, "
         "vllm adds `--enable-expert-parallel`. Typical: EP=TP for "
-        "DSr1/DSv3 on multi-node. Resolution: --ep > $EP env > 1. "
+        "DSr1/DSv3 on multi-node. Default: 1. "
         "EP > TP is rejected at server-restart time.",
     )
     opt.add_argument(
@@ -416,50 +345,49 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--pd-prefill-nodes",
         type=int,
-        default=int(os.environ.get("PD_PREFILL_NODES", "0") or 0),
+        default=0,
         help="Number of prefill nodes (disaggregated only); pn+dn=nodes",
     )
     opt.add_argument(
         "--pd-decode-nodes",
         type=int,
-        default=int(os.environ.get("PD_DECODE_NODES", "0") or 0),
+        default=0,
         help="Number of decode nodes (disaggregated only)",
     )
     opt.add_argument(
         "--pd-prefill-tp",
         type=int,
-        default=int(os.environ.get("PD_PREFILL_TP", "0") or 0),
+        default=0,
         help="TP for prefill group (disaggregated only); default = --tp",
     )
     opt.add_argument(
         "--pd-decode-tp",
         type=int,
-        default=int(os.environ.get("PD_DECODE_TP", "0") or 0),
+        default=0,
         help="TP for decode group (disaggregated only); default = --tp",
     )
     opt.add_argument(
         "--pd-transfer-backend",
         type=str,
-        default=os.environ.get("PD_TRANSFER_BACKEND", ""),
+        default="",
         help="sglang: mooncake|nixl ; vllm: NixlConnector|...; empty = default",
     )
     opt.add_argument(
         "--pd-ib-device",
         type=str,
-        default=os.environ.get("PD_IB_DEVICE", ""),
+        default="",
         help="comma-separated IB/RoCE device list (e.g. mlx5_0,mlx5_1). "
         "Empty = use $NCCL_IB_HCA from RayJob pod env at server-launch time.",
     )
     opt.add_argument(
         "--skip-variants",
         type=str,
-        default=os.environ.get("SKIP_VARIANTS", ""),
+        default="",
         help="Comma/whitespace-separated list of variant names or fnmatch "
         "globs to drop from the backends/params grids before launch. "
         "Examples: `attn_aiter` (exact), `attn_aiter,sched_dfs` (two "
-        "exacts), `attn_*,vllm_aiter_*` (globs). Resolution: "
-        "--skip-variants > $SKIP_VARIANTS > empty. Exported back into "
-        "$SKIP_VARIANTS so all executors and the multi-node orchestrator "
+        "exacts), `attn_*,vllm_aiter_*` (globs). Exported into "
+        "the internal SKIP_VARIANTS handoff so all executors and the multi-node orchestrator "
         "subprocess see the same value. Dropped variants surface in "
         "state.json under each action's `dropped_variants` field tagged "
         "`source=user_skip`.",
@@ -475,24 +403,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "min(120, max_hours * 60 * 0.02). Pass 0 to disable closing phase."
         ),
     )
-    opt.add_argument("--isl", type=int, default=int(os.environ.get("ISL", "256")),
-                      help="Input sequence length (default $ISL or 256)")
-    opt.add_argument("--osl", type=int, default=int(os.environ.get("OSL", "256")),
-                      help="Output sequence length (default $OSL or 256)")
+    opt.add_argument("--isl", type=int, default=256, help="Input sequence length (default 256)")
+    opt.add_argument("--osl", type=int, default=256, help="Output sequence length (default 256)")
     opt.add_argument(
         "--profile-osl",
         dest="profile_osl",
         type=int,
-        default=(
-            int(os.environ["PROFILE_OSL"])
-            if os.environ.get("PROFILE_OSL", "").strip().isdigit()
-            else None
-        ),
+        default=None,
         help=(
             "Profiling-phase output sequence length. When set, it overrides "
             "--osl for the roofline/profile server ONLY, so its torch-profiler "
             "trace stays serializable; baseline/optimize phases still run at "
-            "--osl. Default $PROFILE_OSL; when unset the profile phase uses "
+            "--osl. When unset the profile phase uses "
             "min(--osl, 1024) and is auto-lowered further if needed to keep the "
             "capture window within the serialization cap."
         ),
@@ -513,9 +435,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "discovery runs and the baseline is unchanged."
         ),
     )
-    opt.add_argument("--precision", type=str,
-                      default=os.environ.get("PRECISION", "bf16"),
-                      help="Model precision (default $PRECISION or bf16)")
+    opt.add_argument("--precision", type=str, default="bf16", help="Model precision (default bf16)")
     opt.add_argument(
         "--framework-version",
         dest="framework_version",
@@ -593,7 +513,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--model-class",
         type=str,
-        default=os.environ.get("MODEL_CLASS", None),
+        default=None,
         help=(
             "Categorical model-class key. It is the deterministic key for "
             "several consumers: the atom explore seed grid "
@@ -628,8 +548,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "section. The data is REPORT-ONLY: it does not influence "
             "Objective, scoring, or any agent prompt. Other dimensions "
             "(model / framework / precision / ISL / OSL) are derived "
-            "from --model and the standard FRAMEWORK / PRECISION / ISL / "
-            "OSL env vars."
+            "from the corresponding CLI arguments."
         ),
     )
     opt.add_argument("--max-ticks", type=int, default=None, help="Hard tick cap (None = unlimited; mostly for tests)")
@@ -673,17 +592,12 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--enable-framework-config-exploration",
         action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_EXPLORATION",
-            "0",
-        ).strip()
-        in ("1", "true", "True", "TRUE", "yes"),
+        default=False,
         help="(Stage-1, default OFF) Let the FRAMEWORK_AGENT phase run "
         "explore-style config-grid exploration (reusing the ExploreExecutor) "
         "before it advances, giving FRAMEWORK the EXPLORE config-search "
         "capability. The EXPLORE phase and overall phase flow are unchanged; "
-        "results share the explore_search dedup ledger. Also read from "
-        "$INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_EXPLORATION=1.",
+        "results share the explore_search dedup ledger.",
     )
     opt.add_argument(
         "--launch-info-file",
@@ -711,18 +625,13 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--no-framework-agent",
         action="store_true",
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_NO_FRAMEWORK",
-            "0",
-        ).strip()
-        in ("1", "true", "True", "TRUE", "yes"),
+        default=False,
         help="Skip the FRAMEWORK_AGENT phase (PRELUDE → EXPLORE "
         "directly). The phase pre-scans upstream sglang/"
         "vllm PRs via framework-agent and lands KEPT "
         "patches before EXPLORE starts. Disable when "
         "the framework-agent toolchain is unavailable "
-        "or you want a faster cold start. Also read from "
-        "$INFERENCE_OPTIMIZER_NO_FRAMEWORK=1. "
+        "or you want a faster cold start. "
         "Default: framework phase enabled.",
     )
     opt.add_argument(
@@ -1025,7 +934,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--pr-feed-window-days",
         dest="pr_feed_window_days",
         type=int,
-        default=int(os.environ.get("PR_FEED_WINDOW_DAYS", "30") or "30"),
+        default=30,
         help="Look-back window for the PR feed warmup (days). Default: 30.",
     )
     # specialist research_lane capacity
@@ -1052,8 +961,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Number of GPUs available to specialists that request "
         "needs_gpu=true. Defaults to the whole machine (visible GPU "
         "count on the launch host); set "
-        "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=0 (or pass 0) to "
-        "disable GPU specialists. GPU specialists serialize against the "
+        "--gpu-specialist-capacity 0 to disable GPU specialists. GPU specialists serialize against the "
         "serving lanes via gpu_research_lane. "
         "Set INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES to a "
         "comma-separated GPU id pool when the specialist pool should "
@@ -1100,7 +1008,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--specialist-model",
         dest="specialist_model",
         type=str,
-        default=os.environ.get("INFERENCE_OPTIMIZER_SPECIALIST_MODEL", "") or None,
+        default=None,
         help="Claude model used for specialist sub-agents (defaults to "
         "the orchestration --claude-model). KB_design §3.5 §6.",
     )
@@ -1108,13 +1016,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--specialist-max-turns",
         dest="specialist_max_turns",
         type=int,
-        default=int(
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_SPECIALIST_MAX_TURNS",
-                str(_DEFAULT_SPECIALIST_MAX_TURNS),
-            )
-            or _DEFAULT_SPECIALIST_MAX_TURNS
-        ),
+        default=_DEFAULT_SPECIALIST_MAX_TURNS,
         help="Hard cap on LLM turns per specialist task (KB_design "
         "§3.5 §6). On exhaustion the runner synthesises an empty "
         "specialist_done (Inv-5.3).",
@@ -1123,7 +1025,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--specialist-per-turn-max-seconds",
         dest="specialist_per_turn_max_seconds",
         type=float,
-        default=float(os.environ.get("INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "600") or "600"),
+        default=600.0,
         help="Wall-clock fallback ceiling per specialist task when no "
         "explicit wall_budget_sec is provided (legacy backstop, default "
         "600s; production dispatches use the WS1 wall-clock budget).",
@@ -1134,11 +1036,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="specialist_dispatch_mode",
         type=str,
         choices=("subprocess", "inprocess"),
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_SPECIALIST_DISPATCH_MODE",
-            "subprocess",
-        ).strip()
-        or "subprocess",
+        default="subprocess",
         help="Specialist execution shape. 'subprocess' (default) spawns "
         "a fresh `claude` CLI per task inside a per-task git worktree "
         "for isolation (PR-A2). 'inprocess' keeps the legacy M5 path "
@@ -1149,11 +1047,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--specialist-mcp-config",
         dest="specialist_mcp_config",
         type=str,
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_SPECIALIST_MCP_CONFIG",
-            "",
-        ).strip()
-        or None,
+        default=None,
         help="Optional path to an MCP config JSON forwarded to the "
         "subprocess claude (`--mcp-config`). Used to wire kb / pr "
         "MCP servers into specialists. Default: None.",
@@ -1161,41 +1055,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Integration toggles. Roofline refresh is unconditional now (fires at PRELUDE and every 10%
     # cumulative_gain_validated crossing); the legacy composite/deny profile toggles are gone.
-    def _env_default_on(env_var: str) -> bool:
-        """Resolve a default-on boolean toggle from an environment variable.
-
-        Args:
-            env_var (str): The environment variable name to read.
-
-        Returns:
-            bool: ``False`` only when the variable is explicitly set to ``"0"``;
-            ``True`` otherwise (including when unset).
-        """
-        return os.environ.get(env_var, "1").strip() != "0"
-
     opt.add_argument(
         "--allow-empty-kernel-shape",
         dest="allow_empty_kernel_shape",
         action="store_true",
-        default=os.environ.get(
-            "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE",
-            "0",
-        )
-        .strip()
-        .lower()
-        in {"1", "true", "yes", "on"},
+        default=False,
         help="Escape hatch (default off): allow kernel optimization to "
         "dispatch a candidate with no trace-anchored shape. Normally "
         "a shapeless candidate is rejected with a structured error so "
         "the run returns to ``trace_analyze`` instead of burning a "
-        "kernel-optimization budget on an unanchored kernel. Env: "
-        "HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE=1.",
+        "kernel-optimization budget on an unanchored kernel.",
     )
     opt.add_argument(
         "--enable-roofline",
         dest="enable_roofline",
         action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_ENABLE_ROOFLINE"),
+        default=True,
         help="Select which analysis action the Coordinator enqueues at "
         "PRELUDE bootstrap and on every +10%% watermark crossing. "
         "Default on: ``roofline`` (composite profile + "
@@ -1203,22 +1078,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "to use plain ``profile`` instead (lighter — captures the "
         "trace only, skips trace_analyze). Behaviour is otherwise "
         "identical (same idempotency keys, same pending-task "
-        "dispatch gate, same watermark anchor update). Env: "
-        "INFERENCE_OPTIMIZER_ENABLE_ROOFLINE=0.",
+        "dispatch gate, same watermark anchor update).",
     )
     opt.add_argument(
         "--research-scout",
         dest="research_scout",
         action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_RESEARCH_SCOUT"),
+        default=True,
         help="Auto-dispatch a read-only research scout at PRELUDE (and "
         "every --research-scout-interval EXPLORE rounds) that "
         "collects proven priors — reference launch scripts, model "
         "config.json architecture features, and cross-framework / "
         "NVIDIA research — into ``research_hints.md`` and seeds "
         "high-priority gaps. Default on; pass ``--no-research-scout`` "
-        "to disable the whole feature. Env: "
-        "INFERENCE_OPTIMIZER_RESEARCH_SCOUT=0.",
+        "to disable the whole feature.",
     )
     opt.add_argument(
         "--research-scout-interval",
@@ -1233,39 +1106,37 @@ def _build_parser() -> argparse.ArgumentParser:
         "--static-recon",
         dest="static_recon",
         action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_STATIC_RECON"),
+        default=True,
         help="Auto-dispatch a read-only static-recon specialist at PRELUDE "
         "that greps the framework source for un-bridged capability "
         "switches (predicates that silently disable a faster path for "
         "this model/GPU/precision, e.g. a CUDA-only ``*_supported()`` "
         "on ROCm) and seeds bridge candidates as gaps[]. Default on; "
-        "pass ``--no-static-recon`` to disable. Env: "
-        "INFERENCE_OPTIMIZER_STATIC_RECON=0.",
+        "pass ``--no-static-recon`` to disable.",
     )
     opt.add_argument(
         "--recipe-sediment",
         dest="recipe_sediment",
         action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_RECIPE_SEDIMENT"),
+        default=True,
         help="Sediment KEEP/REVERT provenance into the persistent recipe: "
         "KEEP optimizations traceable to a research hint carry their "
         "source + measured gain into ``what_worked``; REVERTs land in "
         "``what_failed`` so the next warm-start avoids re-testing them. "
         "Default on; pass ``--no-recipe-sediment`` to keep the recipe "
-        "purely ephemeral. Env: INFERENCE_OPTIMIZER_RECIPE_SEDIMENT=0.",
+        "purely ephemeral.",
     )
     opt.add_argument(
         "--target-advisory",
         dest="target_advisory",
         action=argparse.BooleanOptionalAction,
-        default=_env_default_on("INFERENCE_OPTIMIZER_TARGET_ADVISORY"),
+        default=True,
         help="Inject an advisory 'External target gap' block (throughput / "
         "TPOT / interactivity gap vs the LLM-authored competitor "
         "target) into the orchestration and specialist prompts; when "
         "the TPOT ratio dominates it nudges toward latency-reducing "
         "directions. Advisory only — never gates Objective or scoring. "
-        "Default on; pass ``--no-target-advisory`` to disable. Env: "
-        "INFERENCE_OPTIMIZER_TARGET_ADVISORY=0.",
+        "Default on; pass ``--no-target-advisory`` to disable.",
     )
     # Post-optimization concurrency sweep (on by default): a baseline-vs-optimized Magpie grid across CONC
     # values, output to reports/conc_sweep_summary.json (see orchestrator/conc_sweep.py). Bounded by
@@ -1274,38 +1145,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
         action=argparse.BooleanOptionalAction,
-        default=(
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP",
-                "",
-            )
-            .strip()
-            .lower()
-            not in ("0", "false", "no", "off")
-        ),
+        default=True,
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default; disable with --no-enable-conc-sweep or "
-        "INFERENCE_OPTIMIZER_ENABLE_CONC_SWEEP=0.",
+        "On by default; disable with --no-enable-conc-sweep.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
         type=str,
-        default=_parse_conc_sweep_default(),
+        default="1,2,4,8,16,32,64,128",
         help="Comma-separated CONC ladder for --enable-conc-sweep. Default 1,2,4,8,16,32,64,128.",
     )
     opt.add_argument(
         "--conc-sweep-timeout-sec",
         dest="conc_sweep_timeout_sec",
         type=int,
-        default=int(
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_CONC_SWEEP_TIMEOUT_SEC",
-                "1800",
-            )
-        ),
+        default=1800,
         help="Per-variant timeout (seconds) for --enable-conc-sweep. "
         "Default 1800 (~30 min). Per-variant cap is also clamped "
         "by the remaining --conc-sweep-total-budget-sec.",
@@ -1314,12 +1171,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--conc-sweep-total-budget-sec",
         dest="conc_sweep_total_budget_sec",
         type=int,
-        default=int(
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_CONC_SWEEP_TOTAL_BUDGET_SEC",
-                "9000",
-            )
-        ),
+        default=9000,
         help="Total wall-clock budget (seconds) for the whole conc-sweep "
         "action, independent of the per-variant Magpie timeout. "
         "Once exhausted, remaining variants are recorded as "
@@ -1356,35 +1208,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # measured runtime and the anchor are both the warm client-only phase (apples-to-apples) and
     # one-time cold-boot / aiter recompile no longer trips the kill.
     # 0 disables (legacy variant_timeout_sec hard cap still applies); overtime kills skip stack rebench.
-    def _env_num_or(default, env_var: str, cast):
-        """Resolve a numeric CLI default from an environment variable.
-
-        Args:
-            default: Value to use when the variable is unset or invalid.
-            env_var (str): The environment variable name to read.
-            cast: The numeric constructor to apply (``float`` or ``int``).
-
-        Returns:
-            The parsed env value cast via ``cast``, or ``cast(default)`` on
-            absence / parse error.
-        """
-        raw = os.environ.get(env_var, "").strip()
-        if not raw:
-            return cast(default)
-        try:
-            return cast(raw)
-        except (TypeError, ValueError):
-            return cast(default)
-
     opt.add_argument(
         "--explore-overtime-kill-ratio",
         dest="explore_overtime_kill_ratio",
         type=float,
-        default=_env_num_or(
-            2.0,
-            "INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO",
-            float,
-        ),
+        default=2.0,
         help="Per-variant explore overtime kill: each single-variant "
         "Magpie run in the explore loop is reaped once its "
         "POST-READY (pure hot client) wall-clock exceeds "
@@ -1395,8 +1223,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "recorded with outcome=KILLED_OVERTIME + runtime_sec + "
         "wall_clock_ratio_vs_baseline (no tput) so the LLM can "
         "distinguish it from a hard timeout / crash. Default 2.0 (kill "
-        "at +100%% over the warm client anchor). Pass 0 to disable. "
-        "Env: INFERENCE_OPTIMIZER_EXPLORE_OVERTIME_KILL_RATIO.",
+        "at +100%% over the warm client anchor). Pass 0 to disable.",
     )
     # Explore variant hard timeout — operator override for the auto-derived cap.
     # ExploreExecutor auto-derives from baseline_runtime_sec*(kill_ratio+0.5); 0 (default) keeps auto-derive.
@@ -1405,28 +1232,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--explore-variant-timeout-sec",
         dest="explore_variant_timeout_sec",
         type=int,
-        default=_env_num_or(
-            0,
-            "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC",
-            int,
-        ),
+        default=0,
         help="Pin the per-variant hard timeout (seconds) inside the "
         "EXPLORE phase. ``0`` (default) auto-derives from "
         "``baseline_runtime_sec * (--explore-overtime-kill-ratio + "
         "--explore-variant-timeout-safety-margin)`` once baseline "
         "lands, with a 2400-14400 s range guard. Set to a positive "
-        "integer to pin (CI smoke runs / debugging). Env: "
-        "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SEC.",
+        "integer to pin (CI smoke runs / debugging).",
     )
     opt.add_argument(
         "--explore-variant-timeout-safety-margin",
         dest="explore_variant_timeout_safety_margin",
         type=float,
-        default=_env_num_or(
-            0.5,
-            "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN",
-            float,
-        ),
+        default=0.5,
         help="Headroom (as a fraction of baseline_runtime_sec) added on "
         "top of --explore-overtime-kill-ratio when the EXPLORE hard "
         "cap is auto-derived. Default 0.5 (≈ 50%% of baseline as "
@@ -1434,8 +1252,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "fresh aiter shapes, spec-decoding draft load). Bump for "
         "workloads with heavy compile cost; lower to tighten the "
         "backstop. No effect when --explore-variant-timeout-sec is "
-        "set to a positive value. Env: "
-        "INFERENCE_OPTIMIZER_EXPLORE_VARIANT_TIMEOUT_SAFETY_MARGIN.",
+        "set to a positive value.",
     )
     # drop scoreboard
     # Legacy action_scores is retired; flag controls a resumed session's leftover scoreboard:
@@ -1445,11 +1262,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="legacy_action_scores",
         type=str,
         choices=("drop", "warn"),
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_LEGACY_ACTION_SCORES",
-            "drop",
-        ).strip()
-        or "drop",
+        default="drop",
         help="Resume-mode handling of the legacy scoreboard "
         "(``action_scores`` and friends). 'drop' (default) "
         "silently discards. 'warn' logs a WARNING + adds a "
@@ -1463,11 +1276,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="migration_mode",
         type=str,
         choices=("strict", "lenient"),
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_MIGRATION_MODE",
-            "strict",
-        ).strip()
-        or "strict",
+        default="strict",
         help="Strictness of the legacy → v0.8 state.json migration. "
         "'strict' (default) aborts on fact-layer field loss; "
         "'lenient' logs WARNING and continues. KB_design §3.10 §5.3.",
@@ -1489,13 +1298,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="breakdown_include_transcripts",
         type=str,
         choices=("true", "false"),
-        default=os.environ.get(
-            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS",
-            "false",
-        )
-        .strip()
-        .lower()
-        or "false",
+        default="false",
         help="Inline specialist transcript bodies into "
         "``specialist_runs`` (true) or reference them by path "
         "only (false, default). KB_design §3.12 §7.",

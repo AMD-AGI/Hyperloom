@@ -187,6 +187,15 @@ def _attach_kernel_roofline(
                 disc[field] = rk.get(field)
 
 
+_DEFAULT_INCLUDE_TRANSCRIPTS = False
+
+
+def set_default_include_transcripts(value: bool) -> None:
+    """Set the process-local transcript inlining default for CLI runs."""
+    global _DEFAULT_INCLUDE_TRANSCRIPTS
+    _DEFAULT_INCLUDE_TRANSCRIPTS = bool(value)
+
+
 def build(
     session_dir: Path | str,
     *,
@@ -197,9 +206,8 @@ def build(
     Args:
         session_dir: hyperloom session directory (needs ``manifest.json``
             or ``state.json`` for usable output).
-        include_transcripts: inline specialist transcripts. ``None``
-            consults ``INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1``;
-            defaults to False since transcripts are large.
+        include_transcripts: inline specialist transcripts. ``None`` defaults
+            to False since transcripts are large.
 
     Returns:
         A dict matching :class:`schema.SessionBreakdown`.
@@ -207,10 +215,7 @@ def build(
     sd = Path(session_dir).resolve()
     warnings: list[str] = []
     if include_transcripts is None:
-        include_transcripts = os.environ.get(
-            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS",
-            "",
-        ).strip().lower() in ("1", "true", "yes")
+        include_transcripts = _DEFAULT_INCLUDE_TRANSCRIPTS
 
     state = _load_session_json(state_path(sd), "state.json", warnings)
     manifest = _load_session_json(manifest_path(sd), "manifest.json", warnings)

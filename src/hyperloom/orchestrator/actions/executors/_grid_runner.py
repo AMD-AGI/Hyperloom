@@ -884,58 +884,7 @@ async def run_grid(
     preclean_before_run: bool = True,
     server_already_ready: bool = False,
 ) -> list[VariantResult]:
-    """Execute every variant in ``grid`` once, in order.
-
-    Returns the per-variant :class:`VariantResult` list (all attempts); the
-    caller picks winners. Subprocess calls run in ``asyncio.to_thread`` so the
-    Coordinator reactor isn't blocked.
-
-    ``model_path`` / ``gpu_type`` are forwarded to every variant's YAML render.
-    ``benchmark_script`` / ``result_dir`` (pre-sanitized) route around scripts
-    that hardcode ``--result-dir /workspace/`` (see SKILL.md "Magpie leak-path
-    salvage"). ``soft_deadline_sec``: reap a variant once wall-clock
-    exceeds it, marking it ``killed_overtime=True``; None/0 disables.
-    ``server_lifecycle`` (``{cleanup, pid_dir, port}``) enables Magpie's
-    persistent-server reuse so a paired warm round can re-attach to a hot
-    server; None keeps the legacy boot-per-variant behaviour.
-    ``warmup_before_measure`` defaults on via
-    ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``: when no explicit
-    ``server_lifecycle`` is supplied and the YAML supports lifecycle reuse,
-    each variant gets a discarded warmup round followed by the returned hot
-    measurement round.
-
-    Args:
-        base_yaml_path (Path): Base Magpie YAML templated per variant.
-        base_extra_args (str): Server args merged ahead of each variant's args.
-        grid (list[GridVariant]): Variants to run, in order.
-        output_root (Path): Root directory for per-variant slots.
-        magpie_python (str | None): Python interpreter; auto-resolved when None.
-        cwd (str): Working directory for Magpie subprocesses.
-        variant_timeout_sec (int): Per-variant hard timeout in seconds.
-        keep_going_on_failure (bool): Continue the grid after a variant failure.
-        model_path (str | None): Forwarded to each variant's YAML render.
-        gpu_type (str | None): Forwarded to each variant's YAML render.
-        benchmark_script (str | None): Pre-sanitized Magpie script override.
-        result_dir (str | None): Pre-sanitized ``$RESULT_DIR`` override.
-        soft_deadline_sec (float | None): Overtime soft deadline per variant;
-            None/0 disables.
-        server_lifecycle (dict[str, Any] | None): ``{cleanup, pid_dir, port}``
-            enabling persistent-server reuse.
-        warmup_before_measure (bool | None): Whether to auto-run a discarded
-            warmup before returning a measured result. ``None`` resolves from
-            ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``.
-        preclean_before_run (bool): Whether to pre-clean stale servers before
-            the measured Magpie launch. Reattach rounds must pass ``False``.
-        server_already_ready (bool): Pass ``True`` when the measured round
-            re-attaches to a server booted by a prior subprocess (warm reuse /
-            auto-warmup measure round). This bypasses the from-ready soft-deadline
-            anchor so the overtime soft-kill fires from spawn instead of waiting
-            for a ready marker that will never appear in the reuse round's own
-            server.log.
-
-    Returns:
-        list[VariantResult]: Per-variant results for every attempt, in order.
-    """
+    """Execute each grid variant and return all per-variant results."""
     if not magpie_python:
         magpie_python = _resolve_magpie_python()
     if warmup_before_measure is None:

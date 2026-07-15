@@ -1,68 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Read-vs-write dispatcher for the recipe-snapshot KB.
-
-Routes calls between the local store and the gbrain read-side remote
-according to the design fixed in 2026-05-28:
-
-Writes — local-only::
-
-    :meth:`put_recipe` and :meth:`append_attempt` are forwarded
-    verbatim to :class:`LocalRecipeStore` (deletes go straight to
-    ``local.delete_recipe``). The remote client never sees a
-    write request, by construction (it doesn't expose write
-    methods at all). The local store is the authoritative place
-    new rows land.
-
-Reads — remote-first via the SINGLE ``/recipes/search`` route, fall
-through to local on absence / failure::
-
-    The remote half is reached ONLY through ``/recipes/search``.
-    ``get_recipe`` decodes the 5-tuple from the canonical_id into
-    ``label_match`` and issues ONE search — the server decides
-    exact-vs-relative fallback + ranking, the client takes the top
-    row. ``get_history`` / ``list_attempts`` /
-    ``list_session_attempts`` are LOCAL-only (those routes are not
-    used). For the search-backed read:
-    1. If ``remote`` is configured AND enabled → call the central
-       kb-service first.
-    2. If the remote answer carries a non-empty result, return it
-       as-is. The central server is the wider corpus (it
-       aggregates rows written by other operators / older runs
-       that shipped to ``/v1/points``); a hit there is most
-       informative.
-    3. If the remote answer is "absence" (None / empty list /
-       404) we fall through to the local store. Rationale: the
-       remote can lag arbitrarily behind local writes (writes go
-       local-only under this design — the central server only
-       picks up rows via separately-scheduled bulk ingest), so
-       "remote says no" is not the same as "this row never
-       existed". A local hit completes the read; a local miss
-       returns the same absence shape the remote produced.
-    4. If the remote raises :class:`RemoteRecipeClientError`
-       (transport / 4xx / 5xx) we log + invoke the optional
-       ``on_remote_failure`` callback, then fall through to the
-       local store. Callers therefore never have to unwrap remote
-       errors.
-
-Reads — local-only mode::
-
-    A dispatcher constructed with ``remote=None`` (e.g.
-    ``--degraded-kb`` or no gbrain configured) skips step 1
-    entirely; reads go directly to the local store. A
-    ``remote.enabled=False`` client behaves the same way (the
-    client itself short-circuits each call to "no info").
-
-NB: We do NOT merge remote + local results. Each read is
-satisfied by exactly one source. Merging would double-count rows
-that exist in both stores at slightly different versions, and
-silently obscure the fact that the central corpus is stale
-relative to local writes.
-
-This dispatcher is the only object the rest of the optimizer
-should construct directly — the local store + remote client are
-implementation details. Construction is cheap; all I/O is lazy.
-"""
+"""Recipe KB dispatcher: local writes, remote-first reads with local fallback."""
 
 from __future__ import annotations
 
