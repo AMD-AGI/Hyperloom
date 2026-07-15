@@ -318,7 +318,7 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
 
     Ray is used broadly (multi-node scheduling, kernel/profile/recover
     executors), not only by Magpie. The probe imports ``ray`` with
-    ``python_exe`` instead of ``shutil.which("ray")`` on purpose: a
+    ``python_exe`` instead of a PATH-only ``which ray`` lookup on purpose: a
     bypass-only host may have a stray ``ray`` executable on ``PATH`` from an
     unrelated venv while ``python_exe`` still cannot ``import ray``, so a
     PATH-only check would false-positive and the Ray-backed executors would

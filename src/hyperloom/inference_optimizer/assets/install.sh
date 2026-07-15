@@ -1037,8 +1037,8 @@ acquire_install_lock
 # sed trims ONLY leading/trailing whitespace (like str.strip()), so " bypass" /
 # "bypass " skip Magpie here to match runtime, while an internal-space value
 # such as "by pass" stays != "bypass" and correctly falls through to Magpie
-# (runtime resolves such unknown values back to magpie). tr -d '[:space:]'
-# would wrongly collapse "by pass" -> "bypass" and diverge from runtime.
+# (runtime resolves such unknown values back to magpie). A blanket delete of
+# ALL whitespace would wrongly collapse "by pass" -> "bypass" and diverge.
 HYPERLOOM_BENCHMARK_BACKEND_LC="$(printf '%s' "${HYPERLOOM_BENCHMARK_BACKEND:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then
   log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_atomic_scripts_patch"
