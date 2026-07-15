@@ -1670,6 +1670,15 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
         "These trees are read-only. Use Read / Grep / Glob to navigate. "
         "Do NOT attempt Edit / Write / git apply (PolicyGate R4)."
     )
+    rows.append("")
+    rows.append(
+        "你可以使用 web-search 工具来查看本地 repo 的线上最新版本,"
+        "观察你想要修改的部分的实现和本地有什么区别。"
+        "Use ``WebSearch`` to find the upstream version of a file or feature,"
+        "then ``WebFetch`` to read its latest implementation directly — "
+        "before authoring a patch, confirm whether the upstream repo already "
+        "contains the fix or optimization you are about to write."
+    )
     return rows
 
 

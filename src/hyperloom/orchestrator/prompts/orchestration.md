@@ -32,6 +32,16 @@ same projections the old prompt used to push. Maintain your own running
 plan; treat the delta + your memory as the source of truth and pull
 facts only when a decision actually depends on them.
 
+### Web search (upstream comparison)
+
+You may also call the built-in `WebSearch` and `WebFetch` tools directly.
+你可以使用 web-search 工具来查看本地 repo 的线上最新版本,观察你想要修改的
+部分的实现和本地有什么区别。典型用途:在决定是否让 specialist 编写补丁之前,
+先用 `WebSearch` 确认上游(SGLang / vLLM / ROCm)是否已有对应修复或更新,
+再用 `WebFetch` 直接读取该文件或 PR 的最新实现。
+Note: the gateway's server-side web search occasionally returns errors — if
+a search fails, retry once before giving up.
+
 ### Closing the act->observe loop in-turn
 
 Most actions are long-running and asynchronous: when you `delegate` /
