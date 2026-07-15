@@ -12,10 +12,17 @@ subtrees:
 
 - caption: Install
   entries:
+<<<<<<< HEAD
   - file: install/local-mode.md
     title: Quickstart — Docker
   - file: install/bare-metal.md
     title: Quickstart — Bare metal
+=======
+  - file: install/quickstart.md
+    title: Quickstart — hosted UI
+  - file: install/setup.md
+    title: Quickstart — bare metal
+>>>>>>> origin/main
   - file: install/slurm.md
     title: Quickstart — Slurm
 

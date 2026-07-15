@@ -153,6 +153,60 @@ def test_anthropic_only_critic_agent_runtime_needed(clean_creds_env):
     assert cli._critic_agent_runtime_needed("agent") is True
 
 
+def test_anthropic_intent_skips_critic_agent_even_after_openai_env_appears(clean_creds_env):
+    """Preflight may add stale/runtime OpenAI env, but captured Anthropic intent wins."""
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
+    codex_follows_claude = cli._codex_model_should_follow_claude()
+    assert codex_follows_claude is True
+
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://api.anthropic.com")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "stale-openai-token")
+
+    assert cli._critic_agent_runtime_needed(
+        "agent",
+        codex_follows_claude=codex_follows_claude,
+    ) is False
+
+
+def test_build_backends_uses_claude_critic_when_codex_follows_claude(
+    clean_creds_env,
+    monkeypatch,
+    tmp_path,
+):
+    """Stale OpenAI env after preflight must not force critic-agent/Codex."""
+    from hyperloom.inference_optimizer.cli import backends as cli_backends
+
+    clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    clean_creds_env.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-fake-token")
+    clean_creds_env.setenv("OPENAI_BASE_URL", "https://api.anthropic.com")
+    clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "stale-openai-token")
+
+    class _FakeClaude:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeCodex:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(cli_backends, "ClaudeBackend", _FakeClaude)
+    monkeypatch.setattr(cli_backends, "CodexBackend", _FakeCodex)
+
+    built = cli_backends._build_backends(
+        claude_model="claude-opus-4-8",
+        codex_model="stale-codex-model",
+        kernel_codex=True,
+        critic_choice="agent",
+        session_dir=tmp_path,
+        critic_agent_root=None,
+        no_kernel=True,
+        codex_follows_claude=True,
+    )
+
+    assert isinstance(built["critic"], _FakeClaude)
+
+
 def test_openai_only_critic_agent_runtime_needed(clean_creds_env):
     """Official OpenAI-only keeps the critic-agent path."""
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "openai-fake-token")
