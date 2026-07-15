@@ -111,9 +111,31 @@ print(target.resolve())
 PY
 ```
 
+## Pre-launch Runtime Install
+
+Before the first `optimize` launch, run the full runtime installer in the same
+environment that will launch the optimizer. Preflight loads `kernel-agent.env.sh`
+before it can reach the later Ray/Magpie/InferenceX auto-install checks, so this
+step must happen before launching.
+
+For Docker mode, run this inside the container. For bare-metal mode, run it on
+the host:
+
+```bash
+set -a; . ./.env; set +a
+export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
+ulimit -Sn 65536 || true
+bash hyperloom/inference_optimizer/assets/install.sh
+. "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
+```
+
+If `hyperloom/inference_optimizer/assets/install.sh` is not present (source
+checkout layout), use `src/hyperloom/inference_optimizer/assets/install.sh`.
+
 ## Launch Requirements
 
-1. Install packages and save artifacts to a writable folder.
+1. Run the pre-launch runtime install above and source
+   `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
 2. Run in background with `setsid nohup`.
 3. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
 4. Report the session ID, log path, PID, and initial health check result.
