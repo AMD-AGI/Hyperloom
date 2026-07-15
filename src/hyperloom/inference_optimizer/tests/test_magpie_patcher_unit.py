@@ -189,15 +189,6 @@ def test_apply_reason_fdopen_write_error(tmp_path, monkeypatch):
     assert mp._apply_patch_atomic_reason(f) == mp._ATOMIC_REASON_IO_ERROR
 
 
-def test_apply_patch_atomic_bool_wrapper(tmp_path):
-    f = tmp_path / "b.py"
-    f.write_text(_LEGACY_SRC, encoding="utf-8")
-    assert mp._apply_patch_atomic(f) is True
-    bad = tmp_path / "bad.py"
-    bad.write_text("nonsense", encoding="utf-8")
-    assert mp._apply_patch_atomic(bad) is False
-
-
 # ---- remote trust patch ---------------------------------------------------
 def test_is_remote_trust_patched(tmp_path):
     f = tmp_path / "s.sh"

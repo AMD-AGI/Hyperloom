@@ -22,12 +22,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import is_truthy
+
 
 log = logging.getLogger(__name__)
 
 
 _PULSE_TIMEOUT_SEC = 8.0
-_OFF_VALUES = frozenset({"0", "false", "no", "off", ""})
 
 
 def _enabled() -> bool:
@@ -43,8 +44,12 @@ def _enabled() -> bool:
     # test mocks. Mirrors ``_run_magpie``'s guard.
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return False
-    val = os.environ.get("HYPERLOOM_GRID_ROBUSTNESS_PULSE", "1").strip().lower()
-    return val not in _OFF_VALUES
+    # On by default; truthy unless explicitly set to an off token (0/false/no/
+    # off/blank). Unknown tokens keep it on (default=True).
+    return is_truthy(
+        os.environ.get("HYPERLOOM_GRID_ROBUSTNESS_PULSE", "1"),
+        default=True,
+    )
 
 
 def _resolve_session_dir() -> Path | None:

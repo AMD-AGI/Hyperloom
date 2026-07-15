@@ -877,7 +877,7 @@ def _preflight(
         else:
             from ..session.paths import magpie_dir as _magpie_default
 
-            magpie_dir = _magpie_default(_session_dir_resolve())
+            magpie_dir = _magpie_default()
         magpie_dir.parent.mkdir(parents=True, exist_ok=True)
         if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
             # Refuse-to-clobber: don't clone Magpie main over an explicit $MAGPIE_PATH (would destroy local work).
@@ -913,7 +913,7 @@ def _preflight(
 
         open_source_root = _open_source_default()
         _magpie_env = os.environ.get("MAGPIE_PATH")
-        magpie_root = Path(_magpie_env) if _magpie_env else _magpie_default(_session_dir_resolve())
+        magpie_root = Path(_magpie_env) if _magpie_env else _magpie_default()
         # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",

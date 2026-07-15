@@ -6,11 +6,14 @@ Writes one :class:`Finding` per line to
 ``{session_dir}/agents/robustness/findings/{session_id}.jsonl`` via
 :func:`asyncio.to_thread` (keeps the tick off the disk I/O path).
 Best-effort: write failures log one WARN per error class, never raise.
+
+The on-disk subdir is exported as :data:`FINDINGS_SUBDIR` so cross-package
+readers (e.g. the Critic's ``decision_reviewer``) import the one string
+instead of re-hardcoding it.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -18,10 +21,18 @@ from typing import Any, Iterable
 
 import asyncio
 
+from hyperloom.common.io import append_jsonl
+
 from ..decision.action_ladder import Finding
 
 
 log = logging.getLogger(__name__)
+
+
+# On-disk JSONL subdir under the session dir. The single source of truth for
+# this path; ``PostmortemFinalizer`` reads the same subtree and the Critic's
+# ``decision_reviewer`` imports this constant to discover the findings file.
+FINDINGS_SUBDIR: str = "agents/robustness/findings"
 
 
 @dataclass
@@ -30,7 +41,7 @@ class FindingSinkConfig:
 
     session_dir: Path
     session_id: str = "default"
-    subdir: str = "agents/robustness/findings"
+    subdir: str = FINDINGS_SUBDIR
 
     @property
     def file_path(self) -> Path:
@@ -94,11 +105,8 @@ class FindingSink:
         """
         path = self._config.file_path
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
-                for row in rows:
-                    handle.write(json.dumps(row, ensure_ascii=False))
-                    handle.write("\n")
+            for row in rows:
+                append_jsonl(path, row, make_parents=True, ensure_ascii=False)
         except OSError as exc:
             self._warn_once("io", f"finding sink io error: {exc}")
 
@@ -128,4 +136,4 @@ def finding_to_row(finding: Finding) -> dict[str, Any]:
     return row
 
 
-__all__ = ["FindingSink", "FindingSinkConfig", "finding_to_row"]
+__all__ = ["FINDINGS_SUBDIR", "FindingSink", "FindingSinkConfig", "finding_to_row"]

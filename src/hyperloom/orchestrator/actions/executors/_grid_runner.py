@@ -22,6 +22,8 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.env import is_truthy
+
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
@@ -92,7 +94,6 @@ from ._grid_variant_filter import (
     _COMPATIBILITY_FLAG_RULES as _COMPATIBILITY_FLAG_RULES,
     _XDIT_ENV_BLACKLIST as _XDIT_ENV_BLACKLIST,
     _XDIT_ENV_COMBO_BLACKLIST as _XDIT_ENV_COMBO_BLACKLIST,
-    _is_truthy_env as _is_truthy_env,
     xdit_blacklist_reason as xdit_blacklist_reason,
     _HELP_TEXT_CACHE as _HELP_TEXT_CACHE,
     _HELP_PROBE_COMMANDS as _HELP_PROBE_COMMANDS,
@@ -389,7 +390,7 @@ def unsupported_capability_reason(variant: "GridVariant") -> str | None:
         return None
     envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
     val = envs.get("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS")
-    if val is None or not _is_truthy_env(val):
+    if val is None or not is_truthy(val, default=True):
         return None
     return _probe_vllm_aiter_shared_expert_unsupported()
 
