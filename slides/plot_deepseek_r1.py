@@ -2,10 +2,8 @@
 
 """Render the DeepSeek-R1-0528 FP8 per-GPU throughput slide figure.
 
-Builds a bar chart comparing MI355X baseline, NVIDIA B200, and Hyperloom
-MI355X tokens/sec per GPU, then saves it as ``docs/images/deepseek_r1_comparison.png``
-for use in the slide deck. Uses the non-interactive ``Agg`` backend so it can
-run headless.
+Bar chart comparing MI355X baseline, NVIDIA B200, and Hyperloom MI355X
+tokens/sec per GPU; saved to ``docs/images/deepseek_r1_comparison.png``.
 """
 import matplotlib
 matplotlib.use('Agg')
