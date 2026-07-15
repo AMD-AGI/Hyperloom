@@ -63,6 +63,9 @@ def _build_grid(
     isl_osl_configs: list[str],
     num_prompts_factor: int,
     base_extra_args: str,
+    base_remove_args: list[str] | None = None,
+    base_unset_envs: list[str] | None = None,
+    base_args_mode: str = "append",
     max_model_len: int = 0,
 ) -> tuple[list[GridVariant], list[dict[str, Any]]]:
     """Fan out CONC × (ISL, OSL) into per-combo Magpie variants (each
@@ -77,6 +80,9 @@ def _build_grid(
         isl_osl_configs: ``"ISL:OSL"`` strings to fan out.
         num_prompts_factor: Multiplier deriving ``NUM_PROMPTS`` from concurrency.
         base_extra_args: Server args applied to every variant.
+        base_remove_args: Inherited server flags removed by current_best.
+        base_unset_envs: Inherited env names removed by current_best.
+        base_args_mode: ``"append"`` or ``"replace"`` for the base args.
         max_model_len: When positive, drops combos whose ``ISL + OSL`` exceeds
             it.
 
@@ -129,6 +135,9 @@ def _build_grid(
                     name=name,
                     extra_server_args=base_extra_args,
                     extra_envs=variant_envs,
+                    remove_args=list(base_remove_args or []),
+                    unset_envs=list(base_unset_envs or []),
+                    args_mode="replace" if str(base_args_mode).strip().lower() == "replace" else "append",
                     note=f"conc={conc} isl={isl} osl={osl}",
                 )
             )
@@ -309,6 +318,9 @@ class SweepExecutor:
         isl_osl_configs = list(params.get("isl_osl_configs") or self.default_isl_osl_configs)
         num_prompts_factor = int(params.get("num_prompts_factor", self.default_num_prompts_factor))
         base_extra_args = params.get("base_extra_args", "")
+        base_remove_args = [str(v) for v in (params.get("base_remove_args") or []) if str(v).strip()]
+        base_unset_envs = [str(v) for v in (params.get("base_unset_envs") or []) if str(v).strip()]
+        base_args_mode = str(params.get("base_args_mode") or "append")
         timeout_sec = int(params.get("variant_timeout_sec", self.variant_timeout_sec))
 
         # Drop ISL+OSL combos over the context window (see _build_grid);
@@ -320,6 +332,9 @@ class SweepExecutor:
             isl_osl_configs=isl_osl_configs,
             num_prompts_factor=num_prompts_factor,
             base_extra_args=base_extra_args,
+            base_remove_args=base_remove_args,
+            base_unset_envs=base_unset_envs,
+            base_args_mode=base_args_mode,
             max_model_len=max_model_len,
         )
 

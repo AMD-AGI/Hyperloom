@@ -21,7 +21,7 @@ INFERENCEX_API = "https://inferencex.semianalysis.com/api/v1/benchmarks"
 
 
 def _unmangle_msys_path(v: str) -> str:
-    """Undo Git-Bash-on-Windows MSYS path conversion of /wekafs/* → C:/.../wekafs/*.
+    """Undo Git-Bash-on-Windows MSYS path conversion of shared POSIX roots.
 
     Safe no-op on Linux/macOS or unmangled paths.
 
@@ -31,17 +31,17 @@ def _unmangle_msys_path(v: str) -> str:
     Returns:
         str: The de-mangled POSIX path, or ``v`` unchanged if not mangled.
     """
-    if isinstance(v, str) and re.search(r"[A-Za-z]:[/\\].*[/\\]wekafs", v):
-        v = re.sub(r"[A-Za-z]:[/\\].*[/\\](wekafs.*)", r"/\1", v).replace("\\", "/")
+    if isinstance(v, str) and re.search(r"[A-Za-z]:[/\\].*[/\\](wekafs|mnt[/\\]shared)", v):
+        v = re.sub(r"[A-Za-z]:[/\\].*[/\\]((?:wekafs|mnt[/\\]shared).*)", r"/\1", v).replace("\\", "/")
     return v
 
 
-def get_nfs_root(default: str = "/wekafs") -> str:
+def get_nfs_root(default: str = "/mnt/shared") -> str:
     """Return $NFS_ROOT with Windows Git Bash path-mangling defense applied.
 
     All ci/* code MUST use this helper instead of os.environ.get("NFS_ROOT")
     directly, otherwise local dry-run on Windows produces malformed paths like
-    `C:/Program Files/Git/wekafs/...` that don't match anything on the runner.
+    `C:/Program Files/Git/mnt/shared/...` that don't match anything on the runner.
 
     Args:
         default (str): Fallback root used when ``NFS_ROOT`` is unset.
@@ -147,8 +147,8 @@ def synthesize_entry_from_ci_config(model_cfg: dict) -> dict:
     ``merge_model_config()`` flow works unchanged.
 
     Required fields in ``model_cfg``:
-      - ``model_hf``           HF repo (e.g., ``zai-org/GLM-5``)
-      - ``image``              container image tag (e.g., ``primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix``)
+      - ``model_hf``           HF repo (e.g., ``Qwen/Qwen3-8B``)
+      - ``image``              container image tag (e.g., ``lmsysorg/sglang:latest``)
       - ``framework``          ``sglang`` or ``vllm``
       - ``precision``          ``fp8`` / ``fp4`` / ``bf16``
       - ``conc``               concurrency cap
