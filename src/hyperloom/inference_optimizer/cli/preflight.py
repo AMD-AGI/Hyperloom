@@ -304,6 +304,94 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: installed {pip_spec}")
 
 
+def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
+    """Probe-then-install Ray using the interpreter that will import it.
+
+    Ray is used broadly (multi-node scheduling, kernel/profile/recover
+    executors), not only by Magpie. The probe imports ``ray`` with
+    ``python_exe`` instead of a PATH-only ``which ray`` lookup on purpose: a
+    bypass-only host may have a stray ``ray`` executable on ``PATH`` from an
+    unrelated venv while ``python_exe`` still cannot ``import ray``, so a
+    PATH-only check would false-positive and the Ray-backed executors would
+    then fail at runtime.
+
+    Args:
+        python_exe (str): The interpreter that will import Ray (and run the
+            probe / install).
+        pip_extra (list[str]): Extra arguments threaded into the ``pip
+            install`` invocation (e.g. ``--break-system-packages``).
+    """
+    check = subprocess.run([python_exe, "-c", "import ray"], capture_output=True)
+    if check.returncode == 0:
+        print("Preflight: ray OK")
+        return
+    print("Preflight: ray not importable, installing ray[default]==2.44.1 + click<8.3.0 ...")
+    subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
+        check=True,
+    )
+    print("Preflight: ray installed OK")
+
+
+# InferenceX benchmark_serving client-side deps. Mirrors the ``_BENCH_SERVING_DEPS``
+# list in assets/install.sh (keep in sync). ``benchmark_serving.py`` lives under
+# InferenceX (not Magpie's pyproject), so ``pip install -e Magpie`` never pulls
+# these; every bypass/Magpie client launch imports them before hitting the server.
+_BENCH_SERVING_DEPS = (
+    "aiohttp",
+    "tqdm",
+    "numpy",
+    "requests",
+    "transformers",
+    "huggingface_hub",
+    "datasets",
+    "pandas",
+)
+
+
+def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
+    """Probe-then-install the InferenceX benchmark_serving client deps in python_exe.
+
+    ``assets/install.sh:ensure_bench_serving_deps`` installs these into the
+    install-time ``$PYTHON`` (often ``/opt/venv``). The bypass runner, however,
+    launches ``benchmark_serving.py`` with the ACTIVE benchmark interpreter
+    (``sys.executable``); when that differs from the install-time interpreter the
+    client dies with a missing-module error even though Ray reported OK. Route the
+    ensure through ``python_exe`` (the resolved benchmark interpreter) so the two
+    stay aligned. Detection uses ``importlib.util.find_spec`` (no heavy import) in
+    a single probe subprocess, then pip-installs only the missing modules.
+
+    Args:
+        python_exe (str): The interpreter that will import the client deps.
+        pip_extra (list[str]): Extra ``pip install`` arguments (e.g.
+            ``--break-system-packages``).
+    """
+    mods = list(_BENCH_SERVING_DEPS)
+    probe = (
+        "import importlib.util, sys; "
+        "print('\\n'.join(m for m in sys.argv[1:] "
+        "if importlib.util.find_spec(m) is None))"
+    )
+    result = subprocess.run(
+        [python_exe, "-c", probe, *mods], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        # Probe itself failed unexpectedly; fall back to attempting all so a
+        # genuinely missing client is not silently left uninstalled.
+        missing = mods
+    else:
+        missing = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if not missing:
+        print("Preflight: benchmark_serving client deps OK")
+        return
+    print(f"Preflight: installing benchmark_serving client deps: {' '.join(missing)} ...")
+    subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, *missing],
+        check=True,
+    )
+    print("Preflight: benchmark_serving client deps installed OK")
+
+
 def _unset_hip_visible_devices() -> None:
     """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set (SKILL.md §"GPU Runner Type").
 
@@ -721,9 +809,20 @@ def _preflight(
                 os.environ[alias] = safe_key
                 print(f"Preflight: filled {alias} from SAFE_API_KEY")
     # --- Resolve install interpreters ---
-    from hyperloom.orchestrator.actions.executors._grid_runner import _resolve_magpie_python
+    # Resolve the ACTIVE benchmark backend first so a bypass-only environment
+    # (no Magpie / no /opt/venv) never routes installs through Magpie's
+    # interpreter. ``resolve_benchmark_interpreter()`` returns the current
+    # interpreter for bypass and the Magpie-importable venv for Magpie, so the
+    # bypass path never resolves the Magpie venv.
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+        resolve_backend_name as _resolve_active_backend_name,
+        resolve_benchmark_interpreter as _resolve_benchmark_interpreter,
+    )
 
-    magpie_python = _resolve_magpie_python()
+    _magpie_backend_active = _resolve_active_backend_name() == "magpie"
+    # Interpreter used for benchmark-runtime installs (Ray). For bypass this is
+    # sys.executable; for Magpie it's the Magpie-importable venv.
+    benchmark_python = _resolve_benchmark_interpreter()
 
     # Outside a venv, add --break-system-packages so pip installs on bare-metal Debian/Ubuntu.
     pip_extra: list[str] = []
@@ -808,21 +907,35 @@ def _preflight(
     _check_shm_disk()
 
     # --- Runtime dep install ---
-    # 1. Ray — needed by Magpie for task scheduling even without kernel-agent.
-    if shutil.which("ray") is None:
-        print("Preflight: ray not found, installing ray[default]==2.44.1 + click<8.3.0 ...")
-        subprocess.run(
-            [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
-            check=True,
-        )
-        print("Preflight: ray installed OK")
+    # 1. Ray — used broadly (multi-node scheduling, kernel/profile/recover
+    # executors), not only by Magpie, so it is installed regardless of backend.
+    # Install it with the active backend's interpreter so a bypass-only box
+    # gets Ray in its own venv instead of Magpie's.
+    _ensure_ray(benchmark_python, pip_extra)
 
-    # 2. Magpie — the benchmark engine all executors shell out to ($MAGPIE_PATH override; auto-clones if missing).
-    check = subprocess.run(
-        [magpie_python, "-c", "import Magpie"],
-        capture_output=True,
-    )
-    if check.returncode != 0:
+    # 1b. InferenceX benchmark_serving client deps — required by every serving
+    # benchmark client launch. install.sh installs these into the install-time
+    # $PYTHON, but the bypass runner launches the client with the active
+    # benchmark interpreter; ensure them there too so a bypass-only box whose
+    # sys.executable differs from /opt/venv can still import the client.
+    _ensure_bench_serving_deps(benchmark_python, pip_extra)
+
+    # 2. Magpie — the benchmark engine the Magpie backend shells out to
+    # ($MAGPIE_PATH override; auto-clones if missing). Skipped entirely when the
+    # active benchmark backend does not need Magpie (e.g. bypass): for the
+    # Magpie backend ``benchmark_python`` already resolves to the
+    # Magpie-importable venv (via resolve_benchmark_interpreter), so a
+    # bypass-only environment never resolves the Magpie venv / /opt/venv.
+    magpie_python = benchmark_python
+    if not _magpie_backend_active:
+        print(
+            f"Preflight: benchmark backend is "
+            f"{_resolve_active_backend_name()!r}; skipping Magpie install/import"
+        )
+        check = None
+    else:
+        check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
+    if _magpie_backend_active and check is not None and check.returncode != 0:
         magpie_env = os.environ.get("MAGPIE_PATH")
         magpie_env_explicit = bool(magpie_env)
         if magpie_env:
