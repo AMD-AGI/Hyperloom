@@ -42,7 +42,6 @@ class _State:
         return self._rem_min
 
 
-# PHASE_NAMES + exit reason vocab presence
 def test_framework_is_in_phase_names_between_prelude_and_explore():
     names = phase_state.PHASE_NAMES
     i = names.index("FRAMEWORK_AGENT")
@@ -94,14 +93,13 @@ def test_long_run_and_gain_helpers_handle_edge_values():
     assert phase_state._cumulative_gain_validated(invalid_gain) == 0.0  # noqa: SLF001
 
 
-# exit_normal_framework_agent
 def test_exit_normal_framework_agent_returns_none_when_nothing_to_do():
     state = _State()
     assert phase_state.exit_normal_framework_agent(state) is None
 
 
 def test_exit_normal_framework_agent_force_exit_when_remaining_below_ratio():
-    # remaining 30min < 0.6 × 2h × 60 = 72min → fires.
+    # remaining 30min < 72min force-exit floor → fires.
     state = _State(remaining_minutes_value=30.0)
     out = phase_state.exit_normal_framework_agent(state, max_hours=2.0)
     assert out is not None
@@ -112,7 +110,7 @@ def test_exit_normal_framework_agent_force_exit_when_remaining_below_ratio():
 
 
 def test_exit_normal_framework_agent_no_force_exit_when_remaining_above_ratio():
-    # remaining 80min > 0.6 × 2h × 60 = 72min → no force exit.
+    # remaining 80min > 72min force-exit floor → no force exit.
     state = _State(remaining_minutes_value=80.0)
     assert phase_state.exit_normal_framework_agent(state, max_hours=2.0) is None
 
@@ -131,8 +129,7 @@ def test_exit_normal_framework_agent_accepts_positional_remaining_minutes():
 
 def test_exit_normal_framework_agent_exits_on_consecutive_reject_plateau():
     """3 consecutive resolved-no-keep candidates (here 'reject') trip the
-    plateau exit. (Updated from the pre-plateau-feature behaviour where the
-    streak was advisory-only and reject rows were ignored.)"""
+    plateau exit."""
     batches = [
         {
             "batch_id": "b1",
@@ -286,12 +283,8 @@ def test_framework_agent_consecutive_no_keep_handles_malformed_progress():
 
 def test_exit_normal_framework_agent_plateau_counts_non_benchmarked_no_keep_rows():
     """not_applicable / apply_failed / authored_empty rows count toward the
-    no-keep streak (they are resolved candidates that did not KEEP).
-
-    In a wheel-based framework env the direct_apply path cannot run and
-    authoring overwhelmingly returns not_applicable / authored_empty, so a batch
-    of dead candidates must still trip the plateau gate — otherwise FRAMEWORK
-    (which has no wall-clock budget cap) grinds for hours without leverage.
+    no-keep streak (they are resolved candidates that did not KEEP), so a
+    batch of dead candidates still trips the plateau gate.
     """
     progress = [
         {"candidate_id": "c1", "status": "not_applicable", "kept": False},
@@ -368,25 +361,21 @@ def test_exit_normal_framework_agent_plateau_routes_to_explore():
     assert reason == "framework_agent_plateau"
 
 
-def test_exit_normal_framework_agent_plateau_streak_env_override(monkeypatch):
-    """INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK overrides the threshold."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK", "2")
+def test_exit_normal_framework_agent_plateau_uses_default_threshold():
+    """The framework plateau threshold is fixed at the default."""
     progress = [
         {"candidate_id": "c1", "status": "reverted", "kept": False},
         {"candidate_id": "c2", "status": "reverted", "kept": False},
+        {"candidate_id": "c3", "status": "reverted", "kept": False},
     ]
     state = _State(framework_agent_phase_progress=progress)
     out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
-    assert out[1]["threshold"] == 2
+    assert out[1]["threshold"] == 3
 
 
-def test_framework_agent_plateau_streak_env_invalid_uses_default(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK", "invalid")
-    assert phase_state._framework_agent_plateau_streak_threshold() == 3  # noqa: SLF001
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK", "0")
+def test_framework_agent_plateau_streak_threshold_is_default():
     assert phase_state._framework_agent_plateau_streak_threshold() == 3  # noqa: SLF001
 
 
@@ -407,7 +396,6 @@ def test_exit_normal_framework_agent_force_exit_beats_phase_done():
     assert out[0] == "framework_agent_force_exit_low_budget"
 
 
-# compute_next_phase routing (with explicit framework_agent_phase_enabled)
 def test_compute_next_phase_prelude_to_framework_when_enabled():
     state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
     out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=True)
@@ -467,7 +455,6 @@ def test_compute_next_phase_framework_stays_when_no_signal():
     assert out is None
 
 
-# compute_next_phase routing with explore_enabled=False (--no-explore)
 def test_compute_next_phase_prelude_skips_explore_to_kernel():
     state = _State(phase=phase_state.PHASE_PRELUDE, baseline_tput=1500.0)
     out = phase_state.compute_next_phase(

@@ -32,8 +32,25 @@ async def test_build_reactor_components_local_only_mode_runs_a_tick(tmp_path: Pa
         intents = await bundle.reactor.tick(ctx)
         assert intents
         assert any(i.type is IntentType.ALERT for i in intents)
-        # No server URL means primary source degrades after fail_threshold.
         assert bundle.server_client is None
+    finally:
+        await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_config_map_covers_all_registry_entries(tmp_path: Path):
+    """The factory-built classifier must resolve a config for every registry
+    slot: entries the factory omits (e.g. cluster_fault) fall back to the
+    registry default, so nothing is left unconfigured."""
+    from hyperloom.agents.robustness.signals import signal_registry_config_attrs
+
+    config = Config(session_dir=tmp_path, robustness_server_url="")
+    bundle = build_reactor_components(config)
+    try:
+        resolved = bundle.components.classifier.signal_configs
+        assert set(resolved) == set(signal_registry_config_attrs())
+        # Every distinct registry slot resolved to an instance (no None).
+        assert all(cfg is not None for cfg in resolved.values())
     finally:
         await bundle.aclose()
 
@@ -46,18 +63,14 @@ async def test_build_reactor_components_uses_server_url_when_set(tmp_path: Path)
     )
     bundle = build_reactor_components(config)
     try:
-        # We cannot reach the URL; primary source should fail and the
-        # fallback eventually serve. We just assert the bundle wires the
-        # server_client when a URL is configured.
+        # Assert the bundle wires the server_client when a URL is configured.
         assert bundle.server_client is not None
         assert bundle.server_client.base_url == "http://example.invalid:8000"
     finally:
         await bundle.aclose()
 
 
-# ---------------------------------------------------------------------------
-# M1.5 LLM RCA wiring
-# ---------------------------------------------------------------------------
+# LLM RCA wiring
 
 
 @pytest.mark.asyncio
@@ -248,14 +261,12 @@ async def test_factory_propagates_severity_min_config(tmp_path: Path):
         await bundle.aclose()
 
 
-# ---------------------------------------------------------------------------
-# M2 multi-node policy: disable_local_probe + cluster fan-out wiring
-# ---------------------------------------------------------------------------
+# Multi-node policy: disable_local_probe + cluster fan-out wiring
 
 
 @pytest.mark.asyncio
 async def test_factory_uses_quiet_fallback_when_local_probe_disabled(tmp_path: Path):
-    """``disable_local_probe`` swaps the LocalProbe for a quiet stub that never yields high-severity local symptoms (Ray-worker policy)."""
+    """``disable_local_probe`` swaps the LocalProbe for a quiet stub that never yields high-severity local symptoms."""
     from hyperloom.agents.robustness.factory import _QuietFallback
     from hyperloom.agents.robustness.sources.local_probe import LocalProbeSource
 
@@ -314,7 +325,6 @@ async def test_factory_scriptable_skips_inference_server_probe(tmp_path: Path):
     bundle = build_reactor_components(config)
     try:
         fallback = bundle.components.router._fallback  # type: ignore[attr-defined]
-        # LocalProbe is retained — only the server health probe is skipped.
         assert isinstance(fallback, LocalProbeSource)
         targets = fallback._config.health_probe_targets  # type: ignore[attr-defined]
         assert config.inference_server_health_url not in targets

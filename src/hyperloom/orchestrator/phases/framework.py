@@ -54,8 +54,7 @@ class FrameworkPhase(PhaseHandler):
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
         # When the baseline could not launch, dispatch a one-shot
-        # enablement_specialist before the perf PR-discovery loop. Guarded via
-        # ``enablement_dispatched``.
+        # enablement_specialist before the perf PR-discovery loop.
         try:
             enablement_tid = await self._maybe_enqueue_enablement_specialist()
         except Exception:  # noqa: BLE001 — never wedge the perf pump
@@ -75,10 +74,7 @@ class FrameworkPhase(PhaseHandler):
             if getattr(t, "kind", "") == "framework_agent":
                 return
         # Serialize one candidate at a time: skip while a candidate proposal
-        # awaits its Critic verdict (resolved on a later tick). Delivery of the
-        # proposal to the Critic is durable (re-presented from pending_proposals
-        # until decided — see Coordinator._augment_critic_inbox_with_pending), so
-        # the verdict reliably lands and this wait cannot wedge the phase.
+        # awaits its (durable) Critic verdict, resolved on a later tick.
         try:
             if any(
                 getattr(p, "action_name", "") == "framework_agent"
@@ -89,19 +85,10 @@ class FrameworkPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — defensive
             pass
         # An authoring specialist (or its downstream integrate_patch) for the
-        # current candidate may still be running. The authoring track records
-        # its terminal progress row only when the dispatcher harvests the
-        # specialist/integrate_patch result; until then the candidate has no
-        # progress row and ``_select_next_framework_agent_candidate`` would
-        # re-select it every tick, re-auditing and re-dispatching the same
-        # candidate forever (observed: pull/1015 re-dispatched 30+ times while
-        # its specialist had already finished but the result was not yet
-        # harvested). Wait only on a live TASK (queued/running) — NOT on a
-        # pending Critic proposal: a stuck/orphaned pending proposal in the
-        # in-memory registry never represents active GPU work and must not
-        # wedge the pump (observed: pump silent for 30+ min after a revert
-        # while 0 tasks ran). The proposal-pending case is still covered by the
-        # original ``next_candidate is None`` inflight wait below.
+        # current candidate may still be running; wait only on a live TASK
+        # (queued/running), NOT on a pending Critic proposal. The
+        # proposal-pending case is covered by the ``next_candidate is None``
+        # inflight wait below.
         if getattr(state, "framework_agent_authoring_enabled", False):
             try:
                 _q = await self.tasks.queued()
@@ -115,29 +102,19 @@ class FrameworkPhase(PhaseHandler):
             ):
                 return
             # Proposal-window guard: the task check above misses the interval
-            # between a specialist completing (config-lever / patch deliverable)
-            # and its integrate_patch becoming a live TASK — during that window
-            # the deliverable exists only as a pending Critic proposal. Without
-            # this guard the pump re-selects the same candidate (it has no
-            # progress row yet) and routes a SECOND integrate_patch of the same
-            # deliverable (observed: vllm/pull/1007 benched twice -> 2 no-KEEP
-            # rows -> premature FRAMEWORK plateau after only 2 distinct
-            # candidates). ``_framework_agent_authoring_inflight`` also covers
-            # pending integrate_patch proposals, so waiting here serializes one
-            # candidate's author->integrate->KEEP/REVERT lifecycle before the
-            # next is selected. No livelock risk: the row is stamped when the
-            # integrate_patch resolves, which clears the inflight signal.
+            # between a specialist completing and its integrate_patch becoming a
+            # live TASK (the deliverable exists only as a pending Critic
+            # proposal). ``_framework_agent_authoring_inflight`` covers pending
+            # integrate_patch proposals, serializing one candidate's
+            # author->integrate->KEEP/REVERT lifecycle before the next.
             if await self._framework_agent_authoring_inflight():
                 return
-        # Pick the most promising un-dispatched candidate (agent-ranked), or
-        # request a new batch if exhausted.
+        # Pick the most promising un-dispatched candidate, or request a new batch.
         next_candidate = await self._select_best_framework_agent_candidate()
         if next_candidate is None:
-            # Hold the phase open while authored patches are still benched/critic-reviewed (gains must land before plateau judge); gated by authoring flag.
-            # Only wait when the pump itself discovered a PR batch to author against:
-            # an empty batch list means no pump-initiated authoring is outstanding, so
-            # an LLM-proposed integrate_patch must NOT keep FRAMEWORK open (else the
-            # phase livelocks under a large budget — no discover, no done, no advance).
+            # Hold the phase open while pump-discovered authored patches are still
+            # benched/reviewed; only when the pump itself discovered a PR batch
+            # (an LLM-proposed integrate_patch must not keep FRAMEWORK open).
             discovered_batch = bool(getattr(self.shared_state, "framework_agent_batches", None) or [])
             if (
                 discovered_batch
@@ -145,7 +122,8 @@ class FrameworkPhase(PhaseHandler):
                 and await self._framework_agent_authoring_inflight()
             ):
                 return
-            # Discover a fresh batch; only DISCOVER_FAILURE_RETRY_LIMIT consecutive failures or an empty-but-valid payload mark the phase done.
+            # Discover a fresh batch; only DISCOVER_FAILURE_RETRY_LIMIT
+            # consecutive failures or an empty-but-valid payload mark the phase done.
             from ..framework import client as _fa_client
 
             ok = await self._discover_next_framework_batch()
@@ -161,11 +139,8 @@ class FrameworkPhase(PhaseHandler):
                     state.save(self.session_dir)
                     return
                 if failures == 0:
-                    # Empty-but-valid payload. A single empty batch can be a
-                    # transient upstream blip (cortex/PR-Monitor/GitHub search
-                    # flapping), so tolerate a bounded number of consecutive
-                    # empties across ticks before giving up — otherwise one
-                    # momentary empty result silently skips the whole phase.
+                    # Empty-but-valid payload: tolerate a bounded number of
+                    # consecutive empties (transient upstream blip) before giving up.
                     empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0) + 1
                     state.framework_agent_empty_discoveries = empties
                     if empties < _fa_client.DISCOVER_FAILURE_RETRY_LIMIT:
@@ -196,16 +171,12 @@ class FrameworkPhase(PhaseHandler):
                 state.framework_agent_phase_done = True
                 state.save(self.session_dir)
                 return
-        # Run semantic audit before the Critic/apply. A confident verdict
-        # routes the candidate (skip already-present, raw-diff for direct_apply,
-        # authoring-with-evidence for needs_rewrite); an unknown / unavailable
-        # audit preserves the legacy both-tracks behaviour (zero regression).
+        # Run semantic audit before the Critic/apply. A confident verdict routes
+        # the candidate; an unknown / unavailable audit falls back to both-tracks.
         audit = await self._audit_framework_agent_candidate(next_candidate)
         audit_step = str((audit or {}).get("recommended_next_step") or "")
         _cand_id_log = self._framework_candidate_key(next_candidate)
-        # Only honour a skip when the audit is confident AND evidence-backed;
-        # otherwise fall through to authoring (never silently skip a GPU test on
-        # a low-confidence already-present claim).
+        # Only honour a skip when the audit is confident AND evidence-backed.
         if audit_step == "skip" and not self._framework_agent_audit_skip_confident(audit):
             log.info(
                 "FRAMEWORK: audit skip downgraded (low confidence / no evidence) candidate=%s conf=%s",
@@ -217,10 +188,8 @@ class FrameworkPhase(PhaseHandler):
             await self._record_framework_agent_audit_skip(next_candidate, audit)
             state.save(self.session_dir)
             return
-        # direct_apply needs a clean git checkout to apply / commit / reset.
-        # On a wheel install (no git tree among the framework source roots)
-        # degrade to authoring so the candidate still progresses instead of
-        # failing at ``git apply`` in the executor.
+        # direct_apply needs a clean git checkout; degrade to authoring on a
+        # wheel install (no git tree among the framework source roots).
         if audit_step == "direct_framework" and not self._framework_agent_roots_have_git():
             log.info(
                 "FRAMEWORK: direct_apply downgraded to authoring "
@@ -228,9 +197,8 @@ class FrameworkPhase(PhaseHandler):
                 _cand_id_log,
             )
             audit_step = "author_via_specialist"
-        # A candidate that belongs to a different concrete framework cannot
-        # be direct-applied into this session's source tree. Downgrade to
-        # authoring so the idea can still be ported. ``aiter`` is shared across
+        # A candidate from a different concrete framework cannot be
+        # direct-applied; downgrade to authoring. ``aiter`` is shared across
         # frameworks and is never treated as a mismatch.
         if audit_step == "direct_framework":
             session_fw = str(getattr(state, "framework", "") or "").strip().lower()
@@ -252,8 +220,8 @@ class FrameworkPhase(PhaseHandler):
                     _cand_id_log,
                 )
                 audit_step = "author_via_specialist"
-        # Submit the candidate as a proposal; the async Critic verdict drives
-        # the apply/author enqueue or the critic_denied row on a later tick.
+        # Submit the candidate as a proposal; the async Critic verdict drives the
+        # apply/author enqueue or the critic_denied row on a later tick.
         await self._submit_framework_agent_candidate_for_review(
             next_candidate,
             audit=audit,
@@ -289,9 +257,9 @@ class FrameworkPhase(PhaseHandler):
             cand_id = str(params.get("framework_agent_candidate_id") or "")
             if not cand_id or cand_id in unprocessed_ids:
                 return True
-        # An authored patch awaiting Critic review or a candidate awaiting its
-        # pre-screen verdict both keep the phase from exiting early — but only
-        # while the proposal targets a still-unprocessed candidate.
+        # An authored patch awaiting Critic review (or a candidate awaiting its
+        # pre-screen verdict) keeps the phase open, but only while the proposal
+        # targets a still-unprocessed candidate.
         try:
             for p in self.state.pending_proposals.values():
                 if getattr(p, "decided", False):
@@ -407,17 +375,9 @@ class FrameworkPhase(PhaseHandler):
             roots = list(resolve_source_file_allowlist())
             session_framework = str(getattr(state, "framework", "") or "").strip().lower()
             cand_framework = str(candidate.get("framework") or "").strip().lower()
-            # A candidate discovered from a DIFFERENT framework's
-            # repo (LLM selector may pick one — see cross-framework acceptance
-            # note in the candidate-selection prompt) must be judged for
-            # portability into this session's own framework, not audited as
-            # if it were a same-framework patch. `framework` stays the
-            # candidate's own source framework so cross_framework_audit's
-            # src_framework/dst_framework split is correct; when
-            # cand_framework is blank (the common same-framework case — most
-            # candidates discovered from this session's own repo never carry
-            # an explicit stamp) this resolves to session_framework exactly
-            # like before, so same-framework audit behaviour is unchanged.
+            # A candidate from a DIFFERENT framework's repo is judged for
+            # portability into this session's framework; a blank cand_framework
+            # (the common same-framework case) resolves to session_framework.
             is_cross_fw_candidate = bool(cand_framework) and cand_framework != session_framework
             audit = await _fa_client.phase_audit(
                 candidate=candidate,
@@ -445,7 +405,7 @@ class FrameworkPhase(PhaseHandler):
             candidate["_audit"] = audit
         except Exception:  # noqa: BLE001 — caching is best-effort
             pass
-        # Persist the verdict next to the candidate's decision.json.
+        # Persist the verdict next to decision.json.
         try:
             from ..framework.artifacts import write_semantic_audit
 
@@ -640,10 +600,8 @@ class FrameworkPhase(PhaseHandler):
             f"- Unified diff: {diff_url or '(none)'} (fetch with WebFetch to read the upstream change)",
         ]
         notes_lines.extend(self._framework_agent_audit_seed_lines(audit))
-        # Cross-framework port. When the audit ran in cross_framework
-        # mode the upstream diff targets a different framework's layout/API and
-        # can never be git-applied; the specialist must REWRITE the equivalent
-        # logic against this session's (target) framework source.
+        # Cross-framework port: the specialist REWRITES the equivalent logic
+        # against this session's (target) framework source.
         is_cross_framework = isinstance(audit, dict) and str(audit.get("layer") or "") == "cross_framework"
         cf_src_framework = ""
         cf_dst_framework = ""
@@ -722,17 +680,13 @@ class FrameworkPhase(PhaseHandler):
             notes_lines.extend(fb_lines)
         notes = "\n".join(notes_lines)
         params: dict[str, Any] = {
-            # Cross-framework ports route to a dedicated
-            # rewrite domain (isolated system prompt / PolicyGate / provenance
-            # observability). Guarded by is_cross_framework so same-framework
-            # authoring is byte-for-byte unchanged. KB writeback is unaffected
-            # (it keys off the umbrella provenance prefix, not the domain).
+            # Cross-framework ports route to a dedicated rewrite domain.
             "domain": ("cross_framework_rewrite_specialist" if is_cross_framework else "serving_specialist"),
             "gap_canonical_id": gap_cid,
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
-            # Provenance markers so the dispatcher-side bridge recognises an authored FRAMEWORK patch.
+            # Provenance markers for the dispatcher-side authored-patch bridge.
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": cand_id,
             "framework_batch_id": batch_id,
@@ -744,8 +698,7 @@ class FrameworkPhase(PhaseHandler):
             **self._framework_gpu_params(),
         }
         if is_cross_framework:
-            # Thread cross-framework provenance so the specialist->
-            # integrate_patch->ledger path records source/target framework.
+            # Thread cross-framework provenance to the integrate_patch->ledger path.
             params["cross_framework"] = True
             params["source_framework"] = cf_src_framework
             params["target_framework"] = cf_dst_framework
@@ -759,8 +712,7 @@ class FrameworkPhase(PhaseHandler):
         idem = f"framework_agent_authoring:{batch_id}:{cand_id}"
         if reauthor_attempt > 0:
             idem = f"{idem}:reauthor:{int(reauthor_attempt)}"
-        # Add gpu_research_lane + a budget-sourced TTL: this internal dispatch
-        # bypasses intent_router.
+        # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _spec_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
@@ -780,31 +732,17 @@ class FrameworkPhase(PhaseHandler):
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
-        # Livelock break (cross-resume): if the authoring specialist for this
-        # candidate ALREADY exists in a TERMINAL state but the candidate still
-        # has no ``framework_agent_phase_progress`` row, its empty deliverable was
-        # never harvested into a terminal row (the dispatcher only harvests
-        # specialists that complete IN the current process — a specialist that
-        # finished before a resume is returned here by idempotency key without
-        # re-running, so the harvest hook never fires). Without a terminal row
-        # ``_select_best_framework_agent_candidate`` re-selects this candidate every
-        # tick and we re-log "dispatched" forever (observed: pull/1022 dispatched
-        # 30+ times across resumes). Stamp the terminal author_empty row now and
-        # skip the (no-op) re-dispatch so the pump advances to the next candidate.
+        # Livelock break (cross-resume): a specialist that finished before a
+        # resume is returned here by idempotency key without re-running, so its
+        # empty deliverable never got a terminal progress row. Stamp
+        # author_empty now and skip the no-op re-dispatch so the pump advances.
         from ..state.task_registry import TERMINAL_STATES as _TERMINAL_STATES
 
         if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
             already_rows = self._framework_processed_candidate_keys()
-            # Only stamp when the authored deliverable is genuinely NOT in flight.
-            # A specialist that produced a config-lever / patch deliverable routes
-            # it to an integrate_patch (often first as a pending Critic proposal,
-            # which the pump's task-only inflight guard does not see). That
-            # integrate_patch owns the terminal row — stamping author_empty here
-            # would prematurely mislabel a candidate that is actually being
-            # benchmarked. ``_framework_agent_authoring_inflight`` checks pending
-            # integrate_patch proposals too, so it distinguishes the true
-            # cross-resume harvest-miss (nothing in flight) from a deliverable
-            # still being benched.
+            # Only stamp when the deliverable is genuinely NOT in flight;
+            # _framework_agent_authoring_inflight also checks pending
+            # integrate_patch proposals so a benched deliverable is not mislabeled.
             authoring_inflight = await self._framework_agent_authoring_inflight()
             if cand_id and cand_id not in already_rows and not authoring_inflight:
                 log.info(
@@ -825,11 +763,8 @@ class FrameworkPhase(PhaseHandler):
                         cand_id,
                     )
                 return ""
-        # Remember which candidate this specialist task authors for. The
-        # downstream integrate_patch task only carries ``specialist_task_id``,
-        # so the authored-outcome bridge resolves the PR-URL candidate id from
-        # this map (else the progress row is keyed on a task_id that never
-        # matches the select key -> FRAMEWORK pump re-dispatches forever).
+        # Map specialist task -> candidate so the authored-outcome bridge can
+        # resolve the PR-URL candidate id from the downstream integrate_patch.
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
         try:
             if spec_tid and cand_id:
@@ -931,7 +866,7 @@ class FrameworkPhase(PhaseHandler):
         plans bridging discovery, runs a **best-effort** candidate-PR enumeration
         (network; fully exception-guarded, degrades to repos-only), and renders
         the authoring mandate via
-        ``framework_agent.enablement_authoring.build_mandate`` (the single source
+        ``framework_agent.enablement_ops.build_mandate`` (the single source
         of the enablement prompt). Returns ``None`` **only** when the launch log
         is blank (nothing to act on); a non-blank log always yields params, even
         when it classifies as ``UNKNOWN`` — the LLM specialist repairs from the
@@ -954,8 +889,7 @@ class FrameworkPhase(PhaseHandler):
         if not text:
             return None
         from hyperloom.agents.framework.enablement import EnablementRequest, classify_failure
-        from hyperloom.agents.framework.enablement_authoring import build_mandate
-        from hyperloom.agents.framework.enablement_discovery import build_search_plan
+        from hyperloom.agents.framework.enablement_ops import build_mandate, build_search_plan
         from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
         state = self.shared_state
@@ -963,14 +897,9 @@ class FrameworkPhase(PhaseHandler):
         model = (getattr(state, "model_name", "") or "").strip()
         repo_url = repo_url_for_framework(framework)
 
-        # Taxonomy-independent dispatch: we dispatch a specialist
-        # for ANY non-blank launch log, even one that classifies as ``UNKNOWN``.
-        # The enumerated ``kind`` is advisory only (it routes bridge-repo hints
-        # and labels the mandate); it is NOT a gate. A brand-new failure the
-        # rule table has never seen must still get a repair attempt — the LLM
-        # specialist reads the full raw log regardless of ``kind`` — otherwise
-        # every novel gap would wedge the run in needs_human_review. Blank logs
-        # (nothing to act on) are the only non-dispatch case (handled above).
+        # Dispatch a specialist for ANY non-blank launch log, even one that
+        # classifies as ``UNKNOWN``: ``kind`` is advisory (routes bridge-repo
+        # hints and labels the mandate), not a gate.
         signature = classify_failure(text)
         req = EnablementRequest(
             framework=framework,
@@ -981,18 +910,14 @@ class FrameworkPhase(PhaseHandler):
         )
         plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
         candidate_refs = self._discover_enablement_candidate_refs(req, plan)
-        # Lead with a different candidate each attempt (deterministic
-        # left-rotation).
+        # Lead with a different candidate each attempt (deterministic left-rotation).
         if candidate_refs and attempt:
             n = len(candidate_refs)
             k = attempt % n
             candidate_refs = candidate_refs[k:] + candidate_refs[:k]
         source_context = self._read_enablement_source_context(signature)
-        # Auto-feedback (structural): for a weight-init failure, derive the
-        # checkpoint's ground-truth per-layer weight inventory from the model's
-        # safetensors index and fold it into the mandate. This makes the loop
-        # self-correct from the checkpoint on every retry instead of re-deriving
-        # a wrong sharing rule from the raw error alone (no manual hints needed).
+        # For a weight-init failure, fold the checkpoint's ground-truth per-layer
+        # weight inventory into the mandate so the loop self-corrects each retry.
         weight_facts = self._derive_checkpoint_weight_facts(text)
         if weight_facts:
             source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
@@ -1002,10 +927,8 @@ class FrameworkPhase(PhaseHandler):
             candidate_refs=candidate_refs,
             source_context=source_context,
         )
-        # Patches from prior rounds that made forward progress (each cleared an
-        # earlier crash). They are re-applied as a base before this round's
-        # patch (serial-gap stacking), so the specialist must author a fix that
-        # composes ON TOP of them — targeting the *current* (deeper) failure.
+        # Progressing patches from prior rounds, re-applied as a base before this
+        # round's patch (serial-gap stacking); author a fix composing on top.
         base_patches = [str(p) for p in (getattr(state, "enablement_kept_patches", None) or [])]
         base_setup = [str(c) for c in (getattr(state, "enablement_setup_commands", None) or [])]
         notes = mandate.task_description
@@ -1039,23 +962,18 @@ class FrameworkPhase(PhaseHandler):
             "gap_layer": "framework",
             "gap_evidence": {"model": model, "failure_kind": signature.kind},
             "framework": framework,
-            # Reuse the FRAMEWORK authoring machinery; the enablement tag routes
-            # the integrate gate to runnable_decision rather than the perf gate.
+            # Enablement tag routes the integrate gate to runnable_decision.
             "framework_agent_authoring": True,
             "enablement": True,
             "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
             "enablement_search_repos": list(plan.repos),
-            # Pre-patch failure signature, replayed by integrate_patch against
-            # the post-patch failure.
+            # Pre-patch failure signature, replayed by integrate_patch.
             "enablement_before_signature": signature.to_dict(),
             "enablement_candidate_refs": list(candidate_refs),
-            # Progressing patches from prior rounds, stacked as a base before
-            # this round's patch (see integrate_patch enablement_base_patches).
+            # Progressing patches from prior rounds, stacked as a base.
             "enablement_base_patches": base_patches,
-            # Allowlisted install/setup commands from prior rounds, replayed by
-            # integrate_patch before boot (durable env setup). Forwarded to
-            # the synthetic integrate_patch task by _autosubmit_specialist_patch.
+            # Allowlisted setup commands from prior rounds, replayed before boot.
             "enablement_setup_commands": base_setup,
             "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
@@ -1104,25 +1022,12 @@ class FrameworkPhase(PhaseHandler):
     def _derive_checkpoint_weight_facts(self, launch_log: str) -> str:
         """Auto-derive ground-truth checkpoint-weight facts for a weight-init failure.
 
-        When a launch fails with a *weight-loading* error — vLLM/HF strict init
-        (``weights were not initialized from checkpoint``) or a state_dict
-        mismatch (``Missing/Unexpected key(s) in state_dict``) — the offending
-        parameter names in the traceback are only *half* the picture: the
-        specialist also needs to know which of those names ACTUALLY EXIST in the
-        checkpoint (so it can copy/alias from a real source) versus which are
-        instantiated by the model but absent from the checkpoint (so they need
-        synthesis/sharing). Prior enablement rounds kept re-deriving a wrong
-        sharing rule because that ground truth was never fed back.
-
-        This parses the failing ``model...`` parameter names out of the launch
-        log, then cross-references the model's ``*.safetensors.index.json`` (or
-        ``pytorch_model.bin.index.json``) ``weight_map`` to report, per offending
-        family, which layer indices carry that weight in the checkpoint and which
-        do not. The result is a compact, verifiable FACTS block that is appended
-        to the enablement mandate on EVERY retry, so the loop self-corrects from
-        the checkpoint instead of guessing. Fully exception-guarded: any failure
-        (no index, unreadable, no matches) returns ``""`` and the mandate degrades
-        to the log-only form.
+        On a weight-loading error (strict init / state_dict mismatch), parses the
+        offending ``model...`` parameter names from the launch log and
+        cross-references the model's ``*.index.json`` ``weight_map`` to report,
+        per offending family, which layer indices carry that weight in the
+        checkpoint and which do not. Returns a compact FACTS block appended to the
+        enablement mandate. Fully exception-guarded: any failure returns ``""``.
 
         Args:
             launch_log: The captured launch / traceback text.
@@ -1138,11 +1043,8 @@ class FrameworkPhase(PhaseHandler):
             import re as _re
             from pathlib import Path as _Path
 
-            # Offending parameter names in the traceback (e.g.
-            # 'model.layers.5.self_attn.indexer.k_norm.weight'). Parsed FIRST so
-            # the trigger is robust to a head-truncated launch log that dropped
-            # the "not initialized from checkpoint" phrase but still carries the
-            # quoted weight names (the real signal we need).
+            # Offending parameter names in the traceback; parsed first so the
+            # trigger is robust to a head-truncated launch log.
             offending = set(_re.findall(r"['\"]((?:model|language_model|transformer)\.[\w.]+)['\"]", text))
             weighty = {o for o in offending if o.endswith((".weight", ".bias", "_scale"))}
             phrase_hit = (
@@ -1151,14 +1053,23 @@ class FrameworkPhase(PhaseHandler):
                 or "unexpected key" in low
                 or "error(s) in loading state_dict" in low
             )
-            # Fire when the log names offending weights/biases even if the
-            # explanatory phrase was truncated off; require weight-shaped names
-            # so we do not misfire on unrelated quoted 'model.*' tokens.
+            # Fire when the log names weight-shaped offending params even if the
+            # explanatory phrase was truncated off.
             if not (phrase_hit or weighty):
                 return ""
             if not offending:
                 return ""
             model_path = str(getattr(self.shared_state, "model_path", "") or "").strip()
+            if model_path:
+                # ``model_path`` may be an HF repo id; resolve to the local
+                # weights dir so the sharded-index read works for repo-id launches.
+                from hyperloom.inference_optimizer.model_config_utils import (
+                    resolve_local_model_dir,
+                )
+
+                _resolved = resolve_local_model_dir(model_path)
+                if _resolved is not None:
+                    model_path = str(_resolved)
             if not model_path or not _Path(model_path).is_dir():
                 return ""
             # Load the checkpoint weight_map (sharded index) or list single-file keys.
@@ -1170,8 +1081,7 @@ class FrameworkPhase(PhaseHandler):
             if not weight_map:
                 return ""
             ckpt_keys = set(weight_map.keys())
-            # Group offending names by a layer-index-stripped "family" so we can
-            # report the per-layer presence pattern compactly.
+            # Group offending names by a layer-index-stripped "family".
             def _family(name: str) -> str:
                 return _re.sub(r"\.\d+\.", ".{N}.", name)
 
@@ -1188,7 +1098,7 @@ class FrameworkPhase(PhaseHandler):
                     d["missing_layers"].add(li)
             lines: list[str] = []
             for fam in sorted(fams):
-                # For this family, which layer indices DO exist in the checkpoint?
+                # Which layer indices for this family exist in the checkpoint?
                 fam_re = _re.compile("^" + _re.escape(fam).replace(r"\{N\}", r"\d+") + "$")
                 present_layers = sorted(
                     {li for k in ckpt_keys if fam_re.match(k) for li in [_layer_idx(k)] if li is not None}
@@ -1240,20 +1150,20 @@ class FrameworkPhase(PhaseHandler):
         + opted-in ROCm/HIP/aiter bridge repos) via the ``sources`` layer, then
         ranks each :class:`framework_agent.models.Candidate` with
         ``score_enablement_title`` (per-Candidate so the ref/html_url is
-        preserved — ``rank_titles`` only scores bare strings) and returns the
-        top ``req.max_search_candidates`` refs (``html_url`` preferred).
+        preserved) and returns the top ``req.max_search_candidates`` refs
+        (``html_url`` preferred).
 
         Network + git; **fully exception-guarded**: any failure degrades to an
         empty tuple so the mandate falls back to repos-only.
 
         Args:
             req: The :class:`framework_agent.enablement.EnablementRequest`.
-            plan: The :class:`framework_agent.enablement_discovery.EnablementSearchPlan`.
+            plan: The :class:`framework_agent.enablement_ops.EnablementSearchPlan`.
 
         Returns:
             tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
         """
-        from hyperloom.agents.framework.enablement_discovery import score_enablement_title
+        from hyperloom.agents.framework.enablement_ops import score_enablement_title
         from hyperloom.agents.framework.models import Candidate, ExploreRequest
         from hyperloom.agents.framework.sources import enumerate_candidates
 
@@ -1347,8 +1257,7 @@ class FrameworkPhase(PhaseHandler):
         attempt = int(getattr(state, "enablement_attempts", 0) or 0)
         params = self._build_enablement_specialist_params(launch_log, attempt=attempt)
         if params is None:
-            # A non-blank log that classifies to UNKNOWN is recorded for human
-            # review, once per distinct log.
+            # A non-blank UNKNOWN log is recorded for human review, once per log.
             await self._maybe_record_enablement_human_review(launch_log)
             return ""
         from ..actions.executors._multi_node_env import is_multi_node
@@ -1360,8 +1269,7 @@ class FrameworkPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — best-effort warmup
             log.debug("enablement: warm specialist params failed", exc_info=True)
         idem = f"enablement_authoring:{params.get('enablement_failure_kind', '')}:{attempt}"
-        # Add gpu_research_lane + a budget-sourced TTL: this internal dispatch
-        # bypasses intent_router.
+        # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _existing = await self.tasks.create_or_return_existing(
             kind="specialist",
@@ -1499,20 +1407,11 @@ class FrameworkPhase(PhaseHandler):
         def _reset_baseline_failure_backstop() -> None:
             """Clear the baseline-failure counters on enablement forward progress.
 
-            The baseline fast-fail backstop (``baseline_failure_streak`` /
-            ``baseline_total_failures`` → ``stop_reason='baseline_failed'`` at
-            :data:`_BASELINE_MAX_TOTAL_FAILURES`) exists to stop a run whose
-            baseline keeps failing *the same way*. But a **serial** enablement
-            makes the baseline re-fail on purpose: each round clears gap #n and
-            the next baseline/integrate boot stops at a *new, deeper* gap #(n+1).
-            Those crashes are progress, not a stuck baseline — yet the backstop
-            counts them independently of enablement (the counters only reset on
-            an actual baseline SUCCESS), so N serial gaps trip ``baseline_failed``
-            at N=3 and guillotine a healthy, advancing loop. Reset them whenever
-            enablement advances/succeeds so the honest ``enablement_stalled`` cap
-            (consecutive NO-progress rounds) becomes the sole enablement-phase
-            fast-fail; a real baseline regression after enablement completes still
-            re-arms the streak normally.
+            A serial enablement makes the baseline re-fail on purpose (each round
+            clears gap #n and the next boot stops at a deeper gap), so those
+            crashes are progress, not a stuck baseline. Reset the backstop
+            counters so ``enablement_stalled`` is the sole enablement-phase
+            fast-fail.
             """
             state.baseline_failure_streak = 0
             state.baseline_arg_error_streak = 0
@@ -1525,8 +1424,7 @@ class FrameworkPhase(PhaseHandler):
             _stack_setup_commands()
         elif status == "advanced" or bool(res.get("advanced")):
             # Forward progress on a serial enablement: stack the progressing
-            # patch(es) + setup commands and pivot the next round to the
-            # newly-revealed gap.
+            # patches + setup commands and pivot to the newly-revealed gap.
             kept = list(getattr(state, "enablement_kept_patches", None) or [])
             for p in res.get("patches_applied") or []:
                 sp = str(p)
@@ -1538,8 +1436,6 @@ class FrameworkPhase(PhaseHandler):
             if new_log:
                 state.enablement_launch_log = new_log
             state.enablement_stall_streak = 0
-            # Serial-gap revalidation crashes are progress, not a stuck
-            # baseline: clear the baseline fast-fail backstop (see helper).
             _reset_baseline_failure_backstop()
             state.enablement_dispatched = False
         else:
@@ -1591,17 +1487,14 @@ class FrameworkPhase(PhaseHandler):
         status = str(res.get("status") or "")
 
         if lane == "enablement" or res.get("enablement"):
-            # Delegate to existing enablement rearm logic (no behaviour change).
             self._maybe_rearm_enablement(res)
             return
 
         if status != "apply_failed":
-            # Non-apply-failed results for perf lanes are handled by the
-            # existing writeback path; nothing to do here.
+            # Non-apply-failed perf-lane results go through the writeback path.
             return
 
         if lane not in ("perf_framework", "perf_explore"):
-            # Unknown lane — ignore silently.
             return
 
         # Determine the candidate key for tracking retry attempts.
@@ -1609,7 +1502,6 @@ class FrameworkPhase(PhaseHandler):
         if not isinstance(candidate, dict):
             candidate = {}
         cand_id = self._framework_candidate_key(candidate)
-        # Fallback: use specialist_task_id when no candidate dict is present.
         if not cand_id:
             cand_id = str(res.get("specialist_task_id") or "").strip()
         if not cand_id:
@@ -1622,14 +1514,12 @@ class FrameworkPhase(PhaseHandler):
         )
 
         state = self.shared_state
-        from ..loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
 
         existing = getattr(state, "apply_fail_reauthor_attempts", None)
         apply_fail_attempts: dict[str, int] = existing if isinstance(existing, dict) else {}
         prior = int(apply_fail_attempts.get(cand_id, 0) or 0)
         attempt = prior + 1
         apply_fail_attempts[cand_id] = attempt
-        # Always write back (handles first-use when attribute wasn't set).
         state.apply_fail_reauthor_attempts = apply_fail_attempts
 
         log.info(
@@ -1717,7 +1607,6 @@ class FrameworkPhase(PhaseHandler):
         retry_feedback = retry_feedback or []
         state = self.shared_state
 
-        # Build a feedback section for the mandate.
         feedback_lines: list[str] = []
         if retry_feedback:
             feedback_lines.append("")
@@ -1735,8 +1624,7 @@ class FrameworkPhase(PhaseHandler):
 
         if lane == "perf_framework":
             # Re-dispatch a framework_agent authoring specialist with apply
-            # failure context injected.  We reuse _enqueue_framework_agent_authoring_specialist
-            # with a crafted critic_feedback-style note carrying the apply stderr.
+            # failure context injected via a critic_feedback-style note.
             cand_id = self._framework_candidate_key(candidate)
             if not cand_id:
                 log.warning("_enqueue_author_specialist: perf_framework missing cand_id")
@@ -3830,13 +3718,40 @@ class FrameworkPhase(PhaseHandler):
         grid: list[dict[str, Any]] = []
         seen_names: set[str] = set()
 
-        def _add(name: str, args: str, envs: dict[str, str], note: str) -> None:
+        def _controls(raw: Any) -> dict[str, Any]:
+            if not isinstance(raw, dict):
+                return {}
+            out: dict[str, Any] = {}
+            for key in ("remove_args", "unset_envs"):
+                value = raw.get(key)
+                if isinstance(value, str):
+                    vals = [value.strip()] if value.strip() else []
+                elif isinstance(value, (list, tuple, set)):
+                    vals = [str(v).strip() for v in value if str(v).strip()]
+                else:
+                    vals = []
+                if vals:
+                    out[key] = vals
+            mode = str(raw.get("args_mode") or "append").strip().lower()
+            if mode == "replace":
+                out["args_mode"] = "replace"
+            return out
+
+        def _add(
+            name: str,
+            args: str,
+            envs: dict[str, str],
+            note: str,
+            controls: dict[str, Any] | None = None,
+        ) -> None:
             nm = (name or "").strip()
             if not nm or nm in seen_names:
                 return
+            controls = dict(controls or {})
             # A variant with neither a server-arg nor an env override has
-            # nothing for the restart to apply; drop it.
-            if not args and not envs:
+            # nothing for the restart to apply unless it removes inherited
+            # args/envs.
+            if not args and not envs and not controls:
                 return
             seen_names.add(nm)
             grid.append(
@@ -3844,6 +3759,7 @@ class FrameworkPhase(PhaseHandler):
                     "name": nm,
                     "extra_args": args,
                     "extra_envs": envs,
+                    **controls,
                     "provenance": provenance,
                     "note": (note or "")[:200],
                 }
@@ -3866,6 +3782,7 @@ class FrameworkPhase(PhaseHandler):
                 args,
                 envs,
                 str(raw.get("note") or raw.get("provenance") or ""),
+                _controls(raw),
             )
 
         # ``explicit_grid=[]`` means the caller harvested an empty set --
@@ -3933,6 +3850,20 @@ class FrameworkPhase(PhaseHandler):
             cb_args = str(cb.get("extra_server_args") or "")
             if cb_args:
                 params["base_extra_args"] = cb_args
+            _raw_remove = cb.get("remove_args")
+            _raw_unset = cb.get("unset_envs")
+            cb_remove = [_raw_remove] if isinstance(_raw_remove, str) and _raw_remove.strip() else [
+                str(v) for v in (_raw_remove or []) if str(v).strip()
+            ]
+            cb_unset = [_raw_unset] if isinstance(_raw_unset, str) and _raw_unset.strip() else [
+                str(v) for v in (_raw_unset or []) if str(v).strip()
+            ]
+            if cb_remove:
+                params["base_remove_args"] = cb_remove
+            if cb_unset:
+                params["base_unset_envs"] = cb_unset
+            if str(cb.get("args_mode") or "").strip().lower() == "replace":
+                params["base_args_mode"] = "replace"
         base_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
         if base_tput:
             params["base_tput"] = base_tput
@@ -4061,13 +3992,42 @@ class FrameworkPhase(PhaseHandler):
         es = getattr(self.shared_state, "explore_search", None)
         if isinstance(es, dict) and isinstance(es.get("tested"), dict):
             tested = es["tested"]
+        cb = getattr(self.shared_state, "current_best", None) or {}
+        base_remove_args: list[str] = []
+        base_unset_envs: list[str] = []
+        if isinstance(cb, dict):
+            raw_remove = cb.get("remove_args")
+            raw_unset = cb.get("unset_envs")
+            base_remove_args = [raw_remove] if isinstance(raw_remove, str) and raw_remove.strip() else [
+                str(v) for v in (raw_remove or []) if str(v).strip()
+            ]
+            base_unset_envs = [raw_unset] if isinstance(raw_unset, str) and raw_unset.strip() else [
+                str(v) for v in (raw_unset or []) if str(v).strip()
+            ]
         out: list[dict[str, Any]] = []
         for v in grid or []:
             if not isinstance(v, dict):
                 continue
+            v_remove = v.get("remove_args")
+            v_unset = v.get("unset_envs")
+            remove_args = list(
+                dict.fromkeys(
+                    base_remove_args
+                    + ([v_remove] if isinstance(v_remove, str) and v_remove.strip() else [str(x) for x in (v_remove or []) if str(x).strip()])
+                )
+            )
+            unset_envs = list(
+                dict.fromkeys(
+                    base_unset_envs
+                    + ([v_unset] if isinstance(v_unset, str) and v_unset.strip() else [str(x) for x in (v_unset or []) if str(x).strip()])
+                )
+            )
             fp = canonical_fingerprint(
                 str(v.get("extra_args") or v.get("extra_server_args") or ""),
                 dict(v.get("extra_envs") or {}),
+                remove_args=remove_args,
+                unset_envs=unset_envs,
+                args_mode=str(v.get("args_mode") or "append"),
             )
             if fp in tested:
                 continue
@@ -4304,7 +4264,21 @@ class FrameworkPhase(PhaseHandler):
                 if isinstance(envs_raw, dict)
                 else {}
             )
-            if not args and not envs:
+            controls: dict[str, Any] = {}
+            for key in ("remove_args", "unset_envs"):
+                raw = p.get(key)
+                if isinstance(raw, str):
+                    vals = [raw.strip()] if raw.strip() else []
+                elif isinstance(raw, (list, tuple, set)):
+                    vals = [str(v).strip() for v in raw if str(v).strip()]
+                else:
+                    vals = []
+                if vals:
+                    controls[key] = vals
+            mode = str(p.get("args_mode") or "append").strip().lower()
+            if mode == "replace":
+                controls["args_mode"] = "replace"
+            if not args and not envs and not controls:
                 continue
             name = str(p.get("name") or "").strip() or f"framework-config-{i}"
             out.append(
@@ -4312,6 +4286,7 @@ class FrameworkPhase(PhaseHandler):
                     "name": name,
                     "extra_args": args,
                     "extra_envs": envs,
+                    **controls,
                     "provenance": "framework_agent:config",
                     "note": str(p.get("reason") or "")[:200],
                 }

@@ -9,7 +9,6 @@ import pytest
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
-    build_specialist_prompts_for_domain,
     _render_measured_impact,
     _format_version_note,
 )
@@ -30,9 +29,11 @@ _DOMAIN_KEYS = (
 @pytest.mark.parametrize("domain_key", _DOMAIN_KEYS)
 @pytest.mark.parametrize("framework", ["vllm", "atom"])
 def test_build_for_each_domain_and_framework(domain_key, framework):
-    sys_p, user_p = build_specialist_prompts_for_domain(
+    domain = get_domain(domain_key)
+    assert domain is not None
+    sys_p, user_p = build_specialist_prompts(SpecialistPromptInputs(
         task_id="t1",
-        domain_key=domain_key,
+        domain=domain,
         framework=framework,
         gpu_type="MI300X",
         tp=2,
@@ -49,15 +50,10 @@ def test_build_for_each_domain_and_framework(domain_key, framework):
         gap_layer="kernel_agent",
         gap_symptom="slow",
         gap_evidence={"k": 1},
-    )
+    ))
     assert sys_p
     assert "## 2. HARDWARE CONTEXT" in user_p
     assert "concurrency: 64" in user_p
-
-
-def test_unknown_domain_raises():
-    with pytest.raises(ValueError):
-        build_specialist_prompts_for_domain(task_id="t", domain_key="nope")
 
 
 def _rich_inputs(**overrides):
@@ -127,7 +123,7 @@ def _rich_inputs(**overrides):
                     "framework_version": "0.6.1",
                 },
             },
-            {"attrs": {}},  # filtered (no statement)
+            {"attrs": {}},  # filtered
         ],
         warm_start_pitfalls=[
             {
@@ -153,12 +149,12 @@ def test_build_rich_user_prompt_sections():
     sys_p, user_p = build_specialist_prompts(_rich_inputs())
     assert "TraceLens snapshot #7" in user_p
     assert "Executive Summary" in user_p
-    assert "`k1`" in user_p  # kernel roofline table
-    assert "`h1`" in user_p  # hot kernels table
+    assert "`k1`" in user_p
+    assert "`h1`" in user_p
     assert "find-recipe result" in user_p
     assert "enable cudagraph" in user_p
-    assert "+5.00%" in user_p  # measured_impact dict render
-    assert "[from vllm@0.6.1, you're on 0.6.2]" in user_p  # version note
+    assert "+5.00%" in user_p
+    assert "[from vllm@0.6.1, you're on 0.6.2]" in user_p
     assert "do not enforce eager" in user_p
     assert "mcp__pr_monitor__" in user_p
     assert "/src/vllm" in user_p
@@ -213,14 +209,11 @@ def test_scope_freeform():
 def test_gpu_autonomy_block_and_auto_retry():
     inp = _rich_inputs(bench=True, mode="patch", auto_retry_reason="timeout on prior attempt")
     sys_p, _ = build_specialist_prompts(inp)
-    # GPU specialists (with a card allocation) get the on-GPU autonomy block
-    # framing broad scripting/profiling/serving freedom + the optional rebench.
     assert "On-GPU autonomy" in sys_p
     assert "specialists.rebench" in sys_p
     assert "Auto-retry notice" in sys_p
 
 
-# ---- small pure helpers ----
 def test_render_measured_impact_variants():
     assert _render_measured_impact("just a string") == "just a string"
     assert _render_measured_impact(None) == ""

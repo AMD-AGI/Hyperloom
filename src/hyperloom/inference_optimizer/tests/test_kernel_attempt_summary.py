@@ -23,7 +23,6 @@ from hyperloom.orchestrator.kernel.attempt_summary import (
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-# Fixtures
 def _top15_entry(
     kid: str,
     *,
@@ -121,7 +120,6 @@ def _write_backend_results(
     )
 
 
-# Categories
 def test_unattempted_no_source_classifies_vendor_lib_ops(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001", name="aten::mm", source_file="", reusable=False, backends=[])],
@@ -220,7 +218,6 @@ def test_in_flight_classifies_correctly(tmp_path: Path) -> None:
     assert out["by_kernel"][0]["category"] == CATEGORY_IN_FLIGHT
 
 
-# Backend ladder harvesting
 def test_backend_ladder_loaded_from_kernel_agent_results(tmp_path: Path) -> None:
     session_dir = tmp_path
     state = _make_state(
@@ -327,7 +324,6 @@ def test_backend_ladder_with_artifact_marks_partial(tmp_path: Path) -> None:
     assert breakdown["correctness_failed"] == 1 or breakdown["speedup_below_threshold"] == 1
 
 
-# Top takeaways + glossary
 def test_top_takeaways_highlight_highest_gpu_pct_missed(tmp_path: Path) -> None:
     state = _make_state(
         session_id="sid1",
@@ -419,7 +415,6 @@ def test_attempt_without_top15_still_listed(tmp_path: Path) -> None:
     assert any(r["kernel_id"] == "k_obsolete" for r in out["by_kernel"])
 
 
-# Summary exposes failure root-cause directly.
 def _write_full_kernel_result(
     session_dir: Path,
     session_id: str,

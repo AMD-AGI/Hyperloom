@@ -1,10 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Phase-budget dispatch guard (KERNEL/EXPLORE interleave-stall fix).
+"""Phase-budget dispatch guard for KERNEL/EXPLORE interleave.
 
-Regression for the bug where a long serially-drained KERNEL/EXPLORE grid kept
-``_pump_dispatcher_once`` from returning, starving the per-phase cyclic budget
-exit so the phase machine never advanced.
+Ensures a long serially-drained KERNEL/EXPLORE grid does not starve the
+per-phase cyclic budget exit and stall the phase machine.
 """
 
 from __future__ import annotations
@@ -39,47 +38,35 @@ def _paused(stub) -> bool:
 
 
 # KERNEL budget = 0.38 * 6h ≈ 2.28h.
-def test_kernel_over_budget_pauses(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "1")
+def test_kernel_over_budget_pauses():
     stub = _stub(phase="KERNEL_AGENT", elapsed_h=9.0)
     assert _paused(stub) is True
 
 
-def test_kernel_under_budget_not_paused(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "1")
+def test_kernel_under_budget_not_paused():
     stub = _stub(phase="KERNEL_AGENT", elapsed_h=1.0)  # < 2.28h
     assert _paused(stub) is False
 
 
-def test_explore_over_budget_pauses(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "1")
+def test_explore_over_budget_pauses():
     stub = _stub(phase="EXPLORE", elapsed_h=4.0)  # EXPLORE budget 0.45*6h=2.7h
     assert _paused(stub) is True
 
 
 # PRELUDE / SWEEP / CLOSE are never gated (mandatory-work phases).
-def test_prelude_never_paused_even_over_budget(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "1")
+def test_prelude_never_paused_even_over_budget():
     stub = _stub(phase="PRELUDE", elapsed_h=9.0)
     assert _paused(stub) is False
 
 
-def test_sweep_never_paused(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "1")
+def test_sweep_never_paused():
     stub = _stub(phase="SWEEP", elapsed_h=9.0)
     assert _paused(stub) is False
 
 
-# Short bounded run (≤24h) is not "long" → phases anchored on whole session, no cyclic pause.
+# Short bounded run (<24h) is not "long" → phases anchored on whole session, no cyclic pause.
 def test_short_bounded_run_not_paused(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "1")
     stub = _stub(phase="KERNEL_AGENT", elapsed_h=9.0, max_minutes=120, cycle_minutes=360.0)
     assert ps.is_long_run(stub.shared_state) is False
-    assert _paused(stub) is False
-
-
-# Cyclic disabled → no pause (legacy monotonic behaviour).
-def test_cyclic_disabled_not_paused(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "0")
-    stub = _stub(phase="KERNEL_AGENT", elapsed_h=9.0)
     assert _paused(stub) is False

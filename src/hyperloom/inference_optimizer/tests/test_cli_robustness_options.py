@@ -2,9 +2,7 @@
 
 """Unit tests for ``hyperloom.inference_optimizer.cli`` robustness backend wiring.
 
-Covers ``_build_robustness_options`` (multi-node ``--nodes >= 2`` cluster
-policy: disable local probe, enable cluster pod metrics, turn off the
-127.0.0.1:8888 inference probe, lift the no_levers floor to 60 min) and
+Covers ``_build_robustness_options`` (multi-node cluster policy) and
 ``_resolve_robustness_choice`` (multi-node auto-downgrade to mock).
 """
 
@@ -14,10 +12,8 @@ import argparse
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import (
-    _build_robustness_options,
-    _resolve_robustness_choice,
-)
+import hyperloom.inference_optimizer.cli as optimizer_cli
+from hyperloom.inference_optimizer.cli.backends import _build_robustness_options
 
 
 _WORKLOAD_ENV_KEYS = (
@@ -35,8 +31,7 @@ def _clear_workload_env(monkeypatch):
     for key in _WORKLOAD_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("ROBUSTNESS_SERVER_URL", raising=False)
-    # _build_robustness_options falls back to $FRAMEWORK for the scriptable
-    # server-probe default; clear it so framework-unset tests are deterministic.
+    # Clear $FRAMEWORK so framework-unset tests are deterministic.
     monkeypatch.delenv("FRAMEWORK", raising=False)
 
 
@@ -56,9 +51,6 @@ def _ns(**overrides) -> argparse.Namespace:
     )
     base.update(overrides)
     return argparse.Namespace(**base)
-
-
-# _build_robustness_options — multi-node cluster policy
 
 
 def test_single_node_emits_no_multi_node_options():
@@ -246,25 +238,22 @@ def test_nodes_zero_or_none_treated_as_single_node():
         assert "disable_local_probe" not in options
 
 
-# _resolve_robustness_choice — multi-node auto-downgrade to mock
-
-
 def test_resolve_choice_single_node_default_keeps_agent():
     """Default path on single-node stays ``"agent"`` to preserve real LocalProbe coverage."""
     ns = _ns(nodes=1, robustness_backend=None)
-    assert _resolve_robustness_choice(ns) == "agent"
+    assert optimizer_cli._resolve_robustness_choice(ns) == "agent"
 
 
 def test_resolve_choice_single_node_explicit_mock_kept():
     """Explicit ``--robustness-mock`` on single-node passes through."""
     ns = _ns(nodes=1, robustness_backend="mock")
-    assert _resolve_robustness_choice(ns) == "mock"
+    assert optimizer_cli._resolve_robustness_choice(ns) == "mock"
 
 
 def test_resolve_choice_multi_node_no_server_default_downgrades_to_mock(capsys):
     """``nodes >= 2`` + default agent + no server → mock, silently."""
     ns = _ns(nodes=2, robustness_backend=None)
-    chosen = _resolve_robustness_choice(ns)
+    chosen = optimizer_cli._resolve_robustness_choice(ns)
     assert chosen == "mock"
     captured = capsys.readouterr()
     assert "WARN" not in captured.err
@@ -274,7 +263,7 @@ def test_resolve_choice_multi_node_no_server_default_downgrades_to_mock(capsys):
 def test_resolve_choice_multi_node_no_server_explicit_agent_warns(capsys):
     """``nodes >= 2`` + explicit agent + no server → mock with a WARNING pointing at the SKILL section."""
     ns = _ns(nodes=2, robustness_backend="agent")
-    chosen = _resolve_robustness_choice(ns)
+    chosen = optimizer_cli._resolve_robustness_choice(ns)
     assert chosen == "mock"
     captured = capsys.readouterr()
     assert "WARN" in captured.err
@@ -289,7 +278,7 @@ def test_resolve_choice_multi_node_with_server_url_keeps_agent(capsys):
         robustness_backend="agent",
         robustness_server_url="http://robustness.svc:8080",
     )
-    chosen = _resolve_robustness_choice(ns)
+    chosen = optimizer_cli._resolve_robustness_choice(ns)
     assert chosen == "agent"
     captured = capsys.readouterr()
     assert "WARN" not in captured.err
@@ -302,20 +291,20 @@ def test_resolve_choice_multi_node_default_with_server_keeps_agent():
         robustness_backend=None,
         robustness_server_url="http://robustness.svc:8080",
     )
-    assert _resolve_robustness_choice(ns) == "agent"
+    assert optimizer_cli._resolve_robustness_choice(ns) == "agent"
 
 
 def test_resolve_choice_multi_node_server_via_env_keeps_agent(monkeypatch):
     """A server via ``ROBUSTNESS_SERVER_URL`` env also keeps the agent on multi-node."""
     monkeypatch.setenv("ROBUSTNESS_SERVER_URL", "http://robustness.svc:8080")
     ns = _ns(nodes=2, robustness_backend="agent")
-    assert _resolve_robustness_choice(ns) == "agent"
+    assert optimizer_cli._resolve_robustness_choice(ns) == "agent"
 
 
 def test_resolve_choice_multi_node_explicit_mock_no_warning(capsys):
     """Explicit ``--robustness-mock`` must NOT see the WARNING."""
     ns = _ns(nodes=4, robustness_backend="mock")
-    chosen = _resolve_robustness_choice(ns)
+    chosen = optimizer_cli._resolve_robustness_choice(ns)
     assert chosen == "mock"
     captured = capsys.readouterr()
     assert "WARN" not in captured.err
@@ -324,7 +313,7 @@ def test_resolve_choice_multi_node_explicit_mock_no_warning(capsys):
 def test_resolve_choice_missing_nodes_attr_treated_as_single_node():
     """Legacy entry points that omit ``nodes`` keep the agent default."""
     ns = argparse.Namespace(robustness_backend=None)
-    assert _resolve_robustness_choice(ns) == "agent"
+    assert optimizer_cli._resolve_robustness_choice(ns) == "agent"
 
 
 def test_resolve_choice_nodes_zero_or_none_treated_as_single_node():
@@ -333,4 +322,4 @@ def test_resolve_choice_nodes_zero_or_none_treated_as_single_node():
         _ns(nodes=0, robustness_backend="agent"),
         _ns(nodes=None, robustness_backend="agent"),
     ):
-        assert _resolve_robustness_choice(ns) == "agent"
+        assert optimizer_cli._resolve_robustness_choice(ns) == "agent"

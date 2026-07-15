@@ -84,8 +84,6 @@ async def main():
 asyncio.run(main())
 ```
 
-A `quantize_via_prompt_sync` wrapper is also exported for non-async callers.
-
 ## Return shape
 
 `QuantSkillRunResult` (frozen dataclass):
@@ -154,16 +152,6 @@ operator promotion, and budget exhaustion.
 
 `from hyperloom.agents.quantization import …`
 
-| symbol                       | purpose                                                                 |
-| ---------------------------- | ----------------------------------------------------------------------- |
-| `quantize_via_prompt`        | async entry; runs the full diagnose-fix-retry loop.                     |
-| `quantize_via_prompt_sync`   | `asyncio.run` wrapper for non-async callers.                            |
-| `QuantSkillRunResult`        | return dataclass (`status` / `quantized_model_dir` / `assessment`).     |
-| `Assessment`                 | per-attempt verdict dataclass.                                          |
-| `OutcomeId`                  | StrEnum of all 30 outcome IDs.                                          |
-| `AUTO_RECOVER`               | frozenset of outcomes SKILL.md is expected to self-heal in-session.     |
-| `AUTO_FAIL`                  | frozenset of outcomes that always end the run as `failed`.              |
-| `ASK`                        | frozenset of outcomes that surface to the operator.                     |
-| `ASK_RETRYABLE`              | subset of `ASK` that increments the retry counter when a fix exists.    |
-| `SUCCESS_TAGS`               | outcomes treated as success when ending a multi-attempt trail.          |
-| `UNCLASSIFIED_FAILURE`       | catch-all outcome (#30).                                                |
+| symbol                | purpose                                             |
+| --------------------- | --------------------------------------------------- |
+| `quantize_via_prompt` | async entry; runs the full diagnose-fix-retry loop. |

@@ -16,23 +16,22 @@ log = _logging.getLogger(__name__)
 class MachinePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
-    # phase state machine
     def _ensure_phase_initialised(self) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
         state = self.shared_state
-        # Phase budget normalised + persisted so CLI flags land in state.json for resume parity.
+        # Persist the phase budget so CLI flags land in state.json for resume parity.
         if not state.phase_budget_pct:
             state.phase_budget_pct = dict(self._phase_budget_pct)
         current = (state.phase or "").strip().upper()
         if current in _phase_state.PHASE_NAMES:
-            # Already initialised; keep CLI-side budget override authoritative.
+            # Already initialised; keep the CLI-side budget override authoritative.
             state.phase_budget_pct = dict(self._phase_budget_pct)
             try:
                 state.save(self.session_dir)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception("Coordinator: save after phase budget refresh failed")
             return
-        # Fresh start; pre-phase-machine resume state is treated as fresh (cross-version unsupported).
+        # Fresh start; pre-phase-machine resume state is treated as fresh.
         state.record_phase_transition(
             to_phase=_phase_state.PHASE_PRELUDE,
             reason="phase_entered",
@@ -50,23 +49,21 @@ class MachinePhase(PhaseHandler):
             return
         state = self.shared_state
         if (state.cortex_session_id or "").strip():
-            # cli already T0'd or resume picked up the sid; gate up here to skip the import.
+            # cli already T0'd or resume picked up the sid.
             return
         # Derive workload / hw from SharedState.
         workload = getattr(state, "model_name", "") or "unknown_model"
         hw = getattr(state, "gpu_type", "") or "unknown_gpu"
-        # marathon_dispatch_id mirrors the cli path: the hyperloom-internal manifest session id.
         extra_attrs = {
             "marathon_dispatch_id": getattr(state, "session_id", "") or "",
             "framework_name": getattr(state, "framework", "") or "",
             "model_class": getattr(state, "model_class", "") or "",
             "claw_session_id": getattr(state, "claw_session_id", "") or "",
             "sandbox_user_id": getattr(state, "sandbox_user_id", "") or "",
-            # boot_origin is a dev-debug label, NOT written to KB; distinguishes SDK-fallback from cli path.
+            # boot_origin is a dev-debug label, NOT written to KB.
             "boot_origin": "coordinator_fallback",
         }
         try:
-            # Reuse the held dispatcher so T0 anchors the SAME local store KEEP/REVERT/CLOSE target.
             from ..knowledge.cortex_t0 import run_t0_anchor
 
             run_t0_anchor(
@@ -93,7 +90,7 @@ class MachinePhase(PhaseHandler):
             ``kernel_enabled`` flag is set.
         """
         # Mirror persisted kernel_enabled flag; --no-kernel removes the kernel_agent role.
-        return "kernel_agent" in self.role_registry and bool(getattr(self.shared_state, "kernel_enabled", True))
+        return "kernel_agent" in self.role_registry and bool(self.shared_state.kernel_enabled)
 
     def _explore_enabled(self) -> bool:
         """Whether the EXPLORE phase is enabled for this run.
@@ -103,7 +100,7 @@ class MachinePhase(PhaseHandler):
             KERNEL/SWEEP).
         """
         # Mirror persisted explore_enabled flag; --no-explore collapses to KERNEL/SWEEP. EXPLORE is a phase, not a role.
-        return bool(getattr(self.shared_state, "explore_enabled", True))
+        return bool(self.shared_state.explore_enabled)
 
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick.
@@ -119,8 +116,7 @@ class MachinePhase(PhaseHandler):
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
-            # Default True to match SharedState.framework_agent_phase_enabled + the cli resume fallback.
-            framework_agent_phase_enabled=bool(getattr(state, "framework_agent_phase_enabled", True)),
+            framework_agent_phase_enabled=bool(state.framework_agent_phase_enabled),
             explore_enabled=self._explore_enabled(),
             max_hours=max_hours_arg,
         )
@@ -128,11 +124,9 @@ class MachinePhase(PhaseHandler):
             await self._maybe_enqueue_explore_research_scout()
             await self._maybe_force_stalled_domain_specialist()
         await self._maybe_enqueue_trajectory_reviewer()
-        # (default OFF) FRAMEWORK config-exploration lane: before actually
-        # leaving FRAMEWORK_AGENT, run explore-style config-grid rounds so
-        # FRAMEWORK gains the EXPLORE config-search capability. Placed after the
-        # trajectory reviewer so holding the phase never skips it. No-op unless
-        # framework_config_exploration_enabled is set (default flow unchanged).
+        # (default OFF) FRAMEWORK config-exploration lane: run explore-style
+        # config-grid rounds before leaving FRAMEWORK_AGENT. No-op unless
+        # framework_config_exploration_enabled is set.
         if self._framework_config_lane_should_engage(next_phase):
             if await self._maybe_hold_for_framework_config_lane():
                 return
@@ -142,10 +136,10 @@ class MachinePhase(PhaseHandler):
         if target == (state.phase or "").upper():
             return  # already there
         prior = state.phase
-        # Consume escalate hint after a hint-driven transition so the next tick re-evaluates fresh.
+        # Consume escalate hint after a hint-driven transition.
         if isinstance(evidence, dict) and (evidence.get("evidence") == "llm_escalation" or "hint" in evidence):
             state.consume_pending_escalate_hint()
-        # Terminal transition (target=CLOSE): mirror vocab stop_reason onto state via ENUM-validated writer.
+        # Terminal transition (target=CLOSE): mirror the stop_reason onto state.
         if (
             target == _phase_state.PHASE_CLOSE
             and isinstance(evidence, dict)
@@ -155,12 +149,8 @@ class MachinePhase(PhaseHandler):
             and not state.stop_reason
         ):
             state.set_stop_reason(reason)
-        # A SWEEP→EXPLORE loopback opens a new macro-cycle. Bump the cycle
-        # counter + persist the no-gain streak BEFORE recording the
-        # transition so the new EXPLORE phase rows carry the new cycle number.
-        # A cyclic EXPLORE plateau winds the cycle down with
-        # ``switch_bottleneck`` — record the bottleneck we plateaued on so the
-        # next macro-cycle's orchestration prompt redirects specialists off it.
+        # A cyclic EXPLORE plateau winds the cycle down with ``switch_bottleneck``:
+        # record the plateaued bottleneck so the next cycle steers specialists off it.
         if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):
             try:
                 state.mark_bottleneck_switch(
@@ -193,13 +183,9 @@ class MachinePhase(PhaseHandler):
             reason=reason,
             evidence=evidence,
         )
-        # Mirror the phase boundary into the operator-facing
-        # lifecycle log so a launcher poll surfaces "entered <phase>" in
-        # chat (with the human-friendly label) alongside the step-level
-        # events. Uses the ENTER status (not START): a phase boundary is a
-        # point-in-time marker, not a paired START/END interval, so it must
-        # not read as "still running" forever. Best-effort; must never roll
-        # back the transition.
+        # Mirror the phase boundary into the operator-facing lifecycle log using
+        # the ENTER status (a point-in-time marker, not a START/END interval).
+        # Best-effort; never rolls back the transition.
         try:
             state.record_lifecycle_event(
                 step=target,
@@ -236,7 +222,7 @@ class MachinePhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: phase_transition event bus write failed")
-        # Phase-entry side effects are additive; hook failures are logged but never roll back the transition.
+        # Phase-entry side effects are additive; hook failures are logged only.
         try:
             await self._on_phase_entered(from_phase=prior or "", to_phase=target)
         except Exception:  # noqa: BLE001 — defensive
@@ -250,7 +236,7 @@ class MachinePhase(PhaseHandler):
             to_phase: The phase being entered; selects which per-phase entry
                 hook fires.
         """
-        # Orchestration checkpoint at the phase seam; runs before per-phase side effects.
+        # Orchestration checkpoint at the phase seam.
         try:
             await self._maybe_checkpoint_orchestration(
                 tick=int(getattr(self.shared_state, "tick", 0) or 0),

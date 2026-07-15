@@ -3,8 +3,7 @@
 """Coverage for Coordinator pure/sync helper methods.
 
 Builds one Coordinator with mock backends and exercises the formatting / gap /
-fact / tag helpers directly (both empty-guard and populated paths), avoiding the
-async event loop."""
+fact / tag helpers directly, avoiding the async event loop."""
 
 from __future__ import annotations
 
@@ -40,7 +39,7 @@ def coord(session_dir) -> Coordinator:
 
 # -- WS1: explicit specialist wall-clock budget ----------------------------
 def test_specialist_wall_budget_base_no_macro_cycle(coord: Coordinator) -> None:
-    # ≤24h runs keep macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
+    # macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
     coord.shared_state.macro_cycle = 0
     assert coord._specialist_wall_budget_sec(needs_gpu=False) == 10 * 60
     assert coord._specialist_wall_budget_sec(needs_gpu=True) == 60 * 60
@@ -48,29 +47,26 @@ def test_specialist_wall_budget_base_no_macro_cycle(coord: Coordinator) -> None:
 
 def test_specialist_wall_budget_macro_cycle_amplifies(coord: Coordinator) -> None:
     coord.shared_state.macro_cycle = 1
-    # cpu: 10 × (1+1) = 20min; gpu: 60 × 2 = 120min.
     assert coord._specialist_wall_budget_sec(needs_gpu=False) == 20 * 60
     assert coord._specialist_wall_budget_sec(needs_gpu=True) == 120 * 60
 
 
 def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
     coord.shared_state.macro_cycle = 10
-    # gpu: 60 × 11 = 660min → capped at 240min (4h); cpu: 10 × 11 = 110min.
     assert coord._specialist_wall_budget_sec(needs_gpu=True) == 240 * 60
     assert coord._specialist_wall_budget_sec(needs_gpu=False) == 110 * 60
 
 
 # -- WS2: GPU lease TTL re-source + structured-finally release --------------
 def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
-    # TTL = wall_budget × (1 + grace); the lease must outlive the kill so cards
-    # are never reclaimed mid-run (iron law kill ≤ gpu_lease TTL ≤ lane TTL).
+    # TTL = wall_budget × (1 + grace); lease must outlive the kill.
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 
     coord.shared_state.macro_cycle = 0
     budget = coord._specialist_wall_budget_sec(needs_gpu=True)  # 3600
     ttl = int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
     assert ttl == int(3600 * 1.1)
-    assert ttl >= budget  # kill ≤ lease TTL
+    assert ttl >= budget
 
 
 def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> None:
@@ -122,7 +118,7 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
                 _Task(), prebound_lease=None, extra_context={}, gpu_lease=sentinel_lease,
             )
         )
-    # C1: lease released via finally even though run_task raised.
+    # lease released via finally even though run_task raised.
     assert released == [sentinel_lease]
 
 
@@ -249,7 +245,7 @@ def test_needs_roofline_for_watermark_guards(coord: Coordinator) -> None:
     # crossing the watermark over last roofline
     ss.last_roofline_tput = 100.0
     ss.baseline_tput = 100.0
-    ss.cumulative_gain_validated = 50.0  # cur=150 -> 1.5x >= 1.1
+    ss.cumulative_gain_validated = 50.0
     assert coord._needs_roofline_for_watermark() is True
 
 
@@ -269,8 +265,8 @@ def test_extract_gaps_from_baseline_populated(coord: Coordinator) -> None:
     assert "throughput_below_target" in ids
     assert "baseline_unstable" in ids
     sev = {g["canonical_id"].split("#")[-1]: g["severity"] for g in gaps}
-    assert sev["throughput_below_target"] == "high"  # 12% >= 10
-    assert sev["baseline_unstable"] == "high"  # streak >= 2
+    assert sev["throughput_below_target"] == "high"
+    assert sev["baseline_unstable"] == "high"
 
 
 def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
@@ -290,12 +286,11 @@ def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
     # explore plateau gap fired at streak >= 6 -> high severity
     plateau = [g for g in gaps if g["canonical_id"].endswith("explore_plateau")][0]
     assert plateau["severity"] == "high"
-    assert cids  # non-empty
+    assert cids
 
 
 # -- advisory blocks (empty-guard paths) ----------------------------------
 def test_advisory_blocks_empty_by_default(coord: Coordinator) -> None:
-    # no plateau / no competitor target / no proposals -> empty strings
     assert coord._plateau_advisory_block() == ""
     assert coord._target_gap_advisory_block() == ""
     assert coord._current_primary_gap() is None
@@ -419,8 +414,7 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
     monkeypatch.delenv("GEMM_TUNING_BACKEND", raising=False)  # default: forge
     ss = coord.shared_state
     ss.last_gemm_tuning = {}
-    # forge backend: any precision on a supported framework is eligible — bf16/
-    # fp16 dense must NOT be pre-filtered out (real e2e KEEPs include them).
+    # forge backend: any precision on a supported framework is eligible.
     ss.framework = "sglang"
     ss.precision = "fp16"
     assert coord._gemm_tuning_required_before_kernel_opt() is True
@@ -429,7 +423,7 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
     # Unsupported framework -> not eligible.
     ss.framework = "trt-llm"
     assert coord._gemm_tuning_required_before_kernel_opt() is False
-    # Supported framework + terminal status -> not required (already done).
+    # Supported framework + terminal status -> not required.
     ss.framework = "sglang"
     ss.precision = "fp8"
     ss.last_gemm_tuning = {"status": "succeeded"}
@@ -451,41 +445,7 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
     cid = coord._workload_canonical_id()
     assert cid.startswith("inference:")
     assert "mi300x" in cid
-    # anchor delegates to the same derivation
     assert coord._workload_canonical_id() == cid
-
-
-def test_resolve_issue_canonical_priority(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
-
-    pending = PendingProposal(
-        proposal_msg_id="m1",
-        from_agent="orchestration",
-        action_name="explore",
-        predicted_gain_pct=0.0,
-        payload={"gap_canonical_id": "explicit-top"},
-    )
-    assert coord._resolve_issue_canonical(pending) == "explicit-top"
-    # falls back to params then anchor
-    pending2 = PendingProposal(
-        proposal_msg_id="m2",
-        from_agent="orchestration",
-        action_name="explore",
-        predicted_gain_pct=0.0,
-        payload={"params": {"gap_canonical_id": "from-params"}},
-    )
-    assert coord._resolve_issue_canonical(pending2) == "from-params"
-
-
-def test_target_analysis_baseline_exists(coord: Coordinator) -> None:
-    # conftest seeds a target analysis marker; the json may or may not exist,
-    # but the call must return a bool without raising.
-    assert isinstance(coord._target_analysis_baseline_exists(), bool)
-
-
-def test_kernel_opt_keep_pending(coord: Coordinator) -> None:
-    # delegates to SharedState; with no pending keeps -> empty string
-    assert coord._kernel_opt_keep_pending() == ""
 
 
 # -- framework candidate selection -------------------------------------
@@ -533,7 +493,6 @@ def test_match_framework_agent_candidate_by_id_and_pr_number(coord: Coordinator)
     assert coord._match_framework_agent_candidate("PR:34", cands)["pr_number"] == 34
     # bare PR number fallback
     assert coord._match_framework_agent_candidate("34", cands)["pr_number"] == 34
-    # unknown
     assert coord._match_framework_agent_candidate("999", cands) is None
     assert coord._match_framework_agent_candidate("", cands) is None
 
@@ -588,7 +547,6 @@ def test_framework_known_candidate_ids(coord: Coordinator) -> None:
     ss.research_scout_seen_pr_ids = ["p3"]
     ids = coord._framework_known_candidate_ids()
     assert {"c1", "u2", "p3"}.issubset(ids)
-    # tried refs reflects the same set
     assert set(coord._framework_tried_refs()) == ids
 
 

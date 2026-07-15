@@ -3,24 +3,17 @@
 
 """Batch-index rotation for production-pool dispatcher workflows.
 
-The pool is larger than one batch, so each scheduled fire runs ONE batch and the
-batch index advances over time to sweep the whole pool, wrapping at the end.
-This is the single source of truth for that arithmetic so it can be unit-tested
-instead of living only inside a workflow's shell heredoc.
+Each scheduled fire runs ONE batch; the batch index advances over time to sweep
+the whole pool, wrapping at the end. Single source of truth for that arithmetic
+so it can be unit-tested.
 
-The rotation is paced by ``max_hours`` (the per-task optimizer budget), mirroring
-optimize-submit's generate_hf_matrix._cron_batch_index: one batch advances per
-``max_hours`` of wall-clock time since the anchor.
+The rotation is paced by ``max_hours`` (the per-task optimizer budget): one batch
+advances per ``max_hours`` of wall-clock time since the anchor.
 
 INVARIANT (must hold): the schedule cron PERIOD must equal ``max_hours``.
 ``slot = floor(elapsed / max_hours)`` only advances exactly one batch per fire
-when each fire is ``max_hours`` apart:
-  * cron faster than max_hours (e.g. 4x/day but max_hours=12 -> step 12h = 2
-    fires/slot): two consecutive fires land on the SAME slot -> the SAME batch
-    is dispatched twice.
-  * cron slower than max_hours: some slots are never hit -> batches are skipped.
-This is NOT robust to arbitrary cron changes — it is robust to the ANCHOR
-shifting, not to the period. If you change one, change the other to match.
+when each fire is ``max_hours`` apart; a faster cron double-dispatches a slot and
+a slower cron skips slots. If you change one, change the other to match.
 
 CLI (used by the workflow):
     python3 batch_rotate.py --count N --batch-size B --max-hours H \
@@ -34,14 +27,11 @@ import argparse
 import math
 from datetime import datetime, timezone
 
-# Anchor instant: the first scheduled fire that maps to batch 0. 2026-06-25
-# 03:07 UTC (Beijing 11:07) — the 06-24 fires never ran (that day's dispatches
-# all failed with HTTP 422), so the rotation is anchored here to actually start
-# the sweep at batch 0 instead of skipping ahead by the calendar clock.
+# Anchor instant: the first scheduled fire that maps to batch 0.
 ROTATE_ANCHOR_UTC = datetime(2026, 6, 25, 3, 7, tzinfo=timezone.utc)
 
 # Fallback optimizer budget (hours) used as the rotation step size when
-# --max-hours is unset/invalid. Keep in sync with the gte100 dispatcher default.
+# --max-hours is unset/invalid.
 DEFAULT_MAX_HOURS = 12.0
 
 

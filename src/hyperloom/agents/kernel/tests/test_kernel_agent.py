@@ -39,16 +39,10 @@ def run_json_allow_fail(cmd: list[str], *, workspace: Path) -> tuple[int, dict]:
     return proc.returncode, payload
 
 
-# ``classify_patchability`` only routes a candidate to optimization
-# backends when its ``source_file`` resolves under a reusable framework
-# root (sglang / vllm / aiter / FlyDSL checkouts) — see
-# ``tracelens_analysis.classify_patchability``. The synthetic fixtures
-# below therefore live under ``/sgl-workspace/sglang/...`` so the trace
-# tool classifies them as routable; arbitrary paths like
-# ``/src/kernels/rmsnorm.py`` are (correctly) rejected as "source not
-# under a reusable framework root" and short-circuit to a skipped REVERT.
-# The files need not exist on disk: the gate keys off the path prefix +
-# source_type, not file contents.
+# ``classify_patchability`` only routes a candidate when its ``source_file``
+# resolves under a reusable framework root, so the synthetic fixtures live under
+# ``/sgl-workspace/sglang/...`` to be classified as routable. The files need not
+# exist on disk: the gate keys off the path prefix + source_type, not contents.
 _FRAMEWORK_ROOT = "/sgl-workspace/sglang/python/sglang/srt/layers"
 
 
@@ -204,7 +198,7 @@ class KernelAgentToolTests(unittest.TestCase):
             timeout=30,
             env={
                 **os.environ,
-                # Missing paths make the "not found" warning deterministic.
+                # Missing paths make the warning deterministic.
                 "TRACELENS_ROOT": str(ROOT / "missing-tracelens-root"),
                 "TRACELENS_INTERNAL_ROOT": str(ROOT / "missing-tracelens"),
                 "HYPERLOOM_BUNDLE": str(ROOT / "missing-bundle"),
@@ -219,8 +213,7 @@ class KernelAgentToolTests(unittest.TestCase):
         trace_tool_text = TRACE_TOOL.read_text(encoding="utf-8")
         skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
 
-        # Open-source deps default to a pod-local base, decoupled from USER_DATA_PATH,
-        # with HYPERLOOM_OPEN_SOURCE_ROOT as an optional override.
+        # Open-source deps default to a pod-local base with an optional override.
         self.assertIn(
             '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"',
             install_text,
@@ -229,22 +222,20 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
         # Internal extension is opt-in: no default path.
         self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"', install_text)
-        # GEAK has a dedicated root so moving it to pod-local storage does not
-        # implicitly move TraceLens via HYPERLOOM_ROOT.
+        # GEAK has a dedicated root, independent of TraceLens.
         self.assertIn('GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"', install_text)
         # Override is read but never written into a generated env file.
         self.assertNotIn("export HYPERLOOM_OPEN_SOURCE_ROOT", install_text)
-        # Assert the override pattern, not the exact pin, so ref bumps don't break this.
+        # Assert the override pattern, not the exact pin.
         self.assertIn('GEAK_REF="${GEAK_REF:-', install_text)
         # Prefix match on `_PIP_FLAGS` allows future flag additions.
         self.assertIn('_PIP_FLAGS="-q --no-cache-dir', install_text)
         self.assertNotIn("GEAK_MEMORY_KB_PATH", install_text)
         self.assertIn('"click<8.3.0" "ray[default]==2.44.1"', install_text)
         self.assertIn('chmod 600 "$env_file"', install_text)
-        # No hard-coded /wekafs TRACELENS_ROOT fallback; tool fails loudly when missing.
+        # No hard-coded TRACELENS_ROOT fallback; tool fails loudly when missing.
         self.assertNotIn("DEFAULT_TRACELENS_ROOT", trace_tool_text)
-        # Robust to the add_argument(...) call being split across lines: assert
-        # the flag and its TRACELENS_ROOT env default independently.
+        # Assert the flag and its TRACELENS_ROOT env default independently.
         self.assertIn('"--tracelens-root"', trace_tool_text)
         self.assertIn('default=os.environ.get("TRACELENS_ROOT", "")', trace_tool_text)
         self.assertIn(
@@ -256,7 +247,7 @@ class KernelAgentToolTests(unittest.TestCase):
             'TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text
         )
         self.assertNotIn("Executor asks", skill_text)
-        # Public TraceLens is cloned into the pod-local repo tree by default; TRACELENS_ROOT overrides.
+        # Public TraceLens is cloned into the pod-local repo tree by default.
         self.assertIn(
             'TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"',
             install_text,
@@ -285,10 +276,9 @@ class KernelAgentToolTests(unittest.TestCase):
             )
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         self.assertIn("would install Node.js/npm + @anthropic-ai/claude-code", proc.stdout)
-        self.assertIn('TRACELENS_REF="48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3"', install_text)
+        self.assertIn('TRACELENS_REF="4d6e0d9f03bab0541f04a68952dcf13988475708"', install_text)
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
- # clone AND pin the ref inside the temp sibling, then atomically
-        # rename — never publish an unpinned/half-cloned $TRACELENS_ROOT.
+ # Clone and pin the ref in a temp sibling, then atomically rename.
         self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$_tl_tmp"', install_text)
         self.assertIn('git -C "$_tl_tmp" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
         self.assertIn('git -C "$_tl_tmp" checkout -q FETCH_HEAD', install_text)
@@ -296,7 +286,7 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertNotIn(
             'TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"', install_text
         )
-        # Read-only internal root may trigger a writable mirror (optional extension).
+        # Read-only internal root may trigger a writable mirror.
         self.assertIn(
             'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"',
             install_text,
@@ -431,7 +421,7 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            # Default ladder converged to forge-only; legacy per-kernel backends removed.
+            # Default ladder converged to forge-only.
             self.assertEqual(result["selected_backends"], ["forge"])
             # E2E evidence still missing, so still NEEDS_REVIEW.
             self.assertEqual(result["proposal"]["decision"], "NEEDS_REVIEW")
@@ -520,7 +510,7 @@ class KernelAgentToolTests(unittest.TestCase):
                     "1.5",
                     "--accuracy-passed",
                     "true",
-                    # Well above the 1.05x KEEP threshold.
+                    # Above the 1.05x KEEP threshold.
                     "--micro-speedup",
                     "1.6",
                     "--dry-run",
@@ -589,13 +579,9 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            # A vendor BLAS binary (hipblasLt) carries no rewritable source,
-            # so ``classify_patchability`` marks it non-routable. The
-            # optimizer now short-circuits *before* backend selection
-            # into a skipped/REVERT
-            # result instead of running an empty backend ladder. The
-            # invariant remains: no backend is dispatched and the proposal
-            # is REVERT.
+            # A vendor BLAS binary (hipblasLt) carries no rewritable source, so it is
+            # marked non-routable and short-circuits into a skipped/REVERT before backend
+            # selection: no backend is dispatched and the proposal is REVERT.
             self.assertEqual(result["status"], "skipped")
             self.assertEqual(result["reason"], "non_routable_candidate")
             self.assertEqual(result["error_class"], "missing_native_source")
@@ -634,12 +620,8 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            # A hallucinated kernel_id is now a *graceful skip* rather than
-            # a hard failure (commit bdeac3ce "survive hallucinated
-            # kernel_id"): the optimizer exits 0 with status=skipped so the
-            # orchestrator moves to the next decision instead of burning the
-            # whole run. The invariant this test pins is that no fabricated /
-            # partial optimization result is emitted for an unknown id.
+            # A hallucinated kernel_id is a graceful skip: the optimizer exits 0 with
+            # status=skipped and emits no fabricated/partial result for an unknown id.
             self.assertEqual(code, 0)
             self.assertEqual(result["status"], "skipped")
             self.assertEqual(result["reason"], "kernel_id_not_in_candidates")
@@ -685,7 +667,7 @@ class KernelAgentToolTests(unittest.TestCase):
 
 
 class AuthFailureDetectionTests(unittest.TestCase):
-    """Cover :func:`_count_auth_failures` and the partial-promotion guard (r24 custom_allreduce 401-loop regression)."""
+    """Cover :func:`_count_auth_failures` and the partial-promotion guard."""
 
     def test_count_auth_failures_recognises_401_loop(self) -> None:
         sys.path.insert(0, str(ROOT / "tools"))

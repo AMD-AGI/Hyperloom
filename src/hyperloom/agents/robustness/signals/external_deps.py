@@ -32,10 +32,7 @@ from .symptom import Symptom, SymptomSeverity
 class ExternalDepsConfig:
     """Tunables for :func:`evaluate_external_deps_signals`."""
 
-    # J1 fires on a single 401: the gateway is the global auth source.
-    fire_on_first_401: bool = True
-    # J2 mount stat latency budget; ``ok=False`` (FileNotFound) fires HIGH
-    # regardless of latency.
+    # J2 mount stat latency budget; ``ok=False`` fires HIGH regardless of latency.
     mount_latency_warn_ms: float = 5000.0
     mount_latency_critical_ms: float = 15000.0
 
@@ -106,7 +103,7 @@ def evaluate_external_deps_signals(
     if not isinstance(deps, dict) or not deps:
         return []
     out: list[Symptom] = []
-    out.extend(_gateway_symptoms(deps.get("gateway") or {}, cfg))
+    out.extend(_gateway_symptoms(deps.get("gateway") or {}))
     out.extend(_mount_symptoms(deps.get("mounts") or [], cfg))
     if tracelens_latch is not None:
         out.extend(
@@ -125,13 +122,11 @@ def evaluate_external_deps_signals(
 
 def _gateway_symptoms(
     gateway: dict[str, Any],
-    cfg: ExternalDepsConfig,
 ) -> list[Symptom]:
     """J1: fire ``gateway_auth_outage`` when the LLM gateway returns 401/403.
 
     Args:
         gateway (dict[str, Any]): Gateway probe result (status/status_code/url).
-        cfg (ExternalDepsConfig): Tunables.
 
     Returns:
         list[Symptom]: A one-element list with the ``gateway_auth_outage``
@@ -200,7 +195,7 @@ def _mount_symptoms(
         latency_ms = entry.get("latency_ms")
         ok = bool(entry.get("ok"))
         error = entry.get("error")
-        # Fatal-path: stat returned an error (mount disappeared).
+        # stat returned an error (mount disappeared).
         if not ok:
             out.append(
                 Symptom(
@@ -282,7 +277,7 @@ def _tracelens_symptoms(
     if not isinstance(cli_info, dict) or not cli_info:
         return []
     if latch.value:
-        return []  # one-shot — already alerted in this session.
+        return []  # one-shot
     if bool(cli_info.get("any_present")):
         return []
     latch.value = True

@@ -17,10 +17,10 @@ from hyperloom.agents.quantization.driver import runner
 # --------------------------------------------------------------------------- #
 def test_iter_message_text_shapes() -> None:
     obj_block = SimpleNamespace(text="from-object")
-    dict_block = {"text": "from-dict"}  # lines 82-83
+    dict_block = {"text": "from-dict"}
     msg = SimpleNamespace(content=[obj_block, dict_block, SimpleNamespace(text="")], result="final-result")
     out = list(runner._iter_message_text(msg))
-    assert out == ["from-object", "from-dict", "final-result"]  # result string -> line 86
+    assert out == ["from-object", "from-dict", "final-result"]
 
 
 async def test_run_one_attempt_captures_sdk_error(tmp_path: Path) -> None:
@@ -48,7 +48,7 @@ async def test_run_one_attempt_captures_sdk_error(tmp_path: Path) -> None:
         sdk_options_cls=_Options,
         log=logs.append,
     )
-    # SDK error captured, not raised (line 303 path).
+    # SDK error captured, not raised.
     assert "sdk blew up" in result.sdk_error
     assert any("WARNING" in line for line in logs)
 
@@ -102,7 +102,7 @@ def test_run_one_attempt_missing_skill(tmp_path: Path) -> None:
 # result_collector branches                                                   #
 # --------------------------------------------------------------------------- #
 def test_read_text_oserror_on_directory(tmp_path: Path) -> None:
-    # Reading a directory raises an OSError that is swallowed (lines 147-148).
+    # Reading a directory raises an OSError that is swallowed.
     assert rc._read_text(tmp_path) is None
 
 
@@ -111,7 +111,7 @@ def test_resolve_quantized_dir_not_mapping(tmp_path: Path) -> None:
     path, present, err = rc._resolve_quantized_dir(tmp_path)
     assert path is None
     assert present is True
-    assert err == "manifest_not_mapping"  # line 203
+    assert err == "manifest_not_mapping"
 
 
 def test_resolve_quantized_dir_missing_manifest(tmp_path: Path) -> None:
@@ -130,11 +130,11 @@ def test_resolve_quantized_dir_pyyaml_missing(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
     path, present, err = rc._resolve_quantized_dir(tmp_path)
-    assert (path, present, err) == (None, True, "pyyaml_missing")  # lines 194-195
+    assert (path, present, err) == (None, True, "pyyaml_missing")
 
 
 def test_scan_hypothesis_attempts_missing_dir(tmp_path: Path) -> None:
-    # Nonexistent workspace -> empty tuple (lines 270-271).
+    # Nonexistent workspace -> empty tuple.
     assert rc._scan_hypothesis_attempts(tmp_path / "does_not_exist") == ()
 
 

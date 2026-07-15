@@ -32,7 +32,6 @@ def test_format_variant_line():
     assert "+5.00%" in line
     assert "tput=120.0" in line
     assert "E=1" in line
-    # no-measurement / no-flag branch
     line2 = SharedState._format_variant_line({"name": "v2"})
     assert "no_meas" in line2
     assert "(no-flag)" in line2
@@ -95,7 +94,7 @@ def test_format_optimization_stack():
 
 def test_format_last_trace_analyze():
     st = SharedState()
-    assert st._format_last_trace_analyze() == "(none)"
+    assert st._format_trace_analyze_blob(st.last_trace_analyze) == "(none)"
     st.last_trace_analyze = {
         "trace_input": "t",
         "candidates_path": "c",
@@ -106,7 +105,7 @@ def test_format_last_trace_analyze():
             {"code": "crash", "returncode": 1},
         ],
     }
-    out = st._format_last_trace_analyze()
+    out = st._format_trace_analyze_blob(st.last_trace_analyze)
     assert "k1" in out
     assert "high_idle" in out
 

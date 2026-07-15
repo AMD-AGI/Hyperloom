@@ -35,16 +35,17 @@ The Critic runtime never produces this JSON itself — it builds it via
 
 | `intent_type` | Required payload fields |
 |---|---|
-| `review_verdict` | `target_proposal_msg_id`, `verdict` |
+| `review_verdict` | `target_proposal_msg_id` plus either `verdict` or `verdict_map` |
 | `send_message` | `topic` |
 | `alert` | `severity`, `summary` |
 
 ## Validation
 
-The runtime's `runtime.intent_envelope.validate_envelope(...)` mirrors
-the Coordinator's PolicyGate checks. If the SKILL produces a malformed
-review, `commit-review` raises `ReviewValidationError` and the host
-should fall back to a `needs_review` heartbeat (see
+The runtime's `runtime.intent_envelope.validate_envelope(...)` delegates
+payload-shape validation to `hyperloom.inference_optimizer.protocol.intent`
+and then applies the Critic role allowlist above. If the SKILL produces a
+malformed review, `commit-review` raises `ReviewValidationError` and the
+host should fall back to a `needs_review` heartbeat (see
 [references/coordinator_protocol.md](coordinator_protocol.md)).
 
 ## Heartbeat fallback

@@ -10,24 +10,12 @@ the PR Monitor directly via MCP.
 
 from __future__ import annotations
 
-import logging
-import os
 from dataclasses import dataclass
 
 
-log = logging.getLogger(__name__)
-
-
-# Default in-cluster service URL; operator overrides via ``--pr-monitor-url``.
-DEFAULT_PR_MONITOR_URL: str = "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/v1"
-# MCP URL passed to specialist LLM backend; trailing slash mandatory.
+# MCP URL passed to specialist LLM backend; trailing slash mandatory. In-cluster
+# fallback used only when --pr-monitor-mcp-url is not supplied.
 DEFAULT_PR_MONITOR_MCP_URL: str = "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/mcp/"
-
-DEFAULT_PR_MONITOR_TIMEOUT_SEC: float = 5.0
-
-
-class PRMonitorError(RuntimeError):
-    """Raised for unrecoverable PR Monitor interactions."""
 
 
 @dataclass
@@ -40,7 +28,6 @@ class PRMonitorClient:
     via MCP directly.
     """
 
-    base_url: str = DEFAULT_PR_MONITOR_URL
     enabled: bool = True
 
     @classmethod
@@ -54,32 +41,18 @@ class PRMonitorClient:
         """Build a client, resolving config from args then env vars.
 
         Args:
-            url (str | None): Explicit base URL; falls back to
-                ``PR_MONITOR_URL`` / ``PRIMUS_CORTEX_PR_URL`` env vars
-                then :data:`DEFAULT_PR_MONITOR_URL`.
+            url (str | None): Accepted for CLI compatibility; REST access was removed.
             enabled (bool): Whether the MCP tool group is enabled.
             timeout_sec (float | None): Ignored (kept for call-site compat).
 
         Returns:
             PRMonitorClient: The configured client instance.
         """
-        del timeout_sec  # no longer used
-        resolved_url = (
-            url
-            or os.environ.get("PR_MONITOR_URL", "").strip()
-            or os.environ.get("PRIMUS_CORTEX_PR_URL", "").strip()
-            or DEFAULT_PR_MONITOR_URL
-        ).rstrip("/")
-        return cls(
-            base_url=resolved_url,
-            enabled=bool(enabled),
-        )
+        del url, timeout_sec
+        return cls(enabled=bool(enabled))
 
 
 __all__ = [
     "DEFAULT_PR_MONITOR_MCP_URL",
-    "DEFAULT_PR_MONITOR_TIMEOUT_SEC",
-    "DEFAULT_PR_MONITOR_URL",
     "PRMonitorClient",
-    "PRMonitorError",
 ]

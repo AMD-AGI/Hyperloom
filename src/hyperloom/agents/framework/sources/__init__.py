@@ -14,7 +14,8 @@ backend's policy.
 
 from __future__ import annotations
 
-from typing import Iterable
+from dataclasses import dataclass
+from typing import Callable, Iterable
 
 from ..logging_setup import get_logger
 from ..keywords import (
@@ -87,6 +88,62 @@ def _pr_to_candidate(
 _log = get_logger(__name__)
 
 
+# Error policies for a search backend. ``_HARD_FAIL`` lets the backend's
+# exceptions propagate (a misconfigured / unreachable *required* source aborts
+# the whole enumeration); ``_BEST_EFFORT`` degrades any failure to ``[]`` so an
+# optional source never fails the run.
+_HARD_FAIL = "hard_fail"
+_BEST_EFFORT = "best_effort"
+
+
+@dataclass(frozen=True)
+class BackendSpec:
+    """A PR-source backend: its mode name, runner, and error policy.
+
+    Attributes:
+        name (str): The ``search_mode`` id this backend serves (also the
+            ``Candidate.source`` label its runner stamps).
+        run (Callable): Maps an :class:`ExploreRequest` to that backend's
+            candidates.
+        error_policy (str): :data:`_HARD_FAIL` or :data:`_BEST_EFFORT`.
+    """
+
+    name: str
+    run: Callable[[ExploreRequest], list[Candidate]]
+    error_policy: str
+
+    def invoke(self, request: ExploreRequest) -> list[Candidate]:
+        """Run the backend under its error policy.
+
+        Best-effort backends swallow any exception and return ``[]``; hard-fail
+        backends let their exceptions propagate (``SourceConfigError`` for
+        missing config, ``PrimusCortexError`` for transport).
+
+        Args:
+            request (ExploreRequest): The request to dispatch to this backend.
+
+        Returns:
+            list[Candidate]: The backend's candidates, or ``[]`` when a
+                best-effort backend failed.
+        """
+        if self.error_policy == _BEST_EFFORT:
+            try:
+                return self.run(request)
+            except Exception:  # noqa: BLE001 — best-effort source degrades to []
+                return []
+        return self.run(request)
+
+
+# Registry of PR-source backends keyed by ``search_mode``. Runners are resolved
+# by name at call time (via the module-level ``_run_*`` functions) so a test can
+# monkeypatch an individual backend and have the dispatch pick it up.
+_SEARCH_BACKENDS: dict[str, BackendSpec] = {
+    "gbrain_pr_kb": BackendSpec("gbrain_pr_kb", lambda req: _run_pr_kb(req), _BEST_EFFORT),
+    "primus_cortex": BackendSpec("primus_cortex", lambda req: _run_primus_cortex(req), _HARD_FAIL),
+    "github": BackendSpec("github", lambda req: _run_github(req), _BEST_EFFORT),
+}
+
+
 def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
     """Enumerate candidates per ``request.search_modes`` and union the results.
 
@@ -125,29 +182,16 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
         return _dedupe(out)
 
     for mode in request.search_modes:
-        if mode == "gbrain_pr_kb":
-            found = _run_pr_kb(request)
-            _log.info(
-                "enumerate_candidates: gbrain_pr_kb returned %d candidate(s)",
-                len(found),
-            )
-            out.extend(found)
-        elif mode == "primus_cortex":
-            found = _run_primus_cortex(request)
-            _log.info(
-                "enumerate_candidates: primus_cortex returned %d candidate(s)",
-                len(found),
-            )
-            out.extend(found)
-        elif mode == "github":
-            found = _run_github(request)
-            _log.info(
-                "enumerate_candidates: github returned %d candidate(s)",
-                len(found),
-            )
-            out.extend(found)
-        else:
+        spec = _SEARCH_BACKENDS.get(mode)
+        if spec is None:
             raise SourceConfigError(f"unknown search_mode: {mode!r}")
+        found = spec.invoke(request)
+        _log.info(
+            "enumerate_candidates: %s returned %d candidate(s)",
+            spec.name,
+            len(found),
+        )
+        out.extend(found)
 
     deduped = _dedupe(out)
     _log.info(
@@ -192,7 +236,7 @@ def _run_github(request: ExploreRequest) -> list[Candidate]:
         request.repo_url,
         gap_description=request.gap_description,
         limit=request.max_search_candidates,
-        states=request.pr_states or ("open",),
+        states=request.pr_states,
     )
     return [_pr_to_candidate(pr, request.repo_url, "github") for pr in prs]
 
@@ -271,11 +315,10 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
     # backport-relevant ones that may already be in the local dev build;
     # semantic audit downstream judges + dedups them. "all" is the API's broad
     # filter; default stays open-only when pr_states is unset.
-    states = request.pr_states or ("open",)
+    states = request.pr_states
     broad = any(s in ("merged", "closed", "all") for s in states)
     search_state = "all" if broad else "open"
-    # Only forward ``state`` to the label-only list endpoint when broadening;
-    # the open-only default keeps the historical call shape unchanged.
+    # Only forward ``state`` to the label-only list endpoint when broadening.
     list_state_kwargs: dict[str, str] = {"state": search_state} if broad else {}
 
     keywords = _resolve_keywords(request)
@@ -303,8 +346,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             timeout_sec=cfg.timeout_sec,
         )
     except PrimusCortexError:
-        # Service may not implement /v1/search/prs; fall back to label-only
-        # listing and rerank the larger pool client-side.
+        # Service may not implement /v1/search/prs; fall back to label-only listing.
         prs = list_perf_prs(
             request.repo_url,
             base_url=cfg.base_url,
@@ -314,10 +356,8 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             **list_state_kwargs,
         )
 
-    # /v1/search/prs uses word-AND matching, so a long multi-keyword query can
-    # filter the pool to zero even when relevant PRs exist. Fall back to
-    # label-only listing + client rerank so IO's --framework-discover
-    # doesn't abort with "no candidates".
+    # /v1/search/prs uses word-AND matching; a long query can filter the pool to
+    # zero, so fall back to label-only listing + client rerank.
     if not prs:
         prs = list_perf_prs(
             request.repo_url,
@@ -328,8 +368,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             **list_state_kwargs,
         )
 
-    # Rank then trim; scores are carried on Candidate.score for IO's
-    # framework arm to log.
+    # Rank then trim; scores are carried on Candidate.score.
     ranked = _rank_by_keyword_overlap(prs, keywords)[:requested]
     return [
         _pr_to_candidate(

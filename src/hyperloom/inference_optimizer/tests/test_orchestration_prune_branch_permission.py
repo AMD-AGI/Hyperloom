@@ -2,9 +2,8 @@
 
 """Orchestration permission widenings for scheduling-police intents.
 
-Orchestration may now emit PRUNE_BRANCH (Roofline-v2 C3) and
-ESCALATE_STRATEGY_CHANGE in addition to the robustness path;
-Kernel/Critic cannot emit any.
+Orchestration may emit PRUNE_BRANCH and ESCALATE_STRATEGY_CHANGE in addition to
+the robustness path; Kernel/Critic cannot emit any.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ def gate() -> PolicyGate:
 
 # Orchestration (new permission) — happy path + payload-shape guard
 def test_orchestration_can_emit_prune_branch_with_family(gate):
-    """C3 enabler: Orchestration forwards roofline advice as PRUNE_BRANCH."""
+    """Orchestration forwards roofline advice as PRUNE_BRANCH."""
     gate.validate_intent(
         "orchestration",
         Intent(

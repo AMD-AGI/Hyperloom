@@ -21,9 +21,7 @@ from ._shared import GitHubPr, _repo_slug
 
 
 class PrimusCortexError(RuntimeError):
-    """Raised when a primus-cortex request cannot be completed (CLI maps it to
-    exit code 2 via its blanket ``except Exception``).
-    """
+    """Raised when a primus-cortex request cannot be completed (CLI exit code 2)."""
 
 
 def _normalise_base_url(base_url: str) -> str:
@@ -131,25 +129,6 @@ def _http_get_json(url: str, *, timeout_sec: float) -> Any:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise PrimusCortexError(f"primus_cortex returned non-JSON at {url}: {exc}; body[:200]={text[:200]!r}") from exc
-
-
-def _http_get_text(url: str, *, timeout_sec: float) -> str:
-    """GET and return raw text body; raise PrimusCortexError on >=400.
-
-    Args:
-        url (str): Fully composed URL to GET.
-        timeout_sec (float): Per-request timeout in seconds.
-
-    Returns:
-        str: The decoded response body.
-
-    Raises:
-        PrimusCortexError: On a >=400 status.
-    """
-    status, body, _ = _http_get(url, timeout_sec=timeout_sec)
-    if status >= 400:
-        raise PrimusCortexError(f"primus_cortex HTTP {status} at {url}")
-    return body.decode("utf-8", errors="replace")
 
 
 def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:

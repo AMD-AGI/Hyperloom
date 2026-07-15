@@ -28,7 +28,6 @@ def test_capability_summary_has_distinct_forge_row() -> None:
         [],
         forge_invocations=forge_invs,
     )
-    # forge gets its own row with its own KEEP tally.
     assert cap["forge"]["attempts"] == 1
     assert cap["forge"]["keeps"] == 1
     assert cap["forge"]["status"] == "kept"
@@ -69,7 +68,6 @@ def test_attribution_splits_kernel_gain_to_forge() -> None:
 
 
 def test_attribution_backward_compatible_without_forge() -> None:
-    # Legacy no-forge call still works and never errors.
     out = collectors.collect_attribution({}, [], [], [])
     assert "source_breakdown" in out
     assert out["source_breakdown"]["forge_pct_of_total"] == 0.0

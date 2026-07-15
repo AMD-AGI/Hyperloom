@@ -52,6 +52,7 @@ def _bundle_kernel_node_ops() -> str:
 
 def _load(unique_name: str):
     mod = types.ModuleType(unique_name)
+    mod.__dict__["__file__"] = str(_repo_root() / "multi_node" / "scripts" / "kernel_node_ops.py")
     exec(compile(_bundle_kernel_node_ops(), "kernel_node_ops_bundle.py", "exec"), mod.__dict__)
     sys.modules[unique_name] = mod
     return mod
@@ -112,8 +113,7 @@ def test_apply_valid_py_compiles_ok(patch_env, capsys):
 
 
 def test_apply_bad_py_auto_reverts(patch_env, capsys):
-    # SAFETY: a syntactically invalid .py patch must be auto-reverted so the pod
-    # is never left with an unimportable kernel file.
+    # A syntactically invalid .py patch must be auto-reverted.
     fw, bak = patch_env
     k = _load("kno_apply_py_bad")
     target = fw / "mod.py"
@@ -237,8 +237,7 @@ def test_apply_rejects_backup_dir_outside_root(patch_env, capsys):
 
 
 def test_bench_rejects_absolute_and_parent_staging_paths(tmp_path, capsys):
-    # SECURITY: staged files must be workspace-relative with no '..' so a patch
-    # payload cannot write outside the bench workspace.
+    # Staged files must be workspace-relative with no '..'.
     k = _load("kno_bench_traversal")
     ns = argparse.Namespace(
         workspace=str(tmp_path / "ws"),

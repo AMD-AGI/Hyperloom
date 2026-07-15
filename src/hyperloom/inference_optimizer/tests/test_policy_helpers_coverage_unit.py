@@ -34,7 +34,7 @@ def test_value_is_present() -> None:
     assert _value_is_present([1]) is True
     assert _value_is_present({}) is False
     assert _value_is_present({"a": 1}) is True
-    assert _value_is_present(0) is True  # non-container scalar -> present
+    assert _value_is_present(0) is True
 
 
 def test_delegate_field_present() -> None:
@@ -52,7 +52,7 @@ def test_detect_gpu_count_env_mask(monkeypatch) -> None:
 
 
 def test_detect_gpu_count_rocr_mask_wins(monkeypatch) -> None:
-    # ROCR is canonical on ROCm and is checked before HIP/CUDA.
+    # ROCR is canonical on ROCm, checked before HIP/CUDA.
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
     assert detect_gpu_count() == 4
@@ -142,8 +142,7 @@ def test_path_in_source_allowlist(monkeypatch) -> None:
     assert g._path_in_source_allowlist("/srv/sglang/foo.py") is True
     assert g._path_in_source_allowlist("/srv/sglang/sub/foo.py") is True
     assert g._path_in_source_allowlist("/other/foo.py") is False
-    # Traversal and shared-prefix boundary must NOT slip past (was accepted by
-    # the old raw startswith check).
+    # Traversal and shared-prefix boundary must NOT slip past.
     assert g._path_in_source_allowlist("/srv/sglang/../etc/passwd") is False
     assert g._path_in_source_allowlist("/srv/sglangX/foo.py") is False
 
@@ -172,7 +171,6 @@ def test_freeform_description_too_long() -> None:
 
 
 def test_freeform_description_valid() -> None:
-    # a normal mandate passes without raising
     PolicyGate._check_freeform_task_description(
         "Investigate the MoE kernel launch overhead and propose tuning.",
         where="task[0]",
@@ -194,7 +192,6 @@ def test_freeform_description_kill_redline(desc: str) -> None:
 
 
 def test_freeform_description_kill_not_overmatched() -> None:
-    # benign mentions of killing/process words must not trip the gate
     PolicyGate._check_freeform_task_description(
         "Measure the kernel launch latency; do not kill the serving process.",
         where="task[0]",

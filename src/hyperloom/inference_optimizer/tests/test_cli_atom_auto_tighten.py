@@ -106,7 +106,6 @@ def test_framework_choices_reject_unknown_value():
         )
 
 
-# Cross-cutting static guard: purpose narrowed to multi-node guard only.
 def test_atom_auto_tighten_only_purpose_is_multi_node_guard():
     """Source-level guard: the function body must not flip historical targets; ``nodes`` stays as the guard signal."""
     src = inspect.getsource(optimizer_cli._apply_atom_auto_tighten)

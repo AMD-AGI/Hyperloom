@@ -8,12 +8,11 @@ from __future__ import annotations
 import optimize_submit as opt
 
 
-def test_mimo_uses_current_sglang_profilerfix_image():
+def test_mimo_uses_default_sglang_image():
     image = opt.detect_image("sglang", "XiaomiMiMo/MiMo-V2-7B")
 
     assert image == opt._default_sglang_image()
-    assert "v0.5.12-rocm720-mi30x-profilerfix" in image
-    assert "v0.5.11" not in image
+    assert "sglang" in image
 
 
 class _FakeSafe:

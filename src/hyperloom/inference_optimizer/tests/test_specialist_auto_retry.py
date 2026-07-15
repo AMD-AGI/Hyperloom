@@ -2,18 +2,15 @@
 
 """Failure classification + auto-retry prompt + freeform-patch coverage.
 
-Covers the pure decision core behind the unified specialist's bounded
-transient-failure auto-retry:
+Covers the decision core behind the specialist's bounded transient-failure
+auto-retry:
 
-* ``classify_specialist_failure`` — the runner-status/error -> failure-type +
+* ``classify_specialist_failure`` — runner-status/error -> failure-type +
   retry-eligibility taxonomy (only infra flakes are retry-eligible);
 * the prompt builder's auto-retry notice block (injected on a re-dispatch);
-* the freeform + ``mode=patch`` prompt path (a freeform specialist may author
-  patches just like a domain one).
+* the freeform + ``mode=patch`` prompt path;
 * ``_maybe_auto_retry_specialist`` lane assignment — GPU specialists that set
-  ``needs_gpu=true`` (including bench-enabled specialists) must acquire
-  ``gpu_research_lane`` on retry, mirroring the first-dispatch logic in
-  ``intent_router._handle_delegate``.
+  ``needs_gpu=true`` must acquire ``gpu_research_lane`` on retry.
 """
 
 from __future__ import annotations
@@ -34,9 +31,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
 )
 
 
-# --------------------------------------------------------------------------- #
 # classify_specialist_failure — the taxonomy
-# --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "status,error,expected_type,expected_retry",
     [
@@ -99,9 +94,7 @@ def test_retry_eligibility_matches_membership():
         assert retry_eligible == (ftype in RETRYABLE_SPECIALIST_FAILURES)
 
 
-# --------------------------------------------------------------------------- #
 # Auto-retry notice block (prompt builder)
-# --------------------------------------------------------------------------- #
 def _freeform_inputs(**kwargs) -> SpecialistPromptInputs:
     base = dict(
         task_id="spec-1",
@@ -133,9 +126,7 @@ def test_auto_retry_notice_blank_reason_is_noop():
     assert "Auto-retry notice" not in system
 
 
-# --------------------------------------------------------------------------- #
 # Freeform + mode=patch prompt path
-# --------------------------------------------------------------------------- #
 def test_freeform_patch_prompt_carries_mandate_and_patch_protocol():
     """A freeform specialist dispatched with ``mode=patch`` still gets the
     free-form mandate AND the worktree patch-authoring protocol."""
@@ -147,9 +138,7 @@ def test_freeform_patch_prompt_carries_mandate_and_patch_protocol():
     assert "worktree" in system.lower()
 
 
-# --------------------------------------------------------------------------- #
-# _maybe_auto_retry_specialist — lane assignment mirrors first dispatch (#1 fix)
-# --------------------------------------------------------------------------- #
+# _maybe_auto_retry_specialist — lane assignment mirrors first dispatch
 
 def _make_explore_phase_stub(registry_lanes, registry_ttl, gpu_ttl, captured_tasks):
     """Return a minimal ExplorePhase-like stub with a fake TaskRegistry.
@@ -174,14 +163,13 @@ def _make_explore_phase_stub(registry_lanes, registry_ttl, gpu_ttl, captured_tas
     fake_tasks = MagicMock()
     fake_tasks.create_or_return_existing = _fake_create
 
-    # Minimal coordinator stub.
     coord_stub = MagicMock()
     coord_stub.tasks = fake_tasks
     coord_stub._registry_lanes_ttl = MagicMock(return_value=(list(registry_lanes), registry_ttl))
     coord_stub._gpu_lease_ttl_sec = MagicMock(return_value=gpu_ttl)
     coord_stub._record_observation = AsyncMock()
 
-    # Build ExplorePhase with __init__ bypassed (PhaseHandler only stores _coord).
+    # Build ExplorePhase with __init__ bypassed.
     phase = ExplorePhase.__new__(ExplorePhase)
     phase._coord = coord_stub
     return phase
@@ -207,7 +195,7 @@ def _make_stale_result(runner_status="stale", error="subprocess_timeout"):
 async def test_auto_retry_needs_gpu_acquires_gpu_research_lane():
     """A specialist with needs_gpu=true must include gpu_research_lane in retry lanes.
 
-    Mirrors the first-dispatch logic in intent_router._handle_delegate (High #1 fix).
+    Mirrors the first-dispatch logic in intent_router._handle_delegate.
     """
     captured = []
     phase = _make_explore_phase_stub(

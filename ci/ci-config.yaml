@@ -8,13 +8,9 @@ claw:
   # and are separate from the production_1000 optimize-submit pool.
   sandbox_timeout: 259200
   agent_id: agent_default
-  # plugin 4 (Hyperloom) bundles two tools:
-  #   - tool 3:  hyperloom-public-mcp (primus-safe-core42 MCP server)
-  #   - tool 85: hyperloom-prompt → @/wekafs/HyperloomV2/inference_optimizer/SKILL.md
-  # CI sends pluginId=4 + tools=[] in the message body; the agent reads
-  # SKILL.md off the WekaFS mount and runs the Python `inference_optimizer
-  # optimize` CLI. Marketplace skill download is intentionally NOT used —
-  # the runtime IS on the mount, no /workspace/.skills/ layout required.
+  # Optional deployment-specific plugin id. Public dry runs do not require a
+  # plugin; live SaFE/Claw deployments should set this to the plugin that exposes
+  # the Hyperloom inference_optimizer skill and tools.
   plugin_id: 4
 
 inferenceX:
@@ -79,42 +75,6 @@ models:
     optimization_depth: full
     kernel_opt_backends: claude
     target_gpu: mi300x
-
-  # ── GLM 5 (FP8, MoE+MLA+NSA) multi-node — TP=16 across 2 MI300X nodes ──
-  # Standalone entry: carries model_hf / image / framework / precision / conc /
-  # isl_osl_configs directly. orchestrator.py uses the
-  # synthesize_entry_from_ci_config() path when inferenceX_key is absent.
-  - key: glm5-multinode-fp8-mi300x-sglang
-    model_hf: zai-org/GLM-5
-    model_path_override: ${NFS_ROOT}/models/zai-org-GLM-5
-    # profilerfix: rocprofiler captures HipGraphLaunch kernels (issue #352)
-    # Pre-profilerfix image (restore when reverting): lmsysorg/sglang:v0.5.11-rocm720-mi30x
-    image: primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix
-    framework: sglang
-    precision: fp8
-    conc: 64
-    isl_osl_configs:
-      - [1024, 1024]
-    optimization_depth: full
-    kernel_opt_backends: claude
-    target_gpu: mi300x
-    tp: 16
-    ep: 1
-    mode: remote
-    # Multi-node knobs — see prompt_template.md "Task submission" block.
-    # nodes=2 triggers the RayJob 2-node multi-node prompt path.
-    # GLM-5 multi-node typically needs 2-3 h cold-start + benchmark before
-    # kernel-opt; target_gain / max_hours are sized accordingly.
-    nodes: 2
-    target_gain: 30
-    max_hours: 24
-    random_range_ratio: 0.8
-    rayjob_image: harbor.core42.primus-safe.amd.com/custom/sync/sglang:202605190643
-    # NOTE: do NOT set `claw_plugin_id: null` here. A Claw GUI manual session
-    # defaults to plugin_id=4; without a pluginId the sandbox doesn't load the
-    # plugin tool bundle (Bash/Read/Write/Grep/etc.), so the agent receives the
-    # prompt but has no tools to invoke and the session times out with 0 tool
-    # calls. Leave the field absent → inherits the default plugin_id=4.
 
   # ── Qwen3.5 MoE 397B (BF16, TP=8) ──
   - inferenceX_key: qwen3.5-bf16-mi300x-sglang

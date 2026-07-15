@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Post-PR-321 review Finding 1 regression — Coordinator sequence-denial hints must not steer the LLM toward proposing ``profile`` / ``roofline``.
+"""Coordinator sequence-denial hints must not steer the LLM toward proposing ``profile`` / ``roofline``.
 
 Pins that ``_sequence_denial_for_action`` and
 ``_sequence_denial_for_request`` no longer block on an empty
@@ -38,8 +38,6 @@ def coord(tmp_path: Path) -> Coordinator:
     c.shared_state = _BareState()
     c.role_registry = {"kernel_agent": object()}
     c._compare_against_gpu = ""
-    # Short-circuit ``_target_analysis_baseline_exists`` so the gate doesn't mask the profile-prereq branch under test.
-    c._target_analysis_baseline_exists = lambda: True  # type: ignore[assignment]
     return c
 
 

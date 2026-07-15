@@ -2,13 +2,8 @@
 
 """Conversation-capture coverage for the production specialist / critic paths.
 
-The token ledger (``llm_calls.jsonl``) already captured every component, but
-``conversations.jsonl`` only carried the in-process orchestration / kernel
-turns: the production-default specialist (subprocess) and the critic recovered
-their *tokens* but never their *text*. These tests pin the gap fix:
-
 * :func:`parse_claude_stream_json_response` recovers the assistant reply from
-  the same stream-json ``process.log`` the usage parser reads (full-trace B1).
+  the stream-json ``process.log`` the usage parser reads.
 * the recovered reply, paired with the parent-held prompt, lands a
   ``component=specialist`` row in ``conversations.jsonl``.
 * the critic reasoning loop lands a ``component=critic`` row.

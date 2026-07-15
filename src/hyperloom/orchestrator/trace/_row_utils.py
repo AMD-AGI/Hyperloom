@@ -31,8 +31,7 @@ def coerce_optional_str(value: Any) -> str | None:
 def coerce_optional_int(value: Any) -> int | None:
     """Coerce a value to ``int``, or ``None`` on a miss / bad type.
 
-    Keeps ``None`` distinct from ``0`` so a source that does not report a
-    counter is never conflated with one that genuinely spent zero.
+    Keeps ``None`` distinct from ``0``.
 
     Args:
         value: Arbitrary value to convert.

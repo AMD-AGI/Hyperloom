@@ -2,18 +2,14 @@
 
 """Atomic filesystem writes (canonical ``atomic_write*``).
 
-Single home for the "write to a sibling temp file in the same directory, then
-``os.replace`` into place" idiom that was independently re-implemented across
-the codebase. A reader never observes a half-written file: it sees either the
-old contents or the complete new contents, never a truncated one.
+Write to a sibling temp file in the same directory, then ``os.replace`` into
+place, so a reader never observes a half-written file. Stdlib-only so any
+package may depend on it without creating an import cycle.
 
-Zero first-party imports (stdlib only) so any package may depend on it without
-creating an import cycle (anti-cycle rule: no first-party imports).
-
-Behaviour-preserving flags let each legacy call site delegate here without any
+Behaviour-preserving flags let each call site delegate here without any
 observable change:
 
-* ``make_parents`` — create ``path.parent`` first (some sites did, some did not).
+* ``make_parents`` — create ``path.parent`` first.
 * ``atomic_write_json``: ``indent`` / ``sort_keys`` / ``ensure_ascii`` /
   ``trailing_newline`` mirror the exact ``json.dump`` shape each site used.
 
@@ -24,8 +20,6 @@ Sites intentionally NOT delegated here (kept local by design):
   module-global ``os``/``tempfile`` being monkeypatched by its tests.
 * ``src/hyperloom/agents/kernel/tools/geak_prompt_patcher._atomic_write`` —
   ``shutil.copystat`` preserves the target's mode.
-* ``recipe_kb/local_store._atomic_write_json`` — best-effort ``fsync`` + DEBUG
-  logging for durability on journaling mounts.
 * ``multi_node/scripts/*._atomic_write_bytes`` — shipped to remote nodes and run
   standalone, so they must not gain a ``hyperloom`` import dependency.
 """
@@ -35,7 +29,6 @@ from __future__ import annotations
 import json as _json
 import os
 import tempfile
-from collections import deque
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -127,8 +120,7 @@ def atomic_write_text(
             if fsync:
                 _best_effort_fsync(fh)
         if mode is not None:
-            # Strip group/other bits: written files may hold sensitive payloads,
-            # so never expose them beyond the owner regardless of caller intent.
+            # Strip group/other bits: never expose written payloads beyond owner.
             os.chmod(tmp, mode & 0o700)
         os.replace(tmp, path)
     except Exception:
@@ -201,56 +193,23 @@ def append_jsonl(
             _best_effort_fsync(fh)
 
 
-def read_jsonl(path: Path, *, default: Any = None) -> list[Any]:
-    """Read a JSONL file into a list, skipping blank lines.
+def safe_mtime(path: Path) -> float:
+    """Return ``path``'s modification time, or ``0.0`` when ``stat()`` fails.
 
-    Malformed lines raise ``json.JSONDecodeError`` (callers that want tolerance
-    should catch it); a missing file returns *default* coerced to ``[]`` when
-    *default* is ``None``.
-
-    Args:
-        path: Source JSONL file.
-        default: Value returned when the file does not exist. ``None`` (the
-            default) is normalised to an empty list.
-
-    Returns:
-        The parsed rows in file order.
-    """
-    path = Path(path)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return [] if default is None else default
-    rows: list[Any] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped:
-            rows.append(_json.loads(stripped))
-    return rows
-
-
-def tail_lines(path: Path, n: int) -> list[str]:
-    """Return the last *n* lines of a text file (memory-bounded).
-
-    Uses a bounded ``deque`` so only *n* lines are held in memory regardless of
-    file size. Trailing newlines are stripped from each returned line.
+    Never raises: a missing entry (concurrent cleanup mid-scan) or an
+    ``OSError`` from ``stat`` (e.g. an NFS stale handle) degrades to ``0.0``,
+    which sorts oldest for the ``key=`` / mtime-cutoff comparisons that use it.
 
     Args:
-        path: Source text file.
-        n: Number of trailing lines to return. ``<= 0`` returns ``[]``.
+        path: Filesystem path to stat.
 
     Returns:
-        Up to *n* trailing lines, or ``[]`` when the file does not exist.
+        The ``st_mtime`` of ``path``, or ``0.0`` on any ``stat()`` failure.
     """
-    if n <= 0:
-        return []
-    path = Path(path)
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            tail: deque[str] = deque(fh, maxlen=n)
+        return path.stat().st_mtime
     except OSError:
-        return []
-    return [line.rstrip("\n") for line in tail]
+        return 0.0
 
 
 __all__ = [
@@ -258,6 +217,5 @@ __all__ = [
     "atomic_write_text",
     "atomic_write_json",
     "append_jsonl",
-    "read_jsonl",
-    "tail_lines",
+    "safe_mtime",
 ]

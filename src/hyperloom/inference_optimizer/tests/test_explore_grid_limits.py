@@ -2,8 +2,8 @@
 
 """Explore-grid provenance + GPU-specialist resource policy.
 
-Grid-size caps were removed; grids of any provenance mix pass PolicyGate,
-and the GPU specialist pool resource invariant still holds.
+Grids of any provenance mix pass PolicyGate, and the GPU specialist pool
+resource invariant still holds.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from hyperloom.orchestrator.policy.gate import (
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-# Helpers
 def _gate(research_lane_capacity: int = 1) -> PolicyGate:
     s = SharedState()
     s.phase = "EXPLORE"
@@ -66,7 +65,6 @@ def _specialist_delegate(params: dict) -> Intent:
     )
 
 
-# Explore grids: any provenance mix is accepted (no grid-size cap)
 def test_allows_many_specialist_variants():
     gate = _gate()
     gate.validate_intent("orchestration", _delegate(_specialist_variants(5)))
@@ -135,7 +133,6 @@ def test_propose_allows_all_llm_direct_grid():
     gate.validate_intent("orchestration", intent)  # no raise
 
 
-# GPU specialist request policy (resource invariant, retained)
 def test_gpu_specialist_denied_when_pool_disabled():
     gate = _gate()
     with pytest.raises(PolicyDenied) as exc:

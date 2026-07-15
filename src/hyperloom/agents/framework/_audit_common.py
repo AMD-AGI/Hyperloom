@@ -5,9 +5,8 @@
 Pure building blocks (diff parsing, local-file resolution, symbol extraction,
 verdict assembly, patch-text acquisition) used by both
 :mod:`hyperloom.agents.framework.audit` and
-:mod:`hyperloom.agents.framework.cross_framework`. Kept in a standalone module
-so neither of those two imports the other (breaks the import cycle CodeQL
-``py/cyclic-import`` flagged).
+:mod:`hyperloom.agents.framework.cross_framework`. Kept standalone so neither
+imports the other (breaks the import cycle).
 """
 
 from __future__ import annotations
@@ -58,7 +57,7 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
             changes.append(current)
             continue
         if current is None:
-            # Tolerate a diff with no leading "diff --git" (raw .diff fetch).
+            # Tolerate a diff with no leading "diff --git".
             if raw.startswith("--- ") or raw.startswith("+++ "):
                 current = FileChange(path="")
                 changes.append(current)
@@ -85,7 +84,7 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
             current.removed.append(raw[1:])
         elif raw.startswith(" "):
             current.context.append(raw[1:])
-    # Drop empty/placeholder sections (e.g. pure mode/rename headers).
+    # Drop empty/placeholder sections.
     return [c for c in changes if c.path and c.path != "/dev/null"]
 
 
@@ -213,8 +212,7 @@ def _obtain_patch_text(request: dict[str, Any], work_dir: Path) -> tuple[str, st
     candidate = request.get("candidate") or {}
 
     # gbrain PR KB (primary): synthesize the unified diff from the KB files
-    # page. Degrades to "" (diff_url / primus fallback) on any miss, truncation
-    # or omission, so audit never sees a partial diff (design R3).
+    # page, degrading to "" on any miss so audit never sees a partial diff.
     import os
 
     if (os.environ.get("PR_KB_ENABLE", "1") or "1").strip() != "0":
@@ -234,8 +232,7 @@ def _obtain_patch_text(request: dict[str, Any], work_dir: Path) -> tuple[str, st
             except Exception as exc:  # noqa: BLE001 — best-effort primary
                 log.warning("phase-audit: pr_kb diff fetch failed: %r", exc)
 
-    # diff_url (GitHub ``.diff`` / file://) — the field phase-discover always
-    # stamps; fetched best-effort so the audit works without Primus.
+    # diff_url (GitHub ``.diff`` / file://), fetched best-effort.
     diff_url = str(request.get("diff_url") or candidate.get("diff_url") or "").strip()
     if diff_url:
         text = _fetch_diff_url(diff_url, work_dir)

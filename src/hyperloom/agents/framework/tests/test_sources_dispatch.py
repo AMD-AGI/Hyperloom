@@ -23,8 +23,7 @@ def _minimal_request(**overrides) -> ExploreRequest:
     return ExploreRequest.from_dict(base)
 
 
-# Per-framework repo URLs to parametrise dispatch tests over every framework
-# the CLI accepts (sglang/vllm/atom), so a single-framework regression fails.
+# Per-framework repo URLs to parametrise dispatch tests over every framework.
 _FRAMEWORK_TO_REPO_URL: dict[str, str] = {
     "sglang": "https://github.com/sgl-project/sglang.git",
     "vllm": "https://github.com/ROCm/vllm.git",
@@ -42,7 +41,6 @@ def test_dispatch_explicit_refs_only() -> None:
     assert sources == {"explicit"}
 
 
-# pr_states broadens PR-state coverage (open + merged/closed -> "all")
 def test_pr_states_defaults_to_open() -> None:
     req = _minimal_request()
     assert req.pr_states == ("open",)
@@ -110,10 +108,7 @@ def test_dispatch_explicit_refs_only_across_frameworks(framework: str) -> None:
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
 def test_dispatch_primus_search_per_framework(framework: str, monkeypatch) -> None:
-    """PR-search backends are framework-agnostic — the framework only
-    determines which repo gets queried. atom must be dispatched the
-    same way sglang/vllm are.
-    """
+    """PR-search backends are framework-agnostic; the framework only determines which repo gets queried."""
     req = _minimal_request(
         framework=framework,
         repo_url=_FRAMEWORK_TO_REPO_URL[framework],
@@ -134,7 +129,6 @@ def test_dispatch_primus_search_per_framework(framework: str, monkeypatch) -> No
     monkeypatch.setattr(src, "list_perf_prs", fake_primus)
 
     out = src.enumerate_candidates(req)
-    # The primus backend was called against the framework's own repo URL.
     assert seen_repo_urls == [_FRAMEWORK_TO_REPO_URL[framework]]
     assert any(c.source == "primus_cortex" for c in out)
 
@@ -167,7 +161,7 @@ def test_dispatch_unions_primus_and_github(monkeypatch) -> None:
 
     def fake_github(repo_url, *, gap_description, limit, states=("open",)):  # noqa: ARG001
         return [
-            GitHubPr(number=2, title="dup", html_url="dup"),  # dup with primus
+            GitHubPr(number=2, title="dup", html_url="dup"),
             GitHubPr(number=3, title="c", html_url="u3"),
         ]
 
@@ -178,15 +172,9 @@ def test_dispatch_unions_primus_and_github(monkeypatch) -> None:
     refs = [c.ref for c in out]
     # explicit first, then primus, then github (dedup keeps first occurrence)
     assert refs == ["main", "PR:1", "PR:2", "PR:3"]
-    # dedup preserves primus' source for PR:2 (first seen)
     by_ref = {c.ref: c.source for c in out}
     assert by_ref["PR:2"] == "primus_cortex"
     assert by_ref["PR:3"] == "github"
-
-
-# ---------------------------------------------------------------------------
-# B2 fix: gap-aware primus_cortex routing + client-side rerank
-# ---------------------------------------------------------------------------
 
 
 def test_primus_uses_search_endpoint_when_gap_present(monkeypatch) -> None:
@@ -229,13 +217,12 @@ def test_primus_uses_search_endpoint_when_gap_present(monkeypatch) -> None:
 
 
 def test_primus_falls_back_to_list_when_search_returns_empty(monkeypatch) -> None:
-    """B2 v2: when /v1/search/prs returns 0 candidates (word-AND match too tight),
-    fall back to list_perf_prs + client-side rerank rather than failing the run."""
+    """When /v1/search/prs returns 0 candidates, fall back to list_perf_prs + client-side rerank rather than failing the run."""
     calls: list[str] = []
 
     def fake_search(*_a, **_kw):
         calls.append("search")
-        return []  # service returns empty - the real-world failure mode
+        return []
 
     def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
         calls.append("list")
@@ -290,7 +277,6 @@ def test_primus_falls_back_to_list_when_search_unavailable(monkeypatch) -> None:
     # Fallback over-fetch still uses 3x
     assert captured["limit"] == 6
     refs = [c.ref for c in out]
-    # Rerank still applied to the list_perf_prs payload: fp8/MoE first
     assert refs[0] == "PR:21"
 
 
@@ -321,7 +307,7 @@ def test_primus_no_gap_uses_label_only_path(monkeypatch) -> None:
     )
     out = src.enumerate_candidates(req)
     assert captured["called"] == "list"
-    # No over-fetch when gap is empty (preserves old cheap path)
+    # No over-fetch when gap is empty
     assert captured["limit"] == 1
     assert [c.ref for c in out] == ["PR:30"]
 
@@ -335,11 +321,6 @@ def test_rank_by_keyword_overlap_preserves_ties() -> None:
     ]
     out = src._rank_by_keyword_overlap(prs, ["fp8", "moe"])
     assert [pr.number for pr in out] == [1, 2, 3]
-
-
-# ---------------------------------------------------------------------------
-# C: explicit keyword override
-# ---------------------------------------------------------------------------
 
 
 def test_resolve_keywords_explicit_overrides_gap() -> None:
@@ -358,7 +339,6 @@ def test_resolve_keywords_fallback_to_gap_extract() -> None:
         keywords=[],
     )
     out = src._resolve_keywords(req)
-    # extract_keywords whitelist hits sglang/fp8/moe; order = sorted
     assert "fp8" in out and "moe" in out and "sglang" in out
 
 
@@ -375,8 +355,7 @@ def test_resolve_keywords_lowercases_explicit() -> None:
 
 
 def test_primus_uses_explicit_keywords(monkeypatch) -> None:
-    """End-to-end: --framework-keywords sent as Primus query verbatim,
-    bypassing the gap_description auto-extract."""
+    """End-to-end: --framework-keywords sent as Primus query verbatim, bypassing the gap_description auto-extract."""
     captured: dict[str, object] = {}
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
@@ -414,15 +393,8 @@ def test_rank_by_keyword_overlap_empty_keywords_is_identity() -> None:
     assert out == prs
 
 
-# ---------------------------------------------------------------------------
-# B3 fix: anti-correlation rerank at the dispatcher boundary. These pin the
-# end-to-end behaviour through enumerate_candidates so a rerank/scorer
-# regression surfaces in the dispatcher contract test too.
-# ---------------------------------------------------------------------------
-
-
 def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch) -> None:
-    """Regression (session f219629b, dense/bf16/mi300x): positive-only overlap wrongly picked PR:25769 MegaMoE; the fix must rank a dense+mi300x PR ahead at the enumerate_candidates boundary."""
+    """A dense+mi300x PR must rank ahead of PR:25769 MegaMoE at the enumerate_candidates boundary."""
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
         return [
@@ -457,14 +429,8 @@ def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch)
     assert "PR:25769" in refs
 
 
-# ---------------------------------------------------------------------------
-# Candidate.score must carry the rerank score across the subprocess JSON
-# boundary so the IO framework arm can log it.
-# ---------------------------------------------------------------------------
-
-
 def test_candidate_score_field_populated_for_primus_path(monkeypatch) -> None:
-    """The dispatcher transports the anti-aware rerank score on every primus_cortex Candidate (so IO can persist "why we picked this PR"); order is score-descending, stable on ties."""
+    """The dispatcher transports the rerank score on every primus_cortex Candidate; order is score-descending, stable on ties."""
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
         return [
@@ -485,18 +451,17 @@ def test_candidate_score_field_populated_for_primus_path(monkeypatch) -> None:
     )
     out = src.enumerate_candidates(req)
     scores = [(c.ref, c.score) for c in out]
-    # PR:10 best (dense+sglang+bf16+mi300x positive hits, no anti); PR:12 worst (0).
+    # PR:10 best (positive hits, no anti); PR:12 worst (0).
     assert scores[0][0] == "PR:10"
     assert scores[0][1] > 0.0, f"top candidate must carry a positive score; got {scores}"
-    # PR:11 MegaMoE has anti hits (dense trigger fires moe penalty) so its score
-    # should be <= top candidate.
+    # PR:11 MegaMoE has anti hits so its score should be <= top candidate.
     assert scores[1][1] <= scores[0][1]
-    # Sort order must match score desc (already stable from _rank_by_keyword_overlap).
+    # Sort order must match score desc.
     assert scores == sorted(scores, key=lambda x: -x[1])
 
 
 def test_candidate_score_defaults_to_zero_for_label_only_path(monkeypatch) -> None:
-    """Empty gap/keywords -> label-only cheap path; Candidate.score defaults to 0.0 (opt-in: 0.0 means "no gap-driven ranking happened")."""
+    """Empty gap/keywords -> label-only cheap path; Candidate.score defaults to 0.0 (no gap-driven ranking happened)."""
 
     def fake_search(*a, **kw):  # would never be called when keywords empty
         raise AssertionError("search must not be called on the no-keyword path")
@@ -521,7 +486,7 @@ def test_candidate_score_defaults_to_zero_for_label_only_path(monkeypatch) -> No
 
 
 def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) -> None:
-    """Anti rerank is a no-op when the gap carries no anti-trigger keyword (pins the additive-only contract at the dispatcher boundary)."""
+    """Anti rerank is a no-op when the gap carries no anti-trigger keyword."""
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
         return [
@@ -543,6 +508,5 @@ def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) 
     )
     out = src.enumerate_candidates(req)
     refs = [c.ref for c in out]
-    # Key contract: PR:10 keeps its positive overlap (1) despite containing
- # ``moe``, proving anti is fully gated on the gap-side trigger.
+    # PR:10 keeps its positive overlap despite containing ``moe``; anti is gated on the gap-side trigger.
     assert refs == ["PR:11", "PR:10", "PR:12"]

@@ -13,7 +13,6 @@ import pytest
 from hyperloom.inference_optimizer.experiments import roofline_sweep as rs
 
 
-# extract_templates: both empty -> raise; optimized populated -> two templates
 def test_extract_templates_refuses_when_current_best_empty() -> None:
     state = {"current_best": {"extra_server_args": "", "extra_envs": {}}}
     with pytest.raises(SystemExit, match="did not accept any optimization"):
@@ -40,7 +39,6 @@ def test_extract_templates_optimized_via_envs_only() -> None:
     assert opt.extra_server_args == "" and opt.extra_envs == {"FOO": "1"}
 
 
-# compute_ceiling: parity with the underlying roofline_ceiling helper
 def test_compute_ceiling_matches_underlying_formula() -> None:
     from hyperloom.orchestrator.kernel.roofline_ceiling import (
         ModelMeta,
@@ -77,7 +75,7 @@ def test_compute_ceiling_matches_underlying_formula() -> None:
         concurrency=32,
     )
     assert got == pytest.approx(want)
-    # Higher concurrency raises the ceiling (weight reuse).
+    # Higher concurrency raises the ceiling.
     higher = rs.compute_ceiling(
         model_meta=meta,
         gpu_type="mi355x",
@@ -89,7 +87,6 @@ def test_compute_ceiling_matches_underlying_formula() -> None:
     assert higher > got
 
 
-# write_csv: round-trip
 def test_write_csv_roundtrip(tmp_path: Path) -> None:
     rows = [
         {
@@ -120,7 +117,6 @@ def test_write_csv_roundtrip(tmp_path: Path) -> None:
     assert float(back[1]["measured_tps"]) == 900.0
 
 
-# sweep_one_template: mock SglangServer + run_bench
 class _FakeServer:
     """In-memory replacement for the real SglangServer context manager."""
 
@@ -208,9 +204,7 @@ def test_sweep_one_template_marks_failed_bench_as_oom(tmp_path: Path) -> None:
         )
     assert rows[0]["status"] == "FAILED_OR_OOM"
     assert rows[0]["measured_tps"] is None
-    # Ceiling still computed (independent of bench).
+    # Ceiling still computed independent of bench.
     assert rows[0]["ceiling_tps"] > 0
 
 
-# plot_svg + main --skip-bench tests removed: matplotlib is operator-side only
-# (lazily imported inside plot_svg), so it isn't pulled into the orchestrator CI.

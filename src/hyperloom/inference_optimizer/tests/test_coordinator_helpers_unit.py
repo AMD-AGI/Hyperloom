@@ -54,7 +54,7 @@ def test_closing_grace_explicit():
 
 
 def test_closing_grace_default():
-    # min(120, max_minutes*60*0.02): 200*60*0.02 = 240 -> capped 120
+    # min(120, max_minutes*60*0.02).
     assert ch.effective_closing_grace_sec(200, None) == 120.0
     assert ch.effective_closing_grace_sec(10, None) == 12.0
     assert ch.effective_closing_grace_sec(None, None) == 0.0
@@ -67,7 +67,6 @@ def test_parse_iso_unix():
     assert ch._parse_iso_unix("") == 0.0
     assert ch._parse_iso_unix("not-a-date") == 0.0
     assert ch._parse_iso_unix("2025-01-01T00:00:00Z") > 0
-    # Naive treated as UTC.
     assert ch._parse_iso_unix("2025-01-01T00:00:00") > 0
 
 
@@ -130,7 +129,6 @@ def test_baseline_params_fingerprint():
     )
     assert out["benchmark_script"] == "b.sh"
     assert out["model_path"] is None
-    # extra_envs sorted list of [k, v] pairs.
     assert out["extra_envs"] == [["A", "1"], ["B", "2"]]
 
 
@@ -142,23 +140,22 @@ def test_baseline_params_fingerprint_bad_envs():
 # ---- _resolve_roofline_watermark_ratio ----
 
 
-def test_watermark_ratio_default(monkeypatch):
-    monkeypatch.delenv(ch._ROOFLINE_WATERMARK_RATIO_ENV, raising=False)
+def test_watermark_ratio_default():
     assert ch._resolve_roofline_watermark_ratio() == 1.10
 
 
-def test_watermark_ratio_valid(monkeypatch):
-    monkeypatch.setenv(ch._ROOFLINE_WATERMARK_RATIO_ENV, "1.5")
-    assert ch._resolve_roofline_watermark_ratio() == 1.5
-
-
-def test_watermark_ratio_below_one(monkeypatch):
-    monkeypatch.setenv(ch._ROOFLINE_WATERMARK_RATIO_ENV, "0.5")
+def test_watermark_ratio_env_is_ignored(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "1.5")
     assert ch._resolve_roofline_watermark_ratio() == 1.10
 
 
-def test_watermark_ratio_invalid(monkeypatch):
-    monkeypatch.setenv(ch._ROOFLINE_WATERMARK_RATIO_ENV, "abc")
+def test_watermark_ratio_below_one_env_is_ignored(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "0.5")
+    assert ch._resolve_roofline_watermark_ratio() == 1.10
+
+
+def test_watermark_ratio_invalid_env_is_ignored(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "abc")
     assert ch._resolve_roofline_watermark_ratio() == 1.10
 
 
@@ -198,9 +195,9 @@ def test_dedupe_leaves_json_arg_untouched():
     assert ch._dedupe_extra_server_args(args) == args
 
 
-# ---- _merge_cumulative_extra_*_args (name built to dodge the rename guard) ----
+# ---- _merge_cumulative_extra_server_args ----
 
-_merge = getattr(ch, "_merge_cumulative_extra_" + "sglang_args")
+_merge = ch._merge_cumulative_extra_server_args
 
 
 def test_merge_prefers_full():
@@ -265,7 +262,6 @@ def test_serialize_verdict_advisory_full_fieldset():
         "advice_text": "tune flag",
         "alternative_action": "explore",
     }
-    # Verdict/reasoning/target are not part of the advisory subset.
     assert "verdict" not in out
     assert "reasoning" not in out
 
