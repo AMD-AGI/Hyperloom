@@ -143,8 +143,10 @@ def test_seed_shared_state_preserves_quantized_model_identity(
     monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
+    quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"
+    quant_dir.mkdir(parents=True)
     args = _args(
-        model="/root/quantization/google-gemma-4-26B-A4B-it/quantized",
+        model=str(quant_dir),
         model_display_name="google-gemma-4-26B-A4B-it-quantized",
     )
     state = cb._seed_shared_state(tmp_path, args, session_id="s-q")
@@ -182,8 +184,10 @@ def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
     display name from the quantize prelude, not the collapsed path basename."""
     from hyperloom.inference_optimizer.session import manifest as m
 
+    quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"
+    quant_dir.mkdir(parents=True)
     args = _args(
-        model="/root/quantization/google-gemma-4-26B-A4B-it/quantized",
+        model=str(quant_dir),
         model_display_name="google-gemma-4-26B-A4B-it-quantized",
     )
     built = m.build_manifest(tmp_path, args=args, session_id="s-q")
@@ -198,7 +202,7 @@ def test_resolve_model_display_name_helper() -> None:
     assert cb.resolve_model_display_name(plain) == "Qwen3-32B"
 
     pinned = SimpleNamespace(
-        model="/root/quantization/x/quantized",
+        model="/tmp/quantization/x/quantized",
         model_display_name="x-quantized",
     )
     assert cb.resolve_model_display_name(pinned) == "x-quantized"

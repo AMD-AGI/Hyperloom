@@ -27,7 +27,7 @@ from optimize_submit import (  # noqa: E402
     detect_tp,
 )
 
-_GEMMA4_VLLM_IMAGE = "harbor.core42.primus-safe.amd.com/sync/vllm-openai-rocm:gemma4"
+_GEMMA4_VLLM_IMAGE = "registry.example.invalid/vllm-gemma4:latest"
 
 # Architectures that must route to sglang, not the vLLM fallback image.
 NEW_SGLANG_ARCHS = [
@@ -110,7 +110,8 @@ def test_detect_concurrency_is_fixed_64(tp: int, framework: str) -> None:
         "someorg/Gemma4-mini",          # 'gemma4' (no hyphen) matches
     ],
 )
-def test_gemma4_vllm_uses_dedicated_image(repo_id: str) -> None:
+def test_gemma4_vllm_uses_dedicated_image(monkeypatch, repo_id: str) -> None:
+    monkeypatch.setenv("SAFE_OPTIMIZE_GEMMA4_VLLM_IMAGE", _GEMMA4_VLLM_IMAGE)
     assert detect_image("vllm", repo_id) == _GEMMA4_VLLM_IMAGE
 
 
@@ -124,4 +125,4 @@ def test_gemma4_sglang_unaffected() -> None:
 def test_non_gemma4_vllm_uses_default_image() -> None:
     img = detect_image("vllm", "Qwen/Qwen3-32B")
     assert img != _GEMMA4_VLLM_IMAGE
-    assert "vllm-openai-rocm" in img
+    assert "vllm" in img

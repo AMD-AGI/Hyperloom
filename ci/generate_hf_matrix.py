@@ -72,7 +72,7 @@ def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-_LB_BASE = "https://core42.primus-safe.amd.com/model-leaderboard"
+_LB_BASE = os.environ.get("HYPERLOOM_LEADERBOARD_URL", "").rstrip("/")
 
 
 def _paginate_models(api_path: str) -> tuple[set[str], set[str]]:
@@ -229,6 +229,9 @@ def _leaderboard_models() -> set[str]:
     Returns:
         set[str]: The union of all known leaderboard model ids (lowercased).
     """
+    if not _LB_BASE:
+        print("leaderboard exclusion skipped: HYPERLOOM_LEADERBOARD_URL is not set", file=sys.stderr)
+        return set()
     models, lb_tids = _paginate_models("/api/v1/leaderboard?sort_by=gain&order=desc")
     task_models, task_tids = _paginate_models("/api/v1/tasks")
     models |= task_models
