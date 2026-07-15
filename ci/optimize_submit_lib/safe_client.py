@@ -307,7 +307,7 @@ class SafeOptimizeClient:
             body["resultsPath"] = results_path
         if image:
             body["image"] = image
-        # Override SaFE's wrong-for-core42 MI355X default.
+        # Send the caller-selected GPU type instead of relying on backend defaults.
         if gpu_type:
             body["gpuType"] = gpu_type
         # Always send inferencexPath (even empty) to suppress SaFE's Zod default;

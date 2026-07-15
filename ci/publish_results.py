@@ -12,8 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Public ingress URL so any GHA runner can reach the service. Override via HYPERLOOM_RESULTS_SERVICE_URL.
-DEFAULT_SERVICE_URL = "http://core42.example-internal-host.invalid/hyperloom-results"
+# Public forks should opt in with their own results service URL.
+DEFAULT_SERVICE_URL = ""
 
 
 def load_results(path: Path) -> list[dict[str, Any]]:
@@ -165,7 +165,7 @@ def main() -> int:
     parser.add_argument(
         "--url",
         default=os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", DEFAULT_SERVICE_URL),
-        help="Results service base URL (defaults to the core42 ingress)",
+        help="Results service base URL (defaults to HYPERLOOM_RESULTS_SERVICE_URL; skips when unset)",
     )
     parser.add_argument(
         "--token",

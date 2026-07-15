@@ -17,15 +17,14 @@ log = logging.getLogger("optimize-submit")
 
 # ── Defaults ────────────────────────────────────────────────────────────────────
 
-DEFAULT_API_URL = "https://core42.example-internal-host.invalid"
-# register uses core42-hyperloom (RWX /wekafs downloads); submit uses
-# core42-sandbox (only Sandbox-scoped workspaces can host the task). Set
-# --submit-workspace == --register-workspace to avoid submit_task 400s.
-DEFAULT_REGISTER_WORKSPACE = "core42-hyperloom"
-DEFAULT_SUBMIT_WORKSPACE = "core42-sandbox"
-DEFAULT_VOLUME = "/wekafs"
-# core42 is MI300X; override the prompt-builder's MI355X default. Tool source
-# paths are intentionally not pinned so install.sh can clone writable copies.
+DEFAULT_API_URL = ""
+# Live SaFE/Claw submits are deployment-specific. Public defaults stay empty so
+# forks must opt in with their own service URL, workspaces, and shared volume.
+DEFAULT_REGISTER_WORKSPACE = ""
+DEFAULT_SUBMIT_WORKSPACE = ""
+DEFAULT_VOLUME = ""
+# Default to MI300X policy for AMD public CI examples. Tool source paths are
+# intentionally not pinned so install.sh can clone writable copies.
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
 DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
@@ -140,9 +139,9 @@ def _load_default_prompt_prefix() -> str:
     return ""
 
 
-# RDMA bnxt_re tar package staged on WekaFS, kept as a module constant so the
-# orchestrator and this SaFE path stay in sync.
-_MULTINODE_BNXT_TAR = "/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz"
+# Optional RDMA bnxt_re tar package. Deployments that require it should set the
+# env var; public defaults do not expose private storage paths.
+_MULTINODE_BNXT_TAR = os.environ.get("SAFE_OPTIMIZE_BNXT_TAR", "").strip()
 
 
 def _multinode_prompt_suffix(nodes: int, rayjob_image: str) -> str:
@@ -159,7 +158,7 @@ def _multinode_prompt_suffix(nodes: int, rayjob_image: str) -> str:
     """
     if nodes <= 1:
         return ""
-    return (
+    lines = [
         f"\n\nMulti-node run ({nodes} nodes): this model does NOT fit on a single "
         f"8-GPU sandbox node. You CANNOT benchmark it directly in the sandbox -- "
         f"launch it as a SaFE RayJob (Claw fan-out) and export NODES={nodes} "
@@ -171,8 +170,10 @@ def _multinode_prompt_suffix(nodes: int, rayjob_image: str) -> str:
         f"RayJob node count: {nodes}\n"
         f"env:\n"
         f"- NODES={nodes}\n"
-        f"- PATH_TO_BNXT_TAR_PACKAGE={_MULTINODE_BNXT_TAR}\n"
-    )
+    ]
+    if _MULTINODE_BNXT_TAR:
+        lines.append(f"- PATH_TO_BNXT_TAR_PACKAGE={_MULTINODE_BNXT_TAR}\n")
+    return "".join(lines)
 
 
 def parse_kernel_backends(raw: str | None) -> list[str]:
@@ -280,22 +281,20 @@ def _default_sglang_image() -> str:
     """Return the default SGLang server image.
 
     Returns:
-        The pinned ``profilerfix`` SGLang image whose patched
-        libamdhip64/libroctracer let rocprofiler capture kernels under
-        ``HipGraphLaunch``.
+        The configured SGLang image, or a public image placeholder suitable
+        for dry runs.
     """
-    return "harbor.core42.example-internal-host.invalid/sync/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix"
+    return os.environ.get("SAFE_OPTIMIZE_SGLANG_IMAGE", "lmsysorg/sglang:latest")
 
 
 def _default_vllm_image() -> str:
     """Return the default vLLM server image.
 
     Returns:
-        The pinned ``profilerfix`` vLLM image (v0.21.0 / rocm720) whose patched
-        libamdhip64/libroctracer let rocprofiler capture kernels under
-        HipGraphLaunch.
+        The configured vLLM image, or a public image placeholder suitable
+        for dry runs.
     """
-    return "harbor.core42.example-internal-host.invalid/sync/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix-20260627"
+    return os.environ.get("SAFE_OPTIMIZE_VLLM_IMAGE", "vllm/vllm-openai:latest")
 
 
 # Shared env parser used by the SaFE client and artifact fallback logic.
