@@ -1366,7 +1366,7 @@ def _forge_fusion_timeout_sec(payload: dict) -> int:
     )
     try:
         value = int(float(raw))
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         value = 7200
     return max(1, value)
 

@@ -634,6 +634,11 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._forge_fusion_timeout_sec({}) == 7200
 
+    def test_forge_fusion_timeout_infinite_env_falls_back(self, monkeypatch):
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")
+
+        assert krh._forge_fusion_timeout_sec({}) == 7200
+
     def test_forge_fusion_wrapper_timeout_adds_reap_grace(self):
         assert krh._forge_fusion_wrapper_timeout_sec(123) == 153
 
