@@ -13,9 +13,8 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 
-# compatibility-filter helpers live in the ``_grid_variant_filter`` sibling;
-# patch them there (apply_compatibility_filter resolves them in that module's
-# namespace, not via the _grid_runner re-export).
+# Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling,
+# where apply_compatibility_filter resolves them (not via the re-export).
 from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 
 
@@ -147,8 +146,7 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
 
 # -- _resolve_probe_python / probe interpreter selection ------------------
 def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
-    # The harness interpreter (single-venv install) is used directly and no
-    # vllm-exe resolution is attempted.
+    # The harness interpreter is used directly; no vllm-exe resolution is tried.
     monkeypatch.setattr(gr, "_resolve_magpie_python", lambda: "/srv/venv/bin/python")
     monkeypatch.setattr(
         gr.shutil, "which", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("which() should not be called"))
@@ -157,8 +155,8 @@ def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
 
 
 def test_resolve_probe_python_falls_back_to_vllm_venv(monkeypatch) -> None:
-    # magpie_python fell through to the canonical default -> pin the venv that
-    # actually backs ``vllm serve``.
+    # magpie_python is the canonical default -> pin the venv that backs
+    # ``vllm serve``.
     monkeypatch.setattr(gr, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
     monkeypatch.setattr(gr.shutil, "which", lambda name: "/other/venv/bin/vllm" if name == "vllm" else None)
     monkeypatch.setattr(gr.os.path, "exists", lambda p: p == "/other/venv/bin/python")

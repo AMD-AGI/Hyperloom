@@ -51,8 +51,7 @@ _mn_cli = _MnCliProxy()
 
 EXIT_CONFIG_ERROR = 3
 EXIT_TRANSIENT = 1
-# rayjob.py is imported by cli.py first (see the re-export site), so its
-# symbols are already resolvable by the time this module loads.
+# rayjob.py is imported by cli.py first, so its symbols are already resolvable.
 from .rayjob import (
     _TERMINAL_FAIL_PHASES,
     _TERMINAL_OK_PHASES,
@@ -81,12 +80,9 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
     """
     extra_env = _mn_cli._parse_kv_list(args.extra_env)
     extra_labels = _mn_cli._parse_kv_list(args.extra_label)
-    # Dynamo inference pods run sglang/vllm only; they never call an LLM/agent
-    # endpoint, so no *_API_KEY / SAFE_API_KEY / *_BASE_URL is baked into their
-    # container env. Kernel-opt agents (when used) receive credentials
-    # out-of-band over SSH at invocation time (ssh_runtime._env_prologue), so
-    # dropping the credential fanout here does not affect them. Only operator
-    # --extra-env values are forwarded.
+    # Dynamo inference pods run sglang/vllm only and never call an LLM/agent
+    # endpoint, so no credentials are baked into their container env; only
+    # operator --extra-env values are forwarded (agents get creds over SSH).
     env = dict(extra_env)
 
     owner_id = args.owner_id or os.environ.get("WORKLOAD_ID", "").strip() or None
@@ -151,7 +147,7 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
             wid = safe.create_workload(body)
             info(f"workload created: {wid}")
 
-        # Checkpoint id immediately (idempotency: overlapping retries reuse).
+        # Checkpoint id immediately for idempotent retries.
         st = dict(_mn_cli._load_state())
         st.update(
             {
@@ -204,8 +200,7 @@ def cmd_create_dynamo(args: argparse.Namespace) -> int:
         except safe_client.SafeApiError as exc:
             warn(f"get_workload_service failed ({exc}); using conventional DNS")
 
-        # Discover worker pod IPs from SaFE GetWorkload .pods (SaFE populates
-        # DGD child pods with role-indexed resourceId; see discover_role_pods).
+        # Discover worker pod IPs from SaFE GetWorkload .pods.
         roles = (
             dynamo_support.discover_role_pods(workload, pd_mode=pd_mode)
             if workload
@@ -300,12 +295,9 @@ def _dynamo_require_state() -> dict[str, Any]:
         raise RuntimeError("no ssh_key_path in state; re-run create-dynamo")
     return state
 
-# Env-var prefixes forwarded from the controller (prompt -> setup_env.sh ->
-# os.environ) to the SSH-launched framework child. These are sandbox-side tuning
-# vars that are NOT in the pod container env and are NOT recovered from pid1, so
-# without explicit forwarding the child sees framework defaults (e.g. mori
-# SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK defaults to 4096 and prefill
-# aborts when chunked_prefill_size exceeds it).
+# Env-var prefixes forwarded from the controller's os.environ to the
+# SSH-launched framework child (sandbox-side tuning vars not present in the pod
+# container env and not recovered from pid1).
 _FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")
 
 def _collect_forward_env() -> dict[str, str]:
@@ -317,13 +309,10 @@ def _collect_forward_env() -> dict[str, str]:
         key collisions).
     """
     fwd = {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in _FORWARD_ENV_PREFIXES)}
-    # Multi-node torch profiler: the dynamo SSH path (unlike the RayJob path in
-    # launch_multinode.py) never pins SGLANG_TORCH_PROFILER_DIR, so sglang writes
-    # traces to pod-local /tmp where the sandbox cannot read them -> roofline's
-    # profile_no_trace_failed. Translate the controller's shared-FS trace dir
-    # (HYPERLOOM_MN_PROFILE_TRACE_DIR, set by restart_server_for_round) into
-    # SGLANG_TORCH_PROFILER_DIR so the SSH-launched sglang emits traces to the
-    # wekafs path both server pods and the sandbox mount.
+    # Translate the controller's shared-FS trace dir into
+    # SGLANG_TORCH_PROFILER_DIR so the SSH-launched sglang emits traces to a
+    # path readable by both the pods and the sandbox (else traces go to pod-local
+    # /tmp and roofline fails).
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
@@ -453,9 +442,8 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
     except ServerArgsRejected as exc:
         err(str(exc))
         return EXIT_CONFIG_ERROR
-    # The deployment topology is fixed at create time, so state.pd_mode is
-    # authoritative: a PD deployment must restart in PD mode even if the
-    # caller's --pd-mode defaulted to colocated/aggregated.
+    # Topology is fixed at create time, so state.pd_mode is authoritative: a PD
+    # deployment must restart in PD mode even if --pd-mode defaulted otherwise.
     pd_mode = (
         "disaggregated"
         if (getattr(args, "pd_mode", "") or "").lower() == "disaggregated" or state.get("pd_mode") == "disaggregated"
@@ -470,19 +458,15 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
     if pd_mode == "disaggregated":
         if framework != "sglang":
             raise RuntimeError("PD disaggregation is sglang-only on the Dynamo backend")
-        # Prefill group + decode group: each is its own LWS, each pod uses its
-        # own $LWS_WORKER_INDEX/$LWS_LEADER_ADDRESS. We send per-group tp/nnodes
-        # and the matching --disaggregation-mode.
+        # Prefill and decode are each their own LWS; send per-group tp/nnodes and
+        # the matching --disaggregation-mode.
         pn = int(getattr(args, "pd_prefill_nodes", 0) or 0) or len(state.get("prefill_pod_ips") or [])
         dn = int(getattr(args, "pd_decode_nodes", 0) or 0) or len(state.get("decode_pod_ips") or [])
         ptp = int(getattr(args, "pd_prefill_tp", 0) or 0) or int(args.tp)
         dtp = int(getattr(args, "pd_decode_tp", 0) or 0) or int(args.tp)
-        # Per-role EP / extra-args (InferenceX disagg recipes differ between
-        # prefill and decode). 0 / "" => fall back to the shared --ep /
-        # --extra-args so legacy single-flag callers are unchanged. The
-        # shared --extra-args is the common base; the per-role string is
-        # appended after it (role-specific flags win on duplicate keys via
-        # sglang's own last-wins argparse).
+        # Per-role EP / extra-args; 0 / "" falls back to the shared --ep /
+        # --extra-args. The shared --extra-args is the base and the per-role
+        # string is appended after it (role-specific flags win, last-wins).
         shared_ep = int(getattr(args, "ep", 1) or 1)
         shared_extra = getattr(args, "extra_args", "") or ""
         pep = int(getattr(args, "pd_prefill_ep", 0) or 0) or shared_ep
@@ -553,8 +537,7 @@ def _dynamo_restart_server(args: argparse.Namespace) -> int:
     state["last_restart_pd_mode"] = pd_mode
     state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
     if pd_mode == "disaggregated":
-        # Persist per-role knobs so a state-only resume (env lost on sandbox
-        # recreate) reproduces the same prefill/decode topology.
+        # Persist per-role knobs so a state-only resume reproduces the topology.
         state["last_restart_pd_prefill_nodes"] = int(getattr(args, "pd_prefill_nodes", 0) or 0)
         state["last_restart_pd_decode_nodes"] = int(getattr(args, "pd_decode_nodes", 0) or 0)
         state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
@@ -673,13 +656,9 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
     """Dynamo apply-tracelens-patch: SSH fan-out the TraceLens SGLang patch
     set to every GPU pod via ``apply_tracelens_patch_multinode.py --local``.
 
-    The ray path submits a Ray-actor fan-out; the dynamo path has no ray, so
-    each GPU pod runs the patcher locally over SSH. Both annotate the sglang
-    torch.profiler output the same way, so the NFS-shared trace dir (see
-    SGLANG_TORCH_PROFILER_DIR forwarding in _collect_forward_env) is consumable
-    by TraceLens identically — only the dispatch differs. Idempotent: the
-    in-pod script sentinel-greps and returns status=skipped on already-patched
-    pods, so it is safe to call on every restart_server_for_round.
+    Each GPU pod runs the patcher locally over SSH. Idempotent: the in-pod
+    script returns status=skipped on already-patched pods, so it is safe to
+    call on every restart.
 
     Args:
         args (argparse.Namespace): Parsed ``apply-tracelens-patch`` arguments.
@@ -708,10 +687,8 @@ def _dynamo_apply_tracelens_patch(args: argparse.Namespace) -> int:
     timeout = _mn_cli._poll_timeout_from_args(args)
     per_pod: list[dict] = []
     failures: list[dict] = []
-    # Pod-side interpreter: sglang lives in /opt/venv on the canonical
-    # ROCm sglang-dynamo images; /usr/bin/python3 lacks sglang so
-    # _apply_on_pod's `import sglang` fails with "No module named 'sglang'".
-    # Allow override via $HYPERLOOM_MN_POD_PYTHON.
+    # Pod-side interpreter: sglang lives in /opt/venv on the canonical images
+    # (/usr/bin/python3 lacks it). Override via $HYPERLOOM_MN_POD_PYTHON.
     pod_python = os.environ.get("HYPERLOOM_MN_POD_PYTHON", "/opt/venv/bin/python")
     for ip in gpu_ips:
         info(f"apply-tracelens-patch (dynamo): ssh -> {ip}")
@@ -792,7 +769,7 @@ def _dynamo_apply_patch(args: argparse.Namespace) -> int:
         info(f"apply-patch (dynamo): ssh -> {ip}")
         parsed, tx = _dynamo_ssh_node_op(state, ip, op_args, timeout=args.timeout_sec)
         if parsed and str(parsed.get("status")) == "ok":
-            # Override host with the pod IP so revert targets the same pod.
+            # Key host by pod IP so revert targets the same pod.
             parsed["host"] = ip
             per_node.append(parsed)
         else:

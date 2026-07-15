@@ -2,11 +2,9 @@
 
 """Shared TraceLens markdown sanitizers for LLM prompt injection.
 
-Roofline-v2 N11: TraceLens ``analysis.md`` often embeds charts as
-``![alt](data:image/png;base64,...)`` data URLs. The payload is opaque
-noise to text LLMs (GEAK, Claude Code, Codex, Orchestrator) and can
-bloat prompts to hundreds of KB. Strip in-memory before injection; the
-on-disk ``analysis.md`` stays intact for operators.
+TraceLens ``analysis.md`` often embeds charts as base64 data URLs that
+bloat prompts. Strip them in-memory before injection; the on-disk
+``analysis.md`` stays intact.
 """
 
 from __future__ import annotations

@@ -162,12 +162,10 @@ def test_build_roofline_snapshot_no_analysis():
     assert snap["within_roofline_pct"] == 80.0
     assert snap["theoretical_peak_tok_per_sec"] == 100.0
     assert snap["compute_pct"] is None
-    # default unit is tok/s (text-gen)
     assert snap["throughput_unit"] == "tok/s"
 
 
 def test_build_roofline_snapshot_diffusion_unit():
-    # xDiT carries images/sec in the numeric fields; unit tag says img/s.
     snap = rs.build_roofline_snapshot(
         snapshot_id=1,
         ts="t0",

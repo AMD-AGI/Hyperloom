@@ -2,16 +2,9 @@
 
 """Cross-framework audit helpers for framework-agent P1.
 
-P1 does not rewrite code. It maps source-framework PR diff files to known
-target-framework modules and reports whether the target side is present, so
-the coordinator can route the PR to a specialist rewrite path.
-
-Coverage note (phased rollout): the landing signal depends entirely on
-``cross_framework_map.jsonl``, which currently ships only a handful of
-low/medium-confidence seed mappings (some targets not yet repo-registered).
-Until that map grows, most cross-framework audits fall to low-confidence
-``unknown`` / ``needs_human_review`` verdicts by design rather than a concrete
-``direct_apply`` / ``needs_rewrite`` — this is expected, not a defect.
+Maps source-framework PR diff files to known target-framework modules and
+reports whether the target side is present, so the coordinator can route the
+PR to a specialist rewrite path. Does not rewrite code.
 """
 
 from __future__ import annotations
@@ -89,11 +82,8 @@ def _paths_match(diff_path: str, mapped_path: str) -> bool:
 def _symbol_anchors(change: Any, local: Path | None) -> list[str]:
     """Return src-diff def/class names that already anchor in the target module.
 
-    H1 (#5-P2): upgrade the landing signal from "file exists" to "symbol
-    anchor exists". Reuses ``_audit_common._symbols`` on the diff's added lines
-    and checks which appear in the resolved local target file, mirroring
-    ``audit._analyze_change``'s matched-symbols logic. Best-effort: unreadable
-    files or no added symbols yield an empty list.
+    Checks which symbols added by the diff appear in the resolved local target
+    file. Best-effort: unreadable files or no added symbols yield an empty list.
 
     Args:
         change: One parsed ``FileChange`` from the source diff.
@@ -130,7 +120,6 @@ def _map_changes(changes: list[Any], mapping: list[dict[str, Any]], roots: list[
                     "src_path": str(change.path),
                     "dst_module": dst_module,
                     "dst_present": local is not None,
-                    # H1: symbol-level landing anchor (empty when none matched).
                     "dst_symbol": anchors[0] if anchors else "",
                     "dst_symbol_present": bool(anchors),
                     "local_file": str(local) if local else "",
@@ -225,8 +214,7 @@ def run_cross_framework_audit(request: dict[str, Any]) -> dict[str, Any]:
 
     present = sum(1 for hit in hits if hit.get("dst_present"))
     coverage = present / len(hits)
-    # H1 (#5-P2): symbol-anchor coverage strengthens the landing signal beyond
-    # mere file presence; it only ever raises confidence (capped), never lowers.
+    # Symbol-anchor coverage only raises confidence (capped), never lowers.
     sym_present = sum(1 for hit in hits if hit.get("dst_symbol_present"))
     sym_coverage = sym_present / len(hits)
     metrics["dst_modules_present"] = present

@@ -34,8 +34,7 @@ from .errors import IntentEnvelopeValidationError
 ENVELOPE_SCHEMA_VERSION = "v0.6"
 
 
-# Intent types the Critic role is allowed to emit ( +
-# ``_CRITIC_INTENTS`` in agent_role.py).
+# Intent types the Critic role is allowed to emit.
 ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset(
     {
         IntentType.REVIEW_VERDICT.value,
@@ -45,7 +44,7 @@ ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset(
 )
 
 
-# Verdict vocabulary from policy.REVIEW_VERDICTS.
+# Verdict vocabulary.
 ALLOWED_VERDICTS: frozenset[str] = frozenset(
     {
         "approve",
@@ -57,7 +56,7 @@ ALLOWED_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-# Verdict source vocabulary from references/verdict_schema.md.
+# Verdict source vocabulary.
 ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset(
     {
         "critic",
@@ -68,8 +67,7 @@ ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset(
 )
 
 
-# Default content for the heartbeat fallback. Matches MockCriticBackend
-# behaviour so callers can unit-test parity.
+# Default content for the heartbeat fallback.
 DEFAULT_HEARTBEAT_TOPIC = "heartbeat"
 DEFAULT_HEARTBEAT_BODY = "ok (critic)"
 DEFAULT_ADVICE_TOPIC = "advice"
@@ -120,10 +118,6 @@ class IntentEnvelope:
 def validate_envelope(envelope: dict[str, Any]) -> IntentEnvelope:
     """Validate the dict form and return a typed :class:`IntentEnvelope`.
 
-    The function is the inverse of :meth:`IntentEnvelope.to_dict` — it's the
-    only place we accept envelopes constructed by hand (e.g. when reading
-    a Skill-produced ``review.json``).
-
     Args:
         envelope (dict[str, Any]): The raw envelope dict to validate.
 
@@ -154,9 +148,7 @@ def validate_envelope(envelope: dict[str, Any]) -> IntentEnvelope:
     return out
 
 
-# ---------------------------------------------------------------------------
 # Builders — convenience constructors used by decision_reviewer.
-# ---------------------------------------------------------------------------
 def build_review_verdict_intent(
     *,
     target_proposal_msg_id: str,
@@ -278,7 +270,7 @@ def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
     env = IntentEnvelope()
     for intent in materialised:
         env.append(intent)
-    # Self-check at build time rather than after the LLM responds.
+    # Self-check at build time.
     validate_envelope(env.to_dict())
     return env
 

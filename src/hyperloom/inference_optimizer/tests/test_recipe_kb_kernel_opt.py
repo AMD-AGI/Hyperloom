@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression: KEEP'd kernel optimizations must be persisted into the recipe row.
-
-Bug context (session 20260529T132829Z): k006 reached micro 1.32x but flat
-E2E and was dropped from recipe.json; the ``kernel_optimizations`` array fixes it.
-"""
+"""Regression: KEEP'd kernel optimizations must be persisted into the recipe row."""
 
 from __future__ import annotations
 

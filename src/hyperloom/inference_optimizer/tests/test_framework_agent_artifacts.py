@@ -15,11 +15,10 @@ from hyperloom.orchestrator.framework.artifacts import (
 )
 
 
-# candidate_slug
 def test_candidate_slug_sanitizes_url():
     slug = candidate_slug("https://github.com/ROCm/vllm/pull/1234")
     assert "/" not in slug and ":" not in slug
-    assert slug.strip("-") == slug  # no leading/trailing hyphens
+    assert slug.strip("-") == slug
     assert slug
 
 
@@ -32,7 +31,6 @@ def test_candidate_slug_caps_length():
     assert len(candidate_slug("x" * 500)) == 96
 
 
-# write_decision_json
 def test_write_decision_json_roundtrip(tmp_path: Path):
     dest = write_decision_json(
         tmp_path,
@@ -49,7 +47,7 @@ def test_write_decision_json_roundtrip(tmp_path: Path):
     assert dest is not None
     p = Path(dest)
     assert p.name == "decision.json"
-    assert p.parent.parent.name == "framework_agent"  # runs/framework_agent/<slug>/
+    assert p.parent.parent.name == "framework_agent"
     data = json.loads(p.read_text())
     assert data["candidate_id"] == "ROCm/vllm#42"
     assert data["batch_id"] == "batch-001"
@@ -77,14 +75,12 @@ def test_write_decision_json_normalizes_optional_numerics(tmp_path: Path):
 
 
 def test_write_decision_json_never_raises_on_bad_session_dir(tmp_path: Path):
-    # A file (not a dir) as session_dir → mkdir fails internally → returns None.
     bad = tmp_path / "afile"
     bad.write_text("x", encoding="utf-8")
     out = write_decision_json(bad, candidate_id="c", status="failed")
     assert out is None
 
 
-# write_semantic_audit co-located with decision.json.
 def test_write_semantic_audit_co_located(tmp_path: Path):
     verdict = {
         "candidate_id": "ROCm/vllm#42",
@@ -103,7 +99,6 @@ def test_write_semantic_audit_co_located(tmp_path: Path):
     assert (p.parent / "semantic_audit.md").exists()
     data = json.loads(p.read_text())
     assert data["semantic_status"] == "already_equivalent"
-    # Same slug dir as decision.json -> co-located.
     decision = write_decision_json(tmp_path, candidate_id="ROCm/vllm#42", status="already_present")
     assert Path(decision).parent == p.parent
 
@@ -112,7 +107,6 @@ def test_write_semantic_audit_empty_verdict_returns_none(tmp_path: Path):
     assert write_semantic_audit(tmp_path, candidate_id="c", verdict={}) is None
 
 
-# summarize_candidate_outcomes
 def test_summarize_empty_discovery():
     s = summarize_candidate_outcomes([])
     assert s["outcome_class"] == "empty_discovery"

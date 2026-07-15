@@ -89,8 +89,8 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
         "confidence": 0.85,
     }
     r = _page_to_recipe(fm)
-    # Reader now emits the unified nested KB-interface envelope: champion
-    # under ``body.best_config``, throughput under ``metrics``/``body``.
+    # Reader emits the unified nested KB-interface envelope: champion under
+    # ``body.best_config``, throughput under ``metrics``/``body``.
     assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:0_5_11:fp8"
     assert r["body"]["best_config"] == {
         "extra_server_args": "--cuda-graph-max-bs 256",

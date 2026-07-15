@@ -30,9 +30,6 @@ from hyperloom.common.jsonio import read_json
 STRICT_VALIDATION_ENV = "HYPERLOOM_QUANT_STRICT_VALIDATION"
 
 # MUST-have file globs for the quantized model directory.
-# (Multi-shard models also require ``model.safetensors.index.json``, but its
-# absence on single-file models is not a failure — the weights-glob covers
-# both cases.)
 _WEIGHT_GLOBS = ("*.safetensors", "*.bin")
 _TOKENIZER_FILES = (
     "tokenizer.json",
@@ -96,12 +93,9 @@ class CollectedArtifacts:
     fix_hypothesis_attempts: tuple[int, ...] = field(default_factory=tuple)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # parsing helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Matches a line like ``**MD5 spot-check**: ok``.
-# The validator emits one of ``ok`` / ``FAIL`` / ``skipped`` exactly.
+# Matches a step line; the validator emits one of ok / FAIL / skipped.
 _STEP_LINE_RE = re.compile(
     r"^\*\*Step\s+(?P<num>[1-4])\b[^*]*\*\*\s*:\s*(?P<status>ok|FAIL|skipped)\b",
     re.MULTILINE | re.IGNORECASE,
@@ -120,7 +114,7 @@ def _parse_validation_report(text: str) -> ValidationSteps:
     """
     by_num: dict[str, str] = {}
     for m in _STEP_LINE_RE.finditer(text):
-        # Normalize to lower-case "ok"/"fail"/"skipped" for downstream compares.
+        # Normalize to lower-case for downstream compares.
         status = m.group("status").lower()
         if status == "fail":
             status = "FAIL"  # keep FAIL upper-case to match the spec text
@@ -211,7 +205,7 @@ def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | No
 
     path = Path(str(raw_path))
     if not path.is_absolute():
-        # Manifest paths are conventionally relative to workspace.
+        # Manifest paths are relative to workspace.
         path = (workspace / path).resolve()
     return path, True, None
 
@@ -288,9 +282,7 @@ def _strict_validation_enabled(env: dict[str, str] | None = None) -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # public entry
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def collect_artifacts(

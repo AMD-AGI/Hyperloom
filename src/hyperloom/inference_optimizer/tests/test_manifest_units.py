@@ -48,7 +48,7 @@ class TestBuildSessionId:
     def test_uses_model_name_when_provided(self):
         sid = mf.build_session_id("meta-llama/Llama-3.1-8B")
         assert "meta-llama_Llama-3.1-8B_" in sid
-        # uuid suffix length is 8 hex chars.
+        # uuid suffix is 8 hex chars.
         assert len(sid.rsplit("_", 1)[-1]) == 8
 
     def test_defaults_to_session_when_blank(self):
@@ -112,7 +112,6 @@ class TestDetectImage:
         marker = tmp_path / "marker_image"
         marker.write_text("custom/image:1\n")
 
-        # Substitute the well-known marker paths used by _detect_image.
         original_exists = Path.exists
 
         def fake_exists(self):
@@ -127,7 +126,6 @@ class TestDetectImage:
 
         monkeypatch.setattr(Path, "exists", fake_exists)
         monkeypatch.setattr(Path, "read_text", fake_read_text)
-        # Image detection should pick up the patched marker.
         assert mf._detect_image() == "custom/image:1"
 
     def test_returns_none_when_no_signal(self, monkeypatch):
@@ -178,7 +176,7 @@ class TestBuildManifest:
             max_hours=2,
         )
         out = mf.build_manifest(tmp_path, args=ns)
-        assert out["framework"] == "sglang"  # arg wins over env
+        assert out["framework"] == "sglang"
         assert out["model_path"] == "/weights/m"
         assert out["model_name"] == "m"
         assert out["workload"]["isl"] == 128
@@ -209,7 +207,7 @@ class TestDependencyEscapeGuard:
         udp = tmp_path / "udp"
         udp.mkdir()
         monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, str(udp))
-        # Real a -> b -> a loop; resolve(strict=False) raises RuntimeError.
+        # a -> b -> a loop; resolve(strict=False) raises RuntimeError.
         a = tmp_path / "a"
         b = tmp_path / "b"
         a.symlink_to(b)
@@ -225,5 +223,4 @@ class TestDependencyEscapeGuard:
         b = tmp_path / "b"
         a.symlink_to(b)
         b.symlink_to(a)
-        # Unresolvable path must degrade to False, not raise.
         assert mf._path_is_relative_to(a, tmp_path) is False

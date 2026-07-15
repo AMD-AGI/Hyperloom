@@ -69,9 +69,8 @@ def _mk_target_module(root: Path, rel: str) -> Path:
 
 def test_paths_match_exact_and_suffix() -> None:
     assert cf._paths_match("a/b/c.py", "a/b/c.py") is True
-    # suffix overlap across strip levels
     assert cf._paths_match("python/sglang/srt/x.py", "sglang/srt/x.py") is True
-    assert cf._paths_match("x/y.py", "z/y.py") is False  # only basename, differing dir
+    assert cf._paths_match("x/y.py", "z/y.py") is False
 
 
 def test_paths_match_basename_only() -> None:
@@ -117,7 +116,7 @@ def test_load_map_tolerates_malformed_lines(kb_root: Path) -> None:
         encoding="utf-8",
     )
     out = cf.load_cross_framework_map("sglang", "vllm")
-    assert len(out) == 1  # malformed + non-dict rows skipped
+    assert len(out) == 1
 
 
 # --- run_cross_framework_audit ---------------------------------------------
@@ -190,7 +189,6 @@ def test_audit_mapped_target_absent_non_explicit_roots(kb_root: Path, tmp_path: 
             "target_framework": "vllm",
             "candidate": {"candidate_id": "c1"},
             "diff_text": _SGLANG_DIFF,
-            # fallback roots (non-explicit) -> risk note expected
             "framework_source_roots": [str(empty_root)],
         }
     )
@@ -202,7 +200,6 @@ def test_audit_mapped_target_absent_non_explicit_roots(kb_root: Path, tmp_path: 
 
 
 def test_audit_no_mapped_file(kb_root: Path, tmp_path: Path) -> None:
-    # Map exists for the pair, but the diff touches an unmapped module.
     _seed_map(kb_root, [_MAP_ROW])
     other_diff = _SGLANG_DIFF.replace("radix_cache.py", "some_unmapped_file.py")
     res = cf.run_cross_framework_audit(
@@ -254,12 +251,10 @@ def test_phase_audit_dispatches_to_cross_framework(kb_root: Path, tmp_path: Path
         }
     )
     assert res["layer"] == "cross_framework"
-    # semantic_audit.json persisted next to the work dir
     assert (work / "semantic_audit.json").is_file()
 
 
 def test_phase_audit_same_framework_not_cross(kb_root: Path, tmp_path: Path) -> None:
-    # target_framework == framework must NOT route to cross-framework.
     work = tmp_path / "audit_work2"
     res = audit.run_phase_audit(
         {
@@ -274,14 +269,13 @@ def test_phase_audit_same_framework_not_cross(kb_root: Path, tmp_path: Path) -> 
     assert res.get("layer") != "cross_framework"
 
 
-# --- H1: symbol-level landing (#5-P2) --------------------------------------
+# --- H1: symbol-level landing ----------------------------------------------
 
 
 def _mk_target_module_with_symbol(root: Path, rel: str) -> Path:
     """Create a dst module that already defines the src diff's added symbol."""
     p = root / rel
     p.parent.mkdir(parents=True, exist_ok=True)
-    # _SGLANG_DIFF adds ``def match_prefix`` — anchor it in the target module.
     p.write_text("class PrefixCachingBlock:\n    def match_prefix(self, key):\n        return None\n", encoding="utf-8")
     return p
 
@@ -306,7 +300,6 @@ def test_h1_symbol_anchor_present(kb_root: Path, tmp_path: Path) -> None:
 
 
 def test_h1_symbol_anchor_absent_but_file_present(kb_root: Path, tmp_path: Path) -> None:
-    # File exists but does not define the added symbol -> file present, symbol absent.
     _seed_map(kb_root, [_MAP_ROW])
     target = tmp_path / "vllm_src"
     _mk_target_module(target, "vllm/core/block/prefix_caching_block.py")
@@ -327,9 +320,7 @@ def test_h1_symbol_anchor_absent_but_file_present(kb_root: Path, tmp_path: Path)
 
 
 def test_h1_symbol_anchor_raises_confidence(kb_root: Path, tmp_path: Path) -> None:
-    # Symbol anchor raises confidence vs. file-only presence at the SAME
-    # (partial) coverage. Use a 2-file diff where only one dst module exists so
-    # coverage stays 0.5 (below the 0.85 cap) and the symbol bonus is visible.
+    # Symbol anchor raises confidence over file-only presence at the same coverage.
     two_file_diff = _SGLANG_DIFF + (
         "diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py\n"
         "--- a/python/sglang/srt/managers/scheduler.py\n"
@@ -348,7 +339,7 @@ def test_h1_symbol_anchor_raises_confidence(kb_root: Path, tmp_path: Path) -> No
                 "dst_framework": "vllm",
                 "feature": "chunked_prefill_scheduler",
                 "src_module": "python/sglang/srt/managers/scheduler.py",
-                "dst_module": "vllm/core/absent_scheduler.py",  # never created -> absent
+                "dst_module": "vllm/core/absent_scheduler.py",
             },
         ],
     )
@@ -364,6 +355,5 @@ def test_h1_symbol_anchor_raises_confidence(kb_root: Path, tmp_path: Path) -> No
     _mk_target_module(without_sym, "vllm/core/block/prefix_caching_block.py")
     res_sym = cf.run_cross_framework_audit({**req, "target_framework_source_roots": [str(with_sym)]})
     res_nosym = cf.run_cross_framework_audit({**req, "target_framework_source_roots": [str(without_sym)]})
-    # Same coverage (0.5), but the symbol anchor lifts confidence.
     assert res_sym["metrics"]["dst_modules_present"] == res_nosym["metrics"]["dst_modules_present"]
     assert res_sym["confidence"] > res_nosym["confidence"]

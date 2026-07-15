@@ -234,10 +234,8 @@ def _candidate_excluded_by_memory(
 ) -> bool:
     """True when a discovered candidate matches the session's exclusion memory.
 
-    Hard-dedup (Step B): drops a candidate whose ``pr_url`` / ``ref`` is an
-    excluded id, or whose PR number matches an excluded / already-failed PR
-    (same-PR de-prioritisation collapses to a drop). Genuinely new candidates
-    pass through.
+    Drops a candidate whose ``pr_url`` / ``ref`` is an excluded id, or whose PR
+    number matches an excluded / already-failed PR.
 
     Args:
         pr_url: The candidate's PR URL.
@@ -297,7 +295,6 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     framework = str(request.get("framework") or "sglang").strip().lower()
     repo_url = str(request.get("repo_url") or "").strip()
     if not repo_url:
-        # Standalone repo_map; no reverse-import of hyperloom.inference_optimizer.
         from ..repo_map import repo_url_for_framework
 
         repo_url = repo_url_for_framework(framework)
@@ -310,17 +307,9 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     if not isinstance(gaps, list) or not gaps:
         gaps = [{"gap_canonical_id": "", "gap_description": ""}]
 
-    # #5-P2 forced cross-framework candidates. Operators (or the Coordinator)
-    # can pin exact upstream PRs so they surface as ``source='explicit'``
-    # candidates (always emitted first by ``enumerate_candidates``) instead of
-    # relying on keyword search ranking. Refs are scoped to the repo whose slug
-    # matches ``repo_scope`` (default: apply to any repo). This keeps the forced
-    # refs attributed to their OWN repo so the Coordinator's cross-discover tag
-    # (FRAMEWORK_AGENT_CROSS_DISCOVER_TAG) can stamp them src->dst correctly.
-    #   request field:  "forced_candidate_refs": ["PR:27364", ...]
-    #                   "forced_candidate_repo_scope": "sgl-project/sglang"
-    #   env fallback:   FRAMEWORK_AGENT_FORCE_PR_REFS="PR:27364,PR:27965,PR:25098"
-    #                   FRAMEWORK_AGENT_FORCE_PR_REPO="sgl-project/sglang"
+    # Forced cross-framework candidates: pinned upstream PRs surfaced as
+    # source='explicit'. Scoped to repo_scope; supports request fields and
+    # FRAMEWORK_AGENT_FORCE_PR_REFS / FRAMEWORK_AGENT_FORCE_PR_REPO env fallback.
     forced_refs_raw = request.get("forced_candidate_refs")
     if not forced_refs_raw:
         env_refs = (os.environ.get("FRAMEWORK_AGENT_FORCE_PR_REFS") or "").strip()
@@ -348,7 +337,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
 
     forced_refs: list[str] = []
     if forced_repo_scope and forced_repo_scope not in repo_url.strip().lower():
-        # This queried repo is out of scope for the forced refs; skip.
+        # Queried repo out of scope for the forced refs; skip.
         forced_refs = []
     else:
         seen_fr: set[str] = set()
@@ -358,9 +347,8 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 seen_fr.add(nr)
                 forced_refs.append(nr)
 
-    # Step B hard-dedup: candidates the caller (Hyperloom) has already
-    # discovered or reached a terminal verdict on. Also collapse "same PR
-    # number as a failed candidate" into a drop (deterministic de-prioritise).
+    # Hard-dedup: drop candidates already discovered/finalised, and collapse
+    # "same PR number as a failed candidate" into a drop.
     excluded_ids: set[str] = {
         str(x).strip() for x in (request.get("excluded_candidate_ids") or []) if str(x).strip()
     }
@@ -374,10 +362,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                     excluded_pr_numbers.add(n)
     excluded_count = 0
 
-    # Resolve the primus_cortex base URL (the PR-Monitor service). Only enable
-    # the primus_cortex search mode when a URL is available, else enumerate
-    # raises SourceConfigError before it can fall through to GitHub — which
-    # would make discovery empty whenever primus isn't wired. GitHub
+    # Enable the primus_cortex mode only when a URL is available; GitHub
     # (anonymous, best-effort) is always kept so discovery degrades gracefully.
     primus_url = str(request.get("primus_cortex_url") or os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
     if primus_url:
@@ -388,8 +373,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
         primus_block = {}
 
     # gbrain PR KB is the primary discovery backend when enabled + configured;
-    # prepend it so it ranks ahead of primus_cortex/github, which stay as
-    # fallbacks (design D6 degradation chain).
+    # prepend it so it ranks ahead of primus_cortex/github fallbacks.
     pr_kb_enabled = (os.environ.get("PR_KB_ENABLE", "1") or "1").strip() != "0"
     pr_kb_configured = bool(
         (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
@@ -423,18 +407,14 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 "model_class": str(request.get("model_class") or request.get("model") or ""),
                 "gpu_type": str(request.get("gpu_type") or ""),
                 "precision": str(request.get("precision") or ""),
-                # search_perf_prs MUST be True here: enumerate_candidates
-                # short-circuits to explicit-refs-only (empty for phase-discover)
-                # when it is False, so omitting it made FRAMEWORK discovery
-                # always return 0 candidates (never querying primus_cortex/github).
+                # Must be True: else enumerate_candidates short-circuits to
+                # explicit-refs-only and returns 0 candidates here.
                 "search_perf_prs": True,
                 "search_modes": search_modes,
                 "pr_states": request.get("pr_states") or ["open"],
                 "max_search_candidates": max_candidates,
                 "keywords": gap_keywords,
-                # #5-P2: explicit forced refs are always emitted first by
-                # enumerate_candidates (source='explicit'); empty by default so
-                # same-framework / unforced discovery is byte-for-byte unchanged.
+                # Forced refs are emitted first (source='explicit'); empty by default.
                 "candidate_refs": tuple(forced_refs),
                 **primus_block,
             }
@@ -450,20 +430,16 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
         for cand in cands:
             entry = _asdict(cand)
             repo = str(entry.get("repo") or "")
-            # #5-P2: explicit forced candidates carry repo=repo_url (the queried
-            # repo_url, typically a .git URL). Derive the owner/name slug for
-            # pr_url/diff_url building, but KEEP the ``repo`` field as the
-            # canonical .git URL so the Coordinator's cross-discover origin
-            # helper (exact-match against repo_map .git URLs) can re-tag the
-            # candidate's origin framework (sglang) and route it through the
-            # cross-framework PORT instead of a same-framework raw apply.
+            # Explicit forced candidates carry repo=repo_url (a .git URL).
+            # Derive the owner/name slug for pr_url/diff_url but KEEP the repo
+            # field as the canonical .git URL for cross-discover origin re-tagging.
             repo_slug = repo
             if str(entry.get("source") or "") == "explicit" and (
                 repo.startswith("http") or repo.endswith(".git")
             ):
                 slug = _normalise_pr_kb_repo(repo)
                 if slug:
-                    repo_slug = slug  # used only for pr_url/diff_url below
+                    repo_slug = slug  # used only for pr_url/diff_url
             ref = str(entry.get("ref") or "")
             key = (repo, ref)
             if not ref or key in seen_refs:
@@ -482,8 +458,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 else (f"https://github.com/{repo_slug}/pull/{pr_number}.diff" if repo_slug and isinstance(pr_number, int) else "")
             )
             pr_url = html_url or _pr_url_for(repo_slug, pr_number)
-            # Step B: drop candidates already seen / finalised / equivalent to a
-            # failed PR this session, so discovery stops re-surfacing them.
+            # Drop candidates already seen/finalised or equivalent to a failed PR.
             if _candidate_excluded_by_memory(
                 pr_url=pr_url,
                 ref=ref,
@@ -697,8 +672,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="framework-agent",
         description="Explore serving frameworks/refs in isolated worktrees.",
     )
-    # Global logging flags on the top-level parser so every subcommand picks
-    # them up uniformly (wired into logging_setup.configure_logging).
+    # Global logging flags on the top-level parser so every subcommand picks them up.
     parser.add_argument(
         "--log-level",
         default=None,

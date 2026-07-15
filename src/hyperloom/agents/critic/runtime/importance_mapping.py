@@ -3,10 +3,8 @@
 """Map Critic confidence / verdict signals to KB ``importance`` floats.
 
 Critic may not write the top tier (``>= 0.85``), reserved for Alchemist
-promotion (contract §2.3); the service guards downgrades (G-2
-``max(existing, incoming)``) so we just emit honest in-range values via
-:func:`importance_for_verdict` (Trigger A) and :func:`importance_for_kb_draft`
-(Trigger B).
+promotion; the service guards downgrades so we emit honest in-range values
+via :func:`importance_for_verdict` and :func:`importance_for_kb_draft`.
 """
 
 from __future__ import annotations
@@ -42,8 +40,7 @@ def importance_for_verdict(
         float: The chosen importance within Critic's allowed range.
     """
     confidence_label = (confidence or "medium").lower()
-    # ``advise`` and ``needs_review`` are usually informational — keep them
-    # low so they don't crowd out higher-quality entries.
+    # ``advise`` / ``needs_review`` are informational — keep them low.
     if verdict in ("advise", "needs_review"):
         return _LOW_VERDICT
     if confidence_label == "high":
@@ -58,7 +55,7 @@ def importance_for_kb_draft(*, confidence: float | None) -> float:
 
     The Critic SKILL emits ``confidence`` as a float in ``[0.0, 1.0]``; we
     promote drafts that pass ``0.8`` to ``0.6`` and otherwise default to
-    ``0.5`` (contract §2.3 Critic default).
+    ``0.5``.
 
     Args:
         confidence (float | None): Draft confidence in ``[0.0, 1.0]``;

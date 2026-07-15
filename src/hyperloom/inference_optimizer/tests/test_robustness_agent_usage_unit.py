@@ -1,9 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for ``RobustnessAgentBackend._merge_llm_usage`` — the pure
-mapping that folds the runtime's ``llm_usage`` block onto canonical
-``BackendTurnResult.metadata`` token counters so the Coordinator's reactor
-trace records a ``component=robustness`` ledger row."""
+"""Unit tests for ``RobustnessAgentBackend._merge_llm_usage`` — folds the
+runtime's ``llm_usage`` block onto ``BackendTurnResult.metadata`` token
+counters."""
 
 from __future__ import annotations
 
@@ -27,7 +26,7 @@ def test_merge_llm_usage_noop_when_absent():
     md: dict = {"session_id": "s"}
     RobustnessAgentBackend._merge_llm_usage(md, None)
     RobustnessAgentBackend._merge_llm_usage(md, {})
-    RobustnessAgentBackend._merge_llm_usage(md, {"calls": 1})  # no token keys
+    RobustnessAgentBackend._merge_llm_usage(md, {"calls": 1})
     assert "input_tokens" not in md
     assert "output_tokens" not in md
     assert "model" not in md

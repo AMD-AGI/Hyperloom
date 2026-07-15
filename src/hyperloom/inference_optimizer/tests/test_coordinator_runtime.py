@@ -413,8 +413,8 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
 
 @pytest.mark.asyncio
 async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
-    """LLM sometimes puts idempotency_key under params; Coordinator must
-    treat it as the delegate key and remove it from executor params."""
+    """When idempotency_key is under params, Coordinator treats it as the
+    delegate key and removes it from executor params."""
     delegate = Intent(
         type=IntentType.DELEGATE,
         payload={
@@ -438,7 +438,7 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
         c.shared_state.baseline_tput = 100.0
         c.shared_state.baseline_config_path = "/tmp/baseline.yaml"
         c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
-        # Roofline-v2 N3: params delegate requires fresh roofline snapshot.
+        # params delegate requires a fresh roofline snapshot.
         c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/trace.json.gz",
             "analysis_md_text": "FAKE_REPORT",
@@ -549,8 +549,8 @@ async def test_explore_not_denied_before_profile(session_dir):
 async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     session_dir,
 ):
-    """Reverse regression: the action-layer ``trace_analyze`` hard-gate was
-    removed; actions must NOT be denied when ``last_trace_analyze`` is stale."""
+    """Actions must NOT be denied when ``last_trace_analyze`` is stale (the
+    action-layer ``trace_analyze`` hard-gate was removed)."""
     propose = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={
@@ -611,7 +611,7 @@ async def test_coordinator_kill_task_by_robustness(session_dir):
     try:
         await c.tick(1)  # delegate enqueued; dispatcher fails (no runner)
         all_tasks = await c.tasks.by_state("failed")
-        assert all_tasks  # no runner → failed
+        assert all_tasks
 
         new_task = await c.tasks.create(
             kind="long_running",
@@ -635,10 +635,8 @@ async def test_coordinator_kill_task_by_robustness(session_dir):
 async def test_coordinator_prune_branch_cancels_family_and_records_advisory(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
-        # ``baseline`` is a non-kernel_agent-owned action that flows through the normal
-        # Critic/pending-proposal path — the prune-advisory mechanism under test
-        # is family-agnostic. (Kernel-owned families are REQUEST-only and can no
-        # longer be proposed at all.)
+        # ``baseline`` flows through the normal Critic/pending-proposal path; the
+        # prune-advisory mechanism under test is family-agnostic.
         a = await c.tasks.create(kind="baseline", params={}, idempotency_key="ka")
         b = await c.tasks.create(kind="baseline", params={}, idempotency_key="kb")
 
@@ -651,12 +649,12 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         )
         a_after = await c.tasks.get(a.task_id)
         b_after = await c.tasks.get(b.task_id)
-        # Active queue still gets cancelled — the prune kills work in flight.
+        # Active queue gets cancelled — the prune kills work in flight.
         assert a_after.state == "cancelled"
         assert b_after.state == "cancelled"
         assert "baseline" in c.shared_state.pruned_families
 
-        # Future propose_action carries an advisory observation but is not dropped.
+        # Future propose_action carries an advisory but is not dropped.
         await c._handle_intent(
             "orchestration",
             Intent(
@@ -686,7 +684,7 @@ async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
         await c.stop()
 
 
-# (formerly test_coordinator_audit_wiring.py) — Coordinator audit-trail wiring.
+# Coordinator audit-trail wiring.
 def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
@@ -698,7 +696,7 @@ def _silent_backends() -> dict[str, object]:
 
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
-    """Scoreboard retired; no-op kept for back-compat."""
+    """No-op kept for back-compat."""
     return None
 
 
@@ -974,11 +972,9 @@ async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
 async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
     session_dir,
 ):
-    """Regression: executor consumption must clear Coordinator's live state too.
-
-    Otherwise a later coordinator save re-persisted stale True and made the
-    nominal one-shot eager fallback sticky for all later baseline retries.
-    """
+    """Executor consumption must clear Coordinator's live state too, or a later
+    coordinator save re-persists stale True and makes the one-shot eager
+    fallback sticky for all later baseline retries."""
     from hyperloom.orchestrator.actions.executors.baseline import (
         BaselineExecutor,
     )
@@ -1004,7 +1000,7 @@ async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
         assert executor._consume_eager_fallback() is True
         assert c.shared_state.baseline_eager_fallback is False
 
-        # Simulate any later coordinator path flushing the live SharedState.
+        # A later coordinator path flushing the live SharedState.
         c.shared_state.save(session_dir)
         assert SharedState.load_or_init(session_dir).baseline_eager_fallback is False
     finally:
@@ -1039,9 +1035,9 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
     session_dir,
     caplog,
 ):
-    """Repro (session 20260529T104050Z task 42922ce4): watermark-roofline
-    failure must increment roofline_failure_streak, eagerly clear
-    auto_roofline_pending_task_id, and emit an Auto-roofline warning."""
+    """A watermark-roofline failure must increment roofline_failure_streak,
+    eagerly clear auto_roofline_pending_task_id, and emit an Auto-roofline
+    warning."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
@@ -1067,7 +1063,7 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
         attempt = c.shared_state.roofline_attempts[-1]
         assert attempt["status"] == "failed"
         assert attempt["decision"] == "no_promote"
-        # (b) failure streak should be +1.
+        # (b) failure streak +1.
         assert c.shared_state.roofline_failure_streak == streak_before + 1, (
             "roofline_failure_streak silently stays at 0; LLM + operators have "
             "no way to know the watermark-driven analysis refresh failed."
@@ -1123,7 +1119,7 @@ async def test_unattempted_initial_roofline_does_not_watermark_rearm(
         await c.stop()
 
 
-# (formerly test_coordinator_baseline_fingerprint.py) — baseline-params fingerprint capture.
+# baseline-params fingerprint capture.
 def _mk_baseline_task(params: dict, *, task_id: str = "t-fp-1") -> Task:
     return Task(
         task_id=task_id,
@@ -1267,8 +1263,7 @@ def test_default_health_timeout_is_900s_not_1800s():
     assert _multi_node_server_lifecycle.DEFAULT_HEALTH_TIMEOUT_S == 900
 
 
-# (formerly test_n33_idle_closing_and_critic_archival.py) — N33: critic auto-approve
-# archival actions + Coordinator silent-tick early-closing.
+# Critic auto-approve archival actions + Coordinator silent-tick early-closing.
 def _write_marker_target_baseline(session_dir: Path) -> None:
     path = target_baseline_json(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1308,8 +1303,7 @@ def test_critic_md_carves_out_archival_actions():
     assert "Always `approve` archival actions" in text
 
 
-# (formerly test_n34_dispatcher_resilience_and_report_stop.py) — N34: dispatcher
-# resilience to disappearing ``tasks`` rows + report-task run-loop exit.
+# Dispatcher resilience to disappearing ``tasks`` rows + report-task run-loop exit.
 @pytest.mark.asyncio
 async def test_sub_agent_runner_swallows_tasknotfound_on_final_transition(
     tmp_path,

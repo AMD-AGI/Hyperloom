@@ -31,9 +31,8 @@ class _FakeClock:
 class _ScriptedSource:
     """Source double whose ``fetch`` plays out a queued list of outcomes.
 
-    Each entry is either a :class:`SourceData` (returned) or an
-    exception instance (raised). Out-of-script calls raise
-    ``IndexError`` so tests catch unintended invocations.
+    Each entry is either a :class:`SourceData` (returned) or an exception
+    instance (raised). Out-of-script calls raise ``IndexError``.
     """
 
     def __init__(self, name: str, script: list[object]):
@@ -56,11 +55,6 @@ def _data(label: str) -> SourceData:
     return SourceData(session_summary={"from": label})
 
 
-# ---------------------------------------------------------------------------
-# DegradeRouter happy path
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_router_happy_path_uses_primary_only():
     clock = _FakeClock()
@@ -76,11 +70,6 @@ async def test_router_happy_path_uses_primary_only():
     assert fallback.calls == 0
 
 
-# ---------------------------------------------------------------------------
-# DegradeRouter degrade after consecutive failures
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_router_degrades_after_three_failures(caplog):
     clock = _FakeClock()
@@ -90,7 +79,7 @@ async def test_router_degrades_after_three_failures(caplog):
             SourceUnavailable("first"),
             SourceUnavailable("second"),
             SourceUnavailable("third"),
-            SourceUnavailable("fourth"),  # not consumed because we degrade
+            SourceUnavailable("fourth"),
         ],
     )
     fallback = _ScriptedSource("local", [_data("local"), _data("local"), _data("local"), _data("local")])
@@ -99,8 +88,7 @@ async def test_router_degrades_after_three_failures(caplog):
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
             _ = await router.collect(ctx=None)
-        # After 3rd failure primary is DEGRADED. Subsequent tick skips primary
-        # because clock has not advanced past recheck interval.
+        # After 3rd failure primary is DEGRADED; next tick skips primary within recheck window.
         snap_post = await router.collect(ctx=None)
 
     assert primary.calls == 3, "primary should not be retried inside recheck window"
@@ -113,11 +101,6 @@ async def test_router_degrades_after_three_failures(caplog):
     assert len(transitions) == 1, "single WARN on transition only"
 
 
-# ---------------------------------------------------------------------------
-# DegradeRouter recovery after recheck interval
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_router_recovers_after_recheck_window(caplog):
     clock = _FakeClock()
@@ -126,8 +109,8 @@ async def test_router_recovers_after_recheck_window(caplog):
         [
             SourceUnavailable("a"),
             SourceUnavailable("b"),
-            SourceUnavailable("c"),  # degrade after this
-            _data("server"),  # recovery probe
+            SourceUnavailable("c"),
+            _data("server"),
         ],
     )
     fallback = _ScriptedSource("local", [_data("local"), _data("local"), _data("local")])
@@ -142,7 +125,7 @@ async def test_router_recovers_after_recheck_window(caplog):
     await router.collect(ctx=None)
     assert primary.calls == 3
 
-    # Past recheck window: primary probed, succeeds, state goes HEALTHY.
+    # Past recheck window: primary probed, succeeds, state HEALTHY.
     clock.advance(25.0)
     with caplog.at_level(logging.WARNING):
         snap = await router.collect(ctx=None)
@@ -154,11 +137,6 @@ async def test_router_recovers_after_recheck_window(caplog):
     assert len(transitions) == 1
 
 
-# ---------------------------------------------------------------------------
-# Fallback failures
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_router_returns_empty_when_both_unavailable():
     clock = _FakeClock()
@@ -168,11 +146,6 @@ async def test_router_returns_empty_when_both_unavailable():
     snap = await router.collect(ctx=None)
     assert snap.sources_used == []
     assert snap.degraded_reason and "both sources unavailable" in snap.degraded_reason
-
-
-# ---------------------------------------------------------------------------
-# Unexpected exceptions in primary count as failures but do not crash
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from types import SimpleNamespace
 import urllib.error
 
@@ -316,3 +317,81 @@ def test_kernel_decision_retry_budget_env(monkeypatch) -> None:
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "bad")
     assert settings.resolve_kernel_opt_max_failures() == 2
+
+
+def test_dispatcher_inline_whitelist_filters_and_registry_errors(monkeypatch) -> None:
+    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+
+    reg = SimpleNamespace(names=lambda: ["report", "missing", "lane_action", "ok_action"])
+    coord = SimpleNamespace(
+        action_registry=reg,
+        sub=SimpleNamespace(executor_registry={"lane_action": object(), "ok_action": object()}),
+        _INLINE_ACTION_DENY=frozenset({"report"}),
+    )
+    disp = DispatcherCollaborator(coord)
+    monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda name: (["gpu"] if name == "lane_action" else [], 60))
+    assert disp._inline_action_whitelist() == frozenset({"ok_action"})
+
+    coord.action_registry = SimpleNamespace(names=lambda: (_ for _ in ()).throw(RuntimeError("bad registry")))
+    assert disp._inline_action_whitelist() == frozenset()
+
+    coord.action_registry = None
+    assert disp._inline_action_whitelist() == frozenset()
+
+
+def test_dispatcher_inline_whitelist_all_fallback(monkeypatch) -> None:
+    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+
+    reg = SimpleNamespace(all=lambda: [SimpleNamespace(name="from_all")])
+    coord = SimpleNamespace(
+        action_registry=reg,
+        sub=SimpleNamespace(executor_registry={"from_all": object()}),
+        _INLINE_ACTION_DENY=frozenset(),
+    )
+    disp = DispatcherCollaborator(coord)
+    monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda _name: ([], 60))
+    assert disp._inline_action_whitelist() == frozenset({"from_all"})
+
+
+def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch) -> None:
+    from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod
+    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+
+    coord = SimpleNamespace(
+        _inline_fast_actions_enabled=True,
+        _coordinator_loop=None,
+        _INLINE_ACTION_DENY=frozenset(),
+        action_registry=None,
+        sub=SimpleNamespace(executor_registry={}),
+    )
+    disp = DispatcherCollaborator(coord)
+    assert "action_name required" in disp._run_action_now_sync("  ", {})
+
+    monkeypatch.setattr(disp, "_inline_action_whitelist", lambda: frozenset({"probe"}))
+    assert "coordinator loop not running" in disp._run_action_now_sync("probe", {})
+
+    coord._coordinator_loop = SimpleNamespace(is_closed=lambda: False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "not-a-float")
+    monkeypatch.setattr(disp, "_run_action_now", lambda _name, _params: object())
+
+    class _TimeoutFuture:
+        def result(self, timeout):
+            assert timeout == 120.0
+            raise FuturesTimeoutError()
+
+    monkeypatch.setattr(dispatcher_mod.asyncio, "run_coroutine_threadsafe", lambda _coro, _loop: _TimeoutFuture())
+    assert "still running after 120s" in disp._run_action_now_sync("probe", {})
+
+    class _ErrorFuture:
+        def result(self, timeout):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(dispatcher_mod.asyncio, "run_coroutine_threadsafe", lambda _coro, _loop: _ErrorFuture())
+    assert "errored" in disp._run_action_now_sync("probe", {})
+
+    monkeypatch.setattr(
+        dispatcher_mod.asyncio,
+        "run_coroutine_threadsafe",
+        lambda _coro, _loop: (_ for _ in ()).throw(RuntimeError("closed")),
+    )
+    assert "could not schedule" in disp._run_action_now_sync("probe", {})

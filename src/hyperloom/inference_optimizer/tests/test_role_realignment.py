@@ -66,11 +66,9 @@ def test_orchestration_prompt_no_explore_trims_catalogue_and_marks_skipped(regis
         explore_enabled=False,
         max_minutes=120,
     )
-    # PHASE CONTRACT annotates EXPLORE as skipped + SESSION CONTEXT state line.
     assert "(DISABLED: --no-explore — phase skipped)" in text
     assert "explore_enabled  : false" in text
-    # ACTION CATALOGUE no longer advertises the `explore` action body. The
-    # catalogue lists actions as `- **<name>** —`; assert that bullet is gone.
+    # The `explore` action bullet must be gone from the catalogue.
     assert "- **explore** —" not in text
     # specialist/integrate_patch stay visible (KERNEL still uses them).
     assert "- **specialist** —" in text
@@ -185,7 +183,6 @@ def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
 
 
 def test_shared_state_phase_budget_telemetry_includes_framework():
-    # Regression: the renderer must iterate PHASE_NAMES so FRAMEWORK isn't swallowed.
     s = SharedState(max_minutes=60)
     s.record_phase_transition(
         to_phase="PRELUDE",

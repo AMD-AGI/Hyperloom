@@ -2,18 +2,11 @@
 
 """End-to-end contract test for the cross-framework path.
 
-Code review flagged that the three seams were only tested in isolation:
-discovery-tagging, tagging->audit detection, and audit->specialist prompt each
-had a unit test, but nothing traced a single cross-repo candidate through all
-of them together — so a field rename in any one seam
-(``candidate["framework"]`` <-> ``audit["layer"]`` <-> the specialist
-``params`` keys) would silently break the pipeline without failing a test.
-
-This module runs the REAL coordinator methods for all three seams in sequence
-(only the fa I/O boundaries — ``phase_discover``/``phase_audit`` — and the task
-dispatch helpers are stubbed) and asserts the cross-framework signal survives
-end to end. A same-framework control locks the "no behaviour change when not
-cross-framework" contract.
+Runs the REAL coordinator methods for all three seams in sequence
+(discovery-tagging, tagging->audit detection, audit->specialist prompt) with
+only the fa I/O boundaries (``phase_discover``/``phase_audit``) and task
+dispatch helpers stubbed, and asserts the cross-framework signal survives end
+to end. A same-framework control locks the no-behaviour-change contract.
 """
 
 from __future__ import annotations
@@ -59,14 +52,13 @@ class _TasksStub:
     async def create_or_return_existing(self, **kwargs: Any) -> tuple[Any, bool]:
         self.created.append(kwargs)
         task = SimpleNamespace(kind=kwargs.get("kind"), task_id=f"t-{len(self.created)}", state="")
-        # existing=False so the cross-resume livelock branch is skipped.
         return task, False
 
 
 class _CrossFwCoordStub:
     """Glue stub that binds the REAL methods under test for all three seams."""
 
-    # Seam 1 — discover + tag (the real discovery-merge tagging block).
+    # Seam 1 — discover + tag.
     _discover_next_framework_batch = Coordinator._discover_next_framework_batch
     _framework_agent_repo_url_origin_framework = staticmethod(
         Coordinator._framework_agent_repo_url_origin_framework
@@ -85,10 +77,9 @@ class _CrossFwCoordStub:
         self.shared_state = _StateStub(session_framework)
         self.tasks = _TasksStub()
         self.framework_agent_discover_timeout_sec = 0.0
-        # The repo the discovery batch is queried against (drives cross-fw origin).
+        # Repo the discovery batch is queried against (drives cross-fw origin).
         self._discover_repo_url = _fa_client.repo_url_for_framework(discover_repo_framework)
 
-    # --- overrides isolating fa/network/GPU boundaries ---
     def _framework_agent_discover_repo_urls(self, _framework: str) -> list[str]:
         return [self._discover_repo_url]
 
@@ -121,15 +112,10 @@ def test_cross_framework_candidate_flows_end_to_end(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """sglang session discovers a vllm-repo PR -> tagged -> audited cross-fw -> specialist params carry the port.
-
-    Uses the default cross-framework path (no env opt-in) so the whole pipeline is exercised as
-    it runs in production.
-    """
+    """sglang session discovers a vllm-repo PR -> tagged -> audited cross-fw -> specialist params carry the port."""
     monkeypatch.delenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", raising=False)
 
-    # fa phase-discover returns a candidate WITHOUT a framework tag (the common
-    # shape — fa never stamps origin framework).
+    # fa phase-discover returns a candidate WITHOUT a framework tag.
     async def _discover(**_: Any) -> dict[str, Any]:
         return {
             "batch_id": "batch-xfw",
@@ -146,8 +132,7 @@ def test_cross_framework_candidate_flows_end_to_end(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
 
-    # Capture what the audit forwards to fa phase-audit and hand back a
-    # cross_framework verdict (as cross_framework_audit would).
+    # Capture what the audit forwards to fa phase-audit; return a cross_framework verdict.
     audit_kwargs: dict[str, Any] = {}
 
     async def _audit(**kwargs: Any) -> dict[str, Any]:

@@ -2,9 +2,9 @@
 
 """PR-K — per-source attempts ledger unlocks device retry post-promotion.
 
-The new ``attempts_per_source`` ledger lets ``_is_live`` allow a fresh attempt
+The ``attempts_per_source`` ledger lets ``_is_live`` allow a fresh attempt
 against a promoted device ``.cu`` even when the cumulative ``attempts`` counter
-(all against the wrapper) exceeds max_attempts; legacy entries fall back to cumulative.
+exceeds max_attempts; legacy entries fall back to cumulative.
 """
 
 from __future__ import annotations
@@ -48,7 +48,6 @@ def candidates_factory(tmp_path: Path):
     return _make
 
 
-# record_kernel_opt — writes the per-source ledger.
 def test_record_kernel_opt_writes_attempts_per_source(
     session_dir: Path,
 ) -> None:
@@ -109,7 +108,6 @@ def test_record_kernel_opt_normalizes_empty_source_file(
         {
             "status": "failed",
             "kernel_id": "k042",
-            # source_file omitted on purpose.
             "proposal": {"decision": "REVERT"},
         }
     )
@@ -117,7 +115,6 @@ def test_record_kernel_opt_normalizes_empty_source_file(
     assert entry["attempts_per_source"] == {"": 1}
 
 
-# End-to-end: promotion unlocks a fresh attempt against the device source.
 def test_batch_candidates_unlocks_promoted_device_source_after_wrapper_attempt(
     session_dir: Path,
     candidates_factory,
@@ -127,7 +124,6 @@ def test_batch_candidates_unlocks_promoted_device_source_after_wrapper_attempt(
     device = "/sgl-workspace/aiter/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages.cu"
 
     state = SharedState.load_or_init(session_dir)
-    # Simulate a wrapper attempt that PARTIAL'd.
     state.record_kernel_opt(
         {
             "status": "ok",
@@ -183,7 +179,7 @@ def test_batch_candidates_skips_kernel_when_same_source_already_attempted(
                 "kernel_id": "k001",
                 "gpu_pct": 25.0,
                 "reusable_native_kernel": True,
-                "source_file": wrapper,  # same as the recorded attempt
+                "source_file": wrapper,
             },
         ]
     )
@@ -217,7 +213,7 @@ def test_batch_candidates_falls_back_to_cumulative_for_legacy_entry(
                 "kernel_id": "k001",
                 "gpu_pct": 25.0,
                 "reusable_native_kernel": True,
-                "source_file": "/p/different.cu",  # different source on round 2
+                "source_file": "/p/different.cu",
             },
         ]
     )
@@ -225,7 +221,7 @@ def test_batch_candidates_falls_back_to_cumulative_for_legacy_entry(
         {"candidates_path": cpath},
         session_dir=session_dir,
     )
-    # Legacy entry: cumulative attempts >= 1 → skipped (conservative resume contract).
+    # Legacy entry: cumulative attempts >= 1 → skipped.
     assert out == []
 
 

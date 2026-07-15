@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Bug-fix regression tests.
-
-Bug A: ReportExecutor session_dir resolution via $USER_DATA_PATH.
-Bug B: programmatic handler advances the target-agent cursor to suppress
-duplicate RESPONSEs.
-Bug C: profile success promotes ``main_trace_path`` to
-``shared_state.last_profile_trace``.
-"""
+"""Bug-fix regression tests."""
 
 from __future__ import annotations
 
@@ -30,7 +23,6 @@ from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
-# ---------------------------------------------------------------------------
 def _heartbeat() -> Intent:
     return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
@@ -51,7 +43,6 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return make_session_dir()
 
 
-# Bug A — ReportExecutor session_dir resolution
 @pytest.mark.asyncio
 async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
     """ReportExecutor resolves session_dir from $USER_DATA_PATH."""
@@ -59,7 +50,6 @@ async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
     sd.mkdir()
     state = SharedState(session_id=sd.name, model_name="qwen3-8b", baseline_tput=800.0, cumulative_gain=2.5)
     state.save(sd)
-    # Initialise the coordinator.db schema.
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
     storage_dir = sd / "storage"
@@ -108,7 +98,6 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
     assert summary["baseline_tput"] == 600.0
 
 
-# Bug B — programmatic_handler advances target cursor
 @pytest.mark.asyncio
 async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypatch):
     """After an inline 'trace_analyze' handler, the kernel cursor moves past the request."""
@@ -205,7 +194,6 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
         assert cached["hot_kernels_top15"][0]["kernel_id"] == "k001"
         assert "k001" in cached["reusable_native_kernel_ids"]
 
-        # Different trace_input must NOT hit the cache.
         await c._handle_intent(
             "orchestration",
             Intent(
@@ -224,7 +212,6 @@ async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypa
         await c.stop()
 
 
-# Bug C — profile result promotes main_trace_path to SharedState
 @pytest.mark.asyncio
 async def test_profile_promotion_records_args_and_clears_select_cache(session_dir):
     """A new profile clears the trace_analyze cache and stamps the server config."""
@@ -271,7 +258,7 @@ async def test_profile_promotion_writes_last_profile_trace(session_dir):
 
         result = {
             "status": "succeeded",
-            "output_throughput": 805.0,  # +0.6%, below 1% threshold
+            "output_throughput": 805.0,
             "trace_dir": "/tmp/ws/torch_trace",
             "main_trace_path": "/tmp/ws/torch_trace/main.trace.json.gz",
             "trace_files": ["/tmp/ws/torch_trace/main.trace.json.gz"],
