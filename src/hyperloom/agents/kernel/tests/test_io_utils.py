@@ -94,6 +94,30 @@ def test_safe_float_variants():
     assert io.safe_float("1,234.5%", default=None, strip_percent=True, strip_commas=True) == 1234.5
 
 
+def test_read_json_roundtrip_and_tolerant_defaults(tmp_path):
+    path = tmp_path / "cfg.json"
+    path.write_text('{"b": 2, "a": 1}', encoding="utf-8")
+    assert io.read_json(path) == {"a": 1, "b": 2}
+    # Missing / malformed / directory / falsy inputs fall back to the default
+    # (None by default; the callers that want {} pass it explicitly).
+    assert io.read_json(tmp_path / "missing.json") is None
+    assert io.read_json(tmp_path / "missing.json", default={}) == {}
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json}", encoding="utf-8")
+    assert io.read_json(bad) is None
+    assert io.read_json(bad, default={}) == {}
+    assert io.read_json(tmp_path) is None
+    assert io.read_json("") is None
+    assert io.read_json(None, default={}) == {}
+
+
+def test_read_json_accepts_str_and_path_inputs(tmp_path):
+    path = tmp_path / "cfg.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    assert io.read_json(str(path)) == [1, 2, 3]
+    assert io.read_json(path) == [1, 2, 3]
+
+
 def test_extract_last_json_handles_noise_escapes_and_multiple_objects():
     text = 'log {"first": 1}\nnoise {"msg": "brace } inside", "nested": {"a": 2}} tail'
     assert io.extract_last_json(text) == {"msg": "brace } inside", "nested": {"a": 2}}
@@ -182,3 +206,17 @@ def test_safe_float_matches_common_coerce_for_shared_cases():
     # For the inputs both accept, results agree (both reject bool -> default).
     for value in ("1.5", 3, "bad", None, "", True):
         assert io.safe_float(value, default=0.0) == to_float(value, default=0.0)
+
+
+def test_read_json_matches_common_jsonio_for_shared_cases(tmp_path):
+    from hyperloom.common.jsonio import read_json as common_read_json
+
+    good = tmp_path / "good.json"
+    good.write_text('{"x": [1, 2], "y": "z"}', encoding="utf-8")
+    bad = tmp_path / "bad.json"
+    bad.write_text("{oops", encoding="utf-8")
+    missing = tmp_path / "missing.json"
+    # Tolerant mode agrees on decoded payload, malformed, and missing files.
+    for path in (good, bad, missing):
+        assert io.read_json(path) == common_read_json(path)
+        assert io.read_json(path, default={}) == common_read_json(path, default={})

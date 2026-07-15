@@ -44,7 +44,11 @@ def test_intent_type_values_match_upstream():
 
 
 def test_payload_required_matches_upstream():
-    from hyperloom.agents.robustness.role.envelope import IntentType, PAYLOAD_REQUIRED
+    from hyperloom.agents.robustness.role.envelope import (
+        INTENT_SPEC,
+        IntentType,
+        PAYLOAD_REQUIRED,
+    )
 
     upstream_ip, _, _ = _UPSTREAM  # type: ignore[misc]
     upstream_table = upstream_ip._PAYLOAD_REQUIRED  # noqa: SLF001
@@ -52,6 +56,10 @@ def test_payload_required_matches_upstream():
         local = PAYLOAD_REQUIRED[it]
         upstream = upstream_table[upstream_ip.IntentType(it.value)]
         assert local == upstream, f"{it} drift: local={local} upstream={upstream}"
+        # INTENT_SPEC is the single source; PAYLOAD_REQUIRED must be a faithful
+        # projection of it for every intent the role can emit.
+        if it in INTENT_SPEC:
+            assert INTENT_SPEC[it].required == local, f"{it} spec/table drift"
 
 
 def test_robustness_only_intents_match_upstream():

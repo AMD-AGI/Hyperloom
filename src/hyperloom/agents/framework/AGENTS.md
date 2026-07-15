@@ -75,12 +75,12 @@ The package serves two distinct objectives, gated differently:
   package:
   - `hyperloom.agents.framework.enablement` — failure-signature classifier
     (`classify_failure`) + `EnablementRequest` + the `runnable_decision` gate.
-  - `hyperloom.agents.framework.enablement_discovery` — bridging-repo selection
-    (framework + ROCm/HIP/aiter via `repo_map.bridge_repo_urls`) and
-    enablement-intent ranking.
-  - `hyperloom.agents.framework.enablement_authoring` — the authoring
+  - `hyperloom.agents.framework.enablement_ops` — discovery + authoring:
+    bridging-repo selection (framework + ROCm/HIP/aiter via
+    `repo_map.bridge_repo_urls`) with enablement-intent ranking
+    (`build_search_plan`, `rank_titles`), plus the authoring
     `EnablementMandate` (allowed source roots + task description + patch
-    invariants) handed to the specialist runner.
+    invariants) handed to the specialist runner (`build_mandate`).
 
   Editing ROCm/HIP source (`/opt/rocm`) is a first-class, **default-on** part
   of the enablement path: `hyperloom.orchestrator.framework.paths.resolve_rocm_hip_source_roots`

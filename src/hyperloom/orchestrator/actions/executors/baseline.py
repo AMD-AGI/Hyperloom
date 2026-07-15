@@ -28,6 +28,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.env import is_truthy
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
@@ -78,23 +79,6 @@ _EVAL_FAILURE_MARKERS = (
 # Bounded per-file read so scanning a failed run's logs for eval markers never
 # slurps a multi-GB server.log.
 _EVAL_SCAN_MAX_BYTES = 262_144
-
-
-def _is_truthy(value: Any) -> bool:
-    """Return whether ``value`` represents an affirmative flag.
-
-    Accepts bools and the usual truthy strings (``true``/``1``/``yes``/``on``);
-    everything else (including ``None`` and ``false``/``0``) is False.
-
-    Args:
-        value: The task-param value to interpret.
-
-    Returns:
-        ``True`` for an affirmative bool/string, else ``False``.
-    """
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 # Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
@@ -1114,7 +1098,7 @@ class BaselineExecutor:
         _explicit_run_eval = "RUN_EVAL" in _extra_envs and str(
             _extra_envs["RUN_EVAL"]
         ).strip().lower() in _RUN_EVAL_FALSE_VALUES
-        eval_already_off = _is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
+        eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
         if (
             result.get("status") != "succeeded"
             and not eval_already_off
@@ -1284,7 +1268,7 @@ class BaselineExecutor:
         # which materialize honors over the default-true. An explicit
         # extra_envs RUN_EVAL still loses to the deliberate disable.
         base_extra_envs = dict(params.get("extra_envs") or {})
-        if force_disable_eval or _is_truthy(params.get("disable_run_eval")):
+        if force_disable_eval or is_truthy(params.get("disable_run_eval")):
             base_extra_envs["RUN_EVAL"] = "false"
         try:
             config_path = materialize_config_with_envs(
@@ -1492,7 +1476,7 @@ class BaselineExecutor:
         """
         params = params or {}
         if "baseline_double_run" in params:
-            return _is_truthy(params.get("baseline_double_run"))
+            return is_truthy(params.get("baseline_double_run"))
 
         extra = ctx_extra or {}
         state = extra.get("shared_state") or self.shared_state
