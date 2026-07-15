@@ -1,10 +1,16 @@
+---
+myst:
+    html_meta:
+        "description": "Enable and configure the optional AMD Quark quantization prelude in Hyperloom. Covers structured quantization schemes, Quark checkout, and environment variable configuration."
+        "keywords": "Hyperloom, quantization, AMD Quark, fp8, mxfp4, ptq, MI355X, AMD GPU, ROCm, LLM inference, quantize-scheme"
+---
 # Quantization with AMD Quark
 
 The optional quantization prelude drives [AMD Quark](https://quark.docs.amd.com/)
 before the optimization loop starts, then rewrites `--model` to the exported
 quantized model so the rest of Hyperloom optimizes that artifact.
 
-Quantization is disabled unless you explicitly enable the deterministic master
+Quantization is disabled unless you explicitly enable the deterministic primary
 switch:
 
 ```bash
@@ -30,7 +36,7 @@ Structured schemes are `fp8`, `ptpc_fp8`, `mxfp4`, and `mxfp4_fp8`.
 on the selected GPU, Hyperloom prints `QUANTIZATION_SKIPPED`, sets
 `HYPERLOOM_QUANTIZATION_SKIPPED`, and continues on the unquantized model.
 
-## Quark Checkout
+## Quark checkout
 
 `quantization_agent` requires an AMD Quark checkout at runtime. Hyperloom does
 not bundle Quark or implement quantization itself; it invokes Quark's published

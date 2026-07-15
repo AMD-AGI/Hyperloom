@@ -11,7 +11,7 @@ Per-version migration steps. This page is a companion to
 changed*, this page answers *what you have to do about it*.
 
 If you are starting fresh, skip this page and follow the
-[quickstart](../install/quickstart.md).
+[Docker quickstart](../install/local-mode.md) or [bare-metal quickstart](../install/setup.md).
 
 ---
 
@@ -88,7 +88,7 @@ the "vs B200" comparison number).
 
 ### Required: setup is no longer an in-loop action
 
-Earlier launchers may have waited for the Coordinator to emit a
+Earlier launchers might have waited for the Coordinator to emit a
 `setup` action. Move all setup work to **before** the
 `inference_optimizer optimize` call:
 
@@ -156,7 +156,7 @@ training-mode build:
   accepted by `install.sh`. Use the `_inference` variant.
 * Training and MLPerf-training skills have been removed from this
   repo. There is no in-place migration; switch to the inference flow
-  documented in the [quickstart](../install/quickstart.md).
+  documented in the [Docker quickstart](../install/local-mode.md) or [bare-metal quickstart](../install/setup.md).
 
 ---
 

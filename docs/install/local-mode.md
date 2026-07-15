@@ -1,11 +1,17 @@
-# Quickstart — Using a Docker container
+---
+myst:
+    html_meta:
+        "description": "Run Hyperloom inside a Docker container on an AMD GPU machine. Covers starting the container, connecting Cursor, installing Hyperloom, and configuring credentials."
+        "keywords": "Hyperloom, Docker, container, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Cursor, Dev Containers, quickstart, ROCm"
+---
+# Quickstart — using a Docker container
 
 These instructions allow you to run Hyperloom inside a Docker container on an AMD GPU machine. You attach Cursor to that container and launch the optimization loop from Cursor Chat.
 
 **Prerequisites:**
 
-- A supported AMD GPU: **MI300X / MI308X / MI325X / MI355X** (MI308X and MI325X run with the MI300X runner scripts).
-- Access to an OpenAI-compatible (LiteLLM-style) LLM gateway: set **both** `OPENAI_BASE_URL` (your gateway’s `/v1` endpoint) and `ANTHROPIC_BASE_URL`.
+- A supported AMD GPU: **MI300X / MI325X / MI355X** (MI325X runs with the MI300X runner scripts).
+- Access to an OpenAI-compatible (LiteLLM-style) LLM gateway: set both `OPENAI_BASE_URL` (your gateway’s `/v1` endpoint) and `ANTHROPIC_BASE_URL`.
 
 ### 1. Start the container
 
@@ -43,7 +49,7 @@ docker run -d \
   -f /dev/null
 ```
 
-> **Notes:** You need a model available inside the container — download one after attaching (e.g. `huggingface-cli download ...`), or reuse a host model by adding `-v /path/to/models:/models`. The `-profilerfix` images patch rocprofiler so it captures kernels launched under HipGraphLaunch ([SGLang issue #352](https://github.com/sgl-project/sglang/issues/352)).
+> **Notes:** You need a model available inside the container — download one after attaching (for example, `huggingface-cli download ...`), or reuse a host model by adding `-v /path/to/models:/models`. The `-profilerfix` images patch rocprofiler so it captures kernels launched under HipGraphLaunch ([SGLang issue #352](https://github.com/sgl-project/sglang/issues/352)).
 
 ### 2. Connect Cursor to the container
 
@@ -61,7 +67,9 @@ Cursor opens a new window attached to the running container. Open a workspace fo
 
 ### 3. Install Hyperloom
 
-#### 3.1 Install with an agent (Recommended)
+Choose one of the following installation methods.
+
+#### 3.1 Install with an agent (recommended)
 
 In the container, make sure GitHub authentication is available, then clone
 Hyperloom:
@@ -70,11 +78,13 @@ Hyperloom:
 git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
 ```
 
-Start a coding agent from the repo root (i.e. run `claude` here or open this folder in Cursor) and install Hyperloom using the following prompt:
+Start a coding agent from the repo root (that is, run `claude` here or open this folder in Cursor) and install Hyperloom using the following prompt:
 
 > Follow the tutorial `examples/hyperloom-local-demo.md` and run the hyperloom demo.
 
 #### 3.2 Install from source
+
+Follow these steps to install Hyperloom manually from source.
 
 ##### 3.2.1 Clone Hyperloom and configure credentials
 
@@ -134,7 +144,7 @@ When it finishes, source `kernel-agent.env.sh` before launching.
 
 ---
 
-## Next Step
+## Next step
 
 After setup, open the Hyperloom checkout in Cursor. Then follow
 [Run a Hyperloom optimization](../how-to/optimize.md) to launch, monitor, or

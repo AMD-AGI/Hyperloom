@@ -115,8 +115,7 @@ default path used by the rest of this demo.
 
 ### 1e. AMD GPU (rocm-smi)
 
-Hyperloom's SGLang runner supports **MI300X / MI325X / MI355X** (MI308X and
-MI325X reuse the MI300X scripts). Detect the GPUs and confirm they are idle:
+Hyperloom's SGLang runner supports **MI300X / MI325X / MI355X** (MI325X reuses the MI300X scripts). Detect the GPUs and confirm they are idle:
 
 ```bash
 # GPU model / series (expect MI300X, MI325X, or MI355X)
@@ -173,7 +172,7 @@ Pick the image that matches the GPU you found in Step 1:
 
 | GPU | Image |
 |---|---|
-| MI300X / MI308X / MI325X | `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix` |
+| MI300X / MI325X | `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix` |
 | MI355X | `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix` |
 
 Start a long-running container. This is the standard Local Mode command **plus

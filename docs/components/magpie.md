@@ -42,6 +42,6 @@ applies an idempotent, atomic-write patch to Magpie's cloned `benchmarker.py`
 (`_prepare_benchmark_scripts`) so a concurrent reader never sees a half-copied
 script. See [Hyperloom optimization loop](../conceptual/optimization-loop.md) for more information.
 
-## Magpie Documentation
+## Magpie documentation
 
-For detailed documentation on Magpie, please visit [ROCm Docs](https://rocm.docs.amd.com/projects/magpie/en/latest/).
+For detailed documentation on Magpie, see [Magpie on ROCm Docs](https://rocm.docs.amd.com/projects/magpie/en/latest/).

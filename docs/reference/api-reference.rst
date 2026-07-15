@@ -11,7 +11,7 @@ docstrings for the importable ``hyperloom`` package.
 
 The reference covers the importable ``hyperloom`` package (single src-layout
 namespace). ``ci`` is a script collection that is not laid out as an
-importable package, so it is documented via its in-code docstrings rather
+importable package, so it is documented through its in-code docstrings rather
 than these autosummary pages.
 
 .. autosummary::

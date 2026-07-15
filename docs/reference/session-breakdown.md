@@ -481,7 +481,7 @@ The Hyperloom team commits to the following compatibility guarantees.
 3. Adding new optional fields freely. Consumers must tolerate
    unknown keys.
 
-Consumers may rely on these guarantees for production indexing and
+Consumers can rely on these guarantees for production indexing and
 alerting.
 
 ## See also

@@ -1,4 +1,10 @@
-# Quickstart - Local Setup
+---
+myst:
+    html_meta:
+        "description": "Install and configure Hyperloom on a bare-metal AMD GPU host or inside a Docker container. Covers prerequisites, the /hyperloom-setup skill, and running a demo optimization."
+        "keywords": "Hyperloom, install, setup, bare-metal, Docker, AMD GPU, ROCm, SGLang, vLLM, quickstart, configuration"
+---
+# Quickstart — local setup
 
 Setup runs on an AMD GPU host that already has a ROCm base installed (ROCm
 runtime + ROCm torch); Hyperloom does not install ROCm itself. It supports two
@@ -22,6 +28,8 @@ The installer stops before launching an optimization.
 
 ## Prerequisites
 
+Before running setup, ensure the following requirements are met:
+
 - An AMD GPU host with ROCm runtime and ROCm torch already installed.
 - Python 3.10+ and `pip`.
 - `git` for dependency checkouts performed by setup.
@@ -31,9 +39,9 @@ For private Hyperloom releases, the default path is to download the wheel from
 GitHub Releases with `gh` first. When Hyperloom is published publicly, this can
 be replaced by a direct `pip install` URL or PyPI install.
 
-## 1. Install Hyperloom Into a Workspace
+## 1. Install Hyperloom into a workspace
 
-Download the release wheel, then install it into the directory the user will
+Download the release wheel, then install it into the directory you will
 open in Cursor, Claude Code, or Codex:
 
 ```bash
@@ -51,12 +59,11 @@ python3 -m pip install \
 ```
 
 The target directory is both the Python install target and the agent workspace.
-It is normal for it to contain many Python package directories. Users only need
-to open the directory and run the setup skill.
+It is normal for it to contain many Python package directories. Open the directory and run the setup skill to proceed.
 
 ## 2. Run `/hyperloom-setup`
 
-Open `~/hyperloom` in the user's agent and run:
+Open `~/hyperloom` in your agent and run:
 
 ```text
 /hyperloom-setup
@@ -85,7 +92,7 @@ During setup, Hyperloom also updates `.env` with runtime paths (`MAGPIE_PATH`,
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`, `FRAMEWORK`) and the resolved
 `HYPERLOOM_RUN_MODE`.
 
-## 3. What Setup Does
+## 3. What setup does
 
 The packaged setup backend runs the bare-metal setup phases:
 
@@ -102,7 +109,7 @@ The packaged setup backend runs the bare-metal setup phases:
 The setup backend no longer downloads or installs the Hyperloom wheel; that is
 already done by the `pip install --target` step.
 
-## 4. Run a Demo
+## 4. Run a demo
 
 When setup finishes and `FRAMEWORK` is set, the setup skill offers a Qwen3-8B
 demo run and hands off to the matching demo skill. Pick a length:
@@ -113,7 +120,7 @@ demo run and hands off to the matching demo skill. Pick a length:
 
 The demo reuses the values already in `.env`, so nothing is re-entered.
 
-## Manual Dry Run
+## Manual dry run
 
 To test the backend without running the agent skill:
 
@@ -134,7 +141,7 @@ PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup \
 The dry run should show `Phase 5: install.sh --dry-run` and should not attempt
 to download or install the Hyperloom wheel.
 
-## Common Setup Options
+## Common setup options
 
 The setup skill passes options to the packaged backend. Useful options include:
 
@@ -153,6 +160,8 @@ The setup skill passes options to the packaged backend. Useful options include:
 | `AITER_REF` | Override AITER source tag; otherwise setup auto-selects a compatible tag. |
 
 ## Troubleshooting
+
+The following items address common setup problems.
 
 - If the target directory contains many package folders after `pip install
   --target`, that is expected.

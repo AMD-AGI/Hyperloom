@@ -56,7 +56,7 @@ inference_optimizer optimize --degraded-kb ...
 The local store is always the write target. The resolver order is:
 
 1. `--local-kb-root` (or `HYPERLOOM_LOCAL_KB_ROOT`) when set
-2. otherwise `workspace_root()/kb` — i.e. `$USER_DATA_PATH/kb`, falling back to
+2. otherwise `workspace_root()/kb` — that is, `$USER_DATA_PATH/kb`, falling back to
    `/workspace/hyperloom/kb` when `USER_DATA_PATH` is unset
 
 The store uses a nested on-disk layout keyed by recipe canonical-id components.
@@ -136,7 +136,7 @@ use the default local store.
 **Q: Does a missing remote KB fail the run?**
 
 No. An unset or unreachable gbrain recipe read side degrades to local-only
-operation, and an unset Cortex KB simply skips Critic assess enrichment.
+operation, and an unset Cortex KB skips Critic assess enrichment.
 `--degraded-kb` skips the recipe KB path intentionally.
 
 **Q: Can I back up the KB?**
