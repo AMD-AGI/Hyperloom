@@ -246,9 +246,12 @@ def find_reference_rows(
     """Filter InferenceX rows down to those aligned with our run. Never raises.
 
     Alignment is **strict** on ``hardware``, ``isl`` and ``osl`` — the whole
-    point of the comparison is that the shapes match. ``precision`` is applied
-    only when supplied *and* at least one row matches it, so an unset or
-    unavailable precision degrades to "any" instead of dropping everything.
+    point of the comparison is that the shapes match. Disaggregated and
+    multinode rows are dropped as well: their per-GPU throughput is not
+    comparable to a single-node colocated run (they use a different serving
+    topology). ``precision`` is applied only when supplied *and* at least one
+    row matches it, so an unset or unavailable precision degrades to "any"
+    instead of dropping everything.
 
     Args:
         rows (list[dict]): Raw benchmark records from :func:`fetch_rows`.
@@ -270,6 +273,8 @@ def find_reference_rows(
         and str(r.get("hardware") or "").strip().casefold() == hw
         and _to_int(r.get("isl")) == int(isl)
         and _to_int(r.get("osl")) == int(osl)
+        and not bool(r.get("is_multinode"))
+        and not bool(r.get("disagg"))
     ]
     prec = str(precision or "").strip().casefold()
     if prec:

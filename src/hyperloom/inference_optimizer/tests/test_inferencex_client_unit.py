@@ -138,3 +138,121 @@ def test_fetch_raw_transport_error(monkeypatch):
     monkeypatch.setattr(ix.urllib.request, "urlopen", _raise)
     with pytest.raises(ix.InferenceXFetchError):
         ix._fetch_raw("http://x")
+
+
+# ---- fetch_rows -----------------------------------------------------------
+def _bench_row(**overrides) -> dict:
+    base = {
+        "hardware": "b300",
+        "precision": "fp8",
+        "isl": 1024,
+        "osl": 1024,
+        "conc": 64,
+        "decode_tp": 2,
+        "is_multinode": False,
+        "disagg": False,
+        "metrics": {"tput_per_gpu": 100.0},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_fetch_rows_empty_name_returns_none():
+    assert ix.fetch_rows("") is None
+    assert ix.fetch_rows("   ") is None
+
+
+def test_fetch_rows_plain_list(monkeypatch):
+    import json
+
+    payload = [{"hardware": "b300"}]
+    monkeypatch.setattr(ix, "_fetch_raw", lambda _url: json.dumps(payload).encode("utf-8"))
+    assert ix.fetch_rows("MiniMax-M2.5") == payload
+
+
+def test_fetch_rows_gzip_body(monkeypatch):
+    import gzip
+    import json
+
+    gz = gzip.compress(json.dumps([{"hardware": "b300"}]).encode("utf-8"))
+    monkeypatch.setattr(ix, "_fetch_raw", lambda _url: gz)
+    assert ix.fetch_rows("MiniMax-M2.5") == [{"hardware": "b300"}]
+
+
+def test_fetch_rows_structured_error_returns_empty(monkeypatch):
+    import json
+
+    monkeypatch.setattr(ix, "_fetch_raw", lambda _url: json.dumps({"error": "bad model"}).encode("utf-8"))
+    assert ix.fetch_rows("MiniMax-M2.5") == []
+
+
+def test_fetch_rows_wrapped_list_key(monkeypatch):
+    import json
+
+    monkeypatch.setattr(ix, "_fetch_raw", lambda _url: json.dumps({"data": [{"hardware": "h200"}]}).encode("utf-8"))
+    assert ix.fetch_rows("MiniMax-M2.5") == [{"hardware": "h200"}]
+
+
+def test_fetch_rows_unexpected_dict_returns_empty(monkeypatch):
+    import json
+
+    monkeypatch.setattr(ix, "_fetch_raw", lambda _url: json.dumps({"unexpected": 1}).encode("utf-8"))
+    assert ix.fetch_rows("MiniMax-M2.5") == []
+
+
+def test_fetch_rows_bad_json_returns_none(monkeypatch):
+    monkeypatch.setattr(ix, "_fetch_raw", lambda _url: b"not-json{")
+    assert ix.fetch_rows("MiniMax-M2.5") is None
+
+
+def test_fetch_rows_retries_then_none(monkeypatch):
+    calls = {"n": 0}
+
+    def _boom(_url):
+        calls["n"] += 1
+        raise ix.InferenceXFetchError("HTTP 503")
+
+    monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "3")
+    monkeypatch.setattr(ix, "_fetch_raw", _boom)
+    assert ix.fetch_rows("MiniMax-M2.5") is None
+    assert calls["n"] == 3
+
+
+# ---- find_reference_rows --------------------------------------------------
+def test_find_reference_rows_strict_shape_and_hardware():
+    rows = [_bench_row(), _bench_row(hardware="mi300x"), _bench_row(isl=8192), _bench_row(osl=8192)]
+    out = ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024)
+    assert len(out) == 1
+    assert out[0]["hardware"] == "b300"
+
+
+def test_find_reference_rows_case_insensitive_hardware():
+    out = ix.find_reference_rows([_bench_row(hardware="B300")], hardware="b300", isl=1024, osl=1024)
+    assert len(out) == 1
+
+
+def test_find_reference_rows_precision_filter_and_fallback():
+    rows = [_bench_row(precision="fp8"), _bench_row(precision="fp4")]
+    assert len(ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024, precision="fp4")) == 1
+    # unavailable precision degrades to "any" instead of dropping everything
+    assert len(ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024, precision="bf16")) == 2
+
+
+def test_find_reference_rows_excludes_disagg_and_multinode():
+    rows = [
+        _bench_row(),
+        _bench_row(disagg=True, metrics={"tput_per_gpu": 999999.0}),
+        _bench_row(is_multinode=True, metrics={"tput_per_gpu": 888888.0}),
+    ]
+    out = ix.find_reference_rows(rows, hardware="b300", isl=1024, osl=1024)
+    assert len(out) == 1
+    assert out[0]["metrics"]["tput_per_gpu"] == 100.0
+
+
+def test_find_reference_rows_missing_topology_fields_treated_single_node():
+    row = {"hardware": "b300", "isl": 1024, "osl": 1024, "metrics": {"tput_per_gpu": 5.0}}
+    assert len(ix.find_reference_rows([row], hardware="b300", isl=1024, osl=1024)) == 1
+
+
+def test_find_reference_rows_empty_when_no_shape_match():
+    assert ix.find_reference_rows([_bench_row()], hardware="b300", isl=2048, osl=2048) == []
