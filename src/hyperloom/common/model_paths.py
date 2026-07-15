@@ -43,7 +43,13 @@ def resolve_local_model_dir(model: str | Path | None) -> Path | None:
     if not raw:
         return None
     p = Path(raw).expanduser()
-    if p.is_dir():
+    try:
+        is_dir = p.is_dir()
+    except OSError:
+        # Permission denied or other OS error — treat as not a local dir and
+        # fall through to the HF hub cache probe.
+        is_dir = False
+    if is_dir:
         return p
     # Repo id: reuse the engine's HF hub cache. Lazy import keeps this module
     # dependency-light -- a missing huggingface_hub just degrades to None.
