@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
@@ -81,11 +82,13 @@ def test_backend_order_explicit_payload(monkeypatch) -> None:
     assert krh._backend_order({"backend_order": "FORGE,foo,unknown"}) == ["forge"]
 
 
-def test_backend_order_env_alias(monkeypatch) -> None:
+def test_backend_order_removed_oob_raises(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    # When nothing survives filtering, fall back to the legacy native ladder.
+    # Removed OOB backends (claude/codex/cursor) must fail loudly rather than
+    # being silently substituted with forge.
     monkeypatch.setenv("KERNEL_OPT_BACKENDS", "codex,claude")
-    assert krh._backend_order({}) == ["forge"]
+    with pytest.raises(ValueError, match="no longer available"):
+        krh._backend_order({})
 
 
 def test_backend_order_unknown_backends_yield_empty(monkeypatch) -> None:

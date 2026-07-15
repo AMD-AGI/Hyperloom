@@ -27,7 +27,7 @@ DEFAULT_VOLUME = ""
 # intentionally not pinned so install.sh can clone writable copies.
 DEFAULT_GPU_TYPE = "MI300X"
 DEFAULT_GPU_PROFILE = "mi300x"
-DEFAULT_KERNEL_BACKENDS = ["GEAK", "Claude Code", "Codex"]
+DEFAULT_KERNEL_BACKENDS = ["GEAK"]
 DEFAULT_MAX_HOURS = 6.0
 DEFAULT_TARGET_GAIN = 500.0
 DEFAULT_RESULTS_PATH = "$RESULT_DIR"
