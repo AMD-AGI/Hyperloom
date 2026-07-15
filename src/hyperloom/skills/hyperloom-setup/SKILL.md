@@ -110,8 +110,10 @@ value.
 7. Only when the user chose `baremetal`, ask whether to install a serving
    framework (used as the `--install-framework` value in Step 4):
    - `none`: use an already-installed SGLang/vLLM framework stack on the host.
-   - `sglang`: install SGLang ROCm framework components.
-   - `vllm`: install vLLM ROCm framework components.
+   - `sglang`: install SGLang ROCm framework components (shared with the host torch).
+   - `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
+     pins its own torch, so it runs in an isolated env and never touches the
+     host torch/SGLang stack.
    - If the user is unsure, recommend `none` when a framework is already present;
      otherwise recommend `sglang`.
 
@@ -191,10 +193,11 @@ For `sglang`:
 PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
 ```
 
-For `vllm`:
+For `vllm` (installs into an isolated venv; `--install-framework vllm` already
+defaults to isolated, the flag below is explicit):
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --yes
+PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
 ### `docker`

@@ -37,6 +37,10 @@ SAFE_API_KEY_PLACEHOLDER="ak-your-api-key-here"
 
 FRAMEWORKS="sglang,vllm"
 INSTALL_FRAMEWORK="none"
+# Track whether the operator explicitly picked a framework env (via $FRAMEWORK_ENV
+# or --framework-env). When unset, vLLM defaults to isolated (its wheel pins a
+# torch that would clash with the host stack); others default to shared.
+_FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # Framework versions track docs/compatibility.md (SGLang v0.5.12,
@@ -134,6 +138,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --framework-env requires a value" >&2; exit 2; }
       shift
       FRAMEWORK_ENV="${1:-}"
+      _FRAMEWORK_ENV_WAS_SET="x"
       case "$FRAMEWORK_ENV" in
         shared|isolated) ;;
         *) echo "[install-baremetal] ERROR: --framework-env must be one of: shared, isolated" >&2; exit 2 ;;
@@ -1285,6 +1290,13 @@ EOF
 }
 
 main() {
+  # vLLM defaults to an isolated venv (its ROCm wheel pins a torch that would
+  # clash with the shared host stack). Operators can still force shared with an
+  # explicit $FRAMEWORK_ENV / --framework-env.
+  if [ "$INSTALL_FRAMEWORK" = "vllm" ] && [ -z "$_FRAMEWORK_ENV_WAS_SET" ]; then
+    FRAMEWORK_ENV="isolated"
+    log "vLLM selected; defaulting to isolated framework env"
+  fi
   case "$FRAMEWORK_ENV" in
     shared|isolated) ;;
     *) die "FRAMEWORK_ENV must be one of: shared, isolated" ;;
