@@ -17,7 +17,7 @@ subtrees:
   - file: install/slurm.md
     title: Quickstart — Slurm
 
-- caption: Components
+- caption: Overview
   entries:
   - file: components/index.md
     title: Components
@@ -33,6 +33,8 @@ subtrees:
         title: GEAK
       - url: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/
         title: AgentKernelArena
+  - file: conceptual/optimization-loop.md
+    title: Hyperloom optimization loop
 
 - caption: How to
   entries:
@@ -40,11 +42,6 @@ subtrees:
     title: Run a Hyperloom optimization
   - file: how-to/quantization-quark.md
     title: Quantization with AMD Quark
-
-- caption: Conceptual
-  entries:
-  - file: conceptual/optimization-loop.md
-    title: Hyperloom optimization loop
 
 - caption: Reference
   entries:

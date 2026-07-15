@@ -21,18 +21,15 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * `Quickstart <../examples/README.md>`_
     * :doc:`Slurm quickstart </install/slurm>`
 
-  .. grid-item-card:: Components
+  .. grid-item-card:: Overview
 
     * :doc:`Components </components/index>`
+    * :doc:`Hyperloom optimization loop <conceptual/optimization-loop>`
 
   .. grid-item-card:: How to
 
     * :doc:`Run a Hyperloom optimization </how-to/optimize>`
     * :doc:`Quantization with AMD Quark </how-to/quantization-quark>`
-
-  .. grid-item-card:: Conceptual
-
-    * :doc:`Hyperloom optimization loop <conceptual/optimization-loop>`
 
   .. grid-item-card:: Reference
 
