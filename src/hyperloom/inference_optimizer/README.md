@@ -29,10 +29,11 @@ installed by `pip install hyperloom-inference_optimizer`.
 
 ## Quick CLI
 
-The package installs the `inference_optimizer` console script:
+Use the module entry point; it works both for normal installs and
+`pip install --target` layouts where console scripts are not on `PATH`:
 
 ```bash
-inference_optimizer optimize \
+python3 -m hyperloom.inference_optimizer.cli optimize \
     --model /path/to/model \
     --framework sglang \
     --gpu-type mi300x \
@@ -44,10 +45,10 @@ inference_optimizer optimize \
 Resume an interrupted session:
 
 ```bash
-inference_optimizer optimize --resume
+python3 -m hyperloom.inference_optimizer.cli optimize --resume
 ```
 
-See `inference_optimizer optimize --help` for the full flag set and
+See `python -m hyperloom.inference_optimizer.cli optimize --help` for the full flag set and
 [SKILL.md](SKILL.md) for the prompt-driven launch workflow used inside
 Cursor and Claw.
 
@@ -57,7 +58,7 @@ Cursor and Claw.
 src/hyperloom/inference_optimizer/
 ├── SKILL.md                    # Agent instructions (Cursor / Claw entry point)
 ├── references/                 # SKILL reference chapters (benchmark/cache/critic/…)
-├── cli/                        # `inference_optimizer optimize` entry point
+├── cli/                        # `python -m hyperloom.inference_optimizer.cli optimize` entry point
 │   ├── __init__.py             # main()/_build_parser()/_preflight()/_run_optimize()
 │   ├── backends/bootstrap/executors/kb/model_gate/model_config_utils.py
 │   └── credentials/multi_node/quantization/recover.py
