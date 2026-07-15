@@ -26,6 +26,22 @@ from ..session.paths import (
 
 log = logging.getLogger(__name__)
 
+
+def _per_node_resources(args: argparse.Namespace) -> tuple[int, int]:
+    """Resolve (cpus, mem_gib) per node from the optimize CLI flags.
+
+    Both the RayJob and Infera provision paths honour ``--cpus-per-node`` /
+    ``--mem-per-node``; when a flag is unset the create-* subcommand defaults
+    (96 CPUs, 1024 GiB) apply. No environment variables are consulted.
+    """
+    cpus = getattr(args, "cpus_per_node", None)
+    mem = getattr(args, "mem_per_node", None)
+    return (
+        int(cpus) if cpus is not None else 96,
+        int(mem) if mem is not None else 1024,
+    )
+
+
 def _gc_old_profile_traces(
     root: str | None = None,
     retention_days: int = 7,
@@ -183,14 +199,15 @@ def _provision_multi_node_infera_stack(args: argparse.Namespace) -> None:
     _pd_kv_backend = (getattr(args, "pd_transfer_backend", "") or "").strip() or os.environ.get(
         "INFERENCE_OPTIMIZER_INFERA_KV_BACKEND", "mori"
     )
+    cpus_per_node, mem_per_node = _per_node_resources(args)
     ns_create = argparse.Namespace(
         workspace=None,
         image=image,
         model=model,
         nodes=nodes,
         gpus_per_node=int(gpn),
-        cpus_per_node=96,
-        mem_per_node=1024,
+        cpus_per_node=cpus_per_node,
+        mem_per_node=mem_per_node,
         ephemeral_per_node=400,
         shared_mem_per_node=200,
         backend_framework=(getattr(args, "framework", None) or "sglang"),
@@ -237,6 +254,10 @@ def _provision_multi_node_infera_stack(args: argparse.Namespace) -> None:
 def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS.
 
+    When SaFE is absent and ``HYPERLOOM_MN_EXT_SERVICE_URL`` is set, synthesize
+    ``multi_node_state.json`` from env and skip all SaFE create/init (external
+    mode). Downstream restart / SSH / Magpie client mode read the synthetic state.
+
     For ``--mn-backend infera`` this delegates to
     :func:`_provision_multi_node_infera_stack` (idle InferaDeployment + SSH).
 
@@ -250,8 +271,45 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
 
     Raises:
         SystemExit: With code 2 when ``--nodes >= 2`` but no RayJob image is
-            configured, or with the create/bootstrap return code on failure.
+            configured, when external infera lacks SSH control, or with the
+            create/bootstrap return code on failure.
     """
+    from ..multi_node._internal.external_state import (
+        build_external_state_from_env,
+        external_has_ssh_control,
+        external_service_url,
+    )
+
+    if external_service_url():
+        from ..multi_node.cli import _save_state
+        from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
+
+        ext_state = build_external_state_from_env()
+        ext_state["backend"] = _resolve_mn_backend(args)
+        if ext_state["backend"] == "infera" and not external_has_ssh_control():
+            print(
+                "ERROR: external infera mode requires SSH control. Set "
+                "HYPERLOOM_MN_EXT_SSH_KEY plus HYPERLOOM_MN_EXT_PREFILL_IPS/"
+                "DECODE_IPS (or WORKER_IPS). rayjob external uses Ray, not SSH.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        try:
+            _save_state(ext_state)
+        except OSError as exc:
+            print(f"ERROR: external mode: cannot write synthetic state: {exc}", file=sys.stderr)
+            sys.exit(2)
+        os.environ["BENCHMARK_BASE_URL"] = ext_state["service_url"]
+        os.environ["MAGPIE_RUN_PHASE"] = "client"
+        export_ray_address_to_os()
+        print(
+            "multi-node(external): SaFE bypassed; state synthesized from env. "
+            f"url={ext_state['service_url']} prefill={ext_state['prefill_pod_ips']} "
+            f"decode={ext_state['decode_pod_ips']} worker={ext_state['worker_pod_ips']} "
+            f"ssh_control={'yes' if external_has_ssh_control() else 'no (benchmark-only)'}"
+        )
+        return
+
     nodes = max(1, int(args.nodes))
     if nodes < 2:
         return
@@ -292,13 +350,14 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     # Forward agent-supplied prompt env verbatim; no-op on RayJob reuse (see multi_node/SKILL.md).
     rayjob_extra_env = list(getattr(args, "rayjob_extra_env", None) or [])
 
+    cpus_per_node, mem_per_node = _per_node_resources(args)
     ns_create = argparse.Namespace(
         workspace=None,
         image=image,
         nodes=nodes,
         gpus_per_node=int(gpn),
-        cpus_per_node=96,
-        mem_per_node=1024,
+        cpus_per_node=cpus_per_node,
+        mem_per_node=mem_per_node,
         ephemeral_per_node=400,
         display_name=None,
         description=None,
