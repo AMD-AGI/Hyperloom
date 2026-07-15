@@ -2,7 +2,8 @@
 
 Setup runs on an AMD GPU host. It supports two run modes:
 
-- `baremetal`: setup runs `install_baremetal.sh` on the host (full runtime install).
+- `baremetal`: setup runs `install_baremetal.sh` on the host to validate the
+  ROCm/runtime base and optionally install the serving framework.
   The host needs ROCm runtime and ROCm torch; Hyperloom does not install ROCm itself.
   Setup can optionally install the SGLang or vLLM framework layer.
 - `docker`: setup skill writes `.env` only; runtime install happens inside the
@@ -121,9 +122,11 @@ When setup finishes in `baremetal` mode (and `FRAMEWORK` is set), or when `.env`
 is written in `docker` mode, the setup skill offers a Qwen3-8B demo run and hands
 off to the matching demo skill. Pick a length:
 
-- `3h` — short, no-kernel run; best for a first end-to-end check.
-- `8h` — medium-length run.
-- `24h` — long-horizon cyclic run.
+- [`3h`](../../examples/hyperloom-qwen3-8b-3h/SKILL.md) — short, no-kernel run;
+  best for a first end-to-end check.
+- [`8h`](../../examples/hyperloom-qwen3-8b-8h/SKILL.md) — medium-length run.
+- [`24h`](../../examples/hyperloom-qwen3-8b-24h/SKILL.md) — long-horizon cyclic
+  run.
 
 The demo reuses the values already in `.env`, so nothing is re-entered.
 
