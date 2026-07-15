@@ -221,7 +221,7 @@ and `multi_node` subcommands. Only add exports the prompt did not cover
 
 **DO NOT `--rayjob-extra-env` these (sandbox-only):**
 
-These are consumed by `install.sh` / `inference_optimizer optimize` /
+These are consumed by `install.sh` / `python -m hyperloom.inference_optimizer.cli optimize` /
 `_workload_envs.py` running inside the **sandbox**; nothing inside the
 RayJob pod reads them. Forwarding them pollutes the pod env and risks
 shadowing real values.
@@ -258,7 +258,7 @@ export HYPERLOOM_MN_HEALTH_WAIT_S=1800
 export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-claude}"
 export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-0}"
 
-setsid nohup inference_optimizer --verbose optimize \
+setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --gpu-type "${GPU_TYPE:?set from prompt}" \
@@ -331,7 +331,7 @@ resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
 5. **`stop-multi-job`** — at session end. Always call explicitly for an
    auditable release. `ownerId` cascade is a safety net (sandbox
    deletion removes the SaFE workload and tears the RayJob down via
-   owner-ref), not a substitute. `inference_optimizer optimize
+   owner-ref), not a substitute. `python -m hyperloom.inference_optimizer.cli optimize
    --nodes N>=2` does **not** call it on exit; nor does sandbox idle /
    hard-TTL GC distinguish "session in progress" from "session
    abandoned" — when the sandbox dies the RayJob is collateral, so an
@@ -518,7 +518,7 @@ default `--robustness-agent` was selected via
 
   For each variant in the active framework's grid whose flag the
   probe reports missing, add the variant name to `--skip-variants`
-  on `inference_optimizer optimize` (or `SKIP_VARIANTS=...` in the
+  on `python -m hyperloom.inference_optimizer.cli optimize` (or `SKIP_VARIANTS=...` in the
   prompt). Drop entries the moment a probe shows the flag accepted
   again. The other framework's grid is irrelevant to this run and
   MUST NOT be probed against the wrong launcher.

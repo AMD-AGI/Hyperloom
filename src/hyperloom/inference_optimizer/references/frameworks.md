@@ -6,10 +6,10 @@ A session is single-framework. Pick `sglang` (default), `vllm`, `atom`, or
 `xdit` via `--framework` or `$FRAMEWORK`:
 
 ```bash
-inference_optimizer optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
-FRAMEWORK=vllm inference_optimizer optimize --model "$MODEL_PATH" --max-hours 2
-inference_optimizer optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
-inference_optimizer optimize --framework xdit --model "$MODEL_PATH" --max-hours 2  # scriptable diffusion
+python3 -m hyperloom.inference_optimizer.cli optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
+FRAMEWORK=vllm python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom.inference_optimizer.cli optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
+python3 -m hyperloom.inference_optimizer.cli optimize --framework xdit --model "$MODEL_PATH" --max-hours 2  # scriptable diffusion
 ```
 
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
@@ -55,8 +55,8 @@ optimizer auto-detects via `rocm-smi --showproductname` (falling back to
 `torch.cuda.get_device_properties(0).gcnArchName`).
 
 ```bash
-inference_optimizer optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
-GPU_TYPE=mi300x inference_optimizer optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom.inference_optimizer.cli optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
+GPU_TYPE=mi300x python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
 Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and

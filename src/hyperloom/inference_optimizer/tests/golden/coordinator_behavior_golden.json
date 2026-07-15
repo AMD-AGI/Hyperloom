@@ -138,14 +138,14 @@
     "closing_started_unix": "<volatile>",
     "conc": 0,
     "conc_sweep_concs": [
-      1,
-      2,
-      4,
-      8,
-      16,
-      32,
+      256,
+      128,
       64,
-      128
+      32,
+      16,
+      8,
+      4,
+      2
     ],
     "conc_sweep_enabled": true,
     "conc_sweep_total_budget_sec": 9000,
