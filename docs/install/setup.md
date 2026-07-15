@@ -90,32 +90,31 @@ LLM defaults:
 | Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-4-8` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic` | `DEEPSEEK_MODEL=deepseek-chat` |
 
-During setup, Hyperloom also updates `.env` with runtime paths (`MAGPIE_PATH`,
-`INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`, `FRAMEWORK`) and the resolved
-`HYPERLOOM_RUN_MODE`. In `docker` mode, runtime paths and `FRAMEWORK` are written
-when the demo skill runs setup inside the container.
+Setup also writes runtime vars (`FRAMEWORK`, ROCm/venv roots) and the resolved
+`HYPERLOOM_RUN_MODE` into `.env`. Kernel-agent paths (`MAGPIE_PATH`,
+`INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the workload
+skill's `install.sh`.
 
 ## 3. What Setup Does
 
-In `baremetal` mode, the packaged setup backend runs the bare-metal setup phases:
+In `baremetal` mode, the setup backend runs `install_baremetal.sh` in five phases:
 
 1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
-2. **Framework install**: optionally installs SGLang or vLLM framework layers.
+2. **Framework install**: optionally installs the SGLang or vLLM framework layer.
 3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible.
-4. **Credentials**: validates and persists LLM configuration into `.env`.
-5. **Runtime install**: runs packaged `install.sh` to set up Magpie, InferenceX,
-   TraceLens, GEAK, Ray, and other runtime dependencies.
-6. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv
-   roots, etc.) into `.env`.
-7. **Verify**: runs `install.sh --check-only` and prints next steps.
+4. **Credentials**: resolves LLM gateway credentials into `.env`.
+5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
+   etc.) into `.env`. `PATH`/`LD_LIBRARY_PATH` are not written; the CLI preflight
+   derives them at launch from `ROCM_PATH`/`VIRTUAL_ENV`/`VLLM_VENV_ROOT`.
 
-In `docker` mode, the setup skill only writes credentials and run mode to `.env`.
+`.env` is the single source of truth: no combined script is generated and nothing
+extra needs sourcing. The installer stops before launching; open-source deps and
+the optimizer runtime are installed later by the workload skill's `install.sh`.
+
+In `docker` mode, the setup skill writes credentials and run mode to `.env` only.
 The demo (workload) skill starts a ROCm container and runs the same backend
 inside it (`--install-framework none --yes`).
-
-The setup backend no longer downloads or installs the Hyperloom wheel; that is
-already done by the `pip install --target` step.
 
 ## 4. Run a Demo
 
@@ -147,8 +146,7 @@ PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup \
   --dry-run -- --skip-base-check --install-framework none
 ```
 
-The dry run should show `Phase 5: install.sh --dry-run` and should not attempt
-to download or install the Hyperloom wheel.
+The dry run should print the five bare-metal phases without mutating the system.
 
 ## Common Setup Options
 
