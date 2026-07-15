@@ -3,47 +3,15 @@
   "pool_id": "inferencex-daily-fixed",
   "source": "manual",
   "_readme": [
-    "Fixed daily model set for inference-optimization-daily.yml.",
-    "Each run optimizes EVERY model below once, for up to --max-hours=24, and",
-    "pulls the latest Hyperloom commit into the sandbox (same source-pin",
-    "mechanism as optimize-submit.yml). generate_hf_matrix.py carries the",
-    "framework / precision / tp / conc fields straight into the GitHub Actions",
-    "matrix; the workflow forwards them to optimize_submit.py as",
-    "--manual --framework --precision --tp --concurrency so per-model config",
-    "is FIXED (no auto-detect). Precision is per-model NATIVE because MI300X",
-    "(gfx942) has no native FP4: FP8 for R1/GLM-4.7/Qwen3-Next/MiMo/Kimi/Mixtral/",
-    "gemma-4/Qwen3-14B, BF16 for Llama-3.1-8B / Llama-2-7b / Qwen3-0.6B / Qwen3-8B,",
-    "FP4 only for MXFP4-native gpt-oss.",
-    "Parallelism: most large models use tp8; exceptions are MiniMax M2.7 (tp4 -",
-    "its FP8 block-128 weights are not divisible by 8: 1536/8=192 is not a",
-    "multiple of 128), Qwen3-14B-FP8 (tp2 - small dense), and the small dense",
-    "models Llama-2-7b / Qwen3-0.6B / Qwen3-8B (tp1, single GPU). Kimi, MiMo and",
-    "GLM-4.7 run on sglang (vLLM tp8 MLA assert / missing arch respectively).",
-    "",
-    "Optional per-row fields nodes / rayjob_image drive multi-node RayJob runs",
-    "(nodes>1 => optimize_submit forces --mode claw + injects the topology).",
-    "None of the current rows use them — GLM-5 / GLM-5.1 (the only multi-node",
-    "models) were dropped 2026-06-05; the engine support is kept for future use.",
-    "",
-    "repo_id MUST equal the model's sourceURL as registered in the",
-    "core42-hyperloom playground workspace (see _api_check)."
+    "Fixed example model set for inference-optimization-daily.yml.",
+    "Each run optimizes every model below once and forwards framework, precision,",
+    "tp, and concurrency directly to optimize_submit.py.",
+    "Rows intentionally contain only public model identifiers and runtime knobs.",
+    "Deployment-specific registry, workspace, pre-staging, and validation history",
+    "must be supplied outside this public corpus."
   ],
-  "_api_check": {
-    "endpoint": "GET /api/playground/models?workspace=core42-hyperloom",
-    "checked_at": "2026-06-26",
-    "all_registered": false,
-    "note": "Pool is now 14 models (see the candidates list below for the authoritative set). The original Ready rows are pre-staged under /wekafs/models/<org>-<repo> so SaFE register hits local_path mode (no re-download); ungated/added rows download on first run. GLM-5 and GLM-5.1 were dropped 2026-06-05 (multi-node only; running single-node models here). History: substitutions vs the original wishlist were MiniMax-M3 -> MiniMax-M2.5 (no official M3) and MiMo-V2-PRO -> MiMo-V2.5-Pro. 2026-06-16: replaced MiniMax-M2.5 with meta-llama/Llama-3.1-8B-Instruct (gated, needs HF_TOKEN) and Kimi K2.6 switched INT4 -> FP8. Later changes: dropped Qwen3.6-35B-A3B and DeepSeek-V4-Flash; added zai-org/GLM-4.7-FP8, mistralai/Mixtral-8x7B-Instruct-v0.1, google/gemma-4-26B-A4B-it, Qwen/Qwen3-14B-FP8 (tp2), and small dense models NousResearch/Llama-2-7b-hf, Qwen/Qwen3-0.6B, Qwen/Qwen3-8B (tp1).",
-    "playground_ids": {
-      "deepseek-ai/DeepSeek-R1-0528": "deepseek-r1-0528-kmbd8",
-      "moonshotai/Kimi-K2.6": "kimi-k2-6-k9cpr",
-      "MiniMaxAI/MiniMax-M2.7": "minimax-m2.7-swn8g",
-      "Qwen/Qwen3-Next-80B-A3B-Instruct": "qwen3-next-80b-a3b-instruct-fh9n7",
-      "openai/gpt-oss-120b": "gpt-oss-120b-xhkql",
-      "XiaomiMiMo/MiMo-V2.5-Pro": "mimo-v2-5-pro-pkbhw"
-    }
-  },
   "policy": {
-    "rotation": "none — the whole pool runs every day (BATCH_SIZE=0).",
+    "rotation": "none",
     "refresh_mode": "manual"
   },
   "candidates": [
@@ -57,25 +25,11 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "FP8-native upstream. MI300X has no native FP4; FP4 baseline failed to start, so baseline at FP8. sglang+tp8 starts cleanly.",
       "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
       "pool_index": 1,
-      "label": "Kimi K2.6",
-      "repo_id": "moonshotai/Kimi-K2.6",
-      "framework": "sglang",
-      "precision": "FP8",
-      "tp": 8,
-      "conc": 64,
-      "registered": true,
-      "note": "Run at FP8 (switched from INT4). vLLM tp8 hits MLA num_head%16 assert; sglang handles tp8 cleanly. sglang dynamic-quantizes to FP8 on MI300X; per-GPU memory rises vs the INT4 weights but stays within tp8 headroom.",
-      "is_top": true
-    },
-    {
-      "pool_id": "inferencex-daily-fixed",
-      "pool_index": 2,
       "label": "MiniMax M2.7",
       "repo_id": "MiniMaxAI/MiniMax-M2.7",
       "framework": "vllm",
@@ -83,12 +37,11 @@
       "tp": 4,
       "conc": 64,
       "registered": true,
-      "note": "FP8 block-128 native. tp8 crashes: intermediate 1536/8=192 not divisible by 128 (observed). tp4 -> 384=3x128 OK, ~54G/GPU (no OOM).",
       "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 3,
+      "pool_index": 2,
       "label": "Llama 3.1 8B Instruct",
       "repo_id": "meta-llama/Llama-3.1-8B-Instruct",
       "framework": "vllm",
@@ -96,12 +49,11 @@
       "tp": 8,
       "conc": 64,
       "registered": false,
-      "note": "Most-downloaded Llama on HF (~6.44M dl). Dense 8B, BF16-native (no quantization_config); MI300X has no native FP4, so run BF16. 32 attention heads / 8 KV heads divide by tp8 cleanly. Gated repo (gated=manual): SaFE register/download needs HF_TOKEN with the Llama license accepted; not pre-staged in core42-hyperloom yet. Replaces MiniMax-M2.5 in the daily pool.",
       "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 4,
+      "pool_index": 3,
       "label": "Qwen3-Next",
       "repo_id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
       "framework": "vllm",
@@ -109,12 +61,11 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "FP8-native. A3B MoE; tp8 keeps per-GPU memory low and starts fine. -Instruct-FP8 variant also registered.",
       "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 5,
+      "pool_index": 4,
       "label": "gpt-oss-120b",
       "repo_id": "openai/gpt-oss-120b",
       "framework": "vllm",
@@ -122,12 +73,11 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "Ready (local_path /wekafs/models/openai-gpt-oss-120b, hasInferenceX). MXFP4-native — FP4 is a natural fit.",
       "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 6,
+      "pool_index": 5,
       "label": "MiMo V2.5 Pro",
       "repo_id": "XiaomiMiMo/MiMo-V2.5-Pro",
       "framework": "sglang",
@@ -135,25 +85,11 @@
       "tp": 8,
       "conc": 64,
       "registered": true,
-      "note": "vLLM lacks this arch; needs sglang 0.5.11 ROCm image (verified registered). ~963G -> tp8 required (~120G/GPU). FP8 baseline.",
       "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 7,
-      "label": "GLM 4.7",
-      "repo_id": "zai-org/GLM-4.7-FP8",
-      "framework": "sglang",
-      "precision": "FP8",
-      "tp": 8,
-      "conc": 64,
-      "registered": true,
-      "note": "FP8 compressed-tensors native. Added to make the daily fixed pool 10 models; follows the existing large-FP8-MoE sglang+tp8+conc64 pattern.",
-      "is_top": true
-    },
-    {
-      "pool_id": "inferencex-daily-fixed",
-      "pool_index": 8,
+      "pool_index": 6,
       "label": "Mixtral-8x7B-Instruct v0.1",
       "repo_id": "mistralai/Mixtral-8x7B-Instruct-v0.1",
       "framework": "vllm",
@@ -161,25 +97,11 @@
       "tp": 8,
       "conc": 64,
       "registered": false,
-      "note": "MixtralForCausalLM, 8 experts top-2 (~46.7B MoE), BF16 native (no quantization_config), 32k context. MI300X (gfx942) has no native FP4, so run dynamic FP8 (same large-MoE pattern as Qwen3.6). Single-node vLLM+tp8+conc64.",
       "is_top": true
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 9,
-      "label": "Gemma-4 26B-A4B it",
-      "repo_id": "google/gemma-4-26B-A4B-it",
-      "framework": "vllm",
-      "precision": "FP8",
-      "tp": 2,
-      "conc": 64,
-      "registered": false,
-      "note": "Gemma4ForConditionalGeneration — MULTIMODAL (vision+audio+text), MoE ~26B total / ~4B active, BF16 native (no quantization_config), 256k (262144) context. Stock vLLM/sglang builds do not serve gemma-4; framework=vllm with dedicated image harbor.core42.primus-safe.amd.com/sync/vllm-openai-rocm:gemma4 (auto-selected by optimize_submit for gemma-4 repos). MI300X has no native FP4 -> dynamic FP8. Gated google repo (needs HF_TOKEN with gemma access). CAVEAT: multimodal head + 256k KV cache may need higher tp / context limiting; verify it serves for text-gen before relying on results.",
-      "is_top": true
-    },
-    {
-      "pool_id": "inferencex-daily-fixed",
-      "pool_index": 10,
+      "pool_index": 7,
       "label": "Qwen3-14B FP8",
       "repo_id": "Qwen/Qwen3-14B-FP8",
       "framework": "vllm",
@@ -187,13 +109,12 @@
       "tp": 2,
       "conc": 64,
       "registered": false,
-      "note": "Dense ~14.8B (arch=Qwen3ForCausalLM, model_type=qwen3), FP8-native weights (F8_E4M3 block-quantized, ~203k dl, ungated). MI300X (gfx942) has no native FP4 so FP8 is the natural fit. 40 attention heads / 8 KV heads divide by tp2 cleanly (40/2=20, 8/2=4); small 14B dense model fits comfortably at tp2 (no need for the pool-default tp8). Single-node vLLM+tp2+conc64. Not pre-staged in core42-hyperloom yet (ungated -> SaFE register downloads on first run).",
       "is_top": true,
       "params_b": 15
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 11,
+      "pool_index": 8,
       "label": "Llama-2 7B",
       "repo_id": "NousResearch/Llama-2-7b-hf",
       "framework": "vllm",
@@ -201,13 +122,12 @@
       "tp": 1,
       "conc": 64,
       "registered": false,
-      "note": "Dense ~6.74B (arch=LlamaForCausalLM, model_type=llama), FP16/BF16 native (no quantization_config). Ungated mirror of meta-llama/Llama-2-7b-hf (identical 6.74B base weights, same param count) — chosen because the official repo is gated=manual and neither CI HF token can download it; the original 'meta-llama/Llama-2-7b' is also non-HF format (only consolidated .pth). MI300X has no native FP4 -> BF16. 32 heads / 32 KV (MHA). Small model -> tp1 (single GPU, most representative). Ungated -> SaFE register downloads on first run (no HF license needed); not pre-staged.",
       "is_top": true,
       "params_b": 7
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 12,
+      "pool_index": 9,
       "label": "Qwen3-0.6B",
       "repo_id": "Qwen/Qwen3-0.6B",
       "framework": "vllm",
@@ -215,13 +135,12 @@
       "tp": 1,
       "conc": 64,
       "registered": false,
-      "note": "Dense ~0.75B (arch=Qwen3ForCausalLM, model_type=qwen3), BF16 native (no quantization_config), ungated, ~27.8M dl. MI300X has no native FP4 -> BF16. 16 heads / 8 KV (GQA). Tiny model -> tp1 (single GPU). Not pre-staged (ungated -> SaFE register downloads on first run).",
       "is_top": true,
       "params_b": 1
     },
     {
       "pool_id": "inferencex-daily-fixed",
-      "pool_index": 13,
+      "pool_index": 10,
       "label": "Qwen3-8B",
       "repo_id": "Qwen/Qwen3-8B",
       "framework": "vllm",
@@ -229,7 +148,6 @@
       "tp": 1,
       "conc": 64,
       "registered": false,
-      "note": "Dense ~8.19B (arch=Qwen3ForCausalLM, model_type=qwen3), BF16 native (no quantization_config), ungated, ~13M dl. MI300X has no native FP4 -> BF16. 32 heads / 8 KV (GQA) divide by tp cleanly. Small model -> tp1 (single GPU). Not pre-staged (ungated -> SaFE register downloads on first run).",
       "is_top": true,
       "params_b": 8
     }
