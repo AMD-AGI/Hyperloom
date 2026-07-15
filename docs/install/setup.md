@@ -106,7 +106,8 @@ In `baremetal` mode, the packaged setup backend runs the bare-metal setup phases
 4. **Credentials**: validates and persists LLM configuration into `.env`.
 5. **Runtime install**: runs packaged `install.sh` to set up Magpie, InferenceX,
    TraceLens, GEAK, Ray, and other runtime dependencies.
-6. **Combined env**: writes `runtime/hyperloom.env.sh` and updates `.env`.
+6. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv
+   roots, etc.) into `.env`.
 7. **Verify**: runs `install.sh --check-only` and prints next steps.
 
 In `docker` mode, the setup skill only writes credentials and run mode to `.env`.

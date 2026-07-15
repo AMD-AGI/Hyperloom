@@ -144,6 +144,38 @@ def _load_dotenv_fallback() -> None:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
 
 
+def _prepend_path(var: str, entry: str) -> None:
+    """Prepend ``entry`` to a ``:``-separated env var, skipping if already leading."""
+    if not entry:
+        return
+    current = os.environ.get(var, "")
+    parts = [p for p in current.split(os.pathsep) if p]
+    if parts and parts[0] == entry:
+        return
+    parts = [entry] + [p for p in parts if p != entry]
+    os.environ[var] = os.pathsep.join(parts)
+
+
+def _derive_runtime_paths() -> None:
+    """Rebuild PATH / LD_LIBRARY_PATH from .env-loaded roots (replaces hyperloom.env.sh).
+
+    The bare-metal installer no longer writes a sourceable combined env; PATH-class
+    values are derived here from VIRTUAL_ENV / ROCM_PATH / VLLM_VENV_ROOT so the
+    single .env source stays authoritative. Order mirrors the former script:
+    venv, then ROCm, then the isolated vLLM venv (last prepended wins).
+    """
+    venv = os.environ.get("VIRTUAL_ENV", "")
+    if venv:
+        _prepend_path("PATH", str(Path(venv) / "bin"))
+    rocm = os.environ.get("ROCM_PATH", "")
+    if rocm:
+        _prepend_path("PATH", str(Path(rocm) / "bin"))
+        _prepend_path("LD_LIBRARY_PATH", str(Path(rocm) / "lib"))
+    vllm_root = os.environ.get("VLLM_VENV_ROOT", "")
+    if vllm_root:
+        _prepend_path("PATH", str(Path(vllm_root) / "bin"))
+
+
 _KERNEL_AGENT_PATH_VARS: tuple[str, ...] = ("TRACELENS_ROOT",)
 
 
@@ -708,6 +740,7 @@ def _preflight(
     provider_snapshot = {key: os.environ.get(key) for key in _PROVIDER_FALLBACK_KEYS}
     _load_dotenv_fallback()
     _load_kernel_agent_env_fallback()
+    _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
 
     # Fail fast on missing credentials after the fallback loaders, before any cycle-burning work.

@@ -41,7 +41,7 @@ def test_setup_cli_forwards_flags_and_workspace_env(tmp_path: Path, monkeypatch)
     ]
     env = seen["env"]
     assert env["REPO_ROOT"] == str(tmp_path)
-    assert env["HYPERLOOM_ENV_FILE"] == str(tmp_path / ".env")
+    assert "HYPERLOOM_ENV_FILE" not in env
     assert env["HYPERLOOM_SKILL_PATH"] == str(tmp_path / "SKILL.md")
 
 
@@ -69,7 +69,6 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("REPO_ROOT", "/stale/root")
-    monkeypatch.setenv("HYPERLOOM_ENV_FILE", "/stale/.env")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-anthropic-key")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: stale")
@@ -89,7 +88,7 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
     assert rc == 7
     env = seen["env"]
     assert env["REPO_ROOT"] == str(tmp_path)
-    assert env["HYPERLOOM_ENV_FILE"] == str(tmp_path / ".env")
+    assert "HYPERLOOM_ENV_FILE" not in env
     assert env["HYPERLOOM_SKILL_PATH"] == str(tmp_path / "SKILL.md")
     assert env["HYPERLOOM_SETUP_ENV_AUTHORITATIVE"] == "1"
     for key in (
@@ -115,7 +114,7 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
     )
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("read_dotenv_var() {")
-    end = script_text.index("\nwrite_combined_env() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
     credential_functions = script_text[start:end]
     dotenv = tmp_path / ".env"
     dotenv.write_text(

@@ -163,12 +163,9 @@ credentials are present.
 These are *not* secrets. You normally do not hand-export
 `INFERENCEX_PATH` or `TRACELENS_ROOT` — `install.sh` and its chained
 kernel-agent installer clone and pin the open-source checkouts when missing.
-Before launching optimization, source the generated env file:
-
-```bash
-export USER_DATA_PATH=/path/to/hyperloom-run   # optional; default /workspace/hyperloom
-source "$USER_DATA_PATH/runtime/hyperloom.env.sh"
-```
+Runtime paths are persisted into `.env` by the installer; the CLI preflight
+loads them and derives `PATH` / `LD_LIBRARY_PATH` from `ROCM_PATH` /
+`VIRTUAL_ENV` / `VLLM_VENV_ROOT` at launch, so no separate file needs sourcing.
 
 ### Workspace variables
 
