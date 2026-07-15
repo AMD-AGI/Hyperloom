@@ -403,7 +403,8 @@ def analyze(
     ``reason`` mirrors ``status`` with finer granularity:
     ``ok`` / ``model_mapping_miss`` / ``no_target_gpu_configured`` /
     ``unsupported_target_gpu`` / ``dimension_mismatch`` /
-    ``no_inferencex_data`` / ``fetch_error`` / ``no_valid_rows``.
+    ``precision_mismatch`` / ``no_inferencex_data`` / ``fetch_error`` /
+    ``no_valid_rows``.
 
     Args:
         session_dir: Session directory used to persist the resulting summary
@@ -482,6 +483,17 @@ def analyze(
         if not has_gpu:
             return _skip("no_match", "unsupported_target_gpu",
                          f"InferenceX has no {query.gpu!r} data for model={canonical_model!r}")
+        # GPU present but no comparable row. Distinguish a precision-only miss
+        # (same GPU/shape exists at a different precision) from a shape miss so
+        # the strict precision filter is observable rather than silent.
+        if query.precision:
+            shape_rows = find_reference_rows(
+                rows, hardware=query.gpu, isl=query.isl, osl=query.osl, precision="",
+            )
+            if shape_rows:
+                return _skip("no_match", "precision_mismatch",
+                             f"InferenceX has gpu={query.gpu} isl/osl={query.isl}/{query.osl} rows "
+                             f"but none at precision={query.precision}")
         return _skip("no_match", "dimension_mismatch",
                      f"no InferenceX row for gpu={query.gpu} isl/osl={query.isl}/{query.osl} "
                      f"precision={query.precision or '(any)'}")

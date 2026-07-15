@@ -102,8 +102,8 @@ class BaselineSummary:
           "status":        "ok" | "no_match" | "skipped",
           "reason":        "ok" | "model_mapping_miss" |
                            "no_target_gpu_configured" | "unsupported_target_gpu" |
-                           "dimension_mismatch" | "no_inferencex_data" |
-                           "fetch_error" | "no_valid_rows",
+                           "dimension_mismatch" | "precision_mismatch" |
+                           "no_inferencex_data" | "fetch_error" | "no_valid_rows",
           "warning":       "<human-readable note, empty when status=ok>",
           "source":        "https://inferencex.semianalysis.com/api/v1"
         }
