@@ -783,7 +783,8 @@ def inject_sglang_moe_runner_backend(
         return args
     if _SGLANG_MOE_RUNNER_BACKEND_RE.search(args):
         return args
-    from hyperloom.inference_optimizer.cli.model_gate import _model_is_moe, _resolve_amd_gpu_type
+    from hyperloom.inference_optimizer.cli.model_gate import _model_is_moe
+    from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
 
     if not _resolve_amd_gpu_type(gpu_type):
         return args

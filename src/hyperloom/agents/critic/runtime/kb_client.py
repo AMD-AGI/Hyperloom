@@ -276,7 +276,7 @@ class HTTPKBClient:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                     payload = resp.read().decode("utf-8") or "{}"
-                    body_obj = json.loads(payload) if payload else {}
+                    body_obj = json.loads(payload)
                     registry.counter(CRITIC_KB_WRITE_TOTAL).inc(
                         {
                             "endpoint": endpoint_label,
