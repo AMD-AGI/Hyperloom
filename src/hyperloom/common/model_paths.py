@@ -43,8 +43,16 @@ def resolve_local_model_dir(model: str | Path | None) -> Path | None:
     if not raw:
         return None
     p = Path(raw).expanduser()
-    if p.is_dir():
-        return p
+    # ``is_dir()`` can RAISE rather than return False when a parent is
+    # unreadable: pathlib only swallows ENOENT/ENOTDIR/EBADF/ELOOP, so EACCES --
+    # e.g. a non-root process stat-ing under ``/root/...`` -- propagates. Degrade
+    # to None here (this module's documented contract) so an inaccessible path
+    # can never crash the in-process model readers that call this resolver.
+    try:
+        if p.is_dir():
+            return p
+    except OSError:
+        return None
     # Repo id: reuse the engine's HF hub cache. Lazy import keeps this module
     # dependency-light -- a missing huggingface_hub just degrades to None.
     try:

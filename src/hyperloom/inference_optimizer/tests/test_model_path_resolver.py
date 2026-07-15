@@ -96,3 +96,40 @@ def test_load_model_config_dict_local_dir_unchanged(tmp_path):
     data = _load_model_config_dict(str(d))
     assert isinstance(data, dict)
     assert data.get("model_type") == "mixtral"
+
+
+def test_resolve_inaccessible_local_dir_degrades_to_none(monkeypatch):
+    """An unreadable parent makes ``Path.is_dir()`` RAISE, not return False.
+
+    ``pathlib`` only swallows ENOENT/ENOTDIR/EBADF/ELOOP, so EACCES -- e.g. a
+    non-root process stat-ing under ``/root/...`` -- propagates. The resolver
+    must degrade to ``None`` (its documented contract) instead of letting the
+    OSError escape into every in-process model reader that calls it.
+    """
+    target = "/root/quantization/google-gemma-4-26B-A4B-it/quantized"
+    real_is_dir = Path.is_dir
+
+    def _raising_is_dir(self):
+        if str(self) == target:
+            raise PermissionError(13, "Permission denied")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", _raising_is_dir)
+    assert resolve_local_model_dir(target) is None
+
+
+def test_load_model_config_dict_inaccessible_path_returns_none(monkeypatch):
+    """End-to-end: an inaccessible ``--model`` path must not crash the config
+    reader. With the resolver degrading to None, ``_load_model_config_dict``
+    falls back to the raw path and its ``read_text`` OSError guard yields None.
+    """
+    target = "/root/quantization/google-gemma-4-26B-A4B-it/quantized"
+    real_is_dir = Path.is_dir
+
+    def _raising_is_dir(self):
+        if str(self) == target:
+            raise PermissionError(13, "Permission denied")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", _raising_is_dir)
+    assert _load_model_config_dict(target) is None
