@@ -145,10 +145,22 @@ def _resolve_magpie_python() -> str:
         # the resolver skip such interpreters and fall through to the
         # canonical /opt/venv that has the full dependency set.
         try:
-            # ``run_with_session_kill`` captures stdout/stderr internally and
-            # rejects ``capture_output`` (would raise TypeError).
+            # Probe with ``importlib.util.find_spec`` rather than a bare
+            # ``import`` so a missing module returns a non-zero exit code
+            # WITHOUT the child emitting a ``ModuleNotFoundError`` traceback.
+            # ``run_with_session_kill`` mirrors child stderr to the parent
+            # stream, so a bare ``import Magpie`` on a candidate that lacks it
+            # would leak an alarming traceback into the run log even though the
+            # probe failing is an expected, benign step of interpreter
+            # resolution. ``find_spec`` still checks both Magpie and its
+            # top-level runtime dep ``yaml`` (see the note above).
             proc = run_with_session_kill(
-                [py, "-c", "import Magpie, yaml"],
+                [
+                    py,
+                    "-c",
+                    "import importlib.util as u, sys; "
+                    "sys.exit(0 if u.find_spec('Magpie') and u.find_spec('yaml') else 1)",
+                ],
                 timeout=10,
             )
             return getattr(proc, "returncode", 1) == 0
