@@ -96,31 +96,49 @@ benchmarks (and, when SSH/head is supplied, restarts + GPU-samples) an
 already-provisioned cluster. When both `SAFE_API_*` are present these external
 vars are ignored (normal SaFE flow).
 
-| Env var | Backend | Req? | Purpose |
-| --- | --- | --- | --- |
-| `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | HTTP frontend for benchmarks (-> `BENCHMARK_BASE_URL`); presence triggers external mode |
-| `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` / `_WORKER_IPS` | infera | infera | comma-separated GPU pod IPs (topology / PD / GPU sampling) |
-| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | infera | private key that can SSH into the pods (you supply it; no SaFE to inject one) |
-| `HYPERLOOM_MN_EXT_SSH_PORT` | infera | no | SSH base port (default 2233; decode is role-offset) |
-| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera | no | known_hosts path (else lax host-key check) |
-| `HYPERLOOM_MN_EXT_HEAD_IP` | rayjob | rayjob | Ray head pod IP -> Dashboard `:8265` (submit) + GCS `:6379` (derived) |
-| `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | no | Ray Dashboard auth token (only if the dashboard is authenticated) |
+**Common (both backends):**
 
-Reused as-is: `INFERENCE_OPTIMIZER_NODES`, `INFERENCE_OPTIMIZER_GPUS_PER_NODE`,
-`PD_MODE`, `INFERENCE_OPTIMIZER_MN_BACKEND`, `SAFE_WORKSPACE` (passthrough).
+| Env var | Req? | Purpose |
+| --- | --- | --- |
+| `HYPERLOOM_MN_EXT_SERVICE_URL` | **yes** | HTTP(S) frontend for benchmarks (-> `BENCHMARK_BASE_URL`); presence triggers external mode |
+
+**Infera backend (`--mn-backend infera`):**
+
+| Env var | Req? | Purpose |
+| --- | --- | --- |
+| `HYPERLOOM_MN_EXT_SSH_KEY` | **yes** | private key that can SSH into the pods (you supply it; no SaFE to inject one) |
+| `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` / `_WORKER_IPS` | **yes** (at least one) | comma-separated GPU pod IPs (topology / PD / GPU sampling). PD-disaggregated uses `_PREFILL_IPS` + `_DECODE_IPS`; aggregated uses `_WORKER_IPS` |
+| `HYPERLOOM_MN_EXT_SSH_PORT` | no | SSH base port (default 2233; decode is role-offset +10) |
+| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | no | known_hosts path (else lax host-key check) |
+
+**RayJob backend (`--mn-backend rayjob`):**
+
+| Env var | Req? | Purpose |
+| --- | --- | --- |
+| `HYPERLOOM_MN_EXT_HEAD_IP` | recommended | Ray head pod IP -> Dashboard `:8265` (job submit) + GCS `:6379` (derived `ray_address`). Enables per-round `restart-server` via Ray. Omit for **benchmark-only** (no restarts) |
+| `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | no | Ray Dashboard auth token (only if the dashboard is authenticated) |
+
+RayJob external does **not** use SSH; the infera `_SSH_*` / `*_IPS` vars are
+ignored for `--mn-backend rayjob`.
+
+**Companion vars (reused as-is, normally set by `optimize` from CLI flags):**
+`INFERENCE_OPTIMIZER_NODES`, `INFERENCE_OPTIMIZER_GPUS_PER_NODE`, `PD_MODE`,
+`PD_PREFILL_NODES` / `PD_DECODE_NODES` (inferred from IP-list length when unset),
+`INFERENCE_OPTIMIZER_MN_BACKEND`, `SAFE_WORKSPACE` (passthrough).
 
 Behavior:
 
 * **infera external REQUIRES SSH** (`_SSH_KEY` + at least one `*_IPS`); if missing
   the run **fails fast** (`sys.exit(2)`) rather than degrading. With SSH: full
   SSH restart + on-pod GPU sampling + pd/by-role telemetry, exactly like a
-  SaFE-created infera deployment.
-* **rayjob external** uses Ray via `_HEAD_IP` (not SSH). Without `_HEAD_IP` it is
-  benchmark-only (per-round restart no-ops); the SSH rule does not apply to it.
-* The SSH keypair is normally hyperloom-generated and its **public** key is
-  injected into the pods by SaFE at create time. With SaFE absent you must
-  pre-authorize your own key on the external pods and pass its private path via
-  `_SSH_KEY`.
+  SaFE-created infera deployment. The SSH keypair is normally hyperloom-generated
+  and its **public** key is injected into the pods by SaFE at create time; with
+  SaFE absent you pre-authorize your own key on the pods and pass its private path
+  via `_SSH_KEY`.
+* **rayjob external** uses Ray via `_HEAD_IP` (not SSH); Dashboard on `:8265`,
+  GCS on `:6379`. With `_HEAD_IP`: per-round `restart-server` via Ray job submit.
+  Without `_HEAD_IP`: **benchmark-only** (per-round restart no-ops). The infera
+  SSH rule does not apply.
 
 Example (SaFE assumed absent, infera PD-disaggregated):
 
@@ -132,6 +150,18 @@ export HYPERLOOM_MN_EXT_SSH_KEY=/path/to/id_ed25519
 export INFERENCE_OPTIMIZER_NODES=2 PD_MODE=disaggregated
 inference_optimizer optimize --model <path> --nodes 2 \
   --mn-backend infera --pd-mode disaggregated --tp 8 --ep 8 ...
+```
+
+Example (SaFE assumed absent, rayjob with per-round restart):
+
+```bash
+unset SAFE_API_URL SAFE_API_KEY
+export HYPERLOOM_MN_EXT_SERVICE_URL=http://<ray-serve-or-head-url>:<port>
+export HYPERLOOM_MN_EXT_HEAD_IP=<ray-head-ip>
+# optional: export HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN=<token>
+export INFERENCE_OPTIMIZER_NODES=2
+inference_optimizer optimize --model <path> --nodes 2 \
+  --mn-backend rayjob --tp 8 --ep 8 ...
 ```
 
 ## The Five Subcommands
