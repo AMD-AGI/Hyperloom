@@ -395,3 +395,83 @@ def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch) -> None:
         lambda _coro, _loop: (_ for _ in ()).throw(RuntimeError("closed")),
     )
     assert "could not schedule" in disp._run_action_now_sync("probe", {})
+
+
+def test_multi_node_state_paths_resolution_and_migration(monkeypatch, tmp_path) -> None:
+    from hyperloom.inference_optimizer.multi_node import state_paths
+    from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+
+    monkeypatch.delenv("MULTI_NODE_STATE_FILE", raising=False)
+    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
+    with pytest.raises(RuntimeError, match="cannot resolve"):
+        state_paths.resolve_state_file()
+
+    explicit = tmp_path / "explicit.json"
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(explicit))
+    assert state_paths.resolve_state_file() == explicit
+
+    monkeypatch.delenv("MULTI_NODE_STATE_FILE", raising=False)
+    session = tmp_path / "session"
+    monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, str(session))
+    assert state_paths.resolve_state_file() == session / "runtime" / "multi_node_state.json"
+
+    missing = tmp_path / "missing.json"
+    assert state_paths.state_file_safe_to_read(missing) is False
+    unsafe = tmp_path / "unsafe.json"
+    unsafe.write_text("{}", encoding="utf-8")
+    unsafe.chmod(0o666)
+    assert state_paths.state_file_safe_to_read(unsafe) is False
+    unsafe.chmod(0o600)
+    assert state_paths.state_file_safe_to_read(unsafe) is True
+
+    src = tmp_path / "source_state.json"
+    src.write_text('{"nodes": []}', encoding="utf-8")
+    src.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(src))
+    bound = state_paths.bind_state_file_to_session(session)
+    assert bound == session / "runtime" / "multi_node_state.json"
+    assert bound.read_text(encoding="utf-8") == '{"nodes": []}'
+    assert state_paths.resolve_state_file() == bound
+    assert bound.stat().st_mode & 0o777 == 0o600
+    assert bound.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_multi_node_state_paths_warn_on_permission_failures(monkeypatch, tmp_path) -> None:
+    from hyperloom.inference_optimizer.multi_node import state_paths
+
+    messages: list[str] = []
+    monkeypatch.setattr(state_paths, "warn", messages.append)
+
+    class _BadPath:
+        def chmod(self, _mode):
+            raise OSError("chmod denied")
+
+    state_paths._chmod_state_file(_BadPath())
+    assert "could not chmod state file" in messages[-1]
+
+    runtime_dir = tmp_path / "runtime"
+    original_chmod = type(runtime_dir).chmod
+
+    def _bad_chmod(self, mode):
+        if self == runtime_dir:
+            raise OSError("runtime chmod denied")
+        return original_chmod(self, mode)
+
+    monkeypatch.setattr(type(runtime_dir), "chmod", _bad_chmod)
+    state_paths._ensure_runtime_dir(runtime_dir)
+    assert runtime_dir.is_dir()
+    assert "could not chmod runtime dir" in messages[-1]
+
+
+def test_llm_prompt_parse_response_edges() -> None:
+    from hyperloom.inference_optimizer.breakdown.reporters.llm_prompt import parse_llm_response
+
+    fenced = """```json
+{"executive_summary": "  ok  ", "section_narratives": {"a": "  first  ", "2": "two"}}
+```"""
+    parsed = parse_llm_response(fenced)
+    assert parsed["executive_summary"] == "ok"
+    assert parsed["section_narratives"] == {"a": "first", "2": "two"}
+
+    assert parse_llm_response("not json") == {"executive_summary": "", "section_narratives": {}}
+    assert parse_llm_response("[]") == {"executive_summary": "", "section_narratives": {}}
