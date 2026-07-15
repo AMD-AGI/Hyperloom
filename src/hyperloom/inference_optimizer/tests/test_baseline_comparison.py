@@ -383,6 +383,44 @@ def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
     assert research_hints.load_competitor_target(tmp_path) is None
 
 
+def test_analyze_ok_write_failure_clears_stale_competitor_target(tmp_path, monkeypatch):
+    """When measured advisory write fails, any pre-existing competitor_target.json
+    must be removed so the EXPLORE gap block never reads a non-API source."""
+    from hyperloom.inference_optimizer.session import session_paths
+    from hyperloom.orchestrator.knowledge import research_hints
+
+    research_hints.write_competitor_target(
+        tmp_path,
+        {
+            "gpu": "b300",
+            "model": "MiniMax-M2.5",
+            "per_conc": [{"conc": 64, "tput_per_gpu": 12345.0, "source": "some blog"}],
+        },
+    )
+    assert session_paths.competitor_target_json(tmp_path).exists()
+
+    _patch_fetch_rows(monkeypatch, _make_rows())
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.research_hints.write_competitor_target",
+        lambda *_args, **_kwargs: False,
+    )
+
+    from hyperloom.inference_optimizer.baseline_comparison import analyze
+
+    summary = analyze(
+        session_dir=tmp_path,
+        model_path="MiniMax-M2.5",
+        compare_against_gpu="b300",
+        framework="vllm",
+        precision="fp8",
+        isl=1024,
+        osl=1024,
+    )
+    assert summary.status == "ok"
+    assert not session_paths.competitor_target_json(tmp_path).exists()
+    assert research_hints.load_competitor_target(tmp_path) is None
+
+
 def test_analyze_no_inferencex_data(tmp_path, monkeypatch):
     """Empty API result (``fetch_rows`` returns ``[]``) → ``no_inferencex_data``."""
     _patch_fetch_rows(monkeypatch, [])
