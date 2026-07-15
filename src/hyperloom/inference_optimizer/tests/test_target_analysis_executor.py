@@ -344,6 +344,36 @@ class TestExecutor:
         assert result["reason"] == "no_session_dir"
 
     @pytest.mark.asyncio
+    async def test_skipped_when_no_session_dir_clears_stale_competitor_target(
+        self, tmp_path, monkeypatch,
+    ):
+        from hyperloom.inference_optimizer.session import session_paths
+        from hyperloom.orchestrator.knowledge import research_hints
+
+        sd = tmp_path / "sess"
+        sd.mkdir()
+        research_hints.write_competitor_target(
+            sd,
+            {
+                "gpu": "b300",
+                "model": "MiniMax-M2.5",
+                "per_conc": [{"conc": 64, "tput_per_gpu": 999.0, "source": "scout"}],
+            },
+        )
+        assert session_paths.competitor_target_json(sd).exists()
+
+        ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
+        monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: None)
+        monkeypatch.setattr(
+            "hyperloom.inference_optimizer.session.paths.session_dir",
+            lambda: sd,
+        )
+        result = await ex(_unit_ctx())
+        assert result["reason"] == "no_session_dir"
+        assert not session_paths.competitor_target_json(sd).exists()
+        assert research_hints.load_competitor_target(sd) is None
+
+    @pytest.mark.asyncio
     async def test_writes_skipped_summary_when_no_gpu(self, tmp_path, monkeypatch):
         ex = ta.TargetAnalysisExecutor(compare_against_gpu="")
         monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: tmp_path)
