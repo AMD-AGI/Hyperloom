@@ -55,7 +55,7 @@ def _nfs_fallback_collect(
         int: Number of files copied.
     """
     current_session_hints = set(current_session_hints or set())
-    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    nfs_root = os.environ.get("NFS_ROOT", "/mnt/shared")
     model_basename = (rec.model or "").split("/")[-1]
     model_short = model_basename.lower().replace("-", "").replace("_", "").replace(".", "")
     if not model_short or not rec.task_id:
@@ -130,7 +130,7 @@ def _nfs_fallback_collect(
     if copied:
         return copied
 
-    # Stage B: /wekafs/users/<uid>/<session>/... matched by timestamp.
+    # Stage B: <shared-root>/users/<uid>/<session>/... matched by timestamp.
     users_root = f"{nfs_root}/users"
     if not os.path.isdir(users_root):
         return copied
@@ -235,7 +235,7 @@ def _nfs_fallback_collect(
                 )
                 _consider_result_file(ci_path, sess_path, 0)
 
-        # /wekafs/users/<uid>/<model-basename>/<ts>/: with no artifact hint,
+        # <shared-root>/users/<uid>/<model-basename>/<ts>/: with no artifact hint,
         # accept timestamp dirs under this user+model dir within the task window.
         if rec.safe_user_id and uid_dir == rec.safe_user_id:
             for model_dir_name in _candidate_model_dir_names(rec):
@@ -274,7 +274,7 @@ def _nfs_fallback_collect(
 
     if not candidates:
         log.info(
-            "[task %s] no /wekafs/users candidate matched model=%s (user_id=%s, hints=%s, task_window=%s)",
+            "[task %s] no shared users candidate matched model=%s (user_id=%s, hints=%s, task_window=%s)",
             rec.task_id,
             model_basename,
             rec.safe_user_id or "?",
