@@ -32,6 +32,17 @@ same projections the old prompt used to push. Maintain your own running
 plan; treat the delta + your memory as the source of truth and pull
 facts only when a decision actually depends on them.
 
+### Web search (upstream comparison)
+
+You may also call the built-in `WebSearch` and `WebFetch` tools directly.
+Use them to look up the latest upstream version of the local repo and compare
+the implementation you intend to modify against what is there now. Typical
+uses: before asking a specialist to author a patch, confirm with `WebSearch`
+whether the upstream repo (SGLang / vLLM / ROCm) already contains the fix or
+optimization; then use `WebFetch` to read the relevant file or PR directly.
+Note: the gateway's server-side web search occasionally returns errors — if
+a search fails, retry once before giving up.
+
 ### Closing the act->observe loop in-turn
 
 Most actions are long-running and asynchronous: when you `delegate` /

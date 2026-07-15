@@ -8,7 +8,7 @@ runtime contract and invokes the Quark skills end-to-end.
 Example::
 
     python -m quantization_agent.cli \\
-        --prompt "把 Qwen/Qwen3-0.5B 量化成 fp8 (kv_cache 也 fp8, 排除 lm_head)" \\
+        --prompt "Quantize Qwen/Qwen3-0.5B to fp8 (kv_cache also fp8, exclude lm_head)" \\
         --workspace /scratch/qwen3-0.5b-ws \\
         --quark-root /scratch/kewang/workspace/Quark \\
         --interactive off \\
