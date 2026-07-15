@@ -651,6 +651,8 @@ def test_allowed_tools_claude_returns_emit_intent(gate):
         assert name in orch
     assert "get_recent_outcomes" in orch
     assert "run_action_now" in orch
+    assert "WebSearch" in orch
+    assert "WebFetch" in orch
 
 
 def test_allowed_tools_codex_returns_empty(gate):

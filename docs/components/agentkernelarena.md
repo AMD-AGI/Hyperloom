@@ -22,7 +22,7 @@ loop. It is a companion evaluation harness for comparing Hyperloom's
 kernel-optimization agents against other AI coding agents on standardized GPU
 kernel tasks. Its task categories (`hip2hip`, `triton2triton`, `flydsl2flydsl`,
 and others) overlap with the kernel types that Hyperloom's kernel agent handles
-through GEAK and KernelForge, but Hyperloom does not clone or invoke
+through GEAK, but Hyperloom does not clone or invoke
 AgentKernelArena in the normal runtime path.
 
 ## AgentKernelArena Documentation

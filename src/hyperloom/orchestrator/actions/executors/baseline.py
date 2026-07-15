@@ -271,6 +271,29 @@ _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
 
 
+def _materialized_run_eval_disabled(config_path: Path) -> bool:
+    """Report whether lm-eval is disabled in the materialized benchmark config.
+
+    ``materialize_config_with_envs`` writes the effective ``RUN_EVAL`` (folded
+    from the base YAML ``benchmark.envs``, ``reference_envs``, ``extra_envs`` and
+    process ``$RUN_EVAL``, defaulting to "true") into ``benchmark.envs.RUN_EVAL``
+    -- the value the benchmark subprocess actually consumes. Reading it back is
+    the single source of truth for "did eval run this round", reusing the shared
+    ``_RUN_EVAL_FALSE_VALUES`` present-and-falsey semantics.
+
+    Args:
+        config_path (Path): The materialized benchmark YAML config path.
+
+    Returns:
+        bool: ``True`` when the config's ``RUN_EVAL`` is present and falsey.
+            A missing key reads as enabled (matches the materialize default).
+    """
+    cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
+    val = envs.get("RUN_EVAL")
+    return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
+
+
 def _should_establish_quality_ref(task_kind: str | None) -> bool:
     """Only a genuine ``baseline`` task may establish/overwrite the quality reference.
 
@@ -1241,6 +1264,17 @@ class BaselineExecutor:
             }
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
+        # Whether THIS run actually executes lm-eval, read back from the
+        # materialized config the subprocess consumes -- the single source of
+        # truth. ``materialize_config_with_envs`` folds RUN_EVAL from the base
+        # YAML ``benchmark.envs``, ``reference_envs``, ``extra_envs`` (incl. the
+        # eval-failure fallback / ``disable_run_eval`` force-off), and process
+        # ``$RUN_EVAL`` (defaulting to "true"), so deriving from ``extra_envs``
+        # alone would miss the other sources. Threaded into
+        # ``_run_single_benchmark`` so accuracy is parsed ONLY when eval ran --
+        # never salvaging a prior attempt's stale ``results*.json`` from the
+        # reused per-round slot.
+        run_eval_disabled = _materialized_run_eval_disabled(materialized_config_path)
         hook_result = self._after_materialize_config(config_path, output_dir)
         if hook_result is not None:
             hook_result.setdefault("materialized_config", str(config_path))
@@ -1270,6 +1304,7 @@ class BaselineExecutor:
             "effective_extra_server_args": effective_extra_server_args,
             "params": params,
             "ctx": ctx,
+            "run_eval_disabled": run_eval_disabled,
         }
 
         if not double_run:
@@ -1601,6 +1636,7 @@ class BaselineExecutor:
         effective_extra_server_args: str,
         params: dict[str, Any],
         ctx: RunnerContext,
+        run_eval_disabled: bool = False,
     ) -> dict[str, Any]:
         """Run one Magpie benchmark subprocess and parse its result.
 
@@ -1623,6 +1659,13 @@ class BaselineExecutor:
             params: Task params for this launch.
             ctx: Runner context carrying ``extra`` (e.g. multi-node round
                 state).
+            run_eval_disabled: When True, this run did not execute the serving
+                lm-eval (RUN_EVAL forced off via the eval-failure fallback,
+                ``disable_run_eval``, or a present-and-falsey ``extra_envs``
+                RUN_EVAL), so the serving GSM8K parse is skipped to avoid reading
+                a prior attempt's stale ``results*.json`` from the reused slot.
+                Scriptable frameworks are unaffected: RUN_EVAL does not gate
+                their per-run image ``quality_gate``, which is still parsed.
 
         Returns:
             A result dict: ``status="succeeded"`` with measurements on
@@ -1647,6 +1690,12 @@ class BaselineExecutor:
         # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts
         # that ignore it are caught by the salvage pass.
         env["RESULT_DIR"] = override_result_dir or str(output_dir)
+        # InferenceX ``run_lm_eval`` reads ``$EVAL_RESULT_DIR`` for lm-eval's
+        # ``--output_path``; unset it defaults to ``/tmp/eval_out-*`` and the
+        # ``results*.json`` never reach the task workspace, so the accuracy gate
+        # finds no baseline. Mirror it to ``$RESULT_DIR`` so eval artifacts land
+        # under ``output_dir`` (a sibling of the Magpie ``benchmark_*`` dir).
+        env["EVAL_RESULT_DIR"] = env["RESULT_DIR"]
         # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the
         # task workspace; ``harvest_leaked_artifacts`` is the defense-in-depth net.
         env["SERVER_LOG"] = str(output_dir / "server.log")
@@ -2013,20 +2062,45 @@ class BaselineExecutor:
         # Parse accuracy eval results (GSM8K for serving, or the image-quality
         # gate for scriptable frameworks). Pass the framework so scriptable runs
         # fail closed on a missing quality gate instead of falling back to GSM8K.
-        from ._accuracy_gate import parse_eval_results
-
         eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
-        eval_data = parse_eval_results(workspace, framework=eval_framework)
-        if eval_data.get("accuracy") is not None:
-            result["accuracy"] = eval_data["accuracy"]
-            result["accuracy_task"] = eval_data.get("task", "gsm8k")
-            result["accuracy_metric"] = eval_data.get("metric", "")
-            result["accuracy_source"] = eval_data.get("source_file", "")
-            log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
-        else:
-            log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))
-
         from hyperloom.inference_optimizer import framework_registry
+
+        # RUN_EVAL gates ONLY the serving lm-eval GSM8K run. Scriptable (xDiT)
+        # workloads carry no lm-eval; their sole correctness signal is the image
+        # ``quality_gate`` embedded in ``benchmark_report.json``, which the bench
+        # script writes every run and ``parse_quality_gate`` resolves by newest
+        # mtime -- so there is no stale-artifact risk to guard against. The skip
+        # below therefore applies to serving only, never dropping a scriptable
+        # gate (which would leave baseline_accuracy=0 -> throughput-only KEEP).
+        eval_scriptable = framework_registry.is_scriptable(eval_framework)
+        if run_eval_disabled and not eval_scriptable:
+            # Serving RUN_EVAL was off this run (eval-failure fallback or
+            # ``disable_run_eval``), so lm-eval did not execute and there is no
+            # fresh accuracy to read. Do NOT parse: the eval-failure retry reuses
+            # ``output_dir``, so the slot may still hold a prior attempt's
+            # ``results*.json`` and reading it would promote a stale score into
+            # baseline_accuracy. Reading eval output strictly follows running eval.
+            log.info(
+                "baseline_executor: RUN_EVAL disabled this run (serving); skipping "
+                "accuracy parse (no lm-eval executed)"
+            )
+        else:
+            from ._accuracy_gate import parse_eval_results
+
+            # lm-eval writes ``results*.json`` under ``$EVAL_RESULT_DIR`` (== the
+            # ``RESULT_DIR`` set above), a sibling of (not inside) the Magpie
+            # ``benchmark_*`` workspace. Search from that root so the recursive
+            # ``**/results*.json`` glob finds it.
+            eval_search_root = Path(env["EVAL_RESULT_DIR"])
+            eval_data = parse_eval_results(eval_search_root, framework=eval_framework)
+            if eval_data.get("accuracy") is not None:
+                result["accuracy"] = eval_data["accuracy"]
+                result["accuracy_task"] = eval_data.get("task", "gsm8k")
+                result["accuracy_metric"] = eval_data.get("metric", "")
+                result["accuracy_source"] = eval_data.get("source_file", "")
+                log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
+            else:
+                log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))
 
         log.info(
             "baseline_executor: %s %s (output) e2el=%.1fms",

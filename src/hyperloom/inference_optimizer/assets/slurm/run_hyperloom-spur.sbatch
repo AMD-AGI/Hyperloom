@@ -10,7 +10,7 @@
 #   - the python backend uses the codex kernel-agent conversation backend
 #     (--kernel-codex, driven by CODEX_MODEL) instead of --kernel-claude.
 #
-# Carriers (BACKEND): python runs `inference_optimizer optimize` directly;
+# Carriers (BACKEND): python runs `python -m hyperloom.inference_optimizer.cli optimize` directly;
 # claude / codex are outer CLI carriers that load SKILL.md and drive the same
 # optimize command agentically (claude = Claude Code CLI, codex = OpenAI
 # `codex exec`). Both carriers default KERNEL_OPT_BACKEND_ORDER=geak.

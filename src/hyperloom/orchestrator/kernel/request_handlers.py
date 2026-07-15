@@ -231,8 +231,9 @@ def _reusable_source_roots() -> tuple[str, ...]:
 
 
 _APPLY_TOOL_MODULE: Any | None = None
-# Per-kernel fallback ladder (forge only); the phase-level default is the GEAK delegate.
-_DEFAULT_KERNEL_BACKEND_ORDER = ("forge",)
+# forge is the only per-kernel backend. The default phase-level backend is the
+# whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
+# KERNEL_OPT_BACKEND_ORDER=forge.
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
@@ -3093,6 +3094,11 @@ def _backend_order(payload: dict) -> list[str]:
     Returns:
         list[str]: The filtered, ordered backend names (subset of
             ``{"forge"}``).
+
+    Raises:
+        ValueError: When the requested order contains only removed out-of-band
+            backends (``claude``/``codex``/``cursor``), instead of silently
+            substituting forge.
     """
     order = _raw_kernel_backend_order(payload)
     # `forge` is the only per-kernel backend; bare ``geak`` is a phase-level delegate.
@@ -3100,9 +3106,19 @@ def _backend_order(payload: dict) -> list[str]:
     filtered = [backend for backend in order if backend in allowed]
     if filtered:
         return filtered
+    # The out-of-band backends (claude/codex/cursor) have been removed. Fail
+    # loudly instead of silently substituting forge, so a caller that explicitly
+    # requested a removed backend gets an actionable error rather than an
+    # unexpected forge run (which would then depend on the private KernelForge).
     removed_oob = {"claude", "codex", "cursor"}
-    if any(backend in removed_oob for backend in order):
-        return list(_DEFAULT_KERNEL_BACKEND_ORDER)
+    requested_removed = sorted({backend for backend in order if backend in removed_oob})
+    if requested_removed:
+        raise ValueError(
+            "kernel backend(s) no longer available: "
+            + ", ".join(requested_removed)
+            + ". Set KERNEL_OPT_BACKEND_ORDER to 'forge' (per-kernel) or "
+            "'geak' (whole-phase)."
+        )
     return []
 
 
