@@ -40,7 +40,7 @@ def coord(session_dir) -> Coordinator:
 
 # -- WS1: explicit specialist wall-clock budget ----------------------------
 def test_specialist_wall_budget_base_no_macro_cycle(coord: Coordinator) -> None:
-    # ≤24h runs keep macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
+    # <24h runs keep macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
     coord.shared_state.macro_cycle = 0
     assert coord._specialist_wall_budget_sec(needs_gpu=False) == 10 * 60
     assert coord._specialist_wall_budget_sec(needs_gpu=True) == 60 * 60

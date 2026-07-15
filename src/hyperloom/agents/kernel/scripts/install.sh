@@ -288,6 +288,23 @@ upsert_dotenv_var() {
   mv "$tmp" "$DOTENV"
   chmod 600 "$DOTENV" 2>/dev/null || true
 }
+
+remove_dotenv_var() {
+  local key="$1" tmp line stripped
+  [ -n "$key" ] || return 0
+  [ -f "$DOTENV" ] || return 0
+  tmp="$(mktemp)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    stripped="${stripped#export }"
+    case "$stripped" in
+      "${key}="*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" ;;
+    esac
+  done < "$DOTENV"
+  mv "$tmp" "$DOTENV"
+  chmod 600 "$DOTENV" 2>/dev/null || true
+}
 # In --check-only mode, downgrade post-install verification failures to a
 # warning so report_status can still enumerate what's missing. The caller
 # explicitly asked us NOT to install; failing on the first missing piece
@@ -833,28 +850,21 @@ write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
-  local _openai_url="${_OPENAI_BASE_URL_VAL:-${_ANTHROPIC_BASE_URL_VAL:-${LLM_API_BASE:-${GEAK_BASE_URL_VAL:-}}}}"
-  local _gateway_key="${_OPENAI_KEY_VAL:-${_ANTHROPIC_KEY_VAL:-${GEAK_API_KEY_VAL:-${LLM_GATEWAY_KEY:-${LLM_API_KEY:-}}}}}"
-  # Warn loudly if no gateway URL is resolved — kernel-agent env would silently
-  # lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL and CLIs would resort to whatever
-  # was in the operator's shell rc, defeating the point of this file.
-  if [ -z "${_openai_url:-}" ]; then
+  # Strict per-provider separation: the OpenAI side uses ONLY OpenAI-side
+  # values and the Anthropic side uses ONLY Anthropic-side values. Gateway
+  # aliases (SAFE_API_KEY / LLM_GATEWAY_KEY / GEAK_*) are never fanned out to a
+  # provider slot, so an Anthropic-only setup never grows OpenAI creds (and
+  # vice versa).
+  local _openai_url="${_OPENAI_BASE_URL_VAL:-}"
+  local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-}"
+  local _openai_key="${_OPENAI_KEY_VAL:-}"
+  local _anthropic_key="${_ANTHROPIC_KEY_VAL:-}"
+  # Warn loudly if neither provider URL is resolved — kernel-agent env would
+  # silently lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL and CLIs would resort to
+  # whatever was in the operator's shell rc, defeating the point of this file.
+  if [ -z "${_openai_url:-}" ] && [ -z "${_anthropic_url:-}" ]; then
     warn "LLM gateway URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
   fi
-  # Anthropic base URL: keep an explicit split-provider value as-is; only
-  # derive from the OpenAI-style upstream (strip trailing /v1, the Anthropic
-  # SDK re-appends it) when no Anthropic endpoint was configured.
-  local _anthropic_url=""
-  if [ -n "${_ANTHROPIC_BASE_URL_VAL:-}" ]; then
-    _anthropic_url="${_ANTHROPIC_BASE_URL_VAL}"
-  elif [ -n "${_openai_url:-}" ]; then
-    _anthropic_url="${_openai_url%/}"
-    _anthropic_url="${_anthropic_url%/v1}"
-  fi
-  # Per-side keys: a split deploy writes each provider its own key; a single
-  # gateway resolves both to the same key.
-  local _anthropic_key="${_ANTHROPIC_KEY_VAL:-${_gateway_key}}"
-  local _openai_key="${_OPENAI_KEY_VAL:-${_gateway_key}}"
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
   {
@@ -869,21 +879,14 @@ write_env_file() {
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
+    # Strict per-provider separation: write ONLY each provider's own canonical
+    # base URL + API key. No cross-provider fallback and no gateway aliases
+    # (SAFE_API_KEY / AMD_LLM_API_KEY / LLM_GATEWAY_KEY / ANTHROPIC_AUTH_TOKEN)
+    # so an Anthropic-only setup never emits OpenAI creds (and vice versa).
     [ -n "${_anthropic_url}" ] && echo "export ANTHROPIC_BASE_URL='${_anthropic_url}'"
     [ -n "${_openai_url:-}" ] && echo "export OPENAI_BASE_URL='${_openai_url}'"
-    # Anthropic-side and OpenAI-side keys are written independently so a split
-    # deploy (e.g. DeepSeek Anthropic API + native OpenAI) does not cross-send
-    # the wrong provider's key. Gateway aliases keep the single-gateway key.
-    [ -n "${_anthropic_key}" ] && {
-      echo "export ANTHROPIC_API_KEY='${_anthropic_key}'"
-      echo "export ANTHROPIC_AUTH_TOKEN='${_anthropic_key}'"
-    }
+    [ -n "${_anthropic_key}" ] && echo "export ANTHROPIC_API_KEY='${_anthropic_key}'"
     [ -n "${_openai_key}" ] && echo "export OPENAI_API_KEY='${_openai_key}'"
-    [ -n "${_gateway_key}" ] && {
-      echo "export SAFE_API_KEY='${_gateway_key}'"
-      echo "export AMD_LLM_API_KEY='${_gateway_key}'"
-      echo "export LLM_GATEWAY_KEY='${_gateway_key}'"
-    }
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup inference_optimizer optimize →
@@ -910,8 +913,9 @@ write_env_file() {
     # e2e optimizer budget mode (read by the inference_optimizer kernel request
     # handler to pick the backend budget default) + LLM connection for the runner.
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
-    [ -n "${GEAK_API_KEY_VAL}" ] && echo "export GEAK_API_KEY='${GEAK_API_KEY_VAL}'"
-    [ -n "${GEAK_BASE_URL_VAL}" ] && echo "export GEAK_BASE_URL='${GEAK_BASE_URL_VAL}'"
+    # GEAK_API_KEY / GEAK_BASE_URL are intentionally NOT emitted: they derive
+    # from the OpenAI/Anthropic/gateway values and would reintroduce
+    # cross-provider leakage into the sourced runtime env.
     # GEAK scoring / profiler / shape knobs. These are read by GEAK itself (the
     # Ray actor), but the optimize CLI sources THIS file and its env replaces the
     # launcher's exports -- so any knob not persisted here is silently dropped
@@ -936,16 +940,33 @@ write_env_file() {
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
   [ -n "${INFERENCEX_PATH:-}" ] && upsert_dotenv_var INFERENCEX_PATH "$INFERENCEX_PATH"
-  [ -n "${_anthropic_url}" ] && upsert_dotenv_var ANTHROPIC_BASE_URL "$_anthropic_url"
-  [ -n "${_openai_url:-}" ] && upsert_dotenv_var OPENAI_BASE_URL "$_openai_url"
-  [ -n "${_anthropic_key}" ] && upsert_dotenv_var ANTHROPIC_API_KEY "$_anthropic_key"
-  [ -n "${_anthropic_key}" ] && upsert_dotenv_var ANTHROPIC_AUTH_TOKEN "$_anthropic_key"
-  [ -n "${_openai_key}" ] && upsert_dotenv_var OPENAI_API_KEY "$_openai_key"
-  if [ -n "${_gateway_key}" ]; then
-    upsert_dotenv_var SAFE_API_KEY "$_gateway_key"
-    upsert_dotenv_var AMD_LLM_API_KEY "$_gateway_key"
-    upsert_dotenv_var LLM_GATEWAY_KEY "$_gateway_key"
+  # Persist each provider's own canonical vars (write when present, clear when
+  # absent) so an operator's .env creds survive a re-install. Never cross-write
+  # and never persist gateway aliases, so the two providers stay separated.
+  if [ -n "${_anthropic_url}" ]; then
+    upsert_dotenv_var ANTHROPIC_BASE_URL "$_anthropic_url"
+  else
+    remove_dotenv_var ANTHROPIC_BASE_URL
   fi
+  if [ -n "${_anthropic_key}" ]; then
+    upsert_dotenv_var ANTHROPIC_API_KEY "$_anthropic_key"
+  else
+    remove_dotenv_var ANTHROPIC_API_KEY
+  fi
+  if [ -n "${_openai_url}" ]; then
+    upsert_dotenv_var OPENAI_BASE_URL "$_openai_url"
+  else
+    remove_dotenv_var OPENAI_BASE_URL
+  fi
+  if [ -n "${_openai_key}" ]; then
+    upsert_dotenv_var OPENAI_API_KEY "$_openai_key"
+  else
+    remove_dotenv_var OPENAI_API_KEY
+  fi
+  remove_dotenv_var ANTHROPIC_AUTH_TOKEN
+  remove_dotenv_var SAFE_API_KEY
+  remove_dotenv_var AMD_LLM_API_KEY
+  remove_dotenv_var LLM_GATEWAY_KEY
   [ -n "${TRACELENS_ROOT:-}" ] && upsert_dotenv_var TRACELENS_ROOT "$TRACELENS_ROOT"
   if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
     upsert_dotenv_var TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
@@ -956,8 +977,8 @@ write_env_file() {
   [ -n "${GEAK_ROOT}" ] && upsert_dotenv_var GEAK_ROOT "$GEAK_ROOT"
   [ -n "${_geak_claude_bin}" ] && upsert_dotenv_var GEAK_CLAUDE_BIN "$_geak_claude_bin"
   [ -n "${GEAK_RUN_MODE_VAL}" ] && upsert_dotenv_var GEAK_RUN_MODE "$GEAK_RUN_MODE_VAL"
-  [ -n "${GEAK_API_KEY_VAL}" ] && upsert_dotenv_var GEAK_API_KEY "$GEAK_API_KEY_VAL"
-  [ -n "${GEAK_BASE_URL_VAL}" ] && upsert_dotenv_var GEAK_BASE_URL "$GEAK_BASE_URL_VAL"
+  remove_dotenv_var GEAK_API_KEY
+  remove_dotenv_var GEAK_BASE_URL
   [ -n "${GEAK_SCORE_TARGET:-}" ] && upsert_dotenv_var GEAK_SCORE_TARGET "$GEAK_SCORE_TARGET"
   [ -n "${GEAK_SKIP_PROFILE:-}" ] && upsert_dotenv_var GEAK_SKIP_PROFILE "$GEAK_SKIP_PROFILE"
   [ -n "${GEAK_MAX_BENCHMARK_SHAPES:-}" ] && upsert_dotenv_var GEAK_MAX_BENCHMARK_SHAPES "$GEAK_MAX_BENCHMARK_SHAPES"
@@ -1051,11 +1072,14 @@ ensure_forge_claude_cli() {
     run npm config set prefix /usr/local
     run npm install -g @anthropic-ai/claude-code
   fi
-  # ~/.claude auth from existing provider / GEAK gateway env so the fellow authenticates.
-  local _claude_key="${_ANTHROPIC_KEY_VAL:-${SAFE_API_KEY:-${GEAK_API_KEY_VAL:-${_OPENAI_KEY_VAL:-}}}}"
+  # ~/.claude authenticates the Claude Code CLI (Anthropic-side). Keep the
+  # gateway fallbacks (SAFE_API_KEY / GEAK_*) but never fall back to the
+  # OpenAI-side key/URL, so an OpenAI-only setup does not leak OpenAI creds
+  # into the Claude config.
+  local _claude_key="${_ANTHROPIC_KEY_VAL:-${SAFE_API_KEY:-${GEAK_API_KEY_VAL:-}}}"
   if [ -n "$_claude_key" ]; then
     mkdir -p /root/.claude
-    local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-${GEAK_BASE_URL_VAL:-${_OPENAI_BASE_URL_VAL:-}}}"
+    local _anthropic_url="${_ANTHROPIC_BASE_URL_VAL:-${GEAK_BASE_URL_VAL:-}}"
     _anthropic_url="${_anthropic_url%/}"
     _anthropic_url="${_anthropic_url%/v1}"
     cat > /root/.claude/config.json <<EOF
@@ -1068,7 +1092,7 @@ ensure_forge_claude_cli() {
 EOF
     chmod 600 /root/.claude/config.json
   else
-    warn "gateway API key not set; ~/.claude/config.json not written (forge fellow auth may fail)"
+    warn "Anthropic-side key not set; ~/.claude/config.json not written (forge fellow auth may fail for OpenAI-only setups)"
   fi
 }
 
