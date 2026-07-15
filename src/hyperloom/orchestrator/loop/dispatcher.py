@@ -871,9 +871,10 @@ class DispatcherCollaborator:
         if reg is None:
             return frozenset()
         executors = getattr(self.sub, "executor_registry", {}) or {}
-        names_fn = getattr(reg, "names", None)
+        all_fn = getattr(reg, "all", None)
         try:
-            names = list(names_fn()) if callable(names_fn) else []
+            metadata = list(all_fn()) if callable(all_fn) else []
+            names = [str(getattr(meta, "name", "") or "") for meta in metadata]
         except Exception:  # noqa: BLE001 — defensive
             names = []
         allowed: set[str] = set()
