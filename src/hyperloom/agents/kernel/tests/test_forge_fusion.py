@@ -11,12 +11,31 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "tools" / "forge_fusion.py"
 _SPEC = importlib.util.spec_from_file_location("forge_fusion_tool", _MODULE_PATH)
 assert _SPEC and _SPEC.loader
 forge_fusion = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(forge_fusion)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_environ():
+    """Restore ``os.environ`` after every test.
+
+    ``_inject_author_gateway_env`` (exercised directly and via ``main``) mutates
+    ``os.environ`` in place by design. ``monkeypatch`` does not revert keys the
+    function writes directly, so without this snapshot the leaked ``ANTHROPIC_*``
+    / stability vars pollute later auth/endpoint tests in a full-suite run.
+    """
+    saved = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 def _payload(output_dir: Path) -> dict:
@@ -151,3 +170,26 @@ def test_main_timeout_emits_revert_result(tmp_path, monkeypatch, capsys):
     assert result["kept"] is False
     assert result["requires_e2e_validation"] is False
     assert json.loads((output_dir / "result.json").read_text(encoding="utf-8")) == result
+
+
+def test_run_with_tree_timeout_captures_output():
+    cp = forge_fusion._run_with_tree_timeout(
+        [
+            forge_fusion.sys.executable,
+            "-c",
+            "import sys; print('hi'); sys.stderr.write('err')",
+        ],
+        timeout_sec=30,
+    )
+
+    assert cp.returncode == 0
+    assert "hi" in (cp.stdout or "")
+    assert "err" in (cp.stderr or "")
+
+
+def test_run_with_tree_timeout_reaps_on_timeout():
+    with pytest.raises(subprocess.TimeoutExpired):
+        forge_fusion._run_with_tree_timeout(
+            [forge_fusion.sys.executable, "-c", "import time; time.sleep(30)"],
+            timeout_sec=1,
+        )
