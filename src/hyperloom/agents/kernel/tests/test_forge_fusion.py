@@ -514,3 +514,41 @@ def test_terminate_process_tree_handles_getpgid_oserror(monkeypatch):
 
     forge_fusion._terminate_process_tree(FakeProc())
     assert terminated == [True]
+
+
+def test_as_text_decodes_bytes():
+    assert forge_fusion._as_text(b"abc") == "abc"
+
+
+def test_relay_streams_writes_stdout_and_stderr(capsys):
+    forge_fusion._relay_streams("hello", "err")
+    captured = capsys.readouterr()
+    assert captured.out == "hello"
+    assert captured.err == "err"
+
+
+def test_git_toplevel_handles_subprocess_error(monkeypatch):
+    def fake_run(*_args, **_kwargs):
+        raise forge_fusion.subprocess.SubprocessError("boom")
+
+    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
+    assert forge_fusion._git_toplevel("/x") == ""
+
+
+def test_as_text_decodes_bytes():
+    assert forge_fusion._as_text(b"abc") == "abc"
+
+
+def test_relay_streams_writes_stdout_and_stderr(capsys):
+    forge_fusion._relay_streams("hello", "err")
+    captured = capsys.readouterr()
+    assert captured.out == "hello"
+    assert captured.err == "err"
+
+
+def test_git_toplevel_handles_subprocess_error(monkeypatch):
+    def fake_run(*_args, **_kwargs):
+        raise forge_fusion.subprocess.SubprocessError("boom")
+
+    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
+    assert forge_fusion._git_toplevel("/x") == ""
