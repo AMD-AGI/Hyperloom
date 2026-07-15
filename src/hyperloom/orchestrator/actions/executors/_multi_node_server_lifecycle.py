@@ -209,6 +209,17 @@ def _resolve_pd_args(
 
     pn = _intf(pd_prefill_nodes, "last_restart_pd_prefill_nodes", "PD_PREFILL_NODES")
     dn = _intf(pd_decode_nodes, "last_restart_pd_decode_nodes", "PD_DECODE_NODES")
+    # Resume fallback: the restart path launches with ``pn or len(pods)`` but
+    # persists the raw arg (often 0), so a --resume that also lost the
+    # ``$PD_*_NODES`` env would leave pn/dn at 0 and wrongly fail the
+    # disaggregated gate below (e.g. auto-roofline after resume). Recover the
+    # group sizes from the discovered per-role pod lists that create-infera
+    # persisted (``prefill_pod_ips`` / ``decode_pod_ips``), which are the
+    # authoritative pod counts for the running deployment.
+    if pn <= 0:
+        pn = len(state.get("prefill_pod_ips") or state.get("prefill_pods") or [])
+    if dn <= 0:
+        dn = len(state.get("decode_pod_ips") or state.get("decode_pods") or [])
     ptp = _intf(pd_prefill_tp, "last_restart_pd_prefill_tp", "PD_PREFILL_TP") or tp_int
     dtp = _intf(pd_decode_tp, "last_restart_pd_decode_tp", "PD_DECODE_TP") or tp_int
     tb = (
@@ -430,7 +441,10 @@ async def restart_server_for_round(
 
     # External mode without SSH control: no SaFE-managed pods to restart --
     # the benchmark runs against the already-running server. No-op.
-    from ._multi_node_env import external_service_url, external_has_server_control
+    from hyperloom.inference_optimizer.multi_node._internal.external_state import (
+        external_has_server_control,
+        external_service_url,
+    )
     if external_service_url() and not external_has_server_control():
         log.info(
             "restart_server_for_round: external service URL (benchmark-only, "
@@ -965,6 +979,16 @@ def _worker_startup_crashed(shared_dir: str, ip: str) -> str | None:
         r"[A-Za-z0-9_./-]*: error: .*",  # argparse "<prog>: error: ..."
         r"error: the following arguments are required:.*",
         r"error: argument .*",
+        # Worker subprocess died BEFORE ever reporting ready -- SIGKILL/OOM
+        # (exit code -9), non-zero exit, or an explicit early-exit RuntimeError
+        # (e.g. ``sglang subprocess exited with code -9 before reporting
+        # ready``). /health will never come up for a dead engine, so fast-fail
+        # instead of burning the (aiter-widened) health gate. A too-high
+        # --mem-fraction-static variant is the common OOM trigger.
+        r".*exited with code -?\d+ before reporting ready.*",
+        r".*(sglang|engine|worker) (sub)?process exited with code -?\d+.*",
+        r"(?i).*(cuda|hip|rocm|torch)[^\n]{0,40}out of memory.*",
+        r"(?i).*torch\.OutOfMemoryError.*",
     )
     for pat in patterns:
         m = _re.search(pat, tail)
