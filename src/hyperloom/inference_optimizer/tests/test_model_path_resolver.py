@@ -42,6 +42,18 @@ def test_resolve_existing_dir_returned_as_is(tmp_path):
     assert resolve_local_model_dir(d) == d
 
 
+def test_resolve_permission_error_degrades_to_none(monkeypatch):
+    # A path that raises PermissionError on stat (e.g. in CI sandbox) must
+    # degrade gracefully to None rather than propagating the exception.
+    from unittest.mock import patch
+    from pathlib import Path
+
+    with patch.object(Path, "is_dir", side_effect=PermissionError("denied")):
+        # huggingface_hub not available -> final result is None, not an exception.
+        monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+        assert resolve_local_model_dir("/root/quantization/some-model/quantized") is None
+
+
 def test_resolve_repo_id_uncached_returns_none(monkeypatch):
     # huggingface_hub missing (or a cache miss) -> graceful None. Forcing the
     # module to None in sys.modules makes the import raise deterministically.
