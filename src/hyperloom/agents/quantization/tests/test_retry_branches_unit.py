@@ -12,7 +12,7 @@ from hyperloom.agents.quantization.driver.outcomes import ASK_RETRYABLE, Outcome
 
 def test_read_counter_corrupt_file(tmp_path: Path) -> None:
     (tmp_path / retry._COUNTER_FILE).write_text("not-an-int", encoding="utf-8")
-    # ValueError swallowed -> 0 (lines 100-101).
+    # ValueError swallowed -> 0.
     assert retry._read_counter(tmp_path) == 0
 
 
@@ -20,7 +20,7 @@ def test_resolve_interactive_explicit_and_error(monkeypatch) -> None:
     assert retry._resolve_interactive(True) is True
     assert retry._resolve_interactive(False) is False
 
-    # isatty raising -> auto-detect returns False (lines 140-141).
+    # isatty raising -> auto-detect returns False.
     def _boom():
         raise OSError("no tty")
 
@@ -29,11 +29,10 @@ def test_resolve_interactive_explicit_and_error(monkeypatch) -> None:
 
 
 def test_ask_operator_yes_and_eof(monkeypatch) -> None:
-    # Affirmative answer.
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(readline=lambda: "yes\n"))
     assert retry._ask_operator("ok?") is True
 
-    # EOF / interrupt -> False (lines 154-159).
+    # EOF / interrupt -> False.
     def _raise():
         raise EOFError
 
@@ -54,7 +53,7 @@ def test_decide_next_step_operator_declines_retry(tmp_path, monkeypatch) -> None
         max_requantize_attempts=3,
         counter=0,
     )
-    # Operator declined -> no retry (line 270).
+    # Operator declined -> no retry.
     assert decision.retry is False
     assert decision.note == "operator_declined_retry"
 

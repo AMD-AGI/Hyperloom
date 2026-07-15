@@ -47,8 +47,7 @@ class _CoordinatorStub:
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
     _build_framework_working_memory = Coordinator._build_framework_working_memory
     _FRAMEWORK_TRIED_MEMORY_CAP = Coordinator._FRAMEWORK_TRIED_MEMORY_CAP
-    # cross-framework discovery lane is default-on; the real discovery merge
-    # calls this reverse-lookup on every repo it queries.
+    # Reverse-lookup called on every repo the discovery merge queries.
     _framework_agent_repo_url_origin_framework = staticmethod(
         Coordinator._framework_agent_repo_url_origin_framework
     )
@@ -96,7 +95,6 @@ def test_discover_merges_candidates_across_repos(
     async def _spy(**kwargs: Any) -> dict[str, Any]:
         repo_url = kwargs["repo_url"]
         seen_repo_urls.append(repo_url)
-        # One unique candidate per repo.
         tag = repo_url.rsplit("/", 1)[-1].replace(".git", "")
         return {
             "batch_id": "b-merge",
@@ -112,7 +110,6 @@ def test_discover_merges_candidates_across_repos(
     n_repos = len(stub._framework_agent_discover_repo_urls("sglang"))
     assert len(seen_repo_urls) == n_repos
     batch = stub.shared_state.framework_agent_batches[-1]
-    # One merged candidate per repo (all distinct).
     assert batch["candidate_count"] == n_repos
 
 
@@ -133,11 +130,10 @@ def test_discover_threads_directed_gap_and_keywords(
 
     _call_discover(stub)
 
-    # Directed gap leads the gaps list (model_class=dense, precision=fp8).
+    # Directed gap leads the gaps list.
     gaps = captured["gaps"]
     assert gaps[0]["gap_canonical_id"] == "directed"
     assert "dense" in gaps[0]["gap_description"]
-    # Keywords derived from the workload taxonomy are passed through.
     kws = captured.get("keywords") or []
     assert "dense" in kws
     assert "fp8" in kws
@@ -189,13 +185,11 @@ def test_discover_dedups_against_prior_batches(
     async def _spy(**kwargs: Any) -> dict[str, Any]:
         return {
             "batch_id": "b2",
-            # Same PR every repo returns → must collapse + dedup vs prior.
             "candidates": [{"pr_url": "https://example.com/dup/pr/1"}],
         }
 
     monkeypatch.setattr(_fa_client, "phase_discover", _spy)
     stub = _CoordinatorStub(tmp_path)
-    # Pre-seed a prior batch carrying that exact candidate id.
     stub.shared_state.framework_agent_batches = [
         {
             "batch_id": "b1",
@@ -208,7 +202,6 @@ def test_discover_dedups_against_prior_batches(
     ]
 
     ok = _call_discover(stub)
-    # Every discovered candidate was a duplicate → no new batch appended.
     assert ok is False
     assert len(stub.shared_state.framework_agent_batches) == 1
 
@@ -217,7 +210,7 @@ def test_discover_fallback_filters_processed_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Step B coordinator-side backstop: even if fa re-surfaces a candidate that
+    """Coordinator-side backstop: even if fa re-surfaces a candidate that
     already carries a terminal progress row (but is absent from any prior
     batch's candidate list), the coordinator re-filters it against the full
     excluded set (known ∪ processed) so it is never re-queued."""
@@ -227,14 +220,13 @@ def test_discover_fallback_filters_processed_candidates(
             "batch_id": "b-proc",
             "candidates": [
                 {"pr_url": "https://example.com/processed/pr/7"},  # has a terminal row
-                {"pr_url": "https://example.com/fresh/pr/8"},  # genuinely new
+                {"pr_url": "https://example.com/fresh/pr/8"},  # new
             ],
         }
 
     monkeypatch.setattr(_fa_client, "phase_discover", _spy)
     stub = _CoordinatorStub(tmp_path)
-    # A terminal progress row keyed on the processed candidate, with NO prior
-    # batch carrying it (so _framework_known_candidate_ids alone wouldn't catch it).
+    # Terminal progress row for the processed candidate with no prior batch carrying it.
     stub.shared_state.framework_agent_phase_progress = [
         {"candidate_id": "https://example.com/processed/pr/7", "status": "reverted"},
     ]

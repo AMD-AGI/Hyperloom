@@ -20,45 +20,31 @@ from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 _SEVERITY_CRASH: str = "crash"
 _SEVERITY_REGRESS: str = "regress"
 
-# Bounded transient-failure auto-retry for specialist dispatches: a subprocess
-# timeout / crash / stale-heartbeat re-dispatches up to this many times before
-# the failure is recorded normally. Infra-only (see classify_specialist_failure);
-# semantic empties are left for the orchestrator.
+# Bounded transient-failure auto-retry for specialist dispatches (infra-only).
 SPECIALIST_AUTO_RETRY_MAX: int = 2
 
-# Periodic in-process maintenance/reaper cadence (lease reaping + DB retention). Runs
-# every N coordinator ticks: actively reaps expired serving + GPU leases and
-# prunes the events/tasks DB so a multi-day single-session run never leaks
-# capacity or grows the DB unbounded (no process restart clears them).
+# Periodic in-process maintenance/reaper cadence (lease reaping + DB retention),
+# in coordinator ticks.
 MAINTENANCE_EVERY_TICKS: int = 50
 
-# Default per-macro-cycle wall-clock window (hours) in cyclic mode. Each
-# phase's budget fraction (DEFAULT_PHASE_BUDGET_PCT) applies to this window
-# rather than the whole run.
+# Default per-macro-cycle wall-clock window (hours) in cyclic mode.
 DEFAULT_CYCLE_HOURS: float = 24.0
-# Trailing window for the crash-rate emergency stop: the threshold counts only
-# crashes within this many seconds so old crashes age out on long runs/resume.
+# Trailing window for the crash-rate emergency stop, in seconds.
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
-# Combined baseline-failure backstop: fast-fail after this many TOTAL baseline
-# failures (any error_class), so mixed classes can't dodge the per-class streaks.
+# Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
-# Enablement stall cap: consecutive enablement rounds that neither made the
-# combo runnable nor advanced to a NEW failure signature. Reaching it stops the
-# loop with stop_reason ``enablement_stalled`` instead of re-deriving the same
-# fix until the wall-clock deadline. A *progressing* round resets the streak, so
-# an N-gap serial enablement is bounded by N + this cap, not capped at N.
+# Enablement stall cap: consecutive enablement rounds that neither made the combo
+# runnable nor advanced to a NEW failure signature; reaching it stops the loop
+# with ``enablement_stalled``. A progressing round resets the streak.
 _ENABLEMENT_MAX_STALL: int = 3
-# Unified authored-lane max attempts: applies to apply-failure retries across
-# all non-enablement lanes (perf_framework, perf_explore).  Also used as the
-# new cap for Critic reauthor attempts (raised from 1 → 3).
+# Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
-# Floor on the per-repo framework-PR discover timeout so a slow repo still gets a
-# usable budget even when the phase timeout is spread thin across many repos.
+# Floor on the per-repo framework-PR discover timeout.
 _FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
 _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # Default resume-drift floor (%): a re-measured current_best below this fraction
-# of its recorded tput is flagged as drift. Overridable via env.
+# of its recorded tput is flagged as drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from ..phases import machine_state as _phase_state
 from ..state.optimization_journal import Journal
@@ -107,7 +93,7 @@ from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
 log = logging.getLogger(__name__)
 
 
-# Audit-trail kinds (must match shared_state._AUDIT_ACTIONS); kernel_agent-owned actions excluded.
+# Audit-trail kinds (must match shared_state._AUDIT_ACTIONS).
 _AUDIT_ACTIONS: frozenset[str] = frozenset(
     {
         "baseline",
@@ -157,36 +143,14 @@ def _resolvable_artifacts_from_done(
 ) -> list[dict[str, Any]]:
     """Return ``artifacts_written`` entries whose ``source`` file exists on disk.
 
-    A FRAMEWORK/EXPLORE specialist may deliver a non-diff tuned artifact (e.g.
-    an autotuned aiter ``tuned_fmoe`` CSV) via ``artifacts_written`` instead of
-    a source patch. Such a deliverable is a first-class result: it flows through
-    the ``integrate_patch`` artifact-install channel (backup + install + bench +
-    accuracy gate + REVERT). This is the SHARED routable-signal used by BOTH the
-    autosubmit bridge (``_maybe_autosubmit_specialist_patches``) and the
-    empty-outcome bridge (``_record_framework_agent_authoring_empty_outcome``)
-    so they share one rule: an artifact is routable only when its ``source``
-    resolves to a real file inside the specialist worktree/workspace. (Each
-    bridge passes its own already-unwrapped ``specialist_done`` view — outer for
-    autosubmit, ``payload``-unwrapped for empty-outcome — so agreement holds as
-    long as ``specialist_done`` is not double-wrapped, the same assumption the
-    ``patches_written`` / config-lever routing already relies on.) Keeping the
-    bridges on one signal prevents the FRAMEWORK livelock (skip-stamp without a
-    following integrate_patch).
-
-    Source containment: every ``source`` — relative (resolved under
-    ``resolve_bases``) or absolute — is accepted ONLY when it resolves to a real
-    file inside one of ``resolve_bases``. This matches integrate_patch's sandbox
-    so the signal never routes a deliverable integrate_patch would reject as
-    ``source_outside_workspace`` (incl. a relative ``..`` that escapes the
-    sandbox yet still resolves to an existing file).
-
-    Target scope (intentional trade-off): this pure signal validates the
-    ``source`` only; it does NOT re-resolve ``target`` against the framework
-    allowlist (that would couple a testable pure function to on-disk framework
-    roots). A malformed / out-of-allowlist ``target`` is therefore still routed
-    and rejected downstream by integrate_patch as a terminal ``no_patches`` row
-    (no livelock — the FRAMEWORK pump still advances), rather than skip-stamped
-    as ``authored_empty`` here.
+    A FRAMEWORK/EXPLORE specialist may deliver a non-diff tuned artifact via
+    ``artifacts_written`` instead of a source patch; it flows through the
+    ``integrate_patch`` artifact-install channel. This is the shared routable
+    signal used by both the autosubmit and empty-outcome bridges: an artifact is
+    routable only when its ``source`` resolves to a real file inside one of
+    ``resolve_bases`` (matching integrate_patch's sandbox, rejecting ``..``
+    escapes). Only the ``source`` is validated; a bad ``target`` is rejected
+    downstream by integrate_patch rather than skip-stamped here.
 
     Args:
         done_payload: The specialist ``specialist_done`` payload (unwrapped).
@@ -213,19 +177,10 @@ def _resolvable_artifacts_from_done(
         if not src or not tgt:
             continue
         raw = Path(src)
-        # Candidate paths: an absolute ``source`` is checked as-is; a relative
-        # ``source`` is resolved under each base. In BOTH cases the resolved
-        # path must be a real file that stays inside a base — the SAME
-        # containment integrate_patch's ``_resolve_artifact_specs`` enforces,
-        # rejecting ``source_outside_workspace`` AND ``..`` escapes (a relative
-        # ``../../x`` that ``is_file()`` alone would otherwise mis-route).
-        # NOTE: unlike integrate_patch (which resolves against the FIRST existing
-        # base then validates), we scan ALL bases and take the first that yields
-        # a contained real file. Because ``worktree`` is nested under
-        # ``workspace`` the outcomes match, and this direction is fail-safe: it
-        # is never stricter than integrate_patch's accept, so a genuinely
-        # installable artifact is never dropped (at worst a benign extra routing
-        # round).
+        # An absolute ``source`` is checked as-is; a relative one is resolved
+        # under each base. In both cases the resolved path must be a real file
+        # inside a base (rejecting ``..`` escapes). Scan all bases and take the
+        # first that yields a contained real file.
         cands = [raw] if raw.is_absolute() else [base / raw for base in resolve_bases]
         for cand in cands:
             resolved = cand.resolve()
@@ -250,19 +205,12 @@ def _framework_config_levers_from_done(
 ) -> dict[str, str]:
     """Extract a config-lever set from a FRAMEWORK specialist deliverable.
 
-    A specialist may translate an upstream PR into a CONFIG win (serving flags /
-    env vars already reachable on this build) instead of a source patch. Such a
-    deliverable is a first-class FRAMEWORK result: it flows through the
-    existing ``integrate_patch`` ``config_changes`` channel (apply + bench +
-    accuracy gate), NOT an authored_empty skip.
-
-    The levers are read from the FIRST ``proposal_set`` entry that carries
-    ``extra_args`` and/or ``extra_envs`` (the standard explore-variant schema).
-    ``extra_args`` (a server-arg string or list) and ``extra_envs`` (a mapping)
-    are flattened into a single ``{KEY: value}`` config-changes dict that
-    ``integrate_patch`` layers onto the launch env. Returns ``{}`` when no
-    config lever is present (the caller then treats the deliverable as a patch
-    or an empty outcome as before).
+    A specialist may translate an upstream PR into a config win (serving flags /
+    env vars) instead of a source patch; it flows through the ``integrate_patch``
+    ``config_changes`` channel. Levers are read from the first ``proposal_set``
+    entry carrying ``extra_args`` and/or ``extra_envs``, flattened into a single
+    ``{KEY: value}`` config-changes dict. Returns ``{}`` when no config lever is
+    present.
 
     Args:
         done_payload: The specialist ``specialist_done`` payload (already
@@ -273,7 +221,7 @@ def _framework_config_levers_from_done(
     """
     if not isinstance(done_payload, dict):
         return {}
-    # A patch deliverable takes precedence — it is not a config-only outcome.
+    # A patch deliverable takes precedence.
     patches = done_payload.get("patches_written") or []
     if isinstance(patches, list) and patches:
         return {}
@@ -297,7 +245,7 @@ def _framework_config_levers_from_done(
         elif isinstance(args, (list, tuple)):
             arg_tokens = [str(a) for a in args if str(a).strip()]
         # Fold ``--flag value`` / ``--flag=value`` / bare ``--flag`` pairs into
-        # the config dict so integrate_patch can re-emit them as server args.
+        # the config dict.
         i = 0
         while i < len(arg_tokens):
             tok = arg_tokens[i].strip()
@@ -319,9 +267,8 @@ def _framework_config_levers_from_done(
             return levers
     return {}
 
-# Hard-trigger thresholds: EXPLORE rounds a domain may go without a
-# specialist dispatch / a KEEP before the Coordinator force-dispatches one (a
-# real scheduling event, not an advisory nudge). Overridable via SharedState.
+# Hard-trigger thresholds: EXPLORE rounds a domain may go without a specialist
+# dispatch / a KEEP before the Coordinator force-dispatches one.
 FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
 FORCE_STALLED_KEEP_ROUNDS: int = 12
 
@@ -450,9 +397,8 @@ class PendingProposal:
     verdict: str | None = None  # approve / reject / redirect / advise / needs_review
 
 
-# Path-like keys surfaced from a kernel handler
-# payload (inputs) or result (outputs) so operators can see where a step's
-# artifacts went without enumerating every per-handler return shape.
+# Path-like keys surfaced from a kernel handler payload/result so operators can
+# see where a step's artifacts went.
 _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
     "trace_input",
     "trace_dir",
@@ -472,9 +418,7 @@ _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
     "md_path",
     "tracelens_agent_transcript",
     "tracelens_agent_report",
-    # TraceLens analysis outputs surfaced by trace_analyze_handler — the
-    # analysis.md report, its alias, the per-run audit summary, the roofline
-    # sidecar and the CLI log — so operators can reach them from lifecycle END.
+    # TraceLens analysis outputs surfaced by trace_analyze_handler.
     "trace_report_path",
     "analysis_report_path",
     "tracelens_summary_path",
@@ -485,8 +429,7 @@ _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
 
 def _lifecycle_paths(payload: Any) -> dict[str, str]:
     """Extract present, non-empty path-like fields from a kernel handler
-    payload or result dict. Best-effort: a non-dict argument yields
-    an empty mapping so callers never have to guard the type.
+    payload or result dict. A non-dict argument yields an empty mapping.
 
     Args:
         payload: A kernel handler payload or result; non-dict inputs are
@@ -513,11 +456,12 @@ class CoordinatorState:
 
 
 class _CoordinatorMeta(type):
-    """Class-level delegation for extracted collaborator methods. Instance access is handled by ``Coordinator.__getattr__``; class
-    access (``Coordinator._extracted_method`` — used by tests that copy methods
-    onto stub classes / call them unbound) resolves here to the owning
-    collaborator *class*'s function. Collaborator modules are imported lazily to
-    avoid an import cycle (they import from ``coordinator`` at module top)."""
+    """Class-level delegation for extracted collaborator methods.
+
+    Instance access is handled by ``Coordinator.__getattr__``; class access
+    resolves here to the owning collaborator class's function. Collaborator
+    modules are imported lazily to avoid an import cycle.
+    """
 
     def __getattr__(cls, name):  # noqa: N805 - metaclass first arg is the class
         prop = cls._DELEGATED.get(name)
@@ -533,15 +477,10 @@ class _CoordinatorMeta(type):
 class Coordinator(metaclass=_CoordinatorMeta):
     """The single Coordinator instance per session."""
 
-    # property name -> (module, collaborator class) for class-level delegation
-    # (instance-level uses the lazy properties directly). Kept in sync with the
-    # lazy collaborator properties + ``_DELEGATED``.
+    # property name -> (module, collaborator class) for class-level delegation.
+    # Kept in sync with the lazy collaborator properties + ``_DELEGATED``.
     _COLLAB_MODULES = {
-        # Phase handlers, registered in call-chain order: machine -> prelude ->
-        # sweep -> close -> internal ->
-        # kernel_stack -> kernel -> explore -> framework. ``framework`` is
-        # placed last because it owns the most delegated methods (48, the
-        # largest of the 9 phase clusters). Module paths are relative to
+        # Phase handlers in call-chain order. Module paths are relative to
         # ``hyperloom.orchestrator``.
         "phase_machine": ("phases.machine", "MachinePhase"),
         "phase_prelude": ("phases.prelude", "PreludePhase"),
@@ -591,9 +530,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._warm_replay_enabled: bool = bool(warm_replay_enabled)
         self._warm_replay_min_confidence: float = float(warm_replay_min_confidence)
         self._warm_replay_min_reproduce_pct: float = float(warm_replay_min_reproduce_pct)
-        # KnowledgePlane facade; when non-None pre-warms PR feed + advisory context.
+        # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = knowledge_plane
-        # ProposalScorer facade (advisory only, never gates).
+        # ProposalScorer facade (advisory only).
         self._proposal_scorer: Any = proposal_scorer
         # Phase budget percentages, normalised once at construction.
         self._phase_budget_pct: dict[str, float] = _phase_state.normalize_budget_pct(phase_budget_pct)
@@ -640,22 +579,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
             legacy_action_scores=legacy_action_scores,
             migration_mode=migration_mode,
         )
-        # #266 lifecycle save debounce: terminal events (END/ERROR) flush
-        # immediately so operators see produced artifacts promptly; bursty
-        # non-terminal markers (START/ENTER) coalesce within a short window to
-        # avoid amplifying state.json writes on long / multi-kernel sessions
-        # over NFS. ``_lifecycle_last_save`` is a monotonic timestamp.
+        # Lifecycle save debounce: terminal events flush immediately; bursty
+        # non-terminal markers coalesce within a short window.
+        # ``_lifecycle_last_save`` is a monotonic timestamp.
         self._lifecycle_last_save: float = 0.0
         self._lifecycle_save_min_interval_s: float = 2.0
-        # Thread live SharedState into the runner (constructed earlier) so
-        # executors get it via ctx.extra; durable backstop for per-dispatch
-        # ``base_tput`` injection.
+        # Thread live SharedState into the runner so executors get it via
+        # ctx.extra.
         self.sub.shared_state = self.shared_state
-        # Serving-disjoint physics invariant: the
-        # live serving process holds the first ``serving_tp`` cards, so they are
-        # carved off the specialist pool to avoid shared-card measurement
-        # corruption. ``shared_state.tp`` is restored on resume; the ``TP`` env
-        # (exported by the CLI before construction) is the fresh-start fallback.
+        # Serving-disjoint invariant: the live serving process holds the first
+        # ``serving_tp`` cards, carved off the specialist pool. ``shared_state.tp``
+        # is restored on resume; the ``TP`` env is the fresh-start fallback.
         self.gpu_specialist_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
@@ -663,19 +597,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 serving_tp=self._resolve_serving_tp(),
             ),
         )
-        # Framework-authoring pool over the whole node (serving cards not carved
-        # off, no gpu_specialist_capacity gate). Shares the ``gpu_leases`` table
-        # with ``gpu_specialist_pool``; the cap-1 ``gpu_research_lane`` mutex
-        # serializes the two so they never hold cards at the same time.
+        # Framework-authoring pool over the whole node. Serialized against
+        # ``gpu_specialist_pool`` via the cap-1 ``gpu_research_lane`` mutex.
         self.framework_gpu_pool = SpecialistGpuPool(
             self.db,
             gpu_ids=resolve_whole_machine_devices(),
         )
-        # Dispatcher re-scan poll: while awaiting in-flight tasks, re-scan the
-        # queue at this cadence so a queued GPU task starts the moment its lane
-        # frees (instead of waiting out a long specialist / integrate_patch that
-        # was already being awaited). FIRST_COMPLETED handles lane frees that
-        # coincide with a task completion; the poll covers TTL/external releases.
+        # Dispatcher re-scan poll cadence: re-scan the queue while awaiting
+        # in-flight tasks so a queued GPU task starts the moment its lane frees.
         self._dispatcher_poll_sec = 10.0
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
         try:
@@ -686,14 +615,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 _set_lane_capacity(self.db.raw, "research_lane", cap)
         except Exception:  # noqa: BLE001 — non-fatal; default seed wins
             log.exception("failed to sync research_lane_capacity to leases DB")
-        # WS2: gpu_research_lane stays capacity-1 (strictly serial GPU
-        # specialists). The co-acquisition lock model can't express a
-        # multi-holder lane that is also mutually exclusive with the cap-1
-        # serving lanes, so a single GPU specialist holds the whole machine at a
-        # time (gpu_count up to the whole machine); the GPU pool partitions the
-        # physical cards within that one lease. The seed default (1) is correct;
-        # no runtime sync needed.
-        # `strict_paths` defers to the env flag (on in production, off in tests).
+        # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
+        # the GPU pool partitions physical cards within that one lease.
+        # `strict_paths` defers to the env flag.
         self.policy = PolicyGate(
             role_registry=self.role_registry,
             session_dir=self.session_dir,
@@ -716,10 +640,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Orchestration working-memory checkpoint policy + tracker.
         from ..state import orchestration_memory as _orch_mem
 
-        # Context-token guardrail (#3): derive soft/hard budgets from the
-        # orchestration model's window × fraction (env-overridable). Falls back to
-        # a conservative 200k window for unknown models; 0 budgets => token
-        # triggers disabled (char/tick/time cadence still applies).
+        # Context-token guardrail: derive soft/hard budgets from the
+        # orchestration model's window × fraction (env-overridable). 0 budgets
+        # disable token triggers (char/tick/time cadence still applies).
         def _ckpt_fraction(env_key: str, default: float) -> float:
             try:
                 v = float(os.environ.get(env_key, "").strip() or default)
@@ -744,23 +667,19 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._checkpoint_tracker = _orch_mem.CheckpointTracker(
             last_phase=str(getattr(self.shared_state, "phase", "") or ""),
         )
-        # Minimum ticks between orchestration-memory compactions. A compaction
-        # resets the persistent conversation and forces a full SEED re-push next
-        # tick, so allowing two compactions back-to-back can wedge the run in a
-        # checkpoint-every-tick loop (the SEED's own tokens re-trip the budget).
-        # A true near-window emergency bypasses this floor (see _maybe_checkpoint).
+        # Minimum ticks between orchestration-memory compactions, to avoid a
+        # checkpoint-every-tick loop. A near-window emergency bypasses this floor.
         self._checkpoint_min_tick_gap = 3
-        # Consecutive degenerate checkpoint replies (#1); resets on a good one.
+        # Consecutive degenerate checkpoint replies; resets on a good one.
         self._consec_degenerate_ckpt: int = 0
         # Disable checkpointing entirely via env.
         self._checkpoint_enabled: bool = os.environ.get(
             "INFERENCE_OPTIMIZER_DISABLE_ORCH_CHECKPOINT",
             "",
         ).strip().lower() not in {"1", "true", "yes", "on"}
-        # Seed memory rendered into the next full SEED push (resume recovery source).
-        # Operator rollback (#1): INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK=<n>
-        # re-seeds from the n-th-from-newest history snapshot instead of the live
-        # memory, to recover when the most recent compaction(s) lost a key thread.
+        # Seed memory rendered into the next full SEED push (resume recovery).
+        # INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK=<n> re-seeds from the
+        # n-th-from-newest history snapshot instead of the live memory.
         _seed_memory = dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
         _rollback_raw = os.environ.get("INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK", "").strip()
         if _rollback_raw:
@@ -818,13 +737,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except ValueError:
             self._maintenance_every_ticks = MAINTENANCE_EVERY_TICKS
 
-        # R2: when cyclic mode is on, pin a per-macro-cycle budget window so the
-        # per-phase budget fractions apply per cycle, not per whole run. The
-        # window only *takes effect* for long/unbounded runs — ``_budget_minutes``
-        # (and the reloop gate) ignore it for short bounded runs (--max-hours ≤
-        # 24), whose real budget is not even known here at __init__ (it is set
-        # later in ``run()``). Keeping the assignment unconditional is therefore
-        # harmless: short runs stay anchored on the whole session.
+        # In cyclic mode, pin a per-macro-cycle budget window so per-phase budget
+        # fractions apply per cycle. Only takes effect for long/unbounded runs;
+        # short bounded runs stay anchored on the whole session.
         if _phase_state.is_cyclic_phases_enabled() and float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
             try:
                 _cycle_hours = float(
@@ -837,18 +752,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 _cycle_hours = DEFAULT_CYCLE_HOURS
             self.shared_state.cycle_minutes = max(1.0, _cycle_hours * 60.0)
 
-        # R6: medium-intensity soft restart at each macro-cycle boundary
-        # (reap/prune/clear-caches + compacted-memory conversation reset). On by
+        # Medium-intensity soft restart at each macro-cycle boundary. On by
         # default in cyclic mode; opt out via the env flag.
         self._cycle_soft_restart: bool = os.environ.get(
             "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SOFT_RESTART",
             "",
         ).strip().lower() not in {"1", "true", "yes", "on"}
         # The soft restart's inference-server deep-clean kills lingering server
-        # processes (vLLM/SGLang/atom workers). It is safe at a cycle boundary
-        # (no benchmark in flight) but is the highest-blast-radius step, so it is
-        # separately gated and defaults ON within the soft restart; opt out via
-        # the env flag (tests set it to avoid touching real /proc).
+        # processes; separately gated, defaults ON within the soft restart.
         self._cycle_restart_servers: bool = os.environ.get(
             "INFERENCE_OPTIMIZER_DISABLE_CYCLE_SERVER_RESTART",
             "",
@@ -870,13 +781,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except ValueError:
             self._backend_error_streak_threshold = 5
 
-        # Stable tick order from the live role_registry (NOT the cached
-        # module-level roles_for_run, which keeps "kernel_agent" under --no-kernel).
+        # Stable tick order from the live role_registry.
         _CANONICAL_ORDER = ("orchestration", "kernel_agent", "critic", "robustness")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
-        # Action registry — yaml catalogue mapping action_name → metadata;
-        # load failure falls back to ``None`` (handled gracefully).
+        # Action registry — yaml catalogue mapping action_name -> metadata.
         try:
             self.action_registry: ActionRegistry | None = ActionRegistry().load()
         except Exception:  # noqa: BLE001 — defensive; missing yaml shouldn't kill the run.
@@ -913,11 +822,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
     def router(self) -> IntentRouter:
         """Intent routing collaborator (extracted from this class).
 
-        The ``_handle_*`` intent handlers were moved verbatim into
-        :class:`IntentRouter`; the ``_handle_*`` methods remaining on this class
-        are thin forwarding shims that delegate here. Built lazily and cached so
-        that test doubles constructed via ``Coordinator.__new__`` (bypassing
-        ``__init__``) still resolve a router on first access.
+        The ``_handle_*`` intent handlers live on :class:`IntentRouter`; the
+        methods remaining here are thin forwarding shims. Built lazily and
+        cached.
         """
         r = self.__dict__.get("_router")
         if r is None:
@@ -1011,7 +918,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_parse_geak_accepted_config": "phase_kernel",
         "_record_geak_candidate": "phase_kernel",
         "_promote_geak_from_candidate": "phase_kernel",
-        "_promote_geak_result": "phase_kernel",
         "_record_geak_kernel_journey": "phase_kernel",
         "_ck_blockscale_switch_eligible": "phase_kernel",
         "_ck_switch_precision_is_fp8": "phase_kernel",
@@ -1163,8 +1069,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_gpu_lease_ttl_sec": "dispatcher",
         "_reap_dispatched_task": "dispatcher",
         "_lanes_fit": "dispatcher",
-        "_target_analysis_baseline_exists": "dispatcher",
-        "_kernel_opt_keep_pending": "dispatcher",
         "_sequence_denial_for_action": "dispatcher",
         "_sequence_denial_for_request": "dispatcher",
         "_skip_gemm_tuning": "dispatcher",
@@ -1218,7 +1122,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # owner; everything else is a real AttributeError.
         owner = Coordinator._DELEGATED.get(name)
         if owner is not None:
-            return getattr(getattr(self, owner), name)
+            target = getattr(self, owner)
+            try:
+                # Do not invoke the collaborator's fallback ``__getattr__`` here:
+                # a stale _DELEGATED entry would otherwise bounce back to this
+                # Coordinator and recurse until RecursionError.
+                return object.__getattribute__(target, name)
+            except AttributeError as exc:
+                raise AttributeError(
+                    f"{type(self).__name__!r} delegates {name!r} to {owner!r}, "
+                    f"but that collaborator does not define it"
+                ) from exc
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def _collaborator(self, attr: str, factory):
@@ -1230,9 +1144,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.__dict__[attr] = obj
         return obj
 
-    # Phase handlers, in call-chain order (machine -> prelude -> sweep ->
-    # close -> internal -> kernel_stack -> kernel -> explore -> framework);
-    # ``framework`` is last as it owns the most delegated methods (48).
+    # Phase handlers, in call-chain order.
     @property
     def phase_machine(self):
         from ..phases.machine import MachinePhase
@@ -1308,9 +1220,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
 
     # Advisory disk guard: when the session partition runs low, LRU-trim the
-    # bulkiest churn (per-task runs/ workspaces) while never touching durable
-    # optimization state. Optimization wins live in state.json / journal /
-    # reports, none of which this method removes.
+    # bulkiest churn (per-task runs/ workspaces); durable state is never touched.
     _DISK_FREE_MIN_GB: float = 20.0
     _DISK_USED_MAX_FRAC: float = 0.85
     _DISK_RUNS_KEEP_PER_ACTION: int = 50
@@ -1360,8 +1270,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             try:
                 await t
             except asyncio.CancelledError:
-                # Expected: we just cancelled these tasks; swallow the
-                # cancellation so shutdown drains every task cleanly.
+                # Expected: we just cancelled these tasks.
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
@@ -1431,12 +1340,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
 
 
-    # Statuses that mean the candidate was ADOPTED (positive). Everything else
-    # in framework_agent_phase_progress is a negative signal for the ranker.
+    # Statuses that mean the candidate was ADOPTED; everything else is a negative
+    # signal for the ranker.
     _FRAMEWORK_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
 
-    # Max tried-candidate rows fed into the ranker/discovery working memory
-    # (most-recent-first), to keep the prompt bounded.
+    # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
 
 
@@ -1479,15 +1387,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
 
 
-    # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh anchored on last_roofline_tput.
+    # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh.
     _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
-    # Relative-change floor for the pre-GEAK reprofile: any |cur-last|/last above
-    # this re-runs profile+TraceLens. Tiny value (validated gain is rounded to 3
-    # decimals) so it is effectively "any change", just absorbing float noise.
+    # Relative-change floor for the pre-GEAK reprofile: any change above this
+    # re-runs profile+TraceLens (effectively "any change", absorbing float noise).
     _REPROFILE_CHANGE_TOL: float = 1e-5
 
     # Max re-author rounds per candidate on a needs_review verdict.
-    # Raised from 1 → 3 to match the unified authored-lane cap.
     _MAX_REAUTHOR_ATTEMPTS: int = _AUTHORED_LANE_MAX_ATTEMPTS
 
     # Backstop: max Critic-review submissions for a single candidate before
@@ -1535,9 +1441,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
 
 
-    # optimization_stack actions that change kernel-level performance and thus
-    # warrant a post-opt roofline: source-patch integrate plus GEMM tuning and
-    # geak. Pure param-search (explore/sweep) is excluded.
+    # optimization_stack actions warranting a post-opt roofline; pure
+    # param-search (explore/sweep) is excluded.
     _POST_OPT_ROOFLINE_ACTIONS = frozenset(
         {"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"}
     )
@@ -1575,10 +1480,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
             for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
-            # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch. Best-effort.
+            # FRAMEWORK_AGENT phase pump: enqueue next candidate / fetch next batch.
             await self._pump_framework_agent_phase_safely(caller="tick")
-            # Phase-independent enablement pump: repair a non-runnable combo
-            # before it wedges the run in PRELUDE (see method docstring).
+            # Phase-independent enablement pump: repair a non-runnable combo.
             await self._pump_enablement_safely(caller="tick")
             # phase machine advance at tick boundary.
             await self._advance_phase_if_needed()
@@ -1652,14 +1556,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective
         grace_sec = effective_closing_grace_sec(max_minutes, closing_grace_sec)
-        # Unbounded runs (max_minutes falsy) are capped at the container lifetime
-        # so a long run always has a final wall-clock safety net; bounded runs
-        # keep their explicit deadline unchanged.
+        # Unbounded runs are capped at the container lifetime; bounded runs keep
+        # their explicit deadline.
         effective_minutes = max_minutes if max_minutes else _phase_state.DEFAULT_LONGRUN_MAX_MINUTES
         deadline = time.monotonic() + effective_minutes * 60.0
         self._run_started_monotonic = time.monotonic()
         self._run_deadline = deadline
-        # Capture the live loop so the inline fast-action context tool can marshal coroutines back here.
+        # Capture the live loop for the inline fast-action context tool.
         try:
             self._coordinator_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -1679,7 +1582,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     previous_handlers[sig] = True
                 log.info("Coordinator.run: SIGINT/SIGTERM handlers installed")
             except (NotImplementedError, RuntimeError) as exc:  # noqa: BLE001
-                # add_signal_handler unavailable on Windows or off the main thread (pytest-asyncio worker).
+                # add_signal_handler unavailable off the main thread / on Windows.
                 log.info("Coordinator.run: signal handlers not installed (%s)", exc)
                 previous_handlers = {}
 
@@ -1697,13 +1600,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     # Bump the persistent tick counter — drives phase/plateau math.
                     self.shared_state.increment_tick()
                     in_closing = self.shared_state.closing_phase
-                    # One reactor + dispatcher pass; during closing skip LLM passes, pump deterministic report.
+                    # One reactor + dispatcher pass; during closing skip LLM passes.
                     if not in_closing:
                         for name in self._tick_roles:
                             if self._stop.is_set():
                                 break
                             await self._reactor_pass(name)
-                        # Orchestration checkpoint/compaction; cadence-based, no-op off conversational.
+                        # Orchestration checkpoint/compaction; cadence-based.
                         if not self._stop.is_set():
                             try:
                                 await self._maybe_checkpoint_orchestration(
@@ -1716,10 +1619,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
                     if not in_closing:
                         await self._pump_framework_agent_phase_safely(caller="run")
-                        # Phase-independent enablement pump (see method docstring):
-                        # repair a non-runnable combo stuck in PRELUDE.
+                        # Phase-independent enablement pump.
                         await self._pump_enablement_safely(caller="run")
-                    # phase machine advance at tick boundary; runs even in_closing so CLOSE is recorded.
+                    # phase machine advance; runs even in_closing so CLOSE is recorded.
                     try:
                         await self._advance_phase_if_needed()
                     except Exception as exc:  # noqa: BLE001
@@ -1729,7 +1631,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             exc=exc,
                             tick=tick_n,
                         )
-                    # Periodic reaper + DB retention (R5 + R4); cadence-gated, best-effort.
+                    # Periodic reaper + DB retention; cadence-gated.
                     try:
                         await self._maybe_run_maintenance_tick(tick=tick_n)
                     except Exception:  # noqa: BLE001
@@ -1801,13 +1703,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         stop_reason = "signal"
                         break
                     except asyncio.TimeoutError:
-                        # Normal path: no stop signal within the tick interval —
-                        # fall through and run the next tick.
+                        # Normal path: no stop signal within the tick interval.
                         pass
         finally:
             if self.shared_state.closing_phase:
                 self.shared_state.closing_phase = False
-            # Resuming a terminal session can break out before stop_reason is set; preserve prior reason.
+            # Resuming a terminal session can break out before stop_reason is set.
             self.shared_state.set_stop_reason(
                 stop_reason
                 or self.shared_state.stop_reason
@@ -1829,8 +1730,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     for sig in previous_handlers:
                         loop.remove_signal_handler(sig)
                 except (NotImplementedError, RuntimeError):
-                    # Signal handlers are unsupported off the main thread / on
-                    # some platforms; teardown is best-effort, so ignore.
+                    # Teardown is best-effort; signal handlers may be unsupported.
                     pass
         return self.shared_state.stop_reason
 
@@ -1851,15 +1751,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         """
         backend = self.backends[agent_name]
         prompt = await self._compose_prompt(agent_name)
-        # Conversation-growth accounting happens AFTER the turn returns, from the
-        # backend's reported token usage (see below) — a delta-prompt char count
-        # before the call badly undercounts the cached history in a persistent
-        # conversation.
+        # Conversation-growth accounting happens after the turn returns, from the
+        # backend's reported token usage.
         sys_prompt = await self._load_system_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
-        # Stamp the timeline keys onto backends that self-write their trace row
-        # (critic writes its own llm_calls row from inside run()). No-op for
-        # backends without the hook. Best-effort: never block the turn.
+        # Stamp timeline keys onto backends that self-write their trace row.
+        # No-op for backends without the hook.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
         if callable(_set_trace_ctx):
             try:
@@ -1869,7 +1766,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 )
             except Exception:  # noqa: BLE001
                 pass
-        # max_turns=0 → backend default; ClaudeBackend needs ≥2 for tool_use→tool_result→final-text.
+        # max_turns=0 → backend default.
         _t0 = time.perf_counter()
         try:
             result: BackendTurnResult = await backend.run(
@@ -1887,7 +1784,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             await self._track_backend_error_streak(agent_name, exc)
             return
         except NoIntentEmitted as exc:
-            # No parseable intents; surface as observation so the next tick self-corrects instead of killing the run.
+            # No parseable intents; surface as observation so the next tick self-corrects.
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -1895,7 +1792,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             return
         except Exception as exc:  # noqa: BLE001
-            # Catch-all so one agent's bad turn never stops the loop (repeated crashes → emergency stop).
+            # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
             await self._record_observation(
                 "coordinator",
@@ -1912,21 +1809,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
         if self._backend_error_streak.get(agent_name):
             self._backend_error_streak[agent_name] = 0
             self._backend_error_alarm_armed[agent_name] = True
-        # Record this reactor turn's token spend on the
-        # unified ledger. One call site covers every in-process reactor
-        # role (orchestration / kernel) whose backend reports usage on
-        # metadata (ClaudeBackend + CodexBackend). Best-effort: a trace
-        # failure must never affect intent routing.
+        # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
-        # Full-trace (conversations): persist the full, redacted
-        # prompt+response for this reactor turn. Separate file from the
-        # token ledger; same best-effort posture.
+        # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)
-        # Context-token water level: the persistent conversation's true size
-        # is the backend's reported input usage (input + cache_read +
-        # cache_creation). Fall back to a full-turn char accumulation only when
-        # the backend reports no usage (e.g. codex).
+        # Context-token water level: the persistent conversation's true size is
+        # the backend's reported input usage; fall back to a char count when the
+        # backend reports no usage.
         if agent_name == "orchestration" and self._orchestration_conversational():
             try:
                 md = getattr(result, "metadata", None) or {}
@@ -1943,7 +1833,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     )
             except Exception:  # noqa: BLE001 — accounting must never break routing
                 pass
-        # Completed orchestration turn means SEED delivered; flip flag so later turns send DELTA.
+        # Completed orchestration turn means SEED delivered; later turns send DELTA.
         if agent_name == "orchestration":
             self._orchestration_seeded = True
         for intent in result.intents:
@@ -1958,15 +1848,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a reactor turn.
 
-        The reactor role name (``orchestration`` / ``kernel`` / ``critic`` /
-        ``robustness``) doubles as both the trace ``component`` and
-        ``role``. Only rows carrying real token counters are written, so
-        subprocess-backed reactors (critic / robustness) that don't report
-        usage here don't pollute the ledger with empty rows — their token
-        spend is captured by the dedicated agent collectors instead.
-
-        Wrapped in a broad ``try`` so any unexpected error in trace
-        assembly degrades to a logged warning rather than breaking the
+        The reactor role name doubles as both the trace ``component`` and
+        ``role``. Only rows carrying real token counters are written. Any error
+        in trace assembly degrades to a logged warning rather than breaking the
         tick loop.
 
         Args:
@@ -2078,10 +1962,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
 
 
-    # Multi-node only: cap on how many specialist proposal_set entries
-    # are auto-materialised into a single explore grid per specialist
-    # round. Keeps the deterministic bridge from flooding the action
-    # queue when an LLM specialist returns a large proposal_set.
+    # Multi-node only: cap on specialist proposal_set entries auto-materialised
+    # into a single explore grid per round.
     _MN_AUTO_EXPLORE_GRID_CAP = 6
 
 
@@ -2114,8 +1996,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
 
     # Phases whose long, serially-drained GPU grids must not starve the
-    # per-phase cyclic budget exit. PRELUDE (baseline/roofline bootstrap),
-    # SWEEP, CLOSE, RECOVER own mandatory work and keep draining normally.
+    # per-phase cyclic budget exit. PRELUDE/SWEEP/CLOSE/RECOVER drain normally.
     _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"EXPLORE", "KERNEL_AGENT", "FRAMEWORK_AGENT"})
 
 
@@ -2129,7 +2010,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
 
 
-    # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes (the fact side of KB integration).
+    # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes.
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
 
 
@@ -2153,9 +2034,7 @@ __all__ = [
     "CoordinatorState",
     "PendingProposal",
     "SharedState",
-    # Re-exported from coordinator_helpers for callers/tests that reference
-    # them via ``coordinator.<name>``. Declared so the re-export is
-    # intentional rather than a flagged unused import.
+    # Re-exported from coordinator_helpers for callers/tests.
     "_BASELINE_FINGERPRINT_KEYS",
     "_baseline_params_fingerprint",
     "_dedupe_extra_server_args",
@@ -2165,7 +2044,6 @@ __all__ = [
     "_parse_iso_unix",
     "_resolve_roofline_watermark_ratio",
     "effective_closing_grace_sec",
-    # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in
-    # tests. Declared so the re-export is intentional, not a flagged import.
+    # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.
     "SPECIALIST_FROM_AGENT_PREFIX",
 ]

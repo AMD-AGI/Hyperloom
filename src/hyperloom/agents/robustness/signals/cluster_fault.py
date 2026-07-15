@@ -38,7 +38,7 @@ from .symptom import Symptom, SymptomSeverity
 class ClusterFaultConfig:
     """Tunables for the cluster_fault rule."""
 
-    # Actionable phases; "Succeeded" is excluded (auto-repair already cleaned up).
+    # Actionable phases; "Succeeded" is excluded.
     actionable_phases: frozenset[str] = frozenset({"Isolating", "Failed"})
     high_workload_threshold: int = 4
     high_gpu_threshold: int = 8

@@ -21,11 +21,6 @@ from hyperloom.agents.critic.runtime.importance_mapping import (
 )
 
 
-# ---------------------------------------------------------------------------
-# runtime.importance_mapping
-# ---------------------------------------------------------------------------
-
-
 def test_high_with_measurement_scores_above_default():
     score = importance_for_verdict(verdict="reject", confidence="high", has_measurement=True)
     assert score == 0.7
@@ -52,11 +47,6 @@ def test_cap_importance_enforces_critic_ceiling():
     assert cap_importance(0.99) == CRITIC_IMPORTANCE_CEILING
     assert cap_importance(0.5) == 0.5
     assert cap_importance(-1.0) == 0.0
-
-
-# ---------------------------------------------------------------------------
-# runtime.category_mapping
-# ---------------------------------------------------------------------------
 
 
 def test_kb_kinds_set_matches_contract():

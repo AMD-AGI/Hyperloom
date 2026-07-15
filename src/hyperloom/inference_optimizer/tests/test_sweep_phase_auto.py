@@ -2,8 +2,8 @@
 
 """SWEEP phase auto-dispatch tests.
 
-SWEEP entry now dispatches ``conc_sweep`` directly. The historical full
-workload ``sweep`` helper remains covered as a manual compatibility path.
+SWEEP entry dispatches ``conc_sweep`` directly; the full-workload ``sweep``
+helper is covered as a manual compatibility path.
 """
 
 from __future__ import annotations
@@ -250,7 +250,7 @@ def _patch_stack_validation_internals(monkeypatch, *, new_tput: float):
 def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
-    # current_best already banks a +10% KEEP'd kernel, applied on disk.
+    # current_best already banks a +10% KEEP'd kernel
     c.shared_state = SharedState(
         baseline_tput=100.0,
         baseline_config_path=str(tmp_path / "base.yaml"),
@@ -282,9 +282,9 @@ async def test_stack_validation_reverts_when_no_gain_over_current_best(
 ):
     """Stack worse than current_best (110) but above baseline (100) must REVERT.
 
-    Regression guard: the KEEP decision is incremental over current_best, not
-    total over the original baseline. new_tput=109 is +9% vs baseline yet -0.9%
-    vs current_best, so the stack adds no value and must be reverted.
+    The KEEP decision is incremental over current_best, not total over baseline:
+    new_tput=109 is +9% vs baseline yet -0.9% vs current_best, so the stack adds
+    no value and must be reverted.
     """
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
@@ -380,9 +380,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     assert all(entry["stack_resolved"] is True for entry in resolved_entries)
     assert {entry["stack_validation_kernel_id"] for entry in resolved_entries} == {"k001+k004"}
 
-    # Re-invoking must be a no-op (idempotent): the stack is already validated,
-    # so the call count must not advance. Compare against the snapshot rather
-    # than the literal so the idempotency intent is explicit.
+    # Re-invoking must be a no-op (idempotent): the call count must not advance.
     calls_before_recall = validation_calls
     await c._maybe_validate_positive_needs_review_stack()
 
@@ -504,7 +502,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     c.role_registry = {"kernel_agent": object()}
-    # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP
+    # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP.
     for kid, gain in (("k001", 0.6), ("k004", 0.8)):
         c.shared_state.record_kernel_integrate_result(
             {
@@ -601,7 +599,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
     await c._drain_pending_keep_integrates()
 
     assert len(captured_payloads) == 1
-    # Should use current_best.tput (110.0), not baseline (100.0)
+    # use current_best.tput (110.0), not baseline (100.0)
     assert captured_payloads[0]["base_tput"] == 110.0
 
 
@@ -745,7 +743,7 @@ async def test_enqueue_internal_sweep_task_inherits_baseline_config(coord):
     assert task.params["config_path"] == "/tmp/baseline.yaml"
     assert task.params["base_extra_args"] == "--mla 1"
     assert task.params["benchmark_script"] == "sglang_mi300x.sh"
-    # Grid params present so executor doesn't fall back to its own defaults.
+    # Grid params present so executor doesn't fall back to its own defaults
     assert isinstance(task.params["conc_values"], list)
     assert isinstance(task.params["isl_osl_configs"], list)
     assert isinstance(task.params["num_prompts_factor"], int)
@@ -842,12 +840,12 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
-    # Should not raise:
+    # Should not raise
     await coord._on_enter_sweep(from_phase="KERNEL")
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert "auto_conc_sweep_error" in evidence
     assert "simulated DB outage" in evidence["auto_conc_sweep_error"]
-    # No task was enqueued.
+    # No task was enqueued
     assert coord.tasks._tasks == {}
     assert coord.shared_state.last_conc_sweep["status"] == "skipped"
     assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_failed"
@@ -961,7 +959,7 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
         cortex_kb=None,
         knowledge_plane=None,
     )
-    # Seed state at KERNEL boundary as if a plateau_kernel just fired.
+    # Seed state at KERNEL boundary as if a plateau_kernel just fired
     coord.shared_state.phase = "KERNEL"
     coord.shared_state.kernel_enabled = True
     coord.shared_state.baseline_tput = 100.0
@@ -972,7 +970,6 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
         {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
     ]
 
-    # Simulate a real KERNEL_AGENT → SWEEP transition.
     coord.shared_state.record_phase_transition(
         to_phase="SWEEP",
         reason="plateau_kernel",
@@ -1030,7 +1027,7 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
 def test_internal_sweep_idempotency_key_does_not_collide_with_llm_path():
     """The manual sweep helper key must never collide with the LLM approved key."""
     internal_key = "internal-sweep-phase_entry"
-    # Mirror the format _materialize_approved_proposal builds.
+    # Mirror the format _materialize_approved_proposal builds
     llm_key = "approved-msg_abc123"
     assert internal_key != llm_key
     assert not llm_key.startswith("internal-")
@@ -1087,7 +1084,7 @@ def test_sweep_singleton_denies_delegate_after_auto_enqueue_stamped():
             intent_kind="delegate",
         )
     assert excinfo.value.rule == "sweep_phase_singleton"
-    # Hint must mention the bypass switch so the operator-debug path is discoverable.
+    # Hint must mention the bypass switch
     assert "bypass_sweep_singleton" in (excinfo.value.hint or "")
 
 
@@ -1132,7 +1129,7 @@ def test_sweep_singleton_inert_outside_sweep_phase():
     }
     state = _SweepSingletonState(phase_history=[explore_row])
     gate = _make_policy_gate(shared_state=state)
-    # The rule keys on phase_history[-1].to_phase=="SWEEP", so the stale id is inert.
+    # rule keys on phase_history[-1].to_phase=="SWEEP", so the stale id is inert
     gate._validate_sweep_singleton(
         payload={"action_name": "sweep"},
         intent_kind="delegate",
@@ -1178,8 +1175,7 @@ def test_sweep_singleton_self_clears_at_sweep_to_close_transition():
         ],
     )
     gate = _make_policy_gate(shared_state=state)
-    # Must NOT raise — the singleton rule looks at phase_history[-1],
-    # which is now CLOSE.
+    # Must NOT raise — the singleton rule looks at phase_history[-1] (now CLOSE)
     gate._validate_sweep_singleton(
         payload={"action_name": "sweep"},
         intent_kind="delegate",

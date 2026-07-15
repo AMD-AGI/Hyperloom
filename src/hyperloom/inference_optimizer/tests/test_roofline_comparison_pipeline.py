@@ -2,10 +2,8 @@
 
 """Roofline Comparison pipeline tests — `report.py` ↔ `roofline_snapshots`.
 
-After ``last_trace_analyze_baseline`` was retired, ``final.json``'s
-``roofline_comparison`` block is built from the append-only
-``SharedState.roofline_snapshots`` history, and the markdown section drops the
-retired N31 trigger wording.
+``final.json``'s ``roofline_comparison`` block is built from the append-only
+``SharedState.roofline_snapshots`` history.
 """
 
 from __future__ import annotations
@@ -205,7 +203,7 @@ def test_format_section_zero_snapshots_says_none_captured():
 
 
 def test_format_section_single_snapshot_no_n31_wording(tmp_path):
-    """A single-snapshot section drops the 'none captured' + N31 wording and explains the watermark mechanism."""
+    """A single-snapshot section drops the 'none captured' wording and explains the watermark mechanism."""
     p = tmp_path / "analysis.md"
     p.write_text(
         "# TraceLens\n\n## Executive Summary\n\nbody\n",
@@ -255,9 +253,9 @@ def test_format_section_before_after_renders_both_blocks(tmp_path):
     assert "N31" not in md
 
 
-# kernel_roofline_path sidecar (9fe4609 contract)
+# kernel_roofline_path sidecar
 def test_build_summary_propagates_kernel_roofline_path(analysis_md):
-    """The ``kernel_roofline_path`` sidecar pointer survives into ``final.json`` (9fe4609)."""
+    """The ``kernel_roofline_path`` sidecar pointer survives into ``final.json``."""
     path = analysis_md("analysis_1.md")
     snap = _snapshot(
         snapshot_id=1,

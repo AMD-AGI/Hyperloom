@@ -195,16 +195,10 @@ class MaintenanceCollaborator:
         # Hard context-token guardrail: near the window we MUST compact even when
         # the LLM summary is degenerate (deterministic fallback) to avoid overflow.
         hard = self._checkpoint_policy.is_hard_compaction(tracker.context_tokens_now)
-        # Anti-thrash floor for the TOKEN-budget triggers only. A compaction
-        # RESETS the persistent conversation, so the next tick re-sends the full
-        # SEED whose own token cost re-trips the soft/hard budget — looping
-        # forever (checkpoint every tick → conversation never persists →
-        # orchestration loses cross-tick memory and re-does discovery instead of
-        # progressing). When the token budget is what's firing, require a minimum
-        # tick gap between compactions; genuine cadence triggers (every_ticks /
-        # minutes / chars / phase boundary) are unaffected. A true near-window
-        # emergency (>= 98% of the window — unreachable by a single SEED) always
-        # bypasses the floor so we never overflow the context window.
+        # Anti-thrash floor for the TOKEN-budget triggers only: require a minimum
+        # tick gap between compactions so a re-seeded conversation doesn't
+        # re-trip the budget every tick. Cadence triggers are unaffected; a true
+        # near-window emergency (>= 98%) always bypasses the floor.
         suppress_token_trigger = False
         if not force and ticks_since < max(1, int(getattr(self, "_checkpoint_min_tick_gap", 2) or 2)):
             ctx_token_hard = int(getattr(self._checkpoint_policy, "context_token_hard", 0) or 0)
@@ -223,8 +217,7 @@ class MaintenanceCollaborator:
             suppress_token_trigger = token_due and not in_emergency
             if suppress_token_trigger:
                 # Suppress the token-driven hard flag so the freshly-seeded
-                # conversation can persist; fall through to the cadence check,
-                # which will return False unless a non-token trigger fired.
+                # conversation can persist; fall through to the cadence check.
                 hard = False
         # Authoritative growth signal is the context-token water level; the char
         # count is a fallback for backends that don't report token usage.
@@ -258,10 +251,9 @@ class MaintenanceCollaborator:
             parsed = _orch_mem.parse_checkpoint_reply(raw_text)
             degenerate = _orch_mem.is_degenerate_checkpoint(parsed)
             cur_phase = str(getattr(self.shared_state, "phase", "") or "")
-            # Path 1 — degenerate reply, NOT near the window: skip compaction.
-            # Preserve the live conversation + prior memory (a forgetful summary
-            # must never blank the plan or drop the history). Still reset the
-            # tracker so we don't immediately retry next tick (checkpoint storm).
+            # Path 1 — degenerate reply, NOT near the window: skip compaction,
+            # preserve the live conversation + prior memory, but reset the
+            # tracker to avoid a checkpoint storm.
             if degenerate and not hard:
                 self._coord._consec_degenerate_ckpt += 1
                 tracker.reset(tick=tick, minute_mark=now_min, phase=cur_phase)
@@ -275,9 +267,8 @@ class MaintenanceCollaborator:
                         "parse_error": str(parsed.get("parse_error", "") or ""),
                     },
                 )
-                # Repeated degeneracy: raise the observation's severity so the
-                # operator/robustness sees it (advisory only — never
-                # auto-changes strategy, and does not hijack the alert intent).
+                # Repeated degeneracy: raise the observation's severity
+                # (advisory only).
                 if self._consec_degenerate_ckpt >= 3:
                     await self._record_observation(
                         "coordinator",
@@ -292,8 +283,7 @@ class MaintenanceCollaborator:
                     )
                 return False
             # Path 2 — degenerate but near the window: compact anyway using a
-            # deterministic fallback synthesised from authoritative state, so the
-            # conversation is reset and never overflows.
+            # deterministic fallback synthesised from authoritative state.
             if degenerate and hard:
                 parsed = _orch_mem.deterministic_memory_fallback(self.shared_state)
             # Path 3 (and post-fallback): a usable summary — compact for real.
@@ -311,8 +301,8 @@ class MaintenanceCollaborator:
                 previous=dict(getattr(self.shared_state, "orchestration_memory", {}) or {}),
             )
             self.shared_state.orchestration_memory = record
-            # Append to the rollback ring (bounded) so a later bad compaction can
-            # be recovered from a prior good snapshot (long-run #1).
+            # Append to the bounded rollback ring so a later bad compaction can
+            # be recovered from a prior good snapshot.
             try:
                 hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
                 hist.append(record)

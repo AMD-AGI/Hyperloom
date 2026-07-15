@@ -2,8 +2,8 @@
 
 """Session breakdown exporter.
 
-Produces ``session_breakdown.json`` — a single self-contained snapshot of
-every fact a dashboard needs about one hyperloom session.
+Produces ``session_breakdown.json`` — a self-contained snapshot of every
+fact a dashboard needs about one hyperloom session.
 
 Public surface:
 

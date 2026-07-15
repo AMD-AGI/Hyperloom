@@ -3,14 +3,10 @@ deterministic trace-analysis routes.
 
 Both routes emit a human/downstream-readable ``analysis.md`` (NEITHER is the
 LLM-agent parser contract). This module is the single source of truth for the
-report's section structure and table schemas, so a reader gets the same layout
-regardless of which backend produced it. Each route normalizes its own data into
-the inputs below and fills route-specific-but-unmodeled cells with an em dash.
-
-Route-specific richer detail (e.g. the bypass category rollup / task groups /
-per-kernel detail / CSV exports) is appended verbatim via ``extra_sections``
-AFTER the shared sections, under a clearly-marked divider, so the shared spine
-stays identical across routes while no analytical content is lost.
+report's section structure and table schemas. Each route normalizes its own data
+into the inputs below and fills unmodeled cells with an em dash. Route-specific
+detail is appended verbatim via ``extra_sections`` after the shared sections,
+under a divider.
 """
 
 from __future__ import annotations
@@ -118,7 +114,7 @@ def render_report(
     lines.append(prov)
     lines.append("")
 
-    # Executive Summary (fixed | Metric | Value | schema).
+    # Executive Summary.
     lines.append(EXEC_SUMMARY_HEADING)
     lines.append("")
     lines.append("| Metric | Value |")
@@ -135,7 +131,7 @@ def render_report(
     lines.append(f"| Op-attribution Coverage | {_pct(exec_summary.get('attribution_pct'))} |")
     lines.append("")
 
-    # System-Level Signals (shared table: idle / exposed comm / exposed memcpy).
+    # System-Level Signals.
     lines.append(SYSTEM_SIGNALS_HEADING)
     lines.append("")
     lines.append("| Signal | % of total GPU time | Note |")
@@ -154,7 +150,7 @@ def render_report(
     lines.append(f"| Exposed memcpy (device copy) | {_pct(system_signals.get('exposed_memcpy_pct'))} | - |")
     lines.append("")
 
-    # Top Hot Kernels (shared column schema; AI is DASH for routes without it).
+    # Top Hot Kernels.
     lines.append(TOP_HOT_KERNELS_HEADING)
     lines.append("")
     if hot_kernels:
@@ -170,7 +166,7 @@ def render_report(
         lines.append("_No GPU kernels found in trace._")
     lines.append("")
 
-    # Per-P-item Data tables (shared schema + reasoning-candidate marker).
+    # Per-P-item Data tables.
     for item in p_items:
         rank = item.get("rank", 0)
         lines.append(f"### P{rank}: {_text(canonical_category(item.get('category')))} kernels")

@@ -25,10 +25,9 @@ from ._subprocess_kill import _process_group_alive, _signal_group
 log = logging.getLogger(__name__)
 
 
-# Magpie built-in benchmark scripts that honour ``MAGPIE_RUN_PHASE`` and
-# support the server_lifecycle reuse protocol. Mirrors Magpie's
-# ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` (duplicated to avoid an import-time
-# Magpie dependency).
+# Magpie built-in benchmark scripts that support the server_lifecycle reuse
+# protocol. Mirrors Magpie's ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` (duplicated
+# to avoid an import-time Magpie dependency).
 MAGPIE_BUILTIN_SCRIPTS = frozenset(
     {
         "vllm_mi300x.sh",

@@ -1,12 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for ``_xdit_patcher`` — now a VERIFIER, not a mutator.
+"""Tests for ``_xdit_patcher`` — a VERIFIER, not a mutator.
 
 The two diffusion-profiling adaptations (``repeat=1`` + per-denoise-step
-``denoise_step_<i>`` markers) are baked into the sandbox image by the
-``hyperloom-xdit-adaptation`` overlay. This module no longer edits any file; it
-only verifies the baked sentinels are present in the running xfuser and fails
-soft (returns ``False``, logs remediation) when they are missing (stale image).
+markers) are baked into the sandbox image. This module verifies the baked
+sentinels are present in the running xfuser and fails soft (returns ``False``,
+logs remediation) when they are missing.
 
 Fixtures synthesize a fake xfuser tree in ``tmp_path`` discovered via
 ``$XDIT_PATH`` (``base_model.py`` with / without the baked sentinels).
@@ -31,8 +30,7 @@ _REL = ("xfuser", "model_executor", "models", "runner_models", "base_model.py")
 _PROFILER_SENTINEL = "# hyperloom: retain active window"
 _ANNOT_SENTINEL = "# hyperloom: per-denoise-step annotation"
 
-# A base_model.py that carries BOTH baked adaptations (only the sentinel-bearing
-# lines matter to the verifier; the rest is representative context).
+# A base_model.py carrying BOTH baked adaptations.
 _BAKED_FIXTURE = """\
 class xFuserModel:
     def profile(self, input_args):

@@ -38,8 +38,7 @@ from .benchmark_result import (
 )
 from .benchmark_backend import build_benchmark_command
 
-# Cohesive clusters live in sibling modules; re-exported here so the module
-# namespace + monkeypatch surface is intact.
+# Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
     _MAGPIE_CWD_DEFAULT as _MAGPIE_CWD_DEFAULT,
     _VARIANT_TIMEOUT_SEC_DEFAULT as _VARIANT_TIMEOUT_SEC_DEFAULT,
@@ -116,9 +115,8 @@ def _resolve_magpie_python() -> str:
 
     Order: $MAGPIE_PYTHON (only when it can ``import Magpie``) > first PATH
     ``python3`` that can ``import Magpie`` > /opt/venv/bin/python when present
-    > first PATH ``python3``. A stale ``$MAGPIE_PYTHON``
-    resolved before Magpie was pip-installed (e.g. ``/usr/bin/python3``) is
-    validated and skipped to avoid ``ModuleNotFoundError`` at benchmark time.
+    > first PATH ``python3``. A stale ``$MAGPIE_PYTHON`` is validated and
+    skipped to avoid ``ModuleNotFoundError`` at benchmark time.
 
     Returns:
         str: Path to a Python interpreter that can import Magpie, falling back
@@ -137,17 +135,11 @@ def _resolve_magpie_python() -> str:
         Returns:
             ``True`` if both imports succeed in the interpreter.
         """
-        # Probe Magpie AND its top-level runtime dep ``yaml``: an editable
-        # install puts Magpie on sys.path via a .pth regardless of whether
-        # the interpreter has PyYAML, so ``import Magpie`` alone can succeed
-        # on an interpreter that then dies at Magpie startup with
-        # ``ModuleNotFoundError: No module named 'yaml'`` (surfaced as
-        # subprocess_nonzero / baseline_failed). Requiring yaml here makes
-        # the resolver skip such interpreters and fall through to the
-        # canonical /opt/venv that has the full dependency set.
+        # Probe Magpie AND ``yaml`` so an interpreter that resolves Magpie via a
+        # .pth but lacks PyYAML is skipped in favour of the canonical /opt/venv.
         try:
-            # ``run_with_session_kill`` captures stdout/stderr internally and
-            # rejects ``capture_output`` (would raise TypeError).
+            # run_with_session_kill captures output internally and rejects
+            # capture_output.
             proc = run_with_session_kill(
                 [py, "-c", "import Magpie, yaml"],
                 timeout=10,
@@ -183,35 +175,27 @@ def _resolve_magpie_python() -> str:
 def _resolve_probe_python() -> str:
     """Resolve the interpreter a build-accuracy probe must use.
 
-    A capability probe (e.g. :func:`_probe_vllm_aiter_shared_expert_unsupported`)
-    only produces a correct drop decision when it inspects the SAME framework
-    install the benchmark server actually loads. The server runs ``vllm serve``
-    (the ``vllm`` console-script's own venv), while Magpie itself runs under
-    ``_resolve_magpie_python()``; a bare ``python3`` off ``$PATH`` may be a third,
-    unrelated venv, so probing it can misreport (false ``unsupported`` -> a
-    usable variant is dropped and a ``capability_unsupported`` row is written
-    back that teaches the LLM to avoid a working flag).
+    A capability probe only produces a correct drop decision when it inspects
+    the SAME framework install the benchmark server loads, so a bare ``python3``
+    off ``$PATH`` is deliberately NOT a fallback.
 
-    Resolution order (bare ``python3`` is deliberately NOT a fallback):
+    Resolution order:
     1. ``_resolve_magpie_python()`` — the interpreter that runs the benchmark
        harness; on a single-venv install this is also the vLLM venv.
     2. The interpreter behind the ``vllm`` executable (``<venv>/bin/python``
-       alongside ``shutil.which("vllm")``) when it exists on disk — the venv
-       that literally serves the model.
-    3. ``_resolve_magpie_python()``'s own canonical fallback
-       (``/opt/venv/bin/python``) is the last resort via step 1.
+       alongside ``shutil.which("vllm")``) when it exists on disk.
+    3. ``_resolve_magpie_python()``'s canonical fallback via step 1.
 
     Returns:
         str: Path to the interpreter the probe should invoke.
     """
     magpie_python = _resolve_magpie_python()
     # Prefer the harness interpreter; on a single-venv box it already IS the
-    # vLLM venv, so no extra resolution is needed.
+    # vLLM venv.
     if magpie_python and magpie_python != "/opt/venv/bin/python":
         return magpie_python
-    # magpie_python fell through to the canonical default — try to pin the venv
-    # that actually backs ``vllm serve`` so a Frankenbuild (server on /opt/venv,
-    # PATH python3 elsewhere) is probed against the real server source.
+    # Fell through to the canonical default; pin the venv that backs ``vllm
+    # serve`` so the probe hits the real server source.
     vllm_exe = shutil.which("vllm")
     if vllm_exe:
         vllm_python = os.path.join(os.path.dirname(vllm_exe), "python")
@@ -237,10 +221,8 @@ def _resolve_session_dir() -> Path:
 
 
 
-# User-declared variant skip list: SKIP_VARIANTS is a comma/whitespace list of
-# patterns matched (exact or fnmatch glob) against ``GridVariant.name``.
-# Resolution order: params["skip_variants"] > $SKIP_VARIANTS > "". Name-based
-# only; model/TP predicates live in each executor's filter.
+# SKIP_VARIANTS: comma/whitespace patterns matched (exact or fnmatch) against
+# ``GridVariant.name``. Order: params["skip_variants"] > $SKIP_VARIANTS > "".
 
 
 
@@ -273,29 +255,21 @@ def _resolve_session_dir() -> Path:
 
 
 
-# ── Env-flag capability probe (build-accurate, not version-string based) ──
-# A serving env flag can be *defined* in the framework build yet still crash
-# the server at engine init because the code path it activates imports a module
-# that this particular build did not package (e.g. the vLLM ``+rocm722`` wheel
-# defines ``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS`` but its aiter
-# shared-expert router lazily imports ``...fused_moe.rocm_aiter_fused_moe``,
-# which was moved to ``...fused_moe.experts.rocm_aiter_moe`` in 0.22+ and is
-# absent from that wheel). Knowing the flag *name* exists (envs.py) does not
-# tell us the flag *works*; only the installed build does. We probe the build
-# directly instead of maintaining a version→flag table (which would misfire
-# since the flag name is identical across 0.21 and 0.24).
+# Env-flag capability probe: a serving env flag can be defined in the build yet
+# still crash the server at engine init because the code path it activates
+# imports a module the build did not package. Probe the installed build directly
+# rather than maintaining a version→flag table.
 _UNSET = object()
 
-# Sentinel-cached probe result, keyed by framework. Value is ``None`` (flag
-# usable / not applicable) or a reason string (flag would crash the server).
+# Cached probe result keyed by framework. ``None`` (flag usable / n/a) or a
+# reason string (flag would crash the server).
 _CAP_PROBE_CACHE: dict[str, str | None] = {}
 
-# Subprocess probe: locate the installed vLLM package WITHOUT executing its
-# heavy ``__init__`` (``find_spec('vllm')`` resolves the top-level package
-# without importing it), read the aiter shared-expert router source, extract the
+# Subprocess probe: locate the installed vLLM package via ``find_spec`` without
+# importing it, read the aiter shared-expert router source, extract the
 # ``fused_moe.*`` modules it imports, and verify each resolves to a real file in
 # THIS build. Prints a single JSON line; any failure => ``status=unknown`` so
-# the caller conservatively does NOT drop the variant.
+# the caller does NOT drop the variant.
 _AITER_SHARED_EXPERT_PROBE_SCRIPT = (
     "import importlib.util as u, os, re, json\n"
     "def go():\n"
@@ -352,7 +326,7 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
         )
         lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
         payload = json.loads(lines[-1]) if lines else {}
-    except Exception:  # noqa: BLE001 — best-effort probe, never crash the grid
+    except Exception:  # noqa: BLE001
         return None
     status = payload.get("status")
     if status == "ok":
@@ -368,7 +342,7 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
         )
         _CAP_PROBE_CACHE["vllm"] = reason
         return reason
-    return None  # unknown => conservative, do not drop or cache
+    return None  # unknown => do not drop or cache
 
 
 def unsupported_capability_reason(variant: "GridVariant") -> str | None:
@@ -408,10 +382,9 @@ def unsupported_capability_reason(variant: "GridVariant") -> str | None:
 
 
 
-# Shared sanitization for Orchestration-supplied overrides (benchmark_script /
-# result_dir). Both originate from LLM proposals so we reject path separators /
-# shell metacharacters; the helpers raise ``ValueError`` (Coordinator surfaces
-# ``error_class=bad_param``) instead of running an unsafe subprocess.
+# Sanitization for LLM-supplied overrides (benchmark_script / result_dir):
+# reject path separators / shell metacharacters, raising ``ValueError`` instead
+# of running an unsafe subprocess.
 _SCRIPT_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.sh$")
 _RESULT_DIR_FORBID_RE = re.compile(r"[\s\"'`$;&|<>(){}\[\]\\*?!]")
 
@@ -570,20 +543,16 @@ def _build_variant_yaml(
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
     # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
-    # the relaunched server imports the overlay's kernels (same mechanism as the
-    # geak sweep's OVERLAY_PYTHONPATH). Inert for env/flag variants where
-    # ``overlay_pythonpath`` is unset. getattr-guarded so non-GridVariant callers
-    # (or older payloads) never break.
+    # the relaunched server imports the overlay's kernels. Inert when
+    # ``overlay_pythonpath`` is unset.
     _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
     if _overlay:
         _cur_pp = str(envs.get("PYTHONPATH", "") or "")
         envs["PYTHONPATH"] = f"{_overlay}:{_cur_pp}" if _cur_pp else _overlay
 
-    # PATH guard: the xdit/scriptable wrapper needs BOTH `/venv/bin` (for the
-    # `xdit` console script) and `/opt/rocm/bin` (for `hipcc`, required by
-    # AITER's runtime JIT of module_fmha_v3_fwd). An Orchestration-supplied
-    # extra_envs.PATH can accidentally drop one of these; force-prepend both so
-    # a PATH experiment never breaks binary/hipcc resolution.
+    # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console
+    # script) and `/opt/rocm/bin` (`hipcc`); force-prepend both so an
+    # LLM-supplied PATH can't drop one.
     if str(bench.get("framework", "")).strip().lower() == "xdit":
         _cur_path = str(envs.get("PATH", "") or "")
         _parts = [p for p in _cur_path.split(":") if p]
@@ -642,11 +611,10 @@ def _run_grid_warmup_enabled() -> bool:
 def _kill_stale_servers() -> None:
     """Deep-clean any lingering inference server processes + shared memory.
 
-    Magpie's server_cleanup.sh only reaps the pgrp leader, but vLLM::Worker /
-    EngineCore children escape it; without this pre-clean the next startup
-    hangs ~5 min on zmq / shared-mem conflicts. Called before every Magpie
-    invocation. Uses /proc scan (not pgrep) to avoid clashing with test
-    subprocess mocks. No-op in multi-node mode (servers live in RayJob pods).
+    Reaps vLLM::Worker / EngineCore children that escape Magpie's pgrp-leader
+    cleanup. Called before every Magpie invocation; uses a /proc scan (not
+    pgrep) to avoid clashing with test subprocess mocks. No-op in multi-node
+    mode (servers live in RayJob pods).
 
     Note:
         Side-effecting and best-effort: it sends signals to matching processes
@@ -673,11 +641,9 @@ def _kill_stale_servers() -> None:
         "atom.entrypoints.openai_server",
     )
 
-    # atom's ModelRunner workers spawn via ``multiprocessing.spawn`` (generic
-    # ``spawn_main ... --multiprocessing-fork`` cmdline, unmatchable by
-    # _KILL_PATTERNS) and orphan to init holding their full HIP/VRAM, OOM-ing
-    # the next atom server. Identify survivors by the atom / aiter JIT mmaps in
-    # their address space — a signature our own children never carry.
+    # atom ModelRunner workers spawn with a generic ``--multiprocessing-fork``
+    # cmdline (unmatchable by _KILL_PATTERNS) and can orphan holding VRAM;
+    # identify survivors by atom/aiter JIT mmaps in their address space.
     _FORK_MARKERS = (b"--multiprocessing-fork", b"spawn_main")
     _ATOM_MAP_SIGNATURES = ("/ATOM/atom/", "/aiter/jit/", "/aiter-test/aiter/")
 
@@ -735,19 +701,18 @@ def _kill_stale_servers() -> None:
         is_atom_server = "atom.entrypoints" in text
         if any(pat in text for pat in _KILL_PATTERNS) or _is_orphaned_atom_worker(pid, cmdline):
             killed_atom = killed_atom or is_atom_server or b"--multiprocessing-fork" in cmdline
-            # Kill the whole pgrp — atom ModelRunner children must die with the
-            # leader.
+            # Kill the whole pgrp so atom children die with the leader.
             try:
                 pgid = os.getpgid(pid)
                 if pgid not in (my_pgid, 0):
                     os.killpg(pgid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
-                # Group already gone or not ours to signal; fall through to per-pid kill.
+                # Group gone or not ours; fall through to per-pid kill.
                 pass
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
-                # Process already exited or owned by another user; nothing to kill.
+                # Already exited or owned by another user.
                 pass
 
     # Clear /dev/shm segments that prevent re-binding.
@@ -756,10 +721,10 @@ def _kill_stale_servers() -> None:
             try:
                 os.remove(f)
             except OSError:
-                # Segment already removed or held by another process; safe to skip.
+                # Already removed or held by another process.
                 pass
 
-    # Pause for KFD async VRAM release; atom workers' teardown lags past 2s.
+    # Pause for KFD async VRAM release; atom teardown lags past 2s.
     time.sleep(8 if killed_atom else 2)
 
 
@@ -803,9 +768,8 @@ def _run_magpie(
     Returns:
         tuple[int, str, str]: ``(returncode, stdout, stderr)``.
     """
-    # Pre-clean lingering servers + shared memory (skip under pytest).
-    # Disable this for lifecycle re-attach rounds; otherwise the warm server
-    # created by the discarded round is killed immediately before measurement.
+    # Pre-clean lingering servers + shared memory (skip under pytest, and for
+    # lifecycle re-attach rounds that would kill the warm server).
     if preclean and not os.environ.get("PYTEST_CURRENT_TEST"):
         _kill_stale_servers()
 
@@ -816,25 +780,21 @@ def _run_magpie(
         env["PYTHONPATH"] = f"{magpie_dir}:{env.get('PYTHONPATH', '')}"
 
     # Multi-node: tell Magpie to skip its local-server launch and point
-    # benchmark_serving at the head pod's ClusterIP ({} in single-node).
+    # benchmark_serving at the head pod's ClusterIP.
     from ._multi_node_env import magpie_remote_env
 
     env.update(magpie_remote_env())
 
-    # Pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH`` so it
-    # loads the SAME checkout ``_inferencex_patcher`` patched, not a stale
-    # ``./InferenceX`` / cache copy. ``MAGPIE_INFERENCEX_PATH`` is Magpie's
-    # highest-precedence resolution rung.
+    # Pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH`` (its
+    # highest-precedence rung) so it loads the patched checkout, not a stale copy.
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if inferencex_path:
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-    # Always-on RESULT_DIR default; scripts that ignore it still leak and are
-    # picked up by the ``extract_benchmark_measurement`` salvage path.
+    # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # Pin SERVER_LOG / GPU_METRICS_CSV per-task so logs land alongside
-    # ``benchmark_report.json`` instead of leaking to ``/workspace/``. Always
-    # overwrite so a stale parent value can't redirect into a prior run's slot;
-    # ``harvest_leaked_artifacts`` covers wrappers that ignore these vars.
+    # ``benchmark_report.json``. Always overwrite so a stale parent value can't
+    # redirect into a prior run's slot.
     env["SERVER_LOG"] = str(output_dir / "server.log")
     env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
     cmd = build_benchmark_command(
@@ -843,8 +803,7 @@ def _run_magpie(
         output_dir=output_dir,
     )
     # run_with_session_kill launches Magpie in its own POSIX session and tears
-    # down the whole descendant tree on every exit path. See
-    # ``_subprocess_kill.py``.
+    # down the whole descendant tree on every exit path.
     proc = run_with_session_kill(
         cmd,
         env=env,
@@ -888,9 +847,8 @@ async def run_grid(
     auto_warmup_requested = bool(warmup_before_measure and server_lifecycle is None)
     results: list[VariantResult] = []
 
-    # Variant-boundary robustness pulse: a bounded deterministic tick after
-    # every variant so a mid-grid leak/crash surfaces between variants instead
-    # of after the whole grid. Best-effort; see ``_robustness_pulse.py``.
+    # Variant-boundary robustness pulse: a bounded tick after every variant so
+    # a mid-grid leak/crash surfaces between variants. Best-effort.
     async def _pulse_after_variant(idx: int) -> None:
         """Run a best-effort robustness pulse after a variant completes.
 
@@ -908,11 +866,9 @@ async def run_grid(
 
     for i, variant in enumerate(grid):
         slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
-        # Capability fast-fail: drop a variant whose env flag the installed
-        # framework build cannot honour BEFORE booting a (doomed) server. Turns
-        # a ~multi-minute server-boot crash into a sub-second skip while still
-        # recording the failure in the ledger so the LLM learns not to re-pick
-        # it. See ``unsupported_capability_reason``.
+        # Capability fast-fail: drop a variant whose env flag the build cannot
+        # honour before booting a doomed server, still recording the failure so
+        # the LLM learns not to re-pick it.
         cap_reason = unsupported_capability_reason(variant)
         if cap_reason:
             log.warning(
@@ -1216,9 +1172,8 @@ async def run_grid(
             variant.extra_server_args,
         )
 
-        # Multi-node only: restart sglang/vllm with this variant's flags so
-        # each row runs against a fresh server (parity with single-node
-        # PHASE=all). No-op in single-node mode.
+        # Multi-node only: restart sglang/vllm with this variant's flags so each
+        # row runs against a fresh server. No-op in single-node mode.
         from ._multi_node_server_lifecycle import (
             ServerRestartFailed,
             restart_server_for_round,
@@ -1234,10 +1189,8 @@ async def run_grid(
                         variant.extra_server_args,
                     )
                 ),
-                # Per-variant env overrides (e.g. MORI_* MoE-dispatch
-                # tuning) so server-side env knobs proposed by specialists
-                # actually take effect on the restarted sglang. Empty dict
-                # for arg-only variants → forwarded as a no-op.
+                # Per-variant env overrides so server-side env knobs take effect
+                # on the restarted sglang.
                 extra_env=dict(variant.extra_envs),
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
@@ -1273,8 +1226,7 @@ async def run_grid(
             continue
 
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
-        # leak destinations per-variant (else a stale prior-run artifact
-        # masquerades as this variant's result).
+        # leak destinations per-variant.
         variant_started_unix = time.time()
         try:
             rc, stdout, stderr = await asyncio.to_thread(
@@ -1290,8 +1242,7 @@ async def run_grid(
                 server_already_ready=(server_already_ready or auto_warmup),
             )
         except subprocess.TimeoutExpired as exc:
-            # Harvest pre-timeout leaks so the variant slot captures whatever
-            # the wrapper wrote before the timer fired.
+            # Harvest pre-timeout leaks.
             to_candidates = sorted(slot.glob("benchmark_*"))
             to_destination = to_candidates[-1] if to_candidates else slot
             to_harvested = harvest_leaked_artifacts(
@@ -1343,10 +1294,9 @@ async def run_grid(
                     port=int(lifecycle.get("port") or 0),
                 )
 
-        # Server-liveness watchdog fired: the variant's server engine/worker
-        # bootstrap died but the parent process hung. Record a fast failure
-        # (instead of a ~2h hard-timeout stall) so the ExploreExecutor drops
-        # this variant and the round proceeds. Harvest the crash server.log.
+        # Server-liveness watchdog fired: engine/worker bootstrap died but the
+        # parent hung. Record a fast failure so the round proceeds; harvest the
+        # crash server.log.
         if rc == SERVER_DEAD_RETURNCODE:
             variant_runtime_sec = round(
                 max(0.0, time.time() - variant_started_unix),
@@ -1395,13 +1345,9 @@ async def run_grid(
                 break
             continue
 
-        # Detokenizer-stall watchdog fired: this variant's server came up
-        # healthy (ready marker logged) but then went completely silent — a hung
-        # engine / wedged detokenizer. The clock runs from the ready marker, so
-        # a long cold start does not trip it. Fast-prune the variant with a
-        # distinct ``error_class`` so the ExploreExecutor drops it and the round
-        # proceeds, instead of burning the full ~2h hard timeout on a server
-        # that will never return tokens. Harvest leaks for RCA.
+        # Detokenizer-stall watchdog fired: the server came up healthy but then
+        # went silent (hung engine / wedged detokenizer). Fast-prune with a
+        # distinct ``error_class`` and harvest leaks for RCA.
         if rc == DETOKENIZER_STALL_RETURNCODE:
             variant_runtime_sec = round(
                 max(0.0, time.time() - variant_started_unix),
@@ -1451,9 +1397,8 @@ async def run_grid(
                 break
             continue
 
-        # Soft overtime gate fired: record a ``killed_overtime=True`` result
-        # with no tput so the ExploreExecutor demotes it to ``KILLED_OVERTIME``.
-        # Still harvest leaks for post-mortem.
+        # Soft overtime gate fired: record a ``killed_overtime=True`` result with
+        # no tput and still harvest leaks for post-mortem.
         if rc == OVERTIME_KILL_RETURNCODE:
             variant_runtime_sec = round(
                 max(0.0, time.time() - variant_started_unix),
@@ -1465,11 +1410,9 @@ async def run_grid(
                 ok_destination,
                 subprocess_started_unix=variant_started_unix,
             )
-            # Best-effort rough tput from the engine's periodic server.log
-            # throughput logs: the variant never finished so there's no
-            # benchmark_report, but the partial decode rate is still useful
-            # post-mortem. Informational only — the variant stays failed and
-            # this never feeds winner selection.
+            # Best-effort rough tput from server.log throughput logs;
+            # informational only — the variant stays failed and never feeds
+            # winner selection.
             ok_warnings = [f"harvested_leaked_artifact:{src}" for src, _ in ok_harvested]
             ok_estimate = estimate_killed_variant_throughput(slot)
             estimated_tput = ok_estimate.get("output_throughput") if ok_estimate else None
@@ -1511,9 +1454,8 @@ async def run_grid(
 
         # Locate workspace inside slot.
         candidates = sorted(slot.glob("benchmark_*"))
-        # Always-on artifact harvest (parity with BaselineExecutor) so each
-        # variant slot keeps its server.log / gpu_metrics / profile relay for
-        # Robustness RCA.
+        # Always-on artifact harvest so each slot keeps its server.log /
+        # gpu_metrics / profile relay for Robustness RCA.
         harvest_destination = candidates[-1] if candidates else slot
         harvested = harvest_leaked_artifacts(
             harvest_destination,
@@ -1689,11 +1631,8 @@ def _write_variant_abort_marker(
 ) -> None:
     """Write ``abort_reason.json`` into the variant slot directory.
 
-    When a variant aborts before benchmark_report.json exists, the slot has
-    only ``config.yaml`` and a reader can't tell "tested-but-failed" from
-    "untested". This marker lets final-report / post-mortem tools count failed
-    variants and find an explicit reason even after the log rotated. Failure
-    to write it is non-fatal (log and continue).
+    Lets final-report / post-mortem tools distinguish "tested-but-failed" from
+    "untested" and find an explicit reason. Failure to write it is non-fatal.
 
     Args:
         slot (Path): Variant slot directory the marker is written into.
@@ -1745,10 +1684,7 @@ __all__ = [
     "sanitize_result_dir",
     "sanitize_script_name",
     "server_args_env_name",
-    # Re-exported from the extracted sibling modules (_grid_base /
-    # _grid_server_args / _grid_variant_filter) to keep the module namespace
-    # and test monkeypatch surface intact. Declared so the re-exports are
-    # intentional rather than flagged unused imports.
+    # Re-exported from the sibling modules to keep the namespace intact.
     "coerce_extra_envs",
     "compact_json_server_args",
     "_SPACE_VALUE_FLAGS",

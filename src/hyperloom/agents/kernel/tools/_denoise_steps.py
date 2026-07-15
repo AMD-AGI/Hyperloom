@@ -17,8 +17,7 @@ import re
 from pathlib import Path
 
 _PROFILER_STEP_RE = re.compile(rb"ProfilerStep#(\d+)")
-#: Streaming read chunk size; module-level so tests can shrink it to exercise the
-#: cross-chunk boundary overlap. ``ProfilerStep#<digits>`` is far shorter than this.
+#: Streaming read chunk size.
 _CHUNK_BYTES = 1 << 20  # 1 MiB
 #: Overlap kept between chunks so a marker split across the boundary still matches.
 _OVERLAP_BYTES = 64
@@ -81,7 +80,7 @@ def count_profiler_steps(trace_path: str) -> int:
                     break
                 buf = carry + chunk
                 for m in _PROFILER_STEP_RE.finditer(buf):
-                    steps.add(m.group(1))  # a set dedups matches re-seen in the overlap
+                    steps.add(m.group(1))  # set dedups matches re-seen in overlap
                 carry = buf[-_OVERLAP_BYTES:]
     except OSError:
         return 0
