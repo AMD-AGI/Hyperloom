@@ -271,6 +271,29 @@ _default_baseline_config = default_baseline_config
 _materialize_config_with_envs = materialize_config_with_envs
 
 
+def _materialized_run_eval_disabled(config_path: Path) -> bool:
+    """Report whether lm-eval is disabled in the materialized benchmark config.
+
+    ``materialize_config_with_envs`` writes the effective ``RUN_EVAL`` (folded
+    from the base YAML ``benchmark.envs``, ``reference_envs``, ``extra_envs`` and
+    process ``$RUN_EVAL``, defaulting to "true") into ``benchmark.envs.RUN_EVAL``
+    -- the value the benchmark subprocess actually consumes. Reading it back is
+    the single source of truth for "did eval run this round", reusing the shared
+    ``_RUN_EVAL_FALSE_VALUES`` present-and-falsey semantics.
+
+    Args:
+        config_path (Path): The materialized benchmark YAML config path.
+
+    Returns:
+        bool: ``True`` when the config's ``RUN_EVAL`` is present and falsey.
+            A missing key reads as enabled (matches the materialize default).
+    """
+    cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
+    val = envs.get("RUN_EVAL")
+    return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
+
+
 def _should_establish_quality_ref(task_kind: str | None) -> bool:
     """Only a genuine ``baseline`` task may establish/overwrite the quality reference.
 
@@ -1214,18 +1237,6 @@ class BaselineExecutor:
         base_extra_envs = dict(params.get("extra_envs") or {})
         if force_disable_eval or is_truthy(params.get("disable_run_eval")):
             base_extra_envs["RUN_EVAL"] = "false"
-        # Whether THIS run actually executes lm-eval. RUN_EVAL is falsey when the
-        # eval-failure fallback (``force_disable_eval``) or ``disable_run_eval``
-        # forced it off above, or when the operator passed a present-and-falsey
-        # ``RUN_EVAL`` through ``extra_envs`` (same present-and-falsey semantics as
-        # ``__call__``). Threaded into ``_run_single_benchmark`` so accuracy is
-        # parsed ONLY when eval ran -- never salvaging a prior attempt's stale
-        # ``results*.json`` from the reused per-round slot.
-        _run_eval_val = base_extra_envs.get("RUN_EVAL")
-        run_eval_disabled = (
-            _run_eval_val is not None
-            and str(_run_eval_val).strip().lower() in _RUN_EVAL_FALSE_VALUES
-        )
         try:
             config_path = materialize_config_with_envs(
                 config_path,
@@ -1250,6 +1261,17 @@ class BaselineExecutor:
             }
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
+        # Whether THIS run actually executes lm-eval, read back from the
+        # materialized config the subprocess consumes -- the single source of
+        # truth. ``materialize_config_with_envs`` folds RUN_EVAL from the base
+        # YAML ``benchmark.envs``, ``reference_envs``, ``extra_envs`` (incl. the
+        # eval-failure fallback / ``disable_run_eval`` force-off), and process
+        # ``$RUN_EVAL`` (defaulting to "true"), so deriving from ``extra_envs``
+        # alone would miss the other sources. Threaded into
+        # ``_run_single_benchmark`` so accuracy is parsed ONLY when eval ran --
+        # never salvaging a prior attempt's stale ``results*.json`` from the
+        # reused per-round slot.
+        run_eval_disabled = _materialized_run_eval_disabled(materialized_config_path)
         hook_result = self._after_materialize_config(config_path, output_dir)
         if hook_result is not None:
             hook_result.setdefault("materialized_config", str(config_path))

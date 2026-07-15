@@ -288,3 +288,108 @@ def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
     # Stale results*.json present in the slot, but RUN_EVAL was off this run:
     # accuracy must NOT be set (no stale promotion into baseline_accuracy).
     assert result.get("accuracy") is None
+
+
+def _write_results_score(path: Path, score: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"results": {"gsm8k": {"exact_match,strict-match": score, "alias": "gsm8k"}}}),
+        encoding="utf-8",
+    )
+
+
+# --- Finding 1: discarded warmup round must never be graded ---
+
+
+def test_parse_eval_results_ignores_discarded_warmup_round(tmp_path):
+    """integrate_patch grades from the grid slot (parent of the measured
+    ``benchmark_*`` workspace). ``run_grid`` nests the discarded warmup eval under
+    ``warmup_round/``, whose path sorts lexicographically AFTER the measured
+    ``<model>/`` dir, so ``sorted(...)[-1]`` would wrongly pick the warmup score.
+    The measured round must win.
+    """
+    slot = tmp_path / "variant_00_kv"
+    # Measured round eval at the slot root: slot/<model>/results_<ts>.json.
+    _write_results_score(
+        slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.90
+    )
+    # Discarded warmup round eval nested under warmup_round/ (worse score, and a
+    # path that sorts last so the pre-fix sorted(...)[-1] would select it).
+    _write_results_score(
+        slot / "warmup_round" / "Qwen__model" / "results_2026-07-15T09-00-00.000000.json",
+        0.50,
+    )
+    out = parse_eval_results(slot, framework="vllm")
+    assert out.get("accuracy") == pytest.approx(0.90)
+    assert "warmup_round" not in (out.get("source_file") or "")
+
+
+def test_parse_eval_results_keeps_results_when_root_is_warmup_slot(tmp_path):
+    """The warmup filter is workspace-relative, not absolute: a parse rooted AT a
+    ``warmup_round`` slot (the baseline warmup round parses its own
+    ``EVAL_RESULT_DIR == .../warmup_round``) must still find its own results.
+    """
+    warm_slot = tmp_path / "warmup_round"
+    _write_results_score(
+        warm_slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.77
+    )
+    out = parse_eval_results(warm_slot, framework="vllm")
+    assert out.get("accuracy") == pytest.approx(0.77)
+
+
+# --- Finding 2: RUN_EVAL off in the base YAML (not extra_envs) is honored ---
+
+
+def test_baseline_skips_accuracy_when_run_eval_off_in_base_yaml(tmp_path):
+    """RUN_EVAL=false coming from the base YAML ``benchmark.envs`` (not
+    ``extra_envs``) must be honored: baseline reads the effective RUN_EVAL from
+    the materialized config, so a stale ``results*.json`` in the reused slot is
+    not promoted into ``baseline_accuracy``.
+    """
+    base = tmp_path / "base.yaml"
+    cfg = {
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "precision": "bf16",
+            "run_mode": "local",
+            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256, "RUN_EVAL": False},
+            "timeout_seconds": 600,
+            "profiler": {
+                "torch_profiler": {"enabled": False},
+                "system_profiler": {"enabled": False},
+                "tracelens": {"enabled": False},
+            },
+            "gpu_selection": {"auto": False},
+        }
+    }
+    with base.open("w") as f:
+        yaml.safe_dump(cfg, f)
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        env = dict(kwargs.get("env") or {})
+        _fake_workspace(slot)
+        # Stale results in the slot from a prior attempt; RUN_EVAL is off in the
+        # base YAML this run, so lm-eval did not run and this must be ignored.
+        eval_root = env.get("EVAL_RESULT_DIR") or str(slot)
+        _write_lm_eval_output(Path(eval_root))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = asyncio.run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert result.get("accuracy") is None
