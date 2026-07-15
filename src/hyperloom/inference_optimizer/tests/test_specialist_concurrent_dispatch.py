@@ -140,17 +140,16 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
             requires_lanes=["research_lane"],
         )
 
-    started = time.monotonic()
     await coord._pump_dispatcher_once()
-    elapsed = time.monotonic() - started
 
-    # Serial would take ≥1.2s; parallel ~0.3s. Generous budget for CI flakiness.
-    assert elapsed < 1.0, (
-        f"4 specialists serialised (elapsed={elapsed:.3f}s); expected parallel dispatch with elapsed < 1.0s"
-    )
     assert len(probe.entries) == 4
     assert len(probe.exits) == 4
 
+    # Peak concurrency (from overlapping entry/exit intervals) is the
+    # authoritative, deterministic proof of parallel dispatch: if the 4 tasks
+    # serialised, peak would be 1. A wall-clock elapsed budget is intentionally
+    # NOT asserted here — it is redundant with this check and flaky under CI
+    # load (matches the peak-only assertions in the sibling tests below).
     peak = _max_concurrent(probe.entries, probe.exits)
     assert peak == 4, f"expected peak concurrency 4 (capacity=4 with 4 queued), got {peak}"
 
