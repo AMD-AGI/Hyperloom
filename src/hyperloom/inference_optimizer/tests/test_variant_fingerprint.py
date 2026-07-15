@@ -11,6 +11,7 @@ from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
+    variant_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
 
