@@ -34,6 +34,7 @@ def _clean_framework_env(monkeypatch):
         "INFERENCE_OPTIMIZER_VLLM_ARG_UTILS",
         "INFERENCE_OPTIMIZER_ATOM_ARG_UTILS",
         "VIRTUAL_ENV",
+        "VLLM_VENV_ROOT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -166,6 +167,23 @@ class TestProbeFrameworkSourceRootsForEnv:
         result = fp.probe_framework_source_roots_for_env()
         for name in ("vllm", "sglang", "aiter"):
             assert f"{name}/" in result
+
+    def test_isolated_vllm_venv_root_fallback(self, tmp_path, monkeypatch):
+        # Isolated vLLM: main VIRTUAL_ENV has no vllm; VLLM_VENV_ROOT points at
+        # the isolated venv holding vllm + aiter, which must still be discovered.
+        main_venv = tmp_path / "opt-venv"
+        (main_venv / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
+        iso_venv = tmp_path / "vllm-venv"
+        iso_site = iso_venv / "lib" / "python3.12" / "site-packages"
+        for name in ("vllm", "aiter"):
+            (iso_site / name).mkdir(parents=True)
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
+        monkeypatch.setenv("VIRTUAL_ENV", str(main_venv))
+        monkeypatch.setenv("VLLM_VENV_ROOT", str(iso_venv))
+        result = fp._discover_installed_framework_roots()
+        assert any(r.endswith("/vllm/") for r in result)
+        assert any(r.endswith("/aiter/") for r in result)
 
     def test_dedupes_origins_against_defaults(self, tmp_path, monkeypatch):
         shared = tmp_path / "shared"

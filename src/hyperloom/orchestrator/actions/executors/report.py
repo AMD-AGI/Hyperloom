@@ -571,6 +571,8 @@ def _format_md(summary: dict[str, Any]) -> str:
     if ext:
         lines.extend(_format_external_baseline_section(ext))
 
+    lines.extend(_format_conc_sweep_curve_section(summary))
+
     return "\n".join(lines)
 
 
@@ -917,6 +919,99 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _format_conc_sweep_curve_section(summary: dict[str, Any]) -> list[str]:
+    """Render the concurrency-sweep curve section in the Markdown report.
+
+    Emits an embedded image reference when ``conc_sweep_curve_png`` is
+    present in the summary, otherwise returns an empty list.
+
+    Args:
+        summary: The full report summary dict (may contain
+            ``conc_sweep_curve_png``).
+
+    Returns:
+        Markdown lines for the curve section, or ``[]`` when no curve exists.
+    """
+    png_rel = summary.get("conc_sweep_curve_png")
+    if not png_rel:
+        return []
+    lines: list[str] = []
+    lines.append("## Concurrency Sweep — Throughput vs Interactivity")
+    lines.append("")
+    lines.append(
+        "Efficiency (tok/s/GPU) vs Interactivity (tok/s/user) across the "
+        "post-optimization concurrency ladder.  "
+        "Dark-red = baseline, orange = optimized."
+    )
+    lines.append("")
+    # Use the relative path so the image renders correctly when the report
+    # directory is the working directory.
+    lines.append(f"![Concurrency sweep curve]({png_rel})")
+    lines.append("")
+    return lines
+
+
+def _render_conc_sweep_curve_for_report(
+    session_dir: Path,
+    output_dir: Path,
+    state: SharedState,
+) -> Path | None:
+    """Render the concurrency-sweep curve PNG into the reports directory.
+
+    Loads the full ``conc_sweep_summary.json`` (not the slim pointer), calls
+    :func:`render_conc_sweep_curve`, and returns the path on success.
+
+    Args:
+        session_dir: Session directory used to locate
+            ``reports/conc_sweep_summary.json``.
+        output_dir: Reports directory where ``conc_sweep_curve.png`` is
+            written.
+        state: Shared state for model/GPU metadata passed to the plotter.
+
+    Returns:
+        Path to the written PNG, or ``None`` when the chart cannot be
+        produced (missing data, missing matplotlib, IO error).
+    """
+    from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+    json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
+    if not json_path.exists():
+        return None
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.debug("report_executor: cannot load conc_sweep_summary.json for plot: %s", exc)
+        return None
+
+    # Quick check: need at least one arm with a non-None output_throughput.
+    def _has_data(arm_key: str) -> bool:
+        pts = (payload.get(arm_key) or {}).get("points") or []
+        return any(p.get("output_throughput") is not None for p in pts)
+
+    if not _has_data("baseline") and not _has_data("optimized"):
+        log.debug("report_executor: conc_sweep_summary has no throughput data — skipping plot")
+        return None
+
+    png_path = output_dir / "conc_sweep_curve.png"
+    tp = int(payload.get("tp") or getattr(state, "tp", 0) or 1)
+    model_label = str(getattr(state, "model_name", "") or "")
+    gpu_label = str(getattr(state, "gpu_type", "") or "").upper()
+    isl = int(payload.get("isl") or 0)
+    osl = int(payload.get("osl") or 0)
+
+    return render_conc_sweep_curve(
+        payload,
+        png_path,
+        model_label=model_label,
+        gpu_label=gpu_label,
+        tp=tp,
+        isl=isl,
+        osl=osl,
+        draw_ceiling=False,
+    )
+
+
 def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
     """Best-effort load of ``target_analysis/target_baseline.json``; ``None``
     when missing / unreadable (errors swallowed so a corrupt JSON never
@@ -1189,6 +1284,22 @@ class ReportExecutor:
         cs_pointer = _read_conc_sweep_pointer(session_dir)
         if cs_pointer is not None:
             summary["conc_sweep_summary"] = cs_pointer
+
+        # Best-effort InferenceX-style concurrency sweep plot.
+        conc_sweep_curve_png: Path | None = None
+        try:
+            conc_sweep_curve_png = _render_conc_sweep_curve_for_report(
+                session_dir=session_dir,
+                output_dir=output_dir,
+                state=state,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("report_executor: conc_sweep curve render failed", exc_info=True)
+        if conc_sweep_curve_png is not None:
+            try:
+                summary["conc_sweep_curve_png"] = conc_sweep_curve_png.relative_to(session_dir).as_posix()
+            except ValueError:
+                summary["conc_sweep_curve_png"] = conc_sweep_curve_png.as_posix()
 
         json_path = output_dir / "final.json"
         md_path = output_dir / "final.md"

@@ -330,7 +330,7 @@ def main() -> int:
         required=True,
         help=(
             "Path to a pre-generated trace (``.json`` / ``.json.gz``) or a "
-            "torch_trace dir. Use ``inference_optimizer optimize`` to "
+            "torch_trace dir. Use ``python -m hyperloom.inference_optimizer.cli optimize`` to "
             "produce baseline+profile traces."
         ),
     )
@@ -370,7 +370,7 @@ def main() -> int:
         if not trace_path or not Path(trace_path).exists():
             raise RuntimeError(
                 f"--trace-path missing or does not exist: {trace_path}. "
-                "Produce a trace with ``inference_optimizer optimize`` first."
+                "Produce a trace with ``python -m hyperloom.inference_optimizer.cli optimize`` first."
             )
         summary["baseline"] = baseline
         summary["trace_path"] = trace_path
