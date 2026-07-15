@@ -1008,11 +1008,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_geak_timeouts": "phase_kernel",
         "_run_geak_kernel_phase": "phase_kernel",
         "_geak_win_already_recorded": "phase_kernel",
-        "_geak_legacy_promote": "phase_kernel",
         "_parse_geak_accepted_config": "phase_kernel",
         "_record_geak_candidate": "phase_kernel",
         "_promote_geak_from_candidate": "phase_kernel",
-        "_promote_geak_result": "phase_kernel",
         "_record_geak_kernel_journey": "phase_kernel",
         "_ck_blockscale_switch_eligible": "phase_kernel",
         "_ck_switch_precision_is_fp8": "phase_kernel",
@@ -1164,8 +1162,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_gpu_lease_ttl_sec": "dispatcher",
         "_reap_dispatched_task": "dispatcher",
         "_lanes_fit": "dispatcher",
-        "_target_analysis_baseline_exists": "dispatcher",
-        "_kernel_opt_keep_pending": "dispatcher",
         "_sequence_denial_for_action": "dispatcher",
         "_sequence_denial_for_request": "dispatcher",
         "_skip_gemm_tuning": "dispatcher",
@@ -1219,16 +1215,16 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # owner; everything else is a real AttributeError.
         owner = Coordinator._DELEGATED.get(name)
         if owner is not None:
-            owner_obj = object.__getattribute__(self, owner)
+            target = getattr(self, owner)
             try:
-                # Bypass the collaborator's own __getattr__ fallback. Otherwise
-                # a stale _DELEGATED entry whose owner no longer defines `name`
-                # can bounce owner -> coordinator -> owner until RecursionError.
-                return object.__getattribute__(owner_obj, name)
+                # Do not invoke the collaborator's fallback ``__getattr__`` here:
+                # a stale _DELEGATED entry would otherwise bounce back to this
+                # Coordinator and recurse until RecursionError.
+                return object.__getattribute__(target, name)
             except AttributeError as exc:
                 raise AttributeError(
                     f"{type(self).__name__!r} delegates {name!r} to {owner!r}, "
-                    f"but {type(owner_obj).__name__!r} does not define it",
+                    f"but that collaborator does not define it"
                 ) from exc
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 

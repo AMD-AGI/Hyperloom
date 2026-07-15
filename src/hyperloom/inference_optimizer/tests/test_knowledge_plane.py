@@ -190,17 +190,12 @@ def test_collect_kb_provenance_attributes_recipe_reads_per_source(
 def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
     tmp_path: Path,
 ):
-    """The applied warm recipe's KB path is surfaced from its merged provenance."""
+    """The applied warm recipe's KB path is surfaced from the WarmStartContext source tag."""
     from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
 
     state = {
-        "warm_start_recipe": {
-            "raw": "{}", "tier": "exact",
-            "recipe": {
-                "_sources": ["gbrain", "cortex"],
-                "_field_sources": {"best_config": "cortex"},
-            },
-        },
+        "warm_start_recipe": {"raw": "{}", "tier": "exact", "recipe": {}},
+        "warm_start_context": {"match": {"source": "cortex"}},
     }
     out = collect_kb_provenance(tmp_path, state=state, manifest={}, warnings=[])
     assert out["warm_start_recipe_source"] == "cortex"
