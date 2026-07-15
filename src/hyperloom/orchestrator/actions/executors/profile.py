@@ -753,6 +753,14 @@ class ProfileExecutor(BaselineExecutor):
             params["extra_server_args"] = merged_args
         else:
             params.pop("extra_server_args", None)
+        if params.get("base_remove_args") and "remove_args" not in params:
+            raw_remove = params.get("base_remove_args")
+            params["remove_args"] = [raw_remove] if isinstance(raw_remove, str) else list(raw_remove or [])
+        if params.get("base_unset_envs") and "unset_envs" not in params:
+            raw_unset = params.get("base_unset_envs")
+            params["unset_envs"] = [raw_unset] if isinstance(raw_unset, str) else list(raw_unset or [])
+        if str(params.get("base_args_mode") or "").strip().lower() == "replace":
+            params.setdefault("args_mode", "replace")
         extra = getattr(ctx, "extra", None) or {}
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")

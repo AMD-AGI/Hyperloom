@@ -524,6 +524,7 @@ def test_leaderboard_models(monkeypatch):
         "/api/v1/leaderboard": {"results": [{"model": "Org/A", "task_id": "t1"}], "pagination": {"has_more": False}},
         "/api/v1/tasks": {"results": [{"model": "Org/B", "task_id": "t2"}], "pagination": {"has_more": False}},
     }
+    monkeypatch.setattr(gm, "_LB_BASE", "https://leaderboard.example")
     monkeypatch.setattr(gm.urllib.request, "urlopen", _FakeURLMap(routes, html_routes={"/dashboard": "no tasks here"}))
     models = gm._leaderboard_models()
     assert "org/a" in models and "org/b" in models
@@ -660,6 +661,7 @@ def test_leaderboard_models_recovers_hidden(monkeypatch):
         "/api/v1/tasks": {"results": [], "pagination": {"has_more": False}},
     }
     html = {"/dashboard": "api/v1/tasks/hidden1"}
+    monkeypatch.setattr(gm, "_LB_BASE", "https://leaderboard.example")
     monkeypatch.setattr(gm.urllib.request, "urlopen", _FakeURLMap(routes, html_routes=html))
     models = gm._leaderboard_models()
     assert "org/hidden" in models
