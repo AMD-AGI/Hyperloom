@@ -1,10 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the Dynamo multi-node SSH control plane (``ssh_client``).
+"""Unit tests for the Infera multi-node SSH control plane (``ssh_client``).
 
-Guards command-construction / credential-forwarding logic: argv shape, base64
-script shipping, per-variant env injection, and the stdin-only secret path. All
-tests stub ``subprocess.run`` so nothing is spawned.
+These guard the command-construction / credential-forwarding logic that is the
+sole channel for reaching the Infera idle pods: argv shape, base64 script
+shipping, per-variant env injection (e.g. MORI_* MoE-dispatch tuning), and the
+stdin-only secret path. All tests stub ``subprocess.run`` so nothing is spawned.
 """
 
 from __future__ import annotations
@@ -114,7 +115,7 @@ def test_ssh_run_script_no_env_has_no_prefix(monkeypatch, known_hosts):
     )
     ssh_client.ssh_run_script("h", "x=1", "python3", "", key_path="/k", known_hosts=known_hosts)
     remote_cmd = captured["argv"][-1]
-    assert "&& python3 /tmp/mn_dynamo_launch" in remote_cmd
+    assert "&& python3 /tmp/mn_infera_launch" in remote_cmd
 
 
 def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts):
@@ -129,12 +130,12 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts)
     ssh_client.ssh_run_bash_with_env(
         "h",
         "echo body",
-        {"LLM_GATEWAY_KEY": "secret-123"},
+        {"OOB_API_KEY": "secret-123"},
         key_path="/k",
         known_hosts=known_hosts,
     )
     assert captured["argv"][-2:] == ["bash", "-s"]
-    assert "export LLM_GATEWAY_KEY=secret-123" in captured["input"]
+    assert "export OOB_API_KEY=secret-123" in captured["input"]
     assert "echo body" in captured["input"]
     assert "set -uo pipefail" in captured["input"]
     assert not any("secret-123" in a for a in captured["argv"])

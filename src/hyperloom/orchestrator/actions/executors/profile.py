@@ -817,12 +817,19 @@ class ProfileExecutor(BaselineExecutor):
             if isinstance(extra, dict):
                 extra["mn_round_restarted"] = True
 
-        # InferenceX patching happens in the ``_after_materialize_config`` hook.
-        # Multi-node dynamo only: the Dynamo frontend does not propagate
-        # /start_profile to the SSH-launched disagg workers, so torch profiling
-        # is triggered directly on each worker's system server, bracketing the
-        # Magpie benchmark with start/stop. No-ops for RayJob / single-node.
-        from ._multi_node_server_lifecycle import trigger_dynamo_engine_profile
+        # InferenceX patching (``ensure_benchmark_lib_patched`` /
+        # ``ensure_benchmark_serving_patched``) happens in the
+        # ``_after_materialize_config`` hook, which covers the exact InferenceX
+        # checkout Magpie will execute.
+        # Multi-node infera only: the Infera frontend does not propagate
+        # /start_profile to the SSH-launched disagg workers, so torch
+        # profiling must be triggered directly on each worker's system
+        # server (/engine/start_profile). Bracket the Magpie benchmark with
+        # start/stop so traces land in the shared-FS round trace dir for
+        # TraceLens. The helper no-ops for RayJob / single-node and is
+        # fail-soft per worker. ``PROFILE_EXTRA_BODY`` (start_step/num_steps
+        # computed by _workload_envs) is the start_profile payload.
+        from ._multi_node_server_lifecycle import trigger_infera_engine_profile
 
         prof_body: dict[str, Any] = {}
         try:
@@ -833,10 +840,16 @@ class ProfileExecutor(BaselineExecutor):
                 prof_body = parsed
         except (ValueError, TypeError):
             prof_body = {}
-        # The sglang disaggregated scheduler crashes when start_profile carries
-        # the step-window / stage-split params PROFILE_EXTRA_BODY normally sets,
-        # so the dynamo engine-route path forwards ONLY ``output_dir`` and bounds
-        # the trace by the start/stop wall-clock window instead.
+        # The sglang disaggregated scheduler crashes
+        # (``TypeError: unsupported operand type(s) for +=: 'NoneType' and
+        # 'int'`` -> SIGQUIT, server disconnects, no trace) when
+        # start_profile carries the step-window / stage-split params that
+        # the single-node InferenceX PROFILE_EXTRA_BODY normally sets
+        # (``profile_by_stage`` / ``merge_profiles`` / ``num_steps`` /
+        # ``start_step``). Isolated reproduction: ``output_dir``-only =
+        # 8 traces written cleanly; any of the step/stage params = scheduler
+        # crash. So the infera engine-route path forwards ONLY ``output_dir``
+        # and bounds the trace by the start/stop wall-clock window instead.
         _SAFE_PROFILE_KEYS = ("output_dir",)
         prof_body = {k: v for k, v in prof_body.items() if k in _SAFE_PROFILE_KEYS}
         # Pin the trace output dir explicitly: the disagg workers may not carry
@@ -845,11 +858,16 @@ class ProfileExecutor(BaselineExecutor):
         # post-bench trace scan reads.
         if round_trace_root:
             prof_body.setdefault("output_dir", round_trace_root)
-        # Bounded profiling window: open-ended profiling overflows the disagg
-        # scheduler's in-memory trace and crashes stop_profile, so bound by
-        # WALL-CLOCK — after a warmup delay profile a short fixed window
-        # concurrently with the Magpie run, then stop. This is
-        # multi-node-dynamo only.
+        # Bounded profiling window. Open-ended profiling for the whole
+        # Magpie run overflows the disagg scheduler's in-memory trace and
+        # crashes stop_profile ("Server disconnected", no trace) — verified:
+        # a 4s window writes 8 traces cleanly, a ~10min full-run window
+        # crashes the worker. num_steps would bound it but crashes the
+        # disagg scheduler too. So bound by WALL-CLOCK: after a warmup delay
+        # (let load reach steady state) profile a short fixed window
+        # concurrently with the full Magpie run (which still produces the
+        # throughput number), then stop. ``trigger_infera_engine_profile``
+        # no-ops for RayJob / single-node, so this is multi-node-infera only.
         import asyncio as _asyncio
 
         warmup_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WARMUP_S", "60") or 60)
@@ -864,10 +882,10 @@ class ProfileExecutor(BaselineExecutor):
             ``_prof_started`` flag around the active window.
             """
             await _asyncio.sleep(warmup_s)
-            await trigger_dynamo_engine_profile("start", prof_body)
+            await trigger_infera_engine_profile("start", prof_body)
             _prof_started["v"] = True
             await _asyncio.sleep(window_s)
-            await trigger_dynamo_engine_profile("stop")
+            await trigger_infera_engine_profile("stop")
             _prof_started["v"] = False
 
         prof_task = _asyncio.create_task(_bounded_profile_window())
@@ -883,9 +901,9 @@ class ProfileExecutor(BaselineExecutor):
                 except (_asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
             if _prof_started.get("v"):
-                # start fired but stop didn't (window task cancelled mid-run)
-                # -> ensure a matching stop.
-                await trigger_dynamo_engine_profile("stop")
+                # start fired but stop didn't (window task cancelled mid-run
+                # because Magpie finished first) -> ensure a matching stop.
+                await trigger_infera_engine_profile("stop")
 
         # Augment with trace_dir. Multi-node: traces live at the round-scoped
         # wekafs dir we restarted with. Single-node uses workspace/torch_trace.
