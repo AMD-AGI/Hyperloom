@@ -2509,6 +2509,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "llm_model": llm_model,
         "max_turns": max_turns,
         "gpu": gpu,
+        "timeout": timeout,
         "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", True)),
         "verbose": bool(payload.get("verbose", False)),
     }

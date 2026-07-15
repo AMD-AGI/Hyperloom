@@ -632,6 +632,7 @@ class TestForgeGemmHelperCoverage:
         assert input_payload["trace_path"] == str(trace_file)
         assert input_payload["model_path"] == "/models/zaya"
         assert input_payload["max_turns"] == 7
+        assert input_payload["timeout"] == 123
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_failure_branches(self, tmp_path, monkeypatch):

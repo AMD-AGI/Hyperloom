@@ -33,9 +33,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _io_utils import truthy as _truthy  # noqa: E402
 
 sys.path.pop(0)
+sys.path.insert(0, str(Path(__file__).resolve().parent / "backends"))
+from _llm_stability_env import apply_llm_stability_env  # noqa: E402
+
+sys.path.pop(0)
 
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
+DEFAULT_TIMEOUT_SEC = 7200
 
 
 def _inject_author_gateway_env() -> None:
@@ -60,6 +65,7 @@ def _inject_author_gateway_env() -> None:
         os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     os.environ.setdefault("IS_SANDBOX", "1")
+    apply_llm_stability_env(os.environ)
 
 
 def _git_toplevel(path: str) -> str:
@@ -117,6 +123,12 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     if _truthy(args.get("verbose", False)):
         cmd.append("--verbose")
     return cmd
+
+
+def _timeout_sec(args: dict[str, Any]) -> int:
+    """Resolve the forge-fusion subprocess wall-clock timeout."""
+    raw = args.get("timeout") or args.get("timeout_sec") or os.environ.get("FORGE_FUSION_TIMEOUT")
+    return max(1, int(raw or DEFAULT_TIMEOUT_SEC))
 
 
 def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
@@ -178,6 +190,44 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     return result
 
 
+def _timeout_result(output_dir: str, timeout_sec: int, exc: subprocess.TimeoutExpired) -> dict[str, Any]:
+    """Shape a timed-out forge-fusion run as a normal REVERT result."""
+    cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or []))
+    return {
+        "status": "failed",
+        "engine": "forge_fusion",
+        "micro_decision": "failed",
+        "decision": "REVERT",
+        "kept": False,
+        "kernel_speedup": None,
+        "env_flags": {},
+        "baseline_env_flags": {},
+        "artifact_files": [],
+        "patch": None,
+        "requires_e2e_validation": False,
+        "workspace": str(output_dir or ""),
+        "error_class": "subprocess_timeout",
+        "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
+    }
+
+
+def _as_text(data: Any) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return str(data)
+
+
+def _relay_streams(stdout: Any, stderr: Any) -> None:
+    out = _as_text(stdout)
+    err = _as_text(stderr)
+    if out:
+        sys.stdout.write(out)
+    if err:
+        sys.stderr.write(err)
+
+
 def _emit(result: dict[str, Any], output_dir: str) -> None:
     """Write result.json (disk fallback) + print the stdout sentinel."""
     if output_dir:
@@ -209,13 +259,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     _inject_author_gateway_env()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.stdout:
-        sys.stdout.write(proc.stdout)
-    if proc.stderr:
-        sys.stderr.write(proc.stderr)
-
     output_dir = str(payload.get("output_dir") or "")
+    timeout_sec = _timeout_sec(payload)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+    except subprocess.TimeoutExpired as exc:
+        _relay_streams(getattr(exc, "stdout", None), getattr(exc, "stderr", None))
+        result = _timeout_result(output_dir, timeout_sec, exc)
+        _emit(result, output_dir)
+        return 124
+
+    _relay_streams(proc.stdout, proc.stderr)
     result = _normalize_manifest(output_dir, proc.returncode)
     _emit(result, output_dir)
     # Exit mirrors the forge-fusion subprocess: 0 when it ran (result carries the
