@@ -27,9 +27,11 @@ Provide your workload, and the agent works toward an optimized configuration: pr
 hardware potential, identifying bottlenecks, and iteratively rewriting code to maximize throughput on
 AMD GPUs.
 
-## The optimization loop
+=====================
+The optimization loop
+=====================
 
-![Hyperloom optimization loop](../images/Hyperloom_architecture.png)
+.. image:: ../images/Hyperloom_architecture.png
 
 - **Workload understanding and profiling** — Submit your inference workload; the agent profiles it with
    TraceLens (trace collection using Magpie), capturing bottlenecks and roofline targets.
@@ -48,7 +50,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
   .. grid-item-card:: Install
 
     * :doc:`Docker quickstart </install/local-mode>`
-    * :doc:`Bare-metal quickstart </install/bare-metal>`
+    * :doc:`Bare-metal quickstart </install/setup>`
     * :doc:`Slurm quickstart </install/slurm>`
 
   .. grid-item-card:: Components
