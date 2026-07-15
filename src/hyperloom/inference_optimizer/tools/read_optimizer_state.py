@@ -9,10 +9,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
-import pathlib
 import sys
+from pathlib import Path
 from typing import Any
+
+from hyperloom.common.jsonio import read_json
+from hyperloom.inference_optimizer.session.session_paths import manifest_path, state_path
 
 
 SUMMARY_KEYS = (
@@ -24,18 +26,6 @@ SUMMARY_KEYS = (
     "last_trace_analyze",
     "last_sweep",
 )
-
-
-def _load_json(path: pathlib.Path) -> dict[str, Any]:
-    """Load and parse a JSON file into a dict.
-
-    Args:
-        path: The JSON file to read.
-
-    Returns:
-        The parsed JSON object as a dict.
-    """
-    return json.loads(path.read_text())
 
 
 def _format_lifecycle_event(event: dict[str, Any]) -> str:
@@ -78,19 +68,19 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    session_dir = pathlib.Path(args.session_dir)
-    state_path = session_dir / "state.json"
-    manifest_path = session_dir / "manifest.json"
-    if not state_path.is_file():
-        print(f"state.json not found at {state_path}", file=sys.stderr)
+    session_dir = Path(args.session_dir)
+    state_file = state_path(session_dir)
+    manifest_file = manifest_path(session_dir)
+    if not state_file.is_file():
+        print(f"state.json not found at {state_file}", file=sys.stderr)
         return 2
 
-    if manifest_path.is_file():
-        manifest = _load_json(manifest_path)
+    if manifest_file.is_file():
+        manifest = read_json(manifest_file, require_dict=True, strict=True)
         print("session_id:", manifest.get("session_id"))
     print("session_dir:", session_dir)
 
-    state = _load_json(state_path)
+    state = read_json(state_file, require_dict=True, strict=True)
     for key in SUMMARY_KEYS:
         print(f"{key}: {state.get(key)}")
     print("explore_last_round:", state.get("explore_search", {}).get("last_round"))

@@ -14,8 +14,7 @@ name resolved via Kineto correlation (may be empty under cudagraph replay).
 Schema mirrors the fields the Coordinator / kernel-agent consume in the
 TraceLens ``kernel_candidates.json`` / ``summary.json`` / ``kernel_roofline.json``
 contract. Roofline hardware fields (bound_type / efficiency / arithmetic
-intensity) are left null here and filled by the rocprof-compute enrichment
-stage (M6).
+intensity) are estimated from the analytical model.
 """
 
 from __future__ import annotations
@@ -29,11 +28,11 @@ from typing import Any
 from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 from _bypass_classify import classify_kernel
 from _bypass_fusion import analyze_fusion
-from _analysis_md import render_report as _render_canonical_report
+from _analysis_md import render_report
 from _bypass_roofline import compute_roofline
-from _kernel_category import canonical_category as _canonical_category
+from _kernel_category import canonical_category
 from _bypass_source_resolver import editable_trace_source, resolve_source
-from _idle_gate import resolve_idle_pct_threshold as _resolve_idle_pct_threshold
+from _idle_gate import resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
 
 # Category-appropriate optimization guidance (structured, not LLM prose).
@@ -321,10 +320,8 @@ def build_candidates(
         op_dtypes = k.get("op_dtypes") or []
         shape_entries = _trace_shape_entries(op_shapes, op_dtypes, k.get("count") or 0)
 
-        # Benchmark discovery (opt-in; gated by the caller because only the
-        # rocprof-compute roofline enrichment consumes it). A routable kernel's
-        # on-disk test/benchmark seeds the shared GEAK harness that rocprof
-        # profiles for real bound/AI — without it the enrichment skips the row.
+        # Benchmark discovery is opt-in. A routable kernel's on-disk
+        # test/benchmark can seed downstream harness generation.
         bench_files: list[str] = []
         kernel_repo = ""
         if discover_benchmarks and kc.reusable and source_file:
@@ -819,8 +816,7 @@ def render_analysis_md(
         f"framework={framework or 'unknown'}, platform={target_platform or 'unknown'}, "
         f"throughput_unit={throughput_unit}, aggregation_scope={scope}. "
         f"Per-kernel roofline (bound/AI/efficiency) is computed analytically from captured "
-        f"operand shapes + measured kernel time (roofline_source=analytical), with optional "
-        f"rocprof-compute refinement."
+        f"operand shapes + measured kernel time (roofline_source=analytical)."
     )
 
     extra = _render_bypass_extra_sections(
@@ -840,13 +836,13 @@ def render_analysis_md(
         summary_csv_path=summary_csv_path,
     )
 
-    return _render_canonical_report(
+    return render_report(
         route="bypass",
         model_name=model_name or "Workload",
         provenance_detail=provenance,
         exec_summary=exec_summary,
         system_signals=system_signals,
-        idle_threshold=_resolve_idle_pct_threshold(),
+        idle_threshold=resolve_idle_pct_threshold(),
         hot_kernels=hot_rows,
         p_items=p_items,
         extra_sections=extra,
@@ -886,7 +882,7 @@ def _render_bypass_extra_sections(
         L.append("| Rank | Category | GPU % | Time (ms) | Kernels |")
         L.append("|------|----------|-------|-----------|---------|")
         for i, r in enumerate(rollup, start=1):
-            L.append(f"| {i} | {_canonical_category(r['category'])} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |")
+            L.append(f"| {i} | {canonical_category(r['category'])} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |")
     else:
         L.append("_No GPU kernels found in trace._")
     L.append("")
@@ -914,7 +910,7 @@ def _render_bypass_extra_sections(
             eff = c.get("roofline_attainment_pct")
             eff_str = f"{float(eff):.1f}%" if isinstance(eff, (int, float)) else "\u2014"
             L.append(
-                f"| {i} | `{c.get('kernel_id', '')}` | {c.get('name', '')} | {_canonical_category(c.get('kernel_category', ''))} "
+                f"| {i} | `{c.get('kernel_id', '')}` | {c.get('name', '')} | {canonical_category(c.get('kernel_category', ''))} "
                 f"| {float(c.get('gpu_pct') or 0.0):.2f}% | {c.get('bound_type', '')} | {ai_str} | {eff_str} "
                 f"| {float(c.get('optimization_priority') or 0.0):.2f} | {c.get('suggestion', '')} |"
             )
@@ -935,7 +931,7 @@ def _render_bypass_extra_sections(
         )
         L.append("")
         for i, c in enumerate(routable, start=1):
-            _cat = _canonical_category(c["kernel_category"])
+            _cat = canonical_category(c["kernel_category"])
             L.append(f"### P{i}: {c['name']} ({_cat})")
             L.append("")
             L.append(
@@ -1003,7 +999,7 @@ def _render_bypass_extra_sections(
     L.append("## Detailed Analysis")
     L.append("")
     for c in hot:
-        L.append(f"### {c['kernel_id']}: {c['name']} ({_canonical_category(c['kernel_category'])})")
+        L.append(f"### {c['kernel_id']}: {c['name']} ({canonical_category(c['kernel_category'])})")
         L.append("")
         L.append(
             f"**Identification:** {c['gpu_pct']:.2f}% GPU time, {c['call_count']} launches, "
@@ -1140,8 +1136,7 @@ def build_kernel_roofline(
 ) -> dict[str, Any]:
     """Build the per-kernel roofline sidecar payload.
 
-    Hardware roofline fields are null here (populated by the rocprof-compute
-    enrichment stage).
+    Hardware roofline fields are estimated from the analytical model.
 
     Args:
         candidates: Output of :func:`build_candidates`.

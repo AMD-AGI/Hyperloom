@@ -10,10 +10,9 @@ the rules and de-duplicates by ``(name, subject_key)``.
 from .aiter_jit import (
     AiterJitConfig,
     AiterJitDetector,
-    evaluate_aiter_jit_signals,
 )
 from .budget import BudgetConfig, evaluate_budget_signals
-from .classifier import Classifier
+from .classifier import Classifier, SignalSpec, signal_registry_config_attrs
 from .cluster_fault import evaluate_cluster_fault_signals
 from .crash import evaluate_crash_signals
 from .critic_health import (
@@ -33,7 +32,6 @@ from .external_deps import (
 from .gpu_leak import (
     GpuLeakConfig,
     GpuLeakDetector,
-    evaluate_gpu_leak_signals,
 )
 from .health import evaluate_health_signals
 from .kernel_pipeline import (
@@ -57,7 +55,6 @@ from .state_integrity import (
 from .progress import (
     ProgressConfig,
     ProgressDetector,
-    evaluate_progress_signals,
 )
 from .repeated_payload import (
     RepeatedPayloadConfig,
@@ -86,11 +83,12 @@ __all__ = [
     "ProgressDetector",
     "RayPendingDetector",
     "RepeatedPayloadConfig",
+    "SignalSpec",
     "StateIntegrityConfig",
     "Symptom",
     "SymptomSeverity",
     "TraceLensCliFiredOnce",
-    "evaluate_aiter_jit_signals",
+    "signal_registry_config_attrs",
     "evaluate_budget_signals",
     "evaluate_cluster_fault_signals",
     "evaluate_cold_start_signals",
@@ -99,11 +97,9 @@ __all__ = [
     "evaluate_decision_audit_signals",
     "evaluate_event_signals",
     "evaluate_external_deps_signals",
-    "evaluate_gpu_leak_signals",
     "evaluate_health_signals",
     "evaluate_kernel_pipeline_signals",
     "evaluate_local_health_signals",
-    "evaluate_progress_signals",
     "evaluate_repeated_payload_signals",
     "evaluate_stall_signals",
     "evaluate_state_integrity_signals",

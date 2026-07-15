@@ -10,7 +10,6 @@ Monotonic chain PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWE
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -170,9 +169,6 @@ def llm_proposable_actions_for(phase: str) -> tuple[str, ...]:
     return tuple(sorted(PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper(), frozenset())))
 
 
-# Interleave mode (env-flagged): widen EXPLORE/KERNEL proposable sets; chain stays monotonic.
-PHASE_INTERLEAVE_ENV: str = "INFERENCE_OPTIMIZER_PHASE_INTERLEAVE"
-
 # EXPLORE interleave adds KERNEL_AGENT_OWNED_ACTIONS so kernel REQUESTs pass R1.
 _INTERLEAVE_EXPLORE_EXTRAS: frozenset[str] = KERNEL_AGENT_OWNED_ACTIONS
 
@@ -187,21 +183,17 @@ _INTERLEAVE_KERNEL_EXTRAS: frozenset[str] = frozenset(
 
 
 def is_phase_interleave_enabled() -> bool:
-    """Return True when EXPLORE↔KERNEL interleave is enabled (default OFF; env opt-in knob).
+    """Return True when EXPLORE↔KERNEL interleave is enabled.
 
     Interleave lets specialists in EXPLORE trigger KERNEL-class actions (and
     KERNEL reach back to explore/specialist/integrate_patch) without waiting for
-    the phase machine. It is OFF by default (strict per-phase channel); set
-    ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` to an explicit on value
-    (``1``/``true``/``yes``/``on``) to enable it.
+    the phase machine. It remains disabled by policy so the chain stays strict
+    and monotonic.
 
     Returns:
-        bool: True only when ``$INFERENCE_OPTIMIZER_PHASE_INTERLEAVE`` is one
-        of ``1``/``true``/``yes``/``on`` (case-insensitive); False otherwise
-        (including unset/empty).
+        bool: Always ``False``.
     """
-    raw = (os.environ.get(PHASE_INTERLEAVE_ENV) or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return False
 
 
 def llm_proposable_actions_for_with_interleave(
@@ -322,6 +314,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
         "sweep_done",
         "conc_sweep_done",  # SWEEP → CLOSE when conc_sweep settles
+        "conc_sweep_failed",  # SWEEP → CLOSE when conc_sweep reaches a failed terminal result
         "sweep_budget_exhausted",
         "no_kernel_skipped",  # EXPLORE → SWEEP when kernel disabled
         "kernel_phase_aborted_no_trace",  # KERNEL_AGENT → SWEEP when profile fails
@@ -388,6 +381,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "no_kernel_skipped",
         "sweep_done",
         "conc_sweep_done",
+        "conc_sweep_failed",
         "explore_force_exit_low_budget",
         "framework_agent_phase_done",
         "framework_agent_plateau",
@@ -526,17 +520,16 @@ DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = _default_framework_f
 # shown no leverage on the current batch and exits to EXPLORE. Non-benchmarked
 # outcomes (``not_applicable``/``apply_failed``/``already_present``/audit-skip/
 # critic_denied) are neither a test nor a reset — they're skipped. A KEEP resets
-# the streak. Overridable via ``INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK``.
+# the streak.
 DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 3
 
 
 # ---------------------------------------------------------------------------
-# R1 cyclic phase machine (env-gated)
+# R1 cyclic phase machine
 # ---------------------------------------------------------------------------
 # When enabled, SWEEP loops back to EXPLORE (a new macro-cycle) while budget
 # remains and the run hasn't globally converged, instead of always terminating
-# at CLOSE. Off by default => behaviour identical to the monotonic chain.
-PHASE_CYCLIC_ENV: str = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"
+# at CLOSE.
 
 # Safety ceiling on macro-cycles (defense against a pathological tight loop).
 DEFAULT_MAX_MACRO_CYCLES: int = 1000
@@ -553,7 +546,6 @@ DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
 # A macro-cycle "gained" when validated cumulative gain rose by more than this
 # (percentage points); guards against float noise being read as progress.
 DEFAULT_CYCLE_MIN_GAIN_PCT: float = 1e-6
-SATURATION_CONVERGENCE_ENV: str = "INFERENCE_OPTIMIZER_SATURATION_CONVERGENCE"
 
 # Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle so
 # late cycles can still capture small wins while the run still converges once
@@ -588,32 +580,23 @@ def decaying_keep_threshold_pct(macro_cycle: int, *, multi_node: bool = False) -
 def is_cyclic_phases_enabled() -> bool:
     """Whether the cyclic phase machine is enabled.
 
-    Enabled by default; set ``INFERENCE_OPTIMIZER_CYCLIC_PHASES`` to a falsy
-    value (``0``/``false``/``off``) to force the legacy monotonic chain. Even
-    when enabled, the macro-cycle behaviour additionally requires a
+    Enabled by default. The macro-cycle behaviour additionally requires a
     long/unbounded budget (see :func:`is_long_run`) so short bounded runs never
     loop in practice.
 
     Returns:
-        bool: True unless ``$INFERENCE_OPTIMIZER_CYCLIC_PHASES`` is set to a
-        falsy value (``0``/``false``/``no``/``off``).
+        bool: Always ``True``.
     """
-    return os.environ.get(PHASE_CYCLIC_ENV, "").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+    return True
 
 
 # Long-run gate. The cyclic macro-cycle behaviour (per-cycle budget window +
-# SWEEP→EXPLORE reloop) only engages for unbounded runs or bounded runs longer
-# than this threshold. A short bounded run (``--max-hours ≤ 24``) stays on the
-# legacy single-pass chain with whole-run phase budgets, regardless of the
-# (default-on) cyclic env flag — this is the "≤24h behaves exactly as before"
-# contract. Gating on the budget (not just the env flag) keeps short-run phase
-# budgets spanning the whole run rather than being compressed to the cycle
-# window (DEFAULT_CYCLE_HOURS).
+# SWEEP→EXPLORE reloop) engages for unbounded runs or bounded runs at least as
+# long as this threshold. A short bounded run (``--max-hours < 24``) stays on
+# the legacy single-pass chain with whole-run phase budgets, regardless of the
+# (default-on) cyclic env flag. Gating on the budget (not just the env flag)
+# keeps short-run phase budgets spanning the whole run rather than being
+# compressed to the cycle window (DEFAULT_CYCLE_HOURS).
 DEFAULT_LONGRUN_THRESHOLD_MINUTES: float = 24 * 60
 
 
@@ -621,21 +604,21 @@ def is_long_run(state: Any) -> bool:
     """True when the session budget justifies cyclic macro-cycling.
 
     Unbounded runs (``max_minutes`` == 0, i.e. the 14-day ceiling) and bounded
-    runs longer than :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES` are "long".
-    Everything ``≤ 24h`` is a short bounded run and must behave like the legacy
-    monotonic chain.
+    runs at least as long as :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES` are
+    "long". Everything ``< 24h`` is a short bounded run and must behave like
+    the legacy monotonic chain.
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes``.
 
     Returns:
         bool: True for unbounded runs (``max_minutes`` == 0) or bounded runs
-        longer than :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES`.
+        at least as long as :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES`.
     """
     mm = _max_minutes(state)
     if mm <= 0:
         return True
-    return mm > float(DEFAULT_LONGRUN_THRESHOLD_MINUTES)
+    return mm >= float(DEFAULT_LONGRUN_THRESHOLD_MINUTES)
 
 
 def _cumulative_gain_validated(state: Any) -> float:
@@ -696,7 +679,7 @@ def should_reloop_to_explore(
     if not is_cyclic_phases_enabled():
         return False, evidence
 
-    # Short bounded runs (``--max-hours ≤ 24``) never open a new macro-cycle:
+    # Short bounded runs (``--max-hours < 24``) never open a new macro-cycle:
     # they wind down to CLOSE on a single pass exactly like the legacy chain,
     # even though cyclic mode is on by default. Without this gate a 4h run that
     # reached SWEEP with ≥30min remaining would reloop.
@@ -728,15 +711,9 @@ def should_reloop_to_explore(
     # Physical ceiling convergence. If every roofline family that
     # has dominated across cycles is now within its configured roofline
     # saturation threshold, stop cleanly instead of relooping on noise-floor
-    # 0.1% gains. Env escape hatch restores the pure gain-based behavior.
-    sat_conv_enabled = os.environ.get(SATURATION_CONVERGENCE_ENV, "").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+    # 0.1% gains.
     sat = getattr(state, "saturated_directions", {}) or {}
-    if sat_conv_enabled and isinstance(sat, dict) and sat:
+    if isinstance(sat, dict) and sat:
         rows = [v for v in sat.values() if isinstance(v, dict)]
         if rows and all(bool(v.get("saturated")) for v in rows):
             evidence["reloop_blocked"] = "all_directions_saturated"
@@ -966,7 +943,7 @@ def _budget_minutes(state: Any) -> float:
     total ``max_minutes`` so behaviour is identical to the monotonic chain.
 
     The per-cycle window only applies to long/unbounded runs (:func:`is_long_run`).
-    A short bounded run (``--max-hours ≤ 24``) always anchors its phase budgets
+    A short bounded run (``--max-hours < 24``) always anchors its phase budgets
     on the whole session even when ``cycle_minutes`` is set, so its phases are
     never silently compressed to the cycle window (DEFAULT_CYCLE_HOURS).
     Note: ``session_remaining_seconds`` deliberately keeps using ``max_minutes``
@@ -1737,7 +1714,7 @@ def exit_normal_sweep(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """SWEEP normal exit: sweep_done OR conc_sweep_done OR budget exhausted.
+    """SWEEP normal exit: sweep_done, conc_sweep terminal, or budget exhausted.
 
     Emits an exit on concurrency-sweep completion so a singleton-blocked sweep does not idle.
 
@@ -1760,6 +1737,8 @@ def exit_normal_sweep(
     last_conc = getattr(state, "last_conc_sweep", None) or {}
     if isinstance(last_conc, dict):
         cs_status = str(last_conc.get("status") or "").lower()
+        if cs_status == "failed":
+            return "conc_sweep_failed", {"conc_sweep_status": cs_status}
         if cs_status in ("succeeded", "partial", "completed", "skipped"):
             return "conc_sweep_done", {"conc_sweep_status": cs_status}
     remaining = phase_budget_remaining_seconds(
@@ -1958,19 +1937,8 @@ def _framework_agent_consecutive_no_keep(state: Any) -> int:
 
 
 def _framework_agent_plateau_streak_threshold() -> int:
-    """Resolve the consecutive-no-keep plateau threshold (env-overridable)."""
-    import os
-
-    try:
-        val = int(
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK",
-                DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK,
-            )
-        )
-    except (TypeError, ValueError):
-        return DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
-    return val if val > 0 else DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    """Resolve the consecutive-no-keep plateau threshold."""
+    return DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
 def exit_normal_framework_agent(
@@ -2216,6 +2184,11 @@ def compute_next_phase(
     if current == PHASE_SWEEP:
         norm = exit_normal_sweep(state, budget_pct=budget_pct, now_unix=now_unix)
         if norm is not None:
+            exit_reason, exit_evidence = norm
+            # Failed conc_sweep closeout is terminal: preserve the honest
+            # stop_reason instead of opening another macro-cycle.
+            if exit_reason == "conc_sweep_failed":
+                return PHASE_CLOSE, exit_reason, exit_evidence
             # R1: in cyclic mode, loop back to EXPLORE (a new macro-cycle)
             # while budget remains and the run hasn't globally converged (R7);
             # otherwise wind down to CLOSE (the monotonic-chain behaviour).
@@ -2230,7 +2203,7 @@ def compute_next_phase(
                     reloop_target,
                     "cycle_reloop",
                     {
-                        **norm[1],
+                        **exit_evidence,
                         **reloop_ev,
                         "loopback": True,
                     },
@@ -2246,12 +2219,12 @@ def compute_next_phase(
                     PHASE_CLOSE,
                     "global_converged",
                     {
-                        **norm[1],
+                        **exit_evidence,
                         **reloop_ev,
                         "terminal": True,
                     },
                 )
-            return PHASE_CLOSE, norm[0], {**norm[1], **reloop_ev}
+            return PHASE_CLOSE, exit_reason, {**exit_evidence, **reloop_ev}
         return None
 
     # PHASE_CLOSE — terminal, no further transitions.
@@ -2599,7 +2572,6 @@ __all__ = [
     "LIFECYCLE_STATUS_START",
     "LIFECYCLE_STEP_LABELS",
     "PHASE_ALLOWED_ACTIONS",
-    "PHASE_INTERLEAVE_ENV",
     "PHASE_LLM_PROPOSABLE_ACTIONS",
     "PHASE_CLOSE",
     "PHASE_EXIT_REASONS",
@@ -2621,7 +2593,6 @@ __all__ = [
     "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
     "DEFAULT_CYCLE_MIN_GAIN_PCT",
-    "PHASE_CYCLIC_ENV",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_cyclic_phases_enabled",
     "is_long_run",

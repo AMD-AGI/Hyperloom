@@ -252,14 +252,4 @@ class MessageBus:
         row = await self.db.fetchone("SELECT * FROM events WHERE msg_id = ?", (msg_id,))
         return Message.from_row(row) if row else None
 
-    async def count(self) -> int:
-        """Return the total number of messages in the bus.
-
-        Returns:
-            int: The row count of the ``events`` table.
-        """
-        row = await self.db.fetchone("SELECT COUNT(*) AS c FROM events")
-        return int(row["c"]) if row else 0
-
-
 __all__ = ["Message", "MessageBus", "TOPIC_ALLOWLIST"]

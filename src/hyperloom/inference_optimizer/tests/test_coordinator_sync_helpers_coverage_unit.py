@@ -40,7 +40,7 @@ def coord(session_dir) -> Coordinator:
 
 # -- WS1: explicit specialist wall-clock budget ----------------------------
 def test_specialist_wall_budget_base_no_macro_cycle(coord: Coordinator) -> None:
-    # ≤24h runs keep macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
+    # <24h runs keep macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
     coord.shared_state.macro_cycle = 0
     assert coord._specialist_wall_budget_sec(needs_gpu=False) == 10 * 60
     assert coord._specialist_wall_budget_sec(needs_gpu=True) == 60 * 60
@@ -452,40 +452,7 @@ def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
     assert cid.startswith("inference:")
     assert "mi300x" in cid
     # anchor delegates to the same derivation
-    assert coord._gap_anchor_canonical_id() == cid
-
-
-def test_resolve_issue_canonical_priority(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
-
-    pending = PendingProposal(
-        proposal_msg_id="m1",
-        from_agent="orchestration",
-        action_name="explore",
-        predicted_gain_pct=0.0,
-        payload={"gap_canonical_id": "explicit-top"},
-    )
-    assert coord._resolve_issue_canonical(pending) == "explicit-top"
-    # falls back to params then anchor
-    pending2 = PendingProposal(
-        proposal_msg_id="m2",
-        from_agent="orchestration",
-        action_name="explore",
-        predicted_gain_pct=0.0,
-        payload={"params": {"gap_canonical_id": "from-params"}},
-    )
-    assert coord._resolve_issue_canonical(pending2) == "from-params"
-
-
-def test_target_analysis_baseline_exists(coord: Coordinator) -> None:
-    # conftest seeds a target analysis marker; the json may or may not exist,
-    # but the call must return a bool without raising.
-    assert isinstance(coord._target_analysis_baseline_exists(), bool)
-
-
-def test_kernel_opt_keep_pending(coord: Coordinator) -> None:
-    # delegates to SharedState; with no pending keeps -> empty string
-    assert coord._kernel_opt_keep_pending() == ""
+    assert coord._workload_canonical_id() == cid
 
 
 # -- framework candidate selection -------------------------------------

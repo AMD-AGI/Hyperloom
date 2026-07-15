@@ -8,7 +8,7 @@ hangs / 401 storms:
 * **J1 ``gateway_auth_outage``** — gateway ``/models`` returns 401/403
   (key lost/revoked); every claude/codex CLI will fail at the gateway.
 * **J2 ``wekafs_degraded``** — ``stat`` on a source mount errored or
-  exceeded the latency budget; ``trace_analyze`` / OOB CLI hang silently.
+  exceeded the latency budget; ``trace_analyze`` / external CLI hang silently.
 * **J3 ``tracelens_cli_missing``** — neither TraceLens perf-report CLI
   is on ``PATH``. Boot-time-only, so the detector latches after first fire.
 
@@ -32,8 +32,6 @@ from .symptom import Symptom, SymptomSeverity
 class ExternalDepsConfig:
     """Tunables for :func:`evaluate_external_deps_signals`."""
 
-    # J1 fires on a single 401: the gateway is the global auth source.
-    fire_on_first_401: bool = True
     # J2 mount stat latency budget; ``ok=False`` (FileNotFound) fires HIGH
     # regardless of latency.
     mount_latency_warn_ms: float = 5000.0
@@ -106,7 +104,7 @@ def evaluate_external_deps_signals(
     if not isinstance(deps, dict) or not deps:
         return []
     out: list[Symptom] = []
-    out.extend(_gateway_symptoms(deps.get("gateway") or {}, cfg))
+    out.extend(_gateway_symptoms(deps.get("gateway") or {}))
     out.extend(_mount_symptoms(deps.get("mounts") or [], cfg))
     if tracelens_latch is not None:
         out.extend(
@@ -125,13 +123,11 @@ def evaluate_external_deps_signals(
 
 def _gateway_symptoms(
     gateway: dict[str, Any],
-    cfg: ExternalDepsConfig,
 ) -> list[Symptom]:
     """J1: fire ``gateway_auth_outage`` when the LLM gateway returns 401/403.
 
     Args:
         gateway (dict[str, Any]): Gateway probe result (status/status_code/url).
-        cfg (ExternalDepsConfig): Tunables.
 
     Returns:
         list[Symptom]: A one-element list with the ``gateway_auth_outage``
@@ -217,7 +213,7 @@ def _mount_symptoms(
                     source="local",
                     suggestion=(
                         "WekaFS mount may have dropped; trace_analyze / "
-                        "OOB CLI / benchmark scripts will hang. Check "
+                        "external CLI / benchmark scripts will hang. Check "
                         "the read-only mount; consider re-mounting"
                     ),
                 )
@@ -251,7 +247,7 @@ def _mount_symptoms(
                 subject={"path": path},
                 source="local",
                 suggestion=(
-                    "WekaFS read latency degrading; if it persists, trace_analyze / OOB CLI requests will time out"
+                    "WekaFS read latency degrading; if it persists, trace_analyze / external CLI requests will time out"
                 ),
             )
         )

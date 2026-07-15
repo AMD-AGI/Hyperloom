@@ -6,6 +6,7 @@ Ensure the child raylet does not inherit the low container default."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,6 +21,15 @@ import ray_runtime  # noqa: E402
 
 # Minimum soft RLIMIT_NOFILE the raylet needs to stay up.
 TARGET_NOFILE = 65536
+KERNEL_ROOT = Path(__file__).resolve().parent.parent
+INSTALL_SH = KERNEL_ROOT / "scripts" / "install.sh"
+
+
+def _extract_shell_function(name: str) -> str:
+    lines = INSTALL_SH.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line == f"{name}() {{")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    return "\n".join(lines[start : end + 1])
 
 
 class _FakeResource:
@@ -67,6 +77,36 @@ class _FakeResource:
 
 class _Proc:
     returncode = 0
+
+
+def test_install_sh_fd_limit_function_returns_success_when_hard_cap_sufficient():
+    """Shell install preflight must not return 1 when the hard cap is high enough."""
+    body = f"""
+set -euo pipefail
+RAY_MIN_NOFILE=65536
+FAKE_SOFT=1024
+FAKE_HARD=524288
+log() {{ :; }}
+warn() {{ :; }}
+ulimit() {{
+  case "$1" in
+    -Sn)
+      if [ "$#" -eq 1 ]; then
+        printf '%s\\n' "$FAKE_SOFT"
+      else
+        FAKE_SOFT="$2"
+      fi
+      ;;
+    -Hn) printf '%s\\n' "$FAKE_HARD" ;;
+    *) return 2 ;;
+  esac
+}}
+{_extract_shell_function("ensure_fd_limit_for_ray")}
+ensure_fd_limit_for_ray
+"""
+    result = subprocess.run(["bash", "-c", body], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
 
 
 def _install_fake_ray_start(monkeypatch, events):

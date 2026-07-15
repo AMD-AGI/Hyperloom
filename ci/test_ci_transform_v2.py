@@ -39,14 +39,6 @@ def test_safe_get_none_value_returns_default():
 # ── _patch_baseline ──
 
 
-def test_patch_baseline_legacy_alias():
-    data = {"baseline": {"extra_sglang_args": "--foo"}}
-    notes = tx._patch_baseline(data)
-    assert data["baseline"]["extra_server_args"] == "--foo"
-    assert "extra_sglang_args" not in data["baseline"]
-    assert any("legacy" in n for n in notes)
-
-
 def test_patch_baseline_empty_default():
     data = {"baseline": {}}
     tx._patch_baseline(data)
@@ -110,12 +102,6 @@ def test_patch_phase_timeline_alias_added():
     data = {"phase_timeline": [{"extras": {"candidate_extra_server_args": "--x"}}]}
     tx._patch_phase_timeline(data)
     assert data["phase_timeline"][0]["extras"]["best_extra_server_args"] == "--x"
-
-
-def test_patch_phase_timeline_legacy_candidate_key():
-    data = {"phase_timeline": [{"extras": {"candidate_extra_sglang_args": "--y"}}]}
-    tx._patch_phase_timeline(data)
-    assert data["phase_timeline"][0]["extras"]["best_extra_server_args"] == "--y"
 
 
 def test_patch_phase_timeline_no_pt():

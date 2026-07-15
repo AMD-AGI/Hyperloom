@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from hyperloom.agents.framework.keywords import (
     extract_keywords,
-    score_title_against_keywords,
     score_title_with_anti_signal,
 )
 
@@ -115,40 +114,9 @@ def test_extract_dedupes_and_orders_stably() -> None:
 
 
 # ---------------------------------------------------------------------------
-# score_title_against_keywords (B2 rerank helper)
-# ---------------------------------------------------------------------------
-
-
-def test_score_title_counts_overlap() -> None:
-    """Returns the number of distinct keyword tokens present in the title."""
-    assert score_title_against_keywords("fp8 MoE perf", ["fp8", "moe"]) == 2
-
-
-def test_score_title_case_insensitive() -> None:
-    """Matching is lowercase-insensitive on both the title and the keywords."""
-    assert score_title_against_keywords("FP8 MoE perf", ["FP8", "MOE"]) == 2
-
-
-def test_score_title_zero_when_no_overlap() -> None:
-    """No overlapping tokens -> 0 (used by the rank function to tail-sort)."""
-    assert score_title_against_keywords("doc update", ["fp8", "moe"]) == 0
-
-
-def test_score_title_handles_empty_inputs() -> None:
-    """Empty title or empty keyword list never crashes; returns 0."""
-    assert score_title_against_keywords("", ["fp8"]) == 0
-    assert score_title_against_keywords("fp8 stuff", []) == 0
-
-
-def test_score_title_snake_case_token() -> None:
-    """snake_case tokens count as a single token by the regex token split."""
-    assert score_title_against_keywords("tensor_parallel optimisation", ["tensor_parallel"]) == 1
-
-
-# ---------------------------------------------------------------------------
 # score_title_with_anti_signal (B3 anti-correlation reranker).
-# Anti pairs are gated on the gap keyword being present, so scoring is strictly
-# additive (no trigger -> same ordering as score_title_against_keywords).
+# Anti pairs are gated on the gap keyword being present, so scoring stays
+# positive-only when no trigger keyword is active.
 # ---------------------------------------------------------------------------
 
 
@@ -185,14 +153,11 @@ def test_score_anti_bf16_vs_low_bit_pr_demoted() -> None:
 
 
 def test_score_anti_inactive_when_trigger_absent() -> None:
-    """Anti is gated on the gap keyword: gap=['throughput'] lacks the ``dense`` trigger, so a MoE title scores the same as the legacy positive-only scorer."""
+    """Anti is gated on the gap keyword: gap=['throughput'] lacks the ``dense`` trigger."""
     gap = ["throughput"]
     moe_title = "MegaMoE throughput optimization"
     score = score_title_with_anti_signal(moe_title, gap)
-    legacy = score_title_against_keywords(moe_title, gap)
-    assert score == float(legacy), (
-        f"anti must not activate without a trigger keyword in the gap (got new={score} vs legacy={legacy})"
-    )
+    assert score == 1.0
 
 
 def test_score_anti_clamps_at_zero_never_negative() -> None:

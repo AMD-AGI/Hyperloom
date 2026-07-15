@@ -289,29 +289,12 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         path: Path to the ``.jsonl`` file.
 
     Returns:
-        The dict records; missing files, unreadable files, and malformed lines
-        yield (or are skipped to) an empty/partial list.
+        The dict records; missing files, unreadable files, and malformed or
+        non-object lines are skipped to an empty/partial list.
     """
-    import json
+    from hyperloom.common.jsonio import read_jsonl
 
-    out: list[dict[str, Any]] = []
-    if not path.exists():
-        return out
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return out
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            out.append(obj)
-    return out
+    return read_jsonl(path, require_dict=True, skip_malformed=True, skip_non_dict=True)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -972,7 +955,7 @@ class LangfuseEmitter:
     def _flush_ext_shards(self) -> None:
         """Backfill out-of-process children's token rows from ext/*.jsonl.
 
-        Children (geak / oob / robustness / specialist subprocess) never
+        Children (geak / forge / robustness / specialist subprocess) never
         connect to Langfuse; their tokens land in ``ext/<component>-<pid>.
         jsonl`` once the parent parses them. We emit those as text-less
         Generations here so the trace still accounts their spend.
@@ -1399,18 +1382,10 @@ def _read_breakdown_file(session_dir: Path) -> dict[str, Any]:
         dict[str, Any]: the parsed breakdown object, or ``{}`` when the file is
             missing, unreadable, or not a JSON object.
     """
-    import json
-
+    from hyperloom.common.jsonio import read_json
     from hyperloom.inference_optimizer.breakdown import BREAKDOWN_FILENAME
 
-    path = Path(session_dir) / BREAKDOWN_FILENAME
-    if not path.exists():
-        return {}
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        return obj if isinstance(obj, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return read_json(Path(session_dir) / BREAKDOWN_FILENAME, default={}, require_dict=True)
 
 
 def record_session_breakdown(
@@ -1468,16 +1443,9 @@ def read_receipt(session_dir: Path) -> dict[str, Any] | None:
         dict[str, Any] | None: the post-flush receipt dict, or ``None`` when no
             receipt was written or it is unreadable.
     """
-    import json
+    from hyperloom.common.jsonio import read_json
 
-    path = _receipt_path(session_dir)
-    if not path.exists():
-        return None
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        return obj if isinstance(obj, dict) else None
-    except (json.JSONDecodeError, OSError):
-        return None
+    return read_json(_receipt_path(session_dir), default=None, require_dict=True)
 
 
 __all__ = [

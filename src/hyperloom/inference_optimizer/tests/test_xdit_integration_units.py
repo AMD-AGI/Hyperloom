@@ -26,12 +26,12 @@ class TestFrameworkRegistry:
         assert "xdit" in fr.names()
         assert fr.is_supported("XDiT") is True
         assert fr.is_scriptable("xdit") is True
-        assert fr.kind("xdit") == fr.SCRIPTABLE
+        assert fr.FRAMEWORKS["xdit"].kind == fr.SCRIPTABLE
 
     def test_serving_frameworks_not_scriptable(self):
         for name in ("sglang", "vllm", "atom"):
             assert fr.is_scriptable(name) is False
-            assert fr.kind(name) == fr.SERVING
+            assert fr.FRAMEWORKS[name].kind == fr.SERVING
 
     def test_extra_args_env_and_unit(self):
         assert fr.extra_args_env("xdit") == "EXTRA_XDIT_ARGS"
@@ -39,10 +39,10 @@ class TestFrameworkRegistry:
         assert fr.throughput_unit("xdit") == "img/s"
         assert fr.throughput_unit("vllm") == "tok/s"
 
-    def test_server_reuse_and_repo_url(self):
-        assert fr.supports_server_reuse("xdit") is False
-        assert fr.supports_server_reuse("sglang") is True
-        assert fr.repo_url("xdit") == "https://github.com/xdit-project/xDiT.git"
+    def test_registry_capability_fields(self):
+        assert fr.FRAMEWORKS["xdit"].supports_server_reuse is False
+        assert fr.FRAMEWORKS["sglang"].supports_server_reuse is True
+        assert fr.FRAMEWORKS["xdit"].repo_url == "https://github.com/xdit-project/xDiT.git"
 
     def test_unknown_falls_back_to_default(self):
         assert fr.extra_args_env("rust-burn") == fr.extra_args_env(fr.DEFAULT_FRAMEWORK)

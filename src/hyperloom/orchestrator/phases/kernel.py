@@ -28,7 +28,7 @@ from ..loop.coordinator_helpers import (  # noqa: F401 - re-exported for callers
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
     _infer_model_class_from_config,
-    _merge_cumulative_extra_sglang_args,
+    _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
     _parse_iso_unix,
     _resolve_roofline_watermark_ratio,
@@ -567,13 +567,10 @@ class KernelPhase(PhaseHandler):
             runner_timeout_s: int | None = None,
         ) -> None:
             state.geak_result = result
-            if self._geak_legacy_promote():
-                self._promote_geak_result(result)
-            else:
-                # Rebench-first: record the recovered win as an UNVALIDATED
-                # candidate; the caller enqueues the main-flow rebench that will
-                # write the headline once it lands.
-                self._record_geak_candidate(result)
+            # Rebench-first: record the recovered win as an UNVALIDATED
+            # candidate; the caller enqueues the main-flow rebench that will
+            # write the headline once it lands.
+            self._record_geak_candidate(result)
             self._record_geak_kernel_journey(result)
             evidence = {
                 "status": result.get("status"),
@@ -626,7 +623,7 @@ class KernelPhase(PhaseHandler):
                 "(crash before handback); promoting recovered result."
             )
             _promote_recovered_result(recovered, recovered_from="existing_result_json")
-            if not self._geak_legacy_promote() and recovered.get("status") == "ok":
+            if recovered.get("status") == "ok":
                 try:
                     await self._enqueue_internal_stack_rebench(
                         reason="geak_e2e_win_recovered"
@@ -727,15 +724,14 @@ class KernelPhase(PhaseHandler):
                 # Rebench-first: enqueue the main-flow rebench. Under a budget cap
                 # it may not get to run, in which case the candidate honestly
                 # stays pending (never a self-reported headline).
-                if not self._geak_legacy_promote():
-                    try:
-                        await self._enqueue_internal_stack_rebench(
-                            reason="geak_e2e_win_sigterm_recovered"
-                        )
-                    except Exception:  # noqa: BLE001 - defensive
-                        log.exception(
-                            "geak: enqueue rebench for sigterm-recovered result failed"
-                        )
+                try:
+                    await self._enqueue_internal_stack_rebench(
+                        reason="geak_e2e_win_sigterm_recovered"
+                    )
+                except Exception:  # noqa: BLE001 - defensive
+                    log.exception(
+                        "geak: enqueue rebench for sigterm-recovered result failed"
+                    )
                 return
             _finish_skip({
                 "status": "error",
@@ -789,14 +785,9 @@ class KernelPhase(PhaseHandler):
             })
             return
 
-        if self._geak_legacy_promote():
-            # Legacy escape hatch: promote the self-reported value up front, then
-            # remediate with a 2a/2b revalidation.
-            self._promote_geak_result(result)
-        else:
-            # Rebench-first (default): record the win as an UNVALIDATED candidate
-            # only; the headline is written later from the measured rebench.
-            self._record_geak_candidate(result)
+        # Rebench-first: record the win as an UNVALIDATED candidate only; the
+        # headline is written later from the measured rebench.
+        self._record_geak_candidate(result)
         self._record_geak_kernel_journey(result)
         # Enqueue the same-harness config-identity rebench (2b, GEAK-harness 2a
         # fallback). Rebench-first: this is the ONLY path that writes the headline
@@ -840,27 +831,13 @@ class KernelPhase(PhaseHandler):
 
         Used to gate crash-recovery from an existing ``result.json`` so a prior
         cycle's win (``geak/`` is a fixed path) is not re-promoted on a
-        later KERNEL entry. Mirrors the ``optimization_stack`` dedup in
-        ``_promote_geak_result``.
+        later KERNEL entry. Mirrors the ``optimization_stack`` dedup in the
+        measured GEAK candidate promotion path.
         """
         return any(
             isinstance(item, dict) and item.get("action") == "geak_e2e"
             for item in (self.shared_state.optimization_stack or [])
         )
-
-    def _geak_legacy_promote(self) -> bool:
-        """Whether to keep the LEGACY "promote self-reported value, revalidate
-        later" GEAK flow (escape hatch).
-
-        Default OFF: GEAK now aligns with explore/forge - the main-flow
-        rebench measures first and only a validated measurement writes the
-        headline (current_best / optimization_stack / cumulative_gain*). Set
-        ``INFERENCE_OPTIMIZER_GEAK_LEGACY_PROMOTE=1`` to restore the old
-        provisional-first behaviour.
-        """
-        return str(
-            os.environ.get("INFERENCE_OPTIMIZER_GEAK_LEGACY_PROMOTE", "").strip()
-        ).lower() in ("1", "true", "yes", "on")
 
     @staticmethod
     def _parse_geak_accepted_config(
@@ -884,10 +861,9 @@ class KernelPhase(PhaseHandler):
     def _record_geak_candidate(self, result: dict[str, Any]) -> None:
         """Record a GEAK e2e win as an UNVALIDATED candidate (no headline).
 
-        The rebench-first flow's counterpart to the legacy
-        ``_promote_geak_result``: it stores the accepted config + the
-        optimizer's OWN (audit-only) throughput/speedup under
-        ``geak_pending`` but deliberately does NOT touch ``current_best`` /
+        It stores the accepted config + the optimizer's OWN (audit-only)
+        throughput/speedup under ``geak_pending`` but deliberately does NOT touch
+        ``current_best`` /
         ``optimization_stack`` / ``cumulative_gain*``. The headline is written
         only later, from a measured main-flow rebench, by
         ``_promote_geak_from_candidate`` (mirrors forge's "no integrate ->
@@ -1040,148 +1016,6 @@ class KernelPhase(PhaseHandler):
         self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
 
-    def _promote_geak_result(self, result: dict[str, Any]) -> None:
-        """Fold a GEAK e2e win into current_best + the validated gain ledger.
-
-        Also appends an ``optimization_stack`` entry and the matching
-        ``gain_per_stack_entry`` so the session-breakdown attribution section
-        credits the e2e gain to a concrete stack entry (carrying the per-kernel
-        / head / config evidence from ``result.json``) instead of leaving the
-        gain unattributed.
-        """
-        if not isinstance(result, dict) or result.get("status") not in ("ok",):
-            return
-        new_tput = float(result.get("final_throughput_tok_s") or 0.0)
-        base = float(self.shared_state.baseline_tput or 0.0)
-        if new_tput <= 0:
-            return
-        # The accepted config is recorded as {"flags": "<--a --b>", "env":
-        # "KEY=VAL KEY=VAL ..."} (bench_e2e.sh EXTRA_ENV format). Parse the env
-        # string into REAL env vars so downstream config-rebuild
-        # (_materialize_stack_config_for_resume / sweep / conc_sweep) reproduces
-        # the optimized server. Previously the whole string was stuffed under a
-        # single bogus key (``GEAK_ACCEPTED_ENV``), which vLLM ignores, so
-        # the win (e.g. VLLM_TUNED_CONFIG_FOLDER) never engaged on reuse. General:
-        # any KEY=VAL token becomes an env var; any --flag token folds into flags.
-        accepted_cfg = result.get("accepted_config") or {}
-        accepted_flags = str(accepted_cfg.get("flags") or "").strip()
-        parsed_envs, _extra_flags = _split_env_and_flags(str(accepted_cfg.get("env") or ""))
-        if _extra_flags:
-            accepted_flags = (accepted_flags + " " + _extra_flags).strip()
-
-        cb = dict(self.shared_state.current_best or {})
-        cb_envs = dict(cb.get("extra_envs") or {}) if isinstance(cb.get("extra_envs"), Mapping) else {}
-        cb_envs.update(parsed_envs)
-        cb.update({
-            "action": "geak_e2e",
-            "tput": new_tput,
-            "ttft_mean_ms": result.get("ttft_ms"),
-            "tpot_mean_ms": result.get("tpot_ms"),
-            # Reproducible config: flags + parsed env, so any consumer that
-            # rebuilds a server from current_best relaunches the optimized stack.
-            "extra_server_args": accepted_flags,
-            "extra_envs": cb_envs,
-            # Sweep-reuse handles: the optimized self-contained launch + bench scripts.
-            "geak_launch_script": result.get("final_launch_script"),
-            "geak_bench_script": result.get("bench_script"),
-            "geak_eval_dir": result.get("eval_dir"),
-            # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag winners.
-            "final_overlay": result.get("final_overlay") or "",
-            "workspace": result.get("eval_dir"),
-        })
-        self.shared_state.current_best = cb
-
-        # Attribute the e2e gain to a concrete optimization_stack entry so the
-        # breakdown's attribution / optimization_stack sections reflect it (the
-        # native lanes do the same via append_stack_gain_entry).
-        ts = datetime.now(timezone.utc).isoformat()
-        already = any(
-            isinstance(item, dict) and item.get("action") == "geak_e2e"
-            for item in (self.shared_state.optimization_stack or [])
-        )
-        if not already:
-            entry = {
-                "action": "geak_e2e",
-                "variant_name": "geak_e2e",
-                "tput": new_tput,
-                "candidate_extra_server_args": accepted_flags,
-                "extra_envs": dict(parsed_envs),
-                "final_overlay": result.get("final_overlay") or "",
-                "workspace": result.get("eval_dir"),
-                # Per-kernel / head evidence for the attribution + lifecycle view.
-                "accepted_kernels": result.get("accepted_kernels") or [],
-                "accepted_heads": result.get("accepted_heads") or [],
-                "report_path": result.get("report_path"),
-                "source": "geak_e2e",
-                "ts": ts,
-            }
-            self.shared_state.optimization_stack.append(entry)
-            self.shared_state.append_stack_gain_entry(
-                action="geak_e2e",
-                variant_name="geak_e2e",
-                new_tput=new_tput,
-                extra_server_args=accepted_flags,
-                ts=ts,
-            )
-        if base > 0:
-            # The PROVISIONAL gain must stay internally consistent with the two
-            # persisted leaderboard anchors: current_best.tput (the promoted
-            # final, ``new_tput``) and baseline_tput (``base``). So it is exactly
-            # ``(current_best.tput / baseline) - 1`` - the codebase's
-            # absolute-throughput/baseline convention, on the SAME (cold) basis
-            # as the baseline anchor. We deliberately do NOT substitute GEAK's HOT
-            # final here: a hot-numerator-over-cold-baseline ratio both overstates
-            # the win and contradicts current_best.tput (which a reader divides by
-            # baseline). GEAK's own within-harness speedups are recorded
-            # separately below for cross-check.
-            gain = (new_tput - base) / base * 100.0
-            # This ratio is GEAK-harness numerator / orchestrator-harness
-            # denominator (cross-harness), so it is PROVISIONAL only. Do NOT stamp
-            # cumulative_gain_validated here - validated may only be produced by a
-            # same-harness full-stack rebench, consumed in _promote_to_shared_state.
-            # Native/codex lanes are unaffected (they never call this method; their
-            # validated gain is already same-harness).
-            self.shared_state.cumulative_gain = gain
-            self.shared_state.cumulative_gain_provenance = (
-                "geak_cross_harness_provisional"
-            )
-            self.shared_state.resume_pending_revalidation = True
-
-            # Audit cross-check: stash GEAK's OWN within-harness speedups (clean
-            # A/B, harness-internal) + basis on current_best so the report can
-            # show them next to the cross-harness provisional. These never feed
-            # the leaderboard number; they let a reviewer compare GEAK's reported
-            # win (e.g. cold_geak_speedup) against Hyperloom's cross-harness one.
-            am = result.get("alignment_metrics") or {}
-            cb2 = self.shared_state.current_best
-            if isinstance(cb2, dict):
-                cb2["geak_alignment"] = {
-                    "hot_geak_speedup": am.get("hot_geak_speedup"),
-                    "cold_geak_speedup": am.get("cold_geak_speedup"),
-                    "hot_speedup": am.get("hot_speedup"),
-                    "cold_speedup": am.get("cold_speedup"),
-                    "final_basis": am.get("final_basis") or result.get("final_throughput_basis"),
-                    "geak_throughput_speedup": result.get("throughput_speedup"),
-                }
-
-            # Surface the PURE cross-harness measurement residue (GEAK vs
-            # orchestrator on the SAME accepted config) so a large value flags a
-            # measurement mismatch (not a real win). Reporting/audit only; the
-            # validated number is gated on the same-harness rebench regardless.
-            bb = result.get("baseline_basis") or {}
-            mdiv = bb.get("measurement_divergence_pct")
-            try:
-                mdiv_f = abs(float(mdiv)) if mdiv is not None else None
-            except (TypeError, ValueError):
-                mdiv_f = None
-            if mdiv_f is not None and mdiv_f > _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT:
-                log.warning(
-                    "geak promote: large cross-harness measurement "
-                    "divergence %.2f%% (|.|>%.1f%%) - provisional gain %.2f%% "
-                    "held until same-harness revalidation",
-                    float(mdiv), _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT, gain,
-                )
-
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
         """Replay GEAK-e2e's kernel_journey.json into the breakdown recorder.
 
@@ -1220,8 +1054,7 @@ class KernelPhase(PhaseHandler):
         # assembler backfills each kernel's discovery-sourced fields
         # (name/gpu_pct/bound_type/source_file). GEAK-e2e profiles via rocprofv3,
         # not tracelens, so the route is ``bypass``; ``tool="geak"`` keeps the
-        # version provenance under the canonical GEAK e2e optimizer (the legacy
-        # per-kernel backend is the distinct ``geak_v3`` token).
+        # version provenance under the canonical GEAK e2e optimizer.
         for run in (journey.get("discovery_runs") or []):
             if not isinstance(run, dict):
                 continue

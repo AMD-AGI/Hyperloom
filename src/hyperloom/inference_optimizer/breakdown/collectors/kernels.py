@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import safe_mtime
 
 from ._common import (
     _load_json_safe,
@@ -25,7 +26,7 @@ from ._common import (
 
 
 
-# GEAK / OOB invocations
+# Kernel backend invocations
 def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
     """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts, so historical sessions still render.
 
@@ -301,16 +302,16 @@ def _infer_run_dir_kernel_id(run_dir: Path) -> str:
 def collect_kernel_invocations(
     session_dir: Path,
     warnings: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return ``(geak_invocations, oob_invocations, forge_invocations)`` from each run dir's ``optimization_attempts.jsonl``, split by ``backend`` into three independent lanes.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``(geak_invocations, forge_invocations)`` from optimization attempts.
 
     Args:
         session_dir (Path): Absolute session root.
         warnings (list[str]): Shared warnings list (mutated in place).
 
     Returns:
-        tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-        The ``(geak, oob, forge)`` invocation lanes, each sorted by
+        tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        The ``(geak, forge)`` invocation lanes, each sorted by
         ``(kernel_id, ts)``.
     """
     all_invocations: list[dict[str, Any]] = []
@@ -343,7 +344,6 @@ def collect_kernel_invocations(
     _stamp_kernel_level_decisions(all_invocations, run_dirs, session_dir, warnings)
 
     geak: list[dict[str, Any]] = []
-    oob: list[dict[str, Any]] = []
     forge: list[dict[str, Any]] = []
     for inv in all_invocations:
         backend = inv.get("backend") or ""
@@ -351,15 +351,9 @@ def collect_kernel_invocations(
             geak.append(inv)
         elif backend == "forge":
             forge.append(inv)
-        elif backend in ("claude", "codex"):
-            oob.append(inv)
-        else:
-            # Unknown / legacy backends fall back to the oob lane (forge keeps
-            # its own lane above so it is never mislabeled as oob).
-            oob.append(inv)
-    for lane in (geak, oob, forge):
+    for lane in (geak, forge):
         lane.sort(key=lambda e: (e.get("kernel_id") or "", e.get("ts") or ""))
-    return geak, oob, forge
+    return geak, forge
 
 
 def _read_kernel_candidates(
@@ -464,7 +458,6 @@ def _collect_detected_kernels(
     session_dir: Path,
     state: dict[str, Any],
     geak: list[dict[str, Any]],
-    oob: list[dict[str, Any]],
     warnings: list[str],
     *,
     forge: list[dict[str, Any]] | None = None,
@@ -474,14 +467,13 @@ def _collect_detected_kernels(
 
     Merges static profile fields (from ``kernel_candidates.json``,
     preferred, else ``benchmark_report.kernel_summary``),
-    ``selected_for_optimization``, per-lane ``geak`` / ``oob`` / ``forge``
+    ``selected_for_optimization``, per-lane ``geak`` / ``forge``
     summaries, ``adopted_by`` (from integrate KEEPs), and ``final_decision``.
 
     Args:
         session_dir (Path): Absolute session root.
         state (dict[str, Any]): Parsed ``state.json``.
         geak (list[dict[str, Any]]): GEAK-lane invocations.
-        oob (list[dict[str, Any]]): OOB-lane invocations.
         warnings (list[str]): Shared warnings list (mutated in place).
         forge (list[dict[str, Any]] | None): Forge-lane invocations. Defaults
             to ``None`` (treated as empty).
@@ -596,14 +588,13 @@ def _collect_detected_kernels(
             }
             name_to_kid[name_str] = alias
 
-    # 3) lifecycle stamps (selected / geak / oob / adopted_by / final_decision)
+    # 3) lifecycle stamps (selected / geak / forge / adopted_by / final_decision)
     selected_ids = {
         str(e.get("kernel_id") or "")
         for e in ((state.get("last_trace_analyze") or {}).get("hot_kernels_top15") or [])
         if isinstance(e, dict)
     }
     geak_idx = _index_invocations_by_kernel(geak)
-    oob_idx = _index_invocations_by_kernel(oob)
     forge_idx = _index_invocations_by_kernel(forge)
 
     integ = state.get("kernel_integrate_attempts") or {}
@@ -629,7 +620,6 @@ def _collect_detected_kernels(
     for kid, entry in by_kid.items():
         entry["selected_for_optimization"] = kid in selected_ids
         entry["geak"] = geak_idx.get(kid)  # None if lane never touched this kid
-        entry["oob"] = oob_idx.get(kid)
         entry["forge"] = forge_idx.get(kid)
         # e2e (integrate) gain so the table shows why a micro-KEPT kernel reverted.
         if kid in integ_gain_by_kid:
@@ -639,7 +629,7 @@ def _collect_detected_kernels(
             # the KEPT lane with the highest micro-speedup; fall back to
             # 'kernel_agent' when integrate KEPT but no single lane shows a KEEP.
             kept_lanes: list[tuple[str, float]] = []
-            for lane in ("geak", "oob", "forge"):
+            for lane in ("geak", "forge"):
                 row = entry.get(lane)
                 if row and row.get("decision") in ("KEEP", "PARTIAL"):
                     kept_lanes.append((lane, row.get("best_speedup") or 0.0))
@@ -655,7 +645,7 @@ def _collect_detected_kernels(
         elif kid in rejected_kids:
             entry["adopted_by"] = None
             entry["final_decision"] = "rejected"
-        elif entry["geak"] or entry["oob"] or entry["forge"]:
+        elif entry["geak"] or entry["forge"]:
             entry["adopted_by"] = None
             entry["final_decision"] = "attempted"
         else:
@@ -709,7 +699,6 @@ def _collect_recommended_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _collect_optimized_kernels(
     geak: list[dict[str, Any]],
-    oob: list[dict[str, Any]],
     state: dict[str, Any],
     forge: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -722,7 +711,6 @@ def _collect_optimized_kernels(
 
     Args:
         geak (list[dict[str, Any]]): GEAK-lane invocations.
-        oob (list[dict[str, Any]]): OOB-lane invocations.
         state (dict[str, Any]): Parsed ``state.json``.
         forge (list[dict[str, Any]] | None): Forge-lane invocations.
 
@@ -731,7 +719,7 @@ def _collect_optimized_kernels(
         ``kernel_id``.
     """
     by_kid: dict[str, dict[str, Any]] = {}
-    for invs in (geak, oob, forge or []):
+    for invs in (geak, forge or []):
         for inv in invs:
             kid = inv.get("kernel_id") or ""
             if not kid:
@@ -885,7 +873,6 @@ def collect_kernel_lifecycle(
     session_dir: Path,
     state: dict[str, Any],
     geak: list[dict[str, Any]],
-    oob: list[dict[str, Any]],
     warnings: list[str],
     forge: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -898,7 +885,6 @@ def collect_kernel_lifecycle(
         session_dir (Path): Absolute session root.
         state (dict[str, Any]): Parsed ``state.json``.
         geak (list[dict[str, Any]]): GEAK-lane invocations.
-        oob (list[dict[str, Any]]): OOB-lane invocations.
         warnings (list[str]): Shared warnings list (mutated in place).
         forge (list[dict[str, Any]] | None): Forge-lane invocations (own lane).
 
@@ -908,9 +894,9 @@ def collect_kernel_lifecycle(
     """
     forge = forge or []
     return {
-        "detected": _collect_detected_kernels(session_dir, state, geak, oob, warnings, forge=forge),
+        "detected": _collect_detected_kernels(session_dir, state, geak, warnings, forge=forge),
         "recommended": _collect_recommended_kernels(state),
-        "optimized": _collect_optimized_kernels(geak, oob, state, forge),
+        "optimized": _collect_optimized_kernels(geak, state, forge),
         "adopted": _collect_adopted_kernels(state),
         "rejected": _collect_rejected_kernels(state),
     }
@@ -988,19 +974,6 @@ _CONC_SWEEP_SUMMARY_REL_PATH = "reports/conc_sweep_summary.json"
 _CONC_SWEEP_VARIANT_RE = re.compile(r"^(baseline|optimized)_conc(\d+)$")
 
 
-def _safe_mtime(p: Path) -> float:
-    """mtime for sort keys; 0.0 when the entry vanished mid-scan.
-
-    Breakdown collectors must never raise, so a concurrent workspace cleanup
-    that removes a path between enumeration and ``stat`` must not surface as
-    an exception out of ``collect_conc_sweep_summary``.
-    """
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
 def _conc_sweep_successful_pairs(summary: dict[str, Any]) -> int:
     try:
         return int((summary.get("summary") or {}).get("successful_pairs") or 0)
@@ -1012,7 +985,7 @@ def _load_conc_variant_point(variant_dir: Path, *, arm: str, conc: int) -> dict[
     """Best-effort point extraction from a conc_sweep variant workspace."""
     result_paths = sorted(
         variant_dir.rglob("inferencex_result.json"),
-        key=_safe_mtime,
+        key=safe_mtime,
         reverse=True,
     )
     for result_path in result_paths:
@@ -1124,7 +1097,7 @@ def _recover_conc_sweep_summary_from_runs(
         return {}
     tasks = sorted(
         (p for p in runs_dir.iterdir() if p.is_dir()),
-        key=_safe_mtime,
+        key=safe_mtime,
         reverse=True,
     )
     best_payload: dict[str, Any] = {}

@@ -17,6 +17,7 @@ from typing import Optional
 import httpx
 
 from hyperloom.common.env import env_bool, env_int
+from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, DEFAULT_DEEPSEEK_MODEL
 
 log = logging.getLogger(__name__)
 
@@ -83,9 +84,10 @@ class Config:
     agent_stall_timeout_s: float = 300.0
 
     # -- LLM for RCA (auto-detected from Claw sandbox env) --
-    llm_model: str = "claude-opus-4-7"
+    llm_model: str = "claude-opus-4-8"
     llm_base_url: str = ""
     llm_api_key: str = ""
+    llm_provider: str = "openai"
 
     # -- LLM RCA throttle / activation --
     # ``None`` = auto-enable when llm_base_url + llm_api_key are both set;
@@ -302,20 +304,22 @@ class Config:
         """
         session_dir = _discover_session_dir()
         server_url = await _probe_robustness_server()
-        llm_base_url, llm_api_key = _discover_llm_credentials()
+        llm_base_url, llm_api_key, llm_provider = _discover_llm_credentials()
         workload_uid = _discover_workload_uid()
-        disable_local_probe = _env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
-        enable_cluster_pod_metrics = _env_bool(
+        disable_local_probe = env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
+        enable_cluster_pod_metrics = env_bool(
             "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS",
             False,
         )
-        nodes = _env_int("ROBUSTNESS_NODES", 1)
+        nodes = env_int("ROBUSTNESS_NODES", 1)
 
         config = cls(
             session_dir=session_dir,
             robustness_server_url=server_url,
+            llm_model=_discover_llm_model(llm_provider),
             llm_base_url=llm_base_url,
             llm_api_key=llm_api_key,
+            llm_provider=llm_provider,
             workload_uid=workload_uid,
             disable_local_probe=disable_local_probe,
             enable_cluster_pod_metrics=enable_cluster_pod_metrics,
@@ -398,19 +402,60 @@ async def _probe_robustness_server() -> str:
     return ""
 
 
-def _discover_llm_credentials() -> tuple[str, str]:
+def _discover_llm_credentials() -> tuple[str, str, str]:
     """Pick up LLM credentials already in the Claw sandbox environment.
 
     Returns:
-        tuple[str, str]: A ``(base_url, api_key)`` pair read from the
-        sandbox environment variables; either element may be empty if
-        unset.
+        tuple[str, str, str]: A ``(base_url, api_key, provider)`` tuple read
+        from sandbox environment variables; URL/key may be empty if unset.
     """
-    base_url = os.environ.get("OPENAI_BASE_URL", "")
-    api_key = (
-        os.environ.get("SAFE_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("LLM_API_KEY", "")
+    openai_base = os.environ.get("OPENAI_BASE_URL", "").strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if openai_key:
+        return openai_base or "https://api.openai.com/v1", openai_key, "openai"
+    gateway_key = (
+        os.environ.get("SAFE_API_KEY", "").strip()
+        or os.environ.get("LLM_API_KEY", "").strip()
+        or os.environ.get("LLM_GATEWAY_KEY", "").strip()
     )
-    return base_url, api_key
+    if gateway_key and openai_base:
+        return openai_base, gateway_key, "openai"
+
+    anthropic_key = (
+        os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+    )
+    if anthropic_key:
+        return os.environ.get("ANTHROPIC_BASE_URL", "").strip() or "https://api.anthropic.com", anthropic_key, "anthropic"
+
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if deepseek_key:
+        return os.environ.get("DEEPSEEK_BASE_URL", "").strip() or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, deepseek_key, "anthropic"
+
+    return "", "", "openai"
+
+
+def _discover_llm_model(provider: str) -> str:
+    """Resolve the RCA model for the discovered provider."""
+    explicit = (
+        os.environ.get("ROBUSTNESS_LLM_MODEL", "").strip()
+        or os.environ.get("LLM_MODEL", "").strip()
+    )
+    if explicit:
+        return explicit
+    if os.environ.get("DEEPSEEK_API_KEY", "").strip() or os.environ.get("DEEPSEEK_BASE_URL", "").strip():
+        return os.environ.get("DEEPSEEK_MODEL", "").strip() or DEFAULT_DEEPSEEK_MODEL
+    if provider == "openai":
+        return (
+            os.environ.get("OPENAI_MODEL", "").strip()
+            or os.environ.get("CODEX_MODEL", "").strip()
+            or "gpt-5.5"
+        )
+    return (
+        os.environ.get("ANTHROPIC_MODEL", "").strip()
+        or os.environ.get("CLAUDE_MODEL", "").strip()
+        or "claude-sonnet-4-5-20250929"
+    )
 
 
 _WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (
@@ -438,35 +483,3 @@ def _discover_workload_uid() -> str:
     return ""
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    """Read a boolean configuration value from the environment.
-
-    Args:
-        name: Name of the environment variable to read.
-        default: Value to return when the variable is unset.
-
-    Returns:
-        ``True`` when the variable is set to one of ``1``, ``true``, ``yes``,
-        or ``on`` (case-insensitive); ``False`` for any other set value; and
-        ``default`` when the variable is unset.
-
-    Delegates to :func:`hyperloom.common.env.env_bool`.
-    """
-    return env_bool(name, default)
-
-
-def _env_int(name: str, default: int) -> int:
-    """Read an integer configuration value from the environment.
-
-    Args:
-        name: Name of the environment variable to read.
-        default: Value to return when the variable is unset, empty, or not a
-            valid integer.
-
-    Returns:
-        The parsed integer, or ``default`` when the variable is missing or
-        cannot be parsed.
-
-    Delegates to :func:`hyperloom.common.env.env_int`.
-    """
-    return env_int(name, default)

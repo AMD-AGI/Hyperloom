@@ -8,7 +8,7 @@ from pathlib import Path
 
 from hyperloom.inference_optimizer.breakdown.reporters import render_session_report
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.decision_journal import render as render_dj
-from hyperloom.inference_optimizer.breakdown.reporters._renderers.invocations import render_geak, render_oob
+from hyperloom.inference_optimizer.breakdown.reporters._renderers.invocations import render_geak
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.kernel_profiling import render as render_kp
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.phase_timeline import render as render_phase_timeline
 
@@ -184,16 +184,6 @@ def test_invocation_renderer_normalizes_and_caps_attempt_rows() -> None:
     assert "x" * 81 not in sec.markdown_block
 
 
-def test_oob_invocation_renderer_uses_legacy_top_level_key() -> None:
-    sec = render_oob({"oob_invocations": [{"kernel_id": "k-oob", "decision": "ERROR"}]})
-
-    assert not sec.skipped
-    assert sec.section_id == "oob_invocations"
-    assert sec.decisions[0].kind == "attempted"
-    assert "0 KEEP / 1 FAILED across 1 attempts" in sec.decisions[0].rationale
-    assert "k-oob" in sec.markdown_block
-
-
 def test_phase_timeline_renderer_renders_capped_histogram() -> None:
     events = ["bootstrap"]
     events.extend(
@@ -245,7 +235,7 @@ def test_compose_includes_v1_1_sections_in_report() -> None:
         sweep={},
         kernel_lifecycle={"detected": []},
         geak_invocations=[],
-        oob_invocations=[],
+        forge_invocations=[],
         phase_timeline=[],
         attribution={"method": "missing"},
         source_files={},

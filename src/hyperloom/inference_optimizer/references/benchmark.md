@@ -60,9 +60,9 @@ Operator-supplied server flags have a first-class CLI surface:
 framework-specific Magpie env (`EXTRA_VLLM_ARGS`, `EXTRA_SGLANG_ARGS`, or
 `EXTRA_ATOM_ARGS`) for baseline, profile, explore, and sweep. Explicit
 `--max-model-len` / `$MAX_MODEL_LEN` wins over the auto `ISL+OSL+headroom`
-calculation. A comma `$CONC` value such as `4,16,128` is treated as a sweep
-ladder: the single baseline CONC becomes the first value and the ladder is
-forwarded to `INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS`.
+calculation. A comma `$CONC` value such as `4,16,128` is accepted for
+compatibility; the single baseline CONC becomes the first value. Use
+`--conc-sweep-concs` for the explicit sweep ladder.
 
 EXPLORE may deliberately ablate operator-supplied server flags. A grid variant
 can carry `remove_args` to delete inherited CLI flags before its own
