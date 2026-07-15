@@ -16,9 +16,12 @@ single owner. Bad/partial fragments are skipped and noted in ``warnings``.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.jsonio import read_json
+
+_UNREADABLE = object()
 
 
 def parts_dir(session_dir: Path | str) -> Path:
@@ -61,10 +64,12 @@ def _load(path: Path, warnings: list[str]) -> dict[str, Any] | None:
         dict[str, Any] | None: the parsed fragment record, or ``None`` when it
             cannot be read or is not a JSON object.
     """
-    try:
-        rec = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"recorder: failed to read {path.name}: {exc!r}")
+    rec = read_json(
+        path,
+        default=_UNREADABLE,
+        on_error=lambda exc: warnings.append(f"recorder: failed to read {path.name}: {exc!r}"),
+    )
+    if rec is _UNREADABLE:
         return None
     if not isinstance(rec, dict):
         warnings.append(f"recorder: {path.name} is not an object")

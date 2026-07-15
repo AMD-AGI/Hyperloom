@@ -28,15 +28,36 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from hyperloom.common.env import env_bool, is_truthy
+from hyperloom.common.io import append_jsonl
+
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.parse_usage import (
     parse_forge_steps,
     parse_forge_usage,
 )
 
+# Cohesive clusters live in sibling modules; re-exported here so the module
+# namespace + monkeypatch surface is intact.
 from ._kernel_decisions import (
-    _TRUEY as _TRUEY,
     _honest_flag as _honest_flag,
+    _format_last_kernel_opt as _format_last_kernel_opt,
+    _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
+    kernel_patch_key as kernel_patch_key,
+    find_rejected_kernel_patch as find_rejected_kernel_patch,
+    record_kernel_integrate_result as record_kernel_integrate_result,
+    record_kernel_opt as record_kernel_opt,
+    record_gemm_tuning as record_gemm_tuning,
+    _kernel_ids_in_optimization_stack as _kernel_ids_in_optimization_stack,
+    _source_files_in_optimization_stack as _source_files_in_optimization_stack,
+    _kernel_ids_with_integrate_attempts as _kernel_ids_with_integrate_attempts,
+    integrate_attempt_count_for_kernel as integrate_attempt_count_for_kernel,
+    _kernel_trace_impact_pct as _kernel_trace_impact_pct,
+    next_pending_keep_kernel_id as next_pending_keep_kernel_id,
+    pending_keep_kernel_ids as pending_keep_kernel_ids,
+    has_keep_pending_integrate as has_keep_pending_integrate,
+    kernel_opt_attempts_count as kernel_opt_attempts_count,
+    untried_hot_reusable_kernels as untried_hot_reusable_kernels,
 )
 
 
@@ -1523,8 +1544,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
     ref_envs = dict(getattr(state, "reference_envs", None) or {})
     per_token_signal = (
-        _truthy_env_value(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
-        or _truthy_env_value(ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
+        is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
+        or is_truthy(ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
     )
 
     quantization_arg = _parse_server_arg(server_args, "--quantization").lower()
@@ -1551,11 +1572,6 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
         precision = "bf16"
     quant_type = str(payload.get("quant_type") or "auto").strip()
     return precision, quant_type
-
-
-def _truthy_env_value(value: Any) -> bool:
-    """Return True for common env truthy values."""
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_forge_server_log(state, session_dir: Path) -> str:
@@ -2505,10 +2521,7 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     }
     row = {k: v for k, v in row.items() if v is not None}
     try:
-        path = gemm_tuning_steps_path(session_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, sort_keys=True) + "\n")
+        append_jsonl(gemm_tuning_steps_path(session_dir), row, make_parents=True, sort_keys=True)
     except OSError:
         log.debug("full-trace: gemm_tuning audit append failed", exc_info=True)
 
@@ -4082,9 +4095,8 @@ def _trace_kernel_attempt_steps(
     try:
         path = forge_steps_path(session_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            for row in rows:
-                f.write(json.dumps(row, sort_keys=True) + "\n")
+        for row in rows:
+            append_jsonl(path, row, sort_keys=True)
     except OSError:
         log.debug("full-trace: forge_steps append failed", exc_info=True)
 
@@ -4505,7 +4517,7 @@ async def integrate_handler(
     paired_ab: dict[str, Any] | None = None
     paired_pristine_revert: HandlerResult | None = None
     if (
-        os.environ.get("HL_INTEGRATE_PAIRED_AB", "").strip().lower() in _TRUEY
+        env_bool("HL_INTEGRATE_PAIRED_AB", False)
         and decision == "KEEP"
         and apply_result.get("status") == "ok"
     ):
@@ -4654,13 +4666,66 @@ def get_handler(kind: str) -> HandlerFn | None:
     return KERNEL_REQUEST_HANDLERS.get(kind)
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 __all__ = [
     "KERNEL_REQUEST_HANDLERS",
     "get_handler",
     "has_handler",
     "integrate_handler",
-    "run_fusion_handler",
     "run_gemm_tuning_handler",
     "run_optimization_handler",
     "trace_analyze_handler",
+    # Re-exported from sibling modules for backward compat and the test
+    # monkeypatch surface (referenced via ``request_handlers.<name>``).
+    # Declared so the re-exports are intentional, not flagged imports.
+    "_format_last_kernel_opt",
+    "_resolve_kernel_patch_identity",
+    "kernel_patch_key",
+    "find_rejected_kernel_patch",
+    "record_kernel_integrate_result",
+    "record_kernel_opt",
+    "record_gemm_tuning",
+    "_kernel_ids_in_optimization_stack",
+    "_source_files_in_optimization_stack",
+    "_kernel_ids_with_integrate_attempts",
+    "integrate_attempt_count_for_kernel",
+    "_kernel_trace_impact_pct",
+    "next_pending_keep_kernel_id",
+    "pending_keep_kernel_ids",
+    "has_keep_pending_integrate",
+    "kernel_opt_attempts_count",
+    "untried_hot_reusable_kernels",
 ]

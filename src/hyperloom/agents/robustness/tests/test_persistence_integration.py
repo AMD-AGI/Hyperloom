@@ -45,22 +45,24 @@ def _fresh_classifier(
     store = DetectorStateStore(session_dir=session_dir)
     classifier = Classifier(
         state_store=store,
-        crash_config=CrashConfig(),
-        gpu_leak_config=GpuLeakConfig(
-            min_consecutive_ticks=gpu_leak_min_ticks,
-            free_mb_threshold=500.0,
-            owner_patterns=(),  # disable owner heuristic
-        ),
-        kernel_pipeline_config=KernelPipelineConfig(
-            pending_count_threshold=0,
-            min_pending_ticks=ray_min_pending_ticks,
-        ),
-        progress_config=ProgressConfig(
-            gain_window_ticks=3,
-            gain_epsilon_pct=0.1,
-            no_levers_min_minutes=10_000.0,  # disable B3
-        ),
-        aiter_jit_config=AiterJitConfig(),
+        configs={
+            "crash": CrashConfig(),
+            "gpu_leak": GpuLeakConfig(
+                min_consecutive_ticks=gpu_leak_min_ticks,
+                free_mb_threshold=500.0,
+                owner_patterns=(),  # disable owner heuristic for the test
+            ),
+            "kernel_pipeline": KernelPipelineConfig(
+                pending_count_threshold=0,
+                min_pending_ticks=ray_min_pending_ticks,
+            ),
+            "progress": ProgressConfig(
+                gain_window_ticks=3,
+                gain_epsilon_pct=0.1,
+                no_levers_min_minutes=10_000.0,  # disable B3 in this test
+            ),
+            "aiter_jit": AiterJitConfig(),
+        },
     )
     return classifier, store
 
@@ -148,11 +150,13 @@ def test_gpu_leak_resets_when_owner_reappears(tmp_path: Path):
     c2, store2 = _fresh_classifier(tmp_path)
     classifier = Classifier(
         state_store=store2,
-        gpu_leak_config=GpuLeakConfig(
-            min_consecutive_ticks=2,
-            free_mb_threshold=500.0,
-            owner_patterns=("sglang.launch_server",),
-        ),
+        configs={
+            "gpu_leak": GpuLeakConfig(
+                min_consecutive_ticks=2,
+                free_mb_threshold=500.0,
+                owner_patterns=("sglang.launch_server",),
+            ),
+        },
     )
     syms = classifier.classify(data_with_owner, _ctx_with_tick(2))
     assert all(s.name != "gpu_memory_leaked" for s in syms)
@@ -306,11 +310,13 @@ def test_rca_throttle_cooldown_persists(tmp_path: Path):
 def test_classifier_without_state_store_is_in_memory(tmp_path: Path):
     classifier = Classifier(
         state_store=None,
-        gpu_leak_config=GpuLeakConfig(
-            min_consecutive_ticks=2,
-            free_mb_threshold=500.0,
-            owner_patterns=(),
-        ),
+        configs={
+            "gpu_leak": GpuLeakConfig(
+                min_consecutive_ticks=2,
+                free_mb_threshold=500.0,
+                owner_patterns=(),
+            ),
+        },
     )
     syms1 = classifier.classify(_leak_data(), _ctx_with_tick(1))
     assert all(s.name != "gpu_memory_leaked" for s in syms1)
@@ -320,11 +326,13 @@ def test_classifier_without_state_store_is_in_memory(tmp_path: Path):
     # A fresh store-less classifier loses the counter.
     fresh = Classifier(
         state_store=None,
-        gpu_leak_config=GpuLeakConfig(
-            min_consecutive_ticks=2,
-            free_mb_threshold=500.0,
-            owner_patterns=(),
-        ),
+        configs={
+            "gpu_leak": GpuLeakConfig(
+                min_consecutive_ticks=2,
+                free_mb_threshold=500.0,
+                owner_patterns=(),
+            ),
+        },
     )
     syms_fresh = fresh.classify(_leak_data(), _ctx_with_tick(99))
     assert all(s.name != "gpu_memory_leaked" for s in syms_fresh)

@@ -27,7 +27,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ._row_utils import coerce_optional_int as _coerce_optional_int
+from ._row_utils import coerce_optional_int
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | Non
     """
     if not isinstance(usage, dict) or not usage:
         return None
-    projected: dict[str, int | None] = {k: _coerce_optional_int(usage.get(k)) for k in _TOKEN_KEYS}
+    projected: dict[str, int | None] = {k: coerce_optional_int(usage.get(k)) for k in _TOKEN_KEYS}
     if all(v is None for v in projected.values()):
         return None
     return projected

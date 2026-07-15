@@ -2,9 +2,17 @@
 
 """Environment-variable readers (canonical ``env_*``).
 
-Boolean token vocabulary (``1/true/yes/on`` → ``True``, case-insensitive) plus
-int/float readers with safe fallbacks. Stdlib-only so any package may depend on
-it without an import cycle.
+Project-standard boolean token vocabulary (``1/true/yes/on`` → ``True``,
+case-insensitive) plus int/str/float readers with safe fallbacks. Stdlib-only
+so any package may depend on it without an import cycle.
+
+Divergent readers intentionally NOT delegated here (kept local by design):
+
+* ``ci/optimize_submit._env_truthy`` — additionally accepts ``y``.
+* ``orchestrator/roofline_ceiling._env_int`` — reads from a *dict* mapping, not
+  from ``os.environ``.
+* ``orchestrator/trace/trace_env.env_flag`` — also treats ``0/false/no/off`` as
+  an explicit ``False`` vocabulary (superset semantics).
 """
 
 from __future__ import annotations
@@ -12,6 +20,48 @@ from __future__ import annotations
 import os
 
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
+# Canonical "off" vocabulary. The empty string is an explicit false token (a
+# blank/whitespace-only value is never "on"); an unset value (``None``) or an
+# unrecognised token falls back to the caller's ``default`` instead.
+_FALSE_TOKENS = frozenset({"", "0", "false", "no", "off"})
+
+
+def is_truthy(value: object, *, default: bool = False) -> bool:
+    """Interpret an already-read *value* as a boolean flag.
+
+    Unlike :func:`env_bool` (which reads ``os.environ`` by name), this takes a
+    value directly — a task-param, a dict entry, or a pre-read env string —
+    reusing the shared token vocabulary.
+
+    Classification (case-insensitive, whitespace-stripped):
+
+    * ``bool`` values return themselves.
+    * ``1``/``true``/``yes``/``on`` → ``True``.
+    * ``0``/``false``/``no``/``off`` and the empty string → ``False``.
+    * ``None`` (unset) or any *unrecognised* token → ``default``.
+
+    ``default`` is what distinguishes the two legacy idioms this replaces: a
+    strict "affirmative-token only" reader passes ``default=False`` (unknown →
+    ``False``), while an "off-set" reader — truthy unless explicitly one of the
+    off tokens — passes ``default=True`` (unknown → ``True``).
+
+    Args:
+        value: The value to interpret (``bool``, ``str``, ``int``, ``None`` …).
+        default: Returned when *value* is ``None`` or an unrecognised token.
+
+    Returns:
+        The value's boolean interpretation.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    token = str(value).strip().lower()
+    if token in _TRUE_TOKENS:
+        return True
+    if token in _FALSE_TOKENS:
+        return False
+    return default
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -63,4 +113,20 @@ def env_float(name: str, default: float = 0.0) -> float:
         return default
 
 
-__all__ = ["env_bool", "env_int", "env_float"]
+def env_str(name: str, default: str = "") -> str:
+    """Read a stripped string env var.
+
+    Args:
+        name: Environment variable name.
+        default: Value returned when the variable is unset.
+
+    Returns:
+        The stripped value, or ``default`` when unset.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip()
+
+
+__all__ = ["is_truthy", "env_bool", "env_int", "env_float", "env_str"]

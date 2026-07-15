@@ -20,7 +20,7 @@ from typing import Any
 
 # Sibling import: kernel-agent tools cannot rely on the ``hyperloom`` import root.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import truthy as _truthy  # noqa: E402
+from _io_utils import truthy  # noqa: E402
 
 sys.path.pop(0)
 
@@ -88,20 +88,20 @@ def _add_kb_read_opts(cmd: list[str], args: dict[str, Any]) -> None:
     kb_read = args.get("kb_read")
     if kb_read is None:
         kb_read = os.environ.get("FORGE_GEMM_TUNE_KB_READ", "")
-    if not _truthy(kb_read):
+    if not truthy(kb_read):
         return
     cmd.append("--kb-read")
 
     accept = args.get("kb_accept_candidate")
     if accept is None:
         accept = os.environ.get("FORGE_GEMM_TUNE_KB_ACCEPT_CANDIDATE", "")
-    if _truthy(accept):
+    if truthy(accept):
         cmd.append("--kb-accept-candidate")
 
     strict = args.get("kb_strict_lib")
     if strict is None:
         strict = os.environ.get("FORGE_GEMM_TUNE_KB_STRICT_LIB", "")
-    if _truthy(strict):
+    if truthy(strict):
         cmd.append("--kb-strict-lib")
 
     cur_lib = args.get("kb_current_lib")

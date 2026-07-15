@@ -81,7 +81,7 @@ async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
 # baseline_comparison.name_mapping                                            #
 # --------------------------------------------------------------------------- #
 def test_name_mapping_paths() -> None:
-    from hyperloom.inference_optimizer.baseline_comparison import name_mapping as nm
+    from hyperloom.inference_optimizer.baseline_comparison import target_analyzer as nm
 
     assert nm.to_inferencex_name("") is None
     # Whitespace-only collapses to empty after strip.

@@ -10,14 +10,13 @@ incrementally (atomic tmp + ``os.replace``) so a mid-session crash leaves a usab
 from __future__ import annotations
 
 import dataclasses
-import functools
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import atomic_write_text
 from hyperloom.common.timeutil import now_iso
 
 
@@ -264,7 +263,7 @@ class Journal:
             row with the same dedupe key already exists.
         """
         if not entry.ts:
-            entry.ts = _now_iso()
+            entry.ts = now_iso("seconds", z_suffix=True)
         key = entry.dedupe_key()
         for existing in self.entries:
             if existing.dedupe_key() == key:
@@ -308,14 +307,11 @@ class Journal:
     def _flush(self) -> None:
         """Atomic write (tmp + os.replace); best-effort — IOError logged and swallowed (forensic aid, not a correctness invariant)."""
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = self.to_dict()
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            tmp.write_text(
-                json.dumps(payload, indent=2, sort_keys=False) + "\n",
-                encoding="utf-8",
+            atomic_write_text(
+                self.path,
+                json.dumps(self.to_dict(), indent=2, sort_keys=False) + "\n",
+                make_parents=True,
             )
-            os.replace(tmp, self.path)
         except OSError as exc:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)
 
@@ -339,10 +335,6 @@ class Journal:
 
 
 # helpers
-# seconds + ``Z`` suffix (canonical helper; kept importable for callers).
-_now_iso = functools.partial(now_iso, "seconds", z_suffix=True)
-
-
 def _variant_args(variant: dict[str, Any]) -> str:
     """Read a variant's canonical server-arg string.
 

@@ -9,14 +9,14 @@ import json
 from hyperloom.orchestrator.trace import parse_usage as pu
 
 
-# ---- _coerce_optional_int ----
+# ---- coerce_optional_int ----
 
 
 def test_coerce_optional_int():
-    assert pu._coerce_optional_int(None) is None
-    assert pu._coerce_optional_int("5") == 5
-    assert pu._coerce_optional_int(7) == 7
-    assert pu._coerce_optional_int("x") is None
+    assert pu.coerce_optional_int(None) is None
+    assert pu.coerce_optional_int("5") == 5
+    assert pu.coerce_optional_int(7) == 7
+    assert pu.coerce_optional_int("x") is None
 
 
 # ---- normalize_usage ----

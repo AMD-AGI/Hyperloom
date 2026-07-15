@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import atomic_write_json, atomic_write_text
+
 log = logging.getLogger(__name__)
 
 
@@ -58,7 +60,8 @@ class PostmortemFinalizerConfig:
     """
 
     reports_subdir: str = "reports"
-    # Where FindingSink writes; the finalizer only reads here.
+    # Where FindingSink writes; the finalizer only reads here. Kept in sync
+    # with ``role.findings.FINDINGS_SUBDIR`` (the on-disk source of truth).
     findings_subdir: str = "agents/robustness/findings"
     runs_subdir: str = "runs"
     # Cap of HIGH-severity findings rendered in the body.
@@ -461,7 +464,7 @@ class PostmortemFinalizer:
         """
         target = self.reports_dir / filename
         try:
-            target.write_text(body, encoding="utf-8")
+            atomic_write_text(target, body)
             return True
         except OSError as exc:
             log.warning(
@@ -484,9 +487,13 @@ class PostmortemFinalizer:
         """
         target = self.reports_dir / filename
         try:
-            target.write_text(
-                json.dumps(payload, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
+            atomic_write_json(
+                target,
+                payload,
+                indent=2,
+                sort_keys=True,
+                trailing_newline=True,
+                make_parents=False,
             )
             return True
         except (OSError, TypeError, ValueError) as exc:

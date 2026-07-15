@@ -378,7 +378,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
         # Bypass the execution-order gate that would deny an integrate request
         # in the initial phase before reaching the emit.
         monkeypatch.setattr(
-            c.gating,
+            c.dispatcher,
             "_sequence_denial_for_request",
             lambda target, kind: None,
         )

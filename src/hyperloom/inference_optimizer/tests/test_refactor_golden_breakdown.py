@@ -2,12 +2,26 @@
 
 """Refactor safety net: golden behavioral baseline for the Coordinator.
 
-Drives a fixed, deterministic sequence of intents through a real ``Coordinator``
-(with mock backends) and snapshots the resulting observable behavior — the
-persisted ``SharedState`` and the decision/result message topics on the bus. The
-snapshot is asserted (after normalizing non-deterministic fields) on every run,
-gating that ``_handle_*`` intent routing and ``record_*`` state mutations stay
-behavior-preserving.
+This test drives a *fixed, deterministic* sequence of intents through a real
+``Coordinator`` (with mock backends) and snapshots the resulting observable
+behavior — the persisted ``SharedState`` and the decision/result message
+topics on the bus. The snapshot is captured once as a golden fixture and
+asserted byte-for-byte (after normalizing non-deterministic fields) on every
+subsequent run.
+
+Why this exists
+---------------
+The structural refactor (see the "break four God-objects" plan) extracts the
+Coordinator's ``_handle_*`` intent routing and ``record_*`` state mutations into
+collaborator objects (``IntentRouter``, ``WritebackCollaborator``) and moves behavior
+off ``SharedState``. Those moves must be *behavior-preserving*. This test is the
+gate: if an extraction changes what the Coordinator does — different state,
+different bus decisions — the golden mismatch fails the build before the change
+can land.
+
+It deliberately exercises the exact methods the refactor touches:
+``_handle_intent`` → ``_handle_propose_action`` / ``_handle_review_verdict`` /
+``_handle_delegate``, plus the ``SharedState`` mutations they trigger.
 
 Regenerating the golden
 -----------------------

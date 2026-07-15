@@ -289,3 +289,38 @@ def test_shape_ledger_entry_tags_operation_kind_and_proposer() -> None:
     assert entry["provenance"] == "specialist:serving"
     assert entry["proposer"] == "specialist:serving"
     assert entry["scope"] == "domain"
+
+
+# ---------------------------------------------------------------------------
+# _action_family — ordered (predicate, family) table. Order is load-bearing
+# (the ``kernel_opt`` prefix + the ``replay_warm_recipe`` base-token split can
+# overlap the exact ``==`` checks), so pin the full mapping including the
+# tier-suffix and case-folding behavior.
+# ---------------------------------------------------------------------------
+def test_action_family_full_mapping_and_order() -> None:
+    from hyperloom.inference_optimizer.breakdown.collectors import _action_family
+
+    # kernel_opt* prefix + integrate both fold into kernel_agent (prefix match
+    # must win before the exact checks below it fire).
+    assert _action_family("kernel_opt") == "kernel_agent"
+    assert _action_family("kernel_opt_moe_fp8") == "kernel_agent"
+    assert _action_family("integrate") == "kernel_agent"
+    # Exact-match legacy + current families.
+    assert _action_family("backends") == "backends"
+    assert _action_family("params") == "params"
+    assert _action_family("validate_stack") == "validate"
+    assert _action_family("sweep") == "sweep"
+    assert _action_family("explore") == "explore"
+    assert _action_family("framework") == "framework"
+    assert _action_family("gemm_tuning") == "gemm_tuning"
+    assert _action_family("geak_e2e") == "geak"
+    # replay_warm_recipe matches on the base token, so a tier suffix still maps.
+    assert _action_family("replay_warm_recipe") == "replay_warm_recipe"
+    assert _action_family("replay_warm_recipe:exact") == "replay_warm_recipe"
+    # Case-folding: labels are lowercased before matching.
+    assert _action_family("INTEGRATE") == "kernel_agent"
+    assert _action_family("Explore") == "explore"
+    # Unrecognized / empty / falsy -> other.
+    assert _action_family("something_new") == "other"
+    assert _action_family("") == "other"
+    assert _action_family(None) == "other"  # type: ignore[arg-type]

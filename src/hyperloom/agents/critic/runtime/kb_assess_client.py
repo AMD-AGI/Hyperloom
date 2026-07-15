@@ -10,9 +10,13 @@ no network" contract:
   ``{CORTEX_KB_URL}/v2/reasoning/assess`` and fold the verdict into the bundle;
 * unset → :func:`from_env` returns ``None`` and the Critic never calls out.
 
-Config: ``CORTEX_KB_URL`` (URL), ``CORTEX_KB_HTTP_TIMEOUT_SEC`` (timeout),
-``KB_SERVICE_TOKEN`` (bearer). Uses ``urllib`` (no ``httpx``). All failures are
-swallowed — the verdict is advisory, never a gate on the review.
+Config mirrors :mod:`hyperloom.orchestrator.knowledge.recipe_kb`:
+``CORTEX_KB_URL`` (URL), ``CORTEX_KB_HTTP_TIMEOUT_SEC`` (timeout),
+``KB_SERVICE_TOKEN`` (bearer).
+
+Uses ``urllib`` (no ``httpx``) so it installs in the minimal Codex container,
+consistent with :mod:`runtime.kb_client`. All failures are swallowed — the
+verdict is advisory, never a gate on the review.
 """
 
 from __future__ import annotations

@@ -169,6 +169,46 @@ async def test_prune_events_protects_pending_proposal(conn):
 
 
 @pytest.mark.asyncio
+async def test_pending_proposal_seqs_matches_reconstruct_logic(conn):
+    """The pruning guard's pending set must agree with the resume reconstruct
+    logic: a proposal is decided iff a verdict has a NON-EMPTY target equal to
+    its msg_id (empty/missing targets do not decide anything)."""
+    bus = MessageBus(conn)
+    p_pending = Message.new("orchestration", "*", "proposal", {"action_name": "a"})
+    p_decided = Message.new("orchestration", "*", "proposal", {"action_name": "b"})
+    await bus.append_and_seq(p_pending)
+    await bus.append_and_seq(p_decided)
+    # Decided one gets a real verdict.
+    await bus.append_and_seq(Message.new(
+        "critic", "*", "review_verdict",
+        {"target_proposal_msg_id": p_decided.msg_id, "verdict": "reject"},
+    ))
+    # An empty-target verdict must NOT decide any proposal (NULL-trap guard).
+    await bus.append_and_seq(Message.new(
+        "critic", "*", "review_verdict",
+        {"target_proposal_msg_id": "", "verdict": "approve"},
+    ))
+
+    rows = await conn.fetchall(dbm._PENDING_PROPOSAL_SEQS_SQL)
+    pending = {int(r["seq"]) for r in rows or []}
+
+    # Cross-check against the same join replay_for_resume uses.
+    proposals = await bus.tail(topic="proposal", n=1000)
+    verdicts = await bus.tail(topic="review_verdict", n=1000)
+    decided = {
+        v.payload.get("target_proposal_msg_id")
+        for v in verdicts
+        if v.payload.get("target_proposal_msg_id")
+    }
+    expected_pending_seqs = {
+        p.seq for p in proposals if p.msg_id not in decided
+    }
+    assert pending == expected_pending_seqs
+    # Concretely: only the undecided proposal is protected.
+    assert pending == {p_pending.seq}
+
+
+@pytest.mark.asyncio
 async def test_prune_tasks_keeps_recent_done_and_spares_inflight(conn):
     reg = TaskRegistry(conn)
     # In-flight tasks that must never be pruned.
@@ -298,6 +338,7 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
         MockCriticBackend,
         MockRobustnessBackend,
         ScriptedPlan,
+        auto_respond_kernel,
     )
     from .conftest import seed_target_analysis_marker
 
@@ -305,7 +346,7 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "kernel_agent": MockBackend(ScriptedPlan(turns=[]), name="kernel_agent"),
+        "kernel_agent": auto_respond_kernel(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

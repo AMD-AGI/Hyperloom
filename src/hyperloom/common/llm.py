@@ -1,14 +1,29 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Minimal OpenAI-compatible / Anthropic Messages-API POST-and-parse helpers.
+"""``hyperloom.common.llm`` — shared LLM HTTP protocol adapters (tree-reform.MD §4/§7).
 
-Each function issues exactly one synchronous HTTP request and returns the
-completion text (or raises :class:`LLMClientError`). This is a shared protocol
-skeleton, not an SDK replacement: role backends needing streaming, tool-calling,
-or retry policies continue to use the ``openai`` / ``claude_agent_sdk`` packages
-directly. Callers own credential resolution and pass an already-resolved
-``base_url``/``api_key`` pair. ``httpx`` is imported lazily so importing this
-module never pays the cost for callers that do not need it.
+The **protocol** layer only: minimal, credential-agnostic POST-and-parse
+helpers for the OpenAI-compatible chat-completions API and the Anthropic
+Messages API, plus a common error type. Each function issues exactly one
+synchronous HTTP request and returns the completion text (or raises
+:class:`LLMClientError`).
+
+This is the shared "protocol skeleton" that ``hyperloom.inference_optimizer``'s
+report-narrative client builds on (``breakdown/reporters/llm_client.py``); it is
+deliberately NOT an SDK replacement — role backends that need streaming,
+tool-calling, or retry policies (``orchestrator/roles/{claude,codex,critic_agent}.py``,
+``orchestrator/scoring/proposal_scorer.py``) continue to use the ``openai`` /
+``claude_agent_sdk`` packages directly (tree-reform.MD §12.2: role-specific
+agentic behavior stays in ``orchestrator/roles/``).
+
+It intentionally does NOT decide which environment variable supplies an API key
+or base URL — that is a caller concern. Callers own credential resolution
+(which env var, what fallback order); this module only accepts an
+already-resolved ``base_url``/``api_key`` pair.
+
+Zero first-party imports (stdlib + lazy ``httpx``) so any package may depend on
+this without creating an import cycle. ``httpx`` is imported lazily so importing
+this module never pays the cost for callers that end up not needing it.
 """
 
 from __future__ import annotations
@@ -143,7 +158,7 @@ def call_anthropic_messages(
         raise LLMClientError(f"unexpected anthropic response shape: {data!r}") from exc
 
 
-__all__: list[str] = [
+__all__ = [
     "DEFAULT_HTTP_TIMEOUT_SEC",
     "LLMClientError",
     "call_openai_chat_completions",

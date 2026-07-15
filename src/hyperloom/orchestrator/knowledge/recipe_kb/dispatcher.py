@@ -8,9 +8,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from . import RemoteRecipeClientError
 from .canonical_id import InvalidCanonicalIdError, cid_to_path_components
 from .local_store import LocalRecipeStore
-from .remote_client import RemoteRecipeClientError
 
 
 log = logging.getLogger(__name__)
@@ -105,9 +105,9 @@ def _v2_to_arbor(v2_payload: dict[str, Any]) -> dict[str, Any]:
         "framework_name": str(labels.get("framework_name") or labels.get("framework") or ""),
         "framework_version": str(labels.get("framework_version") or ""),
         "precision": str(labels.get("precision") or ""),
-        # arbor payload pulled out of body / metrics. kb-extract recipes may
-        # store optimized args in body.extra_server_args rather than
-        # body.best_config; synthesize best_config when absent.
+        # arbor payload pulled out of body / metrics.
+        # kb-extract recipes store optimized args directly in body.extra_server_args
+        # rather than body.best_config; synthesize best_config when absent.
         "best_config": dict(body.get("best_config") or {})
         or (
             {"extra_server_args": str(body.get("extra_server_args") or "").strip()}
@@ -249,19 +249,9 @@ class RecipeKB:
     on_remote_failure: Any = None
     audit_hook: Any = None
 
-    @property
-    def enabled(self) -> bool:
-        """Always ``True`` — the dispatcher is usable whenever it exists
-        because the local store is always present (writes land locally; reads
-        fall back to local). Remote reachability is handled separately by
-        :meth:`_remote_active`. Exposed so call sites that probe
-        ``client.enabled`` keep working against the v2 dispatcher.
-
-        Returns:
-            bool: Always ``True``.
-        """
-        return True
-
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
     def _remote_active(self) -> bool:
         """``True`` iff the remote client exists and is enabled.
 

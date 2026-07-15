@@ -2639,7 +2639,7 @@ def test_format_last_trace_analyze_renders_idle_warning_inline(session_dir):
             ],
         },
     )
-    rendered = state._format_last_trace_analyze()
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
     assert "high_gpu_idle_pct" in rendered
     assert "60.5%" in rendered
     assert "20.0%" in rendered
@@ -2667,7 +2667,7 @@ def test_format_last_trace_analyze_renders_failure_warning_with_rc(session_dir):
             ],
         },
     )
-    rendered = state._format_last_trace_analyze()
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
     assert "tracelens_analysis_failed" in rendered
     assert "rc=1" in rendered
 
@@ -2684,7 +2684,7 @@ def test_format_last_trace_analyze_omits_warnings_suffix_in_steady_state(session
             "hot_kernels": [{"kernel_id": "k1", "reusable_native_kernel": True}],
         },
     )
-    rendered = state._format_last_trace_analyze()
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
     assert "warnings=" not in rendered, "no warnings → no warnings= suffix; this keeps existing prompt snapshots stable"
 
 
@@ -2728,7 +2728,7 @@ async def test_t5_handler_to_sharedstate_e2e_idle_warning_reaches_prompt(
     assert state.last_trace_analyze["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
 
     # Prompt rendering surfaces it.
-    rendered = state._format_last_trace_analyze()
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
     assert "high_gpu_idle_pct" in rendered
     assert "42.0%" in rendered
 
@@ -2758,7 +2758,7 @@ async def test_t5_handler_to_sharedstate_e2e_failure_warning_reaches_prompt(
     )
     state = SharedState.load_or_init(session_dir)
     state.record_trace_analyze({"trace_input": str(session_dir)}, res)
-    rendered = state._format_last_trace_analyze()
+    rendered = state._format_trace_analyze_blob(state.last_trace_analyze)
     assert "tracelens_analysis_failed" in rendered
     assert "rc=1" in rendered
 

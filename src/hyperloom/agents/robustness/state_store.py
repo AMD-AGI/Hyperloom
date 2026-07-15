@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.io import atomic_write_json
 
 
 log = logging.getLogger(__name__)
@@ -147,23 +147,15 @@ class DetectorStateStore:
             )
             return
         try:
-            # Same-dir tmpfile keeps os.replace atomic (same filesystem).
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=str(self._dir),
-                prefix=".detector_state.",
-                suffix=".tmp",
-                delete=False,
+            atomic_write_json(
+                self._path,
+                self._data,
+                indent=2,
+                sort_keys=True,
+                trailing_newline=True,
+                make_parents=False,
+                fsync=True,
             )
-            try:
-                json.dump(self._data, tmp, indent=2, sort_keys=True)
-                tmp.write("\n")
-                tmp.flush()
-                os.fsync(tmp.fileno())
-            finally:
-                tmp.close()
-            os.replace(tmp.name, self._path)
             self._dirty = False
         except (OSError, TypeError, ValueError) as exc:
             log.warning(

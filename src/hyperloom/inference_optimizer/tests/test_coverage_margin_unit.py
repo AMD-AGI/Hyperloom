@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from hyperloom.common.env import env_float
-from hyperloom.inference_optimizer.breakdown.recorder.sections import section_shape
+from hyperloom.inference_optimizer.breakdown.recorder import section_shape
 from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
     decision_journal,
     kernel_decision_path,

@@ -55,14 +55,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
-from hyperloom.common.subprocess_bridge import emit_json as _emit_json
-from hyperloom.common.subprocess_bridge import read_json as _read_json
+from hyperloom.common.subprocess_bridge import RuntimeAdapterError, emit_json, read_json
 
 from ..config import Config
 from ..factory import build_reactor_components
-from ..finalize.postmortem import finalize_session
 from ..role.envelope import build_envelope_dict
+from ..role.postmortem import finalize_session
 from ..role.prompt_inputs import (
     ReactorContext,
     SharedStateSnapshot,
@@ -75,8 +73,6 @@ log = logging.getLogger("robustness_agent.runtime.cli")
 
 COORDINATOR_INBOX = "coordinator_inbox"
 REQUEST_KINDS: frozenset[str] = frozenset({COORDINATOR_INBOX})
-
-# Re-exported as module-level bindings so monkeypatches resolve through this module's __dict__.
 
 
 def _coerce_request(raw: Any) -> dict[str, Any]:
@@ -255,9 +251,9 @@ def _cmd_tick(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI arguments with ``request``
             and ``out`` attributes.
     """
-    request = _coerce_request(_read_json(args.request))
+    request = _coerce_request(read_json(args.request))
     emit = asyncio.run(_run_tick(request))
-    _emit_json(emit, args.out)
+    emit_json(emit, args.out)
 
 
 def _cmd_finalize(args: argparse.Namespace) -> None:
@@ -295,7 +291,7 @@ def _cmd_finalize(args: argparse.Namespace) -> None:
         "wrote_new_files": bool(wrote),
         "reports_dir": str(session_dir / "reports"),
     }
-    _emit_json(payload, args.out)
+    emit_json(payload, args.out)
 
 
 def _build_parser() -> argparse.ArgumentParser:

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
 """Per-architecture analytic FLOPs / compute-ceiling estimator for the xDiT
 text-to-image models Hyperloom optimizes.
 
@@ -34,7 +36,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# Hardware matrix-core peak TFLOPS (mirrors roofline_ceiling.HW_SPECS).
+from _io_utils import read_json
+
+# ---------------------------------------------------------------------------
+# Hardware matrix-core peak TFLOPS (self-contained; mirrors
+# roofline_ceiling.HW_SPECS so this tool runs standalone in kernel-agent).
+# ---------------------------------------------------------------------------
 _PEAK_TFLOPS: dict[str, dict[str, float]] = {
     "mi300x": {"bf16": 1307.4, "fp16": 1307.4, "fp8": 2614.9, "fp32": 163.4},
     "mi308x": {"bf16": 1307.4, "fp16": 1307.4, "fp8": 2614.9, "fp32": 163.4},
@@ -168,21 +175,14 @@ _BASENAME_HINTS: dict[str, dict[str, Any]] = {
 }
 
 
-def _read_json(p: Path) -> dict[str, Any] | None:
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
 def _denoiser_config(model_dir: Path) -> tuple[dict[str, Any] | None, str]:
     """Return ``(config, subdir)`` for the transformer or unet denoiser."""
     for sub in ("transformer", "unet"):
-        c = _read_json(model_dir / sub / "config.json")
+        c = read_json(model_dir / sub / "config.json")
         if c:
             return c, sub
     # single-file / top-level config
-    c = _read_json(model_dir / "config.json")
+    c = read_json(model_dir / "config.json")
     return c, ""
 
 

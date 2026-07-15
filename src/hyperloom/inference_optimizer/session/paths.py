@@ -14,11 +14,12 @@ Two path concepts:
 
 from __future__ import annotations
 
-import datetime
 import logging
 import os
 import re
 from pathlib import Path
+
+from hyperloom.common.timeutil import utc_now_compact
 
 log = logging.getLogger(__name__)
 
@@ -220,7 +221,7 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
 
     if _layout_mode() == "per_model_ts" and model_name:
         basename = _sanitize_model_basename(model_name)
-        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        ts = utc_now_compact()
         sd = ws / basename / ts
     else:
         sd = ws
@@ -296,15 +297,12 @@ def asset_system_prompts_dir() -> Path:
     return Path(_prompts_pkg.__file__).resolve().parent
 
 
-# Workspace-/session-scoped artefact helpers — the single source of truth for
-# these paths (callers go through e.g. magpie_dir() rather than concatenating).
-def runtime_dir(session_dir: Path | None = None) -> Path:
+# Workspace-/session-scoped artefact helpers. Single source of truth so
+# callers go through e.g. magpie_dir() / runtime_dir() instead of concatenating
+# paths by hand.
+def runtime_dir() -> Path:
     """``<workspace_root>/runtime/`` — workspace-shared writable runtime
-    (kernel-agent env file, GEAK litellm config). Survives across sessions;
-    the ``session_dir`` param is ignored (back-compat).
-
-    Args:
-        session_dir: Ignored; accepted for back-compat.
+    (kernel-agent env file, GEAK litellm config). Survives across sessions.
 
     Returns:
         ``<workspace_root>/runtime``.
@@ -329,13 +327,10 @@ def open_source_root() -> Path:
     return Path("/opt/hyperloom/open-source-repos")
 
 
-def magpie_dir(session_dir: Path | None = None) -> Path:
+def magpie_dir() -> Path:
     """``<open_source_root>/Magpie/`` — Magpie clone (pod-local; ``$MAGPIE_PATH``
     overrides). Aligned with install.sh so script and runtime resolve the same
-    checkout. ``session_dir`` param ignored (back-compat).
-
-    Args:
-        session_dir: Ignored; accepted for back-compat.
+    checkout.
 
     Returns:
         The Magpie checkout path.

@@ -17,7 +17,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import (
     _page_to_recipe,
     build_gbrain_remote_from_env,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb.remote_client import RemoteRecipeClientError
+from hyperloom.orchestrator.knowledge.recipe_kb import RemoteRecipeClientError
 
 
 def test_page_to_recipe_reads_legacy_framework_attr() -> None:

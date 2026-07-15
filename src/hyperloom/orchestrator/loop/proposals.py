@@ -3,7 +3,6 @@
 """Coordinator main loop and runtime protocol manager."""
 
 from __future__ import annotations
-import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
@@ -519,17 +518,16 @@ class ProposalsCollaborator:
             return
         try:
             from ..trace.llm_trace import _now_iso
+            from hyperloom.common.io import append_jsonl
             from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
             path = proposal_task_map_path(self.session_dir)
-            path.parent.mkdir(parents=True, exist_ok=True)
             row = {
                 "ts": _now_iso(),
                 "proposal_msg_id": str(proposal_msg_id),
                 "task_id": str(task_id),
             }
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(row, sort_keys=True) + "\n")
-        except Exception:  # noqa: BLE001
+            append_jsonl(path, row, make_parents=True, sort_keys=True)
+        except Exception:  # noqa: BLE001 — trace must never break the loop
             log.debug(
                 "full-trace: proposal_task_map append failed for "
                 "msg_id=%s task_id=%s", proposal_msg_id, task_id, exc_info=True,

@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from hyperloom.common.jsonio import read_json
+
 
 STRICT_VALIDATION_ENV = "HYPERLOOM_QUANT_STRICT_VALIDATION"
 
@@ -154,13 +156,15 @@ def _read_json(path: Path) -> tuple[dict | None, str | None]:
         ``error`` is a human-readable message. A missing file yields
         ``(None, None)``.
     """
-    raw = _read_text(path)
-    if raw is None:
-        return None, None
-    try:
-        return json.loads(raw), None
-    except json.JSONDecodeError as exc:
-        return None, f"json_decode_error: {exc.msg} at line {exc.lineno}"
+    error: str | None = None
+
+    def _record_decode_error(exc: BaseException) -> None:
+        nonlocal error
+        if isinstance(exc, json.JSONDecodeError):
+            error = f"json_decode_error: {exc.msg} at line {exc.lineno}"
+
+    data = read_json(path, default=None, on_error=_record_decode_error)
+    return data, error
 
 
 def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | None]:

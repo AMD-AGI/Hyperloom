@@ -25,7 +25,6 @@ from _io_utils import (  # noqa: E402
     append_jsonl,
     append_log,
     atomic_write_json,
-    kernel_row_matches,
     read_last_lines,
     safe_float,
     source_text_looks_complete,
@@ -2345,17 +2344,6 @@ def _read_text_file(path: str | Path, *, errors: str | None = "replace") -> str 
         if errors is None:
             return p.read_text(encoding="utf-8")
         return p.read_text(encoding="utf-8", errors=errors)
-    except Exception:
-        return None
-
-
-def _read_json_file(path: str | Path) -> Any | None:
-    """Read a JSON file, returning ``None`` when missing or unparseable."""
-    text = _read_text_file(path, errors=None)
-    if text is None:
-        return None
-    try:
-        return json.loads(text)
     except Exception:
         return None
 

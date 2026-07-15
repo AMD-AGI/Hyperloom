@@ -13,6 +13,8 @@ import logging
 import os
 import struct
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
@@ -1233,95 +1235,80 @@ def _detect_llama_sentencepiece_metadata_gap(model_path: str, data: dict) -> str
     )
 
 
-def _detect_incompatible_model_config(
-    model_path: str, gpu_type: str | None = None, framework: str | None = None,
-) -> str | None:
-    """Detect a statically-knowable model-config incompatibility.
+def _framework_is_scriptable(framework: str | None) -> bool:
+    """True when ``framework`` is a scriptable diffusion runtime (e.g. xDiT).
 
-    Returns a human-readable reason string when the model's ``config.json``
-    will crash vLLM/transformers at load time, else ``None``. Two cases,
-    both conservative (no false positives on healthy configs):
-
-    * ``config.json`` is present but corrupt / not a JSON object — the loader
-      soft-degrades to ``None``, but a present-yet-unparseable file means the
-      framework will fail at config load, so block early.
-    * the config (top level or ``text_config``) declares a RoPE block but has
-      no max-position key at all — the rope init then dereferences a missing
-      ``max_position_embeddings``.
-
-    A fully absent ``config.json`` is NOT blocked (kept soft-degrade): the
-    upstream submission filter + downstream loader still apply.
+    Scriptable frameworks are server-less image workloads that serve Diffusers
+    pipeline repos and never load a HF tokenizer, so the diffusers-pipeline
+    (step 1) and tokenizer-artifact (step 13) config checks are false positives
+    for them and are skipped. Falls back to a literal ``xdit`` match if the
+    registry import fails so the gate is never blocked by a registry error.
 
     Args:
-        model_path (str): The local model directory containing ``config.json``.
-        gpu_type (str | None): Optional GPU type; AMD-only checks fire when it
-            resolves to a known AMD runner.
-        framework (str | None): The selected inference framework. Scriptable
-            diffusion frameworks (e.g. ``xdit``) legitimately serve Diffusers
-            pipeline repos (``model_index.json``), so the diffusers-pipeline
-            rejection — which exists to protect *text-generation* server
-            bring-up — is a false positive and is skipped for them.
+        framework (str | None): The selected inference framework.
 
     Returns:
-        str | None: A human-readable reason when a statically-knowable config
-            incompatibility is detected, else ``None``.
+        bool: ``True`` for a scriptable diffusion framework.
     """
-    if not model_path:
-        return None
-    # The diffusers-pipeline guard blocks Diffusers repos from the text-generation
-    # server path. Scriptable diffusion frameworks (xDiT) legitimately take a
-    # Diffusers pipeline, so skip that check for them (other checks still apply).
-    is_scriptable_fw = False
     try:
         from .. import framework_registry as _fr
 
-        is_scriptable_fw = _fr.is_scriptable(framework)
+        return _fr.is_scriptable(framework)
     except Exception:  # noqa: BLE001 — registry import must never block the gate
-        is_scriptable_fw = str(framework or "").strip().lower() == "xdit"
-    skip_diffusers_check = is_scriptable_fw
-    if not skip_diffusers_check:
-        pipeline_reason = _detect_diffusers_pipeline_model(model_path)
-        if pipeline_reason is not None:
-            return pipeline_reason
-    cfg_path = Path(model_path) / "config.json"
-    if not cfg_path.is_file():
-        return None
-    data = _load_model_config_dict(model_path)
-    if data is None:
-        # File exists but did not parse into a dict.
+        return str(framework or "").strip().lower() == "xdit"
+
+
+def _detect_amd_unsupported_architecture(data: dict) -> str | None:
+    """Return a reason when the architecture has no AMD/ROCm runtime path.
+
+    DSA-like architectures (deepseek_v32, minimax_m1) need a vendor engine on
+    NVIDIA Hopper/Blackwell and crash in engine init on AMD/ROCm. AMD-only: the
+    same model can still run on a vendor-supported NVIDIA engine. Matched
+    case-insensitively against ``model_type`` and ``architectures``.
+
+    Args:
+        data (dict): The decoded model ``config.json`` mapping.
+
+    Returns:
+        str | None: A human-readable reason when the architecture is
+            AMD-unsupported, else ``None``.
+    """
+    model_type = str(data.get("model_type") or "").strip().lower()
+    arches = {a.lower() for a in _config_architectures(data)}
+    if (
+        model_type in _AMD_UNSUPPORTED_MODEL_TYPES
+        or arches & _AMD_UNSUPPORTED_ARCHITECTURES
+    ):
+        label = model_type or (next(iter(arches), "") if arches else "?")
         return (
-            f"config.json at {cfg_path} is present but unparseable "
-            f"(corrupt JSON or not a JSON object); the framework would crash "
-            f"at config load."
+            f"model architecture '{label}' has no AMD/ROCm runtime path "
+            f"(needs a vendor engine on NVIDIA Hopper/Blackwell, e.g. "
+            f"DeepSeek Sparse Attention); it crashes in engine init on "
+            f"this hardware."
         )
-    # Reject DSA-like architectures only on AMD/ROCm (may run on NVIDIA engines).
-    if _resolve_amd_gpu_type(gpu_type):
-        quant_reason = _detect_amd_unsupported_quant(model_path)
-        if quant_reason is not None:
-            return quant_reason
-        model_type = str(data.get("model_type") or "").strip().lower()
-        arches = {a.lower() for a in _config_architectures(data)}
-        if (
-            model_type in _AMD_UNSUPPORTED_MODEL_TYPES
-            or arches & _AMD_UNSUPPORTED_ARCHITECTURES
-        ):
-            label = model_type or (next(iter(arches), "") if arches else "?")
-            return (
-                f"model architecture '{label}' has no AMD/ROCm runtime path "
-                f"(needs a vendor engine on NVIDIA Hopper/Blackwell, e.g. "
-                f"DeepSeek Sparse Attention); it crashes in engine init on "
-                f"this hardware."
-            )
+    return None
+
+
+def _detect_rope_without_max_position(data: dict) -> str | None:
+    """Return a reason when a RoPE block ships with no max-position field.
+
+    The config (top level or ``text_config``) declares a RoPE block but has no
+    max-position key at all, so transformers/vLLM rope init dereferences a
+    missing ``max_position_embeddings`` and crashes in engine init
+    (DeepSeek-V3.2-Exp class).
+
+    Args:
+        data (dict): The decoded model ``config.json`` mapping.
+
+    Returns:
+        str | None: A human-readable reason when a RoPE block lacks any
+            max-position field, else ``None``.
+    """
     scopes = [data]
     nested = data.get("text_config")
     if isinstance(nested, dict):
         scopes.append(nested)
-    null_bool_reason = _detect_null_strict_bool_config(data)
-    if null_bool_reason is not None:
-        return null_bool_reason
-    has_rope = any(
-        s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS
-    )
+    has_rope = any(s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS)
     has_maxpos = any(
         isinstance(s.get(k), int) and not isinstance(s.get(k), bool)
         and s.get(k) > 0
@@ -1335,45 +1322,23 @@ def _detect_incompatible_model_config(
             "init dereferences a missing max_position_embeddings and crashes "
             "in engine init (DeepSeek-V3.2-Exp class)."
         )
-    # Phi-3 longrope/su rope_scaling: hardware-agnostic Phi3Config validation.
-    phi3_reason = _detect_phi3_rope_scaling_incompatible(data)
-    if phi3_reason is not None:
-        return phi3_reason
-    # Gemma2 missing hidden_act: also hardware-agnostic.
-    gemma2_reason = _detect_gemma2_missing_hidden_act(data)
-    if gemma2_reason is not None:
-        return gemma2_reason
-    # Unrecognized architecture: hardware-agnostic ModelConfig ValidationError.
-    unrecognized_reason = _detect_unrecognized_architecture(data)
-    if unrecognized_reason is not None:
-        return unrecognized_reason
-    # Private/third-party quantization: no loader exists on any backend.
-    private_quant_reason = _detect_private_quant(model_path, data)
-    if private_quant_reason is not None:
-        return private_quant_reason
-    peft_adapter_reason = _detect_peft_adapter_only_checkpoint(model_path, data)
-    if peft_adapter_reason is not None:
-        return peft_adapter_reason
-    vocab_shape_reason = _detect_vocab_weight_shape_mismatch(model_path, data)
-    if vocab_shape_reason is not None:
-        return vocab_shape_reason
-    # Tokenizer-artifact checks are text-generation-server concerns. Scriptable
-    # diffusion frameworks (xDiT) never take this path and legitimately ship no
-    # tokenizer files, so skip these checks for them; serving frameworks run them.
-    if not is_scriptable_fw:
-        # Missing tokenizer artifacts: the degraded fallback tokenizer's
-        # empty-prompt warmup triggers an aiter M=0 SIGFPE.
-        tokenizer_reason = _detect_missing_tokenizer_files(model_path, data)
-        if tokenizer_reason is not None:
-            return tokenizer_reason
-        mistral_tokenizer_reason = _detect_mistral_common_tokenizer_gap(model_path, data)
-        if mistral_tokenizer_reason is not None:
-            return mistral_tokenizer_reason
-        llama_tokenizer_reason = _detect_llama_sentencepiece_metadata_gap(model_path, data)
-        if llama_tokenizer_reason is not None:
-            return llama_tokenizer_reason
-    # Custom AutoConfig with unregistered model_type: sglang/vLLM fall back to
-    # PreTrainedConfig (no max_position_embeddings attr) → crash.
+    return None
+
+
+def _detect_unregistered_custom_autoconfig(data: dict) -> str | None:
+    """Return a reason for a custom AutoConfig with an unregistered model_type.
+
+    sglang/vLLM fall back to ``PreTrainedConfig`` (no ``max_position_embeddings``
+    attribute) for a custom ``auto_map.AutoConfig`` whose ``model_type`` is not
+    in the framework's config mapping, and crash in init.
+
+    Args:
+        data (dict): The decoded model ``config.json`` mapping.
+
+    Returns:
+        str | None: A human-readable reason when the config ships a custom
+            AutoConfig for an unregistered model_type, else ``None``.
+    """
     auto_map = data.get("auto_map")
     model_type = str(data.get("model_type") or "").strip().lower()
     if (
@@ -1388,16 +1353,229 @@ def _detect_incompatible_model_config(
             f"PreTrainedConfig which lacks key attributes "
             f"(max_position_embeddings) and crashes in init."
         )
-    # Dual-chunk attention on AMD/ROCm: sglang hard-requires
-    # dual_chunk_flash_attn (sm90+ only) and rejects all other backends.
-    if _resolve_amd_gpu_type(gpu_type) and _model_has_dual_chunk_attention(
-        model_path
-    ):
+    return None
+
+
+def _detect_amd_dual_chunk_attention(model_path: str) -> str | None:
+    """Return a reason when a model needs the AMD-unsupported dual-chunk backend.
+
+    Wraps the ``_model_has_dual_chunk_attention`` predicate as a ``str | None``
+    detector. sglang hard-requires the ``dual_chunk_flash_attn`` backend
+    (sm90+ only, NVIDIA Hopper) for models declaring
+    ``dual_chunk_attention_config`` and rejects all other backends. AMD-only.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+
+    Returns:
+        str | None: A human-readable reason when dual-chunk attention is
+            declared, else ``None``.
+    """
+    if not _model_has_dual_chunk_attention(model_path):
+        return None
+    return (
+        "model declares dual_chunk_attention_config but sglang requires "
+        "the dual_chunk_flash_attn backend which only builds on sm90+ "
+        "(NVIDIA Hopper); no compatible backend exists for AMD/ROCm."
+    )
+
+
+@dataclass(frozen=True)
+class DetectorSpec:
+    """One entry in the model-config compatibility waterfall.
+
+    ``fn`` is a single detector or a tuple of detectors (a short-circuiting
+    sub-chain, e.g. the step-13 tokenizer checks). ``args`` names the runtime
+    values to pass positionally — a subset of ``("model_path", "data",
+    "gpu_type")`` — so heterogeneous detector signatures share one call adapter.
+    ``skip_when_scriptable`` drops the check for scriptable diffusion frameworks;
+    ``amd_only`` runs it only when ``gpu_type`` resolves to a known AMD runner.
+    """
+
+    name: str
+    fn: Callable[..., str | None] | tuple[Callable[..., str | None], ...]
+    args: tuple[str, ...] = ()
+    skip_when_scriptable: bool = False
+    amd_only: bool = False
+
+
+def _run_compat_detector(
+    spec: DetectorSpec, *, model_path: str, data: dict, gpu_type: str | None,
+) -> str | None:
+    """Invoke a spec's detector sub-chain, returning the first non-None reason.
+
+    The uniform call adapter maps each name in ``spec.args`` to its runtime
+    value and calls every detector in the (possibly single-element) sub-chain in
+    order, short-circuiting on the first reason.
+
+    Args:
+        spec (DetectorSpec): The detector spec to run.
+        model_path (str): The local model directory.
+        data (dict): The decoded model ``config.json`` mapping.
+        gpu_type (str | None): The requested GPU type.
+
+    Returns:
+        str | None: The first non-None reason from the sub-chain, else ``None``.
+    """
+    available = {"model_path": model_path, "data": data, "gpu_type": gpu_type}
+    call_args = tuple(available[name] for name in spec.args)
+    fns = spec.fn if isinstance(spec.fn, tuple) else (spec.fn,)
+    for fn in fns:
+        reason = fn(*call_args)
+        if reason is not None:
+            return reason
+    return None
+
+
+# The model-config compatibility waterfall as an ordered table. FIRST MATCH
+# WINS — the order is a behavioral contract (see ``_detect_incompatible_model_
+# config``). Steps 1 (diffusers) and 2 (config absent/corrupt) stay inline in
+# the caller because they gate whether these detectors run at all; this registry
+# is steps 3-15.
+_COMPAT_DETECTORS: tuple[DetectorSpec, ...] = (
+    DetectorSpec(  # 3
+        "amd_unsupported_quant",
+        _detect_amd_unsupported_quant,
+        args=("model_path",),
+        amd_only=True,
+    ),
+    DetectorSpec(  # 4
+        "amd_unsupported_architecture",
+        _detect_amd_unsupported_architecture,
+        args=("data",),
+        amd_only=True,
+    ),
+    DetectorSpec(  # 5
+        "null_strict_bool",
+        _detect_null_strict_bool_config,
+        args=("data",),
+    ),
+    DetectorSpec(  # 6
+        "rope_without_max_position",
+        _detect_rope_without_max_position,
+        args=("data",),
+    ),
+    DetectorSpec(  # 7
+        "phi3_rope_scaling",
+        _detect_phi3_rope_scaling_incompatible,
+        args=("data",),
+    ),
+    DetectorSpec(  # 8
+        "gemma2_hidden_act",
+        _detect_gemma2_missing_hidden_act,
+        args=("data",),
+    ),
+    DetectorSpec(  # 9
+        "unrecognized_architecture",
+        _detect_unrecognized_architecture,
+        args=("data",),
+    ),
+    DetectorSpec(  # 10
+        "private_quant",
+        _detect_private_quant,
+        args=("model_path", "data"),
+    ),
+    DetectorSpec(  # 11
+        "peft_adapter_only",
+        _detect_peft_adapter_only_checkpoint,
+        args=("model_path", "data"),
+    ),
+    DetectorSpec(  # 12
+        "vocab_weight_shape",
+        _detect_vocab_weight_shape_mismatch,
+        args=("model_path", "data"),
+    ),
+    DetectorSpec(  # 13 — tokenizer-artifact sub-chain (text-server only)
+        "tokenizer_artifacts",
+        (
+            _detect_missing_tokenizer_files,
+            _detect_mistral_common_tokenizer_gap,
+            _detect_llama_sentencepiece_metadata_gap,
+        ),
+        args=("model_path", "data"),
+        skip_when_scriptable=True,
+    ),
+    DetectorSpec(  # 14
+        "unregistered_custom_autoconfig",
+        _detect_unregistered_custom_autoconfig,
+        args=("data",),
+    ),
+    DetectorSpec(  # 15
+        "amd_dual_chunk_attention",
+        _detect_amd_dual_chunk_attention,
+        args=("model_path",),
+        amd_only=True,
+    ),
+)
+
+
+def _detect_incompatible_model_config(
+    model_path: str, gpu_type: str | None = None, framework: str | None = None,
+) -> str | None:
+    """Detect a statically-knowable model-config incompatibility.
+
+    Returns a human-readable reason string when the model's ``config.json``
+    will crash vLLM/transformers at load time, else ``None`` (conservative — no
+    false positives on healthy configs). The check runs an ordered waterfall
+    whose FIRST MATCH WINS; steps 1-2 are the inline prologue below and steps
+    3-15 are the ``_COMPAT_DETECTORS`` table:
+
+    1. diffusers pipeline (skipped for scriptable frameworks) — must run before
+       the config-absent short-circuit so a pure Diffusers repo
+       (``model_index.json``, no ``config.json``) is still caught.
+    2. ``config.json`` absent → ``None`` (soft-degrade; the upstream submission
+       filter + downstream loader still apply), present-but-unparseable →
+       block early because the framework would crash at config load.
+    3-15. the detector registry, each returning a reason or ``None``.
+
+    Args:
+        model_path (str): The local model directory containing ``config.json``.
+        gpu_type (str | None): Optional GPU type; AMD-only checks fire when it
+            resolves to a known AMD runner.
+        framework (str | None): The selected inference framework. Scriptable
+            diffusion frameworks (e.g. ``xdit``) legitimately serve Diffusers
+            pipeline repos (``model_index.json``), so the diffusers-pipeline and
+            tokenizer-artifact checks — which protect *text-generation* server
+            bring-up — are false positives and are skipped for them.
+
+    Returns:
+        str | None: A human-readable reason when a statically-knowable config
+            incompatibility is detected, else ``None``.
+    """
+    if not model_path:
+        return None
+    is_scriptable_fw = _framework_is_scriptable(framework)
+    # Step 1: diffusers pipeline gate (before the config-absent short-circuit).
+    if not is_scriptable_fw:
+        pipeline_reason = _detect_diffusers_pipeline_model(model_path)
+        if pipeline_reason is not None:
+            return pipeline_reason
+    # Step 2: config.json absent (soft-degrade) / present-but-corrupt (block).
+    # Loading here also produces ``data`` for the registry detectors and gates
+    # the absent short-circuit — an absent config must not run steps 3-15 (some
+    # detectors, e.g. missing-tokenizer, would false-positive on a bare dir).
+    cfg_path = Path(model_path) / "config.json"
+    if not cfg_path.is_file():
+        return None
+    data = _load_model_config_dict(model_path)
+    if data is None:
         return (
-            "model declares dual_chunk_attention_config but sglang requires "
-            "the dual_chunk_flash_attn backend which only builds on sm90+ "
-            "(NVIDIA Hopper); no compatible backend exists for AMD/ROCm."
+            f"config.json at {cfg_path} is present but unparseable "
+            f"(corrupt JSON or not a JSON object); the framework would crash "
+            f"at config load."
         )
+    # Steps 3-15: run the ordered registry, first non-None reason wins.
+    is_amd = bool(_resolve_amd_gpu_type(gpu_type))
+    for spec in _COMPAT_DETECTORS:
+        if spec.amd_only and not is_amd:
+            continue
+        if spec.skip_when_scriptable and is_scriptable_fw:
+            continue
+        reason = _run_compat_detector(
+            spec, model_path=model_path, data=data, gpu_type=gpu_type,
+        )
+        if reason is not None:
+            return reason
     return None
 
 

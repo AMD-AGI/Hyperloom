@@ -13,13 +13,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.timeutil import iso_z
 from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
 )
 
 from ._common import (
-    _iso_z,
     _load_optimization_journal,
     _parse_iso_unix,
     _to_float,
@@ -80,7 +80,7 @@ def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
         if v
     }
     return {
-        "ts": _iso_z(e.get("ts")),
+        "ts": iso_z(e.get("ts")),
         "action": action,
         "task_id": str(e.get("task_id") or ""),
         "kernel_id": None,
@@ -215,7 +215,7 @@ def collect_phase_timeline(
 
     # Canonicalise every ts to ``...Z`` so mixed-suffix rows dedup and sort consistently.
     for ev in events:
-        ev["ts"] = _iso_z(ev.get("ts"))
+        ev["ts"] = iso_z(ev.get("ts"))
 
     # De-dup: journal rows are appended first and win on collision.
     seen: set[tuple[str, str, str]] = set()
@@ -615,14 +615,14 @@ def collect_phase_segments(
     segments: list[dict[str, Any]] = []
     proxy_seen = False
     for idx, row in enumerate(transitions):
-        entered_ts = _iso_z(row.get("ts"))
+        entered_ts = iso_z(row.get("ts"))
         entered_unix = _unix(row)
         exit_ts = ""
         exit_unix: float | None = None
         exit_reason = ""
         if idx + 1 < len(transitions):
             nxt = transitions[idx + 1]
-            exit_ts = _iso_z(nxt.get("ts"))
+            exit_ts = iso_z(nxt.get("ts"))
             exit_reason = str(nxt.get("reason") or "")
             exit_unix = _unix(nxt)
         elapsed: float | None = None
@@ -672,7 +672,7 @@ def collect_phase_segments(
         ev_evidence = dict(ev.get("evidence") or {})
         if ev_evidence.get("r09_provisional") or (str(ev_evidence.get("evidence") or "") == "m2_proxy"):
             proxy_seen = True
-        ev_ts = _iso_z(ev.get("ts"))
+        ev_ts = iso_z(ev.get("ts"))
         s = _owner_by_window(ev_ts)
         if s is not None:
             s["events"].append(

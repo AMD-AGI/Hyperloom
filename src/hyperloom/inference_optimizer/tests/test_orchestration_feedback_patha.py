@@ -243,13 +243,13 @@ async def test_run_action_now_happy_path_emits_delegated_result(
         c.sub.register_executor("inline_probe", _stub)
         # Stub the whitelist + PolicyGate to focus on inline mechanics.
         monkeypatch.setattr(
-            c.inline_actions,
+            c.dispatcher,
             "_inline_action_whitelist",
             lambda: frozenset({"inline_probe"}),
         )
         monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
         monkeypatch.setattr(
-            c.gating,
+            c.dispatcher,
             "_sequence_denial_for_action",
             lambda *a, **k: None,
         )
@@ -285,7 +285,7 @@ async def test_run_action_now_calls_sequence_denial_with_single_arg(
 
         c.sub.register_executor("inline_probe", _stub)
         monkeypatch.setattr(
-            c.inline_actions,
+            c.dispatcher,
             "_inline_action_whitelist",
             lambda: frozenset({"inline_probe"}),
         )
@@ -314,13 +314,13 @@ async def test_run_action_now_sync_bridges_to_coordinator_loop(
 
         c.sub.register_executor("inline_probe", _stub)
         monkeypatch.setattr(
-            c.inline_actions,
+            c.dispatcher,
             "_inline_action_whitelist",
             lambda: frozenset({"inline_probe"}),
         )
         monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
         monkeypatch.setattr(
-            c.gating,
+            c.dispatcher,
             "_sequence_denial_for_action",
             lambda *a, **k: None,
         )

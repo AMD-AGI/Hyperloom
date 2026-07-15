@@ -14,9 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-from hyperloom.common.coerce import to_float as _coerce_float
+from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json, read_jsonl
-from hyperloom.common.timeutil import iso_z as _common_iso_z
 
 
 
@@ -79,14 +78,12 @@ def _to_float(value: Any) -> float | None:
         float | None: The parsed float, or ``None`` when the value is missing,
         a bool, or not numeric.
     """
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
     if isinstance(value, str):
         text = value.strip()
         if not text or text.upper() == "SKIPPED":
             return None
-        return _coerce_float(text.replace(",", ""))
-    return _coerce_float(value)
+        return to_float(text.replace(",", ""))
+    return to_float(value)
 
 
 def _to_int(value: Any) -> int | None:
@@ -322,23 +319,6 @@ def _parse_iso_unix(ts: Any) -> float | None:
         return datetime.fromisoformat(s).timestamp()
     except ValueError:
         return None
-
-
-def _iso_z(ts: Any) -> str:
-    """Normalise any ISO-8601 timestamp to canonical second-precision ``...Z`` UTC.
-
-    The journal and ``state.phase_history`` use different suffixes;
-    collapsing both keeps display and ``[entered_ts, exit_ts)`` matching
-    consistent. Returns the input unchanged when empty/unparseable.
-
-    Args:
-        ts (Any): An ISO-8601 timestamp value (any suffix), or ``None``.
-
-    Returns:
-        str: The canonical ``...Z`` UTC string, ``""`` for empty input, or the
-        original string when it cannot be parsed.
-    """
-    return _common_iso_z(ts)
 
 
 def _load_optimization_journal(

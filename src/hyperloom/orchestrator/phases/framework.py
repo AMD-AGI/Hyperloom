@@ -866,7 +866,7 @@ class FrameworkPhase(PhaseHandler):
         plans bridging discovery, runs a **best-effort** candidate-PR enumeration
         (network; fully exception-guarded, degrades to repos-only), and renders
         the authoring mandate via
-        ``framework_agent.enablement_authoring.build_mandate`` (the single source
+        ``framework_agent.enablement_ops.build_mandate`` (the single source
         of the enablement prompt). Returns ``None`` **only** when the launch log
         is blank (nothing to act on); a non-blank log always yields params, even
         when it classifies as ``UNKNOWN`` — the LLM specialist repairs from the
@@ -889,8 +889,7 @@ class FrameworkPhase(PhaseHandler):
         if not text:
             return None
         from hyperloom.agents.framework.enablement import EnablementRequest, classify_failure
-        from hyperloom.agents.framework.enablement_authoring import build_mandate
-        from hyperloom.agents.framework.enablement_discovery import build_search_plan
+        from hyperloom.agents.framework.enablement_ops import build_mandate, build_search_plan
         from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
         state = self.shared_state
@@ -1149,12 +1148,12 @@ class FrameworkPhase(PhaseHandler):
 
         Args:
             req: The :class:`framework_agent.enablement.EnablementRequest`.
-            plan: The :class:`framework_agent.enablement_discovery.EnablementSearchPlan`.
+            plan: The :class:`framework_agent.enablement_ops.EnablementSearchPlan`.
 
         Returns:
             tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
         """
-        from hyperloom.agents.framework.enablement_discovery import score_enablement_title
+        from hyperloom.agents.framework.enablement_ops import score_enablement_title
         from hyperloom.agents.framework.models import Candidate, ExploreRequest
         from hyperloom.agents.framework.sources import enumerate_candidates
 

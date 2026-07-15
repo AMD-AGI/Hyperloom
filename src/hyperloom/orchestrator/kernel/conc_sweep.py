@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
     GridVariant,
@@ -531,7 +532,7 @@ async def run_conc_sweep(
     if not base_yaml_path.exists():
         return _skip("baseline_config_missing", config_path=base_yaml_raw)
 
-    task_id = time.strftime("conc_sweep_%Y%m%dT%H%M%SZ", time.gmtime())
+    task_id = f"conc_sweep_{utc_now_compact()}"
     workspace = runs_root(session_dir) / "conc_sweep" / task_id
     workspace.mkdir(parents=True, exist_ok=True)
 

@@ -133,6 +133,18 @@ _SPACE_VALUE_FLAGS = (
     "--json-model-override-args",
     "--override-generation-config",
     "--tool-call-parser",
+    # JSON-object-valued flags: after ``compact_json_server_args`` these are a
+    # single space-free shell word, but their value still contains inner double
+    # quotes (``{"cudagraph_mode":"PIECEWISE"}``). ``dedup_vllm_server_args``
+    # tokenizes with ``shlex.split`` (which STRIPS those quotes) and rejoins
+    # without re-quoting, corrupting the JSON to ``{cudagraph_mode:PIECEWISE}``
+    # -> vLLM boot fails with ``Invalid JSON``. Listing them here makes both
+    # dedup helpers leave the whole arg string untouched (round-trip safe), the
+    # same contract already relied on for the flags above.
+    "--compilation-config",
+    "--speculative-config",
+    "--hf-overrides",
+    "--kv-transfer-config",
 )
 
 _MULTI_VALUE_FLAGS = (

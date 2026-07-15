@@ -28,6 +28,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.env import is_truthy
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
@@ -75,24 +76,8 @@ _EVAL_FAILURE_MARKERS = (
 _EVAL_SCAN_MAX_BYTES = 262_144
 
 
-def _is_truthy(value: Any) -> bool:
-    """Return whether ``value`` represents an affirmative flag.
-
-    Accepts bools and the usual truthy strings (``true``/``1``/``yes``/``on``);
-    everything else (including ``None`` and ``false``/``0``) is False.
-
-    Args:
-        value: The task-param value to interpret.
-
-    Returns:
-        ``True`` for an affirmative bool/string, else ``False``.
-    """
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
-
-
-# Fast-exit arg errors should not consume the slow-baseline retry budget.
+# Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args)
+# should not consume the slow-baseline retry budget.
 FAST_EXIT_THRESHOLD_SEC = 30.0
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
@@ -1064,7 +1049,7 @@ class BaselineExecutor:
         _explicit_run_eval = "RUN_EVAL" in _extra_envs and str(
             _extra_envs["RUN_EVAL"]
         ).strip().lower() in _RUN_EVAL_FALSE_VALUES
-        eval_already_off = _is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
+        eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
         if (
             result.get("status") != "succeeded"
             and not eval_already_off
@@ -1213,7 +1198,7 @@ class BaselineExecutor:
         # Accuracy eval (GSM8K) opt-out: the ``disable_run_eval`` param and the
         # in-executor eval-failure fallback both force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
-        if force_disable_eval or _is_truthy(params.get("disable_run_eval")):
+        if force_disable_eval or is_truthy(params.get("disable_run_eval")):
             base_extra_envs["RUN_EVAL"] = "false"
         try:
             config_path = materialize_config_with_envs(
@@ -1410,7 +1395,7 @@ class BaselineExecutor:
         """
         params = params or {}
         if "baseline_double_run" in params:
-            return _is_truthy(params.get("baseline_double_run"))
+            return is_truthy(params.get("baseline_double_run"))
 
         extra = ctx_extra or {}
         state = extra.get("shared_state") or self.shared_state

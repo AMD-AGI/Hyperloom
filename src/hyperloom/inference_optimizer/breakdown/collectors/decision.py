@@ -14,13 +14,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.timeutil import iso_z
 from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
 )
 
 from ._common import (
-    _iso_z,
     _load_jsonl_safe,
     _load_optimization_journal,
     _parse_iso_unix,
@@ -658,7 +658,7 @@ def collect_decision_trace(
             continue
         task_id = str(e.get("task_id") or "")
         key = _decision_key(task_id, "")
-        ts = _iso_z(e.get("ts"))
+        ts = iso_z(e.get("ts"))
         phase = str(e.get("phase") or "").strip() or _phase_at(ts, phase_windows)
         provenance = str(e.get("provenance") or "")
         change_kind = str(e.get("kind") or "")
@@ -708,7 +708,7 @@ def collect_decision_trace(
     for row in _load_dispatch_history_all(session_dir, warnings):
         dyn_id = str(row.get("dyn_id") or "")
         key = _decision_key(str(row.get("task_id") or ""), dyn_id)
-        ts = _iso_z(row.get("ts"))
+        ts = iso_z(row.get("ts"))
         phase = _phase_at(ts, phase_windows)
         decisions.append(
             {

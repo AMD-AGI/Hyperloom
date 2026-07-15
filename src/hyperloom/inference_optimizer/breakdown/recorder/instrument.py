@@ -27,7 +27,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_float as _to_float
+from hyperloom.common.coerce import to_float
+from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
 
 log = logging.getLogger(__name__)
@@ -87,25 +88,6 @@ def _rel(path: Path, session_dir: Path | str) -> str:
         return str(path)
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    """Read and parse a JSON object from ``path`` (``{}`` on any failure).
-
-    Args:
-        path (Path): the JSON file to read.
-
-    Returns:
-        dict[str, Any]: the parsed JSON object, or ``{}`` when the file is
-            missing, unreadable, invalid, or not a JSON object.
-    """
-    import json
-
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def record_phase_event(
     session_dir: Path | str | None,
     *,
@@ -134,7 +116,7 @@ def record_phase_event(
             "task_id": task_id,
             "status": str(entry.get("status") or ""),
             "decision": str(entry.get("decision") or ""),
-            "key_metric": _to_float(entry.get("key_metric")),
+            "key_metric": to_float(entry.get("key_metric")),
             "key_metric_kind": entry.get("key_metric_kind"),
             "workspace": entry.get("workspace"),
             "error_class": entry.get("error_class"),
@@ -267,10 +249,13 @@ def _snapshot_final(rec, st: Any) -> None:
     from ... import framework_registry
 
     framework = str(getattr(st, "framework", "") or "")
-    tput = _to_float(cb.get("tput"))
-    # Latency is the primary result for scriptable/diffusion (xDiT) image models;
-    # e2el falls back to the tput-derived per-image latency when unmeasured.
-    e2el = _to_float(cb.get("e2el_mean_ms"))
+    tput = to_float(cb.get("tput"))
+    # Latency is the primary result for scriptable/diffusion (xDiT) image models
+    # (throughput_tok_s_per_gpu is only ``1 / latency`` there and misleading as a
+    # headline). Emit e2el/ttft alongside the throughput-unit + primary-metric
+    # markers so consumers pick the right result field per framework. e2el falls
+    # back to the tput-derived per-image latency when no measured value exists.
+    e2el = to_float(cb.get("e2el_mean_ms"))
     if e2el is None and framework_registry.is_scriptable(framework) and tput is not None and tput > 0:
         derived = framework_registry.primary_metric_value(framework, tput)
         e2el = round(float(derived), 4) if derived is not None and derived > 0 else None
@@ -282,9 +267,9 @@ def _snapshot_final(rec, st: Any) -> None:
             "throughput_unit": framework_registry.throughput_unit(framework),
             "primary_metric": framework_registry.primary_metric_name(framework),
             "e2el_mean_ms": e2el,
-            "ttft_mean_ms": _to_float(cb.get("ttft_mean_ms")),
-            "cumulative_gain_pct_validated": _to_float(getattr(st, "cumulative_gain_validated", 0.0)) or 0.0,
-            "cumulative_gain_pct_per_round_sum": _to_float(getattr(st, "cumulative_gain", 0.0)) or 0.0,
+            "ttft_mean_ms": to_float(cb.get("ttft_mean_ms")),
+            "cumulative_gain_pct_validated": to_float(getattr(st, "cumulative_gain_validated", 0.0)) or 0.0,
+            "cumulative_gain_pct_per_round_sum": to_float(getattr(st, "cumulative_gain", 0.0)) or 0.0,
             "validated_ts": str(getattr(st, "cumulative_gain_validated_ts", "") or ""),
             "stack_len": len(stack),
             "extra_server_args": str(cb.get("extra_server_args") or ""),
@@ -344,7 +329,7 @@ def _snapshot_optimization_stack(rec, st: Any) -> None:
             continue
         payload = dict(entry)
         if payload.get("gain_pct") is None and i < len(gains):
-            payload["gain_pct"] = _to_float(gains[i])
+            payload["gain_pct"] = to_float(gains[i])
         rec.record_item("optimization_stack", payload, key=str(i))
 
 
@@ -407,7 +392,7 @@ def _best_attempt_id(
             The attempt's ``micro_speedup`` (or ``speedup``) as a float, or
             ``-inf`` when neither is present.
         """
-        v = _to_float(a.get("micro_speedup") or a.get("speedup"))
+        v = to_float(a.get("micro_speedup") or a.get("speedup"))
         return v if v is not None else float("-inf")
 
     best = max(candidates, key=_spd)
@@ -492,7 +477,7 @@ def record_kernel_invocations(
                 "backend": backend,
                 "decision": decision,
                 "status": status,
-                "micro_speedup": _to_float(att.get("micro_speedup") or att.get("speedup")),
+                "micro_speedup": to_float(att.get("micro_speedup") or att.get("speedup")),
                 "optimized_files": [str(optimized)] if optimized else [],
                 "error": att.get("error") or att.get("error_message"),
             }
@@ -763,12 +748,12 @@ def _normalize_hot_kernel(k: dict[str, Any]) -> dict[str, Any]:
     return {
         "kernel_id": str(k.get("kernel_id") or k.get("id") or ""),
         "name": str(k.get("name") or k.get("kernel_name") or ""),
-        "gpu_pct": _to_float(k.get("gpu_pct") or k.get("gpu_percent")),
-        "time_ms": _to_float(k.get("time_ms") or k.get("duration_ms")),
+        "gpu_pct": to_float(k.get("gpu_pct") or k.get("gpu_percent")),
+        "time_ms": to_float(k.get("time_ms") or k.get("duration_ms")),
         "bound_type": str(k.get("bound_type") or k.get("bottleneck") or ""),
-        "arithmetic_intensity": _to_float(k.get("arithmetic_intensity")),
-        "flops_per_byte": _to_float(k.get("flops_per_byte")),
-        "efficiency_percent": _to_float(k.get("efficiency_percent")),
+        "arithmetic_intensity": to_float(k.get("arithmetic_intensity")),
+        "flops_per_byte": to_float(k.get("flops_per_byte")),
+        "efficiency_percent": to_float(k.get("efficiency_percent")),
         "reusable_native_kernel": bool(k.get("reusable_native_kernel") or False),
         "source_file": k.get("source_file"),
         "recommended_backends": list(k.get("recommended_backends") or []),
@@ -830,7 +815,7 @@ def record_kernel_discovery(
             "source": str(source or ""),
             "status": str(status or ""),
             "ts": _now_iso_safe(),
-            "duration_sec": _to_float(duration_sec),
+            "duration_sec": to_float(duration_sec),
             "scan": scan,
             "hot_kernel_count": len(kernels),
             "hot_kernels": kernels,
@@ -987,7 +972,7 @@ def record_kernel_backend_result(
         # ``verification``; stamp it onto the adopted (best) attempt.
         verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
         best_attempt_id = _best_attempt_id(attempts, verification)
-        kernel_micro_speedup = _to_float(verification.get("micro_speedup"))
+        kernel_micro_speedup = to_float(verification.get("micro_speedup"))
         recorded_any = False
         for att in attempts:
             if not isinstance(att, dict):
@@ -996,7 +981,7 @@ def record_kernel_backend_result(
             attempt_id = str(att.get("attempt_id") or att.get("id") or "")
             optimized = att.get("optimized_path") or att.get("optimized_file")
             att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
-            micro_speedup = _to_float(att.get("micro_speedup") or att.get("speedup"))
+            micro_speedup = to_float(att.get("micro_speedup") or att.get("speedup"))
             if (
                 micro_speedup is None
                 and kernel_micro_speedup is not None
@@ -1019,7 +1004,7 @@ def record_kernel_backend_result(
                 "optimized_files": [str(optimized)] if optimized else [],
                 "error": att.get("error") or att.get("error_message"),
                 "error_class": str(att.get("error_type") or "") or None,
-                "duration_sec": _to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),
+                "duration_sec": to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),
             }
             key = attempt_id or (f"{run_id}-{backend}" if run_id else None)
             rec.record_item("kernel_backend_result", payload, key=key)
@@ -1123,7 +1108,7 @@ def record_kernel_e2e(
         payload = {
             "kernel_id": str(kernel_id),
             "integrated": bool(integrated),
-            "e2e_gain_pct": _to_float(e2e_gain_pct),
+            "e2e_gain_pct": to_float(e2e_gain_pct),
             "validated": bool(validated) if validated is not None else None,
             "decision": str(decision or "").upper(),
             "patch_path": patch_path,
@@ -1260,8 +1245,8 @@ def record_robustness_signal(
         return
     try:
         wd = Path(workdir)
-        signal_data = _read_json(wd / "signal.json")
-        action_data = _read_json(wd / "action.json")
+        signal_data = read_json(wd / "signal.json", default={}, require_dict=True)
+        action_data = read_json(wd / "action.json", default={}, require_dict=True)
         payload = {
             "ts": str(signal_data.get("ts") or action_data.get("ts") or ""),
             "signal": str(signal_data.get("signal") or signal_data.get("kind") or ""),

@@ -14,9 +14,9 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
-    _is_truthy,
 )
 
 
@@ -82,7 +82,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-# --- _is_truthy ------------------------------------------------------------
+# --- is_truthy (baseline's disable_run_eval param interpretation) ----------
 @pytest.mark.parametrize(
     "value,expected",
     [
@@ -100,7 +100,7 @@ def _run(coro):
     ],
 )
 def test_is_truthy(value, expected):
-    assert _is_truthy(value) is expected
+    assert is_truthy(value) is expected
 
 
 # --- _is_eval_rooted_failure ----------------------------------------------

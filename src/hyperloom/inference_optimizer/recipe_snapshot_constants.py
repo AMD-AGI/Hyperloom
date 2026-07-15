@@ -2,8 +2,12 @@
 
 """recipe-snapshot v2 HTTP wire constants — single source of truth.
 
-The recipe-KB remote clients build requests as plain dicts keyed by these
-``Final[str]`` constants so a backend rename surfaces at one grep-able call-site.
+Mirrors the contract documented in
+``primus-cortex-internal/docs/recipe-snapshot-api-reference.md``. The
+recipe-KB remote clients (see :mod:`hyperloom.orchestrator.knowledge.recipe_kb`
+and :mod:`hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client`) build requests as
+plain dicts keyed by these ``Final[str]`` constants so a backend rename surfaces
+at one easy-to-grep call-site instead of being scattered across the codebase.
 """
 
 from __future__ import annotations

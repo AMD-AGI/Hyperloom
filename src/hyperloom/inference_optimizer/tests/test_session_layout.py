@@ -205,9 +205,6 @@ def test_find_latest_per_session_dir_ignores_non_ts_dirs(
 def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
     """runtime/ lives under workspace_root, not the per-session subdir."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
-    assert paths.runtime_dir(sd) == tmp_path / "runtime"
-    # Also true for the no-arg form.
     assert paths.runtime_dir() == tmp_path / "runtime"
 
 

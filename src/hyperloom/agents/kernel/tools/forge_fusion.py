@@ -26,7 +26,7 @@ from typing import Any
 
 # Sibling import: kernel-agent tools cannot rely on the ``hyperloom`` import root.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import truthy as _truthy  # noqa: E402
+from _io_utils import truthy  # noqa: E402
 
 sys.path.pop(0)
 
@@ -108,7 +108,7 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
         cmd.append("--no-author")
     if not bool(args.get("validate", True)):
         cmd.append("--no-validate")
-    if _truthy(args.get("verbose", False)):
+    if truthy(args.get("verbose", False)):
         cmd.append("--verbose")
     return cmd
 

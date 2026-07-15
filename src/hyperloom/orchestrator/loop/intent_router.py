@@ -35,6 +35,27 @@ from ..kernel.request_handlers import get_handler
 log = __import__("logging").getLogger(__name__)
 
 
+# IntentType -> the ``Coordinator`` handler method it dispatches to. Replaces the
+# former 12-branch if/elif in :meth:`IntentRouter._handle_intent`; an unknown
+# type falls through to the observation fallback (see the ``else`` branch there).
+# ``SPECIALIST_DONE`` is a terminal specialist intent (R3 already validated); its
+# handler only bookkeeps (defense-in-depth).
+_INTENT_DISPATCH: dict[IntentType, str] = {
+    IntentType.PROPOSE_ACTION: "_handle_propose_action",
+    IntentType.REVIEW_VERDICT: "_handle_review_verdict",
+    IntentType.DELEGATE: "_handle_delegate",
+    IntentType.REQUEST: "_handle_request",
+    IntentType.RESPONSE: "_handle_response",
+    IntentType.KILL_TASK: "_handle_kill_task",
+    IntentType.PRUNE_BRANCH: "_handle_prune_branch",
+    IntentType.ESCALATE_STRATEGY_CHANGE: "_handle_escalate_strategy_change",
+    IntentType.SEND_MESSAGE: "_handle_send_message",
+    IntentType.ALERT: "_handle_alert",
+    IntentType.UPDATE_STATE: "_handle_update_state",
+    IntentType.SPECIALIST_DONE: "_handle_specialist_done",
+}
+
+
 class IntentRouter:
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
 
@@ -65,31 +86,9 @@ class IntentRouter:
 
         try:
             it = intent.type
-            if it == IntentType.PROPOSE_ACTION:
-                await self._coord._handle_propose_action(source, intent)
-            elif it == IntentType.REVIEW_VERDICT:
-                await self._coord._handle_review_verdict(source, intent)
-            elif it == IntentType.DELEGATE:
-                await self._coord._handle_delegate(source, intent)
-            elif it == IntentType.REQUEST:
-                await self._coord._handle_request(source, intent)
-            elif it == IntentType.RESPONSE:
-                await self._coord._handle_response(source, intent)
-            elif it == IntentType.KILL_TASK:
-                await self._coord._handle_kill_task(source, intent)
-            elif it == IntentType.PRUNE_BRANCH:
-                await self._coord._handle_prune_branch(source, intent)
-            elif it == IntentType.ESCALATE_STRATEGY_CHANGE:
-                await self._coord._handle_escalate_strategy_change(source, intent)
-            elif it == IntentType.SEND_MESSAGE:
-                await self._coord._handle_send_message(source, intent)
-            elif it == IntentType.ALERT:
-                await self._coord._handle_alert(source, intent)
-            elif it == IntentType.UPDATE_STATE:
-                await self._coord._handle_update_state(source, intent)
-            elif it == IntentType.SPECIALIST_DONE:
-                # Terminal specialist intent; handler only bookkeeps.
-                await self._coord._handle_specialist_done(source, intent)
+            handler_name = _INTENT_DISPATCH.get(it)
+            if handler_name is not None:
+                await getattr(self._coord, handler_name)(source, intent)
             else:
                 # Unknown / unhandled intent — record for replay.
                 await self._record_observation(

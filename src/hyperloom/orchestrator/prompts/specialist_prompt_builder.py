@@ -607,7 +607,7 @@ def _focus_enablement_specialist(
 
     Classifies the failure carried in ``gap_symptom`` / ``gap_evidence`` and
     renders the mandate's ``task_description`` verbatim from
-    ``framework_agent.enablement_authoring.build_mandate``.
+    ``framework_agent.enablement_ops.build_mandate``.
 
     Args:
         inp: Assembled prompt inputs for the current dispatch.
@@ -616,7 +616,7 @@ def _focus_enablement_specialist(
         Prompt lines rendered from the enablement mandate.
     """
     from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_authoring import build_mandate
+    from hyperloom.agents.framework.enablement_ops import build_mandate
 
     model = str((inp.gap_evidence or {}).get("model") or "").strip()
     req = EnablementRequest(

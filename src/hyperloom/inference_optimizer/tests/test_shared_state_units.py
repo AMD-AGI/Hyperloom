@@ -267,8 +267,11 @@ def test_record_action_attempt_failed_truncates_error_excerpt():
     assert last["error_excerpt"].startswith("boom!")
     assert last["reported_success"] is False
     assert last["key_metric"] is None
-    # no_report is not a subprocess failure -> no stderr_tail.
-    assert last["stderr_tail"] is None
+    # stderr_tail is now captured for EVERY failure carrying an error blob
+    # (no error_class whitelist), so orchestration/RCA see the actionable tail.
+    assert last["stderr_tail"] is not None
+    assert len(last["stderr_tail"]) == 1000
+    assert "boom!" in last["stderr_tail"]
 
 
 def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
@@ -386,7 +389,9 @@ def test_record_action_failure_basic_fields():
     assert entry["task_id"] == "t-1"
     assert entry["error_class"] == "no_report"
     assert entry["error_excerpt"].startswith("benchmark_report.json missing")
-    assert entry["stderr_tail"] is None
+    # stderr_tail is captured for all failures now (no error_class whitelist).
+    assert entry["stderr_tail"] is not None
+    assert entry["stderr_tail"].startswith("benchmark_report.json missing")
     assert entry["workspace"] == "/runs/baseline/t-1/benchmark_sglang_xyz"
     assert entry["reported_success"] is False
 
