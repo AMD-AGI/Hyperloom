@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from hyperloom.inference_optimizer.cli import _reconcile_crash_count
+from hyperloom.inference_optimizer.cli.bootstrap import _reconcile_crash_count
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
 

@@ -658,7 +658,7 @@ class TestIsPatched:
 
     def test_true_after_apply(self, magpie_dir):
         target = magpie_dir / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
-        assert mp._apply_patch_atomic(target) is True
+        assert mp._apply_patch_atomic_reason(target) == mp._ATOMIC_REASON_APPLIED
         assert mp._is_patched(target) is True
 
     def test_returns_false_when_unreadable(self, tmp_path, monkeypatch):
@@ -671,26 +671,29 @@ class TestIsPatched:
         assert mp._is_patched(ghost) is False
 
 
-# _apply_patch_atomic
+# _apply_patch_atomic_reason
 class TestApplyPatchAtomic:
-    def test_returns_false_when_legacy_block_missing(self, tmp_path):
+    def test_unrecognized_when_legacy_block_missing(self, tmp_path):
         target = tmp_path / "benchmarker.py"
         target.write_text("def foo():\n    pass\n")
-        assert mp._apply_patch_atomic(target) is False
+        assert (
+            mp._apply_patch_atomic_reason(target)
+            == mp._ATOMIC_REASON_UNRECOGNIZED_SHAPE
+        )
         assert "Hyperloom #C1 patch" not in target.read_text()
 
-    def test_returns_false_when_read_fails(self, tmp_path, monkeypatch):
+    def test_io_error_when_read_fails(self, tmp_path, monkeypatch):
         target = tmp_path / "benchmarker.py"
 
         def boom(self, **kwargs):
             raise OSError("io")
 
         monkeypatch.setattr(Path, "read_text", boom)
-        assert mp._apply_patch_atomic(target) is False
+        assert mp._apply_patch_atomic_reason(target) == mp._ATOMIC_REASON_IO_ERROR
 
-    def test_applies_patch_and_returns_true(self, magpie_dir):
+    def test_applies_patch_and_returns_applied(self, magpie_dir):
         target = magpie_dir / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
-        assert mp._apply_patch_atomic(target) is True
+        assert mp._apply_patch_atomic_reason(target) == mp._ATOMIC_REASON_APPLIED
         assert mp._PATCH_SENTINEL in target.read_text()
         assert "def stub" in target.read_text()
 

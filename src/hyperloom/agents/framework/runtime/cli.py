@@ -33,33 +33,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
+from hyperloom.common.subprocess_bridge import emit_json
+
+from ..pr_kb_slug import normalise_repo as _normalise_pr_kb_repo
 
 if TYPE_CHECKING:
     from ..models import ExploreRequest
-
-
-# _emit_json intentionally does NOT delegate to
-# hyperloom.common.subprocess_bridge.emit_json: this copy additionally
-# creates --out's parent directory before writing, which the shared
-# implementation does not do; see subprocess_bridge.py's module docstring
-# for the divergence rationale.
-def _emit_json(obj: Any, out: str | None) -> None:
-    """Serialize obj as JSON to stdout or a file path.
-
-    Always writes to stdout; additionally writes to ``out`` when it names a
-    real path (not ``None`` or ``"-"``).
-
-    Args:
-        obj (Any): JSON-serialisable object to emit.
-        out (str | None): Destination path, or ``None``/``"-"`` for stdout only.
-    """
-    text = json.dumps(obj, ensure_ascii=False, indent=2)
-    if out and out != "-":
-        path = Path(out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text + "\n", encoding="utf-8")
-    sys.stdout.write(text + "\n")
-    sys.stdout.flush()
 
 
 def _load_request(path: str) -> "ExploreRequest":
@@ -96,7 +75,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (unused).
     """
     del args
-    _emit_json(
+    emit_json(
         {
             "required": ["framework", "repo_url", "baseline"],
             "subcommands_available": [
@@ -140,6 +119,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
             },
         },
         "-",
+        make_parents=True,
     )
 
 
@@ -154,7 +134,7 @@ def _cmd_explore(args: argparse.Namespace) -> None:
 
     request = _load_request(args.request)
     summary = explore(request, execute=bool(args.execute))
-    _emit_json(summary, args.out)
+    emit_json(summary, args.out, make_parents=True)
 
 
 def _cmd_candidates(args: argparse.Namespace) -> None:
@@ -176,7 +156,7 @@ def _cmd_candidates(args: argparse.Namespace) -> None:
         "count": len(candidates),
         "candidates": [asdict(c) for c in candidates],
     }
-    _emit_json(payload, args.out)
+    emit_json(payload, args.out, make_parents=True)
 
 
 def _read_json_request(path: str) -> dict[str, Any]:
@@ -481,14 +461,9 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             if str(entry.get("source") or "") == "explicit" and (
                 repo.startswith("http") or repo.endswith(".git")
             ):
-                try:
-                    from framework_agent.pr_kb_slug import normalise_repo as _norm_repo
-
-                    slug = _norm_repo(repo)
-                    if slug:
-                        repo_slug = slug  # used only for pr_url/diff_url below
-                except Exception:  # noqa: BLE001 — best-effort
-                    repo_slug = repo
+                slug = _normalise_pr_kb_repo(repo)
+                if slug:
+                    repo_slug = slug  # used only for pr_url/diff_url below
             ref = str(entry.get("ref") or "")
             key = (repo, ref)
             if not ref or key in seen_refs:
@@ -561,7 +536,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     for rank, candidate in enumerate(out_cands, start=1):
         candidate["prior_rank"] = rank
 
-    _emit_json(
+    emit_json(
         {
             "batch_id": batch_id,
             "framework": framework,
@@ -578,6 +553,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             "candidates": out_cands,
         },
         args.out,
+        make_parents=True,
     )
 
 
@@ -603,7 +579,7 @@ def _cmd_phase_audit(args: argparse.Namespace) -> None:
 
     request = _read_json_request(args.request)
     result = run_phase_audit(request)
-    _emit_json(result, args.out)
+    emit_json(result, args.out, make_parents=True)
 
 
 def _cmd_kb(args: argparse.Namespace) -> None:
@@ -622,29 +598,31 @@ def _cmd_kb(args: argparse.Namespace) -> None:
 
     op = args.kb_op
     if op == "list":
-        _emit_json(
+        emit_json(
             {
                 "kb_root": str(kb_mod._resolve_kb_root()),
                 "domains": kb_mod.list_domains(),
             },
             args.out,
+            make_parents=True,
         )
         return
     if op == "show":
         files = kb_mod.get_domain_files(args.domain)
         if not files:
             raise RuntimeAdapterError(f"domain {args.domain!r} not found under {kb_mod._resolve_kb_root()}")
-        _emit_json(
+        emit_json(
             {
                 "domain": args.domain,
                 "files": [{"path": str(p), "size_bytes": p.stat().st_size} for p in files if p.is_file()],
             },
             args.out,
+            make_parents=True,
         )
         return
     if op == "search":
         hits = kb_mod.search_kb(args.query, domains=args.domain or None)
-        _emit_json(
+        emit_json(
             {
                 "query": args.query,
                 "domain_filter": list(args.domain) if args.domain else None,
@@ -652,6 +630,7 @@ def _cmd_kb(args: argparse.Namespace) -> None:
                 "hits": [{"domain": h.domain, "path": str(h.path)} for h in hits],
             },
             args.out,
+            make_parents=True,
         )
         return
     if op == "contribute":
@@ -664,7 +643,7 @@ def _cmd_kb(args: argparse.Namespace) -> None:
             source=args.source,
             session_id=args.session_id,
         )
-        _emit_json({"status": "appended", "path": str(path)}, args.out)
+        emit_json({"status": "appended", "path": str(path)}, args.out, make_parents=True)
         return
     if op == "synthesize":
         findings: list[Finding] = []

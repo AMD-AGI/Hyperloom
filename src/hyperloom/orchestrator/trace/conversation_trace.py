@@ -26,13 +26,13 @@ Design contract:
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import append_jsonl
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import conversations_path
 from ._row_utils import (
@@ -177,17 +177,6 @@ class ConversationRecord:
         }
 
 
-def _validate_row(row: dict[str, Any]) -> None:
-    """Fail fast if ``row`` deviates from the conversations closed schema."""
-    validate_closed_row(
-        row,
-        fields=_ROW_FIELDS,
-        valid_components=VALID_COMPONENTS,
-        error_cls=ConversationRowError,
-        label="conversations",
-    )
-
-
 def append_conversation(
     *,
     session_dir: Path,
@@ -214,12 +203,16 @@ def append_conversation(
         ConversationRowError: If the serialized row violates the schema.
     """
     row = record.to_row()
-    _validate_row(row)
+    validate_closed_row(
+        row,
+        fields=_ROW_FIELDS,
+        valid_components=VALID_COMPONENTS,
+        error_cls=ConversationRowError,
+        label="conversations",
+    )
     dest = target if target is not None else conversations_path(session_dir)
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with dest.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        append_jsonl(dest, row, make_parents=True, ensure_ascii=False)
     except OSError as exc:
         log.warning(
             "conversation_trace: append failed for component=%s session_id=%s: %r",

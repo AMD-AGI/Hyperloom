@@ -239,9 +239,8 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
 
 
 # 4. exit_normal_explore / exit_normal_kernel — wired to real plateau
-def test_exit_normal_explore_does_not_exit_on_plateau(monkeypatch):
-    """With cyclic off, plateau is advisory only; a bare plateau signal must NOT exit EXPLORE."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "0")
+def test_exit_normal_explore_exits_on_plateau():
+    """A bare EXPLORE plateau signal advances to the next lever."""
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -257,7 +256,9 @@ def test_exit_normal_explore_does_not_exit_on_plateau(monkeypatch):
         stop_reason="",
         plateau_overrides={},
     )
-    assert exit_normal_explore(state) is None
+    out = exit_normal_explore(state)
+    assert out is not None
+    assert out[0] == "explore_no_more_leverage"
 
 
 def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
@@ -563,10 +564,9 @@ def test_stop_reason_vocab_has_v08_additions():
         assert is_valid_stop_reason(new)
 
 
-# 7. plateau is advisory only — pure compute_plateau_* still works
-def test_compute_next_phase_does_not_advance_on_plateau(monkeypatch):
-    """With cyclic off, even when the EXPLORE plateau judge fires, compute_next_phase returns None without an explicit hint or budget gate."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "0")
+# 7. plateau advances EXPLORE — pure compute_plateau_* still works
+def test_compute_next_phase_advances_on_plateau():
+    """When the EXPLORE plateau judge fires, compute_next_phase routes to KERNEL_AGENT."""
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=0.0,
@@ -585,7 +585,9 @@ def test_compute_next_phase_does_not_advance_on_plateau(monkeypatch):
         stop_reason="",
         plateau_overrides={},
     )
-    assert compute_next_phase(state, kernel_enabled=True) is None
+    target, reason, _ = compute_next_phase(state, kernel_enabled=True)
+    assert target == "KERNEL_AGENT"
+    assert reason == "explore_no_more_leverage"
     triggered, _ = compute_plateau_explore(state)
     assert triggered is True
 
@@ -627,7 +629,7 @@ def test_collect_phase_breakdown_buckets_by_phase():
             ],
         },
     }
-    out = collect_attribution(state, [], [], [], [])
+    out = collect_attribution(state, [], [], [])
     pb = out["phase_breakdown"]
     assert pb["explore"]["total_gain_pct"] == 5.0
     assert pb["explore"]["by_domain"]["serving_specialist"] == 5.0
@@ -656,7 +658,7 @@ def test_collect_phase_breakdown_falls_back_to_action_family_when_history_empty(
         "phase_history": [],
     }
     warnings: list[str] = []
-    out = collect_attribution(state, [], [], [], warnings)
+    out = collect_attribution(state, [], [], warnings)
     pb = out["phase_breakdown"]
     assert pb["explore"]["total_gain_pct"] == 2.5
     # Default provenance bucket when winners_history doesn't supply one.
@@ -679,5 +681,5 @@ def test_collect_phase_breakdown_skips_zero_or_negative_deltas():
             {"to_phase": "EXPLORE", "ts_unix": 0.0, "reason": "prelude_done"},
         ],
     }
-    out = collect_attribution(state, [], [], [], [])
+    out = collect_attribution(state, [], [], [])
     assert out["phase_breakdown"]["explore"]["total_gain_pct"] == 0.0

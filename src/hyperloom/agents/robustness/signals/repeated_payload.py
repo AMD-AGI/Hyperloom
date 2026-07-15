@@ -21,11 +21,6 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.payload_aliases import (
-    CANONICAL_KEY as _EXTRA_SERVER_ARGS_CANONICAL,
-    LEGACY_KEY as _EXTRA_SERVER_ARGS_LEGACY,
-    read_extra_server_args as _read_extra_server_args,
-)
 from ..role.prompt_inputs import InboxItem, ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
@@ -290,9 +285,6 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
     payload = event.get("payload") or {}
     if not isinstance(payload, dict):
         return None
-    # Normalise legacy extra-args key so legacy + canonical envelopes
-    # produce identical fingerprints (else a legacy-keyed retry burst is missed).
-    payload = _normalise_extra_server_args_key(payload)
     projection = _FAMILY_PROJECTIONS.get(family, _GENERIC_PROJECTION)
     subset: dict[str, Any] = {}
     for path in projection:
@@ -300,33 +292,6 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
         subset[path] = _strip_blacklisted(value)
     canonical = json.dumps(subset, sort_keys=True, default=str)
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
-
-
-def _normalise_extra_server_args_key(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalise the legacy SGLang extra-args key to the canonical one.
-
-    Returns a shallow copy with ``params.extra_server_args`` populated from
-    the compat helper (originals not mutated). No-op when no extra-args key
-    exists or the canonical key is already present.
-
-    Args:
-        payload: The event payload to normalise.
-
-    Returns:
-        The (possibly copied) payload with a canonical extra-args key.
-    """
-    params = payload.get("params")
-    if not isinstance(params, dict):
-        return payload
-    if _EXTRA_SERVER_ARGS_CANONICAL in params:
-        return payload
-    if _EXTRA_SERVER_ARGS_LEGACY not in params:
-        return payload
-    new_params = dict(params)
-    new_params[_EXTRA_SERVER_ARGS_CANONICAL] = _read_extra_server_args(params)
-    new_payload = dict(payload)
-    new_payload["params"] = new_params
-    return new_payload
 
 
 def _walk_path(payload: dict[str, Any], path: str) -> Any:

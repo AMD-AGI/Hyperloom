@@ -27,6 +27,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Sibling import works whether run as a standalone script or loaded via
+# importlib; the kernel-agent tools cannot rely on the ``hyperloom`` import root.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _io_utils import truthy  # noqa: E402
+
+sys.path.pop(0)
+
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
 
@@ -53,13 +60,6 @@ def _inject_author_gateway_env() -> None:
         os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     os.environ.setdefault("IS_SANDBOX", "1")
-
-
-def _truthy(val: Any) -> bool:
-    """Interpret common truthy spellings from JSON or env strings."""
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _git_toplevel(path: str) -> str:
@@ -114,7 +114,7 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
         cmd.append("--no-author")
     if not bool(args.get("validate", True)):
         cmd.append("--no-validate")
-    if _truthy(args.get("verbose", False)):
+    if truthy(args.get("verbose", False)):
         cmd.append("--verbose")
     return cmd
 

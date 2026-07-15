@@ -29,7 +29,7 @@ OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
 # Local sibling import for the collective-name fallback (tools/ on sys.path).
 sys.path.insert(0, str(ROOT / "tools"))
 from _collective_names import kernel_name_implies_multigpu  # noqa: E402
-from _io_utils import utc_now  # noqa: E402
+from _io_utils import extract_last_json, utc_now  # noqa: E402
 from _paths import workspace_root  # noqa: E402
 
 sys.path.pop(0)
@@ -85,38 +85,6 @@ def load_env_file(path: Path) -> dict[str, str]:
     return env
 
 
-def _extract_trailing_json(text: str) -> dict[str, Any]:
-    """Parse the last top-level JSON object from mixed stdout text."""
-    if not text:
-        raise ValueError("empty stdout")
-    end = text.rfind("}")
-    if end == -1:
-        return json.loads(text)
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(end, -1, -1):
-        ch = text[i]
-        if esc:
-            esc = False
-            continue
-        if ch == "\\":
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "}":
-            depth += 1
-        elif ch == "{":
-            depth -= 1
-            if depth == 0:
-                return json.loads(text[i : end + 1])
-    return json.loads(text)
-
-
 def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: Path) -> dict[str, Any]:
     """Run a subprocess, tee output to a log, and parse trailing JSON."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,7 +102,10 @@ def run_json(cmd: list[str], *, env: dict[str, str], timeout_s: int, log_path: P
         log.write(f"\n[exit_code] {proc.returncode}\n")
     if proc.returncode != 0:
         raise RuntimeError(f"command failed: {' '.join(cmd)}; see {log_path}")
-    return _extract_trailing_json(proc.stdout or "")
+    parsed = extract_last_json(proc.stdout or "")
+    if parsed is None:
+        raise ValueError("no trailing JSON object in stdout")
+    return parsed
 
 
 def _ensure_ray_via_helper(num_gpus: int, log_path: Path) -> bool:
@@ -213,7 +184,7 @@ def run_one_attempt(
     """Run a single backend/replica kernel-optimization attempt.
 
     Args:
-        backend: Backend name to run (e.g. ``forge`` / ``geak_v3``).
+        backend: Backend name to run (e.g. ``forge``).
         replica: Replica index within the backend's parallel fan-out.
         gpu_id: Logical GPU id assigned to this attempt (informational; Ray
             sets the visible-device env vars in workers).
@@ -247,20 +218,16 @@ def run_one_attempt(
         backend,
         "--budget-minutes",
         str(args.backend_budget_min),
-        "--geak-budget-min",
-        str(args.geak_budget_min),
         "--num-gpus",
         str(num_gpus),
     ]
-    if args.geak_cost_limit is not None:
-        cmd.extend(["--geak-cost-limit", str(args.geak_cost_limit)])
     if source_file:
         cmd.extend(["--source-file", source_file])
     if harness_path:
         cmd.extend(["--test-harness-path", harness_path])
     started = time.time()
-    # Match the backend-specific budget plus finalization grace.
-    _effective_budget_min = args.geak_budget_min if backend == "geak_v3" else args.backend_budget_min
+    # Match the backend budget plus finalization grace.
+    _effective_budget_min = args.backend_budget_min
     try:
         result = run_json(cmd, env=local_env, timeout_s=int(_effective_budget_min * 60) + 360, log_path=log_path)
         status = "ok"
@@ -334,41 +301,17 @@ def main() -> int:
         type=float,
         default=60,
         help="Wall-clock budget per backend attempt in minutes "
-        "(default 60). Applies to non-GEAK backends such as forge. "
-        "Agents are told to early-exit as "
+        "(default 60). Agents are told to early-exit as "
         "soon as they hit >=1.50x with passing correctness; "
         "otherwise they iterate up to ~85%% of this budget "
         "and SIGTERM at 100%%.",
     )
-    # Default tracks GEAK's own quick/full budgets plus finalization grace.
-    _geak_budget_default = 70 if os.environ.get("GEAK_RUN_MODE", "full").strip().lower() == "quick" else 180
-    parser.add_argument(
-        "--geak-budget-min",
-        type=float,
-        default=_geak_budget_default,
-        help="Per-attempt wall-clock budget for GEAK only "
-        "(default tracks $GEAK_RUN_MODE: full -> 180, "
-        "quick -> 70; aligned with yaml "
-        "run.budgets.<mode>.total_s + finalize_grace + "
-        "kill_buffer + safety so the prompt-quoted "
-        "budget triggers the matching GEAK mode).",
-    )
     parser.add_argument("--replicas-per-backend", type=int, default=2)
     parser.add_argument(
         "--backends",
-        default="forge,geak_v3",
-        help="Comma list of agentic backends (default 'forge,geak_v3'). "
+        default="forge",
+        help="Comma list of agentic backends (default 'forge'). "
         "Pass an explicit value to force a specific subset.",
-    )
-    # Mirror kernel_optimization.py's default: 0.0 = unlimited (GEAK geak.yaml cost_limit: 0.).
-    parser.add_argument(
-        "--geak-cost-limit",
-        type=float,
-        default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0")),
-        help=(
-            "Per-attempt GEAK cost cap in USD; 0 means unlimited (mirrors "
-            "GEAK's geak.yaml). Override via $HYPERLOOM_GEAK_COST_LIMIT."
-        ),
     )
     parser.add_argument(
         "--num-gpus-override",
@@ -509,13 +452,7 @@ def main() -> int:
                     "pattern; TraceLens reported num_gpus_recommended<2",
                 )
         backends = [b.strip() for b in args.backends.split(",") if b.strip()]
-        # GEAK is single-GPU only; drop it for per_task_gpus>=2 collectives (r20/r22). ALLOW_GEAK_MULTIGPU=1 bypasses.
         backends_dropped: list[str] = []
-        if per_task_gpus >= 2 and "geak_v3" in backends and os.environ.get("ALLOW_GEAK_MULTIGPU") != "1":
-            backends = [b for b in backends if b != "geak_v3"]
-            backends_dropped.append(
-                "geak_v3 (multi-GPU collective unsupported by GEAK sub-agent ray nesting; set ALLOW_GEAK_MULTIGPU=1 to bypass)"
-            )
         max_concurrent = max(1, args.total_gpus // max(1, per_task_gpus))
         total_jobs = len(backends) * args.replicas_per_backend
         summary["gpu_plan"] = {

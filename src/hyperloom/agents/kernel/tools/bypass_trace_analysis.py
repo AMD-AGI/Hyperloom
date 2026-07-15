@@ -48,39 +48,16 @@ from _idle_gate import (  # noqa: E402
     resolve_idle_pct_threshold,
 )
 from _denoise_steps import resolve_perstep_divisor  # noqa: E402
+from _io_utils import atomic_write_json, utc_now, write_text  # noqa: E402
 
 
 AGGREGATION_SCOPE_FULL = "full_trace"
 AGGREGATION_SCOPE_STEADY = "steady_state"
 
 
-def _utc_now_iso() -> str:
-    """Return the current UTC time as a second-precision ISO-8601 string."""
-    return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
-
-
 def _run_stamp() -> str:
     """Return a compact UTC timestamp used to name the per-run output dir."""
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _atomic_write_json(path: Path, payload: Any) -> None:
-    """Write ``payload`` as pretty JSON to ``path`` via a temp-file rename.
-
-    Args:
-        path: Destination file path (parent dirs are created).
-        payload: JSON-serializable object to write.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
-
-
-def _write_text(path: Path, text: str) -> None:
-    """Write ``text`` to ``path``, creating parent directories."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
 
 
 def _maybe_enrich_rocprof(
@@ -443,15 +420,12 @@ def main(argv: list[str] | None = None) -> int:
         _emit_quality_warnings(analyze, trace_health_warnings)
 
     # --- build downstream artifacts from classified device kernels ---
-    # Discover per-kernel benchmark files only when the rocprof roofline
-    # enrichment (the sole consumer) is enabled, so default runs skip the grep.
-    enrich_enabled = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower() in {"1", "true", "yes", "on"}
     candidates = _report.build_candidates(
         analyze,
         framework=args.framework,
         target_platform=args.target_platform,
         top_k=top_k,
-        discover_benchmarks=enrich_enabled and not args.dry_run,
+        discover_benchmarks=False,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"
@@ -487,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         cand["trace_report_path"] = str(analysis_md_path)
 
     throughput_unit = "img/s" if (args.framework or "").lower() == "xdit" else "tok/s"
-    _write_text(
+    write_text(
         analysis_md_path,
         _report.render_analysis_md(
             candidates,
@@ -500,27 +474,25 @@ def main(argv: list[str] | None = None) -> int:
             summary_csv_path=str(kernel_summary_csv_path),
         ),
     )
-    _atomic_write_json(candidates_path, candidates)
+    atomic_write_json(candidates_path, candidates, ensure_ascii=False, sort_keys=False, trailing_newline=False)
     # Structured, code-generated CSV exports (full per-kernel metrics + category
     # summary); machine-readable ground truth that downstream code can load by path.
-    _write_text(kernel_metrics_csv_path, _report.build_metrics_csv(candidates))
-    _write_text(kernel_summary_csv_path, _report.build_category_summary_csv(candidates))
+    write_text(kernel_metrics_csv_path, _report.build_metrics_csv(candidates))
+    write_text(kernel_summary_csv_path, _report.build_category_summary_csv(candidates))
 
     summary = _report.build_summary(
         candidates,
         framework=args.framework,
         target_platform=args.target_platform,
-        generated_at=_utc_now_iso(),
+        generated_at=utc_now(timespec="seconds"),
         trace_health_warnings=trace_health_warnings,
     )
-    # summary.json is written below, after the optional rocprof enrichment, so
-    # its ``rocprof_enrich`` audit field reflects the enrichment outcome.
     summary["estimated"] = estimated
     summary["analysis_degraded"] = analysis_degraded
     # Always present (may be null) so the summary/manifest/result schemas match.
     summary["steady_window"] = steady_window
 
-    _atomic_write_json(
+    atomic_write_json(
         manifest_path,
         {
             "source": "bypass",
@@ -534,8 +506,11 @@ def main(argv: list[str] | None = None) -> int:
             "analyzed_rank": analyzed_rank,
             "rank_count": rank_count,
             "event_total": analyze.get("event_total", 0),
-            "created_at": _utc_now_iso(),
+            "created_at": utc_now(timespec="seconds"),
         },
+        ensure_ascii=False,
+        sort_keys=False,
+        trailing_newline=False,
     )
 
     kernel_roofline = _report.build_kernel_roofline(
@@ -543,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
         analysis_md_path=str(analysis_md_path),
         kernel_candidates_path=str(candidates_path),
     )
-    _atomic_write_json(kernel_roofline_path, kernel_roofline)
+    atomic_write_json(kernel_roofline_path, kernel_roofline, ensure_ascii=False, sort_keys=False, trailing_newline=False)
 
     # Optional rocprof-compute enrichment (opt-in; enriches the sidecar in
     # place). Skipped in --dry-run; env-gated + graceful degradation otherwise.
@@ -553,13 +528,13 @@ def main(argv: list[str] | None = None) -> int:
         else _maybe_enrich_rocprof(kernel_roofline_path, candidates_path, run_dir)
     )
     summary["rocprof_enrich"] = rocprof_enrich
-    _atomic_write_json(summary_path, summary)
+    atomic_write_json(summary_path, summary, ensure_ascii=False, sort_keys=False, trailing_newline=False)
 
     # Kernel-fusion opportunities: time-ordered launch adjacency -> fusable
     # clusters (Elementwise/Norm/Quant chains). A separate artifact carrying the
     # kernel-relationship data the name-aggregated candidates cannot express.
     fusion = _report.build_fusion(analyze)
-    _atomic_write_json(kernel_sequence_path, fusion)
+    atomic_write_json(kernel_sequence_path, fusion, ensure_ascii=False, sort_keys=False, trailing_newline=False)
 
     # Diffusion / scriptable workload-level roofline (parity with the TraceLens
     # route's diffusion_roofline.json): aggregate the per-kernel analytical
@@ -597,7 +572,7 @@ def main(argv: list[str] | None = None) -> int:
                 kernels_aggregated=len(_all_kernels),
             )
             _diff_path = run_dir / "diffusion_roofline.json"
-            _atomic_write_json(_diff_path, _diff_report)
+            atomic_write_json(_diff_path, _diff_report, ensure_ascii=False, sort_keys=False, trailing_newline=False)
             diffusion_roofline_path = str(_diff_path)
         except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
             diffusion_roofline_path = None
@@ -635,7 +610,6 @@ def main(argv: list[str] | None = None) -> int:
         "orchestrator_mode": "bypass",
         "timeline": analyze.get("timeline") or {},
         "attribution": analyze.get("attribution") or {},
-        "rocprof_enrich": rocprof_enrich,
         "trace_health_warnings": trace_health_warnings,
         "artifact_paths": {
             "trace_report_path": str(analysis_md_path),

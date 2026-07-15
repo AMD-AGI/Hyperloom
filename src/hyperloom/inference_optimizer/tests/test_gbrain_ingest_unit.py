@@ -1,9 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Coverage for ``recipe_kb.gbrain_ingest``: YAML emitter edge shapes, the
-seed-only shareable-signal gate, page mapping (stack fingerprint + negative
-knowledge), bulk + single mirror flows, env-built MCP, the mirroring KB
-wrapper, and the CLI ``main`` entry point."""
+"""Coverage for ``recipe_kb.gbrain_ingest`` mirroring helpers."""
 
 from __future__ import annotations
 
@@ -100,39 +97,6 @@ def test_recipe_to_page_emits_fingerprint_and_negatives(monkeypatch) -> None:
     assert "kind:recipe" in content
 
 
-# -- ingest_local_to_gbrain ------------------------------------------------
-def test_ingest_dry_run_and_skip_and_error() -> None:
-    recipes = [
-        {"canonical_id": "a:b:c:d:e", "model": "m"},  # mirrorable
-        {"model": "no-canonical"},  # skipped
-    ]
-    # dry-run: counts ingested without touching mcp
-    stats = gi.ingest_local_to_gbrain(recipes=recipes, mcp=None, dry_run=True)
-    assert stats["ingested"] == 1
-    assert stats["skipped_unmirrorable"] == 1
-
-    # write path with a failing mcp -> error counted, loop continues
-    mcp = _FakeMcp(fail=True)
-    stats2 = gi.ingest_local_to_gbrain(
-        recipes=[{"canonical_id": "a:b:c:d:e"}],
-        mcp=mcp,
-        dry_run=False,
-    )
-    assert stats2["errors"] == 1
-    assert mcp.calls  # put_page attempted
-
-
-def test_ingest_write_success() -> None:
-    mcp = _FakeMcp()
-    stats = gi.ingest_local_to_gbrain(
-        recipes=[{"canonical_id": "a:b:c:d:e"}],
-        mcp=mcp,
-        dry_run=False,
-    )
-    assert stats["ingested"] == 1
-    assert mcp.calls[0][0] == "put_page"
-
-
 # -- mirror_recipe ---------------------------------------------------------
 def test_mirror_recipe_no_mcp() -> None:
     assert gi.mirror_recipe({"canonical_id": "a:b:c:d:e"}, None) is False
@@ -197,32 +161,3 @@ def test_mirroring_kb_swallows_mirror_error(monkeypatch) -> None:
     monkeypatch.setattr(gi, "mirror_recipe", _raise)
     kb = gi.GbrainMirroringRecipeKB(_Inner(), _FakeMcp())
     assert kb.put_recipe(canonical_id="a:b:c:d:e") == "wrote"  # error swallowed
-
-
-# -- main ------------------------------------------------------------------
-def test_main_requires_local_kb_root(monkeypatch, capsys) -> None:
-    monkeypatch.delenv("HYPERLOOM_LOCAL_KB_ROOT", raising=False)
-    assert gi.main([]) == 2
-    assert "requires --local-kb-root" in capsys.readouterr().out
-
-
-def test_main_write_requires_creds(tmp_path, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.recipe_kb.local_store.LocalRecipeStore.list_recent",
-        lambda self, limit: [],
-    )
-    rc = gi.main(["--local-kb-root", str(tmp_path), "--write", "--gbrain-url", "", "--token", ""])
-    assert rc == 2
-    assert "GBRAIN_BASE_URL" in capsys.readouterr().out
-
-
-def test_main_dry_run_success(tmp_path, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.recipe_kb.local_store.LocalRecipeStore.list_recent",
-        lambda self, limit: [{"canonical_id": "a:b:c:d:e"}],
-    )
-    rc = gi.main(["--local-kb-root", str(tmp_path)])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "DRY-RUN" in out
-    assert "ingested" in out

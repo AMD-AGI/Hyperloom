@@ -6,9 +6,10 @@ myst:
 ---
 # Environment variables
 
-Every environment variable read by the Hyperloom runtime, grouped by
-purpose. This page is the *exhaustive* reference; the root README,
-`.env.template`, and each agent SKILL file are *convenience excerpts*.
+User-configurable environment variables for Hyperloom, grouped by purpose.
+Runtime parameters such as framework, tensor parallelism, prompt lengths, and
+phase toggles are configured with CLI flags; internal subprocess handoff envs
+are intentionally not listed as user configuration.
 
 Variables marked **Required** must be set (using shell or `$REPO_ROOT/.env`)
 or the CLI will exit fast at startup. Variables marked **Optional** have
@@ -31,7 +32,7 @@ These variables configure LLM gateway access and optional backend credentials.
 | `ANTHROPIC_AUTH_TOKEN` | No       | Inherits `SAFE_API_KEY` | Claude CLI auth token alias; set explicitly only for split-gateway deployments.                                                                        |
 | `GEAK_API_KEY`         | No       | Inherits `SAFE_API_KEY` | Only set explicitly to override the default inheritance.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | Inherits `OPENAI`<br>`_BASE_URL` | Only set explicitly to override the default inheritance.                                                                                                                          |
-| `GEAK_MODEL_NAME`      | No       | `claude-`<br>`opus-4-8` | GEAK preprocessor / solver model id.                                                                                                                                                           |
+| `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL`; DeepSeek-only defaults to `deepseek-chat` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
 | `ANTHROPIC_API_KEY`    | No       | Inherits `SAFE_API_KEY` (using preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
 | `OPENAI_API_KEY`       | No       | Inherits `SAFE_API_KEY` (using preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
 | `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (for example, `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
@@ -47,7 +48,6 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | Variable                                  | Required             | Default                                                            | Description                                                                                                                                                                          |
 |-------------------------------------------|----------------------|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `REPO_ROOT`                               | No (recommended)     | `$(pwd)`                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts. Falls back to the current working directory when unset.                                                                                                                     |
-| `FORGE_PATH`                              | Conditional          | Set by `local_setup.sh` when `forge` is explicitly requested        | KernelForge checkout root used by the `forge` backend. `local_setup.sh` also exports `KERNEL_FORGE_ROOT` with the same value for compatibility.                                                                                                                        |
 | `INFERENCEX_PATH`                         | Conditional          | Auto-cloned by `install.sh`                                    | Path to the SemiAnalysisAI/InferenceX repo, used by baseline / target analysis. `install.sh` clones it when unset; only required if that auto-clone fails.                                                                                                                                          |
 | `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_OP`<br>`EN_SOU`<br>`RCE_ROOT:-`<br>`/opt/hyperloom/`<br>`open-source`<br>`-repos}/Tr`<br>`aceLens` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/agents/kernel/scripts/install.sh` clones the public repo into the pod-local open-source checkout root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | First of `$HOME/.local/bin/claude`, `/usr/local/bin/claude`, `$(command -v claude)`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Export to force a specific build. |
@@ -63,42 +63,17 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 
 ---
 
-## LLM gateway credentials
+## Workload configuration
 
-The following variables configure the GEAK / Ray runtime's LLM endpoint.
+Use CLI flags for workload shape and runtime behavior:
 
-| Variable           | Required | Default | Description                                                                                                  |
-|--------------------|----------|---------|--------------------------------------------------------------------------------------------------------------|
-| `LLM_GATEWAY_KEY`  | No       | Inherits `SAFE_API_KEY` | Generic LLM gateway key alias for tools that do not use provider-specific env vars directly.        |
-| `LLM_API_BASE`     | No       | Inherits resolved OpenAI-compatible gateway | Generic LLM endpoint alias for GEAK-compatible tools.                           |
+`--model`, `--framework`, `--gpu-type`, `--model-class`, `--tp`, `--ep`,
+`--conc`, `--isl`, `--osl`, `--max-model-len`, `--precision`,
+`--profile-osl`, `--enable-roofline` / `--no-enable-roofline`, and
+`--enable-conc-sweep` / `--no-enable-conc-sweep`.
 
----
-
-## Workload parameters (set by the CLI; can be pre-set for resume)
-
-These are the canonical envs the Coordinator reads. The CLI sets them
-from `--model` / `--framework` / `--isl` etc., but agents may also
-read them when invoked standalone.
-
-| Variable          | Default     | Description                                                          |
-|-------------------|-------------|----------------------------------------------------------------------|
-| `MODEL_PATH`      | —           | Path or Hugging Face (HF) id of the model to optimize.                              |
-| `FRAMEWORK`       | `sglang`    | `sglang`, `vllm`, single-node-only `atom`, or scriptable diffusion `xdit`. A session cannot mix frameworks.   |
-| `GPU_TYPE`        | Auto-detect | `mi300x` / `mi308x` / `mi325x` / `mi355x`.                           |
-| `TARGET_GPU_TYPE` | Mirrors `GPU_TYPE` | Set by the CLI; used by Magpie YAML rendering for script pinning. |
-| `MODEL_CLASS`     | Unset       | Optional launcher hint. When unset, Coordinator boot infers and persists it from model metadata or model-path family keywords; the old live `classify` action is removed. |
-| `TP`              | `1`         | Tensor-parallel size (`--tp`).                                       |
-| `EP`              | `1`         | Expert-parallel size for MoE (`--ep`); `>=2` enables true expert parallelism. |
-| `CONC`            | `8`         | Baseline benchmark concurrency (`--conc`). A comma ladder seeds the concurrency sweep. |
-| `ISL`             | `256`       | Input sequence length.                                               |
-| `OSL`             | `256`       | Output sequence length.                                              |
-| `MAX_MODEL_LEN`   | Auto (`ISL+OSL+4096`) | Server-side max sequence length. When unset, auto-derived as `ISL+OSL+4096` (default `4608`) and then clamped to the model's native context; only an explicit value or model cap yields other numbers. |
-| `PRECISION`       | `bf16`      | Model precision (`bf16`, `fp8`, `mxfp4`, ...).                       |
-| `RANDOM_RANGE_RATIO` | Unset    | Optional Magpie random-range jitter.                                 |
-| `ROCR_VISIBLE_DEVICES` | Inherited | Standard ROCm visible-device mask.                                  |
-| `HIP_VISIBLE_DEVICES` | Inherited | Standard HIP visible-device mask.                                   |
-| `RUN_EVAL`        | `true` when unset | Accuracy eval is on by default; set to a falsey value such as `0` / `false` to disable it. |
-| `INFERENCE_`<br>`OPTIMIZER_`<br>`ENABLE_`<br>`ROOFLINE` | `1` (on) | Env default for the `--enable-roofline` flag (composite `profile` + `trace_analyze` + `analysis.md`). Set to `0` for the profile-only path, equivalent to `--no-enable-roofline`. |
+The CLI may still materialize internal envs for benchmark subprocesses, but
+those are not stable user configuration and should not be pre-set by launchers.
 
 ---
 
@@ -116,20 +91,15 @@ The following variables control the kernel optimization backend ladder.
 
 ## Multi-node / prefill-decode (PD)
 
-These are read by the CLI (`cli/parser.py`) for `--nodes>=2` RayJob / Dynamo
-runs and prefill-decode disaggregation. Each has an equivalent CLI flag.
+Use CLI flags for multi-node and prefill-decode configuration:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NODES` / `INFERENCE_OPTIMIZER_NODES` | `1` | Total GPU nodes for the inference RayJob (`--nodes`). Resolution: `--nodes` > `INFERENCE_OPTIMIZER_NODES` > `NODES` > `1`. |
-| `INFERENCE_OPTIMIZER_MN_BACKEND` | `rayjob` | Multi-node backend (`--mn-backend`): `rayjob` or `dynamo`. |
-| `INFERENCE_OPTIMIZER_RAYJOB_IMAGE` | Unset | Container image for the multi-node RayJob (`--rayjob-image`); required when `--nodes>=2`. |
-| `INFERENCE_OPTIMIZER_GPUS_PER_NODE` | `8` | GPUs per RayJob pod (`--rayjob-gpus-per-node`). |
-| `PD_MODE` | `colocated` | Prefill-decode mode; `--pd-mode` always defaults to `colocated` regardless of inherited env. |
-| `PD_PREFILL_NODES` / `PD_DECODE_NODES` | `0` | Prefill / decode node counts (disaggregated only). |
-| `PD_PREFILL_TP` / `PD_DECODE_TP` | `0` (= `--tp`) | TP for the prefill / decode groups. |
-| `PD_TRANSFER_BACKEND` | Unset | KV transfer backend (sglang: `mooncake`/`nixl`; vllm: `NixlConnector`/…). |
-| `PD_IB_DEVICE` | Unset | Comma-separated IB/RoCE device list; empty uses `$NCCL_IB_HCA`. |
+`--nodes`, `--mn-backend`, `--rayjob-image`, `--rayjob-gpus-per-node`,
+`--pd-mode`, `--pd-prefill-nodes`, `--pd-decode-nodes`, `--pd-prefill-tp`,
+`--pd-decode-tp`, `--pd-transfer-backend`, and `--pd-ib-device`.
+
+The optimizer writes the resolved values into internal handoff envs when it
+creates RayJob / Dynamo workloads; callers should not depend on those env names
+as a public configuration API.
 
 ---
 
@@ -191,10 +161,10 @@ package to populate `session_breakdown.json` for downstream consumers
 Master switch (default **off**) for live Langfuse trace push.
 
 - **SDK install**: when this flag is on, `src/hyperloom/inference_optimizer/assets/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
-- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, oob, robustness, specialist) and KEEP/REVERT decision Scores.
+- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, robustness, specialist) and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
-- **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/EXPLORE/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/oob/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
+- **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/EXPLORE/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
 - **Receipt**: every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting:
   - Whether push was enabled (or the `disabled_reason`)
   - The redacted connection config (host and key-presence booleans — never the keys themselves)
@@ -243,7 +213,7 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
   convenience figures: `total_in_out` (prompt + completion only) and
   `grand_total` (in + out + all cache-creation + cache-read tokens).
 * `by_component` — per-agent breakdown (orchestration / kernel / critic /
-  specialist / proposal_scorer / geak / oob / …), each with the same
+  specialist / proposal_scorer / geak / forge / …), each with the same
   convenience totals.
 * `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE).
 * `attribution` — `attributed_to_decisions` vs `unattributed` split plus

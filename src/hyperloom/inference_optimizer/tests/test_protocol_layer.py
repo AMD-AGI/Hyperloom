@@ -10,7 +10,6 @@ import pytest
 
 from hyperloom.orchestrator.bus.cursor_store import CursorStore
 from hyperloom.inference_optimizer.protocol.intent import (
-    EMIT_INTENT_TOOL_SCHEMA,
     IntentType,
     IntentValidationError,
     validate_envelope,
@@ -96,13 +95,6 @@ def test_validate_envelope_propose_action_requires_predicted_gain():
     envelope = {"intents": [{"intent_type": "propose_action", "payload": {"action_name": "baseline"}}]}
     with pytest.raises(IntentValidationError, match="predicted_gain_pct"):
         validate_envelope(envelope)
-
-
-def test_emit_intent_tool_schema_is_complete():
-    assert EMIT_INTENT_TOOL_SCHEMA["name"] == "emit_intent"
-    enum_values = set(EMIT_INTENT_TOOL_SCHEMA["input_schema"]["properties"]["intent_type"]["enum"])
-    assert "review_verdict" in enum_values
-    assert "objection" not in enum_values
 
 
 # message_bus
@@ -208,10 +200,10 @@ async def test_resource_lock_acquire_release(db):
         ttl_sec=60,
     )
     assert lease.lanes == ("workspace_mutation",)
-    assert "workspace_mutation" in await locks.active_lanes()
+    assert (await locks.lane_holders()).get("workspace_mutation") == 1
     n = await locks.release(lease)
     assert n == 1
-    assert await locks.active_lanes() == []
+    assert await locks.lane_holders() == {}
 
 
 @pytest.mark.asyncio
@@ -234,7 +226,7 @@ async def test_resource_lock_lane_busy_rolls_back(db):
         )
     assert "benchmark_lane" in exc.value.busy_lanes
     # Original lease should still be intact (atomic rollback)
-    assert "benchmark_lane" in await locks.active_lanes()
+    assert (await locks.lane_holders()).get("benchmark_lane") == 1
     await locks.release(a)
 
 
@@ -295,7 +287,7 @@ async def test_resource_lock_heartbeat_and_stale_release(db):
     )
     n = await locks.release(fake)
     assert n == 0
-    assert "profile_lane" in await locks.active_lanes()
+    assert (await locks.lane_holders()).get("profile_lane") == 1
     n = await locks.release(lease)
     assert n == len(lease.lanes)
 
@@ -388,5 +380,6 @@ async def test_cursor_store_never_moves_backwards(db):
     await cs.advance("Critic", seq=10, msg_id="m10")
     s = await cs.advance("Critic", seq=3, msg_id="m3")
     assert s.last_processed_seq == 10
-    assert await cs.is_already_processed("Critic", 3)
-    assert not await cs.is_already_processed("Critic", 11)
+    current = await cs.load("Critic")
+    assert 3 <= current.last_processed_seq
+    assert 11 > current.last_processed_seq

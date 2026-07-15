@@ -27,6 +27,9 @@ from typing import Any, Iterable
 
 import httpx
 
+from hyperloom.common.coerce import to_float
+from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
+
 from .base import SourceData, SourceUnavailable
 
 
@@ -188,20 +191,6 @@ class LocalProbeConfig:
         if self.session_dir is None:
             return None
         return self.session_dir / "storage" / "coordinator.db"
-
-
-@dataclass
-class _ProbeOutcome:
-    """Result of a single sub-probe attempt.
-
-    Attributes:
-        success (bool): Whether the sub-probe produced usable data.
-        detail (str): Optional human-readable detail / failure reason.
-    """
-
-    success: bool
-    detail: str = ""
-
 
 class LocalProbeSource:
     """Minimum-effort local data source for the reactor.
@@ -690,7 +679,7 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
             field = _ROCM_HEADER_MAP.get(header)
             if not field:
                 continue
-            value = _coerce_float_or_none(cells[col_idx])
+            value = to_float(cells[col_idx])
             if value is None:
                 continue
             if field in _ROCM_BYTE_TO_MB_FIELDS:
@@ -711,24 +700,6 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
                     snap["util_mem_pct"] = used / total * 100.0
             out.append(snap)
     return out
-
-
-def _coerce_float_or_none(value: str) -> float | None:
-    """Parse a CSV cell to ``float``, or ``None`` when not numeric.
-
-    Args:
-        value (str): The raw cell text.
-
-    Returns:
-        float | None: The parsed float, or ``None`` when empty or
-        unparseable.
-    """
-    if not value:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
 
 
 def _sample_nvidia_smi() -> dict[str, Any]:
@@ -1352,9 +1323,9 @@ def _normalise_integrate_entry(
             patch_size_bytes = Path(patch_path).stat().st_size
         except (FileNotFoundError, PermissionError, OSError):
             patch_size_bytes = None
-    base_tput = _coerce_optional_float(data.get("base_tput"))
-    new_tput = _coerce_optional_float(data.get("new_tput"))
-    gain_pct = _coerce_optional_float(data.get("gain_pct"))
+    base_tput = to_float(data.get("base_tput"))
+    new_tput = to_float(data.get("new_tput"))
+    gain_pct = to_float(data.get("gain_pct"))
     dispatched_count = data.get("dispatched_count")
     if not isinstance(dispatched_count, int):
         dispatched_count = None
@@ -1427,7 +1398,7 @@ def _scan_oob_attempts(
                     "kernel_id": str(row.get("kernel_id") or ""),
                     "backend": str(row.get("backend") or ""),
                     "report_text": str(row.get("report_text") or "")[:500],
-                    "microbench_speedup": _coerce_optional_float(row.get("microbench_speedup")),
+                    "microbench_speedup": to_float(row.get("microbench_speedup")),
                     "ts": row.get("ts"),
                     "source_file": str(path),
                 }
@@ -1492,31 +1463,6 @@ def _json_loads_or_none(text: str) -> Any:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError):
         return None
-
-
-def _coerce_optional_float(value: Any) -> float | None:
-    """Coerce a value to ``float`` where sensible, else ``None``.
-
-    Booleans are explicitly rejected (so ``True`` is not read as 1.0);
-    ints / floats convert directly and numeric strings are parsed.
-
-    Args:
-        value (Any): The value to coerce.
-
-    Returns:
-        float | None: The float value, or ``None`` when it is a bool,
-        a non-numeric string, or any other type.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return None
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2044,11 +1990,12 @@ async def _probe_gateway_health(
     url: str,
     timeout_s: float,
 ) -> dict[str, Any]:
-    """GET ``$OPENAI_BASE_URL/models`` with Bearer; classify the response.
+    """GET ``$OPENAI_BASE_URL/models`` with the same auth headers as LLM callers.
 
-    A 401 here (with the same auth token that critic + kernel-agent
-    use) means the upstream gateway has revoked / lost the key — J1
-    surfaces this distinct from generic local-server unreachable.
+    A 401 here (with the same token + custom headers that critic +
+    kernel-agent use) means the upstream gateway has revoked / lost the
+    key. Matching the main LLM auth resolver avoids false J1 alerts on
+    gateways that require ``Ocp-Apim-Subscription-Key`` for ``/models``.
 
     Args:
         url (str): The gateway ``/models`` URL to probe.
@@ -2065,10 +2012,7 @@ async def _probe_gateway_health(
         "reachable": False,
         "status": "error",
     }
-    headers: dict[str, str] = {}
-    api_key = os.environ.get("SAFE_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = _gateway_probe_headers(url)
     timeout = httpx.Timeout(max(0.5, float(timeout_s)))
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -2093,6 +2037,25 @@ async def _probe_gateway_health(
     else:
         out["status"] = "server_error"
     return out
+
+
+def _gateway_probe_headers(url: str) -> dict[str, str]:
+    """Build direct HTTP headers for the external gateway health probe.
+
+    Mirrors the OpenAI/Codex client auth: the operator's ``OPENAI_CUSTOM_HEADERS``
+    plus a Bearer token. Header injection is env-driven — there is no host-based
+    subscription-key auto-injection, so a gateway that needs a subscription key
+    must carry it in ``OPENAI_CUSTOM_HEADERS``.
+    """
+    del url  # the probe hits the OpenAI-side gateway; headers are env-driven
+    try:
+        cfg = resolve_openai_client_config(env=dict(os.environ))
+    except LLMConfigError:
+        return {}
+    headers = dict(cfg.default_headers)
+    if cfg.api_key and not any(name.lower() == "authorization" for name in headers):
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    return headers
 
 
 # J2 mount paths, read from env at probe time. All default to "" (no fallback):

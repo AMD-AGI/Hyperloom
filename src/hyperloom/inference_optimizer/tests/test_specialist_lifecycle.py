@@ -411,7 +411,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     tmp_path: Path,
 ):
     """End-to-end via the dispatcher exit hook: one specialist task lands the four bookkeeping mutations."""
-    from hyperloom.inference_optimizer.cli import _build_specialist_executor
+    from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
     from hyperloom.orchestrator.roles.mock_backend import (
         MockBackend,
         MockTurn,
@@ -617,18 +617,13 @@ async def test_force_stalled_domain_noop_outside_explore(force_coord):
     force_coord._handle_intent.assert_not_awaited()
 
 
-# 6. Intent routing branch wired into _handle_intent
+# 6. Intent routing branch wired into the dispatch table
 def test_handle_intent_dispatch_table_has_specialist_done_branch():
     """The dispatch table routes SPECIALIST_DONE to ``_handle_specialist_done``."""
-    import inspect
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+    from hyperloom.orchestrator.loop.intent_router import _INTENT_DISPATCH
 
-    from hyperloom.orchestrator.loop.intent_router import IntentRouter
-
-    src = inspect.getsource(IntentRouter._handle_intent)
-    assert "IntentType.SPECIALIST_DONE" in src, (
-        "_handle_intent must dispatch SPECIALIST_DONE (KB_gaps/Gap-03)"
-    )
-    assert "_handle_specialist_done" in src, (
-        "_handle_intent must route SPECIALIST_DONE to "
-        "_handle_specialist_done"
+    assert _INTENT_DISPATCH.get(IntentType.SPECIALIST_DONE) == "_handle_specialist_done", (
+        "_INTENT_DISPATCH must route SPECIALIST_DONE to "
+        "_handle_specialist_done (KB_gaps/Gap-03)"
     )
