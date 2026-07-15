@@ -330,6 +330,16 @@ class ActionRegistry:
             self.load()
         return list(self._cache.values())
 
+    def names(self) -> list[str]:
+        """Return the loaded action names in deterministic order.
+
+        Returns:
+            list[str]: Sorted action names known to the registry.
+        """
+        if not self._loaded:
+            self.load()
+        return sorted(self._cache)
+
 
 __all__ = [
     "ActionMetadata",

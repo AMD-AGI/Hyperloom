@@ -83,15 +83,12 @@ def cid_to_path_components(
 
     The shape is enforced to exactly eight segments so a malformed id
     cannot quietly route writes to a sibling directory and silently
-    shadow a real recipe. Legacy 6-segment ids (5-tuple era) are
-    accepted and padded with default slugs for model_type and
-    architectures to maintain backward compatibility.
+    shadow a real recipe.
 
     Returns the tuple in the order
-    ``(model, hardware, framework_name, framework_version, precision,
-    model_type, architectures)``,
-    matching :func:`recipe_canonical_id`'s keyword order so callers
-    can splat the result directly into a downstream call.
+    ``(model, hardware, framework_name, model_type, architectures,
+    framework_version, precision)``, matching the order the segments
+    are unpacked from the canonical id.
 
     Args:
         canonical_id (str): The canonical id to decompose.
