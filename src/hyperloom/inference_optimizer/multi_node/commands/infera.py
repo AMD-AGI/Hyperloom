@@ -359,6 +359,16 @@ def cmd_create_infera(args: argparse.Namespace) -> int:
             },
         }
     )
+    if pd_mode == "disaggregated":
+        pn, dn = _resolve_pd_node_counts(
+            args,
+            {"prefill_pod_ips": prefill_ips, "decode_pod_ips": decode_ips},
+        )
+        if pn > 0 or dn > 0:
+            merged["pd_prefill_nodes"] = pn
+            merged["pd_decode_nodes"] = dn
+            merged["last_restart_pd_prefill_nodes"] = pn
+            merged["last_restart_pd_decode_nodes"] = dn
     _mn_cli._save_state(merged)
 
     # Record pod SSH host keys (Infera-only control plane).
@@ -551,6 +561,65 @@ _INFERA_PID_PROBE = (
     'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then echo MN_ALIVE; else echo MN_DEAD; fi'
 )
 
+
+def _pd_role_pod_counts(
+    state: dict[str, Any],
+    *,
+    prefill_targets: list[dict[str, Any]] | None = None,
+    decode_targets: list[dict[str, Any]] | None = None,
+) -> tuple[int, int]:
+    """Return prefill/decode pod counts from targets or persisted state lists.
+
+    Args:
+        state: Multi-node state dict (may carry ``prefill_pod_ips`` / ``decode_pod_ips``).
+        prefill_targets: Optional resolved prefill SSH targets (wins over state).
+        decode_targets: Optional resolved decode SSH targets (wins over state).
+
+    Returns:
+        tuple[int, int]: ``(prefill_count, decode_count)``.
+    """
+    if prefill_targets is not None:
+        prefill_n = len(prefill_targets)
+    else:
+        prefill_n = len(state.get("prefill_pod_ips") or state.get("prefill_pods") or [])
+    if decode_targets is not None:
+        decode_n = len(decode_targets)
+    else:
+        decode_n = len(state.get("decode_pod_ips") or state.get("decode_pods") or [])
+    return prefill_n, decode_n
+
+
+def _resolve_pd_node_counts(
+    args: argparse.Namespace,
+    state: dict[str, Any],
+    *,
+    prefill_targets: list[dict[str, Any]] | None = None,
+    decode_targets: list[dict[str, Any]] | None = None,
+) -> tuple[int, int]:
+    """Resolve PD group sizes: explicit CLI wins, else pod-list length.
+
+    Matches ``external_state`` synthesis and lifecycle ``_resolve_pd_args`` so
+    persisted ``last_restart_pd_*`` equals the ``nnodes`` used at launch.
+
+    Args:
+        args: Parsed ``restart-server`` / create arguments.
+        state: Multi-node state for pod-list fallback.
+        prefill_targets: Optional prefill targets (wins over state lists).
+        decode_targets: Optional decode targets (wins over state lists).
+
+    Returns:
+        tuple[int, int]: ``(pd_prefill_nodes, pd_decode_nodes)``.
+    """
+    prefill_n, decode_n = _pd_role_pod_counts(
+        state,
+        prefill_targets=prefill_targets,
+        decode_targets=decode_targets,
+    )
+    pn = int(getattr(args, "pd_prefill_nodes", 0) or 0) or prefill_n
+    dn = int(getattr(args, "pd_decode_nodes", 0) or 0) or decode_n
+    return pn, dn
+
+
 def _infera_restart_config_matches(
     state: dict[str, Any],
     args: argparse.Namespace,
@@ -590,10 +659,15 @@ def _infera_restart_config_matches(
         return False
     if pd_mode != "disaggregated":
         return True
-    # Per-role PD knobs must also match (state persisted them at last launch).
+    # Compare effective PD topology (CLI explicit > pod-list inference), not raw
+    # CLI zeros left unset by the operator.
+    prefill_n, decode_n = _pd_role_pod_counts(state)
+    args_pn, args_dn = _resolve_pd_node_counts(args, state)
+    state_pn = int(state.get("last_restart_pd_prefill_nodes") or 0) or prefill_n
+    state_dn = int(state.get("last_restart_pd_decode_nodes") or 0) or decode_n
     return (
-        int(state.get("last_restart_pd_prefill_nodes") or 0) == int(getattr(args, "pd_prefill_nodes", 0) or 0)
-        and int(state.get("last_restart_pd_decode_nodes") or 0) == int(getattr(args, "pd_decode_nodes", 0) or 0)
+        args_pn == state_pn
+        and args_dn == state_dn
         and int(state.get("last_restart_pd_prefill_tp") or 0) == int(getattr(args, "pd_prefill_tp", 0) or 0)
         and int(state.get("last_restart_pd_decode_tp") or 0) == int(getattr(args, "pd_decode_tp", 0) or 0)
         and int(state.get("last_restart_pd_prefill_ep") or 0) == int(getattr(args, "pd_prefill_ep", 0) or 0)
@@ -692,6 +766,8 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     print_logs = getattr(args, "print_logs", False)
     rc_total = 0
     all_results: dict[str, Any] = {}
+    pd_prefill_nodes = 0
+    pd_decode_nodes = 0
 
     # Resume fast-path (parity with the RayJob path): if this restart's config
     # matches the last successful launch AND every GPU pod's prior server is
@@ -740,8 +816,13 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             default_port=_mn_cli._infera_default_ssh_port(state) + infera_support.INFERA_SSH_PORT_ROLE_STRIDE,
             default_role="decode",
         )
-        pn = int(getattr(args, "pd_prefill_nodes", 0) or 0) or len(prefill_targets)
-        dn = int(getattr(args, "pd_decode_nodes", 0) or 0) or len(decode_targets)
+        pd_prefill_nodes, pd_decode_nodes = _resolve_pd_node_counts(
+            args,
+            state,
+            prefill_targets=prefill_targets,
+            decode_targets=decode_targets,
+        )
+        pn, dn = pd_prefill_nodes, pd_decode_nodes
         ptp = int(getattr(args, "pd_prefill_tp", 0) or 0) or int(args.tp)
         dtp = int(getattr(args, "pd_decode_tp", 0) or 0) or int(args.tp)
         # Per-role EP / extra-args; 0 / "" falls back to the shared --ep /
@@ -822,9 +903,11 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     state["last_restart_pd_mode"] = pd_mode
     state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
     if pd_mode == "disaggregated":
-        # Persist per-role knobs so a state-only resume reproduces the topology.
-        state["last_restart_pd_prefill_nodes"] = int(getattr(args, "pd_prefill_nodes", 0) or 0)
-        state["last_restart_pd_decode_nodes"] = int(getattr(args, "pd_decode_nodes", 0) or 0)
+        # Persist inferred PD topology so resume fast-path and KB keys match launch.
+        state["pd_prefill_nodes"] = pd_prefill_nodes
+        state["pd_decode_nodes"] = pd_decode_nodes
+        state["last_restart_pd_prefill_nodes"] = pd_prefill_nodes
+        state["last_restart_pd_decode_nodes"] = pd_decode_nodes
         state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
         state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
         state["last_restart_pd_prefill_ep"] = int(getattr(args, "pd_prefill_ep", 0) or 0)
