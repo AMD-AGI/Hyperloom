@@ -14,7 +14,7 @@ def test_from_args_explicit_url():
 
 
 def test_from_args_timeout_sec_ignored():
-    # timeout_sec is accepted for compat but not stored
+    # timeout_sec is accepted for compat but not stored.
     c = pm.PRMonitorClient.from_args(url="http://x", timeout_sec=2.5)
     assert c.enabled is True
 

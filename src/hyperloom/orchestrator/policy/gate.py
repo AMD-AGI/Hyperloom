@@ -123,7 +123,7 @@ class PolicyDenied(RuntimeError):
 _GEMM_TUNING_ACTIONS: frozenset[str] = frozenset({"gemm_tuning", "run_gemm_tuning"})
 
 
-# Per-action delegate source allowlist (action_name → source roles); unlisted actions fall through to the general delegate rules.
+# Per-action delegate source allowlist; unlisted actions fall through to the general delegate rules.
 DELEGATE_ACTION_SOURCE_ALLOWLIST: dict[str, frozenset[str]] = {
     "recover": frozenset({"robustness"}),
 }
@@ -178,18 +178,16 @@ def detect_gpu_count() -> int:
         ids = [tok for tok in raw.split(",") if tok.strip() != ""]
         if ids:
             return len(ids)
-    try:
-        import subprocess
+    import subprocess
 
+    try:
         proc = subprocess.run(
             ["rocm-smi", "--showid"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-    except (FileNotFoundError, OSError, ValueError):
-        return 0
-    except Exception:  # noqa: BLE001
+    except (FileNotFoundError, OSError, ValueError, subprocess.TimeoutExpired):
         return 0
     if proc.returncode != 0:
         return 0
@@ -297,15 +295,13 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
 # Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
 SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
 
-# Free-form (``scope='freeform'``) sanity-gate limits. Coarse sanity tripwire on
-# free-form specialist wave size; the real ceiling is the ``research_lane``
-# capacity (2×GPU) and the GPU specialist pool.
+# Free-form (``scope='freeform'``) sanity-gate limits; the real ceiling is the
+# research_lane capacity and the GPU specialist pool.
 SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
-# Lightweight mechanical red-line tripwire over free-form task descriptions:
-# obviously-destructive host commands a dispatch must never embed. This is a
-# fail-fast sanity check, NOT a security boundary — the isolated worktree, the
-# Critic review, and the integrate_patch gate remain the real boundaries.
+# Fail-fast tripwire for obviously-destructive host commands in free-form task
+# descriptions. NOT a security boundary — the worktree, Critic review, and
+# integrate_patch gate remain the real boundaries.
 _FREEFORM_REDLINE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\brm\s+-rf?\s+(?:/|~|\$HOME|\*)", re.IGNORECASE),
     re.compile(r"\bmkfs\.", re.IGNORECASE),
@@ -313,8 +309,7 @@ _FREEFORM_REDLINE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r">\s*/dev/sd[a-z]"),
     re.compile(r":\(\)\s*\{.*\};\s*:"),  # fork bomb
     re.compile(r"\bshutdown\b|\breboot\b", re.IGNORECASE),
-    # Global process cleanup can kill the optimizer's serving / benchmark
-    # process; ban pipe-to-kill and killall.
+    # Ban pipe-to-kill and killall (can kill the serving / benchmark process).
     re.compile(r"\bps\s+(?:aux|-\w+)\b.*\|.*\bkill\b", re.IGNORECASE),
     re.compile(r"\bpgrep\b.*\|.*\bkill\b", re.IGNORECASE),
     re.compile(r"\bkillall\b", re.IGNORECASE),
@@ -481,11 +476,10 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# `source_file` is special: may match :func:`resolve_source_file_allowlist` (framework trees outside session_dir, resolved at check time).
-# `framework_source_root` is the (optional) integrate_patch/framework_agent git-apply
-# root override; no production path ever sets it (Coordinator relies on allowlist
-# resolution), so gating it here only blocks an LLM-authored override escaping to an
-# arbitrary dir (e.g. "/root") — closes the arbitrary-host-write vector under strict_paths.
+# `source_file` may match :func:`resolve_source_file_allowlist` (framework trees
+# outside session_dir, resolved at check time). `framework_source_root` is the
+# optional git-apply root override; gating it here blocks an LLM-authored override
+# escaping to an arbitrary dir under strict_paths.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
 
 
@@ -525,14 +519,7 @@ def _resolved_within(value: str, root: str) -> bool:
         r = Path(str(root)).resolve()
     except (OSError, RuntimeError):
         return False
-    try:
-        return v == r or v.is_relative_to(r)
-    except AttributeError:  # pragma: no cover — Python <3.9
-        try:
-            v.relative_to(r)
-            return True
-        except ValueError:
-            return False
+    return v == r or v.is_relative_to(r)
 
 
 # Subset of PATH_LIKE_FIELDS that also accept :func:`_trace_path_allowlist` (others stay strictly session-rooted).
@@ -568,9 +555,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # fact-layer KEEP ledger; Coordinator is the sole writer.
         "optimization_stack",
         "gain_per_stack_entry",
-        # schema_version migration breadcrumb; LLM must not roll state.json back.
         "schema_version",
-        # Cortex KB integration fields (Coordinator-only writes; LLM read is fine).
+        # Cortex KB integration fields (Coordinator-only writes).
         "cortex_session_id",
         "cortex_session_summary",
         "warm_start_recipe",
@@ -578,10 +564,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "warm_start_lessons",
         "warm_start_ts",
         "warm_start_context",
-        # KB tag completeness (Coordinator-populated from manifest + baseline config; LLM reads via prompt, Coordinator writes).
+        # KB tag completeness (Coordinator-populated; LLM reads via prompt).
         "stack_fingerprint_meta",
         "baseline_workload_extra",
-        # warm-recipe replay one-shot guard + outcome; LLM cannot edit (bypasses replay budget).
+        # warm-recipe replay one-shot guard + outcome; LLM cannot edit.
         "warm_replay_attempted",
         "warm_replay_outcome",
         "warm_history_injected",
@@ -591,12 +577,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "phase_started_unix",
         "phase_history",
         "phase_budget_pct",
-        # R1/R2/R7 cyclic phase-machine state (Coordinator-only writers:
-        # ``_apply_macro_cycle_reloop`` + ``should_reloop_to_explore`` accounting).
-        # Locked so an LLM ``update_state`` cannot forge the macro-cycle counter,
-        # the per-cycle budget window, the per-cycle gain anchor / no-gain streak
-        # (which drive global-convergence + the decaying acceptance curve), or the
-        # cross-cycle bottleneck-switch handoff.
+        # Cyclic phase-machine state; Coordinator-only writers. Locked so an LLM
+        # update_state cannot forge the macro-cycle counter, budget window, gain
+        # anchor / no-gain streak, or bottleneck-switch handoff.
         "macro_cycle",
         "cycle_minutes",
         "gain_at_cycle_start",
@@ -606,9 +589,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "saturated_directions",
         "bottleneck_shift",
         "cycle_strategy_log",
-        # operator-facing lifecycle event log. Coordinator-only writer
-        # (SharedState.record_lifecycle_event); LLM update_state must not be
-        # able to forge "phase X finished, outputs at <path>" events.
+        # operator-facing lifecycle event log; Coordinator-only writer so the
+        # LLM cannot forge lifecycle events.
         "lifecycle",
         # specialist sub-agent ledger; LLM cannot inject entries (proposals go via the R3 path).
         "specialist_rounds",
@@ -617,44 +599,40 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "rounds_since_last_specialist",
         "rounds_since_last_keep",
         "last_specialist",
-        # research_lane / GPU capacity set once at CLI/manifest time; locked so the LLM can't raise it mid-flight.
+        # research_lane / GPU capacity set once at CLI/manifest time; locked.
         "research_lane_capacity",
         "gpu_specialist_capacity",
-        # phase-machine escalation plumbing; LLM blocked (defense in depth) so it can't force ``skip_to_close``.
+        # phase-machine escalation plumbing; LLM blocked (defense in depth).
         "pending_escalate_hint",
         "last_consumed_escalate_hint",
         "last_consumed_escalate_hint_ts",
         "plateau_overrides",
-        # CLOSE-phase sequencer flag; LLM must not toggle it (would skip cli.finally's safety net).
+        # CLOSE-phase sequencer flag; LLM must not toggle it.
         "close_sequence_done",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
-        # structured gaps ledger; single writer (``_refresh_gaps``) so the LLM can't inject fake gaps.
+        # structured gaps ledger; single writer (``_refresh_gaps``).
         "gaps",
-        # Orchestration working-memory checkpoint; Coordinator-authored (LLM must not self-author durable memory).
+        # Orchestration working-memory checkpoint; Coordinator-authored.
         "orchestration_memory",
         # Bounded rollback ring of prior good orchestration_memory records;
-        # Coordinator-only writer (operator re-seed via env). Locked in lock-step
-        # with its parent so the LLM can't forge/erase rollback snapshots.
+        # Coordinator-only writer, locked in lock-step with its parent.
         "orchestration_memory_history",
-        # FRAMEWORK per-repo discovery budget; set once, locked against LLM inflation.
+        # FRAMEWORK per-repo discovery budget; set once, locked.
         "framework_max_candidates",
-        # Advisory model-architecture profile from the SKILL launcher; locked as the sole source of truth.
+        # Advisory model-architecture profile from the SKILL launcher; locked.
         "model_arch",
-        # Architecture-identity tags from config.json fanned into recipe-snapshot extras; locked against pollution.
+        # Architecture-identity tags from config.json; locked against pollution.
         "model_architectures",
         "model_type",
-        # Multimodal text-fallback degraded-run markers (cli._preflight). Coordinator/
-        # preflight are the sole writers; locked so an LLM update_state cannot forge
-        # or clear "degraded run" — it drives the final report's degraded warning
-        # (report.py) and must reflect the real preflight verdict, not LLM intent.
+        # Multimodal text-fallback degraded-run markers (cli._preflight);
+        # Coordinator/preflight are the sole writers. Drives the final report's
+        # degraded warning, so it must reflect the real preflight verdict.
         "degraded_mode",
         "model_warnings",
-        # Kernel-opt ledgers + Critic patch-verdict store: Coordinator/kernel-agent
-        # are the sole writers (record_trace_analyze / record_kernel_opt /
-        # record_specialist_patch_verdict). Locked so an LLM update_state cannot
-        # launder attacker-chosen snapshot_dir/repo_root/source_file/test_command
-        # into the integrate path, or forge its own Critic approval.
+        # Kernel-opt ledgers + Critic patch-verdict store; Coordinator/kernel-agent
+        # are the sole writers. Locked so an LLM update_state cannot launder
+        # attacker-chosen paths into integrate, or forge its own Critic approval.
         "specialist_patch_verdicts",
         "last_trace_analyze",
         "last_kernel_opt",
@@ -687,7 +665,6 @@ class PolicyGate:
         ``INFERENCE_OPTIMIZER_STRICT_PHASE`` enable strict behavior
         without threading a constructor argument through every caller.
         """
-        # Allow env to enable strict mode without threading a constructor arg through every caller.
         import os as _os
 
         if not self.strict_paths and _os.environ.get("INFERENCE_OPTIMIZER_STRICT_PATHS", "").strip() in (
@@ -870,10 +847,10 @@ class PolicyGate:
             self._validate_specialist_dispatch(role, payload)
             self._validate_phase_action(role, action_name, intent_kind="delegate")
             return
-        # ``integrate_patch`` requires a non-reject Critic verdict (operator env HYPERLOOM_BYPASS_CRITIC=1 overrides out-of-band; in-band bypass_critic ignored).
+        # ``integrate_patch`` requires a non-reject Critic verdict.
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
             self._validate_integrate_patch_critic_gate(payload)
-        # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed (concurrent sweeps crash both vllm engines).
+        # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
         # conc_sweep_phase_singleton: block duplicate conc_sweep proposals.
@@ -914,7 +891,7 @@ class PolicyGate:
                         "'evidence': {...}})"
                     ),
                 )
-        # R1 phase_incompatible. Runs after the structural checks so cheaper denials win.
+        # R1 phase_incompatible; after structural checks so cheaper denials win.
         self._validate_phase_action(role, action_name, intent_kind="delegate")
         # R4 / R5 — block a delegate whose action_name invokes an external tool.
         self._validate_no_kb_write_collision(
@@ -955,11 +932,8 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        # Kernel-owned actions are REQUEST-only — mirror the delegate guard so the
-        # ownership contract is enforced on BOTH the propose and delegate channels
-        # (action_surfaces.KERNEL_AGENT_OWNED_ACTIONS). Without this a propose_action
-        # would pass the gate and materialize as a ``kind=<kernel action>`` task
-        # that bypasses the kernel REQUEST handler.
+        # Kernel-owned actions are REQUEST-only; mirror the delegate guard so a
+        # propose_action can't materialize a kernel task bypassing the REQUEST handler.
         if action_name in KERNEL_AGENT_OWNED_ACTIONS:
             raise PolicyDenied(
                 f"action={action_name!r} is owned by the Kernel-agent; "
@@ -1065,7 +1039,6 @@ class PolicyGate:
         topic = str(payload.get("topic", "")).strip()
         if not topic:
             raise PolicyDenied("send_message missing topic", rule="payload")
-        # Unknown topics are soft-degraded by the Coordinator to "observation"; not rejected here.
 
     def _validate_request(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``REQUEST`` intent against the routing matrix.
@@ -1176,12 +1149,11 @@ class PolicyGate:
                 "review_verdict missing target_proposal_msg_id",
                 rule="payload",
             )
-        # Accept the legacy single ``verdict`` or the per-variant ``verdict_map``; here we validate verdict strings against REVIEW_VERDICTS.
+        # Accept the single ``verdict`` or the per-variant ``verdict_map``.
         has_single = "verdict" in payload
         verdict_map = payload.get("verdict_map")
         has_map = isinstance(verdict_map, dict) and bool(verdict_map)
         if has_single == has_map:
-            # Both or neither — defense in depth.
             raise PolicyDenied(
                 "review_verdict: exactly one of 'verdict' or 'verdict_map' must be present",
                 rule="payload",
@@ -1258,11 +1230,9 @@ class PolicyGate:
         if not phase or phase not in PHASE_NAMES:
             return
         explore_enabled = bool(getattr(state, "explore_enabled", True))
-        # --no-explore is a hard intent: EXPLORE work is disabled for the whole
-        # run, so the interleave grey channel must not let KERNEL re-introduce
-        # an ``explore`` grid. This denial is ALWAYS fail-closed (independent of
-        # ``strict_phase``) because it reflects an explicit operator decision,
-        # not the softer per-phase action contract.
+        # --no-explore disables EXPLORE for the whole run, so the interleave
+        # channel must not let KERNEL re-introduce an ``explore`` grid. Always
+        # fail-closed (independent of ``strict_phase``): it is an operator decision.
         if not explore_enabled and phase == PHASE_KERNEL_AGENT and action_name == EXPLORE_ACTION_NAME:
             raise PolicyDenied(
                 f"action {EXPLORE_ACTION_NAME!r} is disabled for this run "
@@ -1306,7 +1276,7 @@ class PolicyGate:
             f"action contract."
         )
         if not self.strict_phase:
-            # Warn-only: keep the run flowing but record the denial in the audit trail.
+            # Warn-only: keep the run flowing but record the denial.
             try:
                 state.record_policy_denial(
                     action_name=action_name,
@@ -1619,17 +1589,13 @@ class PolicyGate:
                     "the patches you want to apply."
                 ),
             )
-        # The bypass must come from an out-of-band operator channel the LLM
-        # cannot author. An in-band params.bypass_critic is deliberately ignored:
-        # otherwise the same untrusted principal that wrote the patch could also
-        # skip its own Critic review (self-approval). Operators set
-        # HYPERLOOM_BYPASS_CRITIC=1 in the launcher env for an explicit override.
+        # Bypass must come from the out-of-band operator env the LLM cannot
+        # author; an in-band params.bypass_critic is ignored (self-approval).
         bypass = os.environ.get("HYPERLOOM_BYPASS_CRITIC") == "1"
         if bypass:
             return
         if params.get("bypass_critic"):
-            # An LLM-authored in-band bypass is ignored (self-approval blocked);
-            # log it so the attempted override is visible in ops logs.
+            # In-band bypass is ignored; log the attempted override.
             log.warning(
                 "integrate_patch: in-band params.bypass_critic ignored; Critic gate "
                 "enforced for specialist_task_id=%r (operator override is "
@@ -1642,7 +1608,7 @@ class PolicyGate:
             try:
                 verdict = ss.get_specialist_patch_verdict(sid)
             except AttributeError:
-                # Older SharedState without the field → no verdict on record.
+                # Guards a null specialist_patch_verdicts deserialized from state.json.
                 verdict = ""
         if not verdict:
             raise PolicyDenied(
@@ -1713,17 +1679,8 @@ class PolicyGate:
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
 
-        # scope='freeform' has no domain anchor:
-        # it skips the tag / gap vocabulary checks and runs a lightweight
-        # mechanical sanity gate instead.
-        #
-        # This is the sanctioned way to let the agent freely decide a
-        # specialist's mandate: pass ``scope='freeform'`` + ``task_description``
-        # (or a ``tasks=[...]`` wave), NOT an ad-hoc / relaxed ``domain`` tag.
-        # ``params.tags`` remains a controlled vocabulary validated below; the
-        # domain KEY→kb_anchor translation (``normalize_dispatch_tags``) only
-        # accepts real catalogue entries, so genuinely unknown tags still trip
-        # ``specialist_unknown_domain``.
+        # scope='freeform' has no domain anchor: it skips the tag / gap
+        # vocabulary checks and runs a lightweight mechanical sanity gate instead.
         scope_raw = str(params.get("scope") or "").strip().lower()
         if scope_raw == SPECIALIST_SCOPE_FREEFORM:
             self._validate_freeform_specialist_dispatch(params)
@@ -1731,11 +1688,8 @@ class PolicyGate:
 
         # ``params.tags`` is canonical; ``params.domain`` is accepted as a single-tag alias.
         tags = normalize_dispatch_tags(params)
-        # A *bare* dispatch — no explicit scope and no domain/tag anchor —
-        # defaults to the cheap, read-only freeform lane (point 3: safe & cheap
-        # first) instead of being rejected. The freeform gate below still
-        # requires a non-empty task_description, so a fully empty dispatch is
-        # rejected there rather than running an anchorless patch specialist.
+        # A bare dispatch (no scope, no anchor) defaults to the cheap freeform
+        # lane; its gate still requires a non-empty task_description.
         if not scope_raw and not tags:
             self._validate_freeform_specialist_dispatch(params)
             return
@@ -1756,10 +1710,8 @@ class PolicyGate:
                 hint=(f"every tag must be one of {sorted(KNOWLEDGE_DOMAIN_TAG_SET)!r}"),
             )
 
-        # ``scope`` dial (domain | domains | freeform). Absent => legacy
-        # single-domain default. ``domains`` is the cross-domain channel and
-        # requires >1 distinct tag; ``domain`` is single-tag. (``freeform`` has
-        # its own gate.)
+        # ``scope`` dial (domain | domains | freeform). Absent => single-domain
+        # default. ``domains`` requires >1 distinct tag; ``domain`` is single-tag.
         scope = str(params.get("scope") or "").strip().lower()
         if scope and scope not in SPECIALIST_SCOPE_VALUES:
             raise PolicyDenied(
@@ -1786,15 +1738,10 @@ class PolicyGate:
                 hint=("Use scope='domains' for a cross-domain specialist, or pass a single tag."),
             )
 
-        # ``sub_kind`` is a free-form prompt selector (not constrained to a catalogue).
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         if not gap:
-            # Friction symmetry (point 4): a domain/tag-anchored dispatch that
-            # omits the gap id is backfilled from the gaps[] ledger by matching
-            # the dispatch anchor against each gap's ``domain_hint`` — so the
-            # LLM doesn't have to hand-copy a canonical id (and isn't pushed
-            # toward freeform out of friction). Only mutates when a match is
-            # found; otherwise the rejection below still fires.
+            # Backfill the gap id from the gaps[] ledger by matching the dispatch
+            # anchor against each gap's ``domain_hint``; only mutates on a match.
             gap = self._autofill_gap_from_ledger(params, tags)
         if not gap:
             raise PolicyDenied(
@@ -1815,10 +1762,8 @@ class PolicyGate:
                     f"delegate{{action='specialist'}}: max_turns must be int, got {max_turns_raw!r}",
                     rule="specialist_dispatch_source",
                 ) from exc
-            # Depth is bounded by the wall-clock budget rather than a turn count.
-            # ``max_turns=0`` is accepted as "unbounded" (run
-            # to a deliverable conclusion); negatives and values above the
-            # effectively-unbounded hard cap are still rejected.
+            # ``max_turns=0`` means unbounded (depth bounded by wall-clock);
+            # negatives and values above the hard cap are rejected.
             if max_turns < 0 or max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
                 raise PolicyDenied(
                     f"delegate{{action='specialist'}}: max_turns={max_turns} "
@@ -1837,20 +1782,11 @@ class PolicyGate:
         """Validate a specialist's optional GPU request against the GPU
         specialist-pool ceiling.
 
-        Shared by the domain-anchored gate (``_validate_specialist_dispatch``)
-        and the freeform gate (``_validate_freeform_specialist_dispatch``) so a
+        Shared by the domain-anchored and freeform gates so a
         ``scope='freeform'`` dispatch that sets ``needs_gpu`` is governed by the
-        same ceiling instead of slipping past it via the freeform early-return.
-        No-op when the dispatch needs no GPU.
-
-        A bench-enabled specialist (``mode=patch`` & ``bench=true``) does not
-        have to set ``needs_gpu`` explicitly: the Coordinator's
-        ``_warm_specialist_params`` auto-defaults it to True at dispatch so the
-        worktree micro-benchmark holds a GPU lease. We mirror that auto-default
-        here, otherwise such a dispatch slips past this gate (no explicit
-        ``needs_gpu``) and later becomes a GPU-needing queued task that can stall
-        forever when the pool is disabled (``--gpu-specialist-capacity 0``)
-        rather than being rejected at the policy layer.
+        same ceiling. No-op when the dispatch needs no GPU. A bench-enabled
+        specialist (``mode=patch`` & ``bench=true``) is auto-treated as
+        ``needs_gpu`` here, mirroring the Coordinator's dispatch-time default.
 
         Args:
             params (dict[str, Any]): the specialist dispatch ``params`` carrying
@@ -1884,13 +1820,9 @@ class PolicyGate:
             uses_whole_machine_gpu_lane,
         )
 
-        # Whole-machine bench specialists lease from ``framework_gpu_pool``
-        # (the full node), so their default gpu_count must match the dispatcher:
-        # serving_tp when known, otherwise the whole-machine pool capacity.
-        # When serving_tp > 0 the existing bench-floor below already aligns them;
-        # the special case is serving_tp == 0 (no serving yet) where the old
-        # ``serving_tp or 1`` default was 1 while the dispatcher fell back to
-        # ``gpu_pool.capacity`` — corrected here to match.
+        # Whole-machine bench specialists lease from ``framework_gpu_pool``, so
+        # their default gpu_count matches the dispatcher: serving_tp when known,
+        # else the whole-machine pool capacity (the serving_tp == 0 case).
         if uses_whole_machine_gpu_lane(params) and serving_tp == 0:
             default_gpu_count = _whole_machine_pool_size() or 1
         else:
@@ -1924,13 +1856,10 @@ class PolicyGate:
 
         if resolve_specialist_profile(params).reserves_benchmark_lane and serving_tp > 0 and gpu_count < serving_tp:
             gpu_count = serving_tp
-        # Whole-machine, time-shared specialists (framework-authoring + bench)
-        # are validated against the whole-machine pool, NOT the serving-disjoint
-        # pool: the dispatcher routes them to ``framework_gpu_pool`` and they
-        # serialize with serving via ``gpu_research_lane`` (server torn down
-        # between rounds), so the serving carve does not apply. Without this a
-        # bench specialist is spuriously denied whenever serving occupies the
-        # whole node (serving-disjoint size == 0 at TP == #GPUs).
+        # Whole-machine, time-shared specialists validate against the
+        # whole-machine pool, not the serving-disjoint pool: they route to
+        # ``framework_gpu_pool`` and serialize with serving, so the carve
+        # does not apply (else they'd be denied when serving owns the node).
         if uses_whole_machine_gpu_lane(params):
             effective_pool_size = _whole_machine_pool_size()
             pool_desc = "whole-machine GPU pool"
@@ -2015,7 +1944,6 @@ class PolicyGate:
             sev = severity_rank.get(str(g.get("severity") or "").lower(), 0)
             attempts = len(g.get("attempts") or [])
             first_seen = str(g.get("first_seen_ts") or "")
-            # Highest severity first, then fewest attempts, then oldest.
             return (-sev, attempts, first_seen)
 
         matches = [
@@ -2053,12 +1981,9 @@ class PolicyGate:
                 too large, or a task description is empty / too long / trips the
                 red-line tripwire.
         """
-        # Freeform deliberately skips the domain-anchored max_turns gate: a
-        # free-form investigation has no domain/gap to bound its depth, so it is
-        # constrained by the task TIMEOUT (lease TTL / wall-clock) rather than a
-        # turn cap, by design — no max_turns bound applies here. A GPU request must still
-        # clear the same pool ceiling as a domain specialist, otherwise
-        # scope='freeform' would be a hole around the GPU accounting.
+        # Freeform skips the domain-anchored max_turns gate (bounded by the task
+        # timeout instead), but a GPU request must still clear the same pool
+        # ceiling as a domain specialist.
         self._validate_specialist_gpu_request(params)
         wave = params.get("tasks")
         if wave is not None:
@@ -2338,14 +2263,7 @@ class PolicyGate:
             v = Path(str(value)).resolve()
         except (OSError, RuntimeError):
             return False
-        try:
-            return v == sd or v.is_relative_to(sd)
-        except AttributeError:  # pragma: no cover — Python <3.9
-            try:
-                v.relative_to(sd)
-                return True
-            except ValueError:
-                return False
+        return v == sd or v.is_relative_to(sd)
 
     def _path_in_source_allowlist(self, value: str) -> bool:
         """Return whether a path falls under a framework source allowlist.
@@ -2437,7 +2355,7 @@ class PolicyGate:
             if key not in PATH_LIKE_FIELDS:
                 return
             if not self._path_under_session(node):
-                # Multi-node profile traces live outside session_dir; allow only the trace-input fields against the trace allowlist.
+                # Multi-node profile traces live outside session_dir; allow trace-input fields against the trace allowlist.
                 if key in TRACE_PATH_LIKE_FIELDS and self._path_in_trace_allowlist(node):
                     return
                 raise PolicyDenied(
@@ -2484,10 +2402,9 @@ class PolicyGate:
 
 
 # ---------------------------------------------------------------------------
-# Policy-denial write-owner functions. They take ``state`` first and own the
-# PolicyGate denial-streak bookkeeping + its prompt summary, which belongs to
-# this decision domain. ``SharedState`` exposes forwarding shims so existing
-# callers (``state.record_policy_denial`` etc.) reach these.
+# Policy-denial write-owner functions: they take ``state`` first and own the
+# denial-streak bookkeeping + its prompt summary. ``SharedState`` exposes
+# forwarding shims so existing callers reach these.
 # ---------------------------------------------------------------------------
 def record_policy_denial(
     state,

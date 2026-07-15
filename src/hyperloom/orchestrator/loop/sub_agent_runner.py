@@ -5,9 +5,8 @@
 Receives ``delegate{action_name, params}`` intents (after PolicyGate),
 materializes them into ``tasks`` rows, and dispatches the work.
 
-Dispatches to one of two sub-agent forms: deterministic Python
-``ActionRunner`` executors (looked up via ``EXECUTOR_REGISTRY[task.kind]``)
-or the LLM external sub-agent fallback (``backend.run()``).
+Dispatches to deterministic Python ``ActionRunner`` executors, looked up
+via ``EXECUTOR_REGISTRY[task.kind]``.
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ class RunnerContext:
     extra: dict = field(default_factory=dict)
 
 
-# Runner signature: async fn(ctx) -> result_payload (dict)
+# Runner signature: async fn(ctx) -> result_payload (dict).
 ExecutorFn = Callable[[RunnerContext], Awaitable[dict]]
 
 
@@ -96,9 +95,8 @@ class SubAgentRunner:
         self.tasks = tasks
         self.executor_registry: dict[str, ExecutorFn] = dict(executor_registry or {})
         self.session_dir = Path(session_dir) if session_dir else None
-        # Live SharedState threaded into each executor's ctx.extra so
-        # gain-computing executors can recover a baseline anchor when
-        # params['base_tput'] is absent.
+        # Live SharedState threaded into each executor's ctx.extra so gain-computing
+        # executors can recover a baseline anchor when params['base_tput'] is absent.
         self.shared_state = shared_state
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
@@ -268,8 +266,7 @@ class SubAgentRunner:
                 result=result_payload,
             )
         finally:
-            # Always release whoever acquired the lease — pre-bound or owned
-            # (atomic release).
+            # Always release whoever acquired the lease — pre-bound or owned.
             if lease is not None:
                 await self.locks.release(lease)
 

@@ -89,14 +89,13 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-# Cold/hot throughputs modelled on the MaralGPT-Maral-7B-alpha-1 CSV row.
 _COLD_TPUT = 270.9
 _HOT_TPUT = 4701.6
 
 
 def _cold_then_hot_fake_run(captured: list | None = None):
-    """Return a ``run_with_session_kill`` stand-in that emits a cold
-    throughput on its first call and a hot throughput thereafter."""
+    """Return a ``run_with_session_kill`` stand-in that emits a cold throughput
+    on its first call and a hot throughput thereafter."""
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
@@ -386,17 +385,15 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path, monkeypatch):
 
 
 def test_baseline_no_workspace_persists_stderr_to_file(tmp_path):
-    """When Magpie exits nonzero before creating a benchmark_* workspace
-    (no server.log ever written), the executor must persist the captured
-    stderr to ``baseline_stderr.log`` so the failure leaves an on-disk
-    artifact that survives the NFS clone / S3 archive."""
+    """When Magpie exits nonzero before creating a benchmark_* workspace, the
+    executor must persist the captured stderr to ``baseline_stderr.log`` so the
+    failure leaves an on-disk artifact that survives the NFS clone / S3 archive."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="sglang")
     output_dir = tmp_path / "ws"
     crash_text = "torch.OutOfMemoryError: HIP out of memory (workspace_buffer)"
 
     def fake_run(cmd, *args, **kwargs):
-        # Nonzero exit, no benchmark_* workspace created.
         return subprocess.CompletedProcess(cmd, 1, "", crash_text)
 
     executor = _executor(base, tmp_path)
@@ -427,11 +424,10 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
     tmp_path,
     monkeypatch,
 ):
-    """A vLLM engine-core bootstrap failure has server.log carrying
-    ``Engine core initialization failed`` while Magpie exits nonzero without a
-    benchmark_* workspace and is classified ``server_init_dead`` with the
-    server.log root cause surfaced in ``error`` (not a generic
-    ``subprocess_nonzero`` from Magpie's wrapper noise)."""
+    """A vLLM engine-core bootstrap failure (server.log carries ``Engine core
+    initialization failed`` while Magpie exits nonzero without a benchmark_*
+    workspace) is classified ``server_init_dead`` with the server.log root cause
+    surfaced in ``error``."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -447,7 +443,6 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
             "failed. See root cause above. Failed core proc(s): {}\n",
             encoding="utf-8",
         )
-        # Magpie exits nonzero, no benchmark_* workspace produced.
         return subprocess.CompletedProcess(cmd, 1, "", "magpie wrapper noise")
 
     executor = _executor(base, tmp_path, baseline_double_run=False)
@@ -511,11 +506,9 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     tmp_path,
     monkeypatch,
 ):
-    """When Magpie DOES create a benchmark_* workspace but it carries no
-    valid measurement, a server.log death marker takes precedence — the
-    failure is classified ``server_init_dead`` (not the generic ``no_report`` /
-    ``invalid_measurement``) and the real engine fault is surfaced in
-    ``error``."""
+    """When Magpie creates a benchmark_* workspace with no valid measurement, a
+    server.log death marker takes precedence — the failure is classified
+    ``server_init_dead`` and the real engine fault is surfaced in ``error``."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -523,16 +516,14 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
-        # Workspace exists (clears the no_workspace guard) but has no
-        # benchmark_report.json, so the measurement is invalid.
+        # Workspace exists but has no report, so the measurement is invalid.
         (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
         (slot / "server.log").write_text(
             "(APIServer pid=42) RuntimeError: Engine core initialization "
             "failed. See root cause above. Failed core proc(s): {}\n",
             encoding="utf-8",
         )
-        # Magpie exits 0 here on purpose: classification must be driven by the
-        # server.log marker, not the wrapper returncode.
+        # Classification must be driven by the server.log marker, not returncode.
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     executor = _executor(base, tmp_path, baseline_double_run=False)
@@ -556,16 +547,14 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
 
 
 def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
-    """A stale server.log death marker left behind in a reused
-    output_dir must NOT bias a fresh attempt's classification. The executor
-    clears the prior log before launching, so an attempt that boots fine but
-    yields no report is classified by its own outcome (``no_report``) — never
-    the previous attempt's ``server_init_dead``."""
+    """A stale server.log death marker in a reused output_dir must NOT bias a
+    fresh attempt's classification. The executor clears the prior log before
+    launching, so an attempt that boots but yields no report is classified by
+    its own outcome (``no_report``), never ``server_init_dead``."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
     output_dir.mkdir(parents=True)
-    # Stale death marker from a PRIOR attempt in the same slot.
     (output_dir / "server.log").write_text(
         "(APIServer pid=1) RuntimeError: Engine core initialization failed. Failed core proc(s): {}\n",
         encoding="utf-8",
@@ -574,8 +563,7 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
-        # This attempt boots fine but produces no report; crucially it does
-        # NOT (re)write a death marker into server.log.
+        # Boots fine, produces no report, does NOT rewrite a death marker.
         (slot / "benchmark_vllm_20260602_010101").mkdir(parents=True)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -600,8 +588,7 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
 
 
 def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
-    """A checkout already on a local filesystem is returned unchanged
-    (no needless copy)."""
+    """A checkout already on a local filesystem is returned unchanged."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     src = tmp_path / "InferenceX"
@@ -613,8 +600,8 @@ def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
 
 
 def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
-    """A checkout on a simulated network mount is mirrored to local
-    disk and the returned path points at the local copy, not the original."""
+    """A checkout on a simulated network mount is mirrored to local disk and the
+    returned path points at the local copy, not the original."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
@@ -634,7 +621,6 @@ def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
 
     assert dest != str(src)
     assert str(local_root) in dest
-    # Mirror is complete (benchmark_lib.sh + the rest of the patched tree).
     assert (Path(dest) / "benchmarks" / "benchmark_lib.sh").read_text() == ("# patched lib")
     assert (Path(dest) / "utils" / "marker.txt").read_text() == "payload"
 
@@ -643,9 +629,9 @@ def test_ensure_local_inferencex_isolates_per_task_mirrors(
     tmp_path,
     monkeypatch,
 ):
-    """Callers can include a task/output-dir key in the mirror hash so
-    two overlapping baselines sharing one wekafs checkout never rmtree/replace
-    a directory that another server is currently ``cd``-ed into."""
+    """Callers can include a task/output-dir key in the mirror hash so two
+    overlapping baselines sharing one wekafs checkout never rmtree/replace a
+    directory that another server is currently ``cd``-ed into."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
@@ -667,8 +653,7 @@ def test_ensure_local_inferencex_isolates_per_task_mirrors(
 
 
 def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
-    """The relocation can be opted out of via env even on a network
-    mount (escape hatch for multi-node / shared-mount setups)."""
+    """The relocation can be opted out of via env even on a network mount."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
@@ -684,9 +669,9 @@ def test_ensure_local_inferencex_falls_back_on_copy_failure(
     tmp_path,
     monkeypatch,
 ):
-    """When the mirror copy itself fails (e.g. local disk full), the
-    helper degrades to the original network-mount path instead of raising, so
-    the run still proceeds (pre-fix behaviour) rather than aborting."""
+    """When the mirror copy itself fails (e.g. local disk full), the helper
+    degrades to the original network-mount path instead of raising, so the run
+    still proceeds rather than aborting."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
@@ -712,12 +697,10 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
     monkeypatch,
 ):
     """If the copy lands but the mirror is missing the load-bearing
-    ``benchmarks/benchmark_lib.sh`` (partial / corrupt tree), the helper
-    rejects it and returns the original path rather than handing Magpie a
-    broken ``cd`` target."""
+    ``benchmarks/benchmark_lib.sh``, the helper rejects it and returns the
+    original path rather than handing Magpie a broken ``cd`` target."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
-    # Source has NO benchmark_lib.sh, so the post-copy completeness check fails.
     src = tmp_path / "wekafs_InferenceX"
     (src / "utils").mkdir(parents=True)
     (src / "utils" / "marker.txt").write_text("payload")
@@ -733,16 +716,12 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
 
 
 def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
-    """When INFERENCEX_PATH is on a network mount, the
-    local mirror is what Magpie actually ``cd``-s into. Asserts BOTH channels:
+    """When INFERENCEX_PATH is on a network mount, the local mirror is what
+    Magpie actually ``cd``-s into. Asserts both channels:
 
     * the materialized YAML's ``benchmark.inferencex_path`` (the field Magpie's
       ``_build_local_command`` honours — the real ``cd`` target), and
     * the ``MAGPIE_INFERENCEX_PATH`` env fallback.
-
-    The YAML assertion is the load-bearing one: an earlier iteration only
-    rewrote the env fallback and the pickle still dumped onto wekafs because
-    Magpie reads the YAML field, not the env, when it is populated.
     """
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
@@ -788,25 +767,19 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    # Load-bearing: the YAML field Magpie's `cd <inferencex>` reads.
     yaml_ix = seen["materialized_cfg"]["benchmark"]["inferencex_path"]
     assert yaml_ix != str(ix_src), seen["materialized_cfg"]
     assert str(local_root) in yaml_ix
-    # Env fallback also points at the mirror.
     magpie_ix = seen["env"]["MAGPIE_INFERENCEX_PATH"]
     assert magpie_ix != str(ix_src), seen["env"]
     assert str(local_root) in magpie_ix
-    # Relocation is task-local; the process-wide env remains the original
-    # source path, avoiding cross-task races between concurrent materializers.
+    # Relocation is task-local; process-wide env stays the original source path.
     assert os.environ["INFERENCEX_PATH"] == str(ix_src)
 
 
 def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
-    """The Magpie *parent* subprocess cwd is anchored to the stable task
-    output_dir (never the default ``/tmp``) as defence-in-depth. (The actual
-    cuda-graph fix is the local-InferenceX mirror — see
-    ``test_baseline_points_magpie_at_local_inferencex`` — because Magpie
-    re-roots the server via ``cd <inferencex>``.)"""
+    """The Magpie parent subprocess cwd is anchored to the stable task
+    output_dir (never the default ``/tmp``) as defence-in-depth."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -916,10 +889,10 @@ def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
     tmp_path,
     monkeypatch,
 ):
-    """When the reuse port is occupied by a zombie (healthy but no
-    metadata), pre-start cleanup must (a) unlink stale pid/json without
-    sending signals to potentially-recycled PIDs, and (b) invoke
-    _kill_stale_servers() to reap the zombie listener."""
+    """When the reuse port is occupied by a zombie (healthy but no metadata),
+    pre-start cleanup must (a) unlink stale pid/json without sending signals to
+    potentially-recycled PIDs, and (b) invoke _kill_stale_servers() to reap the
+    zombie listener."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1014,9 +987,7 @@ def test_pre_start_cleanup_no_kill_when_port_free(tmp_path, monkeypatch):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    # Port was free — global kill must NOT have fired.
     assert kill_calls["n"] == 0
-    # Stale pid file still removed (safe unlink, no signal).
     assert not (output_dir / "vllm_8888.pid").exists()
     assert state["calls"] == 2
 
@@ -1201,7 +1172,6 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     _write_yaml(tmp_path / "base.yaml", framework="vllm")
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
-    # PID that is essentially never alive.
     (pid_dir / "vllm_8888.pid").write_text("2147483646")
     (pid_dir / "vllm_8888.json").write_text("{}")
 
@@ -1215,7 +1185,7 @@ def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     assert not (pid_dir / "vllm_8888.json").exists()
 
 
-# -- _classify_subprocess_error unit tests ----------------------------
+# _classify_subprocess_error unit tests
 
 from hyperloom.orchestrator.actions.executors.baseline import (
     _classify_subprocess_error,
@@ -1260,15 +1230,12 @@ def test_classify_value_error_with_argv_dump_not_arg_error():
 
 
 def test_classify_subprocess_error_none_tail_does_not_crash():
-    # A slow (>=FAST_EXIT) failure with no captured stderr must not raise:
-    # stderr_tail.lower() is hoisted above the elapsed gate, so a None tail
-    # would AttributeError without the guard.
+    # A slow failure with no captured stderr must not raise.
     assert _classify_subprocess_error(600.0, None) == "subprocess_nonzero"
 
 
 def test_classify_kv_cache_oom_after_weight_load():
-    # KV-cache OOM can surface well after the 30s fast-exit window (weights
-    # take minutes to load), so it must be detected regardless of elapsed time.
+    # KV-cache OOM must be detected regardless of elapsed time.
     tail = (
         "ValueError: Loaded weights leave no GPU memory for the KV cache "
         "under --mem-fraction-static=0.7. Raise --mem-fraction-static above 0.737"

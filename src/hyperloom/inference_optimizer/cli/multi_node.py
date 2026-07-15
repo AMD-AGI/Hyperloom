@@ -205,7 +205,7 @@ def _provision_multi_node_infera_stack(args: argparse.Namespace) -> None:
         recreate=False,
         poll_interval=6,
         poll_timeout=poll_timeout,
-        # PD topology forward (missing in upstream; see comment above).
+        # PD topology forward (see comment above).
         pd_mode=(getattr(args, "pd_mode", "") or "aggregated"),
         pd_prefill_nodes=int(getattr(args, "pd_prefill_nodes", 0) or 0),
         pd_decode_nodes=int(getattr(args, "pd_decode_nodes", 0) or 0),
@@ -219,9 +219,8 @@ def _provision_multi_node_infera_stack(args: argparse.Namespace) -> None:
     state = _load_state()
     su = str(state.get("service_url") or "").strip()
     if su:
-        # Belt-and-suspenders: benchmark_env_for_subprocess also reads
-        # state.service_url, but exporting here makes the frontend URL
-        # visible to any early shell-level Magpie call too.
+        # Also export here so the frontend URL is visible to any early
+        # shell-level Magpie call.
         os.environ["BENCHMARK_BASE_URL"] = su
         os.environ["MAGPIE_RUN_PHASE"] = "client"
         print(f"multi-node(infera): BENCHMARK_BASE_URL={su} (frontend :8000)")
@@ -333,11 +332,11 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     if ra:
         print(f"multi-node: exported RAY_ADDRESS={ra} for kernel-agent Ray tasks")
 
-    # Multi-node: server pods must write torch traces to a sandbox-readable wekafs path, namespaced by rayjob_id.
+    # Server pods write torch traces to a sandbox-readable wekafs path, namespaced by rayjob_id.
     state_after = _load_state()
     rid = (state_after.get("rayjob_id") or "").strip()
     if rid:
-        # Anchor torch-profile shared root on $USER_DATA_PATH so sandbox and RayJob pods see the same path.
+        # Anchor the torch-profile shared root on $USER_DATA_PATH so sandbox and pods agree.
         trace_root_path = mn_profile_trace_root() / rid / "torch_trace"
         trace_root = str(trace_root_path)
         try:
@@ -350,11 +349,10 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         else:
             os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = trace_root
             print(f"multi-node: exported HYPERLOOM_MN_PROFILE_TRACE_DIR={trace_root}")
-            # Best-effort GC of older sibling RayJob trace dirs (active rayjob_id name-guarded).
+            # GC older sibling RayJob trace dirs (active rayjob_id name-guarded).
             _gc_old_profile_traces(keep=rid)
 
-    # RayJob recreate path: replay promoted patches from optimization_stack since fresh pods lost them.
-    # Best-effort; failures degrade to warnings (orchestrator re-runs kernel-agent on missing speedups).
+    # RayJob recreate path: replay promoted patches since fresh pods lost them. Best-effort.
     _replay_kernel_patches_for_multi_node(args)
 
 def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:

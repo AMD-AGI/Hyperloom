@@ -1,19 +1,11 @@
 """One-attempt SDK driver for the quantization-agent.
 
-Mirrors :mod:`kernel-agent.tools.tracelens_skill_runner`:
-
-* keyword-only public API,
-* lazy ``_import_sdk`` with explicit ``sdk_query_factory`` / ``sdk_options_cls``
-  injection seams so tests don't need the SDK installed,
-* ``cwd = quark_root`` with graceful fallback for older SDK builds,
-* SDK errors are stored on the result rather than raised — the classifier in
-  :mod:`driver.assessment` decides whether to fail the attempt by reading the
-  workspace state alongside ``sdk_error``,
-* a single ``log`` callable so the caller can route output to its logger.
-
-The agent leans entirely on ``SKILL.md`` as the runtime contract: this module
-just plumbs ``(workspace, quark_root, attempt_n, threshold, interactive,
-user_prompt)`` into a templated prompt and hands it to the SDK.
+Keyword-only public API with injection seams (``sdk_query_factory`` /
+``sdk_options_cls``) so tests don't need the SDK installed. Runs with
+``cwd = quark_root`` (graceful fallback for older SDK builds), stores SDK
+errors on the result rather than raising, and routes output through a single
+``log`` callable. The agent leans on ``SKILL.md`` as the runtime contract;
+this module just plumbs run context into a templated prompt for the SDK.
 """
 
 from __future__ import annotations
@@ -26,7 +18,7 @@ from typing import Any, Awaitable, Callable, Iterable
 
 DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash"]
-DEFAULT_MAX_TURNS = 240  # ~ Quark workflow has 4 STOPs + validator + eval; generous
+DEFAULT_MAX_TURNS = 240  # Quark workflow has 4 STOPs + validator + eval
 
 SKILL_RELATIVE_PATH = "SKILL.md"
 QUARK_PY310_COMPAT_DIR = ".hyperloom_quark_py310_compat"
@@ -100,9 +92,7 @@ def _iter_message_text(message: Any) -> Iterable[str]:
 def resolve_skill_path(package_root: Path | None = None) -> Path:
     """Return the on-disk path of ``quantization_agent/SKILL.md``.
 
-    The SKILL is the runtime contract loaded into every attempt; resolution
-    is centralized here so callers (including the CLI smoke test) don't
-    hardcode the layout.
+    Resolution is centralized here so callers don't hardcode the layout.
 
     Args:
         package_root: Override for the package root; defaults to the
@@ -111,9 +101,7 @@ def resolve_skill_path(package_root: Path | None = None) -> Path:
     Returns:
         The path to ``SKILL.md`` under the package root.
     """
-
-    # __file__ is .../quantization_agent/driver/runner.py — SKILL.md lives one
-    # level up at the package root (a runtime contract, not a driver detail).
+    # SKILL.md lives one level up from this module, at the package root.
     root = package_root if package_root is not None else Path(__file__).resolve().parent.parent
     return root / SKILL_RELATIVE_PATH
 
@@ -121,12 +109,9 @@ def resolve_skill_path(package_root: Path | None = None) -> Path:
 def _prepare_quark_py310_compat(workspace: Path) -> Path:
     """Create a workspace-local Python 3.10 compatibility shim for Quark 0.12.
 
-    Quark release/0.12 uses a small number of Python 3.11 symbols
-    (``typing.Self`` and ``datetime.UTC``). Hyperloom deployments may still run
-    the optimizer from a Python 3.10 venv, so inject the missing symbols via
-    ``sitecustomize`` without modifying the Quark checkout.
+    Quark 0.12 uses Python 3.11 symbols (``typing.Self`` and ``datetime.UTC``);
+    inject them via ``sitecustomize`` without modifying the Quark checkout.
     """
-
     compat_dir = workspace / QUARK_PY310_COMPAT_DIR
     compat_dir.mkdir(parents=True, exist_ok=True)
     (compat_dir / "sitecustomize.py").write_text(QUARK_PY310_SITE_CUSTOMIZE, encoding="utf-8")
@@ -162,12 +147,10 @@ def build_attempt_prompt(
 ) -> str:
     """Assemble the prompt handed to the SDK for one attempt.
 
-    The runtime contract is in ``SKILL.md``; this prompt just pins the run
-    context (workspace / quark_root / attempt / threshold / interactivity)
-    and embeds the verbatim user prompt. Retry attempts also reference the
-    prior outcome ID + the fix-hypothesis file SKILL.md wrote at the end of
-    the previous attempt, so the LLM can target the diagnosed cause rather
-    than re-running the same plan blindly.
+    Pins the run context (workspace / quark_root / attempt / threshold /
+    interactivity) and embeds the verbatim user prompt. Retry attempts also
+    reference the prior outcome ID and the fix-hypothesis file so the LLM can
+    target the diagnosed cause.
 
     Args:
         user_prompt: The verbatim user instruction to embed.
@@ -269,7 +252,6 @@ async def run_one_attempt(
     Returns:
         The :class:`AttemptResult` for the session.
     """
-
     workspace = Path(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
     quark_root = Path(quark_root)
@@ -318,7 +300,7 @@ async def run_one_attempt(
 
     try:
         options = sdk_options_cls(**kwargs)
-    except TypeError as exc:
+    except TypeError:
         # Older SDK builds may not support cwd; prompt + SKILL.md use absolute
         # paths so retrying without cwd is safe.
         kwargs.pop("cwd", None)
@@ -329,13 +311,11 @@ async def run_one_attempt(
             # mutating process-global os.environ across async awaits. If this
             # SDK predates the env option, fail clearly instead of silently
             # running Quark 0.12 in an incompatible Python 3.10 environment.
-            if "env" in kwargs:
-                raise RuntimeError(
-                    "claude_agent_sdk.ClaudeAgentOptions does not support env; "
-                    "upgrade claude-agent-sdk so Hyperloom can pass the Quark "
-                    "Python 3.10 compatibility shim to SDK subprocesses"
-                ) from env_exc
-            raise env_exc from exc
+            raise RuntimeError(
+                "claude_agent_sdk.ClaudeAgentOptions does not support env; "
+                "upgrade claude-agent-sdk so Hyperloom can pass the Quark "
+                "Python 3.10 compatibility shim to SDK subprocesses"
+            ) from env_exc
 
     chunks: list[str] = []
     sdk_error = ""
@@ -350,9 +330,7 @@ async def run_one_attempt(
                 if log:
                     log(f"[claude-sdk] {text[:1000]}")
     except Exception as exc:  # noqa: BLE001
-        # Per kernel-agent precedent: capture the error but don't raise —
-        # SKILL.md may have produced valid artifacts before the SDK aborted
-        # (e.g. "max turns reached" after validate phase finished).
+        # Capture but don't raise: valid artifacts may exist before the abort.
         sdk_error = f"{type(exc).__name__}: {exc}"
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
@@ -365,7 +343,7 @@ async def run_one_attempt(
     )
 
 
-# Type alias for the injection seam used in tests + by driver/retry.py.
+# Injection seam used in tests and by driver/retry.py.
 RunOneAttemptFn = Callable[..., Awaitable[AttemptResult]]
 
 

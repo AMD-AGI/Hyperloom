@@ -67,7 +67,6 @@ class _KernelResponderBackend:
         return BackendTurnResult(intents=intents or [_heartbeat()], raw_text="(kernel test responder)")
 
 
-# Full 4-agent main-loop e2e
 @pytest.mark.asyncio
 async def test_e2e_propose_approve_dispatch_with_mock_executor(session_dir):
     """Orchestration → Critic (mock) → dispatcher → succeeded."""
@@ -90,7 +89,6 @@ async def test_e2e_propose_approve_dispatch_with_mock_executor(session_dir):
     c = Coordinator(session_dir, backends=backends)
     c.sub.register_executor("baseline", lambda ctx: _async_value({"tput": 1840}))
     try:
-        # tick 1 propose, tick 2 approve+materialize, tick 3 dispatch.
         await c.tick(3)
 
         proposals = await c.bus.tail(topic="proposal")
@@ -134,7 +132,6 @@ async def test_e2e_request_response_round_trip(session_dir):
     }
     c = Coordinator(session_dir, backends=backends)
     try:
-        # tick 1 mirror REQUEST to kernel, tick 2 RESPONSE routed back.
         await c.tick(2)
 
         kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")

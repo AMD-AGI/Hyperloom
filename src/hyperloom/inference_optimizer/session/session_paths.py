@@ -55,9 +55,8 @@ def optimizer_lock_path(session_dir: Path) -> Path:
     return Path(session_dir) / "runtime" / "optimizer.lock"
 
 
-# Per-task workspaces under runs/<action>/<task_id>/.
-# Which actions own a runs/ workspace is derived from the ActionRegistry's
-# ``pipeline_phase`` field; these are the phases whose executors write there.
+# Phases (from the ActionRegistry ``pipeline_phase`` field) whose executors own
+# a per-task ``runs/<action>/<task_id>/`` workspace.
 _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
     {
         "measure",
@@ -69,9 +68,8 @@ _RUNS_WORKSPACE_PHASES: frozenset[str] = frozenset(
     }
 )
 
-# Fallback used only when ActionRegistry can't load (broken yaml / early
-# bootstrap). Must stay in sync with the _RUNS_WORKSPACE_PHASES union;
-# tests/test_action_catalogue.py enforces alignment.
+# Fallback used only when ActionRegistry can't load. Must stay in sync with the
+# _RUNS_WORKSPACE_PHASES union; tests/test_action_catalogue.py enforces this.
 _RUNS_ACTIONS_FALLBACK: frozenset[str] = frozenset(
     {
         "baseline",
@@ -105,7 +103,7 @@ def _runs_actions() -> frozenset[str]:
         The set of action names that own a runs-workspace.
     """
     try:
-        from hyperloom.orchestrator.actions.registry import ActionRegistry  # local: avoid import-time cycle
+        from hyperloom.orchestrator.actions.registry import ActionRegistry  # local: avoid import cycle
 
         registry = ActionRegistry().load()
     except Exception:
@@ -175,10 +173,6 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
 def kernel_agent_runs_root(session_dir: Path) -> Path:
     """``<sd>/kernel-agent/runs/`` — the parent of all per-tool-invocation
     kernel-agent run dirs (keyed by tool-invocation session id beneath it).
-
-    tree-reform.MD §2.4/P2.4: the similarly named ``paths.py`` helper that
-    returned the kernel-agent root was removed; this function is unchanged
-    because it already describes the ``runs/`` directory it returns.
 
     Args:
         session_dir: The session root directory.
@@ -251,10 +245,8 @@ def reports_dir(session_dir: Path) -> Path:
     return Path(session_dir) / "reports"
 
 
-# ---------------------------------------------------------------------------
-# Full-trace artefacts (token + decision timeline) under reports/trace/
-# ---------------------------------------------------------------------------
-# Layout (see FULL_TRACE_DESIGN §3.3):
+# Full-trace artefacts (token + decision timeline) under reports/trace/.
+# Layout:
 #
 #   <sd>/reports/trace/
 #     llm_calls.jsonl              # every in-process LLM call's token row
@@ -262,14 +254,11 @@ def reports_dir(session_dir: Path) -> Path:
 #     decision_trace.jsonl         # collector join product (token+decision)
 #
 # All trace writers are best-effort and swallow OSError; these helpers only
-# compute paths (callers mkdir the parent before writing). The parent process
-# is the sole writer of llm_calls.jsonl, so there is no concurrent-writer
-# fan-in to coordinate on that file. Out-of-process children (specialist /
-# geak / forge / robustness / critic-agent CLI) do NOT append to it; they write
-# their own ext/*.jsonl shard under ``trace_ext_dir`` which the collector
-# (``_load_llm_calls``) and the Langfuse emitter (``_flush_ext_shards``)
-# backfill at read time. The ext shards are a legacy/child-compatibility path:
-# new producers should run in-process and parent-append into llm_calls.jsonl.
+# compute paths. The parent process is the sole writer of llm_calls.jsonl.
+# Out-of-process children write their own ext/*.jsonl shard under
+# ``trace_ext_dir`` which the collector and the Langfuse emitter backfill at
+# read time. The ext shards are a child-compatibility path: new producers
+# should run in-process and parent-append into llm_calls.jsonl.
 def trace_dir(session_dir: Path) -> Path:
     """``<sd>/reports/trace/`` — root of the unified token+decision trace.
 
@@ -368,11 +357,11 @@ def conversations_path(session_dir: Path) -> Path:
     full prompt + completion text for every in-process LLM call.
 
     Sibling of :func:`llm_calls_path`: that ledger holds the *token* account
-    (kept small, no prompt text — see FULL_TRACE_DESIGN §9), while this file
-    carries the *conversation* (redacted full prompt/response) so a session
-    can be replayed or exported (e.g. to Langfuse) after the fact. Both share
-    the same ``session_id`` / ``component`` / ``tick`` / ``phase`` join keys
-    so the two streams line up against ``decision_trace``.
+    (kept small, no prompt text), while this file carries the *conversation*
+    (redacted full prompt/response) so a session can be replayed or exported
+    after the fact. Both share the same ``session_id`` / ``component`` /
+    ``tick`` / ``phase`` join keys so the two streams line up against
+    ``decision_trace``.
 
     Args:
         session_dir: The session root directory.
@@ -454,8 +443,7 @@ def agent_prompt_snapshot(session_dir: Path, role: str) -> Path:
 
 
 # External baseline comparison artefacts. Dedicated top-level subdir (not
-# runs/) because target_analysis is a prep-phase action and prep is not in
-# _RUNS_WORKSPACE_PHASES.
+# runs/) because target_analysis is a prep-phase action.
 def target_analysis_dir(session_dir: Path) -> Path:
     """``<sd>/target_analysis/`` — external baseline artefacts. Owner:
     TargetAnalysisExecutor; reader: ReportExecutor.
@@ -518,7 +506,7 @@ def cortex_dir(session_dir: Path) -> Path:
 def cortex_warm_json(session_dir: Path) -> Path:
     """Compute the path to ``.kb_warm.json``, the T0 ``find-recipe`` snapshot.
 
-    Read by §3.5 specialist assembly (M5).
+    Read by specialist assembly.
 
     Args:
         session_dir (Path): The session root directory.
@@ -533,7 +521,7 @@ def cortex_warm_json(session_dir: Path) -> Path:
 def cortex_pitfalls_json(session_dir: Path) -> Path:
     """Compute the path to ``.kb_pitfalls.json``, the T0 ``traps`` snapshot.
 
-    Read by §3.5 specialist assembly (M5).
+    Read by specialist assembly.
 
     Args:
         session_dir (Path): The session root directory.
@@ -616,10 +604,9 @@ def cortex_audit_jsonl(session_dir: Path) -> Path:
     return cortex_dir(session_dir) / ".kb_audit.jsonl"
 
 
-# recipe-snapshot v2 per-session bookkeeping. Separate
-# ``runtime/recipe_snapshot/`` subtree (not runtime/cortex/) to stay decoupled
-# from the legacy /v1/points client. Writes are local-only, so only the
-# read-side audit log survives here.
+# recipe-snapshot per-session bookkeeping. Separate ``runtime/recipe_snapshot/``
+# subtree (not runtime/cortex/). Writes are local-only, so only the read-side
+# audit log survives here.
 def recipe_snapshot_dir(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/recipe_snapshot/``, the dispatcher bookkeeping root.
 
@@ -716,9 +703,7 @@ def _prune_old_workdirs(root: Path, *, keep: int) -> None:
                     try:
                         child.rmdir()
                     except OSError:
-                        # Best-effort cleanup: a non-empty dir (children removed
-                        # in a later deeper-first pass) or a transient FS error
-                        # is tolerated; the outer rmdir / next sweep retries.
+                        # Best-effort cleanup; the outer rmdir / next sweep retries.
                         pass
             stale.rmdir()
         except OSError:

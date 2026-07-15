@@ -8,7 +8,7 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
-# ray_dashboard imports httpx at module load; provide a lightweight stub.
+# Stub httpx, imported by ray_dashboard at module load.
 _httpx_stub = types.ModuleType("httpx")
 _httpx_stub.Timeout = lambda **kwargs: kwargs
 _httpx_stub.Client = MagicMock()

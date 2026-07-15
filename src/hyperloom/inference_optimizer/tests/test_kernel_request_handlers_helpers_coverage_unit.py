@@ -83,15 +83,14 @@ def test_backend_order_explicit_payload(monkeypatch) -> None:
 
 def test_backend_order_env_alias(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    # Removed OOB backends are filtered out; when nothing survives, fall back to
-    # the legacy native ladder instead of running zero backend attempts.
+    # When nothing survives filtering, fall back to the legacy native ladder.
     monkeypatch.setenv("KERNEL_OPT_BACKENDS", "codex,claude")
     assert krh._backend_order({}) == ["forge"]
 
 
 def test_backend_order_unknown_backends_yield_empty(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    # Unknown, non-OOB backends leave nothing to run and no legacy fallback.
+    # Unknown backends leave nothing to run and no legacy fallback.
     monkeypatch.setenv("KERNEL_OPT_BACKENDS", "foo,bar")
     assert krh._backend_order({}) == []
 
@@ -104,7 +103,7 @@ def test_backend_order_default_is_empty_because_geak_owns_phase(monkeypatch) -> 
 
 
 def test_backend_order_drops_geak_from_per_kernel_ladder(monkeypatch) -> None:
-    # geak (the e2e delegate) is a phase-level delegate, never a per-kernel backend.
+    # geak is a phase-level delegate, never a per-kernel backend.
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     assert krh._backend_order({"backend_order": "geak,forge"}) == ["forge"]
@@ -119,7 +118,7 @@ def test_geak_selected_from_env_order(monkeypatch) -> None:
 
 
 def test_geak_selected_owns_phase_when_mixed(monkeypatch) -> None:
-    # When geak (the e2e delegate) appears anywhere in the order it owns the phase.
+    # geak owns the phase when it appears anywhere in the order.
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge,GEAK")
     assert krh.geak_selected() is True

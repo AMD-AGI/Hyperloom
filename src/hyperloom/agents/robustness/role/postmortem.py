@@ -33,8 +33,7 @@ _FINALIZED_MARKER_NAME: str = ".robustness_finalized"
 _POSTMORTEM_FILENAME: str = "robustness_postmortem.md"
 _DECISION_TRACE_FILENAME: str = "decision_trace.json"
 
-# Action families scanned under ``runs/`` for L2. Mirrors
-# ``hyperloom.inference_optimizer.session.session_paths.RUN_ACTION_FAMILIES`` (source of truth).
+# Action families scanned under ``runs/`` for L2.
 _DECISION_TRACE_ACTION_DIRS: tuple[str, ...] = (
     "baseline",
     "profile",
@@ -65,15 +64,10 @@ class PostmortemFinalizerConfig:
     # with ``role.findings.FINDINGS_SUBDIR`` (the on-disk source of truth).
     findings_subdir: str = "agents/robustness/findings"
     runs_subdir: str = "runs"
-    # HIGH-severity findings rendered in the body (cap keeps markdown readable).
+    # Cap of HIGH-severity findings rendered in the body.
     max_findings_in_report: int = 20
-    # Recent tasks per action in the trace (keeps JSON small on sweep-heavy runs).
+    # Cap of recent tasks per action in the trace.
     max_tasks_per_action: int = 50
-
-
-# ---------------------------------------------------------------------------
-# Public entry points
-# ---------------------------------------------------------------------------
 
 
 class PostmortemFinalizer:
@@ -105,9 +99,6 @@ class PostmortemFinalizer:
         self.session_id = session_id or "default"
         self._config = config or PostmortemFinalizerConfig()
 
-    # ------------------------------------------------------------------
-    # marker
-    # ------------------------------------------------------------------
     @property
     def reports_dir(self) -> Path:
         """Directory under the session where outputs are written.
@@ -135,9 +126,6 @@ class PostmortemFinalizer:
         """
         return self.marker_path.is_file()
 
-    # ------------------------------------------------------------------
-    # main entry
-    # ------------------------------------------------------------------
     def finalize(self, *, stop_reason: str) -> bool:
         """Run the L1+L2 pipeline. Returns True if we wrote new files.
 
@@ -177,8 +165,7 @@ class PostmortemFinalizer:
         except Exception:  # noqa: BLE001
             log.exception("postmortem: failed to render markdown")
             postmortem_md = self._fallback_postmortem_md(stop_reason=stop_reason)
-        # Best-effort writes; failing to write the trace shouldn't stop
-        # us from writing the marker (idempotency wins).
+        # Best-effort writes; the marker is written regardless.
         try:
             self.reports_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -190,9 +177,6 @@ class PostmortemFinalizer:
         self._write_marker(stop_reason=stop_reason)
         return wrote_any
 
-    # ------------------------------------------------------------------
-    # findings — L1 inputs
-    # ------------------------------------------------------------------
     def _findings_path(self) -> Path:
         """Path of the FindingSink JSONL file for this session.
 
@@ -232,9 +216,6 @@ class PostmortemFinalizer:
                 rows.append(obj)
         return rows
 
-    # ------------------------------------------------------------------
-    # decision trace — L2 inputs
-    # ------------------------------------------------------------------
     def _build_decision_trace(self) -> dict[str, Any]:
         """Scan ``runs/<action>/<task>/result.json`` into a trace dict.
 
@@ -334,9 +315,6 @@ class PostmortemFinalizer:
             out.append(_normalise_task_entry(task_dir, result_path, payload))
         return out
 
-    # ------------------------------------------------------------------
-    # markdown rendering
-    # ------------------------------------------------------------------
     def _build_postmortem_md(
         self,
         *,
@@ -369,7 +347,6 @@ class PostmortemFinalizer:
         lines.append(f"- **tasks_count**: {decision_trace.get('total_tasks', 0)}")
         lines.append("")
 
-        # ----- Flashpoint -----
         flashpoint = _pick_flashpoint(findings)
         lines.append("## Flashpoint")
         lines.append("")
@@ -411,7 +388,6 @@ class PostmortemFinalizer:
                     lines.append(f"- `{intent.get('intent_type', '?')}` → `{intent.get('payload', {})}`")
         lines.append("")
 
-        # ----- Findings catalogue -----
         lines.append("## Findings catalogue")
         lines.append("")
         if not findings:
@@ -422,8 +398,7 @@ class PostmortemFinalizer:
             low = [f for f in findings if str(f.get("severity")) == "low"]
             lines.append(f"Totals: HIGH={len(high)} / MEDIUM={len(medium)} / LOW={len(low)}")
             lines.append("")
-            # Render the most recent N HIGH-severity for the operator;
-            # MEDIUM/LOW go to decision_trace.json (full corpus).
+            # Render the most recent N HIGH-severity; MEDIUM/LOW go to decision_trace.json.
             ordered = sorted(
                 high,
                 key=lambda f: f.get("tick_index") or 0,
@@ -440,7 +415,6 @@ class PostmortemFinalizer:
                     )
         lines.append("")
 
-        # ----- Decision-trace summary -----
         lines.append("## Decision-trace summary")
         lines.append("")
         tasks_by_action = decision_trace.get("tasks_by_action") or {}
@@ -478,9 +452,6 @@ class PostmortemFinalizer:
             f"see logs)_\n"
         )
 
-    # ------------------------------------------------------------------
-    # write helpers
-    # ------------------------------------------------------------------
     def _write_text(self, filename: str, body: str) -> bool:
         """Write a text file into the reports directory.
 
@@ -561,11 +532,6 @@ class PostmortemFinalizer:
             log.warning("postmortem: cannot write marker %s: %s", marker, exc)
 
 
-# ---------------------------------------------------------------------------
-# Standalone entry point for the operator CLI / post-hoc runs
-# ---------------------------------------------------------------------------
-
-
 def finalize_session(
     session_dir: Path,
     *,
@@ -590,11 +556,6 @@ def finalize_session(
         config=config,
     )
     return finalizer.finalize(stop_reason=stop_reason)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _pick_flashpoint(
@@ -649,8 +610,7 @@ def _normalise_task_entry(
         "error_class": payload.get("error_class"),
         "ts": payload.get("ts"),
     }
-    # Common executor outputs — only include when non-None to keep
-    # the JSON narrow.
+    # Common executor outputs — only include when non-None.
     for key in (
         "gain_pct",
         "validated_gain_pct",

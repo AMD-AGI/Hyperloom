@@ -8,7 +8,7 @@ Two halves of the enablement flow that both build on a
 * **Discovery** — given a failure signature, decide which repos to scout for an
   enabling PR (the serving framework plus the ROCm / HIP / aiter bridge repos)
   and rank candidate PR titles by enablement intent ("enable / support / add /
-  fix / port to ROCm"). See :func:`build_search_plan`, :func:`rank_titles`,
+  fix / port to ROCm"). See :func:`build_search_plan`,
   :func:`score_enablement_title`.
 * **Authoring** — turn a request + ranked candidates into the
   :class:`EnablementMandate` (allowed source roots + task description + patch
@@ -167,24 +167,6 @@ def score_enablement_title(
     return base + intent_weight * float(intent)
 
 
-def rank_titles(
-    titles: Sequence[str],
-    plan: EnablementSearchPlan,
-) -> list[tuple[str, float]]:
-    """Score and sort candidate titles by enablement relevance, descending.
-
-    Args:
-        titles: Candidate PR titles.
-        plan: The search plan carrying ranking keywords.
-
-    Returns:
-        list[tuple[str, float]]: ``(title, score)`` pairs, highest first;
-        ties keep input order (stable sort).
-    """
-    scored = [(t, score_enablement_title(t, plan)) for t in titles]
-    return sorted(scored, key=lambda pair: pair[1], reverse=True)
-
-
 # ---------------------------------------------------------------------------
 # Authoring: the mandate handed to the patch-authoring sub-agent
 # ---------------------------------------------------------------------------
@@ -209,14 +191,9 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "than authoring from scratch.",
 )
 
-# Environment-setup authorization. Some enablement gaps are NOT source bugs but
-# missing/stale dependencies or tools: e.g. a brand-new model arch needs a newer
-# ``transformers``; PR discovery needs the ``gh`` CLI; a kernel needs a build
-# toolchain. The specialist has ``Bash`` and MAY run these installs during its
-# own validation. To make them DURABLE (reproduced when the Coordinator
-# re-benches, and across pod restarts) the specialist must ALSO record each such
-# command verbatim in ``specialist_done.setup_commands`` — integrate_patch
-# re-runs those (allowlisted, non-interactive) before applying patches + booting.
+# Environment-setup authorization: the specialist MAY run dependency/tool
+# installs during validation, and must record each verbatim in
+# ``specialist_done.setup_commands`` so integrate_patch can replay them.
 ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
     "You MAY install missing/stale packages or CLI tools when that is what the "
     "model needs to build or run — e.g. `pip install -U transformers`, "
@@ -362,6 +339,5 @@ __all__ = [
     "EnablementSearchPlan",
     "build_mandate",
     "build_search_plan",
-    "rank_titles",
     "score_enablement_title",
 ]

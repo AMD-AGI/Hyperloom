@@ -14,7 +14,7 @@ import pytest
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
-# Stubs — minimal SharedState + TaskRegistry doubles.
+# Minimal SharedState + TaskRegistry doubles.
 @dataclass
 class _BareState:
     baseline_tput: float = 100.0
@@ -196,7 +196,6 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
     await coord._on_enter_kernel(from_phase="EXPLORE")
 
     assert len(coord.sub.tasks_run) == 1
-    # Reason is state-versioned on the validated-gain stack length (0 here).
     assert coord.sub.tasks_run[0].params["reason"] == "kernel_entry_g0"
     assert coord.shared_state.last_roofline_tput == 120.0
 

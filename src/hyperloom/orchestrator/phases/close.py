@@ -37,7 +37,7 @@ class ClosePhase(PhaseHandler):
             reason = (row.get("reason") or "").strip()
             if reason and _phase_state.is_valid_stop_reason(reason):
                 return reason
-            # Newest CLOSE-bound row had no usable reason — stop rather than pick up a stale older transition.
+            # Newest CLOSE-bound row had no usable reason — stop rather than use a stale older one.
             break
         return "time_exhausted"
 
@@ -59,19 +59,15 @@ class ClosePhase(PhaseHandler):
         """Best-effort: run one final post-opt roofline at CLOSE when a kernel/source patch was integrated.
 
         Profiles the final optimized service once and writes
-        reports/kernel_roofline_opt.json (the ``close_post_opt`` reason routes
-        the executor to that file, see action_executors/roofline.py), giving the
-        before/after kernel roofline chart its optimized snapshot. No-op for
-        sessions without an integrate-class optimization; runs synchronously so
-        the report/breakdown steps see the file, but is wrapped by the caller so
-        a failure never blocks close.
+        reports/kernel_roofline_opt.json, giving the before/after kernel roofline
+        chart its optimized snapshot. No-op for sessions without an
+        integrate-class optimization; wrapped by the caller so a failure never
+        blocks close.
         """
         if not self._session_integrated_kernel_patch():
             return
-        # Skip on the wall-clock-deadline close path: that path only has the
-        # closing-grace window (<=120s) reserved for report/breakdown, far too
-        # short for a full profile+TraceLens. Only run on a normal converged
-        # close (closing_phase is False), which still has regular tick budget.
+        # Skip on the wall-clock-deadline close path (its grace window is too
+        # short for a full profile+TraceLens); only run on a normal converged close.
         if bool(getattr(self.shared_state, "closing_phase", False)):
             log.info("CLOSE step 0: skipped post-opt roofline (wall-clock closing grace window)")
             return
@@ -84,9 +80,8 @@ class ClosePhase(PhaseHandler):
             task.task_id,
             self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
         )
-        # Hard timeout so a slow profile+TraceLens can never stall the close
-        # sequence (report/breakdown still run). On timeout the optimized
-        # snapshot is simply absent; the chart degrades to baseline-only.
+        # Hard timeout so a slow profile+TraceLens can't stall the close
+        # sequence; on timeout the chart degrades to baseline-only.
         try:
             result = await asyncio.wait_for(
                 self.sub.run_task(task),
@@ -111,7 +106,7 @@ class ClosePhase(PhaseHandler):
                         "failed",
                         {"reason": "close_post_opt_roofline_timeout"},
                     )
-            except Exception:  # noqa: BLE001 — timeout bookkeeping best-effort
+            except Exception:  # noqa: BLE001
                 log.debug(
                     "CLOSE step 0: failed to mark timed-out post-opt roofline task",
                     exc_info=True,
@@ -129,26 +124,21 @@ class ClosePhase(PhaseHandler):
         log.info("CLOSE entered (from=%s); starting 5-step close sequence", from_phase or "<unknown>")
         await self._record_close_step("sequencer_started", status="running")
 
-        # stop_reason MUST persist BEFORE step 2's breakdown (collector derives it from state.json); fill only when blank, derive rather than hard-code time_exhausted.
+        # stop_reason must persist before step 2's breakdown (collector derives it from state.json); fill only when blank.
         if not self.shared_state.stop_reason:
             derived = self._derive_close_stop_reason()
             self.shared_state.set_stop_reason(derived)
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:  # noqa: BLE001
                 log.exception("CLOSE: early stop_reason persist failed; step 5 will retry")
 
-        # CLOSE-entry auto-roofline (former N31) deleted in favour of EXPLORE/KERNEL-entry hooks.
-
-        # Post-optimization roofline (best-effort). Only when this
-        # session integrated a kernel/source patch, profile the final optimized
-        # service once and write reports/kernel_roofline_opt.json so the
-        # before/after kernel roofline chart (baseline kernel_roofline.json vs
-        # this optimized snapshot) has its "after" column. Wrapped so a slow or
-        # failed run never blocks the report / session_breakdown steps below.
+        # Post-optimization roofline (best-effort): profile the final optimized
+        # service once so the before/after kernel roofline chart has its "after"
+        # column. Wrapped so a slow/failed run never blocks the steps below.
         try:
             await self._maybe_run_close_post_opt_roofline()
-        except Exception as exc:  # noqa: BLE001 — best-effort; never block close
+        except Exception as exc:  # noqa: BLE001
             log.warning("CLOSE step 0 (post-opt roofline) failed: %r", exc)
 
         # Report.
@@ -169,9 +159,8 @@ class ClosePhase(PhaseHandler):
                     status="done",
                     task_id=report_task.task_id,
                 )
-                # Surface the final report location in the lifecycle
-                # log. report_executor writes final.{json,md} under
-                # reports_dir(session_dir); advertise whichever exist.
+                # Surface the final report location; advertise whichever of
+                # final.{json,md} exist under reports_dir(session_dir).
                 from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
 
                 _rd = _reports_dir(self.session_dir)
@@ -198,7 +187,7 @@ class ClosePhase(PhaseHandler):
                     task_id=report_task.task_id,
                     detail=detail,
                 )
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001
             log.exception("CLOSE step 1 (report) failed")
             self._emit_lifecycle(
                 step="report",
@@ -231,7 +220,7 @@ class ClosePhase(PhaseHandler):
                     task_id=bd_task.task_id,
                     detail=f"task_state={terminal_state!r}",
                 )
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001
             log.exception("CLOSE step 2 (session_breakdown) failed")
             await self._record_close_step(
                 "session_breakdown",
@@ -240,14 +229,10 @@ class ClosePhase(PhaseHandler):
             )
 
         # ---------------- Langfuse flush + receipt splice -------------------
-        # MUST run before the artifact package: flush_session
-        # reconciles out-of-process children + flips the receipt to final
-        # counts, and patch_breakdown_langfuse splices that post-flush
-        # receipt back into session_breakdown.json. If this ran AFTER
-        # packaging, the bundled SBD would carry counts_final=false and the
-        # final langfuse_receipt.json would be missing from the bundle.
-        # No-op unless live push is enabled; idempotent (a later cli.finally
-        # flush only re-writes the receipt). Best-effort.
+        # Must run before the artifact package: flush_session flips the receipt
+        # to final counts and patch_breakdown_langfuse splices it back into
+        # session_breakdown.json, so the bundled SBD carries final counts.
+        # No-op unless live push is enabled; idempotent; best-effort.
         try:
             from ..trace.langfuse_emitter import (
                 flush_session,
@@ -258,11 +243,10 @@ class ClosePhase(PhaseHandler):
             from hyperloom.inference_optimizer.breakdown import patch_breakdown_langfuse
 
             patch_breakdown_langfuse(self.session_dir)
-            # After the breakdown file is in its final (post-flush) form, attach
-            # the complete JSON to the trace as a ``session_breakdown``
-            # observation. Best-effort; no-op when live push is disabled.
+            # Attach the final breakdown JSON to the trace as a
+            # ``session_breakdown`` observation (no-op when live push is disabled).
             record_session_breakdown(self.session_dir)
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001
             log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
             await self._record_close_step(
                 "langfuse_flush",
@@ -271,14 +255,9 @@ class ClosePhase(PhaseHandler):
             )
 
         # ---------------- Artifact package -> /workspace ------------------
-        # Bundle the curated result/report/analysis files (incl. the
-        # session_breakdown just written in step 2) into a single zip
-        # placed under ``/workspace`` so the Claw sandbox sync ships it
-        # to object storage even when ``$USER_DATA_PATH`` points at a
-        # wekafs path outside ``/workspace`` (the common production case).
-        # Best-effort: failures are recorded but never abort the close
-        # sequence. The zip carries its own PACKAGE_MANIFEST log of what
-        # went in / what was missing.
+        # Bundle the curated result/report/analysis files into a single zip under
+        # ``/workspace`` so the Claw sandbox sync ships it to object storage even
+        # when ``$USER_DATA_PATH`` points outside ``/workspace``. Best-effort.
         try:
             from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 
@@ -298,7 +277,7 @@ class ClosePhase(PhaseHandler):
                     status="skipped",
                     detail="no artifacts matched or dest unwritable",
                 )
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001
             log.exception("CLOSE step 2.6 (artifact_package) failed")
             await self._record_close_step(
                 "artifact_package",
@@ -307,13 +286,12 @@ class ClosePhase(PhaseHandler):
             )
 
         # ---------------- Fact finalize (Cortex commit) -------------------
-        # The canonical "Cortex session commit": writes
-        # update_recipe + finalises the local journal (final_throughput /
+        # Writes update_recipe + finalises the local journal (final_throughput /
         # total_gain_pct). Recorded as the ``fact_finalize`` close_step.
         try:
             self.cortex_finalize_recipe_and_journal()
             await self._record_close_step("fact_finalize", status="done")
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001
             log.exception("CLOSE step 4 (fact_finalize) failed")
             await self._record_close_step(
                 "fact_finalize",
@@ -321,13 +299,12 @@ class ClosePhase(PhaseHandler):
                 detail=repr(exc)[:240],
             )
 
-        # Record a skipped ``ndjson_drain`` close-step for ledger consumers (v2 RecipeKB is local-only).
+        # Record a skipped ``ndjson_drain`` close-step for ledger consumers (RecipeKB is local-only).
         await self._record_close_step("ndjson_drain", status="skipped")
 
         # Mark done.
         self.shared_state.close_sequence_done = True
-        # CLOSE must set stop_reason so the main run loop terminates next tick (else it ticks forever).
-        # Idempotent backstop to the early persist; re-derive rather than hard-code time_exhausted.
+        # Set stop_reason so the main run loop terminates next tick (idempotent backstop to the early persist).
         if not self.shared_state.stop_reason:
             self.shared_state.set_stop_reason(self._derive_close_stop_reason())
         try:
@@ -367,7 +344,7 @@ class ClosePhase(PhaseHandler):
                 )
                 return task
             except Exception:  # noqa: BLE001 — TaskNotFound + friends
-                # Stale id (resume from a wiped-tasks-table session); fall through to fresh enqueue.
+                # Stale id; fall through to fresh enqueue.
                 pass
 
         params: dict[str, Any] = {
@@ -385,7 +362,7 @@ class ClosePhase(PhaseHandler):
             side_effects=["writes_results"],
             lease_ttl_sec=120,
         )
-        # Mirror onto closing_report_task_id (used by wall-clock inspectors + robustness/breakdown).
+        # Mirror onto closing_report_task_id.
         if not self.shared_state.closing_report_task_id:
             self.shared_state.closing_report_task_id = task.task_id
             try:

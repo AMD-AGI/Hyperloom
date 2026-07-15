@@ -63,12 +63,9 @@ _PATCH_PATH_RE: re.Pattern[str] = re.compile(
 )
 
 
-# Candidate ``-p`` strip levels for resolving a diff header path to a real file,
-# mirroring ``action_executors.integrate_patch._P_LEVELS``. Specialists author
-# patches with heterogeneous path prefixes (``a/vllm/...`` -> strip 1,
-# ``b/_aiter_ops.py`` -> strip 0/2, full absolute
-# ``b/usr/local/lib/python3.12/dist-packages/vllm/...`` -> strip 7), so target
-# existence must be probed across levels rather than assuming ``-p1``.
+# Candidate ``-p`` strip levels for resolving a diff header path to a real file.
+# Specialists author patches with heterogeneous path prefixes, so target
+# existence is probed across levels rather than assuming ``-p1``.
 _P_STRIP_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
 
 # Sentinel the post-/pre-image path takes for a created/deleted file.
@@ -160,9 +157,8 @@ def patch_targets_missing(
     return missing
 
 
-# Scope literal that triggers the cross-domain Critic rules (mirrors
-# specialist_profile.SCOPE_DOMAINS; duplicated here to keep this module
-# dependency-light for the Critic backend import).
+# Scope literal that triggers the cross-domain Critic rules. Duplicated from
+# specialist_profile.SCOPE_DOMAINS to keep this module dependency-light.
 SCOPE_DOMAINS_LITERAL: str = "domains"
 
 
@@ -343,9 +339,7 @@ def ground_patch_text(
     if base_checkout is None or not Path(base_checkout).is_dir():
         return PatchGroundingResult(GROUND_UNCHECKED, "no base checkout")
     # Hallucinated-layout guard: a modify/delete hunk whose target file is
-    # absent from the framework tree can never apply (e.g. patching a
-    # CUDA-only file on a ROCm build). Catch it precisely here rather than
-    # letting it surface downstream as an opaque ``git_apply_failed``.
+    # absent from the framework tree can never apply.
     missing = patch_targets_missing(patch_text, Path(base_checkout))
     if missing:
         return PatchGroundingResult(

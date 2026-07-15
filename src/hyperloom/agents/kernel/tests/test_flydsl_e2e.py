@@ -3,7 +3,7 @@
 
 """End-to-end regression test for the FlyDSL kernel path.
 
-Drives the ``flydsl_naive_gemm.py`` fixture through the full classification + enrichment pipeline.
+Drives the ``flydsl_naive_gemm.py`` fixture through classification + enrichment.
 """
 
 from __future__ import annotations

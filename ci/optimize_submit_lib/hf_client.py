@@ -30,12 +30,9 @@ class HuggingFaceClient:
     def __init__(self, token: str = "", timeout: int = 15, tokens: list[str] | None = None, seed: str = ""):
         """Initialise the HF client session.
 
-        Supports a *pool* of HuggingFace tokens. Requests start on a token chosen
-        by hashing ``seed`` (so parallel CI jobs spread their first hit across the
-        pool) and, on HTTP 429 (Too Many Requests), transparently rotate to the
-        next token with exponential backoff before retrying. This mitigates the
-        bursty rate-limiting that hits the resolve/config.json endpoint when many
-        optimize jobs fan out at once.
+        Supports a pool of HuggingFace tokens: requests start on a token chosen
+        by hashing ``seed`` and, on HTTP 429, rotate to the next token with
+        exponential backoff before retrying.
 
         Args:
             token (str): Primary HuggingFace token for gated-model access.
@@ -126,8 +123,7 @@ class HuggingFaceClient:
 
         Pool-then-filter: the listing API matches on tags only, so re-validate
         per-repo on a generative architectures[0] suffix; failing that (or a
-        gated 401) → skip. The pipeline_tag != text-generation gate has been
-        removed so multimodal/other heads are allowed through.
+        gated 401) → skip.
 
         Args:
             limit (int): Maximum number of repos to return.
@@ -158,7 +154,6 @@ class HuggingFaceClient:
                     continue
 
             # Final gate: config.json reachable AND architectures[0] generative.
-            # Skip gated (401/403) or non-generative repos so the pool refills.
             try:
                 cfg = self.model_config(repo)
             except Exception as e:

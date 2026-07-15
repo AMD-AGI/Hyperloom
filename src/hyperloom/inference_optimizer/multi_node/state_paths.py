@@ -21,10 +21,13 @@ def resolve_state_file() -> Path:
     Resolution order:
     1. ``$MULTI_NODE_STATE_FILE`` when set.
     2. ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``.
-    3. Legacy ``/tmp/multi_node_state.json`` (standalone CLI / migration).
 
     Returns:
         Path: The resolved state file location.
+
+    Raises:
+        RuntimeError: When neither ``$MULTI_NODE_STATE_FILE`` nor
+            ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`` is set.
     """
     explicit = os.environ.get("MULTI_NODE_STATE_FILE", "").strip()
     if explicit:
@@ -32,7 +35,10 @@ def resolve_state_file() -> Path:
     pinned = os.environ.get(ENV_CURRENT_SESSION_DIR, "").strip()
     if pinned:
         return Path(pinned) / _RUNTIME_REL
-    return _LEGACY_STATE_FILE
+    raise RuntimeError(
+        "cannot resolve multi-node state file: set $MULTI_NODE_STATE_FILE explicitly "
+        "or call bind_state_file_to_session() to pin it under the active session dir"
+    )
 
 
 def legacy_state_file() -> Path:

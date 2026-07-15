@@ -37,7 +37,7 @@ _MONITOR_VARS = (
     "POLL_INTERVAL_SEC",
 )
 
-# The multi-signal liveness probe reads ``/proc`` (the monitor host is Linux).
+# The liveness probe reads /proc (Linux only).
 _HAS_PROC = os.path.isdir("/proc")
 
 
@@ -72,7 +72,7 @@ def test_monitor_waits_for_delayed_launch_info(tmp_path):
     """A delayed LAUNCH_INFO_FILE: the monitor polls (bounded), resolves it, and exits 0 — not exit 2 before launch-info flushed."""
     sess = tmp_path / "sess"
     (sess / "reports").mkdir(parents=True)
-    # Terminal marker so the first main-loop iteration exits 0 right after the session dir resolves.
+    # Terminal marker so the first main-loop iteration exits 0.
     (sess / "reports" / "final.md").write_text("done\n", encoding="utf-8")
 
     launch = tmp_path / "launch.json"
@@ -98,7 +98,6 @@ def test_monitor_waits_for_delayed_launch_info(tmp_path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    # Monitor should be polling here, not already dead with exit 2.
     time.sleep(1.5)
     launch.write_text(json.dumps({"session_dir": str(sess)}), encoding="utf-8")
     out, err = proc.communicate(timeout=30)
@@ -133,7 +132,7 @@ def test_monitor_fails_fast_when_no_session_source(tmp_path):
 
     assert proc.returncode == 2
     assert "session dir is unknown" in proc.stderr
-    # Fail-fast: with no LAUNCH_INFO_FILE we must NOT enter the bounded wait loop.
+    # With no LAUNCH_INFO_FILE we must not enter the bounded wait loop.
     assert elapsed < 30, f"should fail fast (no wait loop), took {elapsed:.1f}s"
 
 
@@ -166,7 +165,6 @@ def test_monitor_times_out_when_launch_info_never_appears(tmp_path):
     elapsed = time.time() - t0
 
     assert proc.returncode == 2
-    # Waited at least most of the window before giving up.
     assert elapsed >= 2, f"should have polled the wait window, took {elapsed:.1f}s"
     assert "session dir is unknown" in proc.stderr
 
@@ -187,7 +185,7 @@ def test_monitor_tolerates_non_integer_wait_sec(tmp_path):
             "PID_FILE": str(pidfile),
             "REPO_ROOT": str(tmp_path),
             "LAUNCH_INFO_FILE": str(launch),
-            "LAUNCH_INFO_WAIT_SEC": "60x",  # invalid arithmetic token
+            "LAUNCH_INFO_WAIT_SEC": "60x",
             "MAX_HOURS": "1",
         }
     )
@@ -224,7 +222,7 @@ def test_monitor_handles_leading_zero_wait_sec(tmp_path):
             "PID_FILE": str(pidfile),
             "REPO_ROOT": str(tmp_path),
             "LAUNCH_INFO_FILE": str(launch),
-            "LAUNCH_INFO_WAIT_SEC": "08",  # valid digits, but octal-invalid in bash
+            "LAUNCH_INFO_WAIT_SEC": "08",
             "MAX_HOURS": "1",
         }
     )
@@ -251,9 +249,6 @@ def test_monitor_resume_is_pinned_to_resolved_session_dir():
     assert '--resume --resume-from "$session_dir"' in text
 
 
-# --- Robust liveness + cold-start grace (no spurious resume) ----------------
-
-
 @pytest.mark.skipif(not _HAS_PROC, reason="liveness probe reads /proc (Linux)")
 def test_monitor_does_not_resume_during_startup_grace(tmp_path):
     """Within the cold-start grace window a not-yet-alive session is never resumed."""
@@ -269,7 +264,7 @@ def test_monitor_does_not_resume_during_startup_grace(tmp_path):
             "REPO_ROOT": str(tmp_path),
             "INFERENCE_OPTIMIZER_SESSION_DIR": str(sess),
             "MAX_HOURS": "1",
-            "STARTUP_GRACE_SEC": "3600",  # never leave grace during the test
+            "STARTUP_GRACE_SEC": "3600",
             "RECHECK_INTERVAL_SEC": "1",
         }
     )
@@ -277,8 +272,7 @@ def test_monitor_does_not_resume_during_startup_grace(tmp_path):
     out, err = _run_monitor_briefly(env, seconds=3.0)
     combined = out + err
     assert "within startup grace" in combined, combined
-    # The grace line itself ends with "not resuming"; assert the real resume
-    # action marker is absent rather than the bare word "resuming".
+    # Assert the real resume-action marker is absent (not the bare word "resuming").
     assert "optimizer stopped (no terminal marker)" not in combined, combined
 
 
@@ -310,7 +304,7 @@ def test_monitor_does_not_resume_when_owner_pid_alive(tmp_path):
                 "REPO_ROOT": str(tmp_path),
                 "INFERENCE_OPTIMIZER_SESSION_DIR": str(sess),
                 "MAX_HOURS": "1",
-                "STARTUP_GRACE_SEC": "0",  # past grace immediately
+                "STARTUP_GRACE_SEC": "0",
                 "RECHECK_INTERVAL_SEC": "1",
                 "POLL_INTERVAL_SEC": "1",
             }
@@ -343,7 +337,7 @@ def test_monitor_requires_consecutive_dead_confirmations(tmp_path):
             "RECHECK_INTERVAL_SEC": "1",
         }
     )
-    # ~2.5s with a 1s recheck => a couple of confirmations, well short of 5.
+    # ~2.5s with a 1s recheck yields a couple of confirmations, short of 5.
     out, err = _run_monitor_briefly(env, seconds=2.5)
     combined = out + err
     assert "dead signal 1/5" in combined, combined

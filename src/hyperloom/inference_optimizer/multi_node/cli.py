@@ -11,9 +11,9 @@ idempotent), ``kill-inference``, ``stop-multi-job``.
 State lives in ``$MULTI_NODE_STATE_FILE`` (default:
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
 when the session is pinned, else legacy ``/tmp/multi_node_state.json``).
-HTTP polls under the sandbox's 120s ceiling (ADDENDUM-09) and surface
-progress on stderr. Credentials must already be in sandbox env
-(ADDENDUM-13); this module never invents URLs or keys.
+HTTP polls under the sandbox's 120s ceiling and surface progress on stderr.
+Credentials must already be in sandbox env; this module never invents URLs or
+keys.
 """
 
 from __future__ import annotations
@@ -34,12 +34,9 @@ from ._internal import safe_client, ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts
 from ._internal.log import info, warn, err
 from ._internal.server_args_safety import ServerArgsRejected, validate_server_args
-from .state_paths import legacy_state_file, resolve_state_file, state_file_safe_to_read
+from .state_paths import resolve_state_file, state_file_safe_to_read
 
-# Backward-compat alias for tests that monkeypatch ``STATE_FILE``.
-STATE_FILE = resolve_state_file()
-
-# Default poll budget sized under the sandbox 120s ceiling (ADDENDUM-09).
+# Default poll budget sized under the sandbox 120s ceiling.
 _DEFAULT_POLL_INTERVAL_S = 6
 _DEFAULT_POLL_TIMEOUT_S = 110
 # MoE cold-start often needs 20-30 min; set HYPERLOOM_MN_POLL_TIMEOUT_S=1800.
@@ -160,12 +157,7 @@ def _load_state() -> dict[str, Any]:
     """
     path = _state_file()
     if not path.is_file():
-        legacy = legacy_state_file()
-        if path != legacy and legacy.is_file() and state_file_safe_to_read(legacy):
-            warn(f"state file {path} missing; reading legacy {legacy}")
-            path = legacy
-        else:
-            return {}
+        return {}
     if not state_file_safe_to_read(path):
         warn(f"state file {path} failed ownership/permission check; ignoring")
         return {}
@@ -678,7 +670,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         "done; "
         "echo OK"
     )
-    entrypoint = script  # RayDashboardClient wraps as bash; -lc breaks PATH.
+    entrypoint = script  # RayDashboardClient wraps as bash (-lc breaks PATH).
     with _ray_dashboard_client(state) as ray:
         info("submitting verify entrypoint")
         sub_id = ray.submit_job(entrypoint)
@@ -807,7 +799,7 @@ def _build_restart_entrypoint(
 
 
 # Common entrypoint preamble: sources the bootstrap env file so PATH points
-# at /opt/venv/bin (no-op when bootstrap was skipped). See ADDENDUM-13.
+# at /opt/venv/bin (no-op when bootstrap was skipped).
 _MN_ENTRYPOINT_PREAMBLE = (
     "set -euo pipefail; "
     "if [ -f /etc/profile.d/hyperloom-env.sh ]; then "
@@ -934,7 +926,6 @@ def _extract_launcher_summary(launch_logs: str) -> dict:
                     if isinstance(parsed, dict):
                         return parsed
                 except (json.JSONDecodeError, ValueError):
-                    # Keep walking; an inner brace may be a repr, not JSON.
                     pass
                 end_idx = -1
     return {}
@@ -967,15 +958,15 @@ def _build_multinode_launch_entrypoint(
         validate_server_args(extra_args, context="rayjob restart-server --extra-args")
     except ServerArgsRejected as exc:
         raise RuntimeError(str(exc)) from exc
-    # Pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path: $HYPERLOOM_MN_PROFILE_TRACE_DIR,
-    # else derive from state.json's rayjob_id; empty => skip the flag.
+    # Pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path from env, else derive
+    # from state.json's rayjob_id; empty => skip the flag.
     profiler_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if not profiler_dir:
         _st = _load_state()
         _rid = str(_st.get("rayjob_id") or "").strip()
         if _rid:
             _profiler_path = mn_profile_trace_root() / _rid / "torch_trace"
-            # Best-effort mkdir (asymmetric mounts may PermissionError yet work pod-side).
+            # Best-effort mkdir.
             try:
                 _profiler_path.mkdir(parents=True, exist_ok=True)
             except OSError as _exc:
@@ -1506,8 +1497,7 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
             print(logs)
         return EXIT_TRANSIENT
     print(json.dumps(parsed, indent=2, sort_keys=True))
-    # The helper keys success on ``status=="ok"``; this patcher uses
-    # ``applied``/``skipped``, so derive the exit code ourselves.
+    # This patcher uses ``applied``/``skipped`` status, so derive the exit code.
     if parsed.get("status") in ("applied", "skipped"):
         return EXIT_OK
     return EXIT_TRANSIENT
@@ -1628,8 +1618,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
         # Resume fast path: if the prior launch had identical
         # framework/model/tp/ep/pd_mode and is still RUNNING, skip KILL+LAUNCH
-        # and resume polling (large MoE boots outlast a 110s retry window).
-        # Disable with MULTI_NODE_RESTART_RESUME_RUNNING=0.
+        # and resume polling. Disable with MULTI_NODE_RESTART_RESUME_RUNNING=0.
         launch_sub: str = ""
         resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower() not in (
             "0",
@@ -1638,15 +1627,10 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             "off",
         )
         prev_sub = str(state.get("last_restart_submission_id") or "").strip()
-        # ``last_restart_extra_args`` is normalized at write time; do the
-        # same to the live args here so whitespace differences don't make
-        # an otherwise-identical restart miss the resume fast path.
-        # CRITICAL: extra_args carries every backend / params variant flag
-        # (--attention-backend, --cuda-graph-max-bs, --moe-runner-backend,
-        # etc.); a resume that ignores it leaves sglang running with the
-        # PREVIOUS variant's args, so every benchmark measurement after
-        # the first variant reflects stale flags instead of the round's
-        # intended config.
+        # Normalize live args to match the stored (normalized) extra_args so
+        # whitespace differences don't miss the resume fast path. extra_args must
+        # be compared: it carries every variant flag, and ignoring it would
+        # resume sglang with the previous variant's args.
         prev_match = bool(prev_sub) and (
             str(state.get("last_restart_framework") or "") == str(args.framework)
             and str(state.get("last_restart_model") or "") == str(args.model)
@@ -1689,23 +1673,15 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             )
 
         with _ray_dashboard_client(state) as ray:
-            # Phase B: launch new (skipped above when resuming an
-            # existing RUNNING launch). Driver returns once every rank
-            # spawned its launcher; rank 0 /health probe is best-effort
-            # (driver internal, see launch_multinode.py).
+            # Phase B: launch new (skipped when resuming a RUNNING launch).
+            # Driver returns once every rank spawned its launcher.
             if not launch_sub:
                 launch_sub = ray.submit_job(launch_ep)
                 info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
-            # EARLY checkpoint: persist the launch identity + config NOW,
-            # before the (potentially long) _short_poll. Without this,
-            # the next 110s poll timeout raises TransientFailure and
-            # cmd_restart_server returns early — leaving state.json
-            # untouched. The retry loop's next invocation can't see
-            # last_restart_submission_id, falls into KILL+LAUNCH again,
-            # and the server bootstrap is reset from zero. Persisting
-            # here lets the resume-running-launch fast path above
-            # actually fire on retry.
+            # Early checkpoint: persist the launch identity + config before the
+            # (potentially long) _short_poll, so a poll-timeout retry can hit the
+            # resume fast path instead of restarting the bootstrap from zero.
             state["last_server_pid_dir"] = pid_dir
             state["last_server_log_dir"] = log_dir
             if kill_sub:
@@ -1741,8 +1717,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                 logs = ray.get_job_logs(launch_sub)
                 print(logs)
 
-            # Fail-fast on a terminal launch status so the caller raises
-            # ServerRestartFailed in seconds instead of burning the 1800s health wait.
+            # Fail-fast on a terminal launch status instead of burning the health wait.
             if launch_status in _TERMINAL_FAIL_STATUSES:
                 info(
                     f"ERROR launch driver terminal status={launch_status}; "
@@ -1751,8 +1726,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                 )
                 return 1
 
-            # PD disaggregated: read the launcher's prefill/decode URLs and
-            # submit a separate router entrypoint binding 8888 (fatal if it fails).
+            # PD disaggregated: read prefill/decode URLs and submit a separate
+            # router entrypoint binding 8888 (fatal if it fails).
             pd_mode = (getattr(args, "pd_mode", "") or "colocated").lower()
             router_sub = ""
             router_state: dict = {}
@@ -1814,7 +1789,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         state["last_restart_model"] = args.model
         state["last_restart_tp"] = args.tp
         state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-        # Persist PD state so later invocations can fall back when a PD flag is omitted.
+        # Persist PD state so later invocations can fall back when a flag is omitted.
         pd_mode_persist = (getattr(args, "pd_mode", "") or "colocated").lower()
         state["last_restart_pd_mode"] = pd_mode_persist
         if pd_mode_persist == "disaggregated":
@@ -1839,7 +1814,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         info("multi-node servers launched; benchmarks should target $service_url")
         return 0
 
-    # Single-node path. PD is meaningless on one pod; fail loudly rather than drop the flags.
+    # Single-node path. PD is meaningless on one pod; fail loudly.
     if (getattr(args, "pd_mode", "") or "colocated").lower() == "disaggregated":
         info(
             "ERROR --pd-mode disaggregated is not supported in single-node "
@@ -2187,11 +2162,9 @@ def build_parser() -> argparse.ArgumentParser:
         "`--enable-expert-parallel`. EP > TP is rejected by the "
         "orchestrator helper before this CLI is invoked.",
     )
-    # Prefill-Decode disaggregation. colocated (default) keeps the
-    # legacy single-server-group behaviour. disaggregated splits the
-    # cluster into prefill + decode groups, launches sglang_router /
-    # vllm proxy on the head pod, and binds the public 8888 port at
-    # the router (so magpie's BENCHMARK_BASE_URL stays unchanged).
+    # Prefill-Decode disaggregation: colocated (default) keeps a single server
+    # group; disaggregated splits into prefill + decode groups fronted by a
+    # router on the head pod that binds the public 8888 port.
     sp.add_argument(
         "--pd-mode",
         choices=("colocated", "disaggregated"),
@@ -2222,12 +2195,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="TP for decode group (disaggregated only); default = --tp",
     )
-    # Per-role EP / extra server args (disaggregated only). The InferenceX
-    # disagg recipes give prefill and decode DIFFERENT MoE topologies
-    # (e.g. prefill EP1 no-DP vs decode EP8 DP-attn), so a single shared
-    # --ep / --extra-args cannot express them. These per-role knobs default
-    # to 0 / "" (fall back to the shared --ep / --extra-args, preserving the
-    # legacy behaviour) and read $PD_*_EP / $PD_*_EXTRA_ARGS env as defaults.
+    # Per-role EP / extra server args (disaggregated only), so prefill and decode
+    # can use different MoE topologies. Default 0 / "" falls back to the shared
+    # --ep / --extra-args, and $PD_*_EP / $PD_*_EXTRA_ARGS env supply defaults.
     sp.add_argument(
         "--pd-prefill-ep",
         type=int,

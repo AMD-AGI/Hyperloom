@@ -37,22 +37,16 @@ def test_repo_url_for_framework_unknown_returns_empty():
     assert repo_url_for_framework("   ") == ""
 
 
-# ---------------------------------------------------------------------------
-# Cross-cutting static guards
-# ---------------------------------------------------------------------------
 def test_repo_url_for_xdit():
     """xdit must resolve to the upstream xDiT repo so framework discovery on the diffusion framework has a target."""
     assert repo_url_for_framework("xdit") == ("https://github.com/xdit-project/xDiT.git")
 
 
 def test_repo_map_known_frameworks():
-    """The canonical dict must enumerate exactly the supported frameworks (pinned so future additions update this test intentionally)."""
+    """The canonical dict must enumerate exactly the supported frameworks."""
     assert set(_FRAMEWORK_TO_REPO_URL.keys()) == {"sglang", "vllm", "atom", "xdit"}
 
 
-# ---------------------------------------------------------------------------
-# Enablement bridge repos (separate from serving frameworks)
-# ---------------------------------------------------------------------------
 def test_bridge_repos_for_rocm_hip_layer():
     """rocm_hip failures scout aiter/HIP/ROCm for an enabling PR."""
     urls = bridge_repo_urls("rocm_hip")
@@ -86,14 +80,13 @@ def test_bridge_repos_do_not_pollute_known_frameworks():
 
 
 def test_known_frameworks_constant_matches_dict():
-    """KNOWN_FRAMEWORKS must derive from the URL dict so a new entry auto-propagates to validation sites that previously hardcoded the set."""
+    """KNOWN_FRAMEWORKS must derive from the URL dict so a new entry auto-propagates to validation sites."""
     assert KNOWN_FRAMEWORKS == frozenset(_FRAMEWORK_TO_REPO_URL.keys())
     assert "atom" in KNOWN_FRAMEWORKS
 
 
 def test_repo_map_in_sync_with_io_fallback():
-    """orchestrator's framework client re-exports this module's ``repo_url_for_framework``
-    directly, since framework-agent is now always importable alongside orchestrator.
+    """orchestrator's framework client re-exports this module's ``repo_url_for_framework``.
     Skipped when inference_optimizer is absent."""
     pytest.importorskip("hyperloom.orchestrator.framework.client")
     from hyperloom.orchestrator.framework import client as fac

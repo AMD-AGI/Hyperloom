@@ -24,7 +24,7 @@ class PreludePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     def _internal_analysis_kind(self) -> str:
-        """Pick the kind for the next Coordinator-internal analysis task: roofline (composite) when enable_roofline else profile. Both absent from PHASE_LLM_PROPOSABLE_ACTIONS (PolicyGate R1 denies LLM proposals).
+        """Pick the kind for the next Coordinator-internal analysis task: roofline when enable_roofline else profile.
 
         Returns:
             ``"roofline"`` when roofline is enabled, else ``"profile"``.
@@ -77,7 +77,7 @@ class PreludePhase(PhaseHandler):
             state.warm_history_injected = True
             return 0
         recipe = warm.get("recipe") or {}
-        # v2 arbor keeps what_failed top-level; v1 nested under attrs. Fall back to the recipe itself.
+        # what_failed may be top-level or nested under attrs; fall back to the recipe.
         recipe_attrs = (recipe.get("attrs") or recipe) if isinstance(recipe, dict) else {}
         what_failed = recipe_attrs.get("what_failed") or []
         if not isinstance(what_failed, list) or not what_failed:
@@ -98,8 +98,8 @@ class PreludePhase(PhaseHandler):
         for row in what_failed:
             if not isinstance(row, dict):
                 continue
-            args = str(row.get("extra_server_args") or row.get("args") or "").strip()
-            envs = row.get("extra_envs") or row.get("envs") or {}
+            args = str(row.get("extra_server_args") or "").strip()
+            envs = row.get("extra_envs") or {}
             if not isinstance(envs, dict):
                 envs = {}
             if not args and not envs:
@@ -117,7 +117,7 @@ class PreludePhase(PhaseHandler):
                     "extra_envs": dict(envs),
                     "source": "warm_start_recipe",
                     "source_tier": tier,
-                    # Recipe-carried fields preserved for forensics; not used by the dedup gate.
+                    # Preserved for forensics; not used by the dedup gate.
                     "gain_pct": row.get("gain_pct"),
                     "error_class": row.get("error_class") or row.get("reason"),
                 }
@@ -214,8 +214,9 @@ class PreludePhase(PhaseHandler):
     ) -> "Task | None":
         """Enqueue a one-shot ``replay_warm_recipe`` task for a high-confidence T0 prior.
 
-        Skips on --no-warm-replay/resume/low-confidence/empty best_config; otherwise mints an internal
-        task running the baseline workload contract with the KB config applied. Idempotent via warm-replay-prelude.
+        Skips on --no-warm-replay/resume/low-confidence/empty best_config; otherwise
+        mints an internal task running the baseline workload contract with the KB
+        config applied. Idempotent via warm-replay-prelude.
 
         Args:
             baseline_tput: The baseline throughput captured at enqueue time,
@@ -246,7 +247,7 @@ class PreludePhase(PhaseHandler):
             }
             state.warm_replay_attempted = True
             return None
-        # tier/conf stamped at T0 by find_recipe_with_fallback.
+        # tier/conf stamped at T0.
         tier = str(warm.get("tier") or "").strip()
         try:
             conf = float(warm.get("confidence") or 0.0)
@@ -259,14 +260,11 @@ class PreludePhase(PhaseHandler):
         recipe = warm.get("recipe") or {}
         if not isinstance(recipe, dict):
             recipe = {}
-        # best_config/sessions may be top-level or nested under attrs; fall back to recipe itself.
+        # best_config/sessions may be top-level or nested under attrs.
         recipe_attrs = recipe.get("attrs") or recipe
-        # Resolve the replay config via config-donor decoupling: prefer the
-        # WarmStartContext's ready-to-replay champion — whose config may be
-        # BORROWED from a same-architecture sibling when this recipe's own
-        # best_config is empty — and gate on the donor's TRANSFER confidence
-        # rather than the identity-match confidence. Fall back to the identity
-        # recipe's own best_config for legacy state.json without a context.
+        # Prefer the WarmStartContext's ready-to-replay champion (config may be
+        # borrowed from a same-arch sibling), gating on the donor's transfer
+        # confidence; fall back to the identity recipe's own best_config.
         wsc = getattr(state, "warm_start_context", None) or {}
         replay = wsc.get("recommended_replay") if isinstance(wsc, dict) else {}
         replay = replay if isinstance(replay, dict) else {}
@@ -284,17 +282,15 @@ class PreludePhase(PhaseHandler):
             best_config = recipe_attrs.get("best_config") or {}
             if not isinstance(best_config, dict):
                 best_config = {}
-            bc_args = str(best_config.get("extra_server_args") or best_config.get("args") or "").strip()
-            bc_envs = best_config.get("extra_envs") or best_config.get("envs") or {}
+            bc_args = str(best_config.get("extra_server_args") or "").strip()
+            bc_envs = best_config.get("extra_envs") or {}
             if not isinstance(bc_envs, dict):
                 bc_envs = {}
             replay_conf = float(conf or 0.0)
             config_source = str(recipe.get("canonical_id") or "")
             config_tier = "self"
             donor_expected_gain = 0.0
-        # Gate on the replay (config-transfer) confidence: a borrowed
-        # same_arch_class config (0.95) clears the 0.7 bar; a cross-version
-        # (0.5) donor stays advisory-only and is NOT auto-replayed.
+        # Gate on the config-transfer confidence.
         if replay_conf < min_conf:
             state.warm_replay_outcome = {
                 "status": "skipped",
@@ -310,9 +306,7 @@ class PreludePhase(PhaseHandler):
         wsc_patches = (wsc.get("recommended_replay") or {}).get("patches") or [] if isinstance(wsc, dict) else []
         wsc_blocked = wsc.get("blocked_patches") or [] if isinstance(wsc, dict) else []
         wsc_advisory = wsc.get("advisory_blocked_patches") or [] if isinstance(wsc, dict) else []
-        # KG-driven filtering: drop high-confidence advisory blocks, expired
-        # patches, and graph-detected conflicts before replay. Best-effort —
-        # falls back to the unfiltered list on any KG failure.
+        # KG-driven filtering (best-effort; unfiltered on any KG failure).
         wsc_patches = self._filter_warm_patches_with_kg(wsc_patches, wsc_advisory, state)
         if not bc_args and not bc_envs and not wsc_patches:
             state.warm_replay_outcome = {
@@ -323,9 +317,8 @@ class PreludePhase(PhaseHandler):
             }
             state.warm_replay_attempted = True
             return None
-        # Historical gain anchor for _promote_warm_replay: prefer the donor's
-        # expected gain (set when the champion config was borrowed); else MAX
-        # gain across this recipe's attrs.sessions[]; fallback flat gain_pct.
+        # Historical gain anchor: donor's expected gain, else MAX gain across
+        # attrs.sessions[], else the flat gain_pct.
         expected_gain = donor_expected_gain
         sessions_field = recipe_attrs.get("sessions")
         if expected_gain <= 0 and isinstance(sessions_field, list):
@@ -340,8 +333,7 @@ class PreludePhase(PhaseHandler):
                 session_gains.append(g)
             if session_gains:
                 expected_gain = max(session_gains)
-        # Last-chance fallback for offline-ingested seed rows carrying a
-        # flat ``gain_pct`` attr.
+        # Last-chance fallback for offline-ingested seed rows.
         if expected_gain <= 0:
             try:
                 fallback = float(recipe_attrs.get("gain_pct") or 0.0)
@@ -354,18 +346,17 @@ class PreludePhase(PhaseHandler):
             "reason": "warm_replay_prelude",
             "extra_server_args": bc_args,
             "extra_envs": dict(bc_envs),
-            # Reuse the baseline's workload contract; else replay renders from YAML smoke defaults.
+            # Reuse the baseline's workload contract (else YAML smoke defaults).
             "config_path": str(state.baseline_config_path or ""),
-            # Carry the historical-gain anchor forward for the promote path's reproduce ratio.
+            # Historical-gain anchor for the promote path's reproduce ratio.
             "warm_expected_gain_pct": expected_gain,
             "warm_recipe_tier": tier,
             "warm_recipe_conf": conf,
-            # Config provenance: which sibling the champion config was borrowed
-            # from (config_tier="self" when the identity match owned it).
+            # Config provenance ("self" when the identity match owned it).
             "config_donor_tier": config_tier,
             "config_source": config_source,
             "baseline_tput_anchor": float(baseline_tput),
-            # Code patches to apply before server launch (from prs_tested[KEEP]).
+            # Code patches to apply before server launch.
             "patches": list(wsc_patches),
             "blocked_patches": list(wsc_blocked),
         }
@@ -436,10 +427,8 @@ class PreludePhase(PhaseHandler):
             tput = float(tput_raw) if tput_raw is not None else 0.0
         except (TypeError, ValueError):
             tput = 0.0
-        # ``tput`` (output_throughput) is the HOT measure round and is the
-        # comparison value for gain/current_best. The discarded warmup round is
-        # retained only for audit so warm-replay does not reintroduce
-        # cold-before/hot-after drift.
+        # ``tput`` (output_throughput) is the HOT measure round and the
+        # comparison value; the warmup round is retained for audit only.
         cold_raw = result.get("warmup_round_tput")
         try:
             cold_round_tput = float(cold_raw) if cold_raw is not None else 0.0
@@ -447,7 +436,7 @@ class PreludePhase(PhaseHandler):
             cold_round_tput = 0.0
         single_round_tput = tput
         hot_tput = tput
-        # Use the baseline_tput captured at enqueue time so a mid-replay baseline rerun can't shift the anchor; fall back to live state.baseline_tput.
+        # Use the baseline_tput captured at enqueue time (fall back to live state).
         anchor_raw = None
         if task is not None and isinstance(getattr(task, "params", None), dict):
             anchor_raw = task.params.get("baseline_tput_anchor")
@@ -463,14 +452,9 @@ class PreludePhase(PhaseHandler):
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
             return
-        # R3 — warm_replay reuses the BaselineExecutor but is an optimization
-        # candidate, not the baseline, so it must clear the image-quality gate
-        # against the pure baseline reference before promotion. A scriptable run
-        # whose gate ran and FAILED (passed=False / threshold violation vs the
-        # baseline reference) is rejected so a faster but quality-degrading warm
-        # config is never pushed onto the stack/current_best. ``require=False``
-        # keeps a missing/skipped gate non-blocking (parity with
-        # ``is_valid_measurement`` and the serving no-baseline accuracy skip).
+        # warm_replay is an optimization candidate, so it must clear the
+        # image-quality gate against the baseline reference before promotion.
+        # ``require=False`` keeps a missing/skipped gate non-blocking.
         from ..actions.executors._accuracy_gate import quality_gate_passed
 
         qg = result.get("quality_gate")
@@ -486,7 +470,7 @@ class PreludePhase(PhaseHandler):
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
         )
-        # Adopt KB best_config whenever replay beats baseline; expected_gain/min_reproduce kept for audit only, not gating.
+        # Adopt KB best_config whenever replay beats baseline; expected_gain/min_reproduce are audit-only.
         reproduced = measured_gain > 0
         outcome["actual_gain_pct"] = round(measured_gain, 3)
         outcome["throughput_after"] = tput
@@ -499,7 +483,7 @@ class PreludePhase(PhaseHandler):
                     3,
                 )
         if reproduced:
-            # An empty stack entry corrupts session_breakdown attribution; degrade gracefully when task is None.
+            # Degrade gracefully when task is None (empty stack entry corrupts attribution).
             params = (task.params if task is not None else {}) or {}
             warm_args = str(params.get("extra_server_args") or "").strip()
             warm_envs = dict(params.get("extra_envs") or {})
@@ -515,12 +499,11 @@ class PreludePhase(PhaseHandler):
                 state.save(self.session_dir)
                 return
             outcome["status"] = "reproduced"
-            # Push warm best_config onto the stack (schema mirrors explore-KEEP); ts/workspace/gain_pct feed session_breakdown attribution.
+            # Push warm best_config onto the stack (schema mirrors explore-KEEP).
             stack_entry = {
                 "action": "replay_warm_recipe",
                 "name": "warm_replay",
                 "variant_name": "warm_replay",
-                # Canonical key matching EXPLORE-KEEP stack entries so downstream readers key on the same name.
                 "extra_server_args": warm_args,
                 "extra_envs": warm_envs,
                 "tput": float(single_round_tput),
@@ -529,13 +512,13 @@ class PreludePhase(PhaseHandler):
                 "gain_pct": round(measured_gain, 3),
                 "workspace": str(result.get("workspace") or ""),
                 "ts": datetime.now(timezone.utc).isoformat(),
-                # source_tier records the warm-recipe tier (exact/relative) for breakdown attribution.
+                # source_tier records the warm-recipe tier for breakdown attribution.
                 "source_tier": outcome.get("warm_recipe_tier", ""),
                 "source_confidence": outcome.get("warm_recipe_conf", 0.0),
             }
-            # Resume safety: DO NOT clobber existing stack entries; recompute cumulative gain from baseline → current tput.
+            # Resume safety: do not clobber existing stack entries.
             state.optimization_stack = list(state.optimization_stack or [])
-            # Idempotency guard: skip push if a prior promote run already pushed the warm_replay entry.
+            # Idempotency guard: skip push if a prior promote already pushed it.
             already_pushed = any(
                 isinstance(e, dict) and e.get("action") == "replay_warm_recipe" for e in state.optimization_stack
             )
@@ -552,8 +535,7 @@ class PreludePhase(PhaseHandler):
             gp = list(getattr(state, "gain_per_stack_entry", []) or [])
             gp.append(round(measured_gain, 3))
             state.gain_per_stack_entry = gp
-            # Cumulative gain is absolute tput vs baseline, not additive stack
-            # deltas. Both sides use the hot measure-round contract.
+            # Cumulative gain is absolute tput vs baseline, not additive deltas.
             total_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
             state.cumulative_gain = round(total_gain, 3)
             state.cumulative_gain_validated = round(total_gain, 3)
@@ -565,7 +547,6 @@ class PreludePhase(PhaseHandler):
                 "tput": single_round_tput,
                 "hot_tput": hot_tput,
                 "cold_tput": cold_round_tput if cold_round_tput > 0 else None,
-                # Canonical key — matches the current_best shape _lift_to_current_best writes for KEEPs.
                 "extra_server_args": warm_args,
                 "extra_envs": warm_envs,
             }
@@ -576,7 +557,7 @@ class PreludePhase(PhaseHandler):
                 expected_gain,
                 expected_gain * min_reproduce if expected_gain > 0 else 0.0,
             )
-            # Journal warm-replay as a synthetic KEEP; no KB lesson (verification, not a new fact).
+            # Journal warm-replay as a synthetic KEEP; no KB lesson.
             try:
                 journal = self._ensure_journal()
                 from ..state.optimization_journal import KIND_OTHER, OUTCOME_KEEP
@@ -655,7 +636,7 @@ class PreludePhase(PhaseHandler):
             )
 
     async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
-        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Kind-agnostic idempotency key internal-analysis-<reason>; omits baseline_config_path so ProfileExecutor enables torch_profiler.
+        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key internal-analysis-<reason>.
 
         Args:
             reason: Tag distinguishing the enqueue site; used in the
@@ -678,9 +659,8 @@ class PreludePhase(PhaseHandler):
                     params["base_extra_args"] = cb_args
         else:
             # PRELUDE roofline profiles the baseline arm: inject baseline's own
-            # server args (from its materialized yaml), never current_best's,
-            # so a later warm-replay can't swap in compile/fp8 flags that
-            # destabilize profiling and skew the baseline ceiling.
+            # server args (never current_best's) so a later warm-replay can't
+            # swap in flags that skew the baseline ceiling.
             try:
                 from ..kernel.roofline_ceiling import read_baseline_server_args
 

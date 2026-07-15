@@ -45,25 +45,14 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     action_path = f.get("action_path") or []
     gain_provenance = str(f.get("cumulative_gain_provenance") or "")
     revalidation_pending = bool(f.get("revalidation_pending"))
-    # A GEAK(GEAK) e2e candidate that self-reported a win but was NOT
-    # confirmed by a main-flow rebench: it is deliberately excluded from the
-    # headline (current_best / action_path / validated gain). Surface it as an
-    # audit-only note + warning so the report neither hides it nor lets its
-    # self-reported number masquerade as a validated headline gain.
+    # Self-reported GEAK candidate excluded from the headline; surfaced as an audit-only note.
     geak_pending = f.get("geak_pending") if isinstance(f.get("geak_pending"), dict) else {}
     pending_awaiting = geak_pending.get("status") == "awaiting_rebench"
-    # The gain is PROVISIONAL (not same-harness-validated) when its provenance
-    # says so, or a revalidation is pending and no positive validated number
-    # exists yet. In that case we must NOT present the (zeroed/absent) validated
-    # figure as authoritative — that reads like "the optimization did nothing".
-    # Show the provisional number, clearly labelled, plus a credibility warning.
+    # Gain is provisional when provenance says so, or a revalidation is pending with no positive validated number.
     is_provisional = ("provisional" in gain_provenance) or (
         revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
     )
-    # A pending GEAK candidate with no positive validated gain yet means the
-    # headline is genuinely unvalidated — suppress the "Validated cumulative gain:
-    # +0.00%" line (which reads like the optimization did nothing) and let the
-    # audit note below carry the (self-reported, not-yet-confirmed) number.
+    # Headline is unvalidated when a GEAK candidate is pending with no positive validated gain.
     headline_unvalidated = pending_awaiting and not (
         isinstance(gain_v, (int, float)) and gain_v > 0
     )
@@ -82,8 +71,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         base_v = framework_registry.primary_metric_value(fw, base_tput)
         final_v = framework_registry.primary_metric_value(fw, final_tput)
         if base_v is not None and final_v is not None:
-            # For latency-based metrics (xDiT ms) lower is better, so an
-            # improvement shows as a negative delta; annotate to avoid misreads.
+            # For latency-based metrics, an improvement shows as a negative delta.
             note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
             facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
     if is_provisional:

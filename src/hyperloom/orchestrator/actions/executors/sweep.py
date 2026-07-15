@@ -121,10 +121,7 @@ def _build_grid(
                 "NUM_PROMPTS": str(num_prompts),
             }
             # Accuracy eval is concurrency-invariant, so skip it per sweep point
-            # by default (a full GSM8K pass per point is pure waste and at low
-            # CONC blows the per-variant timeout). Opt back in via
-            # INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1. extra_envs wins in
-            # _build_variant_yaml, so this overrides the RUN_EVAL=true default.
+            # by default. Opt back in via INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1.
             if not sweep_run_eval_enabled():
                 variant_envs["RUN_EVAL"] = "false"
             out.append(
@@ -149,7 +146,7 @@ def _result_dict(v: VariantResult) -> dict[str, Any]:
             / ``osl`` keys extracted from the variant's ``extra_envs``.
     """
     d = v.to_dict()
-    # Surface conc/isl/osl from extra_envs so consumers needn't parse them.
+    # Surface conc/isl/osl from extra_envs.
     envs = v.extra_envs or {}
     d["conc"] = int(envs.get("CONC", 0))
     d["isl"] = int(envs.get("ISL", 0))
@@ -219,7 +216,7 @@ class SweepExecutor:
             default_num_prompts_factor: Multiplier for prompt count.
             variant_timeout_sec: Per-variant timeout in seconds.
         """
-        # None = resolve at call time from $FRAMEWORK; explicit fixture wins.
+        # None resolves at call time from $FRAMEWORK; explicit fixture wins.
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.default_conc_values = list(default_conc_values or DEFAULT_CONC_VALUES)
@@ -244,9 +241,8 @@ class SweepExecutor:
                 ``workspace``.
         """
         params = ctx.task.params or {}
-        # GEAK reuse path: when the KERNEL_AGENT phase was delegated to
-        # GEAK, sweep the optimized server via GEAK's own bench_e2e.sh
-        # + the already-built overlay (no overlay reconstruction).
+        # GEAK reuse path: sweep the optimized server via GEAK's own bench_e2e.sh
+        # + the already-built overlay.
         ps_result = params.get("geak_result") or {}
         if ps_result.get("bench_script") and ps_result.get("status") == "ok":
             extra = getattr(ctx, "extra", None) or {}
@@ -279,8 +275,7 @@ class SweepExecutor:
 
         # Workload-contract materialization: sweep overrides CONC/ISL/OSL/
         # NUM_PROMPTS per variant, but TP/MAX_MODEL_LEN/PRECISION/RUN_EVAL/
-        # ROCR_VISIBLE_DEVICES still flow from env onto the variant base
-        # (else variants inherit the YAML's TP=1 default on a TP=8 model).
+        # ROCR_VISIBLE_DEVICES still flow from env onto the variant base.
         resolved_model = str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH", "").strip()
         resolved_gpu = (
             str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
@@ -328,15 +323,11 @@ class SweepExecutor:
             max_model_len=max_model_len,
         )
 
-        # Drop multi-node-invalid variants (cuda-graph-max-bs < CONC). No-op
-        # in single-node — the helper short-circuits on is_multi_node() and
-        # returns the grid unchanged, so the single-node Pareto sweep is
-        # bit-for-bit identical. No reorder here: sweep keeps CONC order for
-        # the Pareto-front computation downstream.
+        # Drop multi-node-invalid variants (cuda-graph-max-bs < CONC). No-op in
+        # single-node; keeps CONC order for the Pareto-front computation.
         grid, _ = apply_multi_node_invalid_variants(grid)
 
-        # Pass `resolved_model` / `resolved_gpu` through so variant servers
-        # inherit the resolved TP/precision.
+        # Pass resolved_model / resolved_gpu so variant servers inherit TP/precision.
         results = await run_grid(
             base_yaml_path=config_path,
             base_extra_args="",  # sweep variants carry args themselves
@@ -351,7 +342,7 @@ class SweepExecutor:
 
         entries = [_result_dict(v) for v in results]
         # Surface skipped combos so the grid stays complete; they never enter
-        # Pareto / best selections (filtered on status == "succeeded").
+        # Pareto / best selections.
         entries.extend(skipped_variants)
         front = _pareto_front(entries)
 

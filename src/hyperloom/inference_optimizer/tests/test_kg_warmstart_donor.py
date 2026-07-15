@@ -80,7 +80,7 @@ def test_single_top_donor_picks_highest_gain() -> None:
 
 
 def test_reverted_knob_excluded() -> None:
-    # The only improving knob is also reverted → no donor.
+    # The only improving knob is also reverted -> no donor.
     kg = _FakeKG(
         improves=[_knob_fact(fp="r1", gain="+30%")],
         reverted=[_knob_fact(fp="r1", predicate="KNOB_REVERTED_ON")],
@@ -94,7 +94,7 @@ def test_zero_gain_yields_none() -> None:
 
 
 def test_configless_knob_yields_none() -> None:
-    # Positive gain but neither args nor envs → not replayable.
+    # Positive gain but neither args nor envs -> not replayable.
     kg = _FakeKG([_knob_fact(fp="c", gain="+15%", args="", envs_json="")])
     assert generate_warmstart_donor_graph_guided(kg, **_KW) is None
 
@@ -112,7 +112,7 @@ def test_no_architectures_yields_none() -> None:
 
 
 def test_cortex_helper_requires_native_kg(monkeypatch) -> None:
-    # _kg_native_config_donor must NOT borrow from a non-native (sim) client.
+    # _kg_native_config_donor must not borrow from a non-native (sim) client.
     from hyperloom.orchestrator.knowledge import cortex_t0
 
     class _SimKG:

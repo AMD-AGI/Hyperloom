@@ -22,9 +22,6 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 
 
-# ---------------------------------------------------------------------------
-# _kill_stale_servers
-# ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _single_node(monkeypatch):
     """Default every test in this module to single-node mode."""
@@ -40,7 +37,7 @@ def test_kill_stale_servers_noop_in_multi_node(monkeypatch):
     slept: list = []
     monkeypatch.setattr("time.sleep", lambda *_a: slept.append(True))
     gr._kill_stale_servers()
-    assert slept == []  # returned before reaching the sleep
+    assert slept == []
 
 
 def _proc_open_factory(cmdlines: dict[str, bytes], maps: dict[str, str]):
@@ -75,7 +72,7 @@ def test_kill_stale_servers_kills_pattern_and_orphan_atom(monkeypatch):
     monkeypatch.setattr(os, "listdir", lambda _p: ["1", "2", "999", "abc"])
     cmdlines = {
         "/proc/1/cmdline": b"vllm serve\x00--model\x00m\x00",  # _KILL_PATTERNS
-        "/proc/2/cmdline": b"python\x00--multiprocessing-fork\x00",  # orphan atom
+        "/proc/2/cmdline": b"python\x00--multiprocessing-fork\x00",
     }
     maps = {"/proc/2/maps": "7f00 r-xp /ATOM/atom/libfoo.so\n"}
     monkeypatch.setattr("builtins.open", _proc_open_factory(cmdlines, maps))
@@ -93,7 +90,6 @@ def test_kill_stale_servers_kills_pattern_and_orphan_atom(monkeypatch):
     assert set(killpg_calls) == {50, 60}
     assert set(kill_calls) == {1, 2}
     assert removed  # /dev/shm segments cleared
-    # Orphan atom worker killed -> long KFD-release pause.
     assert slept == [8]
 
 
@@ -108,7 +104,6 @@ def test_kill_stale_servers_swallows_proc_errors(monkeypatch):
     monkeypatch.setattr(os, "listdir", lambda _p: ["3", "4"])
     cmdlines = {
         "/proc/3/cmdline": b"sglang.srt\x00",  # matches; getpgid raises below
-        # pid 4 cmdline missing -> open raises OSError -> continue
     }
     monkeypatch.setattr("builtins.open", _proc_open_factory(cmdlines, {}))
 
@@ -131,12 +126,9 @@ def test_kill_stale_servers_swallows_proc_errors(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
 
     gr._kill_stale_servers()  # all errors swallowed
-    assert slept == [2]  # no atom worker reaped -> short pause
+    assert slept == [2]
 
 
-# ---------------------------------------------------------------------------
-# run_grid failure branches
-# ---------------------------------------------------------------------------
 def _write_base_yaml(path: Path) -> None:
     cfg = {
         "benchmark": {
@@ -246,7 +238,6 @@ async def test_run_grid_overtime_kill_branch(tmp_path, monkeypatch):
     )
     assert results[0].status == "failed"
     assert results[0].killed_overtime is True
-    # No server.log written -> no estimate, but still no crash.
     assert results[0].estimated_output_throughput is None
 
 
@@ -256,13 +247,12 @@ async def test_run_grid_overtime_kill_estimates_tput_from_server_log(
     monkeypatch,
 ):
     """A killed-overtime variant salvages a rough output tput from the engine's
-    partial ``server.log`` decode-throughput logs (informational only)."""
+    partial ``server.log`` decode-throughput logs."""
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
 
     def _overtime(*_a, output_dir, **_k):
-        # Mimic the engine dumping periodic decode throughput before the soft
-        # deadline reaper fires.
+        # Mimic the engine dumping periodic decode throughput before the reaper.
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         (Path(output_dir) / "server.log").write_text(
             "Decode batch. gen throughput (token/s): 100.0, #queue-req: 0\n"
@@ -285,7 +275,6 @@ async def test_run_grid_overtime_kill_estimates_tput_from_server_log(
     r = results[0]
     assert r.status == "failed"
     assert r.killed_overtime is True
-    # Real measurement stays absent so winner selection is unaffected.
     assert r.output_throughput is None
     # warmup trim drops the 100.0 ramp -> mean(900,1000,1100,1200)=1050.0
     assert r.estimated_output_throughput == pytest.approx(1050.0)
@@ -298,7 +287,7 @@ async def test_run_grid_no_workspace_branch_stops_on_failure(tmp_path, monkeypat
     _write_base_yaml(base)
 
     def _no_ws(*_a, **_k):
-        return 1, "stdout", "boom stderr"  # nonzero, no benchmark_* dir created
+        return 1, "stdout", "boom stderr"  # nonzero, no benchmark_* dir
 
     monkeypatch.setattr(gr, "_run_magpie", _no_ws)
     results = await run_grid(
@@ -309,7 +298,6 @@ async def test_run_grid_no_workspace_branch_stops_on_failure(tmp_path, monkeypat
         variant_timeout_sec=5,
         keep_going_on_failure=False,
     )
-    # First variant fails with no workspace; keep_going_on_failure=False -> stop.
     assert len(results) == 1
     assert results[0].error_class == "no_benchmark_workspace"
 

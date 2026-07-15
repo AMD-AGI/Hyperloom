@@ -18,7 +18,7 @@ Keys are session-scoped and ephemeral:
 * The public key is injected into the workload body as ``MN_SSH_AUTHORIZED_KEY``
   (``mn-sshd-init.sh`` writes it to the pod's ``authorized_keys`` at start).
 * The private key stays in the sandbox and is passed to :func:`ssh_run`.
-* Host keys are recorded under ``known_hosts`` beside the keypair (P1-1).
+* Host keys are recorded under ``known_hosts`` beside the keypair.
 """
 
 from __future__ import annotations
@@ -186,16 +186,11 @@ def ssh_run_script(
 ) -> subprocess.CompletedProcess:
     """Ship ``script_text`` to the pod (base64 over the command line) and run it.
 
-    Mirrors the RayJob ``_wrap_for_dash`` heredoc pattern: the script body is
-    base64-encoded so it survives the SSH command line without quoting issues,
-    decoded into ``remote_path`` on the pod, then executed with ``interpreter``
-    (e.g. ``python3`` / ``bash``) and ``script_args`` appended verbatim.
-
-    ``env`` (optional) is prepended as ``KEY=VAL`` assignments before the
-    interpreter so prompt-driven tuning vars (e.g. mori dispatch tokens) reach
-    the SSH-launched framework child. A bare ``ssh host cmd`` does NOT forward
-    the controller's environment, and these keys are not in the pod's container
-    env, so they must be injected explicitly here.
+    The script body is base64-encoded, decoded into ``remote_path`` on the pod,
+    then executed with ``interpreter`` (e.g. ``python3`` / ``bash``) and
+    ``script_args`` appended verbatim. ``env`` (optional) is prepended as
+    ``KEY=VAL`` assignments before the interpreter so tuning vars reach the
+    SSH-launched framework child.
 
     Args:
         host: The target host/IP.

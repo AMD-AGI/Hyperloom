@@ -2,25 +2,22 @@
 
 """Mirror local recipe snapshots into gbrain (the read-side cache).
 
-main's ``recipe_kb`` writes recipes LOCAL-only; the gbrain read remote
-(:class:`recipe_kb.gbrain_remote_client.GbrainRemoteRecipeClient`) serves
-them back to a future session's warm-start. This module is the
-"separately-scheduled bulk ingest" that lifts the authoritative local
-store into gbrain so remote reads can hit champion configs and
-seed-only identity anchors alike.
+``recipe_kb`` writes recipes LOCAL-only; the gbrain read remote
+(:class:`recipe_kb.gbrain_remote_client.GbrainRemoteRecipeClient`) serves them
+back to a future session's warm-start. This module is the bulk ingest that
+lifts the authoritative local store into gbrain.
 
-Mirror gate (default: permissive so seed-only anchors participate in
-warm-start reads):
+Mirror gate (default permissive):
 
 * Any recipe with a ``canonical_id`` is mirrored, including bare seed-only
   anchors (empty ``best_config``). Set ``RECIPE_KB_MIRROR_REQUIRE_SIGNAL=1``
   to restore the stricter gate (``best_config`` OR reusable prior signal).
-* Idempotent: each recipe maps to a stable ``type: recipe`` page keyed by
-  its 5-tuple canonical id, so re-running overwrites in place.
+* Idempotent: each recipe maps to a stable ``type: recipe`` page keyed by its
+  canonical id, so re-running overwrites in place.
 
-The emitted page is the same better-landing shape the gbrain read client
-expects: ``type: recipe`` + ``tags: kind:/model:/gpu:/framework_name:`` +
-flat ``attrs`` (model/hardware/framework_name/framework_version/precision +
+The emitted page shape: ``type: recipe`` + ``tags:
+kind:/model:/gpu:/framework_name:`` + flat ``attrs``
+(model/hardware/framework_name/framework_version/precision +
 best_config_args / best_config_envs / best_throughput).
 """
 
@@ -36,12 +33,9 @@ from .gbrain_remote_client import _GbrainMcp
 
 log = logging.getLogger(__name__)
 
-# A scalar safe to emit BARE (unquoted) in YAML: starts with a letter and
-# is otherwise alnum/._- only. This keeps identifier-ish values (``recipe``,
-# ``mi300x``, ``sglang``, ``unknown_version``) bare — gbrain's frontmatter
-# parser expects that for keys like ``type`` — while anything that could be
-# reinterpreted (digit-leading versions like ``0_5_11`` -> octal, tokens
-# with ``:`` / spaces / YAML keywords) is JSON-quoted.
+# A scalar safe to emit bare (unquoted) in YAML: letter-leading, otherwise
+# alnum/._- only. Anything reinterpretable (digit-leading versions, tokens with
+# ``:`` / spaces / YAML keywords) is JSON-quoted instead.
 _SAFE_BAREWORD = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
 _YAML_KEYWORDS = frozenset(
     {
@@ -92,11 +86,9 @@ def _recipe_slug_prefix() -> str:
 def _scalar(value: Any) -> str:
     """Render a scalar as a YAML-safe token.
 
-    Bare-word identifiers (letter-leading, alnum/._-) are emitted
-    unquoted so gbrain's frontmatter parser accepts well-known keys like
-    ``type``. Everything else is JSON double-quoted (valid YAML) so the
-    parser never reinterprets a number-ish / bool-ish / underscore-
-    separated token — e.g. ``0_5_11`` must not become octal ``329``.
+    Bare-word identifiers (letter-leading, alnum/._-) are emitted unquoted;
+    everything else is JSON double-quoted so the parser never reinterprets a
+    number-ish / bool-ish / underscore-separated token.
 
     Args:
         value: The scalar value to render.
@@ -147,9 +139,8 @@ def _emit_yaml(obj: Mapping[str, Any], indent: int = 0) -> str:
     return "\n".join(lines)
 
 
-# best_config keys that are NOT environment variables (launch args under the
-# canonical name + the nested env containers + current_best passthrough metadata
-# copied by ``coordinator._build_recipe_payload``).
+# best_config keys that are NOT environment variables (launch args, nested env
+# containers, and current_best passthrough metadata).
 _NON_ENV_BEST_CONFIG_KEYS = frozenset(
     {
         _EXTRA_SERVER_ARGS_KEY,
@@ -177,12 +168,12 @@ def _coerce_server_args(value: Any) -> str:
 def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
     """Split a ``best_config`` dict into (launch_args, envs).
 
-    Handles BOTH canonical best_config shapes so an ingest->read
-    round-trip preserves the champion config:
+    Handles both canonical best_config shapes so an ingest->read round-trip
+    preserves the champion config:
 
     * NESTED (authoritative local shape from
       ``coordinator._build_recipe_payload``): launch args under the
-      canonical key and the env map nested under ``extra_envs`` / ``envs``.
+      canonical key and the env map nested under ``extra_envs``.
       The nested dict MUST be unwrapped —
       treating ``extra_envs`` as a scalar env and ``str()``-ing it would
       serialize a Python ``dict`` repr into a single bogus env value and
@@ -201,8 +192,6 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
     """
     args = _coerce_server_args(best_config.get(_EXTRA_SERVER_ARGS_KEY)).strip()
     nested = best_config.get("extra_envs")
-    if not isinstance(nested, Mapping):
-        nested = best_config.get("envs")
     if isinstance(nested, Mapping):
         envs = {str(k): str(v) for k, v in nested.items()}
     else:
@@ -245,9 +234,9 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     """Map a v2 recipe dict to a (slug, content) gbrain better-landing page.
 
     Returns ``None`` only when the recipe has no ``canonical_id``. By default
-    even pure seed-only anchors are mirrored so future gbrain reads can hit the
-    5-tuple (tier=seed_only); set RECIPE_KB_MIRROR_REQUIRE_SIGNAL=1 to restore
-    the old stricter gate (best_config OR reusable prior).
+    even pure seed-only anchors are mirrored; set
+    ``RECIPE_KB_MIRROR_REQUIRE_SIGNAL=1`` for the stricter gate (best_config OR
+    reusable prior).
 
     Args:
         recipe: The v2 recipe dict to convert.
@@ -266,8 +255,7 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     args, envs = _best_config_split(best_config)
     model = str(recipe.get("model") or "")
     hardware = str(recipe.get("hardware") or "")
-    # Back-compat: mirroring reads the raw recipe payload, so rows persisted
-    # before the framework_name rename still carry the legacy key.
+    # Back-compat: rows predating the framework_name rename use ``framework``.
     framework_name = str(recipe.get("framework_name") or recipe.get("framework") or "")
     attrs: dict[str, Any] = {
         "model": model,
@@ -282,22 +270,16 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "best_throughput": float(recipe.get("best_throughput") or 0.0),
         "validated_gain_pct": float(recipe.get("validated_gain_pct") or 0.0),
     }
-    # Negative-knowledge + provenance lists ride the recipe page so a
-    # gbrain warm-start gets the same anti-priors the local row carries.
-    # Without them ``cortex_t0`` reads empty ``pitfalls`` / ``lessons``
-    # off the warm recipe and the next session loses its "avoid known-
-    # dead knobs" priors. The minimal YAML emitter only handles scalar
-    # lists, so structured list-of-dict fields are stored as JSON strings
-    # (round-tripped by ``GbrainRemoteRecipeClient._json_list`` on read).
+    # Negative-knowledge + provenance lists ride the recipe page so a gbrain
+    # warm-start gets the same anti-priors the local row carries. The minimal
+    # YAML emitter only handles scalar lists, so structured list-of-dict fields
+    # are stored as JSON strings (decoded by ``_json_list`` on read).
     for _field in ("what_worked", "what_failed", "remaining_gaps", "pitfalls", "lessons", "prs_tested"):
         _value = recipe.get(_field)
         if _value:
             attrs[_field] = json.dumps(_value, ensure_ascii=False, default=str)
-    # Stack fingerprint (aiter / rocm / framework_name versions) rides the page as
-    # a nested dict so a gbrain warm-start can derive framework_version / rocm
-    # / aiter without the local store. The reader already expects
-    # attrs["stack_fingerprint"] as a dict (gbrain_remote_client._page_to_recipe);
-    # without this the write side never emits it and the reader always sees {}.
+    # Stack fingerprint rides the page as a nested dict so a gbrain warm-start
+    # can derive framework_version / rocm / aiter without the local store.
     _stack_fp = recipe.get("stack_fingerprint")
     if isinstance(_stack_fp, Mapping) and _stack_fp:
         attrs["stack_fingerprint"] = {str(k): str(v) for k, v in _stack_fp.items()}
@@ -326,7 +308,7 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
         "confidence": float(recipe.get("confidence") or 0.85),
         "attrs": attrs,
     }
-    # Stable slug from the 7-tuple canonical (colons -> path levels).
+    # Stable slug from the canonical id (colons -> path levels).
     slug = _recipe_slug_prefix() + "/" + canonical.replace(":", "/")
     body_lines = [
         f"# Recipe {canonical}",
@@ -391,13 +373,10 @@ class GbrainMirroringRecipeKB:
     """Wrap a :class:`recipe_kb.RecipeKB` so a local ``put_recipe`` also
     mirrors the recipe into gbrain (the read cache), best-effort.
 
-    Preserves the local-first contract: the wrapped dispatcher's local
-    write is authoritative and runs first; the gbrain mirror is a
-    post-write side-effect that never blocks or fails the local result.
-    Mirrors any recipe with a ``canonical_id`` (seed-only anchors included
-    by default; see ``RECIPE_KB_MIRROR_REQUIRE_SIGNAL``). Every other call
-    (reads / append_attempt / ...) delegates to the wrapped dispatcher
-    unchanged.
+    Preserves the local-first contract: the local write is authoritative and
+    runs first; the gbrain mirror is a post-write side-effect that never blocks
+    or fails the local result. Every other call delegates to the wrapped
+    dispatcher unchanged.
     """
 
     def __init__(self, inner: Any, mcp: _GbrainMcp | None) -> None:
@@ -438,8 +417,6 @@ class GbrainMirroringRecipeKB:
         Returns:
             The corresponding attribute from the wrapped dispatcher.
         """
-        # Delegate everything else (get_recipe / search / append_attempt /
-        # local / remote / ...) to the wrapped dispatcher.
         return getattr(self._inner, name)
 
 

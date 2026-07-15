@@ -120,7 +120,6 @@ def test_build_trajectory_digest_with_roofline(tmp_path):
         roofline_snapshots=[{"compute_pct": 80, "memory_pct": 20}],
     )
     result = build_trajectory_digest(tmp_path, state)
-    # May or may not produce output depending on dominant_direction impl
     assert isinstance(result, str)
 
 
@@ -135,7 +134,7 @@ def test_build_trajectory_digest_stall_without_validated(tmp_path):
 
 
 def test_build_trajectory_digest_with_dead_clusters(tmp_path):
-    """Cover exhausted_directions formatting (L150-156)."""
+    """Cover exhausted_directions formatting."""
     from hyperloom.orchestrator.state.optimization_journal import (
         Journal, JournalEntry,
     )
@@ -158,7 +157,7 @@ def test_build_trajectory_digest_with_dead_clusters(tmp_path):
 
 
 def test_load_journal_entries_swallows_errors(tmp_path, monkeypatch):
-    """A Journal.load_or_create failure yields an empty entry list (L52-53)."""
+    """A Journal.load_or_create failure yields an empty entry list."""
     from hyperloom.orchestrator.knowledge import trajectory_reviewer as tr
     def boom(*_a, **_k):
         raise RuntimeError("journal unreadable")
@@ -168,9 +167,9 @@ def test_load_journal_entries_swallows_errors(tmp_path, monkeypatch):
 
 
 def test_build_trajectory_digest_snaps_without_direction_returns_empty(tmp_path):
-    """Snapshots present but no dominant direction + no dead/stall -> "" (L167-168)."""
-    # A snapshot dict that dominant_direction cannot resolve to a lever, with
-    # no stall and no exhausted clusters, produces no lines -> empty string.
+    """Snapshots present but no dominant direction + no dead/stall -> ""."""
+    # A snapshot dominant_direction cannot resolve, with no stall and no
+    # exhausted clusters, produces no lines -> empty string.
     state = _FakeState(
         macro_cycle=0,
         explore_search={"winners_history": [{"cycle": 0}]},
@@ -181,7 +180,7 @@ def test_build_trajectory_digest_snaps_without_direction_returns_empty(tmp_path)
 
 
 def test_build_trajectory_digest_outer_exception_returns_empty(tmp_path, monkeypatch):
-    """An unexpected error inside the digest builder is swallowed (L171-173)."""
+    """An unexpected error inside the digest builder is swallowed."""
     from hyperloom.orchestrator.knowledge import trajectory_reviewer as tr
     def boom(*_a, **_k):
         raise RuntimeError("kaboom")
