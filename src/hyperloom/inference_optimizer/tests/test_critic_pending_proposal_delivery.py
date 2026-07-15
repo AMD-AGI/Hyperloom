@@ -2,14 +2,6 @@
 
 """Durable, at-least-once-until-decided delivery of proposals to the Critic.
 
-Regression: the Critic inbox is a tail-capped projection of bus messages since
-its cursor, and after any Critic turn ``_cursor_advance_to_latest`` jumps the
-cursor to the newest message. A ``topic=proposal`` message buried behind more
-than the tail cap of later events (e.g. a slow FRAMEWORK discover window full of
-timeouts/observations) was therefore dropped from the rendered window AND
-skipped by the advancing cursor — lost forever, no verdict, and the proposer
-phase (observed: FRAMEWORK) wedged waiting on a verdict that could never land.
-
 ``ConversationCollaborator._augment_critic_inbox_with_pending`` re-presents every
 still-undecided proposal from the durable ``pending_proposals`` registry until it
 is decided, independent of the tail/cursor. These tests pin that behaviour AND

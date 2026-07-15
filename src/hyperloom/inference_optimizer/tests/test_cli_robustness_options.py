@@ -2,9 +2,7 @@
 
 """Unit tests for ``hyperloom.inference_optimizer.cli`` robustness backend wiring.
 
-Covers ``_build_robustness_options`` (multi-node ``--nodes >= 2`` cluster
-policy: disable local probe, enable cluster pod metrics, turn off the
-127.0.0.1:8888 inference probe, lift the no_levers floor to 60 min) and
+Covers ``_build_robustness_options`` (multi-node cluster policy) and
 ``_resolve_robustness_choice`` (multi-node auto-downgrade to mock).
 """
 
@@ -33,8 +31,7 @@ def _clear_workload_env(monkeypatch):
     for key in _WORKLOAD_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("ROBUSTNESS_SERVER_URL", raising=False)
-    # _build_robustness_options falls back to $FRAMEWORK for the scriptable
-    # server-probe default; clear it so framework-unset tests are deterministic.
+    # Clear $FRAMEWORK so framework-unset tests are deterministic.
     monkeypatch.delenv("FRAMEWORK", raising=False)
 
 
@@ -54,9 +51,6 @@ def _ns(**overrides) -> argparse.Namespace:
     )
     base.update(overrides)
     return argparse.Namespace(**base)
-
-
-# _build_robustness_options — multi-node cluster policy
 
 
 def test_single_node_emits_no_multi_node_options():
@@ -242,9 +236,6 @@ def test_nodes_zero_or_none_treated_as_single_node():
         assert "auto_probe_inference_server" not in options
         assert "progress_no_levers_min_minutes" not in options
         assert "disable_local_probe" not in options
-
-
-# _resolve_robustness_choice — multi-node auto-downgrade to mock
 
 
 def test_resolve_choice_single_node_default_keeps_agent():

@@ -26,9 +26,7 @@ def _ctx(*, inbox=None) -> ReactorContext:
     )
 
 
-# ---------------------------------------------------------------------------
-# E1 — critic_kb_outage
-# ---------------------------------------------------------------------------
+# critic_kb_outage
 
 
 def test_e1_kb_outage_fires_after_streak():
@@ -80,9 +78,7 @@ def test_e1_kb_outage_streak_resets_on_clean_judge():
     assert all(s.name != "critic_kb_outage" for s in out)
 
 
-# ---------------------------------------------------------------------------
-# E2 — critic_unavailable_streak
-# ---------------------------------------------------------------------------
+# critic_unavailable_streak
 
 
 def test_e2_critic_unavailable_streak_fires():
@@ -127,7 +123,7 @@ def test_e2_critic_unavailable_streak_resets_on_real_critic_verdict():
     ]
     data = SourceData(coordinator_events=coord_events)
     out = evaluate_critic_health_signals(_ctx(), data)
-    # Streak from the newest is 1 (only p3) — silent.
+    # Streak from the newest is 1 (only p3), silent.
     assert all(s.name != "critic_unavailable_streak" for s in out)
 
 
@@ -160,9 +156,7 @@ def test_e2_critic_unavailable_streak_reads_inbox_too():
     assert sym.evidence["consecutive_verdicts"] == 3
 
 
-# ---------------------------------------------------------------------------
-# E4 — critic_prune_stuck
-# ---------------------------------------------------------------------------
+# critic_prune_stuck
 
 
 def test_e4_critic_prune_stuck_fires_at_double_keep_count():
@@ -191,9 +185,7 @@ def test_e4_critic_prune_stuck_silent_below_threshold():
     assert all(s.name != "critic_prune_stuck" for s in out)
 
 
-# ---------------------------------------------------------------------------
-# E5 — critic_runtime_stuck
-# ---------------------------------------------------------------------------
+# critic_runtime_stuck
 
 
 def test_e5_critic_runtime_stuck_fires_on_timeout_marker():
@@ -221,9 +213,7 @@ def test_e5_silent_without_runtime_cli_substring():
     assert all(s.name != "critic_runtime_stuck" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # Custom config
-# ---------------------------------------------------------------------------
 
 
 def test_custom_thresholds_apply():

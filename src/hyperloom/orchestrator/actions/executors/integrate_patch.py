@@ -51,19 +51,14 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0  # grid noise floor; KEEP is re-confirmed by a stack rebench
-DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; aligns with BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 long workload
-# Absolute minimal-correctness floor for the enablement runnable gate: any
-# accuracy strictly above this counts as "not garbage" (a booted-but-broken
-# combo scores ~0.0).
+DEFAULT_VARIANT_TIMEOUT_SEC = 7800
+# Minimal-correctness floor for the enablement runnable gate: accuracy strictly
+# above this counts as "not garbage".
 ENABLEMENT_ACCURACY_FLOOR = 0.0
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
 
-# Enablement environment-setup replay: allowlist of install-only command shapes.
-# A specialist may run arbitrary Bash in its own sandboxed session, but the
-# durable *replay* performed here (before applying patches + booting) is limited
-# to package/tool installation so a recorded ``setup_commands`` list can never be
-# a vector for arbitrary side effects (rm, curl|bash, service restarts, etc.).
-# Matched against the command with leading `sudo `/env-assignments stripped.
+# Enablement setup replay allowlist of install-only command shapes, matched
+# against the command with leading `sudo `/env-assignments stripped.
 _SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
     r"pip3?\s+install\b",
     r"(?:python3?|uv)\s+-m\s+pip\s+install\b",
@@ -77,7 +72,7 @@ _SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
     r"conda\s+install\b",
     r"mamba\s+install\b",
 )
-_SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate (defense-in-depth)
+_SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate
 _SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
 
 
@@ -86,9 +81,7 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
 
     Strips a leading ``sudo`` and any ``KEY=VALUE`` env-assignment prefixes, then
     requires the remainder to start with a known package/tool installer. Rejects
-    anything with shell control operators that could smuggle a second command
-    (``;`` / ``&&`` / ``||`` / ``|`` / backticks / ``$(`` / redirects) so a
-    single allowlisted prefix cannot chain an arbitrary payload.
+    anything with shell control operators that could chain an arbitrary payload.
 
     Args:
         cmd: The raw command string.
@@ -99,8 +92,7 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
     text = (cmd or "").strip()
     if not text:
         return False
-    # Reject shell metacharacters that could chain/redirect a non-allowlisted
-    # command (command separators, pipes, subshells, redirects, newlines).
+    # Reject shell metacharacters that could chain/redirect a non-allowlisted command.
     if re.search(r"[;&|`<>\n]|\$\(", text):
         return False
     # Strip a leading sudo and leading KEY=VALUE env assignments.
@@ -109,7 +101,6 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
     return any(re.match(pat, text) for pat in _SETUP_CMD_ALLOWLIST)
 
 
-# Bare ``isoformat()`` (auto timespec): microseconds only when non-zero.
 _now_iso = functools.partial(now_iso, "auto")
 
 
@@ -159,8 +150,7 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     appending combined output to ``<log_dir>/enablement_setup.log``. Commands
     that fail the allowlist are skipped (never executed). A non-zero install is
     recorded but does NOT hard-fail the integration — the subsequent boot/gate
-    is the source of truth for runnability; a redundant/already-satisfied
-    install may legitimately exit non-zero.
+    is the source of truth for runnability.
 
     Args:
         commands: Candidate setup commands (already deduped / capped).
@@ -179,7 +169,7 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        # Logging is best-effort; a filesystem error must not fail the action.
+        # Logging is best-effort.
         pass
     log_path = log_dir / "enablement_setup.log"
     env = dict(os.environ)
@@ -205,7 +195,7 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
                 with open(log_path, "a", encoding="utf-8") as fh:
                     fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
             except OSError:
-                # Logging is best-effort; a filesystem error must not fail the action.
+                # Logging is best-effort.
                 pass
             if proc.returncode == 0:
                 applied.append(cmd)
@@ -222,8 +212,6 @@ def _root_contains_patch_targets(root: Path, patch_paths: list[Path]) -> bool:
     """True when *every* supplied patch has all its modify/delete targets
     present under ``root`` (at some ``-p`` strip level).
 
-    A patch only applies in the package tree that actually contains the files
-    it edits; ``vllm/...`` patches can never apply under the ``aiter`` root.
     Returns False if any patch is unreadable or has a missing target here.
     """
     if not patch_paths:
@@ -274,7 +262,7 @@ def _resolve_framework_root(
     for p in roots:
         if p.is_dir() and (p / ".git").exists():
             return p
-    # Last resort: a non-git dir (prefer surfacing as clean apply_failed).
+    # Last resort: a non-git dir.
     for p in roots:
         if p.is_dir():
             return p
@@ -471,7 +459,6 @@ def _git_apply_collect_feedback(
             )
             if ok_apply:
                 return True, "", None
-            # Unlikely but possible: real apply failed after check passed.
             feedback = build_apply_feedback(
                 patch_path,
                 channel="git",
@@ -481,12 +468,12 @@ def _git_apply_collect_feedback(
             )
             return False, stderr_apply, feedback
 
-    # All levels failed.  If three_way=False retry with -3.
+    # All levels failed; retry with -3.
     if not three_way:
         ok3, err3, fb3 = _git_apply_collect_feedback(framework_root, patch_path, three_way=True)
         if ok3:
             return True, "", None
-        # Merge both sets of stderrs for a complete picture.
+        # Merge both sets of stderrs.
         all_stderrs = "\n".join(level_stderrs)
         if err3:
             all_stderrs = all_stderrs + "\n-3 retry: " + err3 if all_stderrs else "-3 retry: " + err3
@@ -584,8 +571,7 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
     if cp is None:
         return "failed", "git status check failed"
     if cp.returncode != 0:
-        # Non-git directory (rc=128 "not a git repository") or other git
-        # status errors: treat as clean — no git-managed changes to protect.
+        # Non-git directory or other git status errors: treat as clean.
         log.debug(
             "integrate_patch: git status rc=%d in %s (not a git repo?), "
             "treating as clean",
@@ -655,8 +641,7 @@ def _git_checkout_clean(framework_root: Path) -> tuple[bool, str]:
     """``git checkout -- .`` + ``git clean -fd`` to discard candidate changes.
 
     Last-resort REVERT path when individual reverse-apply fails. User changes
-    must already have been stashed before candidate apply; this helper must not
-    create a new stash because the remaining dirty state is candidate-owned.
+    must already have been stashed before candidate apply.
 
     Args:
         framework_root (Path): Directory to run ``git checkout`` in.
@@ -715,18 +700,14 @@ def _patch_touched_paths(
 ) -> list[str]:
     """Repo-relative paths the applied ``patches`` created / modified / deleted.
 
-    Used to scope the commit-on-KEEP to *only* the files this patch touched, so
-    an unrelated dirty working tree under ``framework_root`` (generated files,
-    manual edits, stray artifacts) is never swept into the ``hyperloom KEEP``
-    commit.
+    Used to scope the commit-on-KEEP to only the files this patch touched.
 
     Per header pair (``old`` ``---``, ``new`` ``+++``):
       * created / modified → the ``new`` target exists post-apply → emit it.
       * deleted → ``new`` is ``/dev/null`` (or its target is gone)
         and ``old`` existed pre-apply → emit the ``old`` path so the subsequent
-        ``git add -A -- <path>`` stages the *removal* of a tracked file.
-    A header that resolves to neither (matches nothing pre or post) is dropped
-    so ``git add`` cannot error on a bogus pathspec.
+        ``git add -A -- <path>`` stages the removal of a tracked file.
+    A header that resolves to neither is dropped so ``git add`` cannot error.
 
     Args:
         framework_root: The git checkout the patches were applied into.
@@ -778,15 +759,9 @@ def _git_commit_kept(
 ) -> tuple[bool, str]:
     """Commit only the patch-touched ``paths`` to git for cross-cycle durability.
 
-    In the cyclic phase machine, KEEP patches accumulate across macro-cycles as
-    *uncommitted* working-tree edits. A later cycle's REVERT may fall back to
-    ``git checkout -- .`` (discards ALL uncommitted changes), which would wipe
-    every prior cycle's win. Committing each KEEP makes those wins survive the
-    checkout fallback (it only clears uncommitted state). The commit is scoped
-    to the exact paths the patch touched (never ``git add -A``) so an unrelated
-    dirty framework tree is not folded into the win commit. Best-effort: a
-    commit failure (e.g. nothing staged) is non-fatal — the KEEP still stands in
-    the working tree exactly as before.
+    Committing each KEEP makes wins survive a later cycle's ``git checkout -- .``
+    revert fallback. The commit is scoped to the exact paths the patch touched
+    (never ``git add -A``). Best-effort: a commit failure is non-fatal.
 
     Args:
         framework_root: The git checkout to commit in.
@@ -826,7 +801,7 @@ def _git_commit_kept(
         return False, "git commit spawn failed"
     if cp.returncode == 0:
         return True, ""
-    # "nothing to commit" is a benign no-op, not an error.
+    # "nothing to commit" is a benign no-op.
     out = (cp.stdout + cp.stderr).lower()
     if "nothing to commit" in out:
         return True, "nothing to commit"
@@ -845,12 +820,9 @@ def _resolve_patch_paths(
     filesystem scan of ``specialist_workspace/{worktree/,}patches/``.
     Entries normalised to absolute Paths; missing ones logged + dropped.
 
-    Security: a resolved patch path must live inside the specialist
-    workspace (or its worktree). ``params.patches`` is LLM-/specialist-
-    controllable, so an absolute path pointing outside the sandbox (another
-    session's patch, ``/etc/...``) is dropped — otherwise it would be read and
-    ``git apply``-ed against the framework tree. Both sides are ``resolve()``-d
-    first so a legitimately symlinked workspace still matches.
+    Security: a resolved patch path must live inside the specialist workspace
+    (or its worktree); an absolute path pointing outside the sandbox is dropped.
+    Both sides are ``resolve()``-d first so a symlinked workspace still matches.
 
     Args:
         specialist_workspace: The specialist task workspace to resolve
@@ -966,11 +938,8 @@ def _resolve_artifact_target(rel_target: str) -> tuple[Path, str] | None:
     roots = [r for r in roots if r.is_dir()]
     if not roots:
         return None
-    # An absolute target is accepted ONLY when it resolves strictly inside an
-    # allowlisted framework root (e.g. a site-packages framework install a
-    # specialist referenced by full path). Same containment guarantee as the
-    # relative case; ".." was already rejected above. ``_is_within`` IS a
-    # guarded ``relative_to``, so the ``relative_to`` below cannot raise.
+    # An absolute target is accepted only when it resolves strictly inside an
+    # allowlisted framework root.
     if Path(rel).is_absolute():
         cand = Path(rel).resolve()
         for root in roots:
@@ -1036,7 +1005,7 @@ def _resolve_artifact_specs(
         if not src_rel or not tgt_rel:
             errors.append({"artifact": json.dumps(entry), "error": "missing_source_or_target"})
             continue
-        # Resolve source inside the workspace / worktree sandbox.
+        # Resolve source inside the workspace sandbox.
         src = Path(src_rel)
         if not src.is_absolute():
             for base in (specialist_workspace / "worktree", specialist_workspace):
@@ -1103,20 +1072,13 @@ def _stamp_framework_kb_provenance(
 ) -> None:
     """Ensure a FRAMEWORK-dispatched deliverable carries KB-writeback provenance.
 
-    The authoring specialist's own LLM output has no reliable convention for
-    tagging ``proposal_set`` entries with the
-    ``specialist:serving:framework...`` provenance prefix that
-    :meth:`IntegratePatchExecutor._find_frameworkoposal` requires (that prefix
-    is only ever emitted by the cross-framework prompt path) — so same-
-    framework PR / config-lever deliverables silently never reach
-    ``lessons.jsonl``. Stamp it here from the dispatch context (candidate URL
-    + framework), which the Coordinator already carries in ``params``, so the
-    KB writeback works regardless of what the LLM itself wrote.
+    Stamps the ``specialist:serving:framework...`` provenance prefix (that
+    :meth:`IntegratePatchExecutor._find_frameworkoposal` requires) from the
+    dispatch context, so same-framework deliverables reach ``lessons.jsonl``.
 
     Mutates ``done_payload["proposal_set"][0]`` in place; no-ops when this
-    action was not dispatched from FRAMEWORK authoring (``params`` lacks
-    ``framework_agent_authoring``), or when a proposal already carries a
-    matching provenance (cross-framework case — left untouched).
+    action was not dispatched from FRAMEWORK authoring, or when a proposal
+    already carries a matching provenance.
 
     Args:
         done_payload: The specialist's parsed ``specialist_done.json`` (may
@@ -1136,9 +1098,7 @@ def _stamp_framework_kb_provenance(
         return
     proposals = done_payload.get("proposal_set")
     if not isinstance(proposals, list) or not proposals or not isinstance(proposals[0], dict):
-        # A config-lever / patch deliverable with no proposal_set entry to
-        # stamp (e.g. a minimal done_payload) still needs a KB-writeback
-        # anchor — synthesize a minimal one.
+        # No proposal_set entry to stamp; synthesize a minimal anchor.
         done_payload["proposal_set"] = [{}]
         proposals = done_payload["proposal_set"]
     target = proposals[0]
@@ -1197,19 +1157,10 @@ class IntegratePatchExecutor:
         """
         params = dict(ctx.task.params or {})
 
-        # Multi-node guard. This executor git-applies the specialist patch
-        # ONLY to the sandbox framework_source_roots; in multi-node mode the
-        # live sglang/vllm runs on RayJob pods, not the sandbox, so a
-        # sandbox-only apply would silently NOT affect pod-side serving — the
-        # bench would measure the unpatched pod and the KEEP/REVERT verdict
-        # would be meaningless. Until a git-diff pod fan-out exists, return a
-        # NEUTRAL "skipped" result (no patch touched, no error). This is NOT a
-        # failure: the Coordinator only records integrate_patch results whose
-        # ``status == "kept"`` (coordinator.py: "any other status → NOT
-        # recorded"), so a skip rolls no failure tally and the session keeps
-        # running every other action (baseline/profile/explore/sweep/
-        # roofline). ``is_multi_node()`` is False single-node, so the normal
-        # path below is reached bit-for-bit unchanged.
+        # Multi-node guard: this executor git-applies patches only to the sandbox
+        # framework_source_roots, which does not affect pod-side serving in
+        # multi-node mode, so return a neutral "skipped" result. No-op
+        # single-node (``is_multi_node()`` is False).
         from ._multi_node_env import is_multi_node
 
         if is_multi_node():
@@ -1244,10 +1195,7 @@ class IntegratePatchExecutor:
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or extra.get("state")
         # Thread the run's baseline accuracy into the accuracy gate when the
-        # dispatching path (generic / EXPLORE integrate) did not carry one, so a
-        # source patch that regresses image quality is caught instead of being
-        # KEEP-ed on throughput alone. Only fills a missing / zero value; an
-        # explicit param is never overridden.
+        # dispatching path did not carry one. Only fills a missing / zero value.
         if shared_state is not None and not params.get("accuracy_baseline"):
             _base_acc = getattr(shared_state, "baseline_accuracy", 0.0)
             if isinstance(_base_acc, (int, float)) and _base_acc > 0:
@@ -1266,12 +1214,8 @@ class IntegratePatchExecutor:
         done_payload = _read_done_payload(specialist_workspace)
         _stamp_framework_kb_provenance(done_payload, params=params, shared_state=shared_state)
 
-        # Enablement environment setup: replay allowlisted install-only
-        # commands (base stacked from prior rounds + this specialist's
-        # ``setup_commands``) BEFORE applying patches / booting, so a package or
-        # tool a specialist relied on (e.g. a newer ``transformers`` for a new
-        # arch, or the ``gh`` CLI) is reproduced durably rather than lost after
-        # its session ends. Non-allowlisted commands are skipped, never run.
+        # Enablement setup: replay allowlisted install-only commands before
+        # applying patches / booting. Non-allowlisted commands are skipped.
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": []}
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
@@ -1289,12 +1233,9 @@ class IntegratePatchExecutor:
             explicit_patches=(list(explicit_patches) if isinstance(explicit_patches, list) else None),
             done_payload=done_payload,
         )
-        # Enablement stacking: serial gaps require prior *progressing* patches to
-        # be re-applied as a base before this round's patch, so a fix for gap #2
-        # composes on top of the (correct-but-incomplete) fix for gap #1 rather
-        # than being reverted and re-derived from the stale original log. Base
-        # patches are applied first, in order. Skip any that are missing / are
-        # already in patch_paths.
+        # Enablement stacking: re-apply prior progressing patches as a base
+        # before this round's patch (applied first, in order). Skip any that are
+        # missing or already in patch_paths.
         base_patches = params.get("enablement_base_patches")
         if bool(params.get("enablement")) and isinstance(base_patches, list) and base_patches:
             seen = {str(p) for p in patch_paths}
@@ -1317,8 +1258,7 @@ class IntegratePatchExecutor:
             if isinstance(cc, dict):
                 config_changes = {str(k): str(v) for k, v in cc.items()}
 
-        # Non-diff tuned artifacts (e.g. an autotuned config JSON) are a
-        # first-class integrable output alongside unified diffs + config_changes.
+        # Non-diff tuned artifacts (e.g. an autotuned config JSON).
         explicit_artifacts = params.get("artifacts")
         artifact_specs, artifact_resolve_errors = _resolve_artifact_specs(
             specialist_workspace=specialist_workspace,
@@ -1327,8 +1267,8 @@ class IntegratePatchExecutor:
         )
 
         # A setup-only enablement round (installs, no source patch) is still a
-        # valid attempt: fall through to boot + gate so the install can be
-        # validated. Only bail as ``no_patches`` when there is truly nothing.
+        # valid attempt: fall through to boot + gate. Only bail as ``no_patches``
+        # when there is truly nothing.
         _setup_ran = bool(setup_result.get("applied"))
         if not patch_paths and not config_changes and not artifact_specs and not _setup_ran:
             return {
@@ -1416,9 +1356,8 @@ class IntegratePatchExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
-        # Mark the non-transactional integrate window before any
-        # framework tree mutation. The Coordinator clears this after promoting
-        # the final KEEP/REVERT/APPLY_FAILED result into SharedState.
+        # Mark the non-transactional integrate window before any framework tree
+        # mutation. The Coordinator clears this after promoting the final result.
         if shared_state is not None:
             try:
                 shared_state.pending_integrate = {
@@ -1438,10 +1377,8 @@ class IntegratePatchExecutor:
             except Exception:  # noqa: BLE001 — sentinel is best-effort
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
 
-        # Preserve user's uncommitted changes BEFORE applying patches.
-        # Stashing here ensures only user state enters the stash (not
-        # Hyperloom candidate artifacts), so `git stash pop` after the
-        # run cleanly restores only the user's original modifications.
+        # Preserve user's uncommitted changes before applying patches, so a
+        # later `git stash pop` cleanly restores only the user's modifications.
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
         if stash_state == "failed":
             log.error(
@@ -1493,7 +1430,7 @@ class IntegratePatchExecutor:
                     break
             applied.append(patch)
         if apply_errors:
-            # Mid-apply failure — reverse the partial set back to clean.
+            # Mid-apply failure: reverse the partial set back to clean.
             reverted = self._revert_patches(framework_root, applied)
             await self._maybe_write_framework_kb_record(
                 done_payload=done_payload,
@@ -1520,9 +1457,8 @@ class IntegratePatchExecutor:
                 base_result["enablement"] = True
             return _with_stash_restore(framework_root, stash_state, stash_note, base_result)
 
-        # Install non-diff tuned artifacts (after patches, before
-        # config_changes). On any artifact error, roll back artifacts + patches
-        # and surface a clean apply_failed (not an opaque git_apply_failed).
+        # Install non-diff tuned artifacts (after patches, before config_changes).
+        # On any error, roll back artifacts + patches and surface apply_failed.
         if artifact_specs:
             applied_artifacts, artifact_apply_errors = self._apply_artifacts(
                 artifact_specs,
@@ -1549,16 +1485,13 @@ class IntegratePatchExecutor:
                     "workspace": str(output_root),
                 }
 
-        # Layer config_changes onto the launch env (via the
-        # variant's ``extra_envs`` knob).
+        # Layer config_changes onto the launch env (via ``extra_envs``).
         config_changes_applied = dict(config_changes)
 
-        # Defensive double-check on the Critic verdict. PolicyGate's
-        # ``integrate_patch_requires_critic_verdict`` already gates the
-        # delegate; this is belt-and-braces for paths that bypass PolicyGate
-        # (legacy resume / test injection). No-ops when SharedState is absent.
-        # The override is out-of-band only (HYPERLOOM_BYPASS_CRITIC=1); an
-        # in-band params.bypass_critic is ignored so an LLM cannot self-approve.
+        # Defensive double-check on the Critic verdict for paths that bypass
+        # PolicyGate. No-ops when SharedState is absent. The override is
+        # out-of-band only (HYPERLOOM_BYPASS_CRITIC=1); an in-band
+        # params.bypass_critic is ignored so an LLM cannot self-approve.
         if shared_state is not None and os.environ.get("HYPERLOOM_BYPASS_CRITIC") != "1":
             if params.get("bypass_critic"):
                 log.warning(
@@ -1592,7 +1525,7 @@ class IntegratePatchExecutor:
                     "workspace": str(output_root),
                 })
 
-        # Optionally skip the bench (test / smoke).
+        # Optionally skip the bench.
         if params.get("apply_only"):
             return _with_stash_restore(framework_root, stash_state, stash_note, {
                 "status": "applied_no_bench",
@@ -1605,7 +1538,7 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Bench the patched config via run_grid (1 variant).
+        # Bench the patched config via run_grid.
         try:
             bench_result, gate_evidence = await self._bench_patch(
                 params=params,
@@ -1643,18 +1576,13 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # Enablement gate: RUNNABILITY + minimal-correctness gate. A
-        # positive ``output_throughput`` means the server booted and served at
-        # least one request. Accuracy is compared against an absolute floor
-        # (``ENABLEMENT_ACCURACY_FLOOR``). Three states:
+        # Enablement gate: runnability + minimal-correctness. A positive
+        # ``output_throughput`` means the server booted; accuracy is compared
+        # against ``ENABLEMENT_ACCURACY_FLOOR``. Three states:
         #   * accuracy > floor      -> correctness_ok=True  (KEEP, verified)
-        #   * accuracy <= floor/NaN -> correctness_ok=False (REVERT, boots but
-        #                              output is garbage)
-        #   * accuracy is None      -> correctness_ok=None  (KEEP but provisional
-        #                              / boot-only; eval never produced a score)
-        # The post-patch failure signature is re-classified and compared to the
-        # pre-patch one: the same actionable failure re-appearing counts as
-        # "not fixed".
+        #   * accuracy <= floor/NaN -> correctness_ok=False (REVERT, garbage)
+        #   * accuracy is None      -> correctness_ok=None  (KEEP but provisional)
+        # The post-patch failure signature is compared to the pre-patch one.
         if params.get("enablement"):
             import math as _math
 
@@ -1676,7 +1604,7 @@ class IntegratePatchExecutor:
             elif isinstance(enablement_accuracy, float) and _math.isnan(enablement_accuracy):
                 correctness_ok = False
             else:
-                # None (or non-numeric): eval never produced a score -> provisional.
+                # None / non-numeric: eval produced no score -> provisional.
                 correctness_ok = None
 
             after_signature = classify_failure(str(bench_result.get("error") or ""))
@@ -1696,20 +1624,15 @@ class IntegratePatchExecutor:
                 after_signature=after_signature,
             )
             if not runs:
-                # Forward-progress case: the patch did not make the combo fully
-                # runnable, but it cleared the prior crash and the boot now
-                # stops at a *new, deeper* actionable failure. That diff is a
-                # necessary building block for a serial (gap #1 -> gap #2 -> ...)
-                # enablement — KEEP it applied ("advanced") and surface the new
-                # failure log so the next round targets gap #(n+1) instead of
-                # reverting and re-deriving gap #(n)'s fix from the stale log.
+                # Forward-progress case: the patch cleared the prior crash and
+                # the boot now stops at a new, deeper actionable failure. KEEP it
+                # applied ("advanced") and surface the new failure log for the
+                # next round.
                 advanced = (not booted) and enablement_made_progress(before_signature, after_signature)
                 if advanced:
                     # Record the applied patch paths for stacking, then revert
-                    # the working tree to clean. The stack is rebuilt fresh next
-                    # round via ``enablement_base_patches`` re-application, so
-                    # the tree never carries uncommitted patches across tasks
-                    # (which would be mis-stashed as user state / double-applied).
+                    # the working tree to clean; the stack is rebuilt fresh next
+                    # round via ``enablement_base_patches`` re-application.
                     stacked_patches = [str(p) for p in applied]
                     new_log = str(bench_result.get("error") or "")
                     artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -1725,7 +1648,7 @@ class IntegratePatchExecutor:
                         "specialist_task_id": specialist_task_id,
                         # Paths applied this round (base + new); recorded by the
                         # Coordinator into enablement_kept_patches for re-apply.
-                        "patches_applied": stacked_patches,
+                        "patches_applied": stacked_patches,  # base + new; recorded by the Coordinator for re-apply
                         "patches_reverted": [str(p) for p in reverted],
                         "artifacts_reverted": artifacts_reverted,
                         "config_changes_applied": {},
@@ -1799,11 +1722,8 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
             })
 
-        # KEEP / REVERT decision.
-        # The Coordinator seeds ``base_tput`` per-dispatch, but a direct
-        # invocation (resume path / test / external caller) may bypass that and
-        # leave it 0.0, which would make ``delta_pct`` None and auto-REVERT a
-        # genuinely valid patch. Fall back to the live ``SharedState`` anchor
+        # KEEP / REVERT decision. When ``base_tput`` is unset (direct/resume
+        # invocation), fall back to the live ``SharedState`` anchor
         # (current_best.tput else baseline_tput) so the gate still measures.
         base_tput = float(params.get("base_tput") or 0.0)
         if base_tput <= 0 and shared_state is not None:
@@ -1825,9 +1745,8 @@ class IntegratePatchExecutor:
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         # KEEP requires delta_pct ≥ keep_threshold AND the accuracy gate.
-        # Framework-authored source patches require the accuracy
-        # gate (gated on the framework authoring markers so generic EXPLORE
-        # integrate_patch keeps its prior throughput-only behaviour).
+        # The accuracy gate is required only for framework-authored source
+        # patches; generic EXPLORE integrate_patch stays throughput-only.
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
         acc_required = bool(params.get("require_accuracy_for_keep", fw_authored))
         acc_baseline = params.get("accuracy_baseline")
@@ -1858,8 +1777,7 @@ class IntegratePatchExecutor:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
-            # Distinguish "accuracy required but unevaluated" from a
-            # throughput/regression revert.
+            # Distinguish "accuracy required but unevaluated" from a throughput revert.
             _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
             revert_status = (
                 "accuracy_unavailable_reject" if (acc_block and accuracy_pass is None and _tput_ok) else "reverted"
@@ -1897,11 +1815,9 @@ class IntegratePatchExecutor:
                 specialist_task_id=specialist_task_id,
                 base_tput=base_tput,
             )
-            # Re-apply the SAME accuracy gate to the authoritative rebench (its
-            # tput becomes the headline below): the confirmation run must clear
-            # stability AND accuracy. A missing verdict blocks when accuracy is
-            # required and a baseline exists (mirrors the first-bench gate), so a
-            # silently eval-less rebench can't KEEP on a stale first-bench pass.
+            # Re-apply the accuracy gate to the authoritative rebench: it must
+            # clear stability AND accuracy, and a missing verdict blocks when
+            # accuracy is required and a baseline exists (mirrors first-bench).
             rb_acc_block, rb_acc_reason, _rb_degraded = accuracy_keep_block(
                 confirm["accuracy_pass"],
                 required=acc_required,
@@ -1919,8 +1835,8 @@ class IntegratePatchExecutor:
                     reasons.append("accuracy regression on rebench")
                 elif rb_acc_block and rb_acc_reason:
                     reasons.append(rb_acc_reason)
-                # Distinguish "accuracy required but unevaluated on the
-                # stable rebench" from a measured regression / stability revert.
+                # Distinguish "accuracy required but unevaluated" from a
+                # measured regression / stability revert.
                 rb_revert_status = (
                     "accuracy_unavailable_reject"
                     if (rb_acc_block and confirm["accuracy_pass"] is None and confirm["stable"])
@@ -1962,8 +1878,8 @@ class IntegratePatchExecutor:
             tps_delta_pct=float(delta_pct or 0.0),
             extra=extra,
         )
-        # In cyclic mode, commit the KEEP so a later macro-cycle's REVERT
-        # checkout fallback can't wipe this win (best-effort, non-fatal).
+        # In cyclic mode, commit the KEEP so a later REVERT checkout fallback
+        # can't wipe this win (best-effort, non-fatal).
         try:
             from ...phases.machine_state import is_cyclic_phases_enabled
 
@@ -1982,22 +1898,16 @@ class IntegratePatchExecutor:
         except Exception:  # noqa: BLE001 — commit durability is best-effort
             log.exception("integrate_patch: commit-on-KEEP raised")
         # Durability: snapshot the KEEP's realized source layer into a
-        # session-scoped, self-contained directory so a later candidate's
-        # ``git reset``/``clean``/``stash pop`` on the shared live tree cannot
-        # wipe it (the root cause of current_best becoming unrelaunchable and
-        # the GEAK baseline falling back to the stock framework). Generic:
-        # keyed on the touched patch targets + applied artifacts, never on a
-        # specific file. Best-effort — a snapshot failure never blocks the KEEP.
+        # session-scoped directory so a later candidate's git reset/clean/stash
+        # on the shared live tree cannot wipe it. Keyed on the touched patch
+        # targets + applied artifacts. Best-effort — never blocks the KEEP.
         source_snapshot_dir = ""
         source_base_sha = ""
         try:
             from ...source_snapshot import snapshot_source_layer
 
             if framework_root is not None:
-                # HEAD is the clean base: KEEP edits are uncommitted (non-cyclic)
-                # so HEAD == pre-apply sha; in cyclic mode HEAD already includes
-                # them and the overlay is idempotent on re-checkout. Either way
-                # this is the base the snapshot files overlay onto.
+                # HEAD is the clean base the snapshot files overlay onto.
                 _cp = _run_git_cp(
                     ["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0
                 )
@@ -2042,8 +1952,7 @@ class IntegratePatchExecutor:
             "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
             "bench_result": bench_result,
             "workspace": str(output_root),
-            # Durable source-layer snapshot handles (consumed by the coordinator
-            # lift -> optimization_stack entry -> env_spec -> handoff).
+            # Durable source-layer snapshot handles.
             "source_snapshot": source_snapshot_dir,
             "framework_root": str(framework_root or ""),
             "base_sha": source_base_sha,
@@ -2206,7 +2115,7 @@ class IntegratePatchExecutor:
                     patch,
                     err,
                 )
-                # Reverse-apply failed → checkout clears all uncommitted at once.
+                # Reverse-apply failed: checkout clears all uncommitted at once.
                 ok2, err2 = _git_checkout_clean(framework_root)
                 if ok2:
                     reverted = list(applied)
@@ -2366,9 +2275,7 @@ class IntegratePatchExecutor:
                 "output_throughput": getattr(r, "output_throughput", None),
                 "ttft_ms": getattr(r, "ttft_ms", None),
                 "itl_ms": getattr(r, "itl_ms", None),
-                # ``VariantResult`` exposes the benchmark dir as ``workspace``
-                # (there is no ``result_dir`` attribute); ``_grade_accuracy``
-                # needs this path to locate the accuracy artifacts.
+                # Benchmark dir; ``_grade_accuracy`` locates accuracy artifacts here.
                 "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
@@ -2390,8 +2297,7 @@ class IntegratePatchExecutor:
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
             )
 
-        # Enablement path: surface the raw accuracy (float / None) so the
-        # enablement branch can apply an absolute floor.
+        # Enablement path: surface the raw accuracy so the branch can apply a floor.
         enablement_accuracy: float | None = None
         if bool(params.get("enablement")) and bench.get("status") == "succeeded":
             try:
@@ -2452,9 +2358,8 @@ class IntegratePatchExecutor:
         For scriptable frameworks (xDiT) ``parse_eval_results`` fails closed on
         a missing quality gate instead of falling back to GSM8K.
         """
-        # Accept numeric strings (e.g. ``"0.85"``) in addition to int/float so a
-        # baseline carried as text is not silently coerced to 0.0 (which would
-        # skip the gate). Non-numeric / missing values fall back to 0.0 (skip).
+        # Accept numeric strings in addition to int/float; non-numeric / missing
+        # values fall back to 0.0 (skip).
         try:
             baseline_value = float(baseline_accuracy)
         except (TypeError, ValueError):

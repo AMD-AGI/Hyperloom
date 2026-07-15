@@ -24,7 +24,6 @@ def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monke
             "cache_creation_input_tokens": None,
             "cache_read_input_tokens": "4",
             "latency_ms": "99",
-            "resume_downgraded": True,
         },
         task_id="k1",
     )
@@ -39,7 +38,6 @@ def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monke
     assert row["cache_read_input_tokens"] == 4
     assert row["latency_ms"] == 99
     assert row["reviewed_msg_ids"] == ["a", "7"]
-    assert row["resume_downgraded"] is True
 
 
 def test_llm_call_record_rejects_unknown_component(tmp_path: Path):

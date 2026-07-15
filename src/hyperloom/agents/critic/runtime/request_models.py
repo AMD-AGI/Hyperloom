@@ -6,8 +6,7 @@ Two entry shapes — ``coordinator_inbox`` (textual prompt, must emit an
 intent envelope) and ``critic_decision_request`` (decision review whose
 incremental turns merge against session memory) — both converge on
 :class:`CriticRequest` (session id, context, parsed proposals, raw payload).
-Import-light: no KB / inbox-parser / LLM dependency, only structural
-validation other modules can rely on.
+Import-light: only structural validation other modules can rely on.
 """
 
 from __future__ import annotations
@@ -19,9 +18,7 @@ from typing import Any
 from .errors import RequestValidationError
 
 
-# ---------------------------------------------------------------------------
 # Allowed request kinds
-# ---------------------------------------------------------------------------
 COORDINATOR_INBOX = "coordinator_inbox"
 DECISION_REQUEST = "critic_decision_request"
 KB_DRAFT_REQUEST = "kb_draft_request"
@@ -39,10 +36,9 @@ REQUEST_KINDS: frozenset[str] = frozenset(
 )
 
 
-# Context dimensions that the KB scope is built from. ``model`` and
-# ``framework`` are treated as critical: when either is missing after
-# memory merge, KB reads are skipped and the verdict downgrades to
-# ``needs_review`` rather than guess.
+# Context dimensions the KB scope is built from. ``model`` and ``framework``
+# are critical: when either is missing after memory merge, KB reads are skipped
+# and the verdict downgrades to ``needs_review``.
 CONTEXT_DIMENSIONS: tuple[str, ...] = (
     "model",
     "framework",
@@ -55,15 +51,13 @@ CONTEXT_DIMENSIONS: tuple[str, ...] = (
 CRITICAL_CONTEXT_KEYS: tuple[str, ...] = ("model", "framework")
 
 
-# ---------------------------------------------------------------------------
 # Proposal extracted from a Coordinator inbox row
-# ---------------------------------------------------------------------------
 @dataclass
 class Proposal:
     """One ``topic=proposal`` row extracted from a Coordinator inbox.
 
     Attributes:
-        msg_id: The Coordinator-issued ``msg_id`` (hex32 in the legacy release).
+        msg_id: The Coordinator-issued ``msg_id``.
         from_agent: Originating agent name (e.g. ``orchestration``).
         seq: Optional bus sequence number (kept for ordering / replay).
         action_name: Convenience copy of ``payload.action_name``.
@@ -88,9 +82,7 @@ class Proposal:
         return asdict(self)
 
 
-# ---------------------------------------------------------------------------
 # CriticRequest
-# ---------------------------------------------------------------------------
 @dataclass
 class CriticRequest:
     """Normalised Critic input.
@@ -134,9 +126,7 @@ class CriticRequest:
         return out
 
 
-# ---------------------------------------------------------------------------
 # Parsing
-# ---------------------------------------------------------------------------
 def _require_str(d: dict[str, Any], key: str, *, where: str) -> str:
     """Extract a required non-empty string field.
 
@@ -234,10 +224,8 @@ def _optional_list(d: dict[str, Any], key: str, *, where: str) -> list[Any]:
 def parse_request(raw: dict[str, Any]) -> CriticRequest:
     """Validate the input dict and return a :class:`CriticRequest`.
 
-    The function is permissive about extra keys (they go into ``raw``)
-    but strict about required ones, mirroring contract §14.4 — invalid
-    requests should fail fast so the SKILL never produces a bogus
-    verdict.
+    Permissive about extra keys (they go into ``raw``) but strict about
+    required ones — invalid requests fail fast.
 
     Args:
         raw (dict[str, Any]): The raw request payload.

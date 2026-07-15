@@ -70,7 +70,7 @@ def test_build_cmd_requires_mandatory_fields():
         forge_gemm_tuning._build_cmd(payload)
     except ValueError as exc:
         assert "model_path is required" in str(exc)
-    else:  # pragma: no cover - assertion helper
+    else:  # pragma: no cover
         raise AssertionError("expected ValueError")
 
 
@@ -82,7 +82,7 @@ def test_load_input_json_rejects_non_object(tmp_path):
         forge_gemm_tuning._load_input_json(str(p))
     except ValueError as exc:
         assert "must contain a JSON object" in str(exc)
-    else:  # pragma: no cover - assertion helper
+    else:  # pragma: no cover
         raise AssertionError("expected ValueError")
 
 

@@ -11,13 +11,8 @@ concrete decision:
   * ``partial`` (no usable model)  -> ``SystemExit(3)``
   * ``failed``                     -> ``SystemExit(3)``
 
-The decision *whether* to quantize is made upstream by the deterministic
-``$HYPERLOOM_QUANTIZE_ENABLED`` gate in ``cli._run_quantization_prelude``;
-reaching this adapter means quantization was switched on, so it runs.
-
-When the user explicitly asked for quantization we must never silently fall
-through and optimize the un-quantized source model — a quantization failure is
-a hard stop for the whole run.
+A quantization failure is a hard stop for the whole run: this adapter never
+silently falls through to optimize the un-quantized source model.
 """
 
 from __future__ import annotations
@@ -49,16 +44,14 @@ async def run_quantization_prelude_async(
     Raises:
         SystemExit: If quantization failed or produced no usable model.
     """
-    # Import lazily so this module loads even where the quantization runtime
-    # deps (e.g. Quark) are absent.
+    # Import lazily so this module loads without the quantization runtime deps.
     from hyperloom.agents.quantization import quantize_via_prompt
 
     workspace = Path(workspace)
     export_dir = workspace / "quantized"
 
-    # The agent is prompt-driven: fold the source model + export dir into the
-    # prompt so the user's --quantize text can be just the scheme
-    # (e.g. "fp8 with fp8 kv_cache, exclude lm_head").
+    # Fold the source model + export dir into the prompt so the user's
+    # --quantize text can be just the scheme.
     effective_prompt = (
         f"Quantize the model at {source_model}. "
         f"Export the HuggingFace-format quantized model to {export_dir}. "

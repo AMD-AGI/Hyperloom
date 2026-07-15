@@ -3,8 +3,7 @@
 """Unit tests for :mod:`runtime.session_memory` edge cases.
 
 Covers input-validation guards, empty-log reads, malformed-cache handling,
-corrupt-JSON detection, and the MergeResult serialiser that the higher-level
-DecisionReviewer tests do not exercise directly.
+corrupt-JSON detection, and the MergeResult serialiser.
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ def test_merge_result_to_dict_is_a_copy():
         "missing_keys": ["workload"],
     }
     d["merged"]["model"] = "changed"
-    assert mr.merged["model"] == "m"  # original untouched
+    assert mr.merged["model"] == "m"
 
 
 def test_session_dir_rejects_invalid_ids(sm):
@@ -89,11 +88,10 @@ def test_append_event_rejects_non_dict(sm):
 
 
 def test_get_cached_priors_absent_and_malformed(sm):
-    assert sm.get_cached_priors("s1", "k") is None  # no cache file yet
+    assert sm.get_cached_priors("s1", "k") is None
     sm.put_cached_priors("s1", "good", [{"id": "x"}])
     assert sm.get_cached_priors("s1", "good") == [{"id": "x"}]
 
-    # Write a malformed entry directly and confirm it is rejected.
     path = sm._priors_cache_path("s1")
     cache = json.loads(path.read_text("utf-8"))
     cache["bad_entry"] = "not-a-dict"
@@ -105,7 +103,6 @@ def test_get_cached_priors_absent_and_malformed(sm):
 
 def test_get_cached_priors_expired(sm):
     sm.put_cached_priors("s1", "k", [{"id": "x"}])
-    # Far-future now exceeds the TTL -> expired -> None.
     assert sm.get_cached_priors("s1", "k", now=1e18) is None
 
 

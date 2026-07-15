@@ -116,7 +116,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         if delta_md:
             parts.append(delta_md)
             parts.append("")
-        # One-liner fact so the summary can cite the signal without the table.
         if isinstance(baseline, dict):
             tk = baseline.get("top_kernel") or {}
             facts.append(

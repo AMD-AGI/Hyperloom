@@ -170,13 +170,12 @@ async def test_phase_discover_shapes_request_and_dedups_keywords(tmp_path, monke
     assert req["framework"] == "sglang"  # normalized
     assert req["repo_url"].endswith("sglang.git")  # resolved from framework
     assert req["max_search_candidates"] == 3
-    # keywords lowercased, trimmed, de-duplicated preserving order
     assert req["keywords"] == ["fused", "moe"]
 
 
 @pytest.mark.asyncio
 async def test_phase_discover_plumbs_exclusion_memory(tmp_path, monkeypatch) -> None:
-    """Step B: excluded_candidate_ids + failed_candidate_context reach the request
+    """excluded_candidate_ids + failed_candidate_context reach the request
     (deduped / truncated) so fa can hard-filter already-seen candidates."""
     captured: dict = {}
 
@@ -196,9 +195,7 @@ async def test_phase_discover_plumbs_exclusion_memory(tmp_path, monkeypatch) -> 
         failed_candidate_context=failed,
     )
     req = captured["request"]
-    # Deduped + trimmed, order-preserving.
     assert req["excluded_candidate_ids"] == ["PR:1", "PR:2"]
-    # Truncated to the most recent 10.
     assert len(req["failed_candidate_context"]) == 10
     assert req["failed_candidate_context"][-1]["ref"] == "PR:14"
 
@@ -224,7 +221,7 @@ async def test_phase_discover_omits_exclusion_keys_when_empty(tmp_path, monkeypa
     assert "failed_candidate_context" not in req
 
 
-# -- phase_audit (design #5: cross-framework target_framework wiring) ------
+# -- phase_audit -----------------------------------------------------------
 @pytest.mark.asyncio
 async def test_phase_audit_same_framework_omits_target_framework(tmp_path, monkeypatch) -> None:
     captured: dict = {}
@@ -238,7 +235,7 @@ async def test_phase_audit_same_framework_omits_target_framework(tmp_path, monke
         candidate={"repo": "sgl-project/sglang"},
         framework="sglang",
         framework_source_roots=["/src/sglang"],
-        target_framework="sglang",  # same as framework -> not cross-framework
+        target_framework="sglang",  # same as framework
         session_dir=tmp_path,
     )
     req = captured["request"]
@@ -271,7 +268,7 @@ async def test_phase_audit_cross_framework_sets_target_and_roots(tmp_path, monke
 @pytest.mark.asyncio
 async def test_phase_audit_cross_framework_without_explicit_roots_omits_key(tmp_path, monkeypatch) -> None:
     """No target_framework_source_roots passed -> key absent (fa falls back to
-    framework_source_roots per design Q1, flagged roots_source=="fallback")."""
+    framework_source_roots)."""
     captured: dict = {}
 
     async def _fake_invoke(*, subcommand, request, session_dir, timeout_sec):

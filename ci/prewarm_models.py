@@ -71,14 +71,8 @@ log = logging.getLogger("prewarm")
 def slug(repo_id: str) -> str:
     """HF repo_id → /wekafs/models/<slug>/ folder name.
 
-    Matches the SaFE backend convention already used by the 47 models on
-    /wekafs/models: a single '/' separator becomes '-' and all other
-    characters are preserved verbatim (including pre-existing '-').
-
-      Qwen/Qwen2.5-7B-Instruct           → Qwen-Qwen2.5-7B-Instruct
-      meta-llama/Llama-3.1-8B            → meta-llama-Llama-3.1-8B
-      deepseek-ai/DeepSeek-R1            → deepseek-ai-DeepSeek-R1
-      dphn/dolphin-2.9.1-yi-1.5-34b      → dphn-dolphin-2.9.1-yi-1.5-34b
+    Matches the SaFE backend convention: a single '/' separator becomes '-' and
+    all other characters are preserved verbatim.
 
     Args:
         repo_id (str): The HuggingFace repo id (``owner/repo``).
@@ -190,9 +184,8 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
     tmp = tmp_dir(target_root, repo_id)
     hf_api = HfApi()
 
-    # Token pool: accept either a single token (str) or a list. Start on a
-    # token chosen by hashing the repo id so parallel prewarm jobs spread
-    # across the pool, then rotate on 429.
+    # Token pool: accept a single token or a list. Start on a token chosen by
+    # hashing the repo id so parallel jobs spread out, then rotate on 429.
     tokens = [t for t in (hf_token if isinstance(hf_token, (list, tuple)) else [hf_token]) if t]
     tok_idx = (hash(repo_id) % len(tokens)) if tokens else 0
 
@@ -203,7 +196,7 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
         n, gb = _dir_stats(dest)
         return {"status": "SKIP", "size_gb": gb, "n_files": n, "elapsed_s": 0, "reason": "already complete"}
 
-    # Clean stale .part if previous run aborted mid-flight
+    # Clean stale .part from an aborted prior run.
     if tmp.exists():
         log.info("[%s] cleaning stale .tmp dir %s", repo_id, tmp)
         shutil.rmtree(tmp, ignore_errors=True)
@@ -225,7 +218,7 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
                     "*.msgpack",
                     "*.onnx",
                     "*.tflite",
-                    "consolidated.*",  # legacy llama-cpp dumps
+                    "consolidated.*",
                 ],
                 tqdm_class=None,
             )
@@ -281,7 +274,7 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
     try:
         tmp.rename(dest)
     except OSError:
-        # Cross-device or other rename failure — fall back to copy+rmtree.
+        # Cross-device rename failure — fall back to copy+rmtree.
         log.warning("[%s] rename failed, fallback to copytree+rmtree", repo_id)
         shutil.copytree(tmp, dest)
         shutil.rmtree(tmp, ignore_errors=True)
@@ -349,7 +342,7 @@ def load_repos(args: argparse.Namespace) -> list[str]:
     if args.candidates:
         repos = _load_candidates(args.candidates)
         return _slice_repos(repos, args.batch_index, args.batch_size)
-    # stdin (one repo per line)
+    # stdin: one repo per line.
     if not sys.stdin.isatty():
         repos = [ln.strip() for ln in sys.stdin if ln.strip() and not ln.startswith("#")]
         if repos:

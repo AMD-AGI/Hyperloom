@@ -99,9 +99,8 @@ def _load_report(workspace: Path | None) -> dict[str, Any]:
 
     Returns:
         dict[str, Any]: The parsed report dict with ``final_report_path``
-            added, or an empty dict when missing, or a dict carrying an
-            ``error`` key when the file is not valid JSON / not an
-            object.
+            added, an empty dict when missing, or a dict carrying an
+            ``error`` key when the file is not valid JSON / not an object.
     """
     if workspace is None:
         return {}

@@ -69,15 +69,8 @@ def test_check_tracelens_cli_error_falls_back_to_default_when_env_unset(
 
 
 def test_tracelens_required_unless_no_kernel_and_roofline_disabled():
-    """Preflight may degrade to WARN only when BOTH --no-kernel AND roofline off.
-
-    The PRELUDE/auto roofline reaches TraceLens (roofline -> trace_analyze ->
-    TraceLens) and is not disabled by --no-kernel alone, so the hard-fail must
-    survive every config except (no_kernel AND not enable_roofline).
-    """
-    # Hard-fail required: roofline on (default) keeps TraceLens in the loop.
+    """Preflight may degrade to WARN only when BOTH --no-kernel AND roofline off."""
     assert cli._tracelens_required_at_preflight(no_kernel=False, enable_roofline=True) is True
     assert cli._tracelens_required_at_preflight(no_kernel=True, enable_roofline=True) is True
     assert cli._tracelens_required_at_preflight(no_kernel=False, enable_roofline=False) is True
-    # Only here is TraceLens truly unused -> WARN allowed.
     assert cli._tracelens_required_at_preflight(no_kernel=True, enable_roofline=False) is False

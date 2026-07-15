@@ -34,7 +34,7 @@ def generate_matrix(config_path: str = "ci-config.yaml", selected_models: str = 
         A dict of the form ``{"include": [{"key": ...}, ...]}`` suitable for a
         GitHub Actions matrix.
     """
-    # Force UTF-8: ci-config.yaml uses box-drawing chars (──); Windows cp1252 would raise UnicodeDecodeError.
+    # Force UTF-8: ci-config.yaml uses box-drawing chars that break under cp1252.
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 

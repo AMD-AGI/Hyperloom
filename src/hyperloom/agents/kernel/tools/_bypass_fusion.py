@@ -40,7 +40,7 @@ def _summarize_cluster(run: list[dict[str, Any]]) -> dict[str, Any]:
     start = min(float(r.get("ts") or 0.0) for r in run)
     end = max(float(r.get("ts") or 0.0) + float(r.get("dur") or 0.0) for r in run)
     span = max(0.0, end - start)
-    # Time between kernels that a fused launch would remove (span not spent in a kernel).
+    # Inter-kernel time a fused launch would remove.
     gap = max(0.0, span - total_dur)
     return {
         "launch_count": len(run),
@@ -115,8 +115,7 @@ def analyze_fusion(launches: list[dict[str, Any]], *, top_k_clusters: int = 20) 
         ``fusable_time_us`` are totals over ALL clusters; ``fusable_clusters`` is
         capped to the ``top_k_clusters`` largest (list-size bound only).
     """
-    # Count/time over ALL fusable clusters (totals must not be truncated); the
-    # returned cluster LIST is separately capped to top_k for payload size.
+    # Totals over ALL clusters; the returned LIST is capped to top_k.
     all_clusters = fusable_clusters(launches)
     fusable_time = sum(c["aggregate_dur_us"] for c in all_clusters)
     listed = all_clusters[:top_k_clusters] if top_k_clusters and top_k_clusters > 0 else all_clusters

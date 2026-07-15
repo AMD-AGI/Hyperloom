@@ -290,8 +290,7 @@ def test_optimization_stack_size_zero_when_none():
 
 
 # ---------------------------------------------------------------------------
-# explore_started — flips True iff an explore-family ``last_*`` line is
-# non-``(none)``; the ``no_levers_found`` cold-start guard defers until then.
+# explore_started — flips True iff an explore-family ``last_*`` line is non-``(none)``.
 # ---------------------------------------------------------------------------
 
 
@@ -320,7 +319,7 @@ def test_explore_started_true_when_any_last_explore_key_is_set():
 
 
 def test_explore_started_true_for_each_individual_explore_family():
-    """Each explore-family key flips the flag independently, so a future shared_state.py rename fails an assertion rather than silently downgrading the gate."""
+    """Each explore-family key flips the flag independently."""
     for key in (
         "last_explore",
         "last_sweep",

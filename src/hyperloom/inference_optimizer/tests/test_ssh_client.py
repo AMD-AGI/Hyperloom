@@ -2,10 +2,9 @@
 
 """Unit tests for the Dynamo multi-node SSH control plane (``ssh_client``).
 
-These guard the command-construction / credential-forwarding logic that is the
-sole channel for reaching the Dynamo idle pods: argv shape, base64 script
-shipping, per-variant env injection (e.g. MORI_* MoE-dispatch tuning), and the
-stdin-only secret path. All tests stub ``subprocess.run`` so nothing is spawned.
+Guards command-construction / credential-forwarding logic: argv shape, base64
+script shipping, per-variant env injection, and the stdin-only secret path. All
+tests stub ``subprocess.run`` so nothing is spawned.
 """
 
 from __future__ import annotations

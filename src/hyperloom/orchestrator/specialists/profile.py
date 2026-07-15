@@ -40,11 +40,9 @@ LANE_GPU = "gpu"
 LANE_VALUES: frozenset[str] = frozenset({LANE_CPU, LANE_GPU})
 
 
-# Defaults. A dispatch that carries a domain/tag anchor resolves to the
-# single-domain, patch-authoring, GPU-leased behaviour (DEFAULT_MODE/_LANE).
-# A *truly bare* dispatch (no scope and no domain/tag anchor) is inferred to be
-# ``freeform`` and therefore resolves to the cheap, read-only research/CPU lane
-# — "safe & cheap first".
+# Defaults: an anchored dispatch resolves to single-domain, patch-authoring,
+# GPU-leased behaviour; a truly bare dispatch is inferred ``freeform`` and
+# resolves to the cheap read-only research/CPU lane.
 DEFAULT_SCOPE = SCOPE_DOMAIN
 DEFAULT_MODE = MODE_PATCH
 DEFAULT_BENCH = False
@@ -125,7 +123,7 @@ def _infer_scope(p: dict[str, Any]) -> str:
         ``SCOPE_DOMAINS`` for two-or-more tags, ``SCOPE_DOMAIN`` for one, or
         ``SCOPE_FREEFORM`` when no anchor is present.
     """
-    # Local import avoids a module-load cycle (specialist_domains is heavier).
+    # Local import avoids a module-load cycle.
     from .domains import normalize_dispatch_tags
 
     tags = normalize_dispatch_tags(p)
@@ -143,24 +141,18 @@ def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
 
     Two dispatch shapes take the whole-machine, time-shared lane:
 
-    * **framework-authoring** specialists (``framework_agent_authoring``) — the
-      long-standing behaviour: they lease the whole node from
-      ``framework_gpu_pool``.
+    * **framework-authoring** specialists (``framework_agent_authoring``) lease
+      the whole node from ``framework_gpu_pool``.
     * **bench-capable** specialists (``mode=patch`` & ``bench=true``,
-      i.e. :attr:`SpecialistProfile.reserves_benchmark_lane`) — they start a
-      real TP-sharded server on the full serving-TP cards and run a benchmark
-      loop, so they are already temporally mutually-exclusive with production
-      serving via ``gpu_research_lane`` + ``benchmark_lane``. Because the
-      serving process is torn down at the end of every explore/integrate round
-      (and its cards freed), a bench specialist can safely take the whole
-      machine in the gap between rounds. Critically, the serving-disjoint pool
-      is *empty* whenever serving occupies the whole node (``TP == #GPUs``), so
-      without this route bench specialists are structurally undispatchable on a
-      whole-machine-serving session.
+      i.e. :attr:`SpecialistProfile.reserves_benchmark_lane`) start a real
+      TP-sharded server on the full serving-TP cards and run a benchmark loop,
+      so they are temporally mutually-exclusive with production serving via
+      ``gpu_research_lane`` + ``benchmark_lane``. The serving-disjoint pool is
+      empty whenever serving occupies the whole node (``TP == #GPUs``), so
+      without this route bench specialists are undispatchable.
 
-    Non-bench GPU probes (microbench / profiling, ``bench=false``) keep the
-    serving-disjoint pool: they are designed to run on cards physically disjoint
-    from serving.
+    Non-bench GPU probes (``bench=false``) keep the serving-disjoint pool: they
+    run on cards physically disjoint from serving.
 
     Args:
         params: The specialist dispatch params (carrying
@@ -204,8 +196,7 @@ def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfi
 
     mode = str(p.get("mode") or "").strip().lower()
     if mode not in MODE_VALUES:
-        # Freeform recon defaults to read-only research; everything else keeps
-        # the legacy patch-authoring default.
+        # Freeform recon defaults to read-only research; else patch-authoring.
         mode = MODE_RESEARCH if scope == SCOPE_FREEFORM else DEFAULT_MODE
 
     bench = _coerce_bool(p.get("bench"), DEFAULT_BENCH)
@@ -215,8 +206,7 @@ def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfi
 
     lane = str(p.get("lane") or "").strip().lower()
     if lane not in LANE_VALUES:
-        # CPU lane for read-only research / freeform recon; GPU lane when the
-        # worker authors patches (and especially when it benches).
+        # CPU lane for read-only research; GPU lane when the worker authors patches.
         lane = LANE_GPU if mode == MODE_PATCH else LANE_CPU
 
     return SpecialistProfile(scope=scope, mode=mode, bench=bench, lane=lane)

@@ -191,9 +191,7 @@ def test_inject_uses_cap_below_native_window(tmp_path):
     assert _context_length_value(out) == 10240
 
 
-# --max-model-len clamp : the injected --context-length must never exceed
-# the run's explicit --max-model-len, otherwise sglang gets a self-contradictory
-# config (context-length above the configured max).
+# --max-model-len clamp: the injected --context-length must never exceed --max-model-len.
 def test_inject_clamps_to_max_model_len(tmp_path):
     """A huge native window + ISL/OSL whose cap exceeds an explicit
     --max-model-len must clamp --context-length down to --max-model-len."""

@@ -2,17 +2,12 @@
 # SPDX-License-Identifier: MIT
 
 # Configuration file for the Sphinx documentation builder.
-#
-# This file only contains a selection of the most common options. For a full
-# list see the documentation:
-#  https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 import os
 import sys
 
 # -- Path setup --------------------------------------------------------------
-# After the src-layout tree-reform the whole ``hyperloom`` distribution lives
-# under a single ``src/`` namespace. Add repo root and ``src`` for autodoc.
+# Add repo root and ``src`` for autodoc.
 _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 for _path in (_repo_root, os.path.join(_repo_root, "src")):
     if os.path.isdir(_path):
@@ -46,7 +41,7 @@ html_theme_options = {
 }
 
 
-# This section turns on/off article info
+# Article info display
 setting_all_article_info = True
 all_article_info_os = ["linux"]
 all_article_info_author = ""
@@ -66,8 +61,7 @@ exclude_patterns = [
 ]
 
 suppress_warnings = [
-    # Autosummary-generated API pages contain toctrees; external-toc warns even
-    # though those pages are generated implementation details.
+    # Autosummary API pages contain toctrees that external-toc warns about.
     "etoc.toctree",
 ]
 

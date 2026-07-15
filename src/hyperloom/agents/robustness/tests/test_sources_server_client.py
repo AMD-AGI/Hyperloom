@@ -38,11 +38,6 @@ def _client(handler) -> RobustnessServerClient:
     return RobustnessServerClient("http://server.test", client=http)
 
 
-# ---------------------------------------------------------------------------
-# Client low-level behaviour
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_list_session_events_unwraps_envelope():
     def handler(request: httpx.Request) -> httpx.Response:
@@ -80,11 +75,6 @@ async def test_connect_error_raises_source_unavailable():
             await client.list_session_pods("sess-1")
     finally:
         await client.aclose()
-
-
-# ---------------------------------------------------------------------------
-# Source adapter behaviour
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -164,11 +154,6 @@ async def test_source_skips_summary_when_now_unix_is_zero():
         await client.aclose()
     assert "/api/v1/sessions/sess-1/summary" not in requested_paths
     assert data.session_summary == {}
-
-
-# ---------------------------------------------------------------------------
-# M2: cluster proxy methods + RobustnessServerSource cluster_faults fetch
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -359,11 +344,6 @@ async def test_source_can_disable_cluster_faults():
 
     assert "/api/v1/cluster/faults" not in paths_hit
     assert data.cluster_faults == []
-
-
-# ---------------------------------------------------------------------------
-# M2.5: cluster pod metrics fan-out -> SourceData.local_gpu
-# ---------------------------------------------------------------------------
 
 
 def _gpu_metric_response(value: float, *, gpu_id: str = "0", ts: int = 100):
@@ -587,7 +567,7 @@ async def test_server_pod_metrics_drive_local_health_gpu_signal():
         if request.url.path == "/api/v1/cluster/faults":
             return httpx.Response(200, json={"faults": []})
         if request.url.path == "/api/v1/cluster/pods/ns1/podA/metrics":
-            # 95 C  -> warn (>= 90) but below crit (100) -> medium
+            # 95 C: warn (>= 90) but below crit (100) -> medium.
             return httpx.Response(200, json=_gpu_metric_response(95.0))
         return httpx.Response(404)
 
@@ -609,11 +589,6 @@ async def test_server_pod_metrics_drive_local_health_gpu_signal():
     assert len(thermal) == 1
     assert thermal[0].severity is SymptomSeverity.MEDIUM
     assert thermal[0].evidence["temperature_c"] == 95.0
-
-
-# ---------------------------------------------------------------------------
-# M2 multi-node: workload_uid -> /cluster/workloads/{uid}/hierarchy fan-out
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -673,8 +648,7 @@ async def test_source_workload_uid_drives_multi_node_pod_metric_fan_out():
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "/sessions/sess-1/pods" in request.url.path:
-            # Session only knows the head pod; workers exist only in the
-            # cluster hierarchy view.
+            # Session only knows the head pod; workers exist only in the cluster hierarchy view.
             return httpx.Response(
                 200,
                 json=[{"pod": {"namespace": "ns1", "name": "head"}}],

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for framework_agent.explorer pure logic, plan mode, and e2e ranking_mode / keep_winner_only / build_concurrency flows. Hermetic - stubs enumerate_candidates, workspace, commands, and metric evaluation to exercise explore() control flow."""
+"""Tests for framework_agent.explorer pure logic, plan mode, and e2e ranking_mode / keep_winner_only / build_concurrency flows. Hermetic - stubs candidate enumeration, workspace, commands, and metric evaluation to exercise explore() control flow."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from hyperloom.agents.framework.models import (
 
 
 # ---------------------------------------------------------------------------
-# winner_decision (split into framework_agent.decision)
+# winner_decision
 # ---------------------------------------------------------------------------
 
 
@@ -172,7 +172,6 @@ def test_explore_plan_writes_summary(monkeypatch, tmp_path: Path) -> None:
 
 # ===========================================================================
 # end-to-end ranking_mode + keep_winner_only + build_concurrency flows
-# (formerly in test_explore_modes.py)
 # ===========================================================================
 
 

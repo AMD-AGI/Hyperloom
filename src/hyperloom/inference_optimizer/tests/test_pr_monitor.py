@@ -18,7 +18,6 @@ from hyperloom.orchestrator.specialists.runner import (
 )
 
 
-# 1. PRMonitorClient stub
 def test_pr_monitor_client_from_args_default_enabled():
     c = PRMonitorClient.from_args()
     assert c.enabled is True
@@ -30,12 +29,11 @@ def test_pr_monitor_client_from_args_disabled():
 
 
 def test_pr_monitor_client_timeout_sec_ignored():
-    # timeout_sec is accepted for call-site compat but silently ignored
+    # timeout_sec is accepted for call-site compat but ignored.
     c = PRMonitorClient.from_args(url="http://x/v1", timeout_sec=2.5)
     assert c.enabled is True
 
 
-# 2. KnowledgePlane facade
 @pytest.fixture
 def plane_with_disabled_pr() -> KnowledgePlane:
     return KnowledgePlane.from_clients(
@@ -63,7 +61,7 @@ def test_plane_reset_round_caches_is_noop():
     plane = KnowledgePlane.from_clients(
         pr_monitor=PRMonitorClient.from_args(),
     )
-    plane.reset_round_caches()  # must not raise
+    plane.reset_round_caches()
 
 
 def test_plane_cortex_enabled_when_url_set():
@@ -77,11 +75,9 @@ def test_plane_cortex_enabled_when_url_set():
     assert plane.cortex_specialist_mcp_headers() == {"Authorization": "Bearer t"}
 
 
-# 3. SpecialistRunner tool-list gating
 def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
     for t in PR_MONITOR_MCP_TOOLS:
         assert t in DEFAULT_SPECIALIST_TOOLS
-    # 12-tool PR-Monitor surface.
     assert len(PR_MONITOR_MCP_TOOLS) == 12
 
 
@@ -140,7 +136,6 @@ def test_specialist_runner_without_plane_keeps_default_tools():
         assert t in tools
 
 
-# 4. MCP config writer
 def test_mcp_config_writes_cortex_kb_server_with_headers(tmp_path):
     from hyperloom.orchestrator.specialists.mcp_config import (
         SPECIALIST_MCP_CONFIG_FILENAME,

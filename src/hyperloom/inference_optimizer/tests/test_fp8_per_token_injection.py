@@ -2,14 +2,10 @@
 
 """sglang ``SGLANG_USE_AITER_FP8_PER_TOKEN`` injection tests.
 
-A dense FP8 checkpoint with per-channel weight + per-token (dynamic) activation
-falls into the slow unfused ``_apply_fallback_scaled_mm`` path in sglang's
-``apply_fp8_linear`` on MI300X (gfx942) unless ``SGLANG_USE_AITER_FP8_PER_TOKEN``
-is set, which flips ``use_per_token_if_dynamic`` on and routes the GEMM to
-aiter's CK ``gemm_a8w8_bpreshuffle`` kernel. Hyperloom injects the env from its
-env-materialization choke point, strictly scoped to sglang + fp8 + gfx942 + that
-exact quant scheme, never clobbering an operator-set value. Exercised at both
-the pure config-detection layer and the ``materialize_config_with_envs`` layer.
+Hyperloom injects the env from its env-materialization choke point, strictly
+scoped to sglang + fp8 + gfx942 + per-channel weight/per-token dynamic act,
+never clobbering an operator-set value. Exercised at both the pure
+config-detection layer and the ``materialize_config_with_envs`` layer.
 """
 
 from __future__ import annotations
@@ -141,9 +137,7 @@ def test_detect_true_when_activation_scheme_absent(tmp_path):
 
 
 def test_detect_false_for_per_tensor_weight(tmp_path):
-    # e2e repro: a per-tensor weight checkpoint already serves from the fast
-    # fused per-tensor torch._scaled_mm path; forcing per-channel bpreshuffle CK
-    # regressed it ~6% on MI300X. The gate must decline despite fp8 + dynamic.
+    # Per-tensor weight already serves the fast fused path; the gate must decline.
     path = _write_model_config(
         tmp_path / "per-tensor",
         {"quantization_config": _fp8_quant_config()},
@@ -153,8 +147,7 @@ def test_detect_false_for_per_tensor_weight(tmp_path):
 
 
 def test_detect_false_when_weight_granularity_undeterminable(tmp_path):
-    # fp8 + dynamic config but no safetensors to confirm per-channel weights:
-    # default-safe -> decline rather than risk the per-tensor regression.
+    # No safetensors to confirm per-channel weights: default-safe -> decline.
     path = _write_model_config(
         tmp_path / "no-weights",
         {"quantization_config": _fp8_quant_config()},
@@ -248,11 +241,7 @@ def _materialize_envs(
 def test_materialize_injects_for_sglang_fp8_dynamic_on_gfx942(
     tmp_path, fp8_dynamic_model
 ):
-    """The fast-path env must be materialized for this workload.
-
-    Before the fix the materialized envs do NOT carry the env (slow unfused
-    fallback); after the fix they do.
-    """
+    """The fast-path env must be materialized for this workload."""
     envs = _materialize_envs(tmp_path, model=fp8_dynamic_model)
     assert envs.get(_ENV) == "1"
 
@@ -292,8 +281,7 @@ def test_materialize_noop_for_static_fp8(tmp_path):
 
 
 def test_materialize_noop_for_per_tensor_weight(tmp_path):
-    # Production-choke-point guard for the e2e-confirmed ~6% regression: a
-    # per-tensor fp8 + dynamic checkpoint must NOT get the env materialized.
+    # A per-tensor fp8 + dynamic checkpoint must NOT get the env materialized.
     model = _write_model_config(
         tmp_path / "per-tensor",
         {"quantization_config": _fp8_quant_config()},

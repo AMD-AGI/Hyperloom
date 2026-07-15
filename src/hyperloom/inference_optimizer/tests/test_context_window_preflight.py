@@ -88,7 +88,7 @@ def test_preflight_fails_for_2048_model(tmp_path, monkeypatch):
     assert "max_position_embeddings=2048" in final_md
     state = json.loads((sd / "state.json").read_text())
     assert state["stop_reason"] == "model_context_window_too_small"
-    # Fail-fast must emit session_breakdown.json itself (it exits before coordinator.run's try/finally).
+    # Fail-fast emits session_breakdown.json itself (exits before coordinator.run's try/finally).
     breakdown = json.loads((sd / "session_breakdown.json").read_text(encoding="utf-8"))
     assert breakdown["session"]["stop_reason"] == "model_context_window_too_small"
 
@@ -123,8 +123,7 @@ def test_preflight_2048_passes_when_headroom_lowered(tmp_path, monkeypatch):
     assert cli_model_gate._preflight_context_window(_args(str(model), 1024, 1024), sd) is False
 
 
-# MAX_MODEL_LEN resolution — clamp to the native window (no context stretch).
-# Policy: MAX_MODEL_LEN = ISL+OSL+headroom, never above max_position_embeddings (else vllm's --max-model-len crashes the server).
+# MAX_MODEL_LEN resolution: MAX_MODEL_LEN = ISL+OSL+headroom, clamped to max_position_embeddings.
 def test_max_model_len_clamped_to_native_window(tmp_path):
     model = tmp_path / "ctx4096"
     _write_config(model, max_position_embeddings=4096)
@@ -145,14 +144,14 @@ def test_max_model_len_uses_full_headroom_when_window_large(tmp_path):
 def test_max_model_len_fallback_when_maxpos_unknown(tmp_path):
     model = tmp_path / "noconfig"
     model.mkdir()
-    # No config.json -> cannot clamp -> keep the headroom default (prior behaviour).
+    # No config.json -> cannot clamp -> keep the headroom default.
     assert (
         cli_model_gate._resolve_max_model_len(1024, 1024, str(model))
         == 1024 + 1024 + cli_model_gate._MAX_MODEL_LEN_HEADROOM
     )
 
 
-# follow-up #1: the preflight stop_reason must be a canonical STOP_REASON_VOCAB term written via set_stop_reason().
+# The preflight stop_reason must be a canonical STOP_REASON_VOCAB term.
 def test_context_window_stop_reason_is_canonical_vocab():
     from hyperloom.orchestrator.phases.machine_state import (
         STOP_REASON_VOCAB,

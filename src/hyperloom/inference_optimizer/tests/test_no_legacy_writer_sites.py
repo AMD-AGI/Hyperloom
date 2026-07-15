@@ -19,14 +19,15 @@ ALLOWED_FILES: dict[str, str] = {
     "src/hyperloom/agents/kernel/tests/test_payload_aliases_shim.py": (
         "tests pin the standalone kernel-agent shim contract"
     ),
-    "src/hyperloom/orchestrator/state/shared_state.py": (
-        "load-time state.json migration only; canonical writers stay on extra_server_args"
-    ),
-    "src/hyperloom/inference_optimizer/tests/test_shared_state_evolution.py": (
-        "tests pin the load-time state.json migration contract"
-    ),
     "src/hyperloom/inference_optimizer/tests/test_no_legacy_writer_sites.py": (
         "this guard names the retired field it scans for"
+    ),
+    "ci/transform_to_session_summary_v2.py": (
+        "load-time session_breakdown.json migration only; reads the retired key "
+        "as a fallback and emits canonical extra_server_args"
+    ),
+    "ci/test_ci_transform_v2.py": (
+        "tests pin the session_breakdown.json legacy-arg migration contract"
     ),
 }
 
