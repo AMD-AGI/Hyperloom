@@ -29,12 +29,12 @@ def test_atomic_write_json_ensure_ascii_false_and_mode(tmp_path):
     p = tmp_path / "unicode.json"
     atomic_write_json(
         p,
-        {"msg": "你好"},
+        {"msg": "café"},
         ensure_ascii=False,
         sort_keys=False,
         mode=0o640,
     )
-    assert p.read_text(encoding="utf-8") == '{\n  "msg": "你好"\n}'
+    assert p.read_text(encoding="utf-8") == '{\n  "msg": "café"\n}'
     # Group/other bits stripped: 0o640 clamped to owner-only.
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
