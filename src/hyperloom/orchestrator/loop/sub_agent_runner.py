@@ -5,9 +5,8 @@
 Receives ``delegate{action_name, params}`` intents (after PolicyGate),
 materializes them into ``tasks`` rows, and dispatches the work.
 
-Dispatches to one of two sub-agent forms: deterministic Python
-``ActionRunner`` executors (looked up via ``EXECUTOR_REGISTRY[task.kind]``)
-or the LLM external sub-agent fallback (``backend.run()``).
+Dispatches to deterministic Python ``ActionRunner`` executors, looked up
+via ``EXECUTOR_REGISTRY[task.kind]``.
 """
 
 from __future__ import annotations

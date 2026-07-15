@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.multi_node.state_paths import (
-    legacy_state_file,
     resolve_state_file,
     state_file_safe_to_read,
 )
@@ -51,12 +50,7 @@ def _read_state() -> dict[str, Any]:
     """
     p = _state_path()
     if not p.is_file():
-        legacy = legacy_state_file()
-        if p != legacy and legacy.is_file() and state_file_safe_to_read(legacy):
-            log.warning("multi_node state file %s missing; reading legacy %s", p, legacy)
-            p = legacy
-        else:
-            return {}
+        return {}
     if not state_file_safe_to_read(p):
         log.warning("multi_node state file %s failed ownership/permission check", p)
         return {}

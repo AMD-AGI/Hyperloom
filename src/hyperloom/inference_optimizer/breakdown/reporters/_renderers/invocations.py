@@ -16,8 +16,7 @@ def _render_pair(
     *,
     section_id: str,
     title: str,
-    invocations_key: str,
-    legacy_key: str,
+    key: str,
 ) -> RenderedSection:
     """Render a kernel invocation section.
 
@@ -25,14 +24,13 @@ def _render_pair(
         breakdown: The full ``session_breakdown.json`` dict.
         section_id: Section identifier for the rendered block.
         title: Human-readable section title.
-        invocations_key: Key under ``invocations`` to read records from.
-        legacy_key: Top-level fallback key for older breakdowns.
+        key: Top-level key to read invocation records from.
 
     Returns:
         The rendered section, or a skipped placeholder when no invocations
         are present.
     """
-    raw = (breakdown.get("invocations") or {}).get(invocations_key) or breakdown.get(legacy_key) or []
+    raw = breakdown.get(key) or []
     # Normalize stray string entries (kernel ids) into dicts.
     invs: list[dict[str, Any]] = []
     for v in raw:
@@ -115,8 +113,25 @@ def render_geak(breakdown: dict[str, Any]) -> RenderedSection:
         breakdown,
         section_id="geak_invocations",
         title="GEAK Invocations",
-        invocations_key="geak",
-        legacy_key="geak_invocations",
+        key="geak_invocations",
+    )
+
+
+@register_renderer("forge_invocations")
+def render_forge(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the Forge invocations section.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        RenderedSection: The rendered Forge invocations section.
+    """
+    return _render_pair(
+        breakdown,
+        section_id="forge_invocations",
+        title="Forge Invocations",
+        key="forge_invocations",
     )
 
 
