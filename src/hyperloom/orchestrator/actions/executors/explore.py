@@ -1553,7 +1553,7 @@ class ExploreExecutor:
                                 # Stable — the warm round-2 tput is the headline;
                                 # recompute gain from it and fold the variant onto
                                 # the stack so the next variant benches against it.
-                                gain = _gain_pct(stack_rebench_tput, running_base_tput)
+                                gain = gain_pct(stack_rebench_tput, running_base_tput)
                                 stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
                                 stack_extra_envs = next_envs
                                 stack_remove_args = list(run_remove_args)
