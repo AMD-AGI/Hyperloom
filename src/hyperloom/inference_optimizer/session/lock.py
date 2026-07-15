@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Single-optimizer session lock (issue #592).
+"""Single-optimizer session lock.
 
 A long ``inference_optimizer optimize`` run is guarded by a robustness monitor
 that re-launches the optimizer via ``--resume`` if it judges the process dead.
@@ -33,9 +33,10 @@ import json
 import os
 import socket
 from contextlib import suppress
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.timeutil import now_iso
 
 from . import session_paths
 
@@ -43,11 +44,6 @@ try:  # POSIX runtime (Linux): authoritative flock-based exclusion.
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX dev hosts (e.g. Windows).
     fcntl = None  # type: ignore[assignment]
-
-
-def _now_iso() -> str:
-    """Return the current UTC time as a second-precision ISO-8601 string."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -152,9 +148,8 @@ class SessionLock:
                 session.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # os.open returns a non-inheritable fd by default (PEP 446), so spawned
-        # serving subprocesses never keep the lock alive past the optimizer.
-        # 0o600: owner-only (the lock body carries pid/host metadata).
+        # Non-inheritable fd (PEP 446) so serving subprocesses don't keep the
+        # lock alive past the optimizer. 0o600: owner-only.
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         if fcntl is not None:
             try:
@@ -172,7 +167,7 @@ class SessionLock:
                 os.close(fd)
                 raise SessionAlreadyRunning(self.session_dir, owner)
         self._fd = fd
-        self._write_owner(self._now_owner(started_at=_now_iso()))
+        self._write_owner(self._now_owner(started_at=now_iso(timespec="seconds")))
         return self
 
     def heartbeat(self) -> None:
@@ -195,7 +190,7 @@ class SessionLock:
 
     def _now_owner(self, *, started_at: str) -> dict[str, Any]:
         """Build the owner document written into the lock body."""
-        now = _now_iso()
+        now = now_iso(timespec="seconds")
         self._started_at = started_at or now
         return {
             "pid": os.getpid(),

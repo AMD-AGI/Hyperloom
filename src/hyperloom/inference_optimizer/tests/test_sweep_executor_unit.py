@@ -8,13 +8,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.coerce import to_int
 from hyperloom.orchestrator.actions.executors import sweep as sw
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     VariantResult,
 )
 
 
-# ---- _coerce_int ----
+# ---- int coercion ----
 
 
 @pytest.mark.parametrize(
@@ -29,7 +30,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     ],
 )
 def test_coerce_int(value, expected):
-    assert sw._coerce_int(value) == expected
+    assert to_int(value, default=0) == expected
 
 
 # ---- _build_grid ----
@@ -47,6 +48,31 @@ def test_build_grid_basic():
     v = grid[0]
     assert v.extra_envs["CONC"] == "4"
     assert v.extra_envs["NUM_PROMPTS"] == "20"
+
+
+def test_build_grid_threads_removal_controls():
+    grid, skipped = sw._build_grid(
+        conc_values=[4],
+        isl_osl_configs=["1024:1024"],
+        num_prompts_factor=5,
+        base_extra_args="--x",
+        base_remove_args=["--bad-base"],
+        base_unset_envs=["SGLANG_BAD_ENV"],
+    )
+    assert skipped == []
+    assert grid[0].remove_args == ["--bad-base"]
+    assert grid[0].unset_envs == ["SGLANG_BAD_ENV"]
+
+
+def test_build_grid_threads_replace_mode():
+    grid, _ = sw._build_grid(
+        conc_values=[4],
+        isl_osl_configs=["1024:1024"],
+        num_prompts_factor=5,
+        base_extra_args="--replacement",
+        base_args_mode="replace",
+    )
+    assert grid[0].args_mode == "replace"
 
 
 def test_build_grid_disables_eval_by_default(monkeypatch):
@@ -123,7 +149,7 @@ def test_pareto_front_dominance():
         {"status": "succeeded", "output_throughput": 100, "e2el_mean_ms": 10},
         {"status": "succeeded", "output_throughput": 90, "e2el_mean_ms": 20},  # dominated
         {"status": "succeeded", "output_throughput": 80, "e2el_mean_ms": 5},  # not dominated
-        {"status": "failed", "output_throughput": 999, "e2el_mean_ms": 1},  # excluded
+        {"status": "failed", "output_throughput": 999, "e2el_mean_ms": 1},  # excluded (failed)
     ]
     front = sw._pareto_front(entries)
     tputs = sorted(e["output_throughput"] for e in front)

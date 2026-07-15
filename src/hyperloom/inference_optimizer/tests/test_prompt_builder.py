@@ -37,7 +37,6 @@ def rules_path() -> Path:
 def test_default_enabled_actions_full_includes_kernel_actions():
     full = default_enabled_actions(no_kernel=False)
     assert set(KERNEL_AGENT_OWNED_ACTIONS) <= set(full)
-    # validate_stack is deprecated; the merged ``explore`` action replaces it.
     assert "explore" in full
     assert "report" in full
     assert "baseline" in full
@@ -47,7 +46,6 @@ def test_default_enabled_actions_no_kernel_excludes_all_kernel_actions():
     bare = default_enabled_actions(no_kernel=True)
     assert set(KERNEL_AGENT_OWNED_ACTIONS).isdisjoint(set(bare))
     assert "profile" not in bare  # profile only feeds kernel-opt
-    # ``explore`` replaces the v0.6 backends/params/validate_stack triple.
     assert "explore" in bare
     assert "baseline" in bare
 
@@ -62,7 +60,7 @@ def test_full_enabled_actions_match_registry_minus_pmc_optional(registry):
 
 def test_recover_is_robustness_delegate_only_with_real_executor(registry):
     """``recover`` is ROBUSTNESS_DELEGATE_ONLY: real executor + metadata, but off the Orchestration prompt surface."""
-    from hyperloom.inference_optimizer.cli import _REAL_EXECUTORS_FULL
+    from hyperloom.inference_optimizer.cli.executors import _REAL_EXECUTORS_FULL
     from hyperloom.orchestrator.actions.executors.recover import (
         RecoverExecutor,
         recover_executor,
@@ -86,7 +84,7 @@ def _section_headers(prompt: str) -> list[str]:
 
 
 def test_full_prompt_has_seven_sections(registry, rules_path):
-    """Eight sections now (PHASE CONTRACT added); legacy 1-7 headers preserved verbatim."""
+    """The full prompt renders the expected top-level section headers."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -104,11 +102,8 @@ def test_full_prompt_has_seven_sections(registry, rules_path):
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "## 4. ACTIONS YOU MAY USE",
             "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
-            # Advisory long-run breadth→depth posture (no new constraint).
             "## MACRO POSTURE (advisory — breadth→depth across the long run)",
-            # Grid catalogue sections retired with the v0.6 backends/params executors.
             "## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)",
-        # 6b. DYNAMIC ACTION removed when dynamic_action folded into ``specialist``.
         "## 7. RULES & OUTPUT PROTOCOL",
     ]
     actual_top = [h for h in headers if h.startswith("## ")]
@@ -203,7 +198,6 @@ def test_emit_hints_use_request_for_kernel_actions(registry, rules_path):
         max_minutes=120,
         rules_fragment_path=rules_path,
     )
-    # propose_action hint for non-kernel; ``explore`` is the canonical grid-runner.
     assert "propose_action{action_name='baseline'" in text
     assert "propose_action{action_name='explore'" in text
     assert "REQUEST{target_agent='kernel_agent'" in text
@@ -237,21 +231,19 @@ def test_missing_rules_fragment_yields_placeholder(tmp_path, registry):
     assert "rules fragment not found" in text
 
 
-def test_unknown_enabled_action_is_silently_skipped(registry, rules_path):
-    """Pass a phantom action name; builder must skip it without raising."""
-    text = build_orchestration_prompt(
-        action_registry=registry,
-        enabled_actions=("baseline", "no_such_action", "report"),
-        framework="sglang",
-        objective_kind="time_only",
-        objective_value=None,
-        max_minutes=60,
-        rules_fragment_path=rules_path,
-        kernel_enabled=False,
-    )
-    assert "**baseline**" in text
-    assert "**report**" in text
-    assert "no_such_action" not in text
+def test_unknown_enabled_action_raises(registry, rules_path):
+    """Enabled actions come from the closed FULL_ENABLED_ACTIONS set; a phantom name is a bug."""
+    with pytest.raises(AssertionError):
+        build_orchestration_prompt(
+            action_registry=registry,
+            enabled_actions=("baseline", "no_such_action", "report"),
+            framework="sglang",
+            objective_kind="time_only",
+            objective_value=None,
+            max_minutes=60,
+            rules_fragment_path=rules_path,
+            kernel_enabled=False,
+        )
 
 
 def test_explicit_kernel_enabled_override_wins(registry, rules_path):
@@ -275,7 +267,7 @@ def test_mission_section_emphasises_cumulative_gain_and_stack_rebench(
     registry,
     rules_path,
 ):
-    """The mission emphasises cumulative gain + ``stack rebench`` (validate_stack keyword gone)."""
+    """The mission emphasises cumulative gain + ``stack rebench``."""
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
@@ -311,7 +303,7 @@ def test_time_budget_section_lists_all_enabled_phases(registry, rules_path):
     assert "stack rebench" in pipeline_block
 
 
-# #144 last comment Layer 2: orchestrator must NOT pre-pin backends='claude'
+# Orchestrator must NOT pre-pin backends='claude'.
 def test_run_optimization_example_does_not_pin_backends_to_claude(
     registry,
     rules_path,
@@ -336,8 +328,7 @@ def test_run_optimization_example_does_not_pin_backends_to_claude(
     assert "backends: 'claude'" not in example_block, (
         "orchestrator example must not pin backends='claude' — that's the #144 last comment Layer 2 regression"
     )
-    assert "backends: 'codex'" not in example_block
-    assert "backends: 'geak_v3'" not in example_block
+    assert "backends:" not in example_block
 
 
 def test_run_optimization_section_documents_auto_pick_rule(registry, rules_path):
@@ -357,6 +348,4 @@ def test_run_optimization_section_documents_auto_pick_rule(registry, rules_path)
         "kernel_opt step must document that backends are auto-picked"
     )
     assert "choose_backends" in k2_section, "K2 step must reference the kernel-agent function that does the pick"
-    # And the historical regression must be called out so the rationale
-    # survives a casual prompt-template cleanup.
     assert "#144" in k2_section

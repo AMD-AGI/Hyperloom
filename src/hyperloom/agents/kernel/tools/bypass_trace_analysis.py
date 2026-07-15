@@ -21,11 +21,6 @@ artifact contract the Coordinator / kernel-agent expect:
 
 and prints a single JSON result object to stdout in the shape
 ``kernel_request_handlers._shape_tool_result`` consumes.
-
-M1 scope: route skeleton — resolve paths, emit *valid* (possibly empty)
-artifacts, and a well-formed result JSON so the whole bypass pipeline runs
-end-to-end. Real trace parsing / candidate generation / roofline land in the
-subsequent milestones (M2+), which fill these same files.
 """
 
 from __future__ import annotations
@@ -38,8 +33,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Sibling modules live next to this tool; it is invoked by absolute path, so
-# put its own directory on sys.path before importing them.
+# Sibling modules live next to this tool (invoked by absolute path).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bypass_report as _report  # noqa: E402
 import _bypass_trace_reader as _reader  # noqa: E402
@@ -48,39 +42,16 @@ from _idle_gate import (  # noqa: E402
     resolve_idle_pct_threshold,
 )
 from _denoise_steps import resolve_perstep_divisor  # noqa: E402
+from _io_utils import atomic_write_json, utc_now, write_text  # noqa: E402
 
 
 AGGREGATION_SCOPE_FULL = "full_trace"
 AGGREGATION_SCOPE_STEADY = "steady_state"
 
 
-def _utc_now_iso() -> str:
-    """Return the current UTC time as a second-precision ISO-8601 string."""
-    return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
-
-
 def _run_stamp() -> str:
     """Return a compact UTC timestamp used to name the per-run output dir."""
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _atomic_write_json(path: Path, payload: Any) -> None:
-    """Write ``payload`` as pretty JSON to ``path`` via a temp-file rename.
-
-    Args:
-        path: Destination file path (parent dirs are created).
-        payload: JSON-serializable object to write.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
-
-
-def _write_text(path: Path, text: str) -> None:
-    """Write ``text`` to ``path``, creating parent directories."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
 
 
 def _maybe_enrich_rocprof(
@@ -90,16 +61,10 @@ def _maybe_enrich_rocprof(
 ) -> dict[str, Any]:
     """Optionally run rocprof-compute enrichment on the roofline sidecar.
 
-    Opt-in via ``HYPERLOOM_ROCPROF_ROOFLINE_ENRICH`` (off by default), mirroring
-    the TraceLens ``write_reports`` enrichment so the bypass sidecar carries the
-    same per-kernel ``rocprof_roofline`` audit fields. Reuses
+    Opt-in via ``HYPERLOOM_ROCPROF_ROOFLINE_ENRICH`` (off by default). Reuses
     ``rocprof_roofline.enrich_kernel_roofline_sidecar``, which degrades
     gracefully (rocprof-compute missing / non-reusable kernel / no benchmark
     files -> row skipped; per-kernel failure -> row failed) and never aborts.
-
-    The heavy per-kernel rocprof runs (before GEAK / after kernel-opt) happen
-    later in the route-agnostic kernel-opt phase; this stage is only the opt-in
-    batch pass.
 
     Args:
         kernel_roofline_path: Path to the written ``kernel_roofline.json``.
@@ -243,17 +208,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "(mixed / decode_only / prefilldecode); off values: '', 0, false, off, none.",
     )
     p.add_argument("--roofline-output-name", default="kernel_roofline.json")
-    # Denoise-step count for scriptable/diffusion workloads (forwarded by the
-    # coordinator). Consumed for per-step diffusion roofline + step-count
-    # validation; 0 means "infer from the trace".
+    # Denoise-step count for scriptable/diffusion workloads; 0 = infer.
     p.add_argument("--num-denoise-steps", type=int, default=0)
-    # Diffusion analytic-ceiling inputs the coordinator forwards to BOTH routes
-    # for scriptable/xDiT workloads (kernel_request_handlers). bypass ACCEPTS them
-    # so it shares the TraceLens tool's CLI surface (a missing --model-path /
-    # --precision would make strict parse_args exit 2 -> trace_analyze_failed).
-    # The per-architecture analytic_ceiling EMISSION on the bypass route is not
-    # wired yet (deferred to the roofline-convergence work); these are parsed and
-    # currently unused so the coordinator can forward a uniform CLI.
+    # Diffusion analytic-ceiling inputs shared with the TraceLens CLI surface;
+    # parsed but unused on this route.
     p.add_argument("--model-path", default=os.environ.get("MODEL_PATH", ""))
     p.add_argument("--precision", default="")
     p.add_argument("--height", type=int, default=0)
@@ -308,17 +266,14 @@ def main(argv: list[str] | None = None) -> int:
     top_k = args.top_k if args.top_k and args.top_k > 0 else 15
 
     framework_l = (args.framework or "").lower()
-    # Steady-state windowing: opt-in via --steady-state-mode / env, and always
-    # on for xDiT (homogeneous diffusion steps -> profile one representative
-    # step). Falls back to full-trace shares when no repeating window is found.
+    # Steady-state windowing: opt-in via --steady-state-mode / env, always on
+    # for xDiT. Falls back to full-trace shares when no repeating window found.
     env_steady = os.environ.get("HYPERLOOM_BYPASS_STEADY_STATE", "").strip().lower() in {"1", "true", "yes", "on"}
     enable_steady = _should_enable_steady(
         steady_state_mode=args.steady_state_mode or "",
         framework=args.framework or "",
         env_steady=env_steady,
     )
-    # ``estimated`` is decided after the scope is known (below): xDiT is estimated
-    # only when it could NOT anchor to a real per-step denoising window.
 
     # --- analyze the trace (independent streaming reader) ---
     analyze: dict[str, Any]
@@ -326,18 +281,15 @@ def main(argv: list[str] | None = None) -> int:
         analyze = {"status": "ok", "timeline": {}, "attribution": {}, "kernels": [], "ops": [], "aggregation_scope": "full_trace"}
     else:
         try:
-            # top_k=0 -> keep all device-kernel aggregates so the category
-            # rollup in the report is complete; candidate slicing uses ``top_k``.
+            # top_k=0 -> keep all device-kernel aggregates; candidate slicing uses top_k.
             analyze = _reader.analyze_trace(
                 args.trace_input, top_k=0, steady_state=enable_steady,
                 framework=args.framework, emit_launches=True,
             )
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
-    # ``analysis_degraded`` distinguishes "analysis actually failed" (bad/unparsable
-    # trace) from a genuine empty result: the pipeline still degrades gracefully
-    # (status stays ``ok``, never aborts) but downstream/record_trace_analyze can
-    # tell the LLM the analysis did NOT really succeed instead of trusting empty.
+    # ``analysis_degraded`` distinguishes an analysis failure (bad/unparsable
+    # trace) from a genuine empty result.
     analysis_degraded = False
     if analyze.get("status") != "ok":
         analysis_degraded = True
@@ -358,18 +310,12 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-    # Aggregation scope is driven by the reader (steady_state vs full_trace) so
-    # every artifact reports the same, accurate scope.
+    # Aggregation scope is driven by the reader (steady_state vs full_trace).
     scope = analyze.get("aggregation_scope", AGGREGATION_SCOPE_FULL)
     steady_window = analyze.get("steady_window")
 
-    # ``estimated`` marks shares that are NOT anchored to a real per-step window.
-    # It applies to ANY framework that requested steady-state windowing (xDiT
-    # auto-on, or text-gen via --steady-state-mode/env) but fell back to full
-    # trace: the shares then mix warmup/all-steps and are a mixed estimate. When
-    # the window locks on (scope==steady_state), shares are trace-anchored -> not
-    # estimated. Text-gen WITHOUT steady requested keeps full-trace as its norm
-    # (enable_steady False -> not estimated).
+    # ``estimated`` marks shares not anchored to a real per-step window (steady
+    # windowing requested but fell back to the full trace).
     estimated = enable_steady and scope != AGGREGATION_SCOPE_STEADY
     if framework_l == "xdit" and estimated:
         trace_health_warnings.append(
@@ -397,9 +343,8 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-    # Multi-rank provenance: xDiT TP>1 produces one trace per rank. The reader
-    # deterministically analyzes one representative rank; surface which one and
-    # how many existed so a single-rank analysis is never silent.
+    # Multi-rank provenance: xDiT TP>1 produces one trace per rank; the reader
+    # analyzes one representative rank.
     analyzed_rank = analyze.get("analyzed_rank")
     rank_count = analyze.get("rank_count", 1)
     if isinstance(rank_count, int) and rank_count > 1:
@@ -415,11 +360,8 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-    # Denoise-step-count validation: the coordinator forwards --num-denoise-steps
-    # (the profiled/scheduled step count) for scriptable/diffusion workloads. Do
-    # NOT silently drop it — compare against the step count the reader inferred
-    # from ProfilerStep annotations and warn on a mismatch (it is a key per-step
-    # diffusion-roofline input consumed by diffusion_roofline).
+    # Warn when the forwarded --num-denoise-steps differs from the count the
+    # reader inferred from ProfilerStep annotations.
     requested_denoise_steps = int(getattr(args, "num_denoise_steps", 0) or 0)
     inferred_denoise_steps = int((steady_window or {}).get("step_count", 0) or 0) or int(
         (analyze.get("attribution") or {}).get("annotation_window_count", 0) or 0
@@ -437,21 +379,17 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-    # Analysis-quality health signals (observability only; never fatal). Gated
-    # on GPU kernels present so shares are meaningful.
+    # Analysis-quality health signals (observability only; never fatal).
     if analyze.get("kernels"):
         _emit_quality_warnings(analyze, trace_health_warnings)
 
     # --- build downstream artifacts from classified device kernels ---
-    # Discover per-kernel benchmark files only when the rocprof roofline
-    # enrichment (the sole consumer) is enabled, so default runs skip the grep.
-    enrich_enabled = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower() in {"1", "true", "yes", "on"}
     candidates = _report.build_candidates(
         analyze,
         framework=args.framework,
         target_platform=args.target_platform,
         top_k=top_k,
-        discover_benchmarks=enrich_enabled and not args.dry_run,
+        discover_benchmarks=False,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"
@@ -464,11 +402,9 @@ def main(argv: list[str] | None = None) -> int:
     kernel_metrics_csv_path = bypass_dir / "kernel_metrics.csv"
     kernel_summary_csv_path = bypass_dir / "kernel_summary.csv"
 
-    # High-idle gate (contract parity with the TraceLens route): when the GPU is
-    # idle for more than the shared threshold of the trace wall span, per-kernel
-    # rewriting cannot move end-to-end latency, so suppress every candidate list
-    # and surface a high_gpu_idle_pct warning for the Coordinator to route to
-    # parameter optimization. Uses the SAME threshold/metric/warning as TraceLens.
+    # High-idle gate: when GPU idle exceeds the threshold, per-kernel rewriting
+    # cannot move end-to-end latency, so suppress every candidate list and
+    # surface a high_gpu_idle_pct warning for the Coordinator.
     idle_pct_value = (analyze.get("timeline") or {}).get("idle_pct")
     idle_pct_threshold = resolve_idle_pct_threshold()
     if isinstance(idle_pct_value, (int, float)) and float(idle_pct_value) > idle_pct_threshold:
@@ -487,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
         cand["trace_report_path"] = str(analysis_md_path)
 
     throughput_unit = "img/s" if (args.framework or "").lower() == "xdit" else "tok/s"
-    _write_text(
+    write_text(
         analysis_md_path,
         _report.render_analysis_md(
             candidates,
@@ -500,27 +436,24 @@ def main(argv: list[str] | None = None) -> int:
             summary_csv_path=str(kernel_summary_csv_path),
         ),
     )
-    _atomic_write_json(candidates_path, candidates)
-    # Structured, code-generated CSV exports (full per-kernel metrics + category
-    # summary); machine-readable ground truth that downstream code can load by path.
-    _write_text(kernel_metrics_csv_path, _report.build_metrics_csv(candidates))
-    _write_text(kernel_summary_csv_path, _report.build_category_summary_csv(candidates))
+    atomic_write_json(candidates_path, candidates, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+    # CSV exports: full per-kernel metrics + category summary.
+    write_text(kernel_metrics_csv_path, _report.build_metrics_csv(candidates))
+    write_text(kernel_summary_csv_path, _report.build_category_summary_csv(candidates))
 
     summary = _report.build_summary(
         candidates,
         framework=args.framework,
         target_platform=args.target_platform,
-        generated_at=_utc_now_iso(),
+        generated_at=utc_now(timespec="seconds"),
         trace_health_warnings=trace_health_warnings,
     )
-    # summary.json is written below, after the optional rocprof enrichment, so
-    # its ``rocprof_enrich`` audit field reflects the enrichment outcome.
     summary["estimated"] = estimated
     summary["analysis_degraded"] = analysis_degraded
     # Always present (may be null) so the summary/manifest/result schemas match.
-    summary["steady_window"] = steady_window
+    summary["steady_window"] = steady_window  # always present (may be null)
 
-    _atomic_write_json(
+    atomic_write_json(
         manifest_path,
         {
             "source": "bypass",
@@ -534,8 +467,11 @@ def main(argv: list[str] | None = None) -> int:
             "analyzed_rank": analyzed_rank,
             "rank_count": rank_count,
             "event_total": analyze.get("event_total", 0),
-            "created_at": _utc_now_iso(),
+            "created_at": utc_now(timespec="seconds"),
         },
+        ensure_ascii=False,
+        sort_keys=False,
+        trailing_newline=False,
     )
 
     kernel_roofline = _report.build_kernel_roofline(
@@ -543,47 +479,35 @@ def main(argv: list[str] | None = None) -> int:
         analysis_md_path=str(analysis_md_path),
         kernel_candidates_path=str(candidates_path),
     )
-    _atomic_write_json(kernel_roofline_path, kernel_roofline)
+    atomic_write_json(kernel_roofline_path, kernel_roofline, ensure_ascii=False, sort_keys=False, trailing_newline=False)
 
     # Optional rocprof-compute enrichment (opt-in; enriches the sidecar in
-    # place). Skipped in --dry-run; env-gated + graceful degradation otherwise.
+    # place). Skipped in --dry-run.
     rocprof_enrich: dict[str, Any] = (
         {"status": "disabled"}
         if args.dry_run
         else _maybe_enrich_rocprof(kernel_roofline_path, candidates_path, run_dir)
     )
     summary["rocprof_enrich"] = rocprof_enrich
-    _atomic_write_json(summary_path, summary)
+    atomic_write_json(summary_path, summary, ensure_ascii=False, sort_keys=False, trailing_newline=False)
 
-    # Kernel-fusion opportunities: time-ordered launch adjacency -> fusable
-    # clusters (Elementwise/Norm/Quant chains). A separate artifact carrying the
-    # kernel-relationship data the name-aggregated candidates cannot express.
+    # Kernel-fusion opportunities: launch adjacency -> fusable clusters.
     fusion = _report.build_fusion(analyze)
-    _atomic_write_json(kernel_sequence_path, fusion)
+    atomic_write_json(kernel_sequence_path, fusion, ensure_ascii=False, sort_keys=False, trailing_newline=False)
 
-    # Diffusion / scriptable workload-level roofline (parity with the TraceLens
-    # route's diffusion_roofline.json): aggregate the per-kernel analytical
-    # roofline into an end-to-end workload roofline + per-denoise-step split
-    # (consuming the effective num_denoise_steps). Best-effort sidecar; never
-    # blocks the per-kernel artifacts.
-    #
-    # NOTE: this is a WORKLOAD-level characterization aggregated from analyze[
-    # "kernels"] (all device kernels), intentionally INDEPENDENT of the per-kernel
-    # high-idle gate above -- that gate suppresses per-kernel rewrite CANDIDATES,
-    # but the workload compute/memory roofline stays valid and useful even in the
-    # high-idle regime, so it is still emitted.
+    # Diffusion / scriptable workload-level roofline: aggregate the per-kernel
+    # analytical roofline into an end-to-end workload roofline + per-denoise-step
+    # split. Best-effort sidecar over all device kernels, independent of the
+    # per-kernel high-idle gate, so still emitted in the high-idle regime.
     diffusion_roofline_path: str | None = None
     if (args.framework or "").lower() == "xdit":
         try:
             from diffusion_roofline import build_report_from_bypass  # noqa: E402
 
-            # Per-step divisor is the denoise steps IN the analyzed window
-            # (trace-inferred, e.g. steady_window.step_count), NOT the requested
-            # full schedule -- the mismatch is already surfaced as a warning.
+            # Per-step divisor is the denoise steps in the analyzed window
+            # (trace-inferred), not the requested full schedule.
             _diff_steps = resolve_perstep_divisor(inferred_denoise_steps, requested_denoise_steps)
-            # Workload totals cover ALL analyzed device kernels (not just the
-            # top-k candidate list) so the roofline is not truncated to the
-            # hottest few (parity with the TraceLens full-CSV aggregation).
+            # Workload totals cover all analyzed device kernels (not just top-k).
             _workload_totals = _report.build_workload_roofline_totals(
                 analyze, target_platform=args.target_platform
             )
@@ -597,7 +521,7 @@ def main(argv: list[str] | None = None) -> int:
                 kernels_aggregated=len(_all_kernels),
             )
             _diff_path = run_dir / "diffusion_roofline.json"
-            _atomic_write_json(_diff_path, _diff_report)
+            atomic_write_json(_diff_path, _diff_report, ensure_ascii=False, sort_keys=False, trailing_newline=False)
             diffusion_roofline_path = str(_diff_path)
         except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
             diffusion_roofline_path = None
@@ -635,7 +559,6 @@ def main(argv: list[str] | None = None) -> int:
         "orchestrator_mode": "bypass",
         "timeline": analyze.get("timeline") or {},
         "attribution": analyze.get("attribution") or {},
-        "rocprof_enrich": rocprof_enrich,
         "trace_health_warnings": trace_health_warnings,
         "artifact_paths": {
             "trace_report_path": str(analysis_md_path),
@@ -648,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
             "trace_input_manifest": str(manifest_path),
         },
     }
-    # Surfaced only when produced (xDiT/scriptable), mirroring the TraceLens route.
+    # Surfaced only when produced (xDiT/scriptable).
     if diffusion_roofline_path:
         result["diffusion_roofline_path"] = diffusion_roofline_path
         result["artifact_paths"]["diffusion_roofline"] = diffusion_roofline_path

@@ -1,13 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 """Behavioral tests for geak_runner's graceful-stop / flush contract.
 
-Regression guard for the bug where the runner's inner soft deadline
-(GEAK_E2E_TIMEOUT_S, consumed by run_e2e's anyio.fail_after) and the outer
-hard subprocess kill used the SAME value, so result.json was SIGKILLed mid-flush
--> "no_result_json" and the measured win was lost.
-
-These drive the REAL call_geak() against a fake runner script so the
-process-group signalling + soft/hard split are exercised end to end.
+Drive the real call_geak() against a fake runner script so the process-group
+signalling and soft/hard timeout split are exercised end to end.
 """
 from __future__ import annotations
 
@@ -47,6 +42,18 @@ def _handoff() -> dict:
             "exp_root": "/tmp/x"}
 
 
+def test_resolve_runner_falls_back_to_open_source_root(tmp_path, monkeypatch):
+    geak_root = tmp_path / "open-source" / "GEAK"
+    runner = geak_root / "interface" / "run_e2e.py"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("# fake\n", encoding="utf-8")
+    monkeypatch.delenv("GEAK_E2E_RUNNER", raising=False)
+    monkeypatch.delenv("GEAK_ROOT", raising=False)
+    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "open-source"))
+
+    assert psr._resolve_runner() == str(runner)
+
+
 def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
     """run_e2e must receive GEAK_E2E_TIMEOUT_S = timeout_s - flush_grace."""
     runner = _write_fake_runner(tmp_path, """
@@ -65,7 +72,7 @@ def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
     out = psr.call_geak(_handoff(), tmp_path / "out", timeout_s=600)
 
     assert out["status"] == "ok"
-    assert out["inner_budget"] == "420"  # 600 - 180
+    assert out["inner_budget"] == "420"
     assert out["returncode"] == 0
 
 
@@ -87,7 +94,6 @@ def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):
     monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
     monkeypatch.setenv("GEAK_FLUSH_GRACE_S", "5")
 
-    # timeout_s small so the outer communicate() times out quickly and SIGTERMs.
     out = psr.call_geak(_handoff(), tmp_path / "out", timeout_s=2)
 
     assert out["status"] == "ok"

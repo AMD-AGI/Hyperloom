@@ -9,13 +9,9 @@ bypass analysis backend from the classified device-kernel aggregates.
 
 Primary ranking unit is the device kernel (full coverage; robust to cudagraph),
 classified by :mod:`_bypass_classify`, enriched with a best-effort launching op
-name resolved via Kineto correlation (may be empty under cudagraph replay).
-
-Schema mirrors the fields the Coordinator / kernel-agent consume in the
-TraceLens ``kernel_candidates.json`` / ``summary.json`` / ``kernel_roofline.json``
-contract. Roofline hardware fields (bound_type / efficiency / arithmetic
-intensity) are left null here and filled by the rocprof-compute enrichment
-stage (M6).
+name. Schema mirrors the ``kernel_candidates.json`` / ``summary.json`` /
+``kernel_roofline.json`` contract. Roofline hardware fields are estimated from
+the analytical model.
 """
 
 from __future__ import annotations
@@ -29,11 +25,11 @@ from typing import Any
 from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 from _bypass_classify import classify_kernel
 from _bypass_fusion import analyze_fusion
-from _analysis_md import render_report as _render_canonical_report
+from _analysis_md import render_report
 from _bypass_roofline import compute_roofline
-from _kernel_category import canonical_category as _canonical_category
+from _kernel_category import canonical_category
 from _bypass_source_resolver import editable_trace_source, resolve_source
-from _idle_gate import resolve_idle_pct_threshold as _resolve_idle_pct_threshold
+from _idle_gate import resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
 
 # Category-appropriate optimization guidance (structured, not LLM prose).
@@ -54,7 +50,7 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
     "Others": "Profile the kernel for tile size and wave occupancy.",
 }
 
-_UNKNOWN_BOUND = "\u2014"  # em dash, matching the golden "unknown bound" marker.
+_UNKNOWN_BOUND = "\u2014"  # em dash "unknown bound" marker.
 _REUSABLE_BACKENDS = ["forge", "geak"]
 
 # Bound-type display prefixes for the (deterministic) per-kernel suggestion.
@@ -64,24 +60,18 @@ _BOUND_PREFIX: dict[str, str] = {"compute_bound": "Compute-bound", "memory_bound
 def _build_suggestion(category: str, bound_type: str) -> str:
     """Deterministic optimization hint from ``category`` + ``bound_type``.
 
-    Pure category->text lookup (``_ACTION_BY_CATEGORY``) optionally prefixed with
-    the analytical bound; NOT LLM-generated, so the ``suggestion`` column is
-    reproducible and attributable. Feeds the specialist prompt's ``action`` slot
-    (reads ``suggestion``/``recommended_actions``), which is otherwise empty for
-    bypass candidates.
+    Category->text lookup optionally prefixed with the analytical bound; feeds
+    the specialist prompt's ``action`` slot.
     """
     action = _ACTION_BY_CATEGORY.get(category, _ACTION_BY_CATEGORY["Others"])
     prefix = _BOUND_PREFIX.get(bound_type, "")
     return f"{prefix}: {action}" if prefix else action
 
-# torch ``Input type`` token -> compact dtype suffix for the shape-string contract
-# (e.g. ``(15360,2048) bf16``). Independent reimplementation of the TraceLens map
-# (this module never imports TraceLens); unmapped/empty types emit a bare shape.
+# torch ``Input type`` token -> compact dtype suffix for the shape-string
+# contract (e.g. ``(15360,2048) bf16``); unmapped/empty types emit a bare shape.
 _DTYPE_SUFFIX: dict[str, str] = {
-    # Suffixes MUST match the shared harness dtype_map (bf16/fp16/fp32) + the
-    # roofline peak table; a compact "f16"/"f32" makes the harness emit an invalid
-    # ``torch.f16`` (crashes at runtime, e.g. under rocprof/GEAK). See
-    # test_bypass_downstream_contract::...valid_torch_dtype_in_harness.
+    # Suffixes MUST match the shared harness dtype_map + roofline peak table; a
+    # compact "f16"/"f32" makes the harness emit an invalid ``torch.f16``.
     "c10::bfloat16": "bf16", "bfloat16": "bf16",
     "c10::half": "fp16", "half": "fp16", "float16": "fp16",
     "float": "fp32", "float32": "fp32",
@@ -159,8 +149,7 @@ def _source_type_for_op(op_name: str) -> str:
     return "unknown"
 
 
-# Native device-code extensions (grouped by source file only; a python launcher
-# frame can host distinct kernels so it also keys on the operation — see below).
+# Native device-code extensions.
 _NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
 
 
@@ -174,7 +163,7 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
     variants of one ``__global__`` into one job); python/Triton sources also key
     on the operation, since one launcher frame can host distinct kernels.
 
-    Each group carries compact ``rows`` (not full candidates, to avoid nesting):
+    Each group carries compact ``rows``:
     ``kernel_id`` / ``name`` / ``device_kernel_name`` / ``shapes`` / ``call_count``
     / ``duration_us`` / ``percent_of_total`` / ``gpu_pct`` / ``bound_type``. Groups
     are ranked by aggregate GPU time; the heaviest row is the primary.
@@ -203,7 +192,7 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
             "kernel_id": c.get("kernel_id", ""),
             "name": c.get("name", ""),
             "device_kernel_name": c.get("device_kernel_name", ""),
-            # A single representative call's per-arg dims (harness-consumable).
+            # One representative call's per-arg dims (harness-consumable).
             "shapes": shapes[0] if shapes else [],
             "call_count": c.get("call_count", 0),
             "duration_us": c.get("duration_us", 0.0),
@@ -265,7 +254,7 @@ def _source_type_from_path(path: str) -> str:
 def _short_name(kernel_name: str) -> str:
     """Shorten a mangled device-kernel name for candidate identity display."""
     n = kernel_name or ""
-    # Strip common C++ template/mangling tails for readability.
+    # Strip C++ template/mangling tails.
     n = re.sub(r"<.*$", "", n)
     n = n.strip()
     return n[:80] if n else "unknown_kernel"
@@ -290,8 +279,8 @@ def build_candidates(
     Returns:
         A dict with ``hot_kernels`` (the FULL ranked hotspot set), plus
         ``routable_kernels`` / ``skipped_kernels`` (a partition of ``hot_kernels``:
-        routable = reusable-with-resolved-source = dispatchable; skipped = the
-        rest) and ``task_groups``.
+        routable = reusable-with-resolved-source = dispatchable) and
+        ``task_groups``.
     """
     kernels = analyze_out.get("kernels") or []
     hot_kernels: list[dict[str, Any]] = []
@@ -302,10 +291,8 @@ def build_candidates(
         kernel_id = f"k{idx:03d}"
         display = op_name or _short_name(kname)
 
-        # Source resolution (unlocks downstream kernel-opt dispatch, which
-        # requires a readable source_file). Priority: (1) a Triton kernel_file
-        # straight from the trace's cpu_op args; (2) the op_to_source.json
-        # dictionary lookup; else unresolved (candidate stays non-routable).
+        # Source resolution. Priority: (1) a Triton kernel_file from the trace's
+        # cpu_op args; (2) op_to_source.json lookup; else unresolved.
         source_file = editable_trace_source(k.get("op_kernel_file", "") or "", k.get("op_kernel_backend", "") or "")
         source_method = "trace_kernel_file" if source_file else "unresolved"
         if not source_file and op_name:
@@ -314,17 +301,13 @@ def build_candidates(
                 source_method = method
 
         # Real per-arg dims/dtypes from the trace, rendered into the downstream
-        # shape-string contract ([{"call_num","shape":"(dims) dtype<br>..."}]) the
-        # GEAK harness (_build_configs) + TraceLens candidates consume;
-        # ``shape_provenance="torch_trace"`` marks the dims real.
+        # shape-string contract.
         op_shapes = k.get("op_shapes") or []
         op_dtypes = k.get("op_dtypes") or []
         shape_entries = _trace_shape_entries(op_shapes, op_dtypes, k.get("count") or 0)
 
-        # Benchmark discovery (opt-in; gated by the caller because only the
-        # rocprof-compute roofline enrichment consumes it). A routable kernel's
-        # on-disk test/benchmark seeds the shared GEAK harness that rocprof
-        # profiles for real bound/AI — without it the enrichment skips the row.
+        # Benchmark discovery is opt-in; a routable kernel's on-disk
+        # test/benchmark can seed downstream harness generation.
         bench_files: list[str] = []
         kernel_repo = ""
         if discover_benchmarks and kc.reusable and source_file:
@@ -350,10 +333,8 @@ def build_candidates(
             "bandwidth_utilization_pct": None,
             "rocprof_roofline": None,
             # Placeholder roofline: bound_type/AI/util above are structural
-            # defaults, NOT measured. ``roofline_source`` tracks how the bound was
-            # derived: "placeholder" (unestimable) -> "analytical" (from shapes +
-            # measured time, below) -> "rocprof" (opt-in measured, sets
-            # roofline_measured=True). Lets downstream/LLM distinguish them.
+            # defaults, NOT measured. ``roofline_source`` tracks derivation:
+            # placeholder -> analytical -> rocprof.
             "roofline_measured": False,
             "roofline_source": _RL_PLACEHOLDER,
             "library": "",
@@ -364,35 +345,28 @@ def build_candidates(
             # Prefer the resolved source's extension; fall back to the op-name heuristic.
             "source_type": _source_type_from_path(source_file) or _source_type_for_op(op_name),
             "reusable_native_kernel": kc.reusable,
-            # Non-reusable keeps the classifier reason. A reusable kernel with no
-            # resolved source is reusable-in-principle but NOT dispatchable, so it
-            # is skipped (see the partition below) with an explicit reason rather
-            # than an empty string.
+            # Non-reusable keeps the classifier reason; a reusable kernel with no
+            # resolved source is not dispatchable.
             "skip_reason": (
                 kc.skip_reason
                 if not kc.reusable
                 else ("" if source_file else "source file not resolved")
             ),
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
-            # Seeds for the shared GEAK harness + rocprof roofline enrichment
-            # (populated only when discover_benchmarks is set; else empty).
+            # Seeds for the GEAK harness + rocprof enrichment (only when
+            # discover_benchmarks is set).
             "benchmark_files": bench_files,
             "kernel_repo": kernel_repo,
-            # ``shapes`` / ``input_shapes`` use the same downstream contract form.
-            # The orchestrator kernel-opt gate (_validate_kernel_shape_and_paths)
-            # reads ``shapes`` (rejects ``empty_kernel_shape`` when absent) and the
-            # GEAK harness parses ``shape`` strings, so a candidate with captured
-            # dims MUST expose them in this format or it can never reach/run GEAK.
+            # ``shapes`` / ``input_shapes`` use the downstream contract form
+            # (the kernel-opt gate + GEAK harness require this format).
             "shapes": shape_entries,
             "input_shapes": shape_entries,
             "input_dtypes": op_dtypes,
             "shape_provenance": "torch_trace" if shape_entries else "unresolved",
         }
-        # Analytical roofline: derive bound_type / AI / efficiency from the
-        # captured shapes + measured time for EVERY estimable kernel — including
-        # vendor kernels (hipBLASLt GEMM / MIOpen conv) that the reusable-gated
-        # rocprof enrichment skips (this is what gives xDiT a real bound). The
-        # opt-in rocprof enrichment later refines it to a measured roofline.
+        # Analytical roofline: derive bound_type / AI / efficiency from captured
+        # shapes + measured time for EVERY estimable kernel (rocprof enrichment
+        # later refines it to a measured roofline).
         rl = compute_roofline(
             category=kc.category,
             shape_str=shape_entries[0]["shape"] if shape_entries else "",
@@ -402,24 +376,20 @@ def build_candidates(
         )
         if rl:
             cand.update(rl)
-        # Optimization ROI = share of GPU time x headroom (1 - efficiency).
-        # High-impact + low-efficiency kernels rank first. With no analytical
-        # efficiency (placeholder), headroom=1 so it degrades to gpu_pct (pure
-        # cost) -- a sensible fallback. Deterministic + reproducible.
+        # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no
+        # analytical efficiency, headroom=1 so it degrades to gpu_pct.
         eff = cand.get("efficiency_percent")
         eff = float(eff) if isinstance(eff, (int, float)) else 0.0
         headroom = 1.0 - min(max(eff, 0.0), 100.0) / 100.0
         cand["optimization_priority"] = round(float(cand.get("gpu_pct") or 0.0) * headroom, 4)
-        # Deterministic per-kernel hint (fills the specialist prompt's action slot).
+        # Deterministic per-kernel hint for the specialist prompt's action slot.
         suggestion = _build_suggestion(kc.category, str(cand.get("bound_type") or ""))
         cand["suggestion"] = suggestion
         cand["recommended_actions"] = [suggestion]
         hot_kernels.append(cand)
 
-    # Group routable candidates that share an editable source so the optimizer
-    # dispatches one job per source function (with all observed shapes) instead
-    # of a redundant run per device-kernel variant. The compact group is stamped
-    # onto each member candidate (downstream reads ``candidate["task_group"]``).
+    # Group routable candidates sharing an editable source (one job per source
+    # function, not per device-kernel variant); stamp the group onto each member.
     task_groups = _build_task_groups(hot_kernels)
     kid_to_group = {kid: g for g in task_groups for kid in g["kernel_ids"]}
     for c in hot_kernels:
@@ -427,27 +397,18 @@ def build_candidates(
         if g is not None:
             c["task_group"] = g
 
-    # 1-based rank by optimization ROI. Stamped as a field WITHOUT reordering
-    # hot_kernels (that list stays gpu_pct-sorted for downstream/top15 stability);
-    # the CSV / md Top-N views sort by this rank themselves.
+    # 1-based rank by optimization ROI, stamped WITHOUT reordering hot_kernels
+    # (that list stays gpu_pct-sorted).
     for rank, c in enumerate(sorted(hot_kernels, key=lambda x: x.get("optimization_priority") or 0.0, reverse=True), start=1):
         c["priority_rank"] = rank
 
-    # Routable subset (contract alignment): ``hot_kernels`` stays the FULL ranked
-    # hotspot set; ``routable_kernels`` is the reusable-with-resolved-source subset
-    # dispatchable to kernel-opt, exposed separately so downstream never conflates
-    # "all hotspots" with the "optimizable subset" (the P0 hot_kernels semantics).
+    # ``routable_kernels`` = reusable-with-resolved-source subset dispatchable to
+    # kernel-opt; ``hot_kernels`` stays the FULL ranked hotspot set.
     routable_kernels = [
         c for c in hot_kernels if c.get("reusable_native_kernel") and c.get("source_file")
     ]
-    # ``skipped_kernels`` is the complement of ``routable_kernels`` within
-    # ``hot_kernels`` so the on-disk contract ``hot_kernels == routable_kernels
-    # + skipped_kernels`` always holds (twin of the TraceLens ``write_reports``
-    # invariant locked in test_tracelens_csv). It captures BOTH non-reusable
-    # kernels AND reusable kernels whose source is unresolved (reusable-in-
-    # principle but not dispatchable): the latter previously fell into neither
-    # bucket, hiding real hotspots (e.g. paged_attention with no resolved
-    # source) from consumers iterating routable + skipped.
+    # Complement within ``hot_kernels`` so the contract
+    # ``hot_kernels == routable_kernels + skipped_kernels`` holds.
     routable_ids = {c["kernel_id"] for c in routable_kernels}
     skipped_kernels = [c for c in hot_kernels if c["kernel_id"] not in routable_ids]
     return {
@@ -482,12 +443,8 @@ def build_summary(
     Returns:
         The ``summary.json`` payload dict.
     """
-    # ``tasks`` mirror the dispatchable (routable) partition and ``skipped`` its
-    # complement, consuming the SAME routable/skipped split build_candidates
-    # computed so summary.json never disagrees with kernel_candidates.json. A
-    # reusable kernel with no resolved source is reusable-in-principle but not
-    # dispatchable, so it is reported as skipped (with its reason) rather than as
-    # an actionable task.
+    # ``tasks`` / ``skipped`` reuse the SAME split build_candidates computed so
+    # summary.json never disagrees with kernel_candidates.json.
     def _audit_row(c: dict[str, Any]) -> dict[str, Any]:
         return {
             "kernel_id": c["kernel_id"],
@@ -510,8 +467,7 @@ def build_summary(
         row = _audit_row(c)
         row["skip_reason"] = c["skip_reason"]
         skipped.append(row)
-    # Compact task-group projection for the audit view (full rows live on
-    # kernel_candidates.json's candidate[].task_group).
+    # Compact task-group projection for the audit view.
     group_entries = [
         {
             "task_group_id": g.get("task_group_id", ""),
@@ -544,9 +500,8 @@ def build_summary(
 def _category_rollup(analyze_out: dict[str, Any]) -> list[dict[str, Any]]:
     """Aggregate GPU time by category over *all* device kernels.
 
-    Uses the full kernel list (not just the top-K candidates) so category
-    shares are complete. Requires the reader to have been called with
-    ``top_k=0``.
+    Uses the full kernel list (not just top-K) so category shares are complete;
+    requires the reader to have been called with ``top_k=0``.
 
     Returns:
         Category rows sorted by GPU time desc, each with gpu_ms / gpu_pct /
@@ -575,12 +530,9 @@ def _category_rollup(analyze_out: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Structured CSV export (deterministic, code-generated; NOT LLM).
+# Structured CSV export (deterministic, code-generated).
 # ---------------------------------------------------------------------------
-#: Stable column order for the per-kernel metrics CSV. Every numeric column is
-#: reproducible from the trace (measured) or a documented formula
-#: (optimization_priority = gpu_pct * (1 - efficiency/100)); roofline_source /
-#: shape_provenance state each value's provenance so the CSV is fully attributable.
+#: Stable column order for the per-kernel metrics CSV.
 _METRICS_COLUMNS: list[str] = [
     "priority_rank", "optimization_priority", "kernel_id", "name", "kernel_category",
     "device_kernel_name", "duration_us", "gpu_pct", "call_count",
@@ -724,7 +676,7 @@ def render_analysis_md(
     """Render the human/downstream ``analysis.md`` report (bypass route).
 
     Structured (not LLM prose); mirrors the golden section layout but is not
-    consumed by ``parse_analysis_md`` (bypass builds candidates directly).
+    consumed by ``parse_analysis_md``.
 
     Args:
         candidates: Output of :func:`build_candidates`.
@@ -756,7 +708,7 @@ def render_analysis_md(
         "top_bottleneck_category": top_cat,
         "attribution_pct": attribution.get("attributed_pct"),
     }
-    # memcpy as % of total wall time for the shared System-Level Signals table.
+    # memcpy as % of total wall time for the System-Level Signals table.
     memcpy_pct: float | None = None
     if isinstance(memcpy_ms, (int, float)) and isinstance(total_ms, (int, float)) and total_ms:
         memcpy_pct = float(memcpy_ms) / float(total_ms) * 100.0
@@ -766,11 +718,8 @@ def render_analysis_md(
         "exposed_memcpy_pct": memcpy_pct,
     }
 
-    # Shared Top Hot Kernels rows (bypass models AI + analytical efficiency).
-    # Displayed Eff% is the binding-side roofline attainment (cross-route
-    # comparable with TraceLens); compute/bandwidth utilization stay in
-    # kernel_roofline.json. efficiency_percent (compute util) still drives the
-    # optimization-priority ranking below.
+    # Top Hot Kernels rows. Displayed Eff% is the binding-side roofline
+    # attainment.
     hot_rows = [
         {
             "name": c.get("name"),
@@ -785,8 +734,8 @@ def render_analysis_md(
         for c in hot
     ]
 
-    # Shared per-P-item Data tables: one P-item per routable candidate (ranked by
-    # optimization ROI). %E2E and launcher Kernel Path are not modelled by bypass.
+    # One P-item per routable candidate (ranked by optimization ROI). %E2E and
+    # launcher Kernel Path are not modelled by bypass.
     routable = [c for c in hot if c.get("reusable_native_kernel")]
     dispatchable = [c for c in routable if c.get("source_file")]
     p_items = []
@@ -819,8 +768,7 @@ def render_analysis_md(
         f"framework={framework or 'unknown'}, platform={target_platform or 'unknown'}, "
         f"throughput_unit={throughput_unit}, aggregation_scope={scope}. "
         f"Per-kernel roofline (bound/AI/efficiency) is computed analytically from captured "
-        f"operand shapes + measured kernel time (roofline_source=analytical), with optional "
-        f"rocprof-compute refinement."
+        f"operand shapes + measured kernel time (roofline_source=analytical)."
     )
 
     extra = _render_bypass_extra_sections(
@@ -840,13 +788,13 @@ def render_analysis_md(
         summary_csv_path=summary_csv_path,
     )
 
-    return _render_canonical_report(
+    return render_report(
         route="bypass",
         model_name=model_name or "Workload",
         provenance_detail=provenance,
         exec_summary=exec_summary,
         system_signals=system_signals,
-        idle_threshold=_resolve_idle_pct_threshold(),
+        idle_threshold=resolve_idle_pct_threshold(),
         hot_kernels=hot_rows,
         p_items=p_items,
         extra_sections=extra,
@@ -872,10 +820,8 @@ def _render_bypass_extra_sections(
 ) -> str:
     """Render the bypass-only richer sections appended after the shared spine.
 
-    Kept verbatim (category rollup / optimization-priority Top-N / per-candidate
-    optimization prose / task groups / per-kernel detail / appendix / CSV links)
-    so no bypass analytical content is lost while the cross-route sections stay
-    identical.
+    Covers category rollup, optimization-priority Top-N, per-candidate
+    optimization prose, task groups, per-kernel detail, appendix, and CSV links.
     """
     L: list[str] = []
 
@@ -886,7 +832,7 @@ def _render_bypass_extra_sections(
         L.append("| Rank | Category | GPU % | Time (ms) | Kernels |")
         L.append("|------|----------|-------|-----------|---------|")
         for i, r in enumerate(rollup, start=1):
-            L.append(f"| {i} | {_canonical_category(r['category'])} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |")
+            L.append(f"| {i} | {canonical_category(r['category'])} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |")
     else:
         L.append("_No GPU kernels found in trace._")
     L.append("")
@@ -914,7 +860,7 @@ def _render_bypass_extra_sections(
             eff = c.get("roofline_attainment_pct")
             eff_str = f"{float(eff):.1f}%" if isinstance(eff, (int, float)) else "\u2014"
             L.append(
-                f"| {i} | `{c.get('kernel_id', '')}` | {c.get('name', '')} | {_canonical_category(c.get('kernel_category', ''))} "
+                f"| {i} | `{c.get('kernel_id', '')}` | {c.get('name', '')} | {canonical_category(c.get('kernel_category', ''))} "
                 f"| {float(c.get('gpu_pct') or 0.0):.2f}% | {c.get('bound_type', '')} | {ai_str} | {eff_str} "
                 f"| {float(c.get('optimization_priority') or 0.0):.2f} | {c.get('suggestion', '')} |"
             )
@@ -935,7 +881,7 @@ def _render_bypass_extra_sections(
         )
         L.append("")
         for i, c in enumerate(routable, start=1):
-            _cat = _canonical_category(c["kernel_category"])
+            _cat = canonical_category(c["kernel_category"])
             L.append(f"### P{i}: {c['name']} ({_cat})")
             L.append("")
             L.append(
@@ -990,7 +936,7 @@ def _render_bypass_extra_sections(
             )
         L.append("")
 
-    # Non-rewritable note (was in the old bullet System-Level Signals).
+    # Non-rewritable note.
     skipped = candidates.get("skipped_kernels") or []
     if skipped:
         L.append(
@@ -1003,7 +949,7 @@ def _render_bypass_extra_sections(
     L.append("## Detailed Analysis")
     L.append("")
     for c in hot:
-        L.append(f"### {c['kernel_id']}: {c['name']} ({_canonical_category(c['kernel_category'])})")
+        L.append(f"### {c['kernel_id']}: {c['name']} ({canonical_category(c['kernel_category'])})")
         L.append("")
         L.append(
             f"**Identification:** {c['gpu_pct']:.2f}% GPU time, {c['call_count']} launches, "
@@ -1071,12 +1017,11 @@ def build_workload_roofline_totals(
     """Aggregate the analytical roofline over ALL analyzed device kernels.
 
     The per-kernel candidate list is capped at ``top_k``; the WORKLOAD roofline
-    (diffusion_roofline totals + kernel efficiency) must instead cover every
-    device kernel so it is not truncated to the hottest few (parity with the
-    TraceLens route, which aggregates its full perf CSV). Classifies + computes
-    the analytical roofline inline for each kernel and accumulates the same
-    totals shape as :func:`diffusion_roofline.aggregate_bypass_candidates`,
-    weighting ``sigma_ideal`` by the binding-side attainment.
+    must instead cover every device kernel so it is not truncated to the hottest
+    few. Classifies + computes the analytical roofline inline for each kernel and
+    accumulates the same totals shape as
+    :func:`diffusion_roofline.aggregate_bypass_candidates`, weighting
+    ``sigma_ideal`` by the binding-side attainment.
 
     Args:
         analyze_out: Result of :func:`_bypass_trace_reader.analyze_trace`.
@@ -1140,8 +1085,7 @@ def build_kernel_roofline(
 ) -> dict[str, Any]:
     """Build the per-kernel roofline sidecar payload.
 
-    Hardware roofline fields are null here (populated by the rocprof-compute
-    enrichment stage).
+    Hardware roofline fields are estimated from the analytical model.
 
     Args:
         candidates: Output of :func:`build_candidates`.
@@ -1162,17 +1106,14 @@ def build_kernel_roofline(
                 "gpu_pct": c["gpu_pct"],
                 "call_count": c["call_count"],
                 "bound_type": c["bound_type"],
-                # Contract alignment (F5): TraceLens kernel_roofline superset.
-                # bottleneck falls back to bound_type (same rule TraceLens uses);
-                # roofline_name has no analytical analogue so it stays null;
-                # suggestion/recommended_actions carry the deterministic hint.
+                # bottleneck falls back to bound_type; roofline_name has no
+                # analytical analogue so it stays null.
                 "bottleneck": c.get("bottleneck") or c.get("bound_type"),
                 "roofline_name": c.get("roofline_name"),
                 "suggestion": c.get("suggestion") or "",
                 "recommended_actions": list(c.get("recommended_actions") or []),
                 "efficiency_percent": c["efficiency_percent"],
-                # Binding-side attainment (compute util if compute-bound else bw
-                # util): the cross-route-comparable efficiency (== TraceLens's).
+                # Binding-side attainment (compute util if compute-bound, else bw).
                 "roofline_attainment_pct": c.get("roofline_attainment_pct"),
                 "arithmetic_intensity": c["arithmetic_intensity"],
                 "compute_utilization_pct": c["compute_utilization_pct"],
@@ -1181,8 +1122,7 @@ def build_kernel_roofline(
                 "source_file": c["source_file"],
                 "rocprof_roofline": c["rocprof_roofline"],
                 "flops_per_byte": c.get("flops_per_byte"),
-                # False = not hardware-measured; roofline_source is how the bound
-                # was derived (placeholder / analytical / rocprof).
+                # roofline_source is how the bound was derived.
                 "roofline_measured": c.get("roofline_measured", False),
                 "roofline_source": c.get("roofline_source", _RL_PLACEHOLDER),
             }
@@ -1210,9 +1150,8 @@ def build_fusion(analyze_out: dict[str, Any]) -> dict[str, Any]:
         The ``kernel_sequence`` payload dict.
     """
     launches = analyze_out.get("kernel_launches") or []
-    # Memoize classification by (device name, op name): a trace has few distinct
-    # kernels but can have very many launches (decode loops -> 100k+), so per-launch
-    # classify_kernel (regex) would be O(launches x rules); cache -> O(distinct).
+    # Memoize classification by (device name, op name): few distinct kernels but
+    # many launches, so caching keeps this O(distinct) not O(launches x rules).
     _cat_cache: dict[tuple[str, str], str] = {}
 
     def _category(name: str, op_name: str) -> str:

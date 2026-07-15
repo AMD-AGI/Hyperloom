@@ -72,8 +72,7 @@ def test_drop_within_warm_does_not_fire():
 
 
 def test_drop_above_ratio_threshold_does_not_fire():
-    """Drop from 30 → 18 hits the cold threshold but the ratio is
-    above ``regression_ratio`` (18 > 30 * 0.8 = 24), so no fire."""
+    """Drop hits the cold threshold but the ratio is above regression_ratio, so no fire."""
     det = AiterJitDetector(AiterJitConfig(cold_so_count=20, regression_ratio=0.5))
     det.evaluate(_ctx(0), SourceData(local_aiter_jit=_aiter(30)))
     out = det.evaluate(_ctx(1), SourceData(local_aiter_jit=_aiter(18)))
@@ -87,7 +86,6 @@ def test_stale_build_fires_medium_after_persistence_window():
             stale_build_persist_ticks=3,
         )
     )
-    # 3 consecutive ticks with build_count=5, unchanged.
     det.evaluate(_ctx(0), SourceData(local_aiter_jit=_aiter(50, build_count=5)))
     det.evaluate(_ctx(1), SourceData(local_aiter_jit=_aiter(50, build_count=5)))
     det.evaluate(_ctx(2), SourceData(local_aiter_jit=_aiter(50, build_count=5)))

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for :mod:`runtime.inbox_parser` against Coordinator prompt output and degraded inputs."""
+"""Tests for :mod:`runtime.inbox_parser`."""
 
 from __future__ import annotations
 

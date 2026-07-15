@@ -16,7 +16,6 @@ from hyperloom.orchestrator.roles import (
 )
 
 
-# -- SDK fakes -------------------------------------------------------------
 @dataclass
 class _FakeToolUse:
     name: str
@@ -60,7 +59,6 @@ def _backend(**over: Any) -> ClaudeBackend:
     return ClaudeBackend(**kwargs)
 
 
-# -- _safe_int -------------------------------------------------------------
 def test_safe_int() -> None:
     assert ClaudeBackend._safe_int(None) == 0
     assert ClaudeBackend._safe_int("bad") == 0
@@ -68,7 +66,6 @@ def test_safe_int() -> None:
     assert ClaudeBackend._safe_int("9") == 9
 
 
-# -- _compose_prompt -------------------------------------------------------
 def test_compose_prompt_raw_vs_normal() -> None:
     raw = _backend(raw_completion=True)
     assert raw._compose_prompt("hello") == "hello"
@@ -78,36 +75,25 @@ def test_compose_prompt_raw_vs_normal() -> None:
     assert len(out) > len("hello")  # suffix appended
 
 
-# -- context provider + emit_intent wiring --------------------------------
 def test_set_context_provider_none_clears() -> None:
     b = _backend()
     b.set_context_provider(None)
-    assert b.has_context_tools is False
+    assert b._context_server_config is None
 
 
-def test_has_emit_intent_tool_in_raw_mode_is_false() -> None:
-    # raw_completion disables MCP emit_intent wiring
-    b = _backend(raw_completion=True)
-    assert b.has_emit_intent_tool is False
-
-
-def test_conversation_session_accessors() -> None:
+def test_reset_conversation_clears_session_id() -> None:
     b = _backend(conversational=True)
-    assert b.conversation_session_id is None  # nothing captured yet
     b._session_id = "sess-1"
-    assert b.conversation_session_id == "sess-1"
     b.reset_conversation()
     assert b._session_id is None
-    # non-conversational backend never exposes a session id
-    b2 = _backend(conversational=False)
-    b2._session_id = "x"
-    assert b2.conversation_session_id is None
 
 
 def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub-key")
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_SMALL_FAST_MODEL", raising=False)
     b = _backend(model="claude-opus-4-6")
 
     opts = b._build_options(tools=[], max_turns=4, system_prompt=None)
@@ -153,10 +139,10 @@ def test_build_options_maps_openai_gateway_env_for_claude_code(monkeypatch) -> N
     assert opts.kwargs["setting_sources"] == []
     assert child_env["ANTHROPIC_API_KEY"] == "openai-key"
     assert child_env["ANTHROPIC_AUTH_TOKEN"] == "openai-key"
-    assert child_env["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: openai-key"
+    # OPENAI_CUSTOM_HEADERS is not copied to the Anthropic side.
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in child_env
 
 
-# -- block helpers ---------------------------------------------------------
 def test_iter_blocks() -> None:
     assert ClaudeBackend._iter_blocks(_Msg(content=[1, 2])) == [1, 2]
     assert ClaudeBackend._iter_blocks(_Msg(content=None)) == []

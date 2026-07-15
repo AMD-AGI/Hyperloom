@@ -78,6 +78,99 @@ def test_build_backends_critic_agent_with_root() -> None:
     assert b["critic"][0] == "critic_agent"
 
 
+def _clear_provider_env(monkeypatch) -> None:
+    for key in (
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    b = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+        kernel_codex=True,
+    )
+    assert b["orchestration"][0] == "claude"
+    # Provider-only keeps the critic-agent on the native Anthropic protocol.
+    assert b["critic"][0] == "critic_agent"
+    assert b["critic"][1]["protocol"] == "anthropic"
+    assert b["critic"][1]["claude_model"] == "claude-x"
+    assert b["kernel_agent"][0] == "claude"
+
+
+def test_build_backends_anthropic_only_degrades_to_claude_without_root(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    # Without critic_agent_root the critic degrades to Claude tool-use.
+    b = _build(critic_choice="agent", critic_agent_root=None)
+    assert b["critic"][0] == "claude"
+
+
+def test_build_backends_deepseek_only_uses_openai_compatible_critic_agent(monkeypatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    b = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+    )
+    # DeepSeek keeps the critic-agent on the OpenAI review path.
+    assert b["critic"][0] == "critic_agent"
+    assert b["critic"][1]["protocol"] == "openai"
+    assert b["critic"][1]["codex_model"] == "claude-x"
+    assert callable(b["critic"][1]["codex_client_factory"])
+
+
+def test_deepseek_factory_default_base_url_carries_v1(monkeypatch) -> None:
+    """The OpenAI SDK appends the route verbatim (no /v1 auto-insertion), so the
+    DeepSeek default base URL must carry the conventional /v1 suffix."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    import openai
+
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw))
+    clib._deepseek_openai_client_factory()()
+    assert captured["base_url"] == "https://api.deepseek.com/v1"
+    assert captured["api_key"] == "test-deepseek-key"
+
+
+def test_deepseek_factory_respects_explicit_base_url(monkeypatch) -> None:
+    """An explicit DEEPSEEK_BASE_URL is used as-is (custom gateways may not use /v1)."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://gw.example/openai/v2/")
+    import openai
+
+    captured: dict = {}
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: captured.update(kw))
+    clib._deepseek_openai_client_factory()()
+    assert captured["base_url"] == "https://gw.example/openai/v2"
+
+
+def test_build_backends_openai_only_uses_codex_for_orchestration_and_kernel(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    b = _build(
+        critic_choice="agent",
+        critic_agent_root=Path("/tmp/critic"),
+        kernel_codex=False,
+    )
+    assert b["orchestration"][0] == "codex"
+    assert b["critic"][0] == "critic_agent"
+    assert b["kernel_agent"][0] == "codex"
+
+
 def test_build_backends_invalid_robustness_choice() -> None:
     with pytest.raises(ValueError, match="robustness_choice"):
         _build(robustness_choice="bogus")
@@ -93,39 +186,90 @@ def test_build_backends_robustness_agent_with_root() -> None:
     assert b["robustness"][0] == "rob_agent"
 
 
-# -- _build_proposal_scorer ------------------------------------------------
-def test_proposal_scorer_disabled() -> None:
-    args = argparse.Namespace(no_proposal_scoring=True)
+def test_proposal_scorer_disabled_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    args = argparse.Namespace(proposal_scoring=False, proposal_scorer_models=None)
     assert clib._build_proposal_scorer(args) is None
 
 
-def test_proposal_scorer_empty_models_returns_none() -> None:
+def test_proposal_scorer_disabled_for_anthropic_only(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     args = argparse.Namespace(
-        no_proposal_scoring=False,
+        proposal_scoring=True,
+        proposal_scorer_models=None,
+    )
+    assert clib._build_proposal_scorer(args) is None
+
+
+def test_proposal_scorer_empty_models_returns_none(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    args = argparse.Namespace(
+        proposal_scoring=True,
         proposal_scorer_models="  ,  ",
     )
     assert clib._build_proposal_scorer(args) is None
 
 
 def test_proposal_scorer_default_models(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(clib, "ProposalScorer", lambda **kw: ("scorer", kw))
-    args = argparse.Namespace(no_proposal_scoring=False)
+    args = argparse.Namespace(proposal_scoring=True)
     out = clib._build_proposal_scorer(args)
     assert out[0] == "scorer"
     assert len(out[1]["models"]) >= 1
 
 
 def test_proposal_scorer_explicit_models(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(clib, "ProposalScorer", lambda **kw: ("scorer", kw))
     args = argparse.Namespace(
-        no_proposal_scoring=False,
+        proposal_scoring=True,
         proposal_scorer_models="m1, m2",
     )
     out = clib._build_proposal_scorer(args)
     assert out[1]["models"] == ("m1", "m2")
 
 
-# -- _robustness_server_configured -----------------------------------------
+def test_proposal_scoring_flag_parsing() -> None:
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    parser = _build_parser()
+    default = parser.parse_args(["optimize", "--model", "x"])
+    assert default.proposal_scoring is False
+    enabled = parser.parse_args(["optimize", "--model", "x", "--proposal-scoring"])
+    assert enabled.proposal_scoring is True
+    disabled = parser.parse_args(["optimize", "--model", "x", "--no-proposal-scoring"])
+    assert disabled.proposal_scoring is False
+
+
+def test_retired_enable_proposal_scoring_flag_rejected() -> None:
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["optimize", "--model", "x", "--enable-proposal-scoring"])
+
+
+def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
+    # Passing only --proposal-scorer-models must not turn scoring on.
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    parser = _build_parser()
+    args = parser.parse_args(
+        ["optimize", "--model", "x", "--proposal-scorer-models", "m1,m2"]
+    )
+    assert args.proposal_scorer_models == "m1,m2"
+    assert args.proposal_scoring is False
+    assert clib._build_proposal_scorer(args) is None
+
+
 def test_robustness_server_configured_via_arg() -> None:
     args = argparse.Namespace(robustness_server_url="http://rob:9000")
     assert clib._robustness_server_configured(args) is True
@@ -139,7 +283,6 @@ def test_robustness_server_configured_via_env(monkeypatch) -> None:
     assert clib._robustness_server_configured(args) is True
 
 
-# -- _build_robustness_options ---------------------------------------------
 def test_robustness_options_single_node_minimal(monkeypatch) -> None:
     for k in clib._MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
@@ -153,7 +296,6 @@ def test_robustness_options_single_node_minimal(monkeypatch) -> None:
         robustness_pod_metrics_categories=None,
     )
     opts = clib._build_robustness_options(args)
-    # single-node: no multi-node defaults emitted
     assert "auto_probe_inference_server" not in opts
     assert "nodes" not in opts
 
@@ -199,7 +341,6 @@ def test_robustness_options_workload_uid_from_env(monkeypatch) -> None:
     assert opts["workload_uid"] == "ray-42"
 
 
-# ---- _resolve_kernel_agent_max_turns ----
 def test_kernel_agent_max_turns_default(monkeypatch):
     from hyperloom.inference_optimizer.cli import backends as cb
     monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", raising=False)

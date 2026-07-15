@@ -1,12 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR KB (gbrain) candidate discovery backend (design P2, D6).
+"""PR KB (gbrain) candidate discovery backend.
 
 Enumerates candidate PRs from the gbrain PR KB for ``request.repo_url``:
 index page (structured) ∪ semantic ``search`` (scoped to this repo's meta
-prefix), with a ``list_pages`` fallback when both yield nothing (the index
-page may be absent and ``search`` does not surface pr-kb-meta pages). Merged
-+ deduped by PR number. Best-effort: any gbrain failure yields ``[]`` so the
+prefix), with a ``list_pages`` fallback when both yield nothing. Merged +
+deduped by PR number. Best-effort: any gbrain failure yields ``[]`` so the
 dispatcher falls back to Cortex / GitHub.
 """
 
@@ -69,7 +68,7 @@ def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
     limit = max(1, int(request.max_search_candidates or 5))
     by_number: dict[int, Candidate] = {}
 
-    # (1) index page — structured enumeration.
+    # index page — structured enumeration.
     try:
         page = client.get_page(index_slug(repo_n))
         for entry in parse_index_prs(page or {}):
@@ -83,7 +82,7 @@ def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
     except GbrainPageError as exc:
         _log.warning("pr_kb: index page fetch failed: %r", exc)
 
-    # (2) semantic query — scoped to this repo's meta prefix.
+    # semantic query — scoped to this repo's meta prefix.
     meta_prefix = f"{slug_prefix()}-meta/{repo_slug(repo_n)}/pr/"
     floor = _min_relevance()
     try:
@@ -107,11 +106,8 @@ def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
                 request.repo_url, repo_n, num, title=str(hit.get("title") or "")
             )
 
-    # (3) list_pages fallback — the index page may be absent and the semantic
-    # ``search`` tool does not surface pr-kb-meta pages, so when the first two
-    # sources yield nothing, enumerate meta pages directly and client-side
-    # filter by this repo's meta prefix (gbrain list_pages has no server-side
-    # prefix filter and caps results, so this is best-effort; design D6).
+    # list_pages fallback — enumerate meta pages directly and client-side
+    # filter by this repo's meta prefix (best-effort; no server-side filter).
     if not by_number:
         list_cap = 500
         try:
@@ -131,11 +127,7 @@ def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
                 by_number[num] = _candidate(
                     request.repo_url, repo_n, num, title=str(entry.get("title") or "")
                 )
-        # list_pages has no server-side prefix filter and caps its result set.
-        # When it returns a full page (>= cap) and none matched this repo, the
-        # repo's meta pages may simply be beyond the cap — surface that as a
-        # WARNING so "this repo suddenly finds no candidates" is diagnosable
-        # rather than a silent empty return.
+        # Warn when the cap was hit with no match: matches may be beyond the cap.
         if not by_number and len(pages) >= list_cap:
             _log.warning(
                 "pr_kb: list_pages hit the %d-page cap with no match for %s "

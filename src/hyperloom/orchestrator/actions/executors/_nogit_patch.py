@@ -2,9 +2,8 @@
 
 """Shared non-git patch apply / revert primitives.
 
-Extracted from ``integrate_patch`` so both the EXPLORE specialist executor
-and the FRAMEWORK-phase per-candidate executor can share the same
-backup-based apply/revert channel without git.
+Lets the EXPLORE specialist executor and the FRAMEWORK-phase per-candidate
+executor share one backup-based apply/revert channel without git.
 
 Public surface
 --------------
@@ -19,24 +18,21 @@ Supporting constants / helpers used by both callers:
 * :func:`_strip_path_prefix` — drop leading path components like ``git apply -p<n>``.
 * :func:`_is_within`        — containment check (both paths pre-resolved).
 
-Backup naming (#3 fix)
-----------------------
+Backup naming
+-------------
 Backup files are named ``<patch_stem>__<rel_flat>__<seq:04d>.bak`` where
 ``rel_flat`` is the target's relative path with ``/`` replaced by ``__`` and
-``seq`` is a caller-supplied global offset (``seq_offset``) plus the record
-index within this apply call.  Callers that accumulate backups across multiple
-``_apply_patch_no_git`` calls (``integrate_patch``, ``framework_agent``) pass
-``seq_offset=len(existing_backups)`` so backup names are globally unique within
-a shared ``backup_root`` directory even when different patches touch files with
-the same basename.
+``seq`` is a caller-supplied offset (``seq_offset``) plus the record index.
+Callers that accumulate backups across multiple ``_apply_patch_no_git`` calls
+pass ``seq_offset=len(existing_backups)`` so names are globally unique within a
+shared ``backup_root`` even when patches touch files with the same basename.
 
-Rename / move revert (#4 fix)
-------------------------------
-When a patch hunk renames a file (``---`` old path ≠ ``+++`` new path, neither
-is ``/dev/null``), ``_apply_patch_no_git`` backs up *both* the old source file
-(so its content can be restored on revert) *and* tracks the new destination
-(so it can be deleted on revert).  Each backup record carries a ``revert_action``
-key:
+Rename / move revert
+--------------------
+For a rename hunk (``---`` old path != ``+++`` new path, neither ``/dev/null``),
+``_apply_patch_no_git`` backs up the old source file (to restore on revert) and
+tracks the new destination (to delete on revert). Each backup record carries a
+``revert_action`` key:
 
 * ``"restore"`` — copy ``backup_path`` back to ``target`` (modified/created files).
 * ``"delete"``  — remove ``target`` (the rename destination, which did not exist
@@ -45,8 +41,7 @@ key:
   which existed before the patch and must be put back).
 
 ``_revert_patches_no_git`` dispatches on ``revert_action`` (falling back to the
-original ``backup_path``-present → restore / absent → delete heuristic for
-records written by older code).
+``backup_path``-present → restore / absent → delete heuristic for older records).
 """
 
 from __future__ import annotations
@@ -63,12 +58,9 @@ from ...specialists.patch_safety import patch_file_targets
 log = logging.getLogger(__name__)
 
 
-# Candidate ``-p`` strip levels, tried in priority order.  ``-p1`` is the
-# git-native default and stays first for backward-compat; specialists author
-# patches with heterogeneous path prefixes (``a/vllm/...`` -> -p1,
-# ``b/_aiter_ops.py`` -> -p0/-p2, full absolute
-# ``b/usr/local/lib/python3.12/dist-packages/vllm/...`` -> -p7), so we must
-# auto-detect rather than assume a single level.
+# Candidate ``-p`` strip levels, tried in priority order (``-p1`` first).
+# Specialists author patches with heterogeneous path prefixes, so we auto-detect
+# rather than assume a single level.
 _P_LEVELS: tuple[int, ...] = (1, 0, 2, 3, 4, 5, 6, 7, 8)
 
 _PATCH_DEV_NULL = "/dev/null"
@@ -143,7 +135,7 @@ def _apply_patch_no_git(
     backup_root: Path,
     *,
     seq_offset: int = 0,
-) -> tuple[bool, str, list[dict[str, Any]]]:
+) -> "tuple[bool, str, list[dict[str, Any]], Any]":
     """Apply ``patch_path`` into ``framework_root`` without git, backing up targets.
 
     Uses the ``patch`` CLI (POSIX standard) with automatic ``-p`` strip-level
@@ -154,9 +146,8 @@ def _apply_patch_no_git(
     ``backup_root`` when callers pass ``seq_offset=len(accumulated_backups)``
     (see module docstring for the naming scheme).
 
-    Rename/move hunks (``---`` old ≠ ``+++`` new, neither ``/dev/null``) are
-    handled completely: the old source file is backed up so revert can restore
-    it; the new destination is tracked so revert can delete it.
+    Rename/move hunks back up the old source file (to restore on revert) and
+    track the new destination (to delete on revert).
 
     Args:
         framework_root: The source-tree root to apply into (need not be a git repo).
@@ -167,19 +158,31 @@ def _apply_patch_no_git(
             multiple ``_apply_patch_no_git`` calls to avoid name collisions.
 
     Returns:
-        A ``(ok, err, backups)`` triple: ``ok`` is ``True`` on success, ``err``
-        is a human-readable failure description, and ``backups`` is a list of
-        per-file backup records.  Each record has:
+        A ``(ok, err, backups, feedback)`` four-tuple: ``ok`` is ``True`` on
+        success, ``err`` is a human-readable failure description, ``backups``
+        is a list of per-file backup records, and ``feedback`` is an
+        :class:`~._apply_feedback.ApplyFeedback` instance on failure or
+        ``None`` on success.  Backup record fields:
 
         * ``"target"`` — absolute path of the affected file.
         * ``"existed"`` — whether the file existed before the patch.
         * ``"backup_path"`` — path of the saved copy (``None`` for new files).
         * ``"revert_action"`` — one of ``"restore"``, ``"delete"``, or
           ``"restore_old"`` (see module docstring).
+
+    .. note::
+        Existing callers that unpack only three items can use
+        ``ok, err, backups, *_ = _apply_patch_no_git(...)`` for zero-change
+        compatibility.
     """
-    # Detect strip level via dry-run.
+    from ._apply_feedback import ApplyFeedback, read_patch_source_context
+
+    # Detect strip level via dry-run; accumulate stderr per level for feedback.
     detected_level: int | None = None
+    dry_run_stderrs: list[str] = []
+    tried_levels: list[int] = []
     for lvl in _P_LEVELS:
+        tried_levels.append(lvl)
         try:
             cp = subprocess.run(
                 ["patch", f"-p{lvl}", "--dry-run", "-i", str(patch_path)],
@@ -190,18 +193,49 @@ def _apply_patch_no_git(
                 cwd=str(framework_root),
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            return False, f"patch CLI unavailable or timed out: {exc}", []
+            err_msg = f"patch CLI unavailable or timed out: {exc}"
+            feedback = ApplyFeedback(
+                patch=str(patch_path),
+                channel="nogit",
+                tried_levels=tried_levels,
+                stderr=err_msg,
+            )
+            return False, err_msg, [], feedback
+        dry_run_stderrs.append(f"-p{lvl}: {cp.stderr.strip()}" if cp.stderr.strip() else f"-p{lvl}: (no stderr)")
         if cp.returncode == 0:
             detected_level = lvl
             break
     if detected_level is None:
-        return False, f"patch --dry-run failed at all strip levels for {patch_path.name}", []
+        combined_stderr = "\n".join(dry_run_stderrs)
+        err_msg = f"patch --dry-run failed at all strip levels for {patch_path.name}"
+        try:
+            patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+            source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
+        except Exception:  # noqa: BLE001
+            source_ctx = ""
+        feedback = ApplyFeedback(
+            patch=str(patch_path),
+            channel="nogit",
+            tried_levels=tried_levels,
+            stderr=combined_stderr,
+            source_context=source_ctx,
+        )
+        return False, err_msg, [], feedback
+
+    def _fail(err_message: str, recs: list[dict[str, Any]]) -> "tuple[bool, str, list[dict[str, Any]], Any]":
+        """Return the canonical 4-tuple failure result with structured feedback."""
+        return False, err_message, recs, ApplyFeedback(
+            patch=str(patch_path),
+            channel="nogit",
+            tried_levels=tried_levels,
+            stderr=err_message,
+        )
 
     # Resolve target files to back up before mutation.
     try:
         patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        return False, f"cannot read patch file: {exc}", []
+        return _fail(f"cannot read patch file: {exc}", [])
 
     framework_root_resolved = framework_root.resolve()
     backup_root.mkdir(parents=True, exist_ok=True)
@@ -251,7 +285,7 @@ def _apply_patch_no_git(
                 continue
             rel_new, abs_new, err = _resolve_target(new_raw)
             if err:
-                return False, err, backups
+                return _fail(err, backups)
             backups.append({
                 "target": str(abs_new),
                 "existed": False,
@@ -265,11 +299,11 @@ def _apply_patch_no_git(
                 continue
             rel_old, abs_old, err = _resolve_target(old_raw)
             if err:
-                return False, err, backups
+                return _fail(err, backups)
             if abs_old.exists():
                 rec, err = _backup_existing(abs_old, rel_old, "restore")  # type: ignore[arg-type]
                 if err:
-                    return False, err, backups
+                    return _fail(err, backups)
                 backups.append(rec)  # type: ignore[arg-type]
             else:
                 backups.append({
@@ -284,15 +318,15 @@ def _apply_patch_no_git(
             # track new destination (to delete on revert).
             rel_old, abs_old, err = _resolve_target(old_raw)
             if err:
-                return False, err, backups
+                return _fail(err, backups)
             rel_new, abs_new, err = _resolve_target(new_raw)
             if err:
-                return False, err, backups
+                return _fail(err, backups)
             # Back up old source so it can be restored on revert.
             if abs_old.exists():  # type: ignore[union-attr]
                 rec, err = _backup_existing(abs_old, rel_old, "restore_old")  # type: ignore[arg-type]
                 if err:
-                    return False, err, backups
+                    return _fail(err, backups)
                 backups.append(rec)  # type: ignore[arg-type]
             # Track new destination for deletion on revert.
             backups.append({
@@ -309,11 +343,11 @@ def _apply_patch_no_git(
                 continue
             rel_t, abs_t, err = _resolve_target(target_raw)
             if err:
-                return False, err, backups
+                return _fail(err, backups)
             if abs_t.exists():  # type: ignore[union-attr]
                 rec, err = _backup_existing(abs_t, rel_t, "restore")  # type: ignore[arg-type]
                 if err:
-                    return False, err, backups
+                    return _fail(err, backups)
                 backups.append(rec)  # type: ignore[arg-type]
             else:
                 backups.append({
@@ -323,10 +357,13 @@ def _apply_patch_no_git(
                     "revert_action": "delete",
                 })
 
-    # Apply for real.
+    # Apply for real. --reject writes .rej files for failed hunks so we can
+    # collect them for reauthor feedback.
+    rej_dir = backup_root / "rej"
+    rej_dir.mkdir(parents=True, exist_ok=True)
     try:
         cp2 = subprocess.run(
-            ["patch", f"-p{detected_level}", "-i", str(patch_path)],
+            ["patch", f"-p{detected_level}", "--reject-file=-", "-i", str(patch_path)],
             capture_output=True,
             text=True,
             timeout=120,
@@ -334,10 +371,70 @@ def _apply_patch_no_git(
             cwd=str(framework_root),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return False, f"patch apply failed: {exc}", backups
+        err_msg = f"patch apply failed: {exc}"
+        feedback = ApplyFeedback(
+            patch=str(patch_path),
+            channel="nogit",
+            tried_levels=tried_levels,
+            stderr=err_msg,
+        )
+        return False, err_msg, backups, feedback
     if cp2.returncode != 0:
-        return False, cp2.stderr.strip() or cp2.stdout.strip(), backups
-    return True, "", backups
+        # Collect any .rej files left next to the target files.
+        rejected_hunks = _collect_rej_files(framework_root, patch_path)
+        apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
+        source_ctx = ""
+        try:
+            patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+            source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
+        except Exception:  # noqa: BLE001
+            pass
+        feedback = ApplyFeedback(
+            patch=str(patch_path),
+            channel="nogit",
+            tried_levels=[detected_level],
+            stderr=apply_stderr,
+            rejected_hunks=rejected_hunks,
+            source_context=source_ctx,
+        )
+        return False, apply_stderr, backups, feedback
+    return True, "", backups, None
+
+
+def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
+    """Collect ``.rej`` reject files left by a failed ``patch`` apply.
+
+    The POSIX ``patch`` tool writes ``<target>.rej`` alongside each file that
+    had failing hunks.  This helper scans ``framework_root`` for any ``.rej``
+    file whose mtime is recent (within 60 s), reads them all, then removes
+    them so they do not interfere with future apply attempts.
+
+    Args:
+        framework_root: The source-tree root that was patched into.
+        patch_path: The patch file that was applied (used for logging only).
+
+    Returns:
+        A concatenated string of all ``.rej`` file contents, or ``""`` when
+        none were found.
+    """
+    import time
+
+    cutoff = time.time() - 60.0
+    parts: list[str] = []
+    try:
+        for rej in sorted(framework_root.rglob("*.rej")):
+            try:
+                if rej.stat().st_mtime >= cutoff:
+                    content = rej.read_text(encoding="utf-8", errors="replace").strip()
+                    if content:
+                        parts.append(f"# {rej.relative_to(framework_root)}\n{content}")
+                    rej.unlink(missing_ok=True)
+            except OSError:
+                # Best-effort scan: skip unreadable/racing .rej files.
+                continue
+    except Exception:  # noqa: BLE001
+        log.debug("_collect_rej_files: scan failed for %s", patch_path, exc_info=True)
+    return "\n\n".join(parts)
 
 
 def _revert_patches_no_git(backups: list[dict[str, Any]]) -> None:
@@ -379,6 +476,7 @@ __all__ = [
     "_P_LEVELS",
     "_PATCH_DEV_NULL",
     "_apply_patch_no_git",
+    "_collect_rej_files",
     "_is_git_tree",
     "_is_within",
     "_revert_patches_no_git",

@@ -6,6 +6,7 @@ Ensure the child raylet does not inherit the low container default."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,19 +21,27 @@ import ray_runtime  # noqa: E402
 
 # Minimum soft RLIMIT_NOFILE the raylet needs to stay up.
 TARGET_NOFILE = 65536
+KERNEL_ROOT = Path(__file__).resolve().parent.parent
+INSTALL_SH = KERNEL_ROOT / "scripts" / "install.sh"
+
+
+def _extract_shell_function(name: str) -> str:
+    lines = INSTALL_SH.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line == f"{name}() {{")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    return "\n".join(lines[start : end + 1])
 
 
 class _FakeResource:
     """Stand-in for the stdlib ``resource`` module with in-memory rlimits.
 
     Records every ``getrlimit`` / ``setrlimit`` into ``events`` so a test
-    can assert ordering relative to the ``ray start`` subprocess. Mimics
-    the kernel's rule that a process may raise its soft limit only up to
-    the hard limit (raising the hard limit raises ``ValueError`` here,
-    matching the unprivileged container case)."""
+    can assert ordering relative to the ``ray start`` subprocess. A process
+    may raise its soft limit only up to the hard limit (raising the hard
+    limit raises ``ValueError`` here)."""
 
-    RLIMIT_NOFILE = 7  # value is irrelevant; kept distinct + truthy
-    RLIM_INFINITY = -1  # matches the stdlib resource module sentinel
+    RLIMIT_NOFILE = 7
+    RLIM_INFINITY = -1
 
     def __init__(self, soft: int, hard: int, events: list):
         self._soft = soft
@@ -43,9 +52,9 @@ class _FakeResource:
         """True when ``value`` is above the current hard cap, treating
         ``RLIM_INFINITY`` (-1) as +infinity on either side."""
         if self._hard == self.RLIM_INFINITY:
-            return False  # no ceiling
+            return False
         if value == self.RLIM_INFINITY:
-            return True  # asking for unlimited under a finite cap
+            return True
         return value > self._hard
 
     def getrlimit(self, which):
@@ -56,8 +65,7 @@ class _FakeResource:
     def setrlimit(self, which, limits):
         assert which == self.RLIMIT_NOFILE
         soft, hard = limits
-        # Unprivileged rule: soft may rise up to the hard cap; the hard cap
-        # may be lowered but not raised. RLIM_INFINITY is treated as +inf.
+        # Soft may rise up to the hard cap; the hard cap may be lowered but not raised.
         if self._exceeds_hard(soft) or (hard != self._hard and self._exceeds_hard(hard)):
             raise ValueError("current limit exceeds maximum limit")
         self._soft = soft
@@ -67,6 +75,36 @@ class _FakeResource:
 
 class _Proc:
     returncode = 0
+
+
+def test_install_sh_fd_limit_function_returns_success_when_hard_cap_sufficient():
+    """Shell install preflight must not return 1 when the hard cap is high enough."""
+    body = f"""
+set -euo pipefail
+RAY_MIN_NOFILE=65536
+FAKE_SOFT=1024
+FAKE_HARD=524288
+log() {{ :; }}
+warn() {{ :; }}
+ulimit() {{
+  case "$1" in
+    -Sn)
+      if [ "$#" -eq 1 ]; then
+        printf '%s\\n' "$FAKE_SOFT"
+      else
+        FAKE_SOFT="$2"
+      fi
+      ;;
+    -Hn) printf '%s\\n' "$FAKE_HARD" ;;
+    *) return 2 ;;
+  esac
+}}
+{_extract_shell_function("ensure_fd_limit_for_ray")}
+ensure_fd_limit_for_ray
+"""
+    result = subprocess.run(["bash", "-c", body], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
 
 
 def _install_fake_ray_start(monkeypatch, events):
@@ -111,10 +149,8 @@ def test_ensure_fd_limit_noop_when_already_high(monkeypatch):
 def test_ensure_fd_limit_clamps_to_low_hard_limit_and_warns(monkeypatch):
     """When the hard cap < target, raise soft to the hard cap and warn.
 
-    This is the unprivileged-container case: only ``docker --ulimit
-    nofile=...`` at launch can lift the hard cap, so the runtime cannot
-    fully fix it — but it must still raise soft as high as allowed and
-    surface the shortfall loudly."""
+    Unprivileged-container case: only ``docker --ulimit nofile=...`` can lift
+    the hard cap, so the runtime raises soft as high as allowed and warns."""
     events: list = []
     fake = _FakeResource(soft=1024, hard=4096, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
@@ -137,8 +173,7 @@ def test_ensure_fd_limit_clamps_to_low_hard_limit_and_warns(monkeypatch):
 def test_ensure_fd_limit_unlimited_hard_targets_min_soft_without_warning(monkeypatch):
     """An unlimited hard cap (RLIM_INFINITY = -1) must be treated as "no
     ceiling": raise soft to exactly ``min_soft`` (NOT min(min_soft, -1) = -1)
-    and emit NO warning. Regressing this re-introduces the boundary bug where
-    -1 was mistaken for a tiny cap."""
+    and emit NO warning."""
     events: list = []
     fake = _FakeResource(soft=1024, hard=_FakeResource.RLIM_INFINITY, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)

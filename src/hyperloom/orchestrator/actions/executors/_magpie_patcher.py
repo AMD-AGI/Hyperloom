@@ -2,29 +2,19 @@
 
 """Idempotent, atomic-write patcher for Magpie ``_prepare_benchmark_scripts``.
 
-Magpie copies its generic ``scripts/benchmark/*.sh`` into
-``<InferenceX>/benchmarks/`` via ``shutil.copy2`` (``O_TRUNC`` + chunked,
-non-atomic to a concurrent reader). A concurrent ``bash`` that re-sources a
-script mid-copy then hits ``syntax error near unexpected token 'fi'``. We
-can't monkey-patch the subprocess Magpie, so we
-patch the cloned ``benchmarker.py`` in place to use a temp-file + ``os.replace``
-copy (no observable intermediate state), with an idempotent byte-identical skip
-so a read-only pre-staged ``InferenceX/benchmarks`` deployment no-ops instead of
-hitting ``[Errno 30]``. The replacement uses ``_hyperloom_*`` aliases to avoid
-shadowing upstream names.
-
-Applied in place, once, never reverted: idempotent via a sentinel substring,
+Patches the cloned ``benchmarker.py`` in place so benchmark scripts are copied
+via a temp-file + ``os.replace`` (no observable intermediate state a concurrent
+``bash source`` could tear), with a byte-identical skip so a read-only
+pre-staged deployment no-ops. Applied once, idempotent via a sentinel substring,
 serialized via ``fcntl.flock``, written atomically. When the legacy block is
-absent the patcher is upstream-aware: if Magpie already copies atomically it
-returns ``True`` (redundant no-op); only a genuinely-unexpected shape returns
-``False`` so the install script can fail-loud.
+absent the patcher is upstream-aware: an already-atomic Magpie returns ``True``;
+only a genuinely-unexpected shape returns ``False`` so install.sh can fail-loud.
 
 :class:`MagpiePatchStatus` carries a classified ``atomic_reason`` so a caller
 can tell an EXPECTED no-op (``upstream_atomic`` / ``already_patched`` /
 ``missing``) apart from a GENUINE failure (``unrecognized_shape`` / ``io_error``)
 where the script-tearing race is actually unmitigated. ``install.sh`` reads
-``atomic_genuine_failure`` to fail-loud by default (``MAGPIE_PATCH_STRICT=1``)
-on a real failure while still warning-and-continuing on a benign no-op.
+``atomic_genuine_failure`` to fail-loud by default on a real failure.
 """
 
 from __future__ import annotations
@@ -44,19 +34,17 @@ from ._patch_sentinel import file_contains_sentinel
 log = logging.getLogger(__name__)
 
 
-# Atomic-patch outcome reasons. These let a caller (install.sh) tell an
-# EXPECTED no-op apart from a GENUINE failure instead of collapsing both into a
-# single ``False``. Only ``UNRECOGNIZED_SHAPE`` and ``IO_ERROR`` mean the
-# script-tearing race may be unmitigated; the rest are benign.
-_ATOMIC_REASON_APPLIED = "applied"  # legacy block rewritten this run
-_ATOMIC_REASON_ALREADY_PATCHED = "already_patched"  # sentinel already present
-_ATOMIC_REASON_UPSTREAM_ATOMIC = "upstream_atomic"  # Magpie already atomic
-_ATOMIC_REASON_MISSING = "missing"  # MAGPIE_PATH unset / file absent
-_ATOMIC_REASON_UNRECOGNIZED_SHAPE = "unrecognized_shape"  # genuine: unpatched
-_ATOMIC_REASON_IO_ERROR = "io_error"  # read/write failed mid-patch
+# Atomic-patch outcome reasons: distinguish an EXPECTED no-op from a GENUINE
+# failure. Only ``UNRECOGNIZED_SHAPE`` and ``IO_ERROR`` mean the script-tearing
+# race may be unmitigated; the rest are benign.
+_ATOMIC_REASON_APPLIED = "applied"
+_ATOMIC_REASON_ALREADY_PATCHED = "already_patched"
+_ATOMIC_REASON_UPSTREAM_ATOMIC = "upstream_atomic"
+_ATOMIC_REASON_MISSING = "missing"
+_ATOMIC_REASON_UNRECOGNIZED_SHAPE = "unrecognized_shape"
+_ATOMIC_REASON_IO_ERROR = "io_error"
 
-# Reasons that mean the atomic-copy race is genuinely NOT mitigated — a strict
-# caller should fail-loud on these, a lenient one warns conspicuously.
+# Reasons that mean the atomic-copy race is genuinely NOT mitigated.
 _ATOMIC_REASONS_GENUINE_FAILURE = frozenset(
     {
         _ATOMIC_REASON_UNRECOGNIZED_SHAPE,
@@ -69,8 +57,7 @@ _ATOMIC_REASONS_GENUINE_FAILURE = frozenset(
 # match an unrelated ``shutil.copy2`` elsewhere.
 _LEGACY_BLOCK = "            shutil.copy2(script, target_file)\n            target_file.chmod(0o755)\n"
 
-# Replacement block; ``_hyperloom_*`` aliases keep the injected imports from
-# shadowing upstream names.
+# Replacement block; ``_hyperloom_*`` aliases avoid shadowing upstream names.
 _PATCHED_BLOCK = (
     "            # Hyperloom #C1 patch: atomic write so a concurrent bash\n"
     "            # `source` cannot see a half-truncated file. Skip the write\n"
@@ -105,7 +92,7 @@ _PATCHED_BLOCK = (
     "                _hyperloom_os.replace(_tmp_name, target_file)\n"
 )
 
-# "Already patched?" sentinel.
+# "Already patched?" sentinels.
 _PATCH_SENTINEL = "Hyperloom #C1 patch"
 _REMOTE_TRUST_SENTINEL = "MAGPIE_TRUST_REMOTE_CODE"
 _EVAL_CONC_SENTINEL = "HYPERLOOM_EVAL_CONCURRENCY_FIX"
@@ -123,19 +110,10 @@ _REMOTE_DIRECT_PATCHED_BLOCK = (
     "    fi\n"
 )
 
-# --- Redundant eval-concurrency flag strip -------------------------------
-# Magpie's generic ``{framework}_{gpu}.sh`` scripts call
-# ``run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC``.
-# But InferenceX's ``run_lm_eval`` (benchmark_lib.sh) does NOT accept
-# ``--concurrent-requests`` — its arg parser rejects any unknown flag with
-# ``Unknown parameter`` and ``return 1``. It already derives concurrency from
-# ``EVAL_CONCURRENT_REQUESTS``/``CONC`` env. So the flag is redundant AND fatal:
-# ``run_eval`` exits non-zero, the ``|| exit $?`` aborts the whole benchmark
-# script, and an otherwise-healthy throughput baseline is thrown away. Strip the
-# flag at install time (concurrency still flows via the ``CONC`` env). Matches
-# ``$CONC`` / ``"$CONC"`` / ``${CONC}`` and the surrounding space. Idempotent:
-# the absence of ``--concurrent-requests`` IS the patched state, so a re-run /
-# already-fixed upstream script is a no-op.
+# Strip the redundant, fatal ``--concurrent-requests <CONC>`` flag from Magpie's
+# generic benchmark scripts: InferenceX's ``run_lm_eval`` rejects it as an
+# unknown flag, aborting the whole script; concurrency still flows via the
+# ``CONC`` env. Idempotent (absence of the flag IS the patched state).
 _EVAL_CONCURRENCY_FLAG_MARKER = "--concurrent-requests"
 _EVAL_CONCURRENCY_FLAG_RE = re.compile(r"\s*--concurrent-requests\s+(?:\"\$CONC\"|\$\{CONC\}|\$CONC)")
 
@@ -152,20 +130,19 @@ _RUN_EVAL_PATCHED_BLOCK = (
     "run_eval --framework lm-eval --port \"$PORT\" || exit $?\n"
 )
 
-# Name of the upstream atomic-copy helper; its presence signals Magpie already
-# copies benchmark scripts atomically.
+# Upstream atomic-copy helper; its presence signals Magpie already copies
+# benchmark scripts atomically.
 _UPSTREAM_ATOMIC_HELPER = "_copy_benchmark_script_atomic"
 
-# Atomic-write primitives we look for when upstream inlined the temp-file +
-# rename dance instead of extracting the named helper.
+# Atomic-write primitives looked for when upstream inlined the temp-file + rename
+# dance instead of extracting the named helper.
 _ATOMIC_MKSTEMP = "tempfile.mkstemp("
 _ATOMIC_REPLACE = "os.replace("
 
-# Method header used to scope inline-atomic detection (so an unrelated
-# ``os.replace`` elsewhere isn't mistaken for a fixed copy loop).
+# Method header used to scope inline-atomic detection.
 _PREPARE_METHOD_MARKER = "def _prepare_benchmark_scripts"
 
-# System-wide lock (``/tmp`` is writable; cross-reboot persistence not needed).
+# System-wide lock.
 _LOCK_PATH = "/tmp/hyperloom_magpie_benchmarker_patcher.lock"
 
 
@@ -263,9 +240,7 @@ def _strip_eval_concurrency_flag(text: str) -> str | None:
         return None
     patched = _EVAL_CONCURRENCY_FLAG_RE.sub("", text)
     if patched == text:
-        # Marker present but in an unexpected shape (e.g. a literal value we
-        # don't recognise). Leave it untouched and let the caller report a
-        # genuine miss rather than silently no-op.
+        # Marker present but in an unrecognised shape; report a genuine miss.
         return None
     return patched
 
@@ -330,8 +305,7 @@ def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
 def _file_lock(lock_path: str) -> Iterator[None]:
     """Best-effort cross-process mutex via ``fcntl.flock``.
 
-    Thin delegator to :func:`best_effort_file_lock` preserved for tests / call
-    sites that import ``_file_lock`` from this module.
+    Thin delegator to :func:`best_effort_file_lock`.
 
     Args:
         lock_path: Filesystem path of the lock file to acquire exclusively.
@@ -420,9 +394,7 @@ def atomic_write_text(
     ``tempfile.mkstemp`` into ``src.parent`` -> ``os.fdopen`` write ->
     ``os.chmod`` to ``src``'s mode -> ``os.replace`` so a crash mid-write
     cannot leave a corrupt file. On any ``OSError`` the temp file is unlinked
-    best-effort and ``False`` is returned. Lives in this module so the
-    module-global ``tempfile`` / ``os`` names (which tests monkeypatch) still
-    intercept; ``_inferencex_patcher`` imports it.
+    best-effort and ``False`` is returned.
 
     Args:
         src: The file to (atomically) overwrite.
@@ -532,28 +504,12 @@ def _apply_patch_atomic_reason(src: Path) -> str:
     return _ATOMIC_REASON_APPLIED
 
 
-def _apply_patch_atomic(src: Path) -> bool:
-    """Bool wrapper over :func:`_apply_patch_atomic_reason`: True when the
-    atomic-copy race is closed (applied / already-patched / upstream-atomic).
-
-    Args:
-        src: The ``benchmarker.py`` file to patch in place.
-
-    Returns:
-        True when the atomic-copy race is closed, False on a genuine failure.
-    """
-    return _apply_patch_atomic_reason(src) not in _ATOMIC_REASONS_GENUINE_FAILURE
-
-
 def _is_remote_trust_patched(src: Path) -> bool:
     """Return whether SGLang compatibility sentinels are already present.
 
-    This gate intentionally checks BOTH sentinels:
-    - ``MAGPIE_TRUST_REMOTE_CODE`` (remote trust compatibility)
-    - ``HYPERLOOM_EVAL_CONCURRENCY_FIX`` (eval concurrency compatibility)
-
-    so a pre-existing remote-trust patch does not short-circuit and skip the
-    newer eval-concurrency fix.
+    Checks BOTH ``MAGPIE_TRUST_REMOTE_CODE`` (remote trust) and
+    ``HYPERLOOM_EVAL_CONCURRENCY_FIX`` (eval concurrency) so a pre-existing
+    remote-trust patch does not short-circuit the eval-concurrency fix.
 
     Args:
         src: The ``sglang_mi300x.sh`` file to inspect.
@@ -644,15 +600,12 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
 class MagpiePatchStatus:
     atomic_ok: bool
     remote_trust_ok: bool
-    # Classified atomic-patch outcome (``_ATOMIC_REASON_*``). Lets callers tell
-    # an EXPECTED no-op (upstream-atomic / already-patched / missing tree) apart
-    # from a GENUINE failure where the atomic-write safeguard is absent.
+    # Classified atomic-patch outcome (``_ATOMIC_REASON_*``): tells an EXPECTED
+    # no-op apart from a GENUINE failure where the atomic-write safeguard is absent.
     atomic_reason: str = _ATOMIC_REASON_MISSING
-    # Whether the redundant ``--concurrent-requests`` eval flag was stripped
-    # from every generic benchmark script (or none needed it). ``False`` means
-    # a script kept the flag in an unrecognised shape, so RUN_EVAL=true
-    # baselines may still abort on InferenceX's ``Unknown parameter``. Defaults
-    # True (not-applicable / no scripts dir) so it never falsely fails install.
+    # Whether the redundant ``--concurrent-requests`` eval flag was stripped from
+    # every generic benchmark script (or none needed it). Defaults True
+    # (not-applicable) so it never falsely fails install.
     eval_flag_ok: bool = True
 
     @property
@@ -683,9 +636,8 @@ def magpie_scripts_patch_status(
 ) -> MagpiePatchStatus:
     """Return independent status for atomic-copy and remote-trust patches.
 
-    This keeps a drift in the optional SGLang remote-client trust patch from
-    being reported as a generic atomic-copy failure. The bool-valued
-    ``ensure_magpie_atomic_scripts_patch`` wrapper remains for compatibility.
+    Keeps a drift in the optional SGLang remote-client trust patch from being
+    reported as a generic atomic-copy failure.
 
     Args:
         magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
@@ -700,12 +652,9 @@ def magpie_scripts_patch_status(
         log.info(
             "_magpie_patcher: MAGPIE_PATH unset or benchmarker.py missing — skipping patch (fine for tests / dry-runs)",
         )
-        # remote_trust_ok=True here means "not applicable / not checked"
-        # (no Magpie tree to inspect), NOT "trust patch verified". It is set
-        # True only so this no-op path does not emit a spurious remote-trust
-        # warning. atomic_ok=False + reason=missing keeps the legacy fail-soft
-        # (install.sh warns, does not abort) but is NOT a genuine failure.
-        # eval_flag_ok=True is likewise "not applicable" (no scripts to scrub).
+        # remote_trust_ok / eval_flag_ok True here mean "not applicable" (no
+        # Magpie tree to inspect); atomic_ok=False + reason=missing is fail-soft
+        # (install.sh warns, does not abort) and is NOT a genuine failure.
         return MagpiePatchStatus(
             atomic_ok=False,
             remote_trust_ok=True,
@@ -734,8 +683,7 @@ def magpie_scripts_patch_status(
             )
         scripts_dir = _resolve_benchmark_scripts_dir(magpie_dir)
         if scripts_dir is None:
-            # No scripts/benchmark dir (reduced test layout / dry run): nothing
-            # to scrub, so the redundant-flag patch is not-applicable.
+            # No scripts/benchmark dir: nothing to scrub (not-applicable).
             eval_flag_ok = True
         else:
             eval_flag_ok = _apply_eval_flag_patch_atomic(scripts_dir)
@@ -756,14 +704,11 @@ def ensure_magpie_atomic_scripts_patch(
     Returns ``True`` when the race is closed (freshly-patched, already-patched,
     or upstream already atomic). Returns ``False`` only when the file is missing
     or neither the legacy block nor an atomic impl is found — the install script
-    should fail-loud on ``False`` (this is a known root-cause fix).
-    Concurrency-safe (flock + atomic rename; patched fast-path skips the lock).
+    should fail-loud on ``False``. Concurrency-safe (flock + atomic rename).
 
-    Reflects the atomic-copy patch only (matching this function's name). The
-    optional SGLang remote-client trust patch is independent and can drift
-    without the atomic race being open, so it is intentionally NOT folded in
-    here; callers that need both must use :func:`magpie_scripts_patch_status`
-    and check ``remote_trust_ok`` / ``ok`` (install.sh does this).
+    Reflects the atomic-copy patch only. The optional SGLang remote-client trust
+    patch is independent; callers that need both must use
+    :func:`magpie_scripts_patch_status` and check ``remote_trust_ok`` / ``ok``.
 
     Args:
         magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when

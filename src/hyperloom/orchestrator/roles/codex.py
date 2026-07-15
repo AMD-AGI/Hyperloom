@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from hyperloom.common.llm_config import LLMConfigError, openai_client_kwargs
+from hyperloom.common.llm_config import LLMConfigError, apply_reasoning_effort, openai_client_kwargs
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
@@ -47,6 +47,8 @@ Rules:
   too, but the fenced form is preferred — it makes parser fallback
   unambiguous).
 - Free text outside the JSON is ignored.
+- Put only NEW information in payload bodies; do not restate context already
+  in SharedState, your inbox, or analysis.md. Keep length proportional to substance.
 - ALWAYS emit at least one intent. If you have nothing to say, emit
   {"intent_type": "send_message", "payload": {"topic": "heartbeat",
   "body_md": "ok"}}.
@@ -76,14 +78,13 @@ class CodexBackend:
     """Production Codex backend. Implements :class:`Backend`."""
 
     model: str = DEFAULT_CODEX_MODEL
-    # Codex speaks the OpenAI protocol, so prefer the OpenAI-side key/URL; the
-    # AMD single-gateway ANTHROPIC_* vars remain accepted as fallbacks below.
+    # Prefer the OpenAI-side key/URL; ANTHROPIC_* vars are accepted as fallbacks.
     api_key_env: str = "OPENAI_API_KEY"
     base_url_env: str = "OPENAI_BASE_URL"
     max_completion_tokens: int = 2000
     name: str = "codex"
-    # Wall-clock cap for one ``run()`` call; bounds a stalled-gateway hang at
-    # asyncio level. Env override: ``INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC``.
+    # Wall-clock cap for one ``run()`` call. Env override:
+    # ``INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC``.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",
@@ -158,13 +159,16 @@ class CodexBackend:
         full_prompt = f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
         messages = build_chat_messages(system_prompt, full_prompt)
 
+        create_params = apply_reasoning_effort(
+            {
+                "model": self.model,
+                "messages": messages,
+                "max_completion_tokens": self.max_completion_tokens,
+            }
+        )
         try:
             resp = await asyncio.wait_for(
-                self._client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    max_completion_tokens=self.max_completion_tokens,
-                ),
+                self._client.chat.completions.create(**create_params),
                 timeout=self.call_timeout_s,
             )
         except asyncio.TimeoutError as exc:
@@ -177,11 +181,8 @@ class CodexBackend:
         choice = resp.choices[0]
         text = choice.message.content or ""
         finish = getattr(choice, "finish_reason", None)
-        # Token usage: the OpenAI chat-completions response carries a
-        # ``usage`` object (prompt_tokens / completion_tokens). Map it
-        # onto the SAME metadata keys ClaudeBackend uses so
-        # Coordinator's accumulator stays backend-agnostic. OpenAI has
-        # no prompt-cache split, so the two cache_* counters are 0.
+        # Map OpenAI usage onto the SAME metadata keys ClaudeBackend uses so the
+        # Coordinator's accumulator stays backend-agnostic; cache_* counters are 0.
         usage = getattr(resp, "usage", None)
         input_tokens = self._safe_int(getattr(usage, "prompt_tokens", None))
         output_tokens = self._safe_int(getattr(usage, "completion_tokens", None))
@@ -217,11 +218,8 @@ class CodexBackend:
                 "output_tokens": output_tokens,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
-                # Full conversation text for conversations.jsonl — the
-                # stateless backend hands it up so the caller (which has
-                # the session_dir / component / tick context) can persist
-                # it. ``full_prompt`` is the user turn; the system prompt
-                # is snapshotted once under agents/<role>/.
+                # Full conversation text for conversations.jsonl, handed up for
+                # the caller to persist.
                 "prompt": full_prompt,
                 "response": text,
             },

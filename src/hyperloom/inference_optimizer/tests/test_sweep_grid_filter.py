@@ -1,9 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the sweep grid builder's max-model-len filter (drop ISL+OSL > max-model-len up front)."""
+"""Unit tests for the sweep grid builder's max-model-len filter."""
 
 from __future__ import annotations
 
+from hyperloom.common.coerce import to_int
 from hyperloom.orchestrator.actions.executors import sweep
 
 
@@ -20,7 +21,6 @@ class TestBuildGridMaxModelLenFilter:
         assert skipped == []
 
     def test_filters_combos_exceeding_context_window(self):
-        # max_model_len=6144 — the value that made every 8192-token variant abort.
         runnable, skipped = sweep._build_grid(
             conc_values=[4, 16],
             isl_osl_configs=["1024:1024", "8192:1024", "1024:8192"],
@@ -28,11 +28,11 @@ class TestBuildGridMaxModelLenFilter:
             base_extra_args="",
             max_model_len=6144,
         )
-        # Only 1024:1024 (sum 2048 <= 6144) survives, once per conc.
+        # Only 1024:1024 (sum 2048 <= 6144) survives, once per conc
         assert len(runnable) == 2
         assert all(v.extra_envs["ISL"] == "1024" for v in runnable)
         assert all(v.extra_envs["OSL"] == "1024" for v in runnable)
-        # 8192:1024 and 1024:8192 dropped for each of the 2 conc values.
+        # 8192:1024 and 1024:8192 dropped for each of the 2 conc values
         assert len(skipped) == 4
         for rec in skipped:
             assert rec["status"] == "skipped"
@@ -40,7 +40,7 @@ class TestBuildGridMaxModelLenFilter:
             assert rec["isl"] + rec["osl"] > 6144
 
     def test_boundary_sum_equal_to_max_is_kept(self):
-        # isl+osl == max_model_len must be allowed (the request fits).
+        # isl+osl == max_model_len must be allowed (the request fits)
         runnable, skipped = sweep._build_grid(
             conc_values=[4],
             isl_osl_configs=["3072:3072"],
@@ -59,21 +59,21 @@ class TestBuildGridMaxModelLenFilter:
             base_extra_args="",
             max_model_len=6144,
         )
-        # Malformed combo is dropped (not counted as a context-window skip).
+        # Malformed combo is dropped (not counted as a context-window skip)
         assert len(runnable) == 1
         assert skipped == []
 
 
 class TestCoerceInt:
     def test_numeric_string(self):
-        assert sweep._coerce_int("6144") == 6144
+        assert to_int("6144", default=0) == 6144
 
     def test_int_passthrough(self):
-        assert sweep._coerce_int(4096) == 4096
+        assert to_int(4096, default=0) == 4096
 
     def test_none_and_empty(self):
-        assert sweep._coerce_int(None) == 0
-        assert sweep._coerce_int("") == 0
+        assert to_int(None, default=0) == 0
+        assert to_int("", default=0) == 0
 
     def test_garbage_is_zero(self):
-        assert sweep._coerce_int("abc") == 0
+        assert to_int("abc", default=0) == 0

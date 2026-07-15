@@ -3,24 +3,22 @@
 """Author-time instrumentation for ``session_breakdown.json``.
 
 These helpers are called from the producing code (the Coordinator's
-``SharedState``) to record breakdown facts where they are born, via the
-recorder toolkit, instead of having the exporter re-walk artifacts later.
+``SharedState``) to record breakdown facts where they are born, instead of
+having the exporter re-walk artifacts later.
 
-Every helper is best-effort: instrumentation must never break the optimizer,
-so all failures are swallowed (logged at debug). Payloads are shaped to the
-matching ``schema.py`` TypedDict so assembly stays structure-preserving.
+Every helper is best-effort: all failures are swallowed (logged at debug).
+Payloads are shaped to the matching ``schema.py`` TypedDict.
 
 Coverage in this module (state-owned sections; single owner = Coordinator):
 
 * ``session`` / ``workload`` / ``final`` / ``explore_search`` / ``sweep``
   -- singletons snapshotted from in-memory state at each persist.
 * ``optimization_stack`` / ``roofline`` -- event items keyed by a stable id
-  (idempotent: re-recording overwrites rather than duplicates).
+  (idempotent).
 * ``phase_timeline`` -- one event per recorded action attempt.
 
-File-born sections (geak/oob invocations, kernel/conc-sweep report summaries,
-critic_robustness, specialist_runs, telemetry, kb_provenance) are produced by
-other processes/executors and are instrumented at those sites separately.
+File-born sections are produced by other processes/executors and are
+instrumented at those sites separately.
 """
 
 from __future__ import annotations
@@ -29,18 +27,17 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_float
+from hyperloom.common.jsonio import read_json
+from hyperloom.common.timeutil import now_iso
+
 log = logging.getLogger(__name__)
 
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
 
-# kernel-agent backend -> invocation section. Three independent lanes: geak,
-# the out-of-band LLM backends (claude/codex) on the oob lane, and forge
-# (Kernel-Forge autonomous loop) on its own lane. forge is NOT folded into oob
-# — it is a distinct backend, so it gets a distinct ``forge_invocations``
-# section (and a distinct capability/attribution row downstream).
+# kernel-agent backend -> invocation section.
 _GEAK_BACKENDS = frozenset({"geak"})
-_OOB_BACKENDS = frozenset({"claude", "codex"})
 _FORGE_BACKENDS = frozenset({"forge"})
 
 _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
@@ -53,30 +50,10 @@ def _now_iso_safe() -> str:
         The current UTC time as a microsecond-precision ISO-8601 string, or
         ``""`` if the clock read fails.
     """
-    from datetime import datetime, timezone
-
     try:
-        return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        return now_iso(timespec="microseconds")
     except Exception:  # noqa: BLE001
         return ""
-
-
-def _to_float(value: Any) -> float | None:
-    """Coerce a value to ``float``, rejecting bools and unparseable inputs.
-
-    Args:
-        value (Any): the value to coerce.
-
-    Returns:
-        float | None: the float value, or ``None`` when ``value`` is None, a
-            bool, or not parseable as a float.
-    """
-    try:
-        if value is None or isinstance(value, bool):
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _recorder(session_dir: Path | str, producer: str):
@@ -111,25 +88,6 @@ def _rel(path: Path, session_dir: Path | str) -> str:
         return str(path)
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    """Read and parse a JSON object from ``path`` (``{}`` on any failure).
-
-    Args:
-        path (Path): the JSON file to read.
-
-    Returns:
-        dict[str, Any]: the parsed JSON object, or ``{}`` when the file is
-            missing, unreadable, invalid, or not a JSON object.
-    """
-    import json
-
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def record_phase_event(
     session_dir: Path | str | None,
     *,
@@ -158,7 +116,7 @@ def record_phase_event(
             "task_id": task_id,
             "status": str(entry.get("status") or ""),
             "decision": str(entry.get("decision") or ""),
-            "key_metric": _to_float(entry.get("key_metric")),
+            "key_metric": to_float(entry.get("key_metric")),
             "key_metric_kind": entry.get("key_metric_kind"),
             "workspace": entry.get("workspace"),
             "error_class": entry.get("error_class"),
@@ -291,13 +249,13 @@ def _snapshot_final(rec, st: Any) -> None:
     from ... import framework_registry
 
     framework = str(getattr(st, "framework", "") or "")
-    tput = _to_float(cb.get("tput"))
+    tput = to_float(cb.get("tput"))
     # Latency is the primary result for scriptable/diffusion (xDiT) image models
     # (throughput_tok_s_per_gpu is only ``1 / latency`` there and misleading as a
     # headline). Emit e2el/ttft alongside the throughput-unit + primary-metric
     # markers so consumers pick the right result field per framework. e2el falls
     # back to the tput-derived per-image latency when no measured value exists.
-    e2el = _to_float(cb.get("e2el_mean_ms"))
+    e2el = to_float(cb.get("e2el_mean_ms"))
     if e2el is None and framework_registry.is_scriptable(framework) and tput is not None and tput > 0:
         derived = framework_registry.primary_metric_value(framework, tput)
         e2el = round(float(derived), 4) if derived is not None and derived > 0 else None
@@ -309,9 +267,9 @@ def _snapshot_final(rec, st: Any) -> None:
             "throughput_unit": framework_registry.throughput_unit(framework),
             "primary_metric": framework_registry.primary_metric_name(framework),
             "e2el_mean_ms": e2el,
-            "ttft_mean_ms": _to_float(cb.get("ttft_mean_ms")),
-            "cumulative_gain_pct_validated": _to_float(getattr(st, "cumulative_gain_validated", 0.0)) or 0.0,
-            "cumulative_gain_pct_per_round_sum": _to_float(getattr(st, "cumulative_gain", 0.0)) or 0.0,
+            "ttft_mean_ms": to_float(cb.get("ttft_mean_ms")),
+            "cumulative_gain_pct_validated": to_float(getattr(st, "cumulative_gain_validated", 0.0)) or 0.0,
+            "cumulative_gain_pct_per_round_sum": to_float(getattr(st, "cumulative_gain", 0.0)) or 0.0,
             "validated_ts": str(getattr(st, "cumulative_gain_validated_ts", "") or ""),
             "stack_len": len(stack),
             "extra_server_args": str(cb.get("extra_server_args") or ""),
@@ -371,7 +329,7 @@ def _snapshot_optimization_stack(rec, st: Any) -> None:
             continue
         payload = dict(entry)
         if payload.get("gain_pct") is None and i < len(gains):
-            payload["gain_pct"] = _to_float(gains[i])
+            payload["gain_pct"] = to_float(gains[i])
         rec.record_item("optimization_stack", payload, key=str(i))
 
 
@@ -434,7 +392,7 @@ def _best_attempt_id(
             The attempt's ``micro_speedup`` (or ``speedup``) as a float, or
             ``-inf`` when neither is present.
         """
-        v = _to_float(a.get("micro_speedup") or a.get("speedup"))
+        v = to_float(a.get("micro_speedup") or a.get("speedup"))
         return v if v is not None else float("-inf")
 
     best = max(candidates, key=_spd)
@@ -445,20 +403,17 @@ def _invocation_section(backend: str) -> str | None:
     """Map a kernel-agent backend to its invocation section name.
 
     Args:
-        backend (str): the backend name (geak / forge / claude / codex / ...).
+        backend (str): the backend name (geak / forge / ...).
 
     Returns:
-        str | None: the matching invocation section (``geak_invocations`` /
-            ``forge_invocations`` / ``oob_invocations``), or ``None`` when the
-            backend has no invocation lane.
+        str | None: the matching invocation section, or ``None`` when the backend
+            has no invocation lane.
     """
     b = str(backend or "").lower()
     if b in _GEAK_BACKENDS:
         return "geak_invocations"
     if b in _FORGE_BACKENDS:
         return "forge_invocations"
-    if b in _OOB_BACKENDS:
-        return "oob_invocations"
     return None
 
 
@@ -468,15 +423,13 @@ def record_kernel_invocations(
     *,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record geak/oob invocations from an in-process kernel-agent result.
+    """Record kernel backend invocations from an in-process kernel-agent result.
 
-    Reads ``result['attempts']`` (per-backend ladder) so backend-level
-    failures are captured even when the kernel-agent crashed before persisting
-    ``optimization_attempts.jsonl`` (the on-disk source the collector reads).
-    When the whole invocation failed before any backend ran (pre-dispatch
-    gating: non_reusable_kernel / missing_source / kernel_agent_root_missing /
-    ...), a single ``FAILED`` marker is recorded so the failure is never
-    invisible in the geak/oob view.
+    Reads ``result['attempts']`` (per-backend ladder) so backend-level failures
+    are captured even when the kernel-agent crashed before persisting the
+    on-disk source. When the whole invocation failed before any backend ran
+    (pre-dispatch gating), a single ``FAILED`` marker is recorded so the failure
+    stays visible in the invocation view.
 
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
@@ -512,8 +465,7 @@ def record_kernel_invocations(
             if not decision and status in _FAILED_STATUSES:
                 decision = "FAILED"
             attempt_id = str(att.get("attempt_id") or att.get("id") or "")
-            # Stamp the kernel-level KEEP/PARTIAL/REVERT onto the adopted (best)
-            # attempt, mirroring the collector's _stamp_kernel_level_decisions.
+            # Stamp the kernel-level decision onto the adopted (best) attempt.
             if kernel_decision and attempt_id and attempt_id == best_attempt_id:
                 decision = kernel_decision
             optimized = att.get("optimized_path") or att.get("optimized_file")
@@ -525,7 +477,7 @@ def record_kernel_invocations(
                 "backend": backend,
                 "decision": decision,
                 "status": status,
-                "micro_speedup": _to_float(att.get("micro_speedup") or att.get("speedup")),
+                "micro_speedup": to_float(att.get("micro_speedup") or att.get("speedup")),
                 "optimized_files": [str(optimized)] if optimized else [],
                 "error": att.get("error") or att.get("error_message"),
             }
@@ -537,7 +489,7 @@ def record_kernel_invocations(
             return
 
         # No per-backend attempts: capture a pre-dispatch / infra failure so
-        # the geak/oob view still shows it (root cause of invisible failures).
+        # the invocation view still shows it (root cause of invisible failures).
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
         decision = str((result.get("proposal") or {}).get("decision") or "").upper()
@@ -547,13 +499,9 @@ def record_kernel_invocations(
         backend = str(result.get("backend") or "").lower()
         section = _invocation_section(backend)
         if section is None:
-            # The optimizer that ran could not be determined (a genuine
-            # pre-dispatch / gating failure where no backend subprocess
-            # launched, or an ambiguous multi-backend value). Do NOT fabricate a
-            # GEAK invocation — that contaminates GEAK's success/failure tally
-            # with failures it never owned. The failure stays visible via the
-            # kernel_dispatch / kernel_backend_result journey lanes. See
-            # Hyperloom#602.
+            # The backend could not be determined; do not fabricate a GEAK
+            # invocation. The failure stays visible via the kernel_dispatch /
+            # kernel_backend_result journey lanes.
             return
         payload = {
             "kernel_id": kid,
@@ -564,8 +512,7 @@ def record_kernel_invocations(
             "status": status or "failed",
             "error": result.get("error") or err_class or None,
             "error_class": err_class or None,
-            # Distinguishes a pre-dispatch gating failure (no backend ran) from
-            # a backend that ran and failed.
+            # Distinguishes a pre-dispatch gating failure from a backend that ran and failed.
             "pre_dispatch_failure": True,
         }
         rec.record_item(section, payload, key=f"{kid}-predispatch" if kid else None)
@@ -596,40 +543,25 @@ def _to_bool(value: Any) -> bool | None:
     return None
 
 
-# Cache of resolved tool metadata, keyed by ``tool:root_dir``. The git/CLI/pip
-# probes are a one-shot per key: they never re-run in the hot path.
+# Cache of resolved tool metadata, keyed by ``tool:root_dir`` (one-shot probe per key).
 _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 
 # Per-tool "authoritative version" recipe. ``root_env`` holds the install root
-# (used for the commit probe and the git-based version strategies). ``version``
+# (used for the commit probe and git-based version strategies). ``version``
 # picks how the human version is derived:
 #   * "git_describe" -> ``git describe --tags --always --dirty`` of the root
 #   * "git_short"    -> ``git rev-parse --short HEAD`` of the root (== commit)
 #   * ("cmd", argv)  -> first line of ``argv --version`` style CLI output
 #   * ("dist", names)-> importlib.metadata version of the first matching dist
-# Notes (verified on-cluster): GEAK's version is its git SHA, NOT the pip
-# ``mini-swe-agent`` (that's the upstream core); InferenceX is git-only (no pip
-# package); TraceLens reads best as ``git describe``; OOB sub-agents report via
-# their npm CLIs (codex/claude), and the OOB harness itself via ``oob-mcp-server``.
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
-    # The whole-pipeline GEAK e2e optimizer — the CANONICAL ``geak`` (formerly
-    # ``geak_v4`` / perfskills). Its checkout lives under $GEAK_ROOT (the GEAK
-    # e2e clone) and its version is that repo's git SHA.
+    # The whole-pipeline GEAK e2e optimizer. Its checkout lives under $GEAK_ROOT
+    # and its version is that repo's git SHA.
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
-    # The legacy per-kernel single-kernel GEAK backend (v3.2.x). Its checkout
-    # lives under $GEAK_V3_ROOT, kept distinct from the e2e ``geak`` above so
-    # versions["geak_v3"] records the v3 clone's SHA, not the e2e clone's.
-    "geak_v3": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
-    "mini": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
-    "geak-gaagent": {"root_env": "GEAK_V3_ROOT", "version": "git_short"},
-    # forge (Kernel-Forge autonomous loop) is its own backend; it locates its
-    # repo via $FORGE_PATH (forge_submit also accepts $KERNEL_FORGE_ROOT /
-    # $KERNEL_FORGE_PATH, but root resolution here pins the primary env var).
+        # forge (Kernel-Forge autonomous loop) locates its repo via $FORGE_PATH.
     "forge": {"root_env": "FORGE_PATH", "version": "git_short"},
     "claude": {"root_env": "", "version": ("cmd", ("claude", "--version"))},
     "codex": {"root_env": "", "version": ("cmd", ("codex", "--version"))},
-    "oob": {"root_env": "", "version": ("dist", ("oob-mcp-server",))},
     "inferencex": {"root_env": "INFERENCEX_PATH", "version": "git_short"},
     "kernel_agent": {"root_env": "HYPERLOOM_KERNEL_AGENT_ROOT", "version": "git_short"},
 }
@@ -711,7 +643,7 @@ def _dist_version(names: tuple[str, ...]) -> str:
             v = str(_dist_ver(name) or "").strip()
         except Exception:  # noqa: BLE001
             continue
-        # Stale ``UNKNOWN.egg-info`` can masquerade as 0.0.0; reject it.
+        # Reject a stale 0.0.0 masquerade.
         if v and v != "0.0.0":
             return v
     return ""
@@ -755,10 +687,8 @@ def _tool_metadata(
 
     Root resolution: explicit ``root`` > caller ``root_env`` > the tool's
     registered ``root_env``. ``commit`` is a cached ``git rev-parse`` of the
-    root. ``version`` is the caller-supplied value when the tool already
-    surfaced its own, else a cached per-tool probe (git describe / CLI
-    ``--version`` / pip dist) following ``_TOOL_PROVENANCE``. All best-effort:
-    nothing here ever raises into the optimizer.
+    root. ``version`` is the caller-supplied value, else a cached per-tool probe
+    following ``_TOOL_PROVENANCE``. Best-effort: never raises into the optimizer.
 
     Args:
         tool (str): the external tool name (keys into ``_TOOL_PROVENANCE``).
@@ -818,12 +748,12 @@ def _normalize_hot_kernel(k: dict[str, Any]) -> dict[str, Any]:
     return {
         "kernel_id": str(k.get("kernel_id") or k.get("id") or ""),
         "name": str(k.get("name") or k.get("kernel_name") or ""),
-        "gpu_pct": _to_float(k.get("gpu_pct") or k.get("gpu_percent")),
-        "time_ms": _to_float(k.get("time_ms") or k.get("duration_ms")),
+        "gpu_pct": to_float(k.get("gpu_pct") or k.get("gpu_percent")),
+        "time_ms": to_float(k.get("time_ms") or k.get("duration_ms")),
         "bound_type": str(k.get("bound_type") or k.get("bottleneck") or ""),
-        "arithmetic_intensity": _to_float(k.get("arithmetic_intensity")),
-        "flops_per_byte": _to_float(k.get("flops_per_byte")),
-        "efficiency_percent": _to_float(k.get("efficiency_percent")),
+        "arithmetic_intensity": to_float(k.get("arithmetic_intensity")),
+        "flops_per_byte": to_float(k.get("flops_per_byte")),
+        "efficiency_percent": to_float(k.get("efficiency_percent")),
         "reusable_native_kernel": bool(k.get("reusable_native_kernel") or False),
         "source_file": k.get("source_file"),
         "recommended_backends": list(k.get("recommended_backends") or []),
@@ -848,18 +778,14 @@ def record_kernel_discovery(
 ) -> None:
     """Record one hot-kernel discovery run (stage 1 of ``kernel_journey``).
 
-    One item per discovery invocation (tracelens / bypass / roofline scan),
-    keyed by the candidates/report path so a re-run with the same artifact
-    overwrites rather than duplicates. Carries the full hot-kernel list the run
-    surfaced.
+    One item per discovery invocation, keyed by the candidates/report path so a
+    re-run with the same artifact overwrites rather than duplicates. Carries the
+    full hot-kernel list the run surfaced.
 
-    ``source`` is the discovery *route* label the dashboard groups by
-    (``tracelens`` / ``bypass`` / ...). ``tool`` is the underlying tool whose
-    authoritative version lands in the top-level ``versions`` map; it defaults
-    to ``source`` but is decoupled because routes can share one toolchain — the
-    deterministic ``bypass`` route runs the same TraceLens toolchain, so its
-    version provenance is still ``tracelens`` (passing ``tool="tracelens"``
-    avoids minting an empty ``versions["bypass"]`` entry).
+    ``source`` is the discovery *route* label the dashboard groups by. ``tool``
+    is the underlying tool whose authoritative version lands in the top-level
+    ``versions`` map; it defaults to ``source`` but is decoupled because routes
+    can share one toolchain (e.g. ``bypass`` reuses the TraceLens toolchain).
 
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
@@ -889,7 +815,7 @@ def record_kernel_discovery(
             "source": str(source or ""),
             "status": str(status or ""),
             "ts": _now_iso_safe(),
-            "duration_sec": _to_float(duration_sec),
+            "duration_sec": to_float(duration_sec),
             "scan": scan,
             "hot_kernel_count": len(kernels),
             "hot_kernels": kernels,
@@ -902,9 +828,7 @@ def record_kernel_discovery(
             key=key,
         )
         # The discovery tool's authoritative version lands in the top-level
-        # ``versions`` map (keyed by tool name), not inline per run. The version
-        # provenance follows the underlying ``tool`` (defaults to ``source``),
-        # so route aliases like ``bypass`` reuse the real toolchain's version.
+        # ``versions`` map, following the underlying ``tool``.
         record_tool_version(
             session_dir,
             tool=(tool or source),
@@ -1044,13 +968,11 @@ def record_kernel_backend_result(
         attempts = result.get("attempts")
         attempts = attempts if isinstance(attempts, list) else []
         result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-        # The kernel-level micro_speedup is derived (best across attempts) and
-        # lives in ``verification`` -- the raw per-attempt dict carries none. We
-        # stamp it onto the adopted (best) attempt so the journey can correlate
-        # achieved speedup with the e2e gain.
+        # The kernel-level micro_speedup (best across attempts) lives in
+        # ``verification``; stamp it onto the adopted (best) attempt.
         verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
         best_attempt_id = _best_attempt_id(attempts, verification)
-        kernel_micro_speedup = _to_float(verification.get("micro_speedup"))
+        kernel_micro_speedup = to_float(verification.get("micro_speedup"))
         recorded_any = False
         for att in attempts:
             if not isinstance(att, dict):
@@ -1059,7 +981,7 @@ def record_kernel_backend_result(
             attempt_id = str(att.get("attempt_id") or att.get("id") or "")
             optimized = att.get("optimized_path") or att.get("optimized_file")
             att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
-            micro_speedup = _to_float(att.get("micro_speedup") or att.get("speedup"))
+            micro_speedup = to_float(att.get("micro_speedup") or att.get("speedup"))
             if (
                 micro_speedup is None
                 and kernel_micro_speedup is not None
@@ -1082,14 +1004,12 @@ def record_kernel_backend_result(
                 "optimized_files": [str(optimized)] if optimized else [],
                 "error": att.get("error") or att.get("error_message"),
                 "error_class": str(att.get("error_type") or "") or None,
-                "duration_sec": _to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),
+                "duration_sec": to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),
             }
             key = attempt_id or (f"{run_id}-{backend}" if run_id else None)
             rec.record_item("kernel_backend_result", payload, key=key)
             recorded_any = True
-            # The backend's authoritative version lands in the top-level
-            # ``versions`` map (keyed by backend name), not inline per attempt.
-            # geak -> $GEAK_ROOT git SHA, claude/codex -> CLI --version.
+            # The backend's authoritative version lands in the top-level ``versions`` map.
             if backend:
                 record_tool_version(
                     session_dir,
@@ -1103,19 +1023,15 @@ def record_kernel_backend_result(
             return
 
         # No per-backend attempts: capture a pre-dispatch / infra failure as a
-        # synthetic FAILED attempt so kernel_journey shows the failure too
-        # (mirrors record_kernel_invocations' pre-dispatch marker; without this
-        # the kernel looks merely "dispatched" with an empty attempt ladder).
+        # synthetic FAILED attempt so kernel_journey shows the failure too.
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
         decision = str((result.get("proposal") or {}).get("decision") or "").upper()
         failed = status in _FAILED_STATUSES or (decision == "REVERT" and bool(err_class))
         if not failed:
             return
-        # Never default an unattributable failure to GEAK; a genuine pre-dispatch
-        # gating failure (no backend launched) is recorded honestly as
-        # "unknown" so the kernel_journey timeline does not inflate GEAK's
-        # failure count with attempts it never owned. See Hyperloom#602.
+        # Never default an unattributable failure to GEAK; record it as
+        # "unknown" so GEAK's failure count is not inflated.
         backend = str(result.get("backend") or "").lower() or "unknown"
         payload = {
             "kernel_id": kid,
@@ -1133,8 +1049,7 @@ def record_kernel_backend_result(
             "error": result.get("error") or err_class or None,
             "error_class": err_class or None,
             "duration_sec": None,
-            # Distinguishes a pre-dispatch gating failure (no backend ran) from
-            # a backend that ran and failed.
+            # Distinguishes a pre-dispatch gating failure from a backend that ran and failed.
             "pre_dispatch_failure": True,
         }
         rec.record_item(
@@ -1193,7 +1108,7 @@ def record_kernel_e2e(
         payload = {
             "kernel_id": str(kernel_id),
             "integrated": bool(integrated),
-            "e2e_gain_pct": _to_float(e2e_gain_pct),
+            "e2e_gain_pct": to_float(e2e_gain_pct),
             "validated": bool(validated) if validated is not None else None,
             "decision": str(decision or "").upper(),
             "patch_path": patch_path,
@@ -1330,8 +1245,8 @@ def record_robustness_signal(
         return
     try:
         wd = Path(workdir)
-        signal_data = _read_json(wd / "signal.json")
-        action_data = _read_json(wd / "action.json")
+        signal_data = read_json(wd / "signal.json", default={}, require_dict=True)
+        action_data = read_json(wd / "action.json", default={}, require_dict=True)
         payload = {
             "ts": str(signal_data.get("ts") or action_data.get("ts") or ""),
             "signal": str(signal_data.get("signal") or signal_data.get("kind") or ""),

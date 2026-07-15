@@ -1,11 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""SWEEP phase handler: auto-enqueue of the param-search/concurrency-sweep
-internal tasks on SWEEP entry."""
+"""SWEEP phase handler: auto-enqueue of the concurrency-sweep task."""
 
 from __future__ import annotations
 import logging as _logging
-import os
 from typing import Any
 from ..state.shared_state import SharedState
 from ..state.task_registry import Task
@@ -18,81 +16,83 @@ class SweepPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
-        """Auto-enqueue a ``sweep`` task on SWEEP entry. Idempotent via internal-sweep-phase_entry (Inv-2.1); PolicyGate's sweep_phase_singleton then denies LLM-emitted sweep (OOM race).
+        """Auto-enqueue a ``conc_sweep`` task on SWEEP entry.
+
+        The automatic phase path runs the baseline-vs-current concurrency curve
+        directly; the full workload ``sweep`` remains a manual executor.
 
         Args:
             from_phase: The phase being left, used only for logging.
         """
         state = self.shared_state
-        # Drain pending KEEP integrates from prior KERNEL so sweep measures full current_best.
+        # Drain pending KEEP integrates so sweep measures full current_best.
         if getattr(state, "has_keep_pending_integrate", False):
             await self._drain_pending_keep_integrates()
-        # Always attempt stack validation for positive NEEDS_REVIEW kernels,
-        # regardless of whether there were pending KEEPs to drain.
+        # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._maybe_validate_positive_needs_review_stack()
-        # Skip the full workload sweep (+ chained conc_sweep) on a cyclic
-        # reloop when no validated gain has landed since the last completed
-        # sweep. A sweep is discovery-only and re-measuring the same
-        # current_best across macro-cycles burns hours of GPU time without
-        # advancing the objective. The first sweep (no prior ``last_sweep``)
-        # always runs; the phase still advances via the existing
-        # ``exit_normal_sweep`` (stale conc_sweep_done / budget) so skipping
-        # never stalls SWEEP. Opt out with
-        # INFERENCE_OPTIMIZER_SWEEP_SKIP_WHEN_NO_GAIN=0.
-        if os.environ.get(
-            "INFERENCE_OPTIMIZER_SWEEP_SKIP_WHEN_NO_GAIN", "1"
-        ).strip().lower() not in {"0", "false", "no", "off"}:
-            _last_sweep = getattr(state, "last_sweep", None)
-            prev_sweep = _last_sweep if isinstance(_last_sweep, dict) else {}
-            prev_validated = prev_sweep.get("cumulative_gain_validated_at_record")
-            cur_validated = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
-            if (
-                prev_sweep
-                and isinstance(prev_validated, (int, float))
-                and cur_validated <= float(prev_validated) + 1e-6
-            ):
-                log.info(
-                    "SWEEP entry (from=%s): skipping auto-sweep + conc_sweep — no "
-                    "validated gain since last sweep (validated=%.4f%% unchanged "
-                    "since %s); phase will advance via existing exit gate.",
-                    from_phase or "<unknown>",
-                    cur_validated,
-                    prev_sweep.get("ts") or "(unknown)",
-                )
-                self._record_phase_entry_evidence(
-                    auto_sweep_skipped="no_validated_gain_since_last_sweep",
-                    auto_sweep_skipped_validated_gain=cur_validated,
-                )
-                return
+        if not getattr(state, "conc_sweep_enabled", False):
+            log.info(
+                "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",
+                from_phase or "<unknown>",
+            )
+            self._record_terminal_conc_sweep_skip(
+                skip_reason="disabled",
+                auto_conc_sweep_skipped="disabled",
+            )
+            return
+        prev_conc = getattr(state, "last_conc_sweep_watermark", None)
+        prev_conc = prev_conc if isinstance(prev_conc, dict) else {}
+        prev_validated = prev_conc.get("cumulative_gain_validated_at_record")
+        cur_validated = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+        if (
+            prev_conc
+            and isinstance(prev_validated, (int, float))
+            and cur_validated <= float(prev_validated) + 1e-6
+        ):
+            log.info(
+                "SWEEP entry (from=%s): skipping auto-conc-sweep — no validated gain since last "
+                "conc_sweep (validated=%.4f%% unchanged since %s).",
+                from_phase or "<unknown>",
+                cur_validated,
+                prev_conc.get("ts") or "(unknown)",
+            )
+            self._record_terminal_conc_sweep_skip(
+                skip_reason="no_validated_gain_since_last_conc_sweep",
+                auto_conc_sweep_skipped="no_validated_gain_since_last_conc_sweep",
+                auto_conc_sweep_skipped_validated_gain=cur_validated,
+            )
+            return
         try:
-            task = await self._enqueue_internal_sweep_task(
+            task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             log.exception(
-                "SWEEP entry hook: failed to enqueue auto-sweep: %r",
+                "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
             )
-            self._record_phase_entry_evidence(auto_sweep_error=repr(exc)[:240])
+            self._record_terminal_conc_sweep_skip(
+                skip_reason="enqueue_failed",
+                auto_conc_sweep_error=repr(exc)[:240],
+            )
             return
-        # Mirror the chosen grid + source onto evidence without re-running lookup.
-        grid_source = str(task.params.get("source") or "")
-        isl_osl = task.params.get("isl_osl_configs") or []
-        conc_values = task.params.get("conc_values") or []
-        # Combos = |conc_values| × |isl_osl_configs| (sweep fans out CONC × (ISL,OSL)).
-        combos = int(len(conc_values)) * int(len(isl_osl)) if (conc_values and isl_osl) else 0
+        if task is None:
+            self._record_terminal_conc_sweep_skip(
+                skip_reason="enqueue_returned_none",
+                auto_conc_sweep_error="enqueue_returned_none",
+            )
+            return
         log.info(
-            "SWEEP entry (from=%s): auto-enqueued sweep task=%s (grid_source=%s, combos=%d)",
+            "SWEEP entry (from=%s): auto-enqueued conc_sweep task=%s (concs=%s total_budget_sec=%s)",
             from_phase or "<unknown>",
             task.task_id,
-            grid_source,
-            combos,
+            task.params.get("concs") or [],
+            task.params.get("total_budget_sec"),
         )
         self._record_phase_entry_evidence(
-            auto_sweep_enqueued=True,
-            auto_sweep_task_id=task.task_id,
-            auto_sweep_grid_source=grid_source,
-            auto_sweep_combos=combos,
+            auto_conc_sweep_enqueued=True,
+            auto_conc_sweep_task_id=task.task_id,
+            auto_conc_sweep_concs=list(task.params.get("concs") or []),
         )
 
     async def _enqueue_internal_conc_sweep_task(
@@ -100,7 +100,9 @@ class SweepPhase(PhaseHandler):
         *,
         reason: str,
     ) -> Task | None:
-        """Build + enqueue a Coordinator-internal ``conc_sweep`` task (caller checks conc_sweep_enabled). Idempotency key + PolicyGate singleton ensure ≤1 per SWEEP; returns None on error.
+        """Build + enqueue a Coordinator-internal ``conc_sweep`` task; returns None on error.
+
+        Idempotency key + PolicyGate singleton ensure at most one per SWEEP.
 
         Args:
             reason: Tag used in the task's idempotency key and logging.
@@ -122,7 +124,7 @@ class SweepPhase(PhaseHandler):
                 kind="conc_sweep",
                 params=params,
                 idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
-                # lease_ttl matches total_budget_sec so a multi-hour conc_sweep doesn't expire mid-flight.
+                # lease_ttl matches total_budget_sec so a long conc_sweep doesn't expire mid-flight.
                 lease_ttl_sec=int(state.conc_sweep_total_budget_sec or 9000),
             )
         except Exception as exc:  # noqa: BLE001 — defensive
@@ -149,12 +151,31 @@ class SweepPhase(PhaseHandler):
         self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
         return task
 
+    def _record_terminal_conc_sweep_skip(
+        self,
+        *,
+        skip_reason: str,
+        **evidence: Any,
+    ) -> None:
+        """Record an auto-conc-sweep skip as terminal so SWEEP can close cleanly."""
+        self._record_phase_entry_evidence(**evidence)
+        self.shared_state.record_conc_sweep(
+            {
+                "status": "skipped",
+                "skip_reason": skip_reason,
+                "was_skipped": True,
+            }
+        )
+        self.shared_state.save(self.session_dir)
+
     async def _enqueue_internal_sweep_task(
         self,
         *,
         reason: str,
     ) -> Task:
-        """Build + enqueue a Coordinator-internal ``sweep`` task. Grid priority: warm_start_recipe.sweep_grid then SKILL.md defaults. Idempotency key internal-sweep-<reason>.
+        """Build + enqueue a Coordinator-internal ``sweep`` task.
+
+        Grid priority: warm_start_recipe.sweep_grid then SKILL.md defaults.
 
         Args:
             reason: Tag used in the task's idempotency key and logging.
@@ -173,8 +194,8 @@ class SweepPhase(PhaseHandler):
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
-        # GEAK-owned KERNEL: hand the e2e result to the sweep so it reuses
-        # GEAK's bench_e2e.sh + overlay instead of relaunching via Magpie.
+        # Hand the GEAK e2e result to the sweep so it reuses GEAK's bench_e2e.sh
+        # + overlay instead of relaunching via Magpie.
         ps_result = getattr(state, "geak_result", None) or {}
         if isinstance(ps_result, dict) and ps_result.get("status") == "ok" \
                 and ps_result.get("bench_script"):
@@ -205,7 +226,7 @@ class SweepPhase(PhaseHandler):
 
     @staticmethod
     def _build_sweep_params_from_recipe(state: SharedState) -> dict[str, Any]:
-        """Pick a sweep grid: warm_start_recipe.sweep_grid takes precedence over SKILL.md defaults; per-field fallback. Returns source/conc_values/isl_osl_configs/num_prompts_factor.
+        """Pick a sweep grid: warm_start_recipe.sweep_grid over SKILL.md defaults, per-field.
 
         Args:
             state: The session SharedState whose ``warm_start_recipe`` may carry
@@ -265,7 +286,6 @@ class SweepPhase(PhaseHandler):
                 return None
             out: list[str] = []
             for v in value:
-                # Accept either "<ISL>:<OSL>" strings or [isl, osl] pairs.
                 if isinstance(v, str) and ":" in v:
                     out.append(v)
                     continue

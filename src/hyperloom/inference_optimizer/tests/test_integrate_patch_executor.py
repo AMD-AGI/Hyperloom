@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR-A4 (Arbor-into-Hyperloom): IntegratePatchExecutor tests."""
+"""IntegratePatchExecutor tests."""
 
 from __future__ import annotations
 
@@ -30,8 +30,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
 
-# Helpers
-
 _VALID_PATCH = """\
 diff --git a/src.py b/src.py
 index 0000000..1111111 100644
@@ -44,9 +42,8 @@ index 0000000..1111111 100644
 """
 
 
-# Targets an *existing* file (src.py) but with context lines that do not match
-# the tree — exercises the genuine ``git_apply_failed`` path (file exists, hunk
-# is stale), distinct from the ``patch_target_missing`` preflight below.
+# Targets an existing file with stale context lines — exercises the
+# ``git_apply_failed`` path, distinct from the ``patch_target_missing`` preflight.
 _BAD_PATCH = """\
 diff --git a/src.py b/src.py
 index 0000000..1111111 100644
@@ -59,9 +56,8 @@ index 0000000..1111111 100644
 """
 
 
-# Targets a file that does not exist in the framework tree at all — a
-# hallucinated layout (e.g. a CUDA-only file on a ROCm build). Must be caught
-# by the missing-target preflight, not a wasted ``git apply``.
+# Targets a file absent from the framework tree — must be caught by the
+# missing-target preflight, not a wasted ``git apply``.
 _MISSING_TARGET_PATCH = """\
 diff --git a/nonexistent.py b/nonexistent.py
 index 0000000..1111111 100644
@@ -117,8 +113,6 @@ def _make_ctx(task_id: str, params: dict[str, Any]) -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={})
 
 
-# Patch path resolution.
-# Force RUN_EVAL for framework-authored source patches (only with a baseline).
 def test_framework_run_eval_envs_forces_for_authored_with_baseline():
     assert IntegratePatchExecutor._framework_run_eval_envs(
         {"framework_agent_authoring": True, "accuracy_baseline": 0.8}
@@ -129,8 +123,7 @@ def test_framework_run_eval_envs_forces_for_authored_with_baseline():
 
 
 def test_framework_run_eval_envs_no_force_without_baseline():
-    # baseline eval never produced a score -> nothing to gate against -> don't
-    # force eval on the candidate (matches the framework degradation path).
+    # No baseline score -> nothing to gate against -> don't force eval.
     assert IntegratePatchExecutor._framework_run_eval_envs({"framework_agent_authoring": True}) is None
     assert (
         IntegratePatchExecutor._framework_run_eval_envs(
@@ -141,7 +134,6 @@ def test_framework_run_eval_envs_no_force_without_baseline():
 
 
 def test_framework_run_eval_envs_none_for_generic_explore():
-    # Generic EXPLORE integrate_patch (no framework markers) -> untouched.
     assert IntegratePatchExecutor._framework_run_eval_envs({"specialist_task_id": "s1", "accuracy_baseline": 0.8}) is None
     assert IntegratePatchExecutor._framework_run_eval_envs({}) is None
 
@@ -176,7 +168,6 @@ def test_resolve_patch_paths_falls_back_to_filesystem_scan(tmp_path: Path):
         "t-c",
         patch_contents=[_VALID_PATCH],
     )
-    # done_payload=None forces the filesystem scan.
     paths = _resolve_patch_paths(
         specialist_workspace=workspace,
         explicit_patches=None,
@@ -201,7 +192,6 @@ def test_resolve_patch_paths_respects_empty_done_list(tmp_path: Path):
     assert paths == []
 
 
-# 2. git apply primitives
 def test_git_apply_succeeds_on_valid_patch(tmp_path: Path):
     repo = tmp_path / "repo"
     init_git_repo(repo)
@@ -234,11 +224,8 @@ def test_git_apply_reverse_rolls_back(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# Specialists author patches whose ``+++ b/<path>`` prefix is *not* a simple
-# ``-p1`` strip (they read framework files at deep absolute paths, e.g.
-# ``b/usr/local/lib/python3.12/dist-packages/vllm/src.py``). The executor must
-# auto-detect the strip level instead of hardcoding ``-p1``; otherwise every
-# such Critic-approved patch fails to apply (regression seen in production).
+# Specialists author patches whose ``+++ b/<path>`` prefix is not a simple
+# ``-p1`` strip; the executor must auto-detect the strip level.
 def _deep_prefix_patch(depth: int) -> str:
     prefix = "/".join(f"d{i}" for i in range(depth))
     return (
@@ -262,13 +249,11 @@ def test_git_apply_auto_detects_deep_p_level(tmp_path: Path):
     ok, err = _git_apply(repo, patch)
     assert ok, f"auto -p detection should apply deep-prefix patch: {err}"
     assert (repo / "src.py").read_text().endswith("return 2\n")
-    # Reverse must auto-detect the same level and roll back cleanly.
     ok_r, err_r = _git_apply_reverse(repo, patch)
     assert ok_r, err_r
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# 3. Framework root resolution
 def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path):
     repo = tmp_path / "repo"
     init_git_repo(repo)
@@ -284,12 +269,11 @@ def test_resolve_framework_root_returns_none_when_no_candidate(monkeypatch, tmp_
     )
     monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path / "missing-ix"))
     root = _resolve_framework_root(None)
-    # Either None or a fallback root — both acceptable for this defensive helper.
+    # Either None or a fallback root is acceptable here.
     if root is not None:
         assert root.exists()
 
 
-# 4. End-to-end executor invocation
 @pytest.mark.asyncio
 async def test_executor_apply_only_succeeds(tmp_path: Path):
     """apply_only=True: patches applied, bench skipped, status='applied_no_bench'."""
@@ -539,9 +523,9 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     assert result["patches_applied"] == []
 
 
-# 4b. Enablement runnable gate: the bench is the launch probe; a positive
-# throughput means the server booted -> KEEP; else -> REVERT. The perf/accuracy
-# KEEP gate is bypassed for enablement-tagged integrations.
+# Enablement runnable gate: the bench is the launch probe; positive throughput
+# means the server booted -> KEEP; else -> REVERT. The perf/accuracy KEEP gate is
+# bypassed for enablement-tagged integrations.
 async def _run_enablement_integrate(
     tmp_path: Path,
     monkeypatch,
@@ -590,7 +574,6 @@ async def _run_enablement_integrate(
 
 @pytest.mark.asyncio
 async def test_enablement_keeps_when_server_boots(tmp_path: Path, monkeypatch):
-    # No eval accuracy produced -> KEEP but provisional (boot-only).
     result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True)
     assert result["status"] == "kept"
     assert result["enablement"] is True
@@ -598,7 +581,6 @@ async def test_enablement_keeps_when_server_boots(tmp_path: Path, monkeypatch):
     assert result["provisional"] is True
     assert result["correctness_verified"] is False
     assert len(result["patches_applied"]) == 1
-    # The patch stays applied on a runnable KEEP.
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
@@ -609,7 +591,6 @@ async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkey
     assert result["enablement"] is True
     assert result["runnable"] is False
     assert result["patches_applied"] == []
-    # REVERT rolls the tree back to its original content.
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
@@ -679,10 +660,9 @@ async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, mon
     """Patch clears the shape_mismatch gap but boot stops at a new missing_weight gap.
 
     The server still does not fully boot (output_throughput=0), but the failure
-    moved to a NEW, deeper actionable signature -> status='advanced': the patch
-    is recorded for stacking (patches_applied non-empty), the new failure log is
-    surfaced, and the working tree is reverted to clean for deterministic
-    re-application next round.
+    moved to a new, deeper actionable signature -> status='advanced': the patch
+    is recorded for stacking, the new failure log is surfaced, and the working
+    tree is reverted to clean for deterministic re-application next round.
     """
     before = {
         "kind": "shape_mismatch",
@@ -707,12 +687,9 @@ async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, mon
     assert result["advanced"] is True
     assert result["enablement"] is True
     assert result["runnable"] is False
-    # The progressing patch is reported for stacking.
     assert len(result["patches_applied"]) == 1
-    # The new (deeper) gap is surfaced for the next round to reclassify + target.
     assert "not initialized from checkpoint" in result["enablement_launch_log"]
     assert result["after_signature"]["kind"] == "missing_weight"
-    # Tree reverted to clean so the stack is rebuilt deterministically next round.
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
@@ -723,8 +700,7 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
     session_dir.mkdir()
     repo = tmp_path / "framework"
     init_git_repo(repo)
-    # A base patch (prior progressing round) touching a DIFFERENT file, plus the
-    # current round's patch on src.py.
+    # A base patch touching a different file, plus this round's patch on src.py.
     (repo / "other.py").write_text("def g():\n    return 10\n", encoding="utf-8")
     git_commit_all(repo, "add other")
     base_patch = tmp_path / "base_000.patch"
@@ -757,14 +733,11 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
     }
     result = await executor(_make_ctx("t-int-stack", params))
     assert result["status"] == "kept"
-    # Both the base patch and this round's patch were applied (stacked).
     assert len(result["patches_applied"]) == 2
-    # Both files reflect their patched content on a runnable KEEP.
     assert (repo / "other.py").read_text().endswith("return 20\n")
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
-# Enablement environment-setup replay: allowlist + resolve + runner.
 @pytest.mark.parametrize(
     "cmd",
     [
@@ -828,14 +801,13 @@ def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
     )
     assert out["applied"] == ["pip install -U transformers"]
     assert out["skipped"] == ["rm -rf /tmp/x"]
-    # The dangerous command was NEVER handed to subprocess.
     assert ran == ["pip install -U transformers"]
     assert (tmp_path / "logs" / "enablement_setup.log").exists()
 
 
 @pytest.mark.asyncio
 async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, monkeypatch):
-    """Q3: enablement integrate replays setup_commands and surfaces them in the result."""
+    """Enablement integrate replays setup_commands and surfaces them in the result."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -848,7 +820,6 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
 
     def _spy_run_setup(commands, *, cwd, log_dir):
         replayed["commands"] = list(commands)
-        # Simulate all allowlisted commands running cleanly.
         return {"applied": list(commands), "skipped": [], "failed": []}
 
     monkeypatch.setattr(ip_mod, "_run_setup_commands", _spy_run_setup)
@@ -876,11 +847,9 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
     result = await executor(_make_ctx("t-int-setup", params))
     assert result["status"] == "kept"
     assert result["setup_commands_applied"] == ["pip install -U transformers"]
-    # The runner was invoked with the resolved setup commands (before boot).
     assert replayed["commands"] == ["pip install -U transformers"]
 
 
-# 5. CLI registration
 def test_integrate_patch_executor_imports_clean():
     """The real executor module must import without side effects."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
@@ -889,7 +858,6 @@ def test_integrate_patch_executor_imports_clean():
     assert callable(ip_mod.IntegratePatchExecutor)
 
 
-# 6. git-free backup-based apply/revert
 _NOGIT_PATCH = """\
 --- a/src.py
 +++ b/src.py
@@ -919,7 +887,7 @@ def test_apply_patch_no_git_keep_and_revert(tmp_path: Path) -> None:
     patch_file.write_text(_NOGIT_PATCH, encoding="utf-8")
     backup_root = tmp_path / "backups"
 
-    ok, err, backups = _apply_patch_no_git(framework_root, patch_file, backup_root)
+    ok, err, backups, *_ = _apply_patch_no_git(framework_root, patch_file, backup_root)
     pytest.importorskip("subprocess")  # ensure patch CLI available; skip gracefully if not
     if not ok:
         pytest.skip(f"patch CLI unavailable or patch failed: {err}")
@@ -928,7 +896,6 @@ def test_apply_patch_no_git_keep_and_revert(tmp_path: Path) -> None:
     assert "return 42" in patched, "patch was not applied"
     assert any(r["backup_path"] for r in backups), "backup was not created"
 
-    # Revert restores original content.
     _revert_patches_no_git(backups)
     restored = (framework_root / "src.py").read_text(encoding="utf-8")
     assert restored == original, "revert did not restore original content"
@@ -956,18 +923,38 @@ def test_apply_patch_no_git_rejects_path_traversal_before_apply(
 
     def fake_run(cmd, *args, **kwargs):
         calls.append(list(cmd))
-        # Simulate a patch implementation whose dry-run accepts the target so
-        # this test exercises Hyperloom's own boundary check before real apply.
+        # Dry-run accepts the target so the test exercises Hyperloom's own
+        # boundary check before real apply.
         if "--dry-run" in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
         raise AssertionError("real patch apply must not run for escaping targets")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    ok, err, backups = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
+    ok, err, backups, *_ = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
 
     assert ok is False
     assert "escapes framework root" in err
     assert backups == []
     assert outside.read_text(encoding="utf-8") == "SAFE\n"
     assert len(calls) == 1
+
+
+def test_derive_lane_enablement():
+    """_derive_lane returns 'enablement' when params.enablement is set."""
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+    assert _derive_lane({"enablement": True}) == "enablement"
+
+
+def test_derive_lane_perf_framework():
+    """_derive_lane returns 'perf_framework' for framework_agent_authoring params."""
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+    assert _derive_lane({"framework_agent_authoring": True}) == "perf_framework"
+    assert _derive_lane({"framework_agent_candidate_id": "x"}) == "perf_framework"
+
+
+def test_derive_lane_perf_explore():
+    """_derive_lane returns 'perf_explore' for plain explore params."""
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+    assert _derive_lane({}) == "perf_explore"
+    assert _derive_lane({"specialist_task_id": "abc"}) == "perf_explore"

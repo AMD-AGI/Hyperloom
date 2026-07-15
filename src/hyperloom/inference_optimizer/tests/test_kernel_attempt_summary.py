@@ -23,7 +23,6 @@ from hyperloom.orchestrator.kernel.attempt_summary import (
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-# Fixtures
 def _top15_entry(
     kid: str,
     *,
@@ -121,7 +120,6 @@ def _write_backend_results(
     )
 
 
-# Categories
 def test_unattempted_no_source_classifies_vendor_lib_ops(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001", name="aten::mm", source_file="", reusable=False, backends=[])],
@@ -220,7 +218,6 @@ def test_in_flight_classifies_correctly(tmp_path: Path) -> None:
     assert out["by_kernel"][0]["category"] == CATEGORY_IN_FLIGHT
 
 
-# Backend ladder harvesting
 def test_backend_ladder_loaded_from_kernel_agent_results(tmp_path: Path) -> None:
     session_dir = tmp_path
     state = _make_state(
@@ -240,7 +237,7 @@ def test_backend_ladder_loaded_from_kernel_agent_results(tmp_path: Path) -> None
         "sid1",
         "k001",
         backends=[
-            {"backend": "geak_v3", "status": "failed", "attempt_id": "geak_v3-1", "optimized_path": ""},
+            {"backend": "forge", "status": "failed", "attempt_id": "forge-1", "optimized_path": ""},
             {"backend": "claude", "status": "failed", "attempt_id": "claude-1", "optimized_path": ""},
             {"backend": "codex", "status": "failed", "attempt_id": "codex-1", "optimized_path": ""},
         ],
@@ -317,7 +314,7 @@ def test_backend_ladder_with_artifact_marks_partial(tmp_path: Path) -> None:
         "sid1",
         "k001",
         backends=[
-            {"backend": "geak_v3", "status": "completed", "attempt_id": "geak_v3-1", "optimized_path": "/tmp/optimized.cu"},
+            {"backend": "forge", "status": "completed", "attempt_id": "forge-1", "optimized_path": "/tmp/optimized.cu"},
             {"backend": "claude", "status": "failed", "attempt_id": "claude-1", "optimized_path": ""},
         ],
     )
@@ -327,7 +324,6 @@ def test_backend_ladder_with_artifact_marks_partial(tmp_path: Path) -> None:
     assert breakdown["correctness_failed"] == 1 or breakdown["speedup_below_threshold"] == 1
 
 
-# Top takeaways + glossary
 def test_top_takeaways_highlight_highest_gpu_pct_missed(tmp_path: Path) -> None:
     state = _make_state(
         session_id="sid1",
@@ -345,13 +341,13 @@ def test_top_takeaways_highlight_highest_gpu_pct_missed(tmp_path: Path) -> None:
         tmp_path,
         "sid1",
         "k001",
-        backends=[{"backend": "geak_v3", "status": "failed", "attempt_id": "geak_v3-1", "optimized_path": ""}],
+        backends=[{"backend": "forge", "status": "failed", "attempt_id": "forge-1", "optimized_path": ""}],
     )
     _write_backend_results(
         tmp_path,
         "sid1",
         "k002",
-        backends=[{"backend": "geak_v3", "status": "failed", "attempt_id": "geak_v3-1", "optimized_path": ""}],
+        backends=[{"backend": "forge", "status": "failed", "attempt_id": "forge-1", "optimized_path": ""}],
     )
     out = build_kernel_optimization_summary(state, tmp_path)
     joined = " ".join(out["top_takeaways"])
@@ -419,7 +415,6 @@ def test_attempt_without_top15_still_listed(tmp_path: Path) -> None:
     assert any(r["kernel_id"] == "k_obsolete" for r in out["by_kernel"])
 
 
-# Summary exposes failure root-cause directly.
 def _write_full_kernel_result(
     session_dir: Path,
     session_id: str,
@@ -454,10 +449,10 @@ def test_produced_artifact_excludes_stdout_log_path(tmp_path: Path) -> None:
         "k001",
         attempts=[
             {
-                "backend": "geak_v3",
+                "backend": "forge",
                 "status": "failed",
                 "attempt_id": "g1",
-                "optimized_path": "/workspace/optimized/geak_v3-78bd_stdout.log",
+                "optimized_path": "/workspace/optimized/forge-78bd_stdout.log",
                 "returncode": 1,
                 "elapsed_s": 213.5,
             }
@@ -482,7 +477,7 @@ def test_backend_ladder_elapsed_uses_elapsed_s_field(tmp_path: Path) -> None:
         "k001",
         attempts=[
             {
-                "backend": "geak_v3",
+                "backend": "forge",
                 "status": "failed",
                 "attempt_id": "g1",
                 "optimized_path": "/workspace/optimized/v1.cu",
@@ -545,7 +540,7 @@ def test_backend_ladder_classifies_preprocess_failed(tmp_path: Path) -> None:
         "k001",
         attempts=[
             {
-                "backend": "geak_v3",
+                "backend": "forge",
                 "status": "failed",
                 "attempt_id": "g1",
                 "optimized_path": "/workspace/optimized/g1_stdout.log",
@@ -588,7 +583,7 @@ def test_backend_ladder_preprocess_failed_with_line_wrapped_stdout(
         "k001",
         attempts=[
             {
-                "backend": "geak_v3",
+                "backend": "forge",
                 "status": "failed",
                 "attempt_id": "g1",
                 "optimized_path": "/workspace/optimized/g1_stdout.log",
@@ -664,7 +659,7 @@ def test_failure_breakdown_classifies_by_error_class(tmp_path: Path) -> None:
         "k001",
         attempts=[
             {
-                "backend": "geak_v3",
+                "backend": "forge",
                 "status": "failed",
                 "attempt_id": "g1",
                 "optimized_path": "/workspace/optimized/g1_stdout.log",

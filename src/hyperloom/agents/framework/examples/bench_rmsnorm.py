@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""GPU micro-benchmark exercising the explore --execute e2e path: times sglang RMSNorm (N=4096, H=8192, bf16) and emits an ``explorer._evaluate_candidate``-compatible benchmark.json."""
+"""GPU micro-benchmark: times sglang RMSNorm and emits a compatible benchmark.json."""
 
 from __future__ import annotations
 

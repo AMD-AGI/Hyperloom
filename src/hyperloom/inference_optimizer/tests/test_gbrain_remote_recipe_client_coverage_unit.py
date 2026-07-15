@@ -72,20 +72,15 @@ def test_mcp_call_bad_json_envelope(monkeypatch) -> None:
 
 
 def test_mcp_call_event_stream_framing_non_dict(monkeypatch) -> None:
-    # text/event-stream body whose only event decodes to a JSON list (not a
-    # JSON-RPC response object) -> no parseable JSON-RPC response is selected,
-    # so the call surfaces a "bad envelope" error rather than treating the list
-    # as a result.
+    # SSE event decoding to a JSON list (not a JSON-RPC object) surfaces "bad envelope".
     _patch_raw(monkeypatch, "data: [1, 2, 3]\n\n")
     with pytest.raises(GbrainRemoteError, match="bad envelope"):
         _mcp().call("list_pages", {})
 
 
 def test_mcp_call_multi_event_sse_selects_result_by_id(monkeypatch) -> None:
-    # A heartbeat/notification event before the JSON-RPC result event: the old
-    # parser concatenated every data: line into one string (invalid JSON ->
-    # "bad envelope"). The per-event id selection must skip the notification and
-    # return the result event whose id matches the request.
+    # Per-event id selection skips a leading notification and returns the
+    # result event whose id matches the request.
     body = (
         'event: message\n'
         'data: {"jsonrpc":"2.0","method":"notifications/ping"}\n'
@@ -149,8 +144,7 @@ def test_mcp_call_sse_large_content_text_read_by_line(monkeypatch) -> None:
 
 
 def test_mcp_call_multiline_data_field_joined(monkeypatch) -> None:
-    # A single SSE event whose data field is split across multiple data: lines
-    # must be joined with newlines before JSON parsing (SSE spec).
+    # A data field split across multiple data: lines is joined with newlines (SSE spec).
     body = (
         'event: message\n'
         'data: {"jsonrpc":"2.0","id":"1","result":\n'
@@ -184,11 +178,8 @@ def test_mcp_call_event_stream_returns_parsed_content(monkeypatch) -> None:
 
 
 def test_mcp_call_event_stream_short_read_on_brace_not_truncated(monkeypatch) -> None:
-    # Regression: gbrain >= 0.41 streams the JSON-RPC response as a single long
-    # ``data:`` line (text/event-stream, chunked, no Content-Length) ending with
-    # a blank-line terminator. A socket short read that lands on an internal
-    # ``}`` must keep reading instead of truncating mid-JSON (which previously
-    # surfaced as a spurious "bad envelope" parse error).
+    # A socket short read landing on an internal ``}`` must keep reading
+    # instead of truncating mid-JSON.
     inner = (
         '{"jsonrpc":"2.0","id":"1","result":'
         '{"content":[{"text":"{\\"ok\\": true}"}]}}'
@@ -436,19 +427,6 @@ def test_label_search_filters_slugs_by_configured_prefix() -> None:
     assert rows[0]["updated_at"] == "t2"
     assert [tool for tool, _ in c._mcp.calls] == ["search", "get_page"]  # type: ignore[union-attr]
     assert c._mcp.calls[1][1]["slug"] == "hyperloom-recipe-kb/new"  # type: ignore[union-attr]
-
-
-def test_list_recent_returns_rows() -> None:
-    c = _client(
-        {
-            _slug("r1"): _recipe_page("m1", "mi300x", "2026-01-01T00:00:00Z"),
-            _slug("r2"): _recipe_page("m2", "mi355x", "2026-02-01T00:00:00Z"),
-        }
-    )
-    rows = c.list_recent(limit=10)
-    assert len(rows) == 2
-    # newest first
-    assert rows[0]["labels"]["hardware"] == "mi355x"
 
 
 def test_build_from_env_timeout(monkeypatch) -> None:

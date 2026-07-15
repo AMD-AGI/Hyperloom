@@ -1,35 +1,19 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Straightforward kernel-patch APPLY + warm-serve E2E REMEASURE (no decision gate).
+"""Kernel-patch APPLY + warm-serve E2E REMEASURE (no decision gate).
 
-This is the "just apply it and tell me the E2E delta" path. It deliberately BYPASSES the
-orchestrator's KEEP / REVERT / NEEDS_REVIEW decision machinery (``kernel_request_handlers``'s
-integrate gate, the ``micro_speedup``/dead-band/parity arbitration). It does exactly three things:
+Bypasses the orchestrator's KEEP / REVERT / NEEDS_REVIEW machinery and does three things:
 
   1. measure BASELINE end-to-end serving throughput (pristine source, warm server, N reps),
-  2. APPLY the patch via :func:`apply_kernel_patch.apply_kernel_patch` — which already handles the
-     aiter/Composable-Kernel ``.cu`` case (AITER_REBUILD, ``jit/build`` + ``cpp_itfs`` cache
-     invalidation, fresh-rebuild verification) as well as Python overlays — then measure PATCHED
-     throughput the same way,
-  3. REVERT via :func:`apply_kernel_patch.revert_kernel_patch` (restore source; keep the patch file),
-     and report the A/B delta.
+  2. APPLY the patch via :func:`apply_kernel_patch.apply_kernel_patch`, then measure
+     PATCHED throughput the same way,
+  3. REVERT via :func:`apply_kernel_patch.revert_kernel_patch` and report the A/B delta.
 
-No accept/reject verdict is emitted. The caller decides what to do with the numbers. Used by both
-the GEAK v3 and GEAK v4 clean paired runs so every E2E number is measured the SAME way.
-
-The serving stack is pluggable: ``--backend {sglang,vllm}`` selects how the server is launched and
-benchmarked; for an aiter ``.cu`` patch the prebuilt fused ``module_aiter_core*.so`` is removed and
-``AITER_REBUILD=1`` is exported so the edited kernel actually recompiles on the patched server.
-
-Example:
-  apply_and_bench.py \
-    --patch-path  <final_patch.diff> \
-    --target-file /sgl-workspace/aiter/csrc/kernels/quant_kernels.cu \
-    --backup-root <work>/backup \
-    --model /wekafs/models/meta-llama-Llama-3.1-8B-Instruct \
-    --backend sglang --tp 1 --isl 1024 --osl 1024 --conc 64 --num-prompts 320 --reps 3 \
-    --out-dir <work> --aiter-rebuild
+No accept/reject verdict is emitted; the caller decides. The serving stack is pluggable
+via ``--backend {sglang,vllm}``; for an aiter ``.cu`` patch the prebuilt fused
+``module_aiter_core*.so`` is removed and ``AITER_REBUILD=1`` is exported so the edited
+kernel recompiles on the patched server.
 """
 
 from __future__ import annotations
@@ -57,8 +41,7 @@ def _log(out_dir: Path, msg: str) -> None:
     try:
         (out_dir / "apply_and_bench.log").open("a", encoding="utf-8").write(line + "\n")
     except OSError:
-        # Logging to disk is best-effort; the line already went to stdout above, so a
-        # write failure (e.g. read-only/full out_dir) must not abort the measurement.
+        # Logging to disk is best-effort.
         pass
 
 
@@ -74,13 +57,10 @@ def _looks_like_diff(path: Path) -> bool:
 
 
 def _diff_unsupported_ops(diff_text: str) -> list[str]:
-    """Detect patch operations that full-source replacement (apply_kernel_patch) CANNOT represent.
+    """Detect patch operations that full-source replacement CANNOT represent.
 
-    apply_and_bench deploys each touched file as a complete-source replace, which faithfully
-    expresses modify + add (the only ops a kernel-optimization patch should contain). It cannot
-    express delete / rename / copy / mode-only / binary changes — so rather than silently
-    mis-applying (e.g. leaving a file the patch deleted), we detect those headers and the caller
-    fails loudly. Returns a list of human-readable unsupported-op descriptions (empty = all good).
+    Full-source replace expresses modify + add but not delete / rename / copy / mode-only /
+    binary changes. Returns a list of unsupported-op descriptions (empty = all good).
     """
     bad: list[str] = []
     for ln in diff_text.splitlines():
@@ -98,22 +78,12 @@ def _diff_unsupported_ops(diff_text: str) -> list[str]:
 
 
 def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Path) -> dict[str, Any]:
-    """Reconstruct the BYTE-EXACT optimized source for EVERY file a diff touches.
+    """Reconstruct the byte-exact optimized source for every file a diff touches.
 
-    Apply the WHOLE diff (all hunks, every file — no scoping, nothing dropped) to a throwaway
-    copy of the repo's CURRENT (committed) tree, then read back each resulting file. This yields
-    the exact bytes the optimizer's patch produces, which the caller then deploys via
-    ``apply_kernel_patch`` (the same full-source replace + backup/manifest path that the
-    integration deploy in #681 uses). Two patch-deploy semantics collapse into one, and companion
-    edits (generated drivers/headers/codegen shims) are preserved rather than filtered out.
-
-    SCOPE: full-source replacement represents modify + add faithfully. delete / rename / copy /
-    mode-only / binary ops cannot be expressed that way, so they are detected up front and the
-    function FAILS (no silent skip) — a kernel-optimization patch should never contain them, and
-    if one does the E2E must refuse rather than measure a half-applied tree.
-
-    Done in an isolated ``git worktree`` of ``repo_root`` so the live tree is never mutated during
-    reconstruction. Returns ``{status, files: {repo_rel_path: reconstructed_source_path}, error}``.
+    Applies the diff to a throwaway copy of the repo's committed tree and reads back each
+    resulting file. delete / rename / copy / mode-only / binary ops are detected up front
+    (the function fails). Done in an isolated ``git worktree`` so the live tree is never
+    mutated. Returns ``{status, files: {repo_rel_path: reconstructed_source_path}, error}``.
     """
     try:
         diff_text = diff_path.read_text(encoding="utf-8", errors="replace")
@@ -128,7 +98,7 @@ def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Pa
         }
     files: dict[str, str] = {}
     wt = out_dir / f"_recon_wt_{diff_path.stem}"
-    # Use a detached worktree at HEAD so reconstruction is hermetic (live repo untouched).
+    # Detached worktree at HEAD for hermetic reconstruction.
     rm = subprocess.run(
         ["git", "-C", str(repo_root), "worktree", "add", "--detach", "-f", str(wt), "HEAD"],
         capture_output=True,
@@ -148,7 +118,7 @@ def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Pa
                 )
                 if ap.returncode != 0:
                     return {"status": "failed", "error": f"git apply -p{lvl}: {ap.stderr[:200]}"}
-                # numstat lists EVERY touched path (incl. new/companion files) — none dropped.
+                # numstat lists every touched path (incl. new/companion files).
                 ns = subprocess.run(
                     ["git", "-C", str(wt), "apply", f"-p{lvl}", "--numstat", str(diff_path)],
                     capture_output=True,
@@ -160,10 +130,9 @@ def _reconstruct_sources_from_diff(diff_path: Path, repo_root: Path, out_dir: Pa
                 for rel in rels:
                     src = wt / rel
                     if not src.is_file():
-                        # Unexpected (deletes are rejected up front) — fail rather than skip.
                         return {"status": "failed", "error": f"reconstructed path missing after apply: {rel}"}
                     dst = recon_dir / rel.replace("/", "__")
-                    dst.write_bytes(src.read_bytes())  # byte-exact
+                    dst.write_bytes(src.read_bytes())
                     files[rel] = str(dst)
                 applied = True
                 _log(
@@ -244,10 +213,7 @@ def _launch_server(
     else:
         raise SystemExit(f"unknown backend: {backend}")
     fh = log_path.open("w", encoding="utf-8")
-    # start_new_session=True puts the server in its OWN process group so teardown can
-    # `killpg` exactly this server's tree (no global `pkill -f sglang` that would also
-    # kill other tenants' / the orchestrator's servers on a shared node). POSIX-only;
-    # the kwarg is a no-op elsewhere.
+    # Own process group (POSIX) so teardown can killpg just this server's tree.
     session_kwargs = {"start_new_session": True} if os.name == "posix" else {}
     return subprocess.Popen(cmd, cwd=cwd, env=env, stdout=fh, stderr=subprocess.STDOUT, **session_kwargs)
 
@@ -287,8 +253,7 @@ def _bench_once(
     out_dir: Path,
     seed: int,
 ) -> dict[str, float] | None:
-    # Fixed --seed so BOTH arms benchmark the IDENTICAL random prompt set: removes
-    # dataset-draw variance from the A/B so the delta reflects the kernel, not the prompts.
+    # Fixed --seed so both arms benchmark the identical random prompt set.
     cmd = [
         sys.executable,
         bs,
@@ -330,28 +295,23 @@ def _bench_once(
     res = out_dir / f"{arm}_rep{rep}.json"
     try:
         d = json.loads(res.read_text())
-        # output_throughput is the headline; tpot/itl are the decode-bound-sensitive
-        # signals (lower=better) that show a kernel delta when aggregate tput is noisy.
+        # output_throughput is the headline; tpot/itl are decode-latency signals (lower=better).
         out: dict[str, float] = {"output_throughput": float(d["output_throughput"])}
         for k in ("median_tpot_ms", "mean_tpot_ms", "median_itl_ms", "mean_itl_ms"):
             if d.get(k) is not None:
                 out[k] = float(d[k])
         return out
     except Exception:
-        # Bench rep produced no parseable result (crash / missing key / bad json):
-        # treat as a dropped sample — the caller filters None and uses the rest.
+        # No parseable result: dropped sample (caller filters None).
         return None
 
 
 def _kill_servers(proc: subprocess.Popen | None, backend: str) -> None:
-    """Tear down ONLY the server we spawned (its process group) — never a global sweep.
+    """Tear down only the server we spawned (its process group) — never a global sweep.
 
-    The server was launched with start_new_session=True, so it leads its own process
-    group; ``killpg`` reaps the whole tree (server + its workers) without touching any
-    other tenant's sglang/vLLM on the node. SIGTERM, grace, then SIGKILL survivors.
-    A broad ``pkill -f sglang/vllm`` is intentionally NOT used (it is multi-tenant
-    unsafe, and this primitive runs in the autonomous combined_e2e path, not just a
-    single-tenant script). Opt back into a blunt sweep only via APPLY_BENCH_PKILL_SWEEP=1.
+    The server leads its own process group, so ``killpg`` reaps the whole tree without
+    touching other tenants: SIGTERM, grace, then SIGKILL survivors. A broad
+    ``pkill -f sglang/vllm`` runs only when APPLY_BENCH_PKILL_SWEEP=1.
     """
     if proc is None:
         return
@@ -364,18 +324,16 @@ def _kill_servers(proc: subprocess.Popen | None, backend: str) -> None:
             try:
                 os.killpg(pgid, signal.SIGTERM)
             except (ProcessLookupError, OSError):
-                # Group already gone (server exited/crashed before teardown): nothing to
-                # signal — the SIGKILL sweep below is the authoritative reap, so ignore.
+                # Group already gone.
                 pass
             for _ in range(15):  # up to ~15s grace for a clean shutdown
                 if proc.poll() is not None:
                     break
                 time.sleep(1)
             try:
-                os.killpg(pgid, signal.SIGKILL)  # reap any survivors in the group
+                os.killpg(pgid, signal.SIGKILL)  # reap survivors
             except (ProcessLookupError, OSError):
-                # Whole group already reaped (clean SIGTERM exit, or never existed):
-                # success state — nothing left to kill.
+                # Whole group already reaped.
                 pass
     else:  # non-POSIX: best-effort single-process teardown
         try:
@@ -385,16 +343,14 @@ def _kill_servers(proc: subprocess.Popen | None, backend: str) -> None:
             try:
                 proc.kill()
             except OSError:
-                # proc already dead between terminate() and kill(): the goal (server
-                # stopped) is met, so swallow.
+                # proc already dead.
                 pass
     try:
         proc.wait(timeout=10)
     except (subprocess.TimeoutExpired, OSError):
-        # Final reap is best-effort; the group was already signalled above. Do not
-        # block teardown waiting on a wedged pipe-flush.
+        # Final reap is best-effort.
         pass
-    # Escape hatch: explicit single-tenant blunt sweep (off by default).
+    # Explicit single-tenant blunt sweep (off by default).
     if os.environ.get("APPLY_BENCH_PKILL_SWEEP") == "1":
         pat = "sglang.launch_server" if backend == "sglang" else "vllm.entrypoints"
         subprocess.run(["pkill", "-9", "-f", pat], check=False)
@@ -438,9 +394,7 @@ def _serve_and_bench(
     if not _wait_health(proc, port, out_dir):
         _kill_servers(proc, backend)
         return {"arm": arm, "status": "server_failed", "reps": [], "median": None}
-    # Untimed WARMUP pass: the server JIT-compiles / captures CUDA graphs on its first
-    # real load, so the first timed run reads ~10-15% low and skews the median. Run one
-    # full benchmark and DISCARD it before the timed reps (open-source-standard warmup).
+    # Untimed warmup pass (server JIT-compiles / captures CUDA graphs on first load).
     _bench_once(bs, model, port, isl, osl, conc, num_prompts, arm, 0, out_dir, seed)
     _log(out_dir, f"{arm} warmup pass done (discarded)")
     reps_out: list[float] = []  # output_throughput per timed rep
@@ -467,17 +421,13 @@ def _serve_and_bench(
 
 
 def _engagement_proof(server_log: Path, target: Path, is_aiter_cu: bool) -> dict[str, Any]:
-    """Was the patched kernel ACTUALLY on the live serving path? (trust, not policy).
+    """Was the patched kernel actually on the live serving path? (trust, not policy).
 
-    A throughput delta is meaningless if the patch never engaged. We DO NOT accept/reject on this
-    — we only report it so a ~0% result is distinguishable from "patch silently not applied". The
-    signal is backend/kernel-generic:
-      * aiter `.cu` patch: the patched server must have REBUILT the edited kernel (aiter JIT build
-        markers in the server log, e.g. "start build [module_..." / "build ... .so"), since we
-        removed the prebuilt `.so` + set AITER_REBUILD=1. A rebuild => the edited source compiled.
+    Reported (not enforced) so a ~0% result is distinguishable from "patch not applied". Signals:
+      * aiter `.cu` patch: aiter JIT build markers in the server log.
       * aiter GEMM-DB tune: "is tuned on cu_num" hits > 0.
       * generic: the kernel source's stem appearing in a build/load line.
-    Absence of any marker => engaged=False (uncertain): the delta should be treated with suspicion.
+    Absence of any marker => engaged=False (uncertain).
     """
     out: dict[str, Any] = {"engaged": False, "reason": "no server log", "markers": []}
     try:
@@ -485,8 +435,8 @@ def _engagement_proof(server_log: Path, target: Path, is_aiter_cu: bool) -> dict
     except OSError:
         return out
     markers: list[str] = []
-    stem = target.stem  # e.g. "quant_kernels", "attention_ragged"
-    # aiter JIT rebuild evidence (the strongest proof for a .cu patch we forced to recompile)
+    stem = target.stem
+    # aiter JIT rebuild evidence.
     for pat in ("start build [module_", "] build ", "ninja", ".so", "hipcc"):
         if pat in text:
             markers.append(f"jit_build:{pat.strip()}")
@@ -538,14 +488,12 @@ def apply_and_bench(
     skip_rebuild: bool = False,
     seed: int = 1234,
 ) -> dict[str, Any]:
-    """Apply ONE OR MORE kernel patches together and measure E2E throughput A/B — NO gate.
+    """Apply one or more kernel patches together and measure E2E throughput A/B — no gate.
 
     Pass either a single (`patch_path`,`target_file`) or a list of `pairs` [(patch, target), ...].
-    Multiple pairs are applied to the SAME patched server, so the A/B reports the COMBINED effect of
-    all optimized patches (the "apply all patches -> final E2E" number). Always reverts every patched
-    source at the end (patch FILES kept). Handles aiter ``.cu`` rebuild (removes prebuilt fused ``.so``
-    + AITER_REBUILD=1; apply step also invalidates aiter jit/cpp_itfs caches via ``apply_kernel_patch``).
-    No keep/revert/needs-review verdict — that policy is the caller's job.
+    Multiple pairs are applied to the same patched server, so the A/B reports their combined
+    effect. Always reverts every patched source at the end (patch files kept). Handles aiter
+    ``.cu`` rebuild (removes prebuilt fused ``.so`` + AITER_REBUILD=1). No verdict.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -570,13 +518,8 @@ def apply_and_bench(
     if base["status"] != "ok":
         return {"status": "baseline_failed", "baseline": base}
 
-    # ---- APPLY all pairs. Each pair's patch may be a FULL SOURCE file (apply_kernel_patch:
-    # backup + aiter .cu rebuild + cache invalidation) OR a unified DIFF/.patch (git apply,
-    # multi-file). We auto-detect so the primitive handles patch/diff/full-source uniformly. ----
-    # ONE deploy mechanism for everything: a diff is reconstructed to BYTE-EXACT full source(s)
-    # (all files, nothing scoped/dropped), then EVERY file — diff-derived or already-full-source —
-    # is deployed via apply_kernel_patch (backup + aiter .cu rebuild + cache invalidation + manifest),
-    # the SAME path the integration deploy in #681 uses. Revert is uniformly via the manifests.
+    # ---- APPLY all pairs. Each patch is a full-source file or a unified diff (auto-detected);
+    # a diff is reconstructed to byte-exact source and deployed via apply_kernel_patch. ----
     _log(out, f"=== APPLY {len(pairs)} patch(es) (byte-exact via apply_kernel_patch; no gate) ===")
     manifests: list[str] = []  # every deploy -> revert via revert_kernel_patch(manifest)
     applied: list[dict[str, Any]] = []
@@ -606,10 +549,7 @@ def apply_and_bench(
 
     for i, (pp, tf) in enumerate(pairs):
         if _looks_like_diff(Path(pp)):
-            # Reconstruct byte-exact full source for EVERY file the diff touches (companion files
-            # preserved), then deploy each via apply_kernel_patch. The declared target (tf) is
-            # deployed to its real path; any additional reconstructed file is deployed in place
-            # (resolved against the repo root that owns the target).
+            # Reconstruct byte-exact source for every file the diff touches, then deploy each.
             repo_root = Path("/sgl-workspace/aiter") if "/aiter/" in str(tf) else Path(tf).parents[2]
             rec = _reconstruct_sources_from_diff(Path(pp), repo_root, out)
             if rec.get("status") != "ok":
@@ -629,7 +569,7 @@ def apply_and_bench(
             if not _deploy_full_source(pp, tf, str(i)):
                 _revert_all()
                 return {"status": "apply_failed", "baseline": base, "applied": applied, "error": "deploy failed"}
-    # For aiter .cu: drop the prebuilt fused module so the patched server re-JITs the edits.
+    # aiter .cu: drop the prebuilt fused module so the patched server re-JITs.
     removed_so = []
     if aiter_rebuild or any_aiter_cu:
         for so in _aiter_prebuilt_so(Path("/sgl-workspace/aiter")):
@@ -637,9 +577,7 @@ def apply_and_bench(
                 so.unlink()
                 removed_so.append(str(so))
             except OSError:
-                # A prebuilt .so we can't remove (already gone / perms) just means aiter may
-                # reuse it; AITER_REBUILD=1 + the jit cache invalidation in apply_kernel_patch
-                # still force a recompile, so this is non-fatal.
+                # Non-fatal: AITER_REBUILD=1 + jit cache invalidation still force a recompile.
                 pass
         if removed_so:
             _log(out, f"removed prebuilt aiter .so ({len(removed_so)}) to force rebuild")
@@ -649,8 +587,7 @@ def apply_and_bench(
         patched = _serve_and_bench(
             "patched", backend, model, tp, port, gpu, isl, osl, conc, num_prompts, reps, patched_env, bs, out, seed
         )
-        # ---- ENGAGEMENT PROOF (trust, not policy): were the patched kernels on the live path?
-        # Reported per target so a ~0% delta is distinguishable from "patch(es) didn't engage".
+        # ---- ENGAGEMENT PROOF (trust, not policy), reported per target.
         engagement = [
             dict(
                 target=str(t),
@@ -660,21 +597,19 @@ def apply_and_bench(
         ]
         _log(out, f"engagement_proof: {[(e['target'].split('/')[-1], e['engaged']) for e in engagement]}")
     finally:
-        # ---- REVERT every patched source (full-source manifests + diff touched-paths). Keep patch files. ----
+        # ---- REVERT every patched source (keep patch files). ----
         _revert_all()
         _log(out, f"reverted {len(manifests)} deploy(s) via manifest")
 
     b_med, p_med = base.get("median"), patched.get("median")
     delta_pct = (p_med - b_med) / b_med * 100.0 if (b_med and p_med) else None
-    # Throughput significance: a delta is meaningful only if it clears the measurement
-    # noise. Use the arms' [p25,p75] spread — overlapping IQRs => "within noise" (flat),
-    # not a real regression/win. Avoids over-reading a sub-% delta as signal.
+    # Significance: a delta is real only if it clears the arms' [p25,p75] spread.
     bs_sp, ps_sp = base.get("tput_spread", {}), patched.get("tput_spread", {})
     significant = None
     if all(bs_sp.get(k) is not None for k in ("p25", "p75")) and all(ps_sp.get(k) is not None for k in ("p25", "p75")):
         # non-overlapping IQRs => significant
         significant = (ps_sp["p25"] > bs_sp["p75"]) or (ps_sp["p75"] < bs_sp["p25"])
-    # TPOT (decode latency, lower=better): delta on the decode-bound-sensitive signal.
+    # TPOT (decode latency, lower=better).
     b_tpot = base.get("tpot_spread_ms", {}).get("median")
     p_tpot = patched.get("tpot_spread_ms", {}).get("median")
     tpot_delta_pct = (p_tpot - b_tpot) / b_tpot * 100.0 if (b_tpot and p_tpot) else None
@@ -752,8 +687,7 @@ def main() -> int:
     ap.add_argument("--aiter-rebuild", action="store_true")
     ap.add_argument("--skip-rebuild", action="store_true")
     a = ap.parse_args()
-    # Build the (patch, target) pair list: --pair entries (rsplit on last ':' so absolute paths
-    # with no ':' work) plus the single --patch-path/--target-file for back-compat.
+    # Build the (patch, target) pair list from --pair entries plus --patch-path/--target-file.
     pairs: list[tuple[str, str]] = []
     for p in a.pair:
         if ":" not in p:

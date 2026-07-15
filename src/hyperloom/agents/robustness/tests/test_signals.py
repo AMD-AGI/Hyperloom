@@ -46,9 +46,7 @@ def _ctx(
     )
 
 
-# ---------------------------------------------------------------------------
 # Stall
-# ---------------------------------------------------------------------------
 
 
 def test_stall_emits_medium_when_agent_silent_past_threshold():
@@ -95,9 +93,7 @@ def test_stall_uses_iso_timestamps_too():
     assert out and out[0].evidence["agent"] == "kernel_agent"
 
 
-# ---------------------------------------------------------------------------
 # Crash
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -121,9 +117,7 @@ def test_crash_signal_thresholds(crash_count, expected_name, expected_severity):
         assert out[0].severity is expected_severity
 
 
-# ---------------------------------------------------------------------------
 # Event
-# ---------------------------------------------------------------------------
 
 
 def test_repeated_policy_denied_emits_medium_alert():
@@ -233,7 +227,6 @@ def test_recover_unsuccessful_silent_when_recover_succeeded():
 
 
 def test_recover_unsuccessful_uses_latest_result_when_multiple_recovers():
-    # Old recover succeeded; newer recover failed → fire on the newer.
     coord_events = [
         {
             "topic": "delegated_result",
@@ -267,7 +260,7 @@ def test_recover_unsuccessful_uses_latest_result_when_multiple_recovers():
 
 
 def test_idempotency_replay_fires_when_same_payload_distinct_keys():
-    """B4: distinct idempotency_keys + same payload hash → MEDIUM alert."""
+    """Distinct idempotency_keys + same payload hash fires a MEDIUM alert."""
     inbox = [
         InboxItem(
             seq=1,
@@ -335,7 +328,7 @@ def test_idempotency_replay_silent_when_payloads_differ():
 
 
 def test_idempotency_replay_silent_when_no_key():
-    """No idempotency_key at all → not a key-bypass attempt, skip."""
+    """No idempotency_key at all is not a key-bypass attempt, so skip."""
     inbox = [
         InboxItem(
             seq=1,
@@ -364,8 +357,7 @@ def test_idempotency_replay_silent_when_no_key():
 
 
 def test_recover_unsuccessful_detected_via_signature_when_kind_missing():
-    # ``kind`` tag elided — still recognised as recover via the
-    # ``force_gpu_cleanup`` + ``gpureset_attempted`` signature.
+    # kind tag elided; recognised as recover via the force_gpu_cleanup + gpureset_attempted signature.
     coord_events = [
         {
             "topic": "delegated_result",
@@ -412,9 +404,7 @@ def test_event_handles_combined_inbox_and_coordinator_events():
     assert any(s.name == "repeated_policy_denied" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # Health
-# ---------------------------------------------------------------------------
 
 
 def test_health_flags_failed_pod_as_high_severity():
@@ -489,9 +479,7 @@ def test_health_does_not_flag_recently_started_pods_with_no_metrics():
     assert evaluate_health_signals(_ctx(now_unix=now), data, config=HealthConfig(no_metrics_warn_s=600)) == []
 
 
-# ---------------------------------------------------------------------------
 # Classifier
-# ---------------------------------------------------------------------------
 
 
 def test_classifier_dedupes_same_subject_keeps_higher_severity():
@@ -541,9 +529,73 @@ def test_classifier_runs_all_default_rules():
         session_pods=[{"pod": {"namespace": "ns", "name": "p"}, "phase": "Failed"}],
         coordinator_events=[],
     )
-    classifier = Classifier(crash_config=CrashConfig(medium_threshold=2))
+    classifier = Classifier(configs={"crash": CrashConfig(medium_threshold=2)})
     out = classifier.classify(data, ctx)
     names = {s.name for s in out}
     assert "crash_count_rising" in names
     assert "repeated_policy_denied" in names
     assert "pod_not_running" in names
+
+
+# ---------------------------------------------------------------------------
+# Signal registry — order + config coverage invariants
+# ---------------------------------------------------------------------------
+
+
+def test_signal_registry_order_is_pinned():
+    """The registry order is part of the contract: ``classify`` appends in this
+    order and ``_dedup`` keeps the first-inserted symptom on an equal-severity
+    tie. Pin it so a reorder is a conscious, reviewed change."""
+    from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
+
+    assert [spec.name for spec in _SIGNAL_REGISTRY] == [
+        "stall",
+        "crash",
+        "event",
+        "health",
+        "local_health",
+        "gpu_leak",
+        "cluster_fault",
+        "budget",
+        "aiter_jit",
+        "progress",
+        "repeated_payload",
+        "decision_audit",
+        "model_gpu_fit",
+        "amdahl_ceiling",
+        "cold_start",
+        "critic_health",
+        "ray_pending",
+        "kernel_pipeline",
+        "state_integrity",
+        "external_deps",
+    ]
+
+
+def test_budget_is_the_only_configless_source_data_row():
+    """Only ``evaluate_budget_signals`` skips SourceData; encode that so the
+    ``needs_source_data`` flag can't silently flip for another row."""
+    from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
+
+    no_data = {spec.name for spec in _SIGNAL_REGISTRY if spec.evaluator is not None and not spec.needs_source_data}
+    assert no_data == {"budget"}
+
+
+def test_kernel_pipeline_config_slot_feeds_two_rows():
+    """One KernelPipelineConfig slot drives the stateful RayPendingDetector and
+    the stateless kernel-pipeline evaluator."""
+    from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
+
+    rows = [spec for spec in _SIGNAL_REGISTRY if spec.config_attr == "kernel_pipeline"]
+    assert {spec.name for spec in rows} == {"ray_pending", "kernel_pipeline"}
+    assert sum(1 for s in rows if s.detector_cls is not None) == 1
+    assert sum(1 for s in rows if s.evaluator is not None) == 1
+
+
+def test_classifier_config_map_covers_every_registry_slot():
+    from hyperloom.agents.robustness.signals.classifier import (
+        signal_registry_config_attrs,
+    )
+
+    classifier = Classifier()
+    assert set(classifier.signal_configs) == set(signal_registry_config_attrs())

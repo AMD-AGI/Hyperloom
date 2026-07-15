@@ -29,7 +29,7 @@ def test_nearest_not_newer_when_exact_missing(tmp_path: Path):
     root = tmp_path / "sglang_roofline_patches"
     older = _mk(root, "sglang_0_5_11")
     _mk(root, "sglang_0_4_9")
-    # 0.5.14 has no exact dir → nearest not-newer same-minor is 0.5.11.
+    # No exact dir -> nearest not-newer same-minor is 0.5.11.
     assert _resolve_sglang_patches_dir(root, "0.5.14") == older
 
 
@@ -48,6 +48,5 @@ def test_empty_subdir_ignored(tmp_path: Path):
 def test_cross_minor_fallback_when_no_same_minor(tmp_path: Path):
     root = tmp_path / "sglang_roofline_patches"
     older = _mk(root, "sglang_0_4_9")
-    # No same-minor (0.5.x) subdir exists, so fall back to the nearest
-    # not-newer patched subdir across minors -> 0.4.9.
+    # No same-minor subdir; fall back to the nearest not-newer subdir -> 0.4.9.
     assert _resolve_sglang_patches_dir(root, "0.5.14") == older

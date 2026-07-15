@@ -14,7 +14,7 @@ import pytest
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
-# Stubs — minimal SharedState + TaskRegistry doubles.
+# Minimal SharedState + TaskRegistry doubles.
 @dataclass
 class _BareState:
     baseline_tput: float = 100.0
@@ -25,6 +25,8 @@ class _BareState:
     current_best: dict[str, Any] = field(default_factory=dict)
     last_baseline: dict[str, Any] = field(default_factory=dict)
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
+    kernel_optimizer: str = "native"
+    phase_history: list[dict[str, Any]] = field(default_factory=list)
 
     def save(self, _session_dir: Path | None) -> None:
         pass
@@ -62,12 +64,15 @@ class _StubTaskRegistry:
 
 
 @pytest.fixture
-def coord(tmp_path: Path) -> Coordinator:
+def coord(tmp_path: Path, monkeypatch) -> Coordinator:
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _BareState()
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
+    c._run_deadline = None
+    c._run_started_monotonic = None
     return c
 
 
@@ -185,13 +190,12 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
     monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
-    monkeypatch.setattr(coord.gating, "_gemm_tuning_required_before_kernel_opt", lambda: False)
+    monkeypatch.setattr(coord.dispatcher, "_gemm_tuning_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
     await coord._on_enter_kernel(from_phase="EXPLORE")
 
     assert len(coord.sub.tasks_run) == 1
-    # Reason is state-versioned on the validated-gain stack length (0 here).
     assert coord.sub.tasks_run[0].params["reason"] == "kernel_entry_g0"
     assert coord.shared_state.last_roofline_tput == 120.0
 

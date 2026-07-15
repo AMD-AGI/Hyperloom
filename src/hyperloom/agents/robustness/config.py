@@ -17,6 +17,7 @@ from typing import Optional
 import httpx
 
 from hyperloom.common.env import env_bool, env_int
+from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, DEFAULT_DEEPSEEK_MODEL
 
 log = logging.getLogger(__name__)
 
@@ -40,9 +41,9 @@ class Config:
 
     Holds every tunable knob the agent uses: auto-detected service
     endpoints, monitoring intervals, alert thresholds, LLM RCA settings,
-    and the many M1/M1.5 reactor signal parameters. Most fields have
-    sensible defaults; the discovered service URLs and LLM credentials
-    are populated by :meth:`discover`.
+    and the reactor signal parameters. Most fields have sensible defaults;
+    the discovered service URLs and LLM credentials are populated by
+    :meth:`discover`.
 
     Attributes:
         session_dir (Path): Directory containing the session's storage
@@ -83,13 +84,14 @@ class Config:
     agent_stall_timeout_s: float = 300.0
 
     # -- LLM for RCA (auto-detected from Claw sandbox env) --
-    llm_model: str = "claude-opus-4-7"
+    llm_model: str = "claude-opus-4-8"
     llm_base_url: str = ""
     llm_api_key: str = ""
+    llm_provider: str = "openai"
 
     # -- LLM RCA throttle / activation --
     # ``None`` = auto-enable when llm_base_url + llm_api_key are both set;
-    # ``False`` = force-disable (ROBUSTNESS_LLM_RCA_DISABLED=1 also flips off).
+    # ``False`` = force-disable.
     llm_rca_enabled: Optional[bool] = None
     llm_rca_severity_min: str = "high"  # one of low/medium/high
     llm_rca_cooldown_s: float = 60.0
@@ -121,7 +123,7 @@ class Config:
     # Informational only (mirrors --nodes); policy driven by the flags above.
     nodes: int = 1
 
-    # -- gpu_memory_leaked signal (2026-05) --
+    # -- gpu_memory_leaked signal --
     # GPU "full" when util_mem_pct > threshold OR free MiB < threshold; fires
     # only after holding for min_consecutive_ticks (anti-flap vs cold-start).
     gpu_leak_util_mem_pct_threshold: float = 99.0
@@ -137,37 +139,37 @@ class Config:
     budget_imminent_pct: float = 0.85
     budget_min_minutes: float = 30.0
     budget_productive_gain_pct: float = 0.5
-    # -- H1 / H2 budget signal extensions (2026-05-18) --
-    # strategy_drift_pct (50%) = earliest gate: MEDIUM when half-burnt with no
-    # gain. Absolute-time thresholds back-stop very long budgets.
+    # -- budget signal extensions --
+    # strategy_drift_pct = earliest gate: MEDIUM when half-burnt with no gain.
+    # Absolute-time thresholds back-stop very long budgets.
     budget_strategy_drift_pct: float = 0.5
     budget_deadline_warning_minutes: float = 30.0
     budget_deadline_hard_cutoff_minutes: float = 5.0
 
-    # -- same_payload_loop signal (B1, 2026-05-18) --
+    # -- same_payload_loop signal --
     # Consecutive identical-payload failures before firing.
     repeated_payload_streak_threshold: int = 3
     repeated_payload_lookback_events: int = 80
 
-    # -- aiter_jit_regressed signal (A7, 2026-05-18) --
+    # -- aiter_jit_regressed signal --
     aiter_jit_cold_so_count: int = 20
     aiter_jit_regression_ratio: float = 0.8
     aiter_jit_stale_build_threshold: int = 1
     aiter_jit_stale_build_persist_ticks: int = 5
 
-    # -- gain_plateau / no_levers_found signals (B2 / B3, 2026-05-18) --
+    # -- gain_plateau / no_levers_found signals --
     progress_gain_window_ticks: int = 6
     progress_gain_epsilon_pct: float = 0.5
     progress_no_levers_min_minutes: float = 45.0
     progress_no_levers_min_ticks: int = 8
 
-    # -- A3 / A4 disk / shm signals (2026-05-18) --
+    # -- disk / shm signals --
     disk_used_warn_pct: float = 85.0
     disk_used_crit_pct: float = 95.0
     shm_used_warn_pct: float = 75.0
     shm_used_crit_pct: float = 90.0
 
-    # -- A5 fd_pressure signal (2026-05-18) --
+    # -- fd_pressure signal --
     fd_warn_used_pct: float = 80.0
     fd_crit_used_pct: float = 95.0
     fd_probe_enabled: bool = True
@@ -185,7 +187,7 @@ class Config:
     decision_audit_enabled: bool = True
     decision_audit_max_integrate: int = 20
     decision_audit_max_oob_attempts: int = 50
-    # Noise-floor cliff; mirrors upstream executors' 1.0% keep threshold.
+    # Noise-floor cliff; mirrors executors' 1.0% keep threshold.
     decision_audit_min_keep_gain_pct: float = 1.0
     decision_audit_dispatch_bypass_epsilon_pct: float = 0.5
 
@@ -196,8 +198,7 @@ class Config:
     # projection over-estimates HBM by ~5%, so below it headroom is ~0.
     preflight_min_headroom_pct: float = 5.0
     preflight_activation_buf_gib: float = 8.0
-    # Amdahl kernel ceiling; 1.5x single-kernel speedup = 2026-05 GEAK
-    # average, 5% min_e2e_ceiling_pct = SKILL noise-floor convention.
+    # Amdahl kernel ceiling; 1.5x single-kernel speedup, 5% noise-floor.
     preflight_amdahl_single_kernel_speedup: float = 1.5
     preflight_amdahl_min_e2e_ceiling_pct: float = 5.0
     # Cold-start vs budget. ``cold_start_minutes=None`` reads
@@ -237,16 +238,16 @@ class Config:
     state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024  # 100 MiB
     state_inbox_bloat_critical_bytes: int = 500 * 1024 * 1024  # 500 MiB
 
-    # -- J external-deps signals (2026-05-19) --
-    # Disable for hosts that audit gateway / mounts externally (e.g. Primus-SaFE).
+    # -- external-deps signals --
+    # Disable for hosts that audit gateway / mounts externally.
     external_deps_enabled: bool = True
     external_mount_stat_timeout_s: float = 5.0
     external_gateway_probe_url: str = ""  # empty → derive from OPENAI_BASE_URL
     external_mount_latency_warn_ms: float = 5000.0
     external_mount_latency_critical_ms: float = 15000.0
 
-    # -- L1 + L2 postmortem finalizer (2026-05-19) --
-    # False disables the L1 flashpoint + L2 decision_trace writers.
+    # -- postmortem finalizer --
+    # False disables the flashpoint + decision_trace writers.
     finalize_enabled: bool = True
     finalize_reports_subdir: str = "reports"
     finalize_max_findings_in_report: int = 20
@@ -261,8 +262,7 @@ class Config:
     # -- server process patterns --
     # Mirrors ``local_probe._DEFAULT_PROCESS_PATTERNS`` so the
     # gpu_memory_leaked "no live owner" check matches every legitimate VRAM
-    # holder; vLLM v1 / Ray / aiter JIT entries are critical or EngineCore-
-    # children get mis-classified as "not a server".
+    # holder.
     server_process_patterns: list[str] = field(
         default_factory=lambda: [
             # SGLang
@@ -302,20 +302,22 @@ class Config:
         """
         session_dir = _discover_session_dir()
         server_url = await _probe_robustness_server()
-        llm_base_url, llm_api_key = _discover_llm_credentials()
+        llm_base_url, llm_api_key, llm_provider = _discover_llm_credentials()
         workload_uid = _discover_workload_uid()
-        disable_local_probe = _env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
-        enable_cluster_pod_metrics = _env_bool(
+        disable_local_probe = env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
+        enable_cluster_pod_metrics = env_bool(
             "ROBUSTNESS_ENABLE_CLUSTER_POD_METRICS",
             False,
         )
-        nodes = _env_int("ROBUSTNESS_NODES", 1)
+        nodes = env_int("ROBUSTNESS_NODES", 1)
 
         config = cls(
             session_dir=session_dir,
             robustness_server_url=server_url,
+            llm_model=_discover_llm_model(llm_provider),
             llm_base_url=llm_base_url,
             llm_api_key=llm_api_key,
+            llm_provider=llm_provider,
             workload_uid=workload_uid,
             disable_local_probe=disable_local_probe,
             enable_cluster_pod_metrics=enable_cluster_pod_metrics,
@@ -398,19 +400,60 @@ async def _probe_robustness_server() -> str:
     return ""
 
 
-def _discover_llm_credentials() -> tuple[str, str]:
+def _discover_llm_credentials() -> tuple[str, str, str]:
     """Pick up LLM credentials already in the Claw sandbox environment.
 
     Returns:
-        tuple[str, str]: A ``(base_url, api_key)`` pair read from the
-        sandbox environment variables; either element may be empty if
-        unset.
+        tuple[str, str, str]: A ``(base_url, api_key, provider)`` tuple read
+        from sandbox environment variables; URL/key may be empty if unset.
     """
-    base_url = os.environ.get("OPENAI_BASE_URL", "")
-    api_key = (
-        os.environ.get("SAFE_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("LLM_API_KEY", "")
+    openai_base = os.environ.get("OPENAI_BASE_URL", "").strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if openai_key:
+        return openai_base or "https://api.openai.com/v1", openai_key, "openai"
+    gateway_key = (
+        os.environ.get("SAFE_API_KEY", "").strip()
+        or os.environ.get("LLM_API_KEY", "").strip()
+        or os.environ.get("LLM_GATEWAY_KEY", "").strip()
     )
-    return base_url, api_key
+    if gateway_key and openai_base:
+        return openai_base, gateway_key, "openai"
+
+    anthropic_key = (
+        os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+    )
+    if anthropic_key:
+        return os.environ.get("ANTHROPIC_BASE_URL", "").strip() or "https://api.anthropic.com", anthropic_key, "anthropic"
+
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if deepseek_key:
+        return os.environ.get("DEEPSEEK_BASE_URL", "").strip() or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, deepseek_key, "anthropic"
+
+    return "", "", "openai"
+
+
+def _discover_llm_model(provider: str) -> str:
+    """Resolve the RCA model for the discovered provider."""
+    explicit = (
+        os.environ.get("ROBUSTNESS_LLM_MODEL", "").strip()
+        or os.environ.get("LLM_MODEL", "").strip()
+    )
+    if explicit:
+        return explicit
+    if os.environ.get("DEEPSEEK_API_KEY", "").strip() or os.environ.get("DEEPSEEK_BASE_URL", "").strip():
+        return os.environ.get("DEEPSEEK_MODEL", "").strip() or DEFAULT_DEEPSEEK_MODEL
+    if provider == "openai":
+        return (
+            os.environ.get("OPENAI_MODEL", "").strip()
+            or os.environ.get("CODEX_MODEL", "").strip()
+            or "gpt-5.5"
+        )
+    return (
+        os.environ.get("ANTHROPIC_MODEL", "").strip()
+        or os.environ.get("CLAUDE_MODEL", "").strip()
+        or "claude-sonnet-4-5-20250929"
+    )
 
 
 _WORKLOAD_UID_ENV_KEYS: tuple[str, ...] = (
@@ -438,35 +481,3 @@ def _discover_workload_uid() -> str:
     return ""
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    """Read a boolean configuration value from the environment.
-
-    Args:
-        name: Name of the environment variable to read.
-        default: Value to return when the variable is unset.
-
-    Returns:
-        ``True`` when the variable is set to one of ``1``, ``true``, ``yes``,
-        or ``on`` (case-insensitive); ``False`` for any other set value; and
-        ``default`` when the variable is unset.
-
-    Delegates to :func:`hyperloom.common.env.env_bool`.
-    """
-    return env_bool(name, default)
-
-
-def _env_int(name: str, default: int) -> int:
-    """Read an integer configuration value from the environment.
-
-    Args:
-        name: Name of the environment variable to read.
-        default: Value to return when the variable is unset, empty, or not a
-            valid integer.
-
-    Returns:
-        The parsed integer, or ``default`` when the variable is missing or
-        cannot be parsed.
-
-    Delegates to :func:`hyperloom.common.env.env_int`.
-    """
-    return env_int(name, default)

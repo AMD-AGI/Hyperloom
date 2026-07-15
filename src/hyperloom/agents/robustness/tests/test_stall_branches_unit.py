@@ -4,10 +4,10 @@
 
 from __future__ import annotations
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.agents.robustness.role.prompt_inputs import InboxItem, ReactorContext
 from hyperloom.agents.robustness.signals.stall import (
     StallConfig,
-    _coerce_unix,
     _collect_last_seen,
     evaluate_stall_signals,
 )
@@ -21,21 +21,21 @@ def _item(from_agent: str, ts=None) -> InboxItem:
 
 
 def test_coerce_unix_variants() -> None:
-    assert _coerce_unix(None) is None
-    assert _coerce_unix(5) == 5.0
-    assert _coerce_unix("2026-01-01T00:00:00Z") > 0  # ISO parse (line 157)
-    assert _coerce_unix("123.5") == 123.5  # float fallback (lines 159-160)
-    assert _coerce_unix("not-a-time") is None  # lines 161-162
+    assert to_unix(None) is None
+    assert to_unix(5) == 5.0
+    assert to_unix("2026-01-01T00:00:00Z") > 0
+    assert to_unix("123.5") == 123.5
+    assert to_unix("not-a-time") is None
 
 
 def test_collect_last_seen_branches() -> None:
     inbox = [
-        _item("user", ts=999.0),  # untracked -> skip (line 113)
-        _item("kernel_agent", ts=50.0),  # tracked -> set (lines 117-119)
+        _item("user", ts=999.0),  # untracked -> skip
+        _item("kernel_agent", ts=50.0),  # tracked -> set
         _item("kernel_agent"),  # no ts -> skip
     ]
     events = [
-        {"agent": "critic"},  # no ts -> continue (line 127)
+        {"agent": "critic"},  # no ts -> continue
         {"agent": "orchestration", "ts": 200.0},
         {"agent": "user", "ts": 5.0},  # untracked
     ]
@@ -53,7 +53,7 @@ def test_evaluate_stall_emits_high() -> None:
 
 
 def test_evaluate_stall_no_activity_no_symptom() -> None:
-    # No ground truth for any agent -> no accusations.
+    # No ground truth for any agent -> no symptom.
     ctx = ReactorContext(inbox=[], now_unix=10_000.0)
     data = SourceData(coordinator_events=[])
     assert evaluate_stall_signals(ctx, data) == []

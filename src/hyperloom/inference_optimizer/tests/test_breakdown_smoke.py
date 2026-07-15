@@ -18,7 +18,6 @@ from hyperloom.inference_optimizer.breakdown import (
 )
 
 
-# Fixture builder
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -339,7 +338,7 @@ def _build_fixture(sd: Path) -> None:
             "kernel_id": "k001",
             "source_file": "/path/to/rmsnorm.py",
             "best_artifact_path": str(sd / "patches/k001/0001.patch"),
-            "selected_backends": ["claude"],
+            "selected_backends": ["forge"],
             "proposal": {"decision": "KEEP", "reasons": ["compile_pass"]},
             "verification": {"micro_speedup": 1.27, "compile_passed": True, "correctness_passed": True},
             "cli_log_path": str(kar / "logs/kernel_optimization/ko-deadbeef.log"),
@@ -352,7 +351,7 @@ def _build_fixture(sd: Path) -> None:
                     {
                         "attempt_id": f"a{i:02d}",
                         "kernel_id": "k001",
-                        "backend": "claude",
+                        "backend": "forge",
                         "model": "claude-sonnet-4.5",
                         "ts": f"2026-05-14T07:{40 + i * 5:02d}:00+00:00",
                         "status": "succeeded",
@@ -384,7 +383,6 @@ def _build_fixture(sd: Path) -> None:
     (sd / "patches/k001" / "0001.patch").write_text("--- a\n+++ b\n", encoding="utf-8")
 
 
-# Tests
 @pytest.fixture
 def fixture_session(tmp_path: Path) -> Path:
     sd = tmp_path / "session"
@@ -406,7 +404,7 @@ def test_envelope(fixture_session: Path) -> None:
         "phase_timeline",
         "capability_summary",
         "geak_invocations",
-        "oob_invocations",
+        "forge_invocations",
         "forge_invocations",
         "kernel_lifecycle",
         "param_search",
@@ -438,8 +436,7 @@ def test_session_metadata(fixture_session: Path) -> None:
     assert s["sandbox_user_id"] == "hai.song@core42.ai"
     assert s["stop_reason"] == "target_reached"
     assert s["max_minutes"] == 180
-    # USER_DATA_PATH root carried through from the manifest so a trace-based
-    # consumer can locate the on-disk artifacts.
+    # USER_DATA_PATH root carried through from the manifest.
     assert s["user_data_path"] == "/hyperloom/users/abcd1234hash"
 
 
@@ -457,29 +454,18 @@ def test_session_user_data_path_env_fallback(fixture_session: Path, monkeypatch)
 
 
 def test_session_meta_emitted_without_ci(fixture_session: Path) -> None:
-    """``session_meta`` is produced by the exporter itself (no CI backfill).
-
-    Guards the regression where sessions that skipped ci/optimize_submit landed
-    in pulse without a ``session_meta`` block.
-    """
+    """``session_meta`` is produced by the exporter itself (no CI backfill)."""
     bd = build(fixture_session)
     assert "session_meta" in bd
     meta = bd["session_meta"]
-    # code_revision is sourced from the manifest and must always be present.
     assert meta["code_revision"] == "86d2ed3"
-    # Mirrors the session code_revision so pulse's COALESCE resolves either.
     assert meta["code_revision"] == bd["session"]["code_revision"]
-    # Field contract the CI backfill used to write.
     for key in ("image", "image_id", "session_duration_seconds"):
         assert key in meta
 
 
 def test_session_stop_reason_falls_back_to_close_phase(tmp_path: Path) -> None:
-    """Legacy states may close via phase_history without top-level stop_reason.
-
-    Regression: ``close_sequence_done=true`` + final ``to_phase=CLOSE`` row
-    while ``state.stop_reason`` stayed blank; the terminal reason must still surface.
-    """
+    """Legacy states may close via phase_history without top-level stop_reason; the terminal reason must still surface."""
     sd = tmp_path / "session"
     _write_json(
         sd / "manifest.json",
@@ -555,11 +541,11 @@ def test_session_stop_reason_prefers_specific_close_reason(tmp_path: Path) -> No
 
 def test_keep_stamping_only_best_attempt(fixture_session: Path) -> None:
     """KEEP decision must land on the BEST attempt, not every attempt."""
-    oob = build(fixture_session)["oob_invocations"]
-    assert len(oob) == 3
-    keeps = [o for o in oob if o["decision"] == "KEEP"]
-    others = [o for o in oob if o["decision"] != "KEEP"]
-    assert len(keeps) == 1, [o["decision"] for o in oob]
+    forge = build(fixture_session)["forge_invocations"]
+    assert len(forge) == 3
+    keeps = [o for o in forge if o["decision"] == "KEEP"]
+    others = [o for o in forge if o["decision"] != "KEEP"]
+    assert len(keeps) == 1, [o["decision"] for o in forge]
     assert len(others) == 2
     assert keeps[0]["micro_speedup"] == 1.27
     assert keeps[0]["compile_passed"] is True
@@ -569,9 +555,9 @@ def test_keep_stamping_only_best_attempt(fixture_session: Path) -> None:
 
 def test_capability_summary(fixture_session: Path) -> None:
     cap = build(fixture_session)["capability_summary"]
-    assert cap["oob"]["status"] == "kept"
-    assert cap["oob"]["keeps"] == 1
-    assert cap["oob"]["attempts"] == 3
+    assert cap["forge"]["status"] == "kept"
+    assert cap["forge"]["keeps"] == 1
+    assert cap["forge"]["attempts"] == 3
     assert cap["geak"]["status"] == "not_attempted"
     assert cap["explore"]["status"] == "kept"
     assert cap["explore"]["best_gain_pct"] == pytest.approx(23.4)
@@ -624,12 +610,12 @@ def test_telemetry_aggregates_gpu_monitor(fixture_session: Path) -> None:
     assert gm["max_power_w"] >= gm["avg_power_w"]
 
 
-def test_attribution_kernel_goes_to_oob(fixture_session: Path) -> None:
-    """The single KEEP'd kernel is OOB; family breakdown must reflect that."""
+def test_attribution_kernel_goes_to_forge(fixture_session: Path) -> None:
+    """The single KEEP'd kernel is forge; family breakdown must reflect that."""
     attr = build(fixture_session)["attribution"]
     assert len(attr["gain_per_stack_entry"]) == 3
     sb = attr["source_breakdown"]
-    assert sb["oob_pct_of_total"] >= 45.0
+    assert sb["forge_pct_of_total"] >= 45.0
     assert sb["geak_pct_of_total"] == 0.0
     assert sb["explore_pct_of_total"] == pytest.approx(31.2)
     assert sb["validated_total_pct"] == pytest.approx(84.2)
@@ -680,7 +666,7 @@ def test_no_kernel_agent_runs_returns_empty_invocations(tmp_path: Path) -> None:
     _write_json(sd / "state.json", {"session_id": "x", "baseline_tput": 100.0})
     b = build(sd)
     assert b["geak_invocations"] == []
-    assert b["oob_invocations"] == []
+    assert b["forge_invocations"] == []
     assert b["kernel_lifecycle"]["detected"] == []
 
 
@@ -800,7 +786,6 @@ def test_source_files_keeps_non_empty_kernel_attempts(fixture_session: Path) -> 
     assert any("optimization_attempts.jsonl" in p for p in sf["kernel_attempts"])
 
 
-# Attribution method (A1)
 def _attribution_fixture(tmp_path: Path, state: dict) -> Path:
     """Minimal session_dir whose only content drives ``collect_attribution``."""
     sd = tmp_path / "session"
@@ -892,9 +877,6 @@ def test_attribution_method_missing(tmp_path: Path) -> None:
     assert attr["method"] == "missing"
 
 
-# framework surfaces in source_breakdown + phase_breakdown
-# Regression: framework KEEPs used to fall into the legacy ``other`` bucket
-# and disappear from ``source_breakdown``; these tests pin the new behaviour.
 def test_attribution_framework_surfaces_in_source_breakdown(
     tmp_path: Path,
 ) -> None:
@@ -937,7 +919,7 @@ def test_attribution_framework_surfaces_in_source_breakdown(
     # Per-source rows reconcile to validated_total (no "other" black-hole).
     summed = (
         sb["geak_pct_of_total"]
-        + sb["oob_pct_of_total"]
+        + sb["forge_pct_of_total"]
         + sb["explore_pct_of_total"]
         + sb["sweep_pct_of_total"]
         + sb["framework_pct_of_total"]
@@ -1054,9 +1036,6 @@ def test_attribution_framework_agent_phase_fallback_when_no_phase_history(
     assert "unattributed" not in pb or pb["unattributed"]["total_gain_pct"] == 0.0
 
 
-# gemm_tuning surfaces in source_breakdown + phase_breakdown
-# Regression: gemm_tuning KEEPs used to fall into ``"other"`` and disappear
-# from per-source totals (same shape of bug as framework).
 def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
     tmp_path: Path,
 ) -> None:
@@ -1093,7 +1072,7 @@ def test_attribution_gemm_tuning_surfaces_in_source_breakdown(
     # Per-source rows reconcile to validated_total (no "other" black-hole).
     summed = (
         sb["geak_pct_of_total"]
-        + sb["oob_pct_of_total"]
+        + sb["forge_pct_of_total"]
         + sb["explore_pct_of_total"]
         + sb["sweep_pct_of_total"]
         + sb["framework_pct_of_total"]
@@ -1132,10 +1111,6 @@ def test_attribution_gemm_tuning_pct_emitted_even_when_zero(
     assert sb["gemm_tuning_pct_of_total"] == 0.0
 
 
-# replay_warm_recipe surfaces in source_breakdown
-# Regression: replay_warm_recipe KEEPs used to fall into ``"other"`` (which is
-# never emitted), so a pure warm-recipe-replay session showed a validated_total
-# with no per-source split to back it. It now gets its own headline row.
 def test_attribution_replay_warm_recipe_surfaces_in_source_breakdown(
     tmp_path: Path,
 ) -> None:
@@ -1171,7 +1146,7 @@ def test_attribution_replay_warm_recipe_surfaces_in_source_breakdown(
     # Per-source rows reconcile to validated_total (no "other" black-hole).
     summed = (
         sb["geak_pct_of_total"]
-        + sb["oob_pct_of_total"]
+        + sb["forge_pct_of_total"]
         + sb["explore_pct_of_total"]
         + sb["replay_warm_recipe_pct_of_total"]
         + sb["sweep_pct_of_total"]
@@ -1338,9 +1313,7 @@ def test_attribution_gemm_tuning_falls_back_to_variant_name_then_question_mark(
     assert by_tuned["?"] == pytest.approx(1.0)
 
 
-# phase_breakdown.explore.by_domain key normalization
-# Raw ``provenance`` strings used to land in ``by_domain`` verbatim; the
-# collector now strips ``specialist:`` and folds ``legacy:*`` into ``legacy_*``.
+# The collector strips ``specialist:`` and folds ``legacy:*`` into ``legacy_*``.
 def test_phase_breakdown_explore_by_domain_strips_specialist_prefix(
     tmp_path: Path,
 ) -> None:
@@ -1491,7 +1464,6 @@ def test_phase_breakdown_default_grid_and_llm_direct_pass_through(
     assert by_domain["llm_direct"] == pytest.approx(3.0)
 
 
-# capability_summary.specialist.by_specialist per-domain split
 def test_capability_summary_specialist_by_specialist_from_domain_breakdown(
     tmp_path: Path,
 ) -> None:
@@ -1591,9 +1563,6 @@ def test_capability_summary_specialist_by_specialist_falls_back_to_domains_list(
     assert bs["compiler_specialist"]["keeps"] == 1
 
 
-# kernel_roofline collector
-# Collector mirrors ``<sd>/reports/kernel_roofline.json``; every field is
-# optional and collectors must not raise when it is missing or malformed.
 def _kernel_roofline_progress_fixture(tmp_path: Path, payload: dict | None) -> Path:
     """Build a session_dir with optional reports/kernel_roofline.json."""
     sd = tmp_path / "session"
@@ -1730,9 +1699,6 @@ def test_kernel_roofline_empty_kernels_list_is_valid(tmp_path: Path) -> None:
     assert not any("kernel_roofline" in w for w in bd["warnings"])
 
 
-# kernel_optimization_summary collector
-# Collector mirrors ``<sd>/reports/kernel_optimization_summary.json`` verbatim
-# (light shape guards only) so the dashboard reads sbd alone.
 def _report_fixture(tmp_path: Path, rel_path: str, payload: dict | None) -> Path:
     """Session_dir with an optional ``reports/<file>.json``."""
     sd = tmp_path / "session"
@@ -1744,8 +1710,7 @@ def _report_fixture(tmp_path: Path, rel_path: str, payload: dict | None) -> Path
 
 
 def test_kernel_opt_summary_missing_file_returns_empty_dict(tmp_path: Path) -> None:
-    """No report → empty dict, no warning (legacy / non-report sessions
-    must stay warning-free; dashboard hides Block 1)."""
+    """No report → empty dict, no warning."""
     sd = _report_fixture(tmp_path, "reports/kernel_optimization_summary.json", None)
     bd = build(sd)
     assert bd["kernel_optimization_summary"] == {}
@@ -1753,9 +1718,7 @@ def test_kernel_opt_summary_missing_file_returns_empty_dict(tmp_path: Path) -> N
 
 
 def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
-    """Happy path: every documented field round-trips verbatim,
-    including the deeply-nested by_kernel rows (verification +
-    backend_ladder), and a rel ``report_path`` is added."""
+    """Happy path: every documented field round-trips verbatim, including the deeply-nested by_kernel rows, and a rel ``report_path`` is added."""
     payload = {
         "schema_version": 1,
         "session_id": "Qwen-Qwen3-30B-A3B-Base_20260602T134619Z_f70dd15b",
@@ -1804,7 +1767,7 @@ def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
                 "verification": {"compile_passed": False, "correctness_passed": None, "micro_speedup": 1.0},
                 "backend_ladder": [
                     {
-                        "backend": "geak_v3",
+                        "backend": "forge",
                         "status": "failed",
                         "produced_artifact": False,
                         "elapsed_sec": 213.5,
@@ -1812,7 +1775,7 @@ def test_kernel_opt_summary_full_payload_passes_through(tmp_path: Path) -> None:
                         "error_message": "preprocess reported 1 error(s)",
                     },
                     {
-                        "backend": "claude",
+                        "backend": "forge",
                         "status": "failed",
                         "produced_artifact": False,
                         "elapsed_sec": 483.5,
@@ -1909,7 +1872,6 @@ def test_kernel_opt_summary_non_dict_blob_returns_empty(tmp_path: Path) -> None:
     assert any("kernel_optimization_summary" in w and "not a JSON object" in w for w in bd["warnings"])
 
 
-# conc_sweep_summary collector
 def test_conc_sweep_summary_missing_file_returns_empty_dict(tmp_path: Path) -> None:
     """No report → empty dict, no warning."""
     sd = _report_fixture(tmp_path, "reports/conc_sweep_summary.json", None)
@@ -2036,9 +1998,6 @@ def test_conc_sweep_summary_non_dict_blob_returns_empty(tmp_path: Path) -> None:
     assert any("conc_sweep_summary" in w and "not a JSON object" in w for w in bd["warnings"])
 
 
-# roofline_progress collector
-# Renamed from the top-level ``roofline`` key to coexist with the list-shaped
-# ``roofline`` consumed by the markdown-report renderer.
 def _roofline_progress_fixture(
     tmp_path: Path,
     *,
@@ -2257,9 +2216,6 @@ def test_roofline_progress_failure_streak_passes_through(tmp_path: Path) -> None
     assert rl["roofline_failure_streak"] == 3
 
 
-# roofline + roofline_progress coexist (post name-clash fix)
-# Regression: two collectors were both registered as ``collect_roofline`` and
-# the markdown-report list silently evaluated to empty; both surfaces now coexist.
 def test_roofline_and_roofline_progress_coexist_independently(
     tmp_path: Path,
 ) -> None:
@@ -2330,9 +2286,6 @@ def test_roofline_list_empty_when_no_snapshots(tmp_path: Path) -> None:
     assert len(bd["roofline_progress"]["trajectory"]) == 2
 
 
-# optimization_stack passthrough (raw KEEP ledger)
-# Mirrors ``state.optimization_stack[]`` to the sbd top level so downstream
-# tooling reads full per-entry evidence without round-tripping to state.json.
 def test_optimization_stack_empty_when_state_has_no_stack(tmp_path: Path) -> None:
     """Fresh session: absent/empty ``state.optimization_stack`` → top-level field is ``[]``, no warning."""
     sd = _roofline_progress_fixture(
@@ -2387,10 +2340,7 @@ def test_optimization_stack_full_field_passthrough(tmp_path: Path) -> None:
 def test_optimization_stack_passes_through_gemm_tuning_evidence(
     tmp_path: Path,
 ) -> None:
-    """A ``gemm_tuning`` KEEP carries ``tuned_file`` /
-    ``final_report_path`` / ``source`` / ``gain_pct`` — these are the
-    full evidence the dashboard needs to attribute speedup to the
-    deterministic FP8 tuner. The passthrough preserves them all."""
+    """A ``gemm_tuning`` KEEP carries ``tuned_file`` / ``final_report_path`` / ``source`` / ``gain_pct``; the passthrough preserves them all."""
     sd = _roofline_progress_fixture(
         tmp_path,
         state={
@@ -2483,7 +2433,6 @@ def test_optimization_stack_drops_non_dict_entries(tmp_path: Path) -> None:
     assert stack[0]["action"] == "params"
 
 
-# A2: final.ttft_mean_ms reconstruction
 def test_final_ttft_reconstructed_from_validate_stack(tmp_path: Path) -> None:
     """Missing ``current_best.ttft_mean_ms`` is read from a disk validate_stack report (``ttft_e2el_source = "validate_stack_disk"``) with a reconstruction warning."""
     sd = tmp_path / "session"
@@ -2599,7 +2548,6 @@ def test_final_ttft_reconstructed_from_warm_replay_measure_round(
     assert final["ttft_e2el_source"] == "stack_top_disk"
 
 
-# A3: baseline.attempts_history reconstruction
 def test_baseline_attempts_history_reconstructed_from_disk(tmp_path: Path) -> None:
     """Empty ``state.baseline_attempts`` + on-disk baseline dirs reconstructs ``status="reconstructed"`` rows with a warning."""
     sd = tmp_path / "session"
@@ -2706,8 +2654,6 @@ def test_baseline_attempts_history_passes_through_error_excerpt(
     assert history[0]["stderr_log_path"] == ("runs/baseline/t1/baseline_stderr.log")
 
 
-# ---------------------------------------------------------------------------
-# B3: invocation populated from baseline_config + server.log
 def test_baseline_invocation_populated(tmp_path: Path) -> None:
     """``baseline.invocation`` reads framework_args from server.log and allowlisted envs, keeping secret-shaped keys out."""
     sd = tmp_path / "session"
@@ -2757,7 +2703,6 @@ def test_baseline_invocation_populated(tmp_path: Path) -> None:
     assert "server.log" in inv["server_log_path"]
 
 
-# B1 / B3: image detection
 def test_session_image_from_env(tmp_path: Path, monkeypatch) -> None:
     """``HYPERLOOM_IMAGE`` populates ``session.image`` when the manifest lacks it; absent all sources it is ``None`` + one warning."""
     sd = tmp_path / "session"
@@ -2798,13 +2743,8 @@ def test_session_image_from_manifest_takes_precedence(
     assert b["session"]["image"] == "registry.example/hyperloom:from-manifest"
 
 
-# C1: baseline.ttft_mean_ms disk-walk fallback
 def test_baseline_ttft_disk_walk_fallback(tmp_path: Path) -> None:
-    """When ``state.last_baseline.workspace`` doesn't resolve, the collector walks ``runs/baseline/`` for the latest report.
-
-    Production parallel: a valid benchmark_report.json existed on wekafs but
-    state's recorded workspace didn't resolve.
-    """
+    """When ``state.last_baseline.workspace`` doesn't resolve, the collector walks ``runs/baseline/`` for the latest report."""
     sd = tmp_path / "session"
     sd.mkdir(parents=True)
     _write_json(sd / "manifest.json", {"schema_version": 1, "session_id": "diskwalk"})
@@ -2872,7 +2812,6 @@ def test_baseline_ttft_disk_walk_fallback_measure_round(tmp_path: Path) -> None:
     assert "measure_round" in baseline["benchmark_report_path"]
 
 
-# C2: framework_args extraction lineage
 def _make_invocation_fixture(
     sd: Path,
     server_log_text: str | None,
@@ -3051,8 +2990,6 @@ def test_framework_args_from_yaml_benchmark_synthesis(tmp_path: Path) -> None:
     assert "envs=[VLLM_FLASH_ATTN=1]" in s, s
 
 
-# Merged from test_v08_observability.py
-
 """Observability and breakdown schema v2 tests."""
 
 
@@ -3064,7 +3001,6 @@ from hyperloom.inference_optimizer.breakdown.exporter import build
 from hyperloom.inference_optimizer.breakdown.schema import SCHEMA_VERSION
 
 
-# Test fixtures
 def _write_state(session_dir: Path, state: dict) -> None:
     (session_dir / "state.json").write_text(json.dumps(state))
     if not (session_dir / "manifest.json").exists():
@@ -3113,7 +3049,6 @@ def _specialist_round(round_id: int = 1, **extras) -> dict:
     return base
 
 
-# 1. Schema version + v1 compat aliases
 def test_schema_version_is_v2():
     assert SCHEMA_VERSION == "hyperloom.session_breakdown.v2"
 
@@ -3146,7 +3081,7 @@ def test_v1_reader_does_not_crash_on_v2_payload(tmp_path):
         "phase_timeline",
         "capability_summary",
         "geak_invocations",
-        "oob_invocations",
+        "forge_invocations",
         "kernel_lifecycle",
         "param_search",
         "sweep",
@@ -3161,7 +3096,6 @@ def test_v1_reader_does_not_crash_on_v2_payload(tmp_path):
     assert b["param_search"] == b["explore_search"]
 
 
-# 2. specialist_runs section
 def test_specialist_runs_empty_when_no_rounds(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
@@ -3227,20 +3161,24 @@ def test_specialist_runs_attaches_transcript_path_when_present(tmp_path):
     assert ref2.get("body") == body_text
 
 
-def test_build_respects_env_var_for_transcripts(tmp_path, monkeypatch):
-    """The CLI env var drives transcripts when ``include_transcripts`` isn't passed."""
+def test_build_respects_process_default_for_transcripts(tmp_path):
+    """The CLI process default drives transcripts when ``include_transcripts`` isn't passed."""
+    from hyperloom.inference_optimizer.breakdown.exporter import set_default_include_transcripts
+
     sd = tmp_path / "session"
     sd.mkdir()
     transcript_dir = sd / "runs" / "specialist" / "t-abc"
     transcript_dir.mkdir(parents=True)
     (transcript_dir / "specialist_done.json").write_text('{"x":1}')
     _write_state(sd, _basic_state(specialist_rounds=[_specialist_round()]))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS", "1")
-    b = build(sd)
-    assert b["specialist_runs"][0]["transcripts"][0].get("body") == '{"x":1}'
+    set_default_include_transcripts(True)
+    try:
+        b = build(sd)
+        assert b["specialist_runs"][0]["transcripts"][0].get("body") == '{"x":1}'
+    finally:
+        set_default_include_transcripts(False)
 
 
-# 3. capability_summary.specialist row (single source)
 def test_capability_summary_specialist_row_when_no_rounds(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
@@ -3322,7 +3260,6 @@ def test_capability_summary_specialist_status_attempted_when_empty_proposals(tmp
     assert b["capability_summary"]["specialist"]["status"] == "attempted"
 
 
-# 4. critic_robustness.kb_writes_summary
 def test_critic_kb_writes_summary_empty_by_default(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
@@ -3362,7 +3299,6 @@ def test_critic_kb_writes_summary_aggregates_by_verdict(tmp_path):
     assert summary["by_verdict"] == {"KEEP": 2, "REVERT": 1}
 
 
-# 5. action_timeline alias mirrors phase_timeline
 def test_action_timeline_mirrors_phase_timeline(tmp_path):
     sd = tmp_path / "session"
     sd.mkdir()
@@ -3410,9 +3346,8 @@ def test_roofline_attempts_are_in_phase_timeline(tmp_path):
     assert row["error_class"] == "trace_analyze_failed"
 
 
-# 6. CLI flag wiring
 def test_cli_exposes_breakdown_include_transcripts_flag():
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     args = parser.parse_args(
@@ -3428,7 +3363,7 @@ def test_cli_exposes_breakdown_include_transcripts_flag():
 
 
 def test_cli_breakdown_include_transcripts_defaults_to_false():
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
@@ -3436,7 +3371,7 @@ def test_cli_breakdown_include_transcripts_defaults_to_false():
 
 
 def test_cli_rejects_unknown_breakdown_include_transcripts():
-    from hyperloom.inference_optimizer.cli import _build_parser
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
     with pytest.raises(SystemExit):

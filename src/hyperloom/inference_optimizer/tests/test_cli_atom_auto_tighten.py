@@ -106,7 +106,6 @@ def test_framework_choices_reject_unknown_value():
         )
 
 
-# Cross-cutting static guard: purpose narrowed to multi-node guard only.
 def test_atom_auto_tighten_only_purpose_is_multi_node_guard():
     """Source-level guard: the function body must not flip historical targets; ``nodes`` stays as the guard signal."""
     src = inspect.getsource(optimizer_cli._apply_atom_auto_tighten)
@@ -127,18 +126,11 @@ def test_atom_auto_tighten_log_line_is_single_line(capsys):
     assert len(atom_lines) == 1, f"expected exactly one atom-context line, got {len(atom_lines)}: {atom_lines!r}"
 
 
-# Forward-looking alias for the multi-node-guard-only behaviour.
-def test_assert_atom_single_node_alias_resolves_to_same_callable():
-    """`_assert_atom_single_node` is a forward-looking alias for `_apply_atom_auto_tighten`; both resolve to the same callable."""
-    assert hasattr(optimizer_cli, "_assert_atom_single_node")
-    assert optimizer_cli._assert_atom_single_node is optimizer_cli._apply_atom_auto_tighten
-
-
-def test_assert_atom_single_node_alias_exits_on_multi_node(capsys):
-    """The alias must inherit the multi-node fail-fast behaviour."""
+def test_apply_atom_auto_tighten_exits_on_multi_node(capsys):
+    """Atom auto-tighten must fail fast for unsupported multi-node runs."""
     args = _fresh_args(nodes=2)
     with pytest.raises(SystemExit) as excinfo:
-        optimizer_cli._assert_atom_single_node(args)
+        optimizer_cli._apply_atom_auto_tighten(args)
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
     assert "--framework atom does not support multi-node" in err

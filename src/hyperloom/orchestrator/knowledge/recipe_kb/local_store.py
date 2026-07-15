@@ -2,11 +2,10 @@
 
 """On-disk recipe-snapshot store backing the local-only write path.
 
-Mirrors the wire contract documented in
-``primus-cortex-internal/docs/recipe-snapshot-api-reference.md`` so a
-caller dispatching reads against either the local store or the central
-kb-service sees identical dicts. Every put_recipe is the local
-equivalent of the v2 ``PUT /recipes/{cid}`` endpoint:
+Mirrors the central kb-service wire contract so a caller dispatching reads
+against either the local store or the central kb-service sees identical
+dicts. Every put_recipe is the local equivalent of the v2
+``PUT /recipes/{cid}`` endpoint:
 
 * prior live row archived to ``history/v{N}.json`` with the incoming
   ``provenance`` recorded in ``replaced_by``;
@@ -23,48 +22,33 @@ Layout (one directory per identity dimension; cid → 5-level path):
         recipe.json              # current live row
         history/
           v1.json
-          v2.json
-          ...
         attempts.ndjson          # append-only attempts log
-        .lock                    # flock target (separate file so reads
-                                 # don't block on the file we're rewriting)
+        .lock                    # flock target (separate file)
 
-Contracts inherited from Arbor's ``recipes.save_recipe`` proven on
-production runs:
+Concurrency/durability contracts: ``fcntl.flock`` (advisory, exclusive)
+coordinates writers; tmp + rename gives readers atomic swaps; ``os.fsync``
+after rename is best-effort durability.
 
-* ``fcntl.flock`` (advisory, exclusive) — coordinates writers in the
-  same OS namespace; cross-host writes via NFS still need the
-  underlying mount to support BSD locking, which both wekafs and
-  EFS do.
-* tmp + rename — POSIX guarantees rename is atomic on the same
-  filesystem, so a concurrent reader either sees the old file or
-  the new file, never a half-written one.
-* ``os.fsync`` after the rename — best-effort durability; tmpfs /
-  some wekafs mounts reject fsync but the rename is still visible.
-
-Anything missing here vs. the central server (audit triggers, GIN
-indices on JSONB) is intentional: the local store is the single
-source of truth in degraded / offline mode and a "best-effort cache"
-in healthy mode. We do not promise SQL-grade analytical queries —
-``search`` is a O(N) walk + in-memory filter and that's deliberate
-(N is bounded by the number of distinct 5-tuples the optimizer has
-ever seen, ~10K is the realistic upper bound).
+The local store is the source of truth in degraded/offline mode and a
+best-effort cache in healthy mode. ``search`` is an O(N) walk + in-memory
+filter (N bounded by the number of distinct 5-tuples ever seen).
 """
 
 from __future__ import annotations
 
-import datetime as _dt
 import errno
 import fcntl
 import json
 import logging
 import os
-import shutil
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+from hyperloom.common.io import atomic_write_json
+from hyperloom.common.jsonio import read_json
+from hyperloom.common.timeutil import now_iso
 
 from .canonical_id import (
     InvalidCanonicalIdError,
@@ -77,9 +61,7 @@ from .schema import Attempt, Recipe
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Filenames + sub-paths within one recipe directory
-# ---------------------------------------------------------------------------
 RECIPE_FILENAME: str = "recipe.json"
 HISTORY_DIRNAME: str = "history"
 ATTEMPTS_FILENAME: str = "attempts.ndjson"
@@ -88,11 +70,8 @@ HISTORY_VERSION_PREFIX: str = "v"
 HISTORY_VERSION_SUFFIX: str = ".json"
 
 
-# ---------------------------------------------------------------------------
 # Order_by whitelist — mirrors the central /recipes/search contract.
-# ---------------------------------------------------------------------------
-# Six values total; everything else raises ValueError so a typo'd
-# ``order_by`` can't silently emit results in the wrong order.
+# Everything else raises ValueError.
 _ORDER_BY_KEYS: dict[str, tuple[str, bool]] = {
     "updated_at DESC": ("updated_at", True),
     "updated_at ASC": ("updated_at", False),
@@ -103,82 +82,13 @@ _ORDER_BY_KEYS: dict[str, tuple[str, bool]] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Errors
-# ---------------------------------------------------------------------------
 class LocalRecipeStoreError(RuntimeError):
     """Raised on unrecoverable failures inside the local KB store.
 
-    Recoverable cases — missing recipe row, empty history — are
-    represented by ``None`` / empty-list returns instead, matching
-    the central API's contract for the same situations.
+    Recoverable cases (missing recipe row, empty history) are
+    represented by ``None`` / empty-list returns instead.
     """
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _utc_now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string.
-
-    Matches the central server's ``created_at`` / ``updated_at``
-    precision (microsecond resolution with an explicit UTC offset) so
-    timestamps written locally compare byte-wise the same way the
-    server's do.
-
-    Returns:
-        str: Current UTC time formatted as an ISO-8601 string with
-            microsecond precision and an explicit offset.
-    """
-    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="microseconds")
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Atomically write ``payload`` as JSON via a tmp-file + rename.
-
-    The tmp file lives in the same directory as ``path`` so the
-    rename is atomic on the same filesystem (POSIX guarantee). Any
-    other layout would risk a cross-device EXDEV.
-
-    fsync is best-effort: tmpfs and certain wekafs mounts reject the
-    syscall, but the rename is already durable on those systems via
-    a different path (e.g. journaling). Logging at DEBUG so operators
-    aren't spammed by the expected miss on tmpfs CI runners.
-
-    Args:
-        path (Path): Destination file path. Parent directories are
-            created if missing.
-        payload (dict[str, Any]): JSON-serialisable mapping to write.
-
-    Raises:
-        Exception: Any error raised while writing or renaming is
-            re-raised after a best-effort cleanup of the tmp file.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(
-        prefix=path.name + ".",
-        suffix=".tmp",
-        dir=str(path.parent),
-    )
-    tmp = Path(tmp_str)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError as exc:
-                log.debug("fsync skipped on %s: %s", tmp, exc)
-        os.replace(tmp, path)
-    except Exception:
-        # Best-effort tmp cleanup so a failed write doesn't leave a
-        # ``recipe.json.XXXXX.tmp`` next to the live row.
-        try:
-            tmp.unlink()
-        except OSError:
-            # Temp file already gone; re-raise the original write error below.
-            pass
-        raise
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -202,11 +112,9 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        return read_json(path, strict=True)
     except FileNotFoundError:
-        # Race: file disappeared between is_file() and open(). Treat
-        # as missing — same outcome as if we'd never seen it.
+        # Race: file disappeared between is_file() and open(); treat as missing.
         return None
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise LocalRecipeStoreError(
@@ -217,9 +125,8 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 def _list_jsonl(path: Path) -> list[dict[str, Any]]:
     """Read every line of an NDJSON file as a JSON dict.
 
-    Malformed lines are logged and skipped (matches the dispatcher
-    drain behaviour) so a single corrupt row can't take down all
-    attempts for a recipe.
+    Malformed lines are logged and skipped so a single corrupt row can't
+    take down all attempts for a recipe.
 
     Args:
         path (Path): NDJSON file to read.
@@ -250,22 +157,16 @@ def _list_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-# ---------------------------------------------------------------------------
 # Per-cid lock
-# ---------------------------------------------------------------------------
 @dataclass
 class _CidLock:
     """Exclusive file-lock for one canonical_id directory.
 
-    Lives on a dedicated ``.lock`` file (NOT ``recipe.json``) so a
-    concurrent reader can ``open(recipe.json)`` without contending on
-    the lock the writer is currently holding. The reader still gets
-    POSIX rename atomicity on the recipe row itself.
-
-    Doubles as a process-local mutex via ``self._mutex`` so two
-    threads in the same process don't dead-lock on the same fcntl
-    region (BSD/POSIX advisory locks are per-process, not
-    per-thread, so we'd otherwise need to serialise this ourselves).
+    Lives on a dedicated ``.lock`` file (not ``recipe.json``) so a
+    concurrent reader can ``open(recipe.json)`` without contending on the
+    writer's lock. Doubles as a process-local mutex via ``self._mutex`` so
+    two threads in the same process don't dead-lock on the same fcntl region
+    (advisory locks are per-process, not per-thread).
     """
 
     path: Path
@@ -288,9 +189,6 @@ class _CidLock:
         """
         self._mutex.acquire()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # ``a+`` so the file is created if missing and the position
-        # is at the end (we don't actually write to it; the lock is
-        # advisory and the file's contents are irrelevant).
         self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX)
@@ -319,15 +217,12 @@ class _CidLock:
                 try:
                     os.close(self._fd)
                 except OSError:
-                    # FD already closed; nothing to release.
                     pass
                 self._fd = None
         self._mutex.release()
 
 
-# ---------------------------------------------------------------------------
 # LocalRecipeStore
-# ---------------------------------------------------------------------------
 @dataclass
 class LocalRecipeStore:
     """Filesystem-backed recipe-snapshot store.
@@ -353,9 +248,7 @@ class LocalRecipeStore:
         """
         self.root = Path(self.root)
 
-    # ------------------------------------------------------------------
     # Path helpers
-    # ------------------------------------------------------------------
     def _recipe_dir(self, canonical_id: str) -> Path:
         """Return the 7-level directory holding one cid's files.
 
@@ -425,14 +318,10 @@ class LocalRecipeStore:
         return self._recipe_dir(canonical_id) / LOCK_FILENAME
 
     def _walk_recipe_dirs(self) -> Iterable[Path]:
-        """Yield every directory at a valid depth below ``root``
-        that contains a live ``recipe.json``.
+        """Yield every 7-level directory below ``root`` holding a live ``recipe.json``.
 
-        Used by :meth:`list_recent` / :meth:`search` — both of which
-        only care about live recipe rows. Directories that hold
-        attempts but no recipe are intentionally excluded.
-
-        Only 7-level directories are accepted.
+        Used by :meth:`search`; directories that hold attempts but no recipe
+        are excluded.
         """
         if not self.root.is_dir():
             return
@@ -452,58 +341,20 @@ class LocalRecipeStore:
                 continue
             yield recipe_dir
 
-    def _walk_cid_dirs(self) -> Iterable[Path]:
-        """Yield every directory exactly seven levels below ``root``
-        that contains EITHER a live ``recipe.json`` OR an
-        ``attempts.ndjson``.
-
-        Used by :meth:`list_session_attempts` so attempts written
-        against a cid that doesn't (yet) have a parent recipe row
-        are still discoverable. Mirrors the central server contract
-        that attempts have no FK to the parent recipe.
-
-        Yields:
-            Each canonical-id directory at the 5-level depth holding either a
-            ``recipe.json`` or an ``attempts.ndjson`` (deduplicated).
-        """
-        if not self.root.is_dir():
-            return
-        seen: set[Path] = set()
-        for filename in (RECIPE_FILENAME, ATTEMPTS_FILENAME):
-            for path in self.root.rglob(filename):
-                if not path.is_file():
-                    continue
-                cid_dir = path.parent
-                try:
-                    rel_parts = cid_dir.relative_to(self.root).parts
-                except ValueError:
-                    continue
-                if len(rel_parts) != 7:
-                    continue
-                if cid_dir in seen:
-                    continue
-                seen.add(cid_dir)
-                yield cid_dir
-
-    # ------------------------------------------------------------------
     # put_recipe
-    # ------------------------------------------------------------------
     def put_recipe(
         self,
         *,
         canonical_id: str,
-        # 7-tuple identity (also encoded in canonical_id; stamped at
-        # the top level for arbor-compat — arbor's recipe.json has
-        # ``model`` / ``hardware`` as top-level fields).
+        # 7-tuple identity (also encoded in canonical_id; stamped at the top
+        # level for arbor-compat).
         model: str = "",
         hardware: str = "",
         framework_name: str = "",
         framework_version: str = "",
         precision: str = "",
-        # Arbor-aligned payload. Each list entry can be either an
-        # already-shaped dict (the wire representation) or a typed
-        # dataclass instance — :meth:`Recipe.from_dict` handles both
-        # via the ``payload`` round-trip below.
+        # Arbor-aligned payload. Each list entry can be an already-shaped dict
+        # or a typed dataclass instance; :meth:`Recipe.from_dict` handles both.
         best_config: dict[str, str] | None = None,
         best_throughput: float = 0.0,
         what_worked: list[Any] | None = None,
@@ -515,95 +366,31 @@ class LocalRecipeStore:
         last_profiled: str = "",
         stack_fingerprint: dict[str, str] | None = None,
         sessions: list[Any] | None = None,
-        # v2 audit / wire-compat fields (kept so the dispatcher can
-        # later push to the central server if we ever re-enable
-        # write-through; provenance is REQUIRED by the central server
-        # so we always stamp something).
+        # v2 audit / wire-compat fields. provenance is required by the central
+        # server so we always stamp something.
         authority: str = "EXPERIENTIAL",
         confidence: float = 0.85,
         evidence_refs: list[Any] | None = None,
         provenance: dict[str, Any] | None = None,
-        # Forward-compat: arbor's existing recipes carry session-level
-        # free-form keys (``session_20260515_findings`` etc.); callers
-        # can pass them via ``extras`` to avoid losing data on rewrite.
+        # Free-form session-level keys preserved verbatim across rewrite.
         extras: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Atomically upsert a recipe row in the arbor schema.
-
-        Atomicity is the same as before:
-
-        1. read live ``recipe.json`` (may be missing on first put);
-        2. archive prior live to ``history/v{prior_version}.json``,
-           stamping ``replaced_by = provenance`` so the archive
-           carries the triggering write's audit footprint;
-        3. write new live ``recipe.json`` at ``version = prior + 1``
-           with refreshed ``updated_at`` (and ``created_at`` carried
-           over on update / set to ``now`` on first write).
-
-        ``what_worked`` / ``what_failed`` / etc. accept either
-        already-shaped dicts (``{"description": ..., "measured_impact":
-        ...}``) or arbor dataclass instances; everything is
-        normalised through ``Recipe.from_dict`` so the on-disk JSON
-        is always the documented arbor shape.
-
-        Args:
-            canonical_id (str): Canonical recipe identity; must be
-                non-empty.
-            model (str): Model identity slot, stamped top-level for
-                arbor-compat.
-            hardware (str): Hardware identity slot.
-            framework_name (str): Framework identity slot.
-            framework_version (str): Framework version identity slot.
-            precision (str): Precision identity slot.
-            best_config (dict[str, str] | None): Best-known config
-                mapping; ``None`` becomes ``{}``.
-            best_throughput (float): Best measured throughput.
-            what_worked (list[Any] | None): Findings that helped, as
-                dicts or arbor dataclasses.
-            what_failed (list[Any] | None): Findings that failed.
-            remaining_gaps (list[Any] | None): Known remaining gaps.
-            prs_tested (list[Any] | None): PRs tested for this recipe.
-            pitfalls (list[Any] | None): Known pitfalls.
-            lessons (list[Any] | None): Lessons learned.
-            last_profiled (str): Timestamp of last profiling run.
-            stack_fingerprint (dict[str, str] | None): Stack
-                fingerprint mapping.
-            sessions (list[Any] | None): Per-session optimization
-                records.
-            authority (str): Authority tier for the row (default
-                ``"EXPERIENTIAL"``).
-            confidence (float): Confidence score in ``[0, 1]``.
-            evidence_refs (list[Any] | None): Supporting evidence
-                references.
-            provenance (dict[str, Any] | None): Audit provenance for
-                this write; recorded in the archived row's
-                ``replaced_by``.
-            extras (dict[str, Any] | None): Free-form arbor keys
-                splatted at the top level of the on-disk row.
-
-        Returns:
-            dict[str, Any]: ``{"canonical_id", "version", "created"}``,
-                identical to the central server's PUT response shape.
-
-        Raises:
-            ValueError: If ``canonical_id`` is empty.
-        """
+        """Atomically upsert a recipe row and archive the prior live version."""
         if not canonical_id:
             raise ValueError("put_recipe requires a non-empty canonical_id")
         recipe_dir = self._recipe_dir(canonical_id)
         recipe_dir.mkdir(parents=True, exist_ok=True)
         lock = _CidLock(self._lock_path(canonical_id))
         with lock:
-            now = _utc_now_iso()
+            now = now_iso(timespec="microseconds")
             live = _read_json(self._live_path(canonical_id))
             created = live is None
             prior_version = int(live.get("version", 0)) if isinstance(live, dict) else 0
             new_version = prior_version + 1 if not created else 1
 
             if not created:
-                # Archive prior live before overwrite. ``replaced_by``
-                # carries the triggering write's provenance so an
-                # audit can trace who supplanted v{N-1}.
+                # Archive prior live before overwrite; ``replaced_by`` carries
+                # the triggering write's provenance for audit.
                 archive_path = self._history_version_path(
                     canonical_id,
                     prior_version,
@@ -615,13 +402,17 @@ class LocalRecipeStore:
                     "replaced_by": dict(provenance or {}),
                     "snapshot": dict(live) if isinstance(live, dict) else {},
                 }
-                _atomic_write_json(archive_path, archive_payload)
+                atomic_write_json(
+                    archive_path,
+                    archive_payload,
+                    indent=2,
+                    sort_keys=True,
+                    make_parents=True,
+                    fsync=True,
+                )
 
-            # Build payload via ``Recipe.from_dict`` so dataclass
-            # instances and dicts both round-trip cleanly (typed
-            # callers can pass ``Finding(description=..., measured_impact=...)``
-            # or ``{"description": ..., "measured_impact": ...}`` —
-            # both end up in the same on-disk shape).
+            # Build payload via ``Recipe.from_dict`` so dataclass instances and
+            # dicts both round-trip into the same on-disk shape.
             payload_dict: dict[str, Any] = {
                 "canonical_id": canonical_id,
                 "version": new_version,
@@ -634,11 +425,11 @@ class LocalRecipeStore:
                 "precision": precision,
                 "best_config": dict(best_config or {}),
                 "best_throughput": float(best_throughput),
-                "what_worked": _normalise_findings(what_worked),
-                "what_failed": _normalise_failures(what_failed),
-                "remaining_gaps": _normalise_gaps(remaining_gaps),
+                "what_worked": _normalise_str_dicts(what_worked, ("description", "measured_impact")),
+                "what_failed": _normalise_str_dicts(what_failed, ("description", "reason")),
+                "remaining_gaps": _normalise_str_dicts(remaining_gaps, ("description", "metrics")),
                 "prs_tested": _normalise_prs(prs_tested),
-                "pitfalls": _normalise_pitfalls(pitfalls),
+                "pitfalls": _normalise_str_dicts(pitfalls, ("description", "severity")),
                 "lessons": _normalise_lessons(lessons),
                 "last_profiled": last_profiled,
                 "stack_fingerprint": dict(stack_fingerprint or {}),
@@ -649,16 +440,18 @@ class LocalRecipeStore:
                 "provenance": dict(provenance or {}),
             }
             if extras:
-                # Splat extras at the top level so arbor consumers
-                # see them where they expect (no nested ``extras``
-                # key on disk).
+                # Splat extras at the top level (no nested ``extras`` key on disk).
                 for key, val in extras.items():
                     payload_dict.setdefault(key, val)
 
             recipe = Recipe.from_dict(payload_dict)
-            _atomic_write_json(
+            atomic_write_json(
                 self._live_path(canonical_id),
                 recipe.to_dict(),
+                indent=2,
+                sort_keys=True,
+                make_parents=True,
+                fsync=True,
             )
 
         return {
@@ -667,9 +460,7 @@ class LocalRecipeStore:
             "created": created,
         }
 
-    # ------------------------------------------------------------------
-    # get_recipe / get_history / delete
-    # ------------------------------------------------------------------
+    # get_recipe
     def get_recipe(
         self,
         *,
@@ -678,10 +469,8 @@ class LocalRecipeStore:
     ) -> dict[str, Any] | None:
         """Read live recipe (``version=None``) or an archived version.
 
-        Returns ``None`` for both "canonical_id never existed" and
-        "version not in history" — matches the central server's 404
-        contract that the dispatcher (Commit 3) maps onto a single
-        ``None`` so callers don't have to discriminate.
+        Returns ``None`` for both "canonical_id never existed" and "version
+        not in history" so callers don't have to discriminate.
 
         Args:
             canonical_id (str): Canonical recipe identity; must be
@@ -700,8 +489,7 @@ class LocalRecipeStore:
             raise ValueError("get_recipe requires a non-empty canonical_id")
         if version is None:
             return _read_json(self._live_path(canonical_id))
-        # Live version requested explicitly → serve from live, since
-        # history is "everything below the current version".
+        # Live version requested explicitly → serve from live.
         live = _read_json(self._live_path(canonical_id))
         if isinstance(live, dict) and int(live.get("version", 0)) == int(version):
             return live
@@ -710,138 +498,12 @@ class LocalRecipeStore:
         )
         if archive is None:
             return None
-        # Archive shape is ``{canonical_id, version, archived_at,
-        # replaced_by, snapshot}`` — return the snapshot (which IS the
-        # historical Recipe row) so callers see the same shape they
-        # would for a live read.
+        # Return the snapshot (the historical Recipe row) so callers see the
+        # same shape as a live read.
         snapshot = archive.get("snapshot") if isinstance(archive, dict) else None
         return dict(snapshot) if isinstance(snapshot, dict) else None
 
-    def get_history(
-        self,
-        *,
-        canonical_id: str,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Return every archived prior version, ascending by version.
-
-        The current (live) row is NOT included — callers fetch that
-        via :meth:`get_recipe`. Mirrors the central server's
-        ``/history`` contract that returns ``{canonical_id, history:
-        [...]}`` with the live row excluded.
-
-        Unknown canonical_id returns ``[]`` (no 404 — matches central
-        server behaviour for ``/history``).
-
-        Args:
-            canonical_id (str): Canonical recipe identity; must be
-                non-empty.
-            limit (int): Maximum number of archived rows to return.
-
-        Returns:
-            list[dict[str, Any]]: Archived prior versions ascending by
-                version (live row excluded), truncated to ``limit``.
-
-        Raises:
-            ValueError: If ``canonical_id`` is empty.
-        """
-        if not canonical_id:
-            raise ValueError("get_history requires a non-empty canonical_id")
-        history_dir = self._history_dir(canonical_id)
-        if not history_dir.is_dir():
-            return []
-        rows: list[dict[str, Any]] = []
-        for entry in sorted(history_dir.iterdir()):
-            if not entry.is_file():
-                continue
-            if not (entry.name.startswith(HISTORY_VERSION_PREFIX) and entry.name.endswith(HISTORY_VERSION_SUFFIX)):
-                continue
-            archive = _read_json(entry)
-            if isinstance(archive, dict):
-                rows.append(archive)
-        rows.sort(key=lambda r: int(r.get("version") or 0))
-        if limit and len(rows) > int(limit):
-            rows = rows[: int(limit)]
-        return rows
-
-    def delete_recipe(self, *, canonical_id: str) -> bool:
-        """Delete the live row, preserving history.
-
-        Mirrors the central server contract: history rows survive,
-        any prior ``GET ?version=N`` still returns the archived
-        snapshot.
-
-        Args:
-            canonical_id (str): Canonical recipe identity; must be
-                non-empty.
-
-        Returns:
-            bool: ``True`` iff a live row was actually removed;
-                ``False`` when none was present.
-
-        Raises:
-            ValueError: If ``canonical_id`` is empty.
-            LocalRecipeStoreError: If the live row exists but cannot
-                be removed.
-        """
-        if not canonical_id:
-            raise ValueError("delete_recipe requires a non-empty canonical_id")
-        live_path = self._live_path(canonical_id)
-        lock = _CidLock(self._lock_path(canonical_id))
-        with lock:
-            try:
-                live_path.unlink()
-                return True
-            except FileNotFoundError:
-                return False
-            except OSError as exc:
-                raise LocalRecipeStoreError(
-                    f"failed to delete {live_path}: {exc}",
-                ) from exc
-
-    # ------------------------------------------------------------------
-    # list_recent / search / list_all_live_recipes
-    # ------------------------------------------------------------------
-    def list_all_live_recipes(self) -> list[dict[str, Any]]:
-        """Return ALL live recipes without the search() 1000-row clamp.
-
-        Used by the mirror ingest CronJob which must iterate the entire
-        corpus. Unlike search(), this bypasses the limit/filter/sort
-        machinery and simply walks every recipe dir.
-        """
-        rows: list[dict[str, Any]] = []
-        for recipe_dir in self._walk_recipe_dirs():
-            try:
-                cid = canonical_id_for_path(
-                    root=self.root,
-                    recipe_dir=recipe_dir,
-                )
-            except InvalidCanonicalIdError:
-                continue
-            payload = _read_json(recipe_dir / RECIPE_FILENAME)
-            if not isinstance(payload, dict):
-                continue
-            payload.setdefault("canonical_id", cid)
-            rows.append(payload)
-        return rows
-
-    def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """Recent live recipes (``updated_at DESC``), no filter.
-
-        Walks the whole store tree — O(N) over distinct cids. Matches
-        the central server's ``GET /recipes`` contract; pagination is
-        a single ``limit`` because the optimizer uses this only for
-        operator dashboards (full search uses :meth:`search`).
-
-        Args:
-            limit (int): Maximum number of recipes to return.
-
-        Returns:
-            list[dict[str, Any]]: Live recipes ordered
-                ``updated_at DESC``, truncated to ``limit``.
-        """
-        return self.search(order_by="updated_at DESC", limit=int(limit))
-
+    # search
     def search(
         self,
         *,
@@ -861,19 +523,15 @@ class LocalRecipeStore:
 
         Mirrors the central server's ``POST /recipes/search``:
 
-        * ``label_match``: dict containment — only rows whose
-          ``labels`` is a strict superset of every (key, value) pair
-          match. Empty/None means no filter.
-        * ``metric_filters``: ``{name: {min?, max?}}`` numeric range
-          bounds. Rows missing the ``metrics`` key are excluded
-          (matches central server semantics — a row without the key
-          can't satisfy the bound).
-        * ``updated_since``: ISO-8601 string compared lexically (UTC
-          ISO-8601 sorts byte-wise the same as chronologically as
-          long as the offset is constant, which our ``_utc_now_iso``
-          guarantees).
-        * ``order_by``: strict whitelist of 6 values, matches the
-          server constant. Anything else raises ValueError.
+        * ``label_match``: dict containment — rows whose ``labels`` is a
+          strict superset of every (key, value) pair match. Empty/None means
+          no filter.
+        * ``metric_filters``: ``{name: {min?, max?}}`` numeric range bounds;
+          rows missing the key are excluded.
+        * ``updated_since``: ISO-8601 string compared lexically (valid because
+          our UTC timestamps sort byte-wise as chronologically).
+        * ``order_by``: strict whitelist of 6 values; anything else raises
+          ValueError.
         * ``limit``: ``[1, 1000]`` clamp.
 
         Args:
@@ -918,8 +576,7 @@ class LocalRecipeStore:
             payload = _read_json(recipe_dir / RECIPE_FILENAME)
             if not isinstance(payload, dict):
                 continue
-            # Defensive: stamp the cid even if the on-disk payload is
-            # missing it (older write before Commit 2 might).
+            # Defensive: stamp the cid if the on-disk payload is missing it.
             payload.setdefault("canonical_id", cid)
             if not _matches_labels(payload, label_match or {}):
                 continue
@@ -935,9 +592,7 @@ class LocalRecipeStore:
         )
         return rows[:clamped_limit]
 
-    # ------------------------------------------------------------------
     # Attempts (append-only)
-    # ------------------------------------------------------------------
     def append_attempt(
         self,
         *,
@@ -953,10 +608,8 @@ class LocalRecipeStore:
     ) -> dict[str, Any]:
         """Append one attempt row.
 
-        Append-only: never reads / mutates the parent recipe. Matches
-        the central server's ``POST /recipes/{cid}/attempts`` —
-        attempts are filed even if the parent recipe row doesn't
-        exist yet (no FK).
+        Append-only: never reads / mutates the parent recipe. Attempts are
+        filed even if the parent recipe row doesn't exist yet (no FK).
 
         Args:
             canonical_id (str): Parent recipe identity; must be
@@ -995,14 +648,13 @@ class LocalRecipeStore:
         recipe_dir = self._recipe_dir(canonical_id)
         recipe_dir.mkdir(parents=True, exist_ok=True)
         attempts_path = self._attempts_path(canonical_id)
-        # ``id`` is monotonic per cid: count existing rows + 1. We do
-        # this under the cid lock so two concurrent appends don't
-        # collide on the same id.
+        # ``id`` is monotonic per cid (existing rows + 1), assigned under the
+        # cid lock so concurrent appends don't collide.
         lock = _CidLock(self._lock_path(canonical_id))
         with lock:
             existing = _list_jsonl(attempts_path)
             next_id = len(existing) + 1
-            stamped_at = attempt_at or _utc_now_iso()
+            stamped_at = attempt_at or now_iso(timespec="microseconds")
             attempt = Attempt(
                 id=next_id,
                 recipe_canonical_id=canonical_id,
@@ -1035,133 +687,17 @@ class LocalRecipeStore:
             "attempt_at": stamped_at,
         }
 
-    def list_attempts(
-        self,
-        *,
-        canonical_id: str,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """List attempts for one recipe, newest first.
-
-        Mirrors the central server's ``GET /recipes/{cid}/attempts``.
-        Empty list for absent canonical_id (no 404 surface).
-
-        Args:
-            canonical_id (str): Parent recipe identity; must be
-                non-empty.
-            limit (int): Maximum number of attempts to return.
-
-        Returns:
-            list[dict[str, Any]]: Attempt rows newest-first, truncated
-                to ``limit``.
-
-        Raises:
-            ValueError: If ``canonical_id`` is empty.
-        """
-        if not canonical_id:
-            raise ValueError(
-                "list_attempts requires a non-empty canonical_id",
-            )
-        rows = _list_jsonl(self._attempts_path(canonical_id))
-        # Newest first — central response is ordered ``attempt_at
-        # DESC`` (per spec) but the on-disk file is append-only so
-        # iteration order is ascending. Reversing gives the required
-        # newest-first contract.
-        rows.reverse()
-        if limit and len(rows) > int(limit):
-            rows = rows[: int(limit)]
-        return rows
-
-    def list_session_attempts(
-        self,
-        *,
-        session_id: str,
-        limit: int = 500,
-    ) -> list[dict[str, Any]]:
-        """List attempts for one session across all recipes (oldest first).
-
-        Mirrors the central server's
-        ``GET /sessions/{session_id}/attempts``. The local store
-        achieves the cross-recipe view by walking the tree.
-
-        Args:
-            session_id (str): Session whose attempts to collect; must
-                be non-empty.
-            limit (int): Maximum number of attempts to return.
-
-        Returns:
-            list[dict[str, Any]]: Attempts for the session across all
-                recipes, oldest-first, truncated to ``limit``.
-
-        Raises:
-            ValueError: If ``session_id`` is empty.
-        """
-        if not session_id:
-            raise ValueError(
-                "list_session_attempts requires a non-empty session_id",
-            )
-        all_rows: list[dict[str, Any]] = []
-        for cid_dir in self._walk_cid_dirs():
-            attempts_path = cid_dir / ATTEMPTS_FILENAME
-            for row in _list_jsonl(attempts_path):
-                if str(row.get("session_id") or "") == session_id:
-                    all_rows.append(row)
-        all_rows.sort(key=lambda r: str(r.get("attempt_at") or ""))
-        if limit and len(all_rows) > int(limit):
-            all_rows = all_rows[: int(limit)]
-        return all_rows
-
-    # ------------------------------------------------------------------
-    # Maintenance helpers (used by tests / future cleanup tooling)
-    # ------------------------------------------------------------------
-    def purge_recipe(self, *, canonical_id: str) -> None:
-        """Remove the entire directory tree for one cid (live + history
-        + attempts).
-
-        Distinct from :meth:`delete_recipe` which preserves history;
-        this is the "obliterate this recipe" escape hatch for tests
-        and CLI tooling. Not reachable from the Coordinator hot path.
-
-        Args:
-            canonical_id (str): Canonical recipe identity; must be
-                non-empty.
-
-        Raises:
-            ValueError: If ``canonical_id`` is empty.
-        """
-        if not canonical_id:
-            raise ValueError("purge_recipe requires a non-empty canonical_id")
-        recipe_dir = self._recipe_dir(canonical_id)
-        if recipe_dir.is_dir():
-            shutil.rmtree(recipe_dir)
-
-
-# ---------------------------------------------------------------------------
 # search filter helpers
-# ---------------------------------------------------------------------------
 def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> bool:
-    """Key-value match against the top-level identity fields of an
-    arbor-shape recipe.
+    """Key-value match against the top-level identity fields of an arbor-shape recipe.
 
-    Recognised label keys map to top-level fields:
-
-    * ``model`` / ``hardware`` / ``framework_name`` /
-      ``framework_version`` / ``precision`` / ``model_type`` /
-      ``architectures`` → the 7-tuple identity slots.
-
-    For ``architectures`` the semantics are *contains*: the query's
-    architecture slug(s) must be a subset of the recipe's architectures
-    (matching gbrain_remote_client behaviour). Both slug strings
-    (``"llamaforcausallm"``) and lists (``["LlamaForCausalLM"]``) are
-    accepted and normalized before comparison.
-
-    Any other key is matched against the recipe's free-form
-    ``extras`` (preserved arbor session-level keys) so a caller
-    that stamps custom labels into ``put_recipe(..., extras={"task":
-    "pretrain"})`` can still filter on ``label_match={"task":
-    "pretrain"}``.
-
-    Empty filter trivially matches everything.
+    Recognised label keys (``model`` / ``hardware`` / ``framework_name`` /
+    ``framework_version`` / ``precision`` / ``model_type`` /
+    ``architectures``) map to the 7-tuple identity slots. For
+    ``architectures`` the semantics are *contains*: the query's slug(s) must
+    be a subset of the recipe's architectures; both slug strings and lists
+    are normalized before comparison. Any other key is matched against the
+    recipe's free-form extras. Empty filter matches everything.
 
     Args:
         payload (dict[str, Any]): Arbor-shape recipe row to test.
@@ -1182,10 +718,8 @@ def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> boo
             if not _model_type_matches(payload.get("model_type"), expected):
                 return False
         elif key == "framework_name":
-            # Back-compat: rows persisted before the framework_name rename
-            # stored the serving framework under the legacy ``framework`` key;
-            # search reads raw on-disk JSON without normalizing through
-            # ``Recipe.from_dict``, so fall back here too.
+            # Fall back to the legacy ``framework`` key since search reads raw
+            # on-disk JSON without normalizing through ``Recipe.from_dict``.
             actual = payload.get("framework_name") or payload.get("framework")
             if actual != expected:
                 return False
@@ -1249,16 +783,9 @@ def _matches_metrics(
 ) -> bool:
     """Numeric range filter against arbor-shape metric fields.
 
-    Recognised metric keys:
-
-    * ``best_throughput`` (or shorthand ``throughput``) — read from
-      the top-level ``best_throughput`` field;
-    * any other key — looked up at the top level (so a caller can
-      stamp custom numeric metrics via
-      ``put_recipe(..., extras={"mfu": 0.4})``).
-
-    Rows missing the key are excluded (cannot be proven to satisfy
-    the bound — same semantics as the central server).
+    Recognised metric keys: ``best_throughput`` (or shorthand
+    ``throughput``) reads the top-level ``best_throughput`` field; any other
+    key is looked up at the top level. Rows missing the key are excluded.
 
     Args:
         payload (dict[str, Any]): Arbor-shape recipe row to test.
@@ -1271,10 +798,7 @@ def _matches_metrics(
     if not metric_filters:
         return True
     for key, bounds in metric_filters.items():
-        # Shorthand alias: ``throughput`` resolves to
-        # ``best_throughput`` for arbor-compat (the v2 wire spec
-        # uses ``throughput`` as the canonical metric key, so
-        # callers might still use that name).
+        # Shorthand alias: ``throughput`` resolves to ``best_throughput``.
         lookup_key = "best_throughput" if key in ("throughput", "best_throughput") else key
         if lookup_key not in payload:
             return False
@@ -1286,7 +810,7 @@ def _matches_metrics(
             lo = bounds.get("min")
             hi = bounds.get("max")
         else:
-            # Tolerate ``{"throughput": 10000}`` shorthand → equality.
+            # Scalar shorthand → equality.
             lo = hi = bounds
         if lo is not None:
             try:
@@ -1330,11 +854,9 @@ def _matches_updated_since(
 def _coerce_sort_value(value: Any, key: str) -> Any:
     """Stable sort coercion for the order_by whitelist.
 
-    ``version`` is integer (defaults to 0 for malformed rows so they
-    sink predictably); the timestamp keys stay as strings (ISO-8601
-    UTC sorts correctly byte-wise). None / missing always maps to
-    "smaller than anything else" so a malformed row falls to the
-    bottom of an ASC sort and the top of a DESC sort.
+    ``version`` is coerced to int (0 for malformed rows); timestamp keys stay
+    as strings (ISO-8601 UTC sorts byte-wise). None / missing maps to the
+    smallest value so malformed rows sink.
 
     Args:
         value (Any): Raw field value pulled from a recipe row.
@@ -1352,20 +874,13 @@ def _coerce_sort_value(value: Any, key: str) -> Any:
     return str(value or "")
 
 
-# ---------------------------------------------------------------------------
-# put_recipe input normalisation — accept dataclass OR dict for every list
-# ---------------------------------------------------------------------------
-# Each helper coerces a heterogeneous list (None / dataclass / plain dict /
-# tuple / scalar) into a list of plain dicts matching the arbor wire shape
-# for that field. Errors are propagated only when the input is unambiguously
-# malformed (e.g. a string where a Finding was expected). Empty / None
-# inputs become empty lists — callers don't have to guard.
+# put_recipe input normalisation — accept dataclass OR dict for every list.
+# Each helper coerces a heterogeneous list into plain dicts matching the arbor
+# wire shape; empty/None inputs become empty lists.
 def _coerce_dict(item: Any) -> dict[str, Any] | None:
     """Return ``item`` as a dict, or ``None`` when it cannot be coerced.
 
-    Accepts a dataclass instance (``__dict__`` view) or a Mapping.
-    Anything else (str / int / None) returns None so the helper-
-    specific extractors can decide whether to skip or raise.
+    Accepts a dataclass instance or a Mapping; anything else returns None.
 
     Args:
         item (Any): Candidate value: dict, dataclass, ``to_dict``-able
@@ -1398,21 +913,6 @@ def _normalise_str_dicts(items: list[Any] | None, keys: tuple[str, ...]) -> list
             continue
         out.append({k: str(d.get(k) or "") for k in keys})
     return out
-
-
-def _normalise_findings(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce findings into arbor ``{description, measured_impact}`` dicts."""
-    return _normalise_str_dicts(items, ("description", "measured_impact"))
-
-
-def _normalise_failures(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce failures into arbor ``{description, reason}`` dicts."""
-    return _normalise_str_dicts(items, ("description", "reason"))
-
-
-def _normalise_gaps(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce gaps into arbor ``{description, metrics}`` dicts."""
-    return _normalise_str_dicts(items, ("description", "metrics"))
 
 
 def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
@@ -1449,11 +949,6 @@ def _normalise_prs(items: list[Any] | None) -> list[dict[str, Any]]:
     return out
 
 
-def _normalise_pitfalls(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce pitfalls into arbor ``{description, severity}`` dicts."""
-    return _normalise_str_dicts(items, ("description", "severity"))
-
-
 def _normalise_lessons(items: list[Any] | None) -> list[dict[str, Any]]:
     """Coerce lessons into arbor ``{statement, measured_impact}`` dicts.
 
@@ -1476,8 +971,7 @@ def _normalise_lessons(items: list[Any] | None) -> list[dict[str, Any]]:
         out.append(
             {
                 "statement": str(d.get("statement") or ""),
-                # Free-form (Coordinator writes a structured dict) — keep
-                # verbatim instead of str()-ing a dict into a lossy string.
+                # Free-form; keep verbatim instead of str()-ing a dict.
                 "measured_impact": d.get("measured_impact") or "",
             }
         )

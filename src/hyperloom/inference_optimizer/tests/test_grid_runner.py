@@ -34,7 +34,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 
 
-# Section 1: _write_variant_abort_marker (formerly test_grid_runner_abort_marker.py)
+# Section 1: _write_variant_abort_marker
 
 
 def _read_marker(slot):
@@ -161,7 +161,7 @@ def test_variant_result_carries_error_class_field():
     assert vr_ok.to_dict()["error_class"] == ""
 
 
-# Section 2: helper-level units (formerly test_grid_runner_helpers_units.py)
+# Section 2: helper-level units
 
 
 class TestResolveSkipSpec:
@@ -196,9 +196,8 @@ class TestReorderGridForMultiNode:
     """reorder is wired into explore/sweep; single-node MUST be a no-op."""
 
     def _grid(self):
-        # Deliberately ordered so a real reorder would change it: a
-        # low-priority backend variant first, a high-priority param variant
-        # last, and an untagged variant in the middle.
+        # Ordered so a real reorder would change it: low-priority backend first,
+        # high-priority param last, untagged in the middle.
         return [
             GridVariant(name="tier5_comm_custom_ar", note="tier5_comm"),
             GridVariant(name="untagged_misc"),
@@ -206,7 +205,7 @@ class TestReorderGridForMultiNode:
         ]
 
     def test_single_node_preserves_order_bit_for_bit(self, monkeypatch):
-        # Hard requirement: single-node grid order is never altered.
+        # Single-node grid order is never altered.
         from hyperloom.orchestrator.actions.executors import (
             _multi_node_env as mne,
         )
@@ -231,7 +230,7 @@ class TestReorderGridForMultiNode:
             priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
         )
         # cuda_graph_max_bs (params tier-1) sorts ahead of tier5_comm; the
-        # untagged variant sinks to the end. Stable sort keeps ties in order.
+        # untagged variant sinks to the end (stable sort).
         assert [v.name for v in out] == [
             "cuda_graph_max_bs_64",
             "tier5_comm_custom_ar",
@@ -422,7 +421,6 @@ class TestCoerceExtraEnvs:
 
 
 # Section 3: per-variant mtime gating + param overrides
-# The autouse fixture below pins INFERENCE_OPTIMIZER_LEAK_ROOTS to an empty sandbox so the harvest doesn't scrape the host's /workspace.
 
 
 @pytest.fixture(autouse=True)
@@ -430,9 +428,6 @@ def _isolate_leak_root(request, tmp_path_factory, monkeypatch):
     """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox for the grid-runner subprocess tests."""
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
-# mtime gating subsection helpers
 
 
 def _write_baseline_yaml_mtime(path: Path) -> None:
@@ -563,9 +558,6 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
     assert any((w or "").startswith("rescued_from_leaked_path:") for w in r.nonfatal_warnings)
 
 
-# param overrides subsection helpers
-
-
 def _write_baseline_yaml_overrides(path: Path) -> None:
     cfg = {
         "benchmark": {
@@ -630,7 +622,7 @@ def test_apply_runtime_overrides_pins_benchmark_script_after_gpu_pop():
 
 
 def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
-    """Regression (2026-06-02 conc_sweep bug): a stale ``state.tp`` re-exported as ``os.environ['TP']`` on resume must NOT downgrade a YAML-pinned TP."""
+    """A stale ``state.tp`` re-exported as ``os.environ['TP']`` on resume must not downgrade a YAML-pinned TP."""
     monkeypatch.setenv("TP", "1")
     bench = {
         "framework": "sglang",
@@ -667,6 +659,41 @@ def test_build_variant_yaml_propagates_benchmark_script(tmp_path):
     cfg = yaml.safe_load(out.read_text())
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
     assert cfg["benchmark"]["runner_type"] == "mi300x"
+
+
+def test_build_variant_yaml_can_remove_base_args_and_unset_envs(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = (
+        "--enable-prefix-caching --max-num-seqs 512 --attention-backend aiter"
+    )
+    cfg["benchmark"]["envs"]["SGLANG_ENABLE_FOO"] = "1"
+    base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    out = _build_variant_yaml(
+        base,
+        base_extra_args="--enable-bar --block-size 128",
+        variant=GridVariant(
+            "without_user_foo",
+            "--max-num-seqs 256",
+            {"SGLANG_KEEP": "1"},
+            remove_args=["--enable-prefix-caching", "--attention-backend"],
+            unset_envs=["SGLANG_ENABLE_FOO"],
+        ),
+        output_subdir=tmp_path / "without_user_foo",
+    )
+
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    args = envs["EXTRA_SGLANG_ARGS"]
+    assert "--enable-prefix-caching" not in args
+    assert "--attention-backend" not in args
+    assert "aiter" not in args
+    assert "--enable-bar" in args
+    assert "--block-size 128" in args
+    assert "--max-num-seqs 256" in args
+    assert envs["SGLANG_KEEP"] == "1"
+    assert "SGLANG_ENABLE_FOO" not in envs
 
 
 def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
@@ -814,6 +841,63 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
     assert len({rd for _, rd in captured_envs}) == 2
 
 
+@pytest.mark.asyncio
+async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, monkeypatch):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = "--bad-base 1 --keep-base 2"
+    cfg["benchmark"]["envs"]["SGLANG_REMOVE_ME"] = "1"
+    base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+    captured_restart: dict = {}
+
+    async def fake_restart_server_for_round(**kwargs):
+        captured_restart.update(kwargs)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._multi_node_server_lifecycle.restart_server_for_round",
+        fake_restart_server_for_round,
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        await run_grid(
+            base_yaml_path=base,
+            base_extra_args="--base-extra 3",
+            grid=[
+                GridVariant(
+                    "remove_inherited",
+                    "--variant 4",
+                    {"SGLANG_KEEP_ME": "1"},
+                    remove_args=["--bad-base"],
+                    unset_envs=["SGLANG_REMOVE_ME"],
+                )
+            ],
+            output_root=tmp_path / "out",
+            variant_timeout_sec=5,
+        )
+
+    args = captured_restart["extra_server_args"]
+    assert "--bad-base" not in args
+    assert "1" not in args.split()
+    assert "--keep-base 2" in args
+    assert "--base-extra 3" in args
+    assert "--variant 4" in args
+    assert captured_restart["unset_env"] == ["SGLANG_REMOVE_ME"]
+    assert captured_restart["extra_env"] == {"SGLANG_KEEP_ME": "1"}
+
+
 # Framework-aware help-text probe (atom + multi-framework cache)
 
 
@@ -927,11 +1011,11 @@ def test_probe_server_help_text_unknown_framework_returns_empty(
     assert _grid_runner._probe_server_help_text("") == ""
 
 
-def test_probe_sglang_help_text_back_compat_shim(
+def test_probe_server_help_text_sglang(
     _reset_help_cache,
     monkeypatch,
 ):
-    """The legacy ``_probe_sglang_help_text`` name is preserved as a thin wrapper so fixtures patching it keep working."""
+    """The framework-keyed probe handles sglang and populates the sglang cache."""
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -942,9 +1026,8 @@ def test_probe_sglang_help_text_back_compat_shim(
             "",
         ),
     )
-    out = _grid_runner._probe_sglang_help_text()
+    out = _grid_runner._probe_server_help_text("sglang")
     assert "USAGE_SGLANG_LEGACY" in out
-    # The shim populates the framework-keyed cache under the sglang key.
     assert "USAGE_SGLANG_LEGACY" in _grid_runner._HELP_TEXT_CACHE.get("sglang", "")
 
 
@@ -988,7 +1071,7 @@ class TestDedupVllmServerArgs:
     """``dedup_vllm_server_args`` collapses repeated vLLM single-value flags."""
 
     def test_duplicate_attention_backend_keeps_last(self):
- # The exact repro: YAML base + variant both inject the flag.
+        # YAML base + variant both inject the flag.
         out = _grid_runner.dedup_vllm_server_args(
             "--attention-backend ROCM_AITER_FA --attention-backend ROCM_FLASH",
             "vllm",
@@ -1010,6 +1093,31 @@ class TestDedupVllmServerArgs:
         )
         # Earlier --attention-backend span removed; everything else stays ordered.
         assert out == ("--enforce-eager --max-model-len 4096 --attention-backend B --trust-remote-code")
+
+    def test_json_config_flag_quotes_survive_dedup(self):
+        # Regression: a variant that duplicates a single-value flag (here
+        # --block-size) used to force the shlex-split/rejoin branch, which
+        # STRIPPED the inner double quotes of a compact --compilation-config
+        # JSON value (``{"cudagraph_mode":"PIECEWISE"}`` -> ``{cudagraph_mode:
+        # PIECEWISE}``) and crashed every explore/kernel/integrate variant
+        # server with ``Invalid JSON``. Listing --compilation-config (and the
+        # other JSON-object flags) in _SPACE_VALUE_FLAGS makes dedup leave the
+        # whole string untouched so the JSON round-trips.
+        raw = (
+            '--compilation-config {"cudagraph_mode":"PIECEWISE"} '
+            "--block-size 128 --block-size 128 --gpu-memory-utilization 0.95"
+        )
+        out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
+        assert '{"cudagraph_mode":"PIECEWISE"}' in out
+        assert "{cudagraph_mode:PIECEWISE}" not in out
+
+    def test_speculative_config_quotes_survive_dedup(self):
+        raw = (
+            '--speculative-config {"method":"eagle"} '
+            "--max-num-seqs 256 --max-num-seqs 256"
+        )
+        out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
+        assert '{"method":"eagle"}' in out
 
     def test_equals_form_is_deduped(self):
         out = _grid_runner.dedup_vllm_server_args(
@@ -1071,10 +1179,8 @@ class TestDedupVllmServerArgs:
         assert out == "--attention-backend C"
 
     def test_json_space_value_flag_left_untouched(self):
- # a flag carrying a JSON/space value must NOT be tokenized
-        # and re-joined (would drop quotes -> {temperature: 0.7}). Leave the
-        # whole string verbatim, even with a duplicate single-value flag also
-        # present (the unquoted $EXTRA_*_ARGS expansion can't round-trip it).
+        # A flag carrying a JSON/space value must not be tokenized and re-joined;
+        # leave the whole string verbatim even with a duplicate flag present.
         raw = "--attention-backend A --attention-backend B --override-generation-config '{\"temperature\": 0.7}'"
         assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
 
@@ -1108,13 +1214,9 @@ class TestCompactJsonServerArgs:
         assert len(out.split()) == 2
 
     def test_compact_json_server_args_internal_space_unsupported(self):
-        # json.dumps keeps spaces INSIDE string values; only separators shrink.
-        # Such a value is therefore NOT made a single shell word — under
-        # Magpie's unquoted $EXTRA_VLLM_ARGS expansion it still word-splits, so
-        # this flag shape is explicitly unsupported (documented limitation). We
-        # leave the value intact (do not corrupt it by stripping inner spaces),
-        # but assert the limitation so callers are not misled into thinking it
-        # is boot-safe.
+        # Spaces inside JSON string values are not collapsed, so the value is not
+        # a single shell word under Magpie's unquoted expansion; this flag shape
+        # is unsupported. The value is left intact, not corrupted.
         out = _grid_runner.compact_json_server_args(
             '--speculative-config {"model": "draft model name"}', "vllm"
         )

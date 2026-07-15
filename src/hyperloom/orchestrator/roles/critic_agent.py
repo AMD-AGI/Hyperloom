@@ -21,9 +21,14 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import Any, Callable, Literal
 
-from hyperloom.common.llm_config import LLMConfigError, openai_client_kwargs
+from hyperloom.common.llm_config import (
+    LLMConfigError,
+    apply_reasoning_effort,
+    openai_client_kwargs,
+    parse_custom_headers,
+)
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
@@ -35,10 +40,6 @@ from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
-
-
-if TYPE_CHECKING:  # pragma: no cover
-    from hyperloom.agents.critic.runtime.web_tools import WebToolClients, WebToolsConfig
 
 
 log = logging.getLogger(__name__)
@@ -84,6 +85,8 @@ Reply with EXACTLY ONE JSON object that matches this review schema:
 Rules (mirror SKILL.md Hard Rules + Approve Standard):
 - Wrap the JSON in a ```json fenced block. Bare JSON is also accepted.
 - Free text outside the JSON is ignored.
+- Keep `reasoning`/`notes` to new, decision-relevant points; do not restate the
+  proposal or context already in the judge_bundle.
 - Emit one verdict object PER proposal in `judge_bundle.proposals`.
 - If `judge_bundle.required_context` is non-empty, every verdict MUST be
   `needs_review` with `source = "critic_unavailable"` and list the
@@ -111,34 +114,25 @@ def _extract_review_json(text: str) -> dict[str, Any] | None:
     return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE)
 
 
-def _assistant_message_with_tool_calls(msg: Any) -> dict[str, Any]:
-    """Re-serialize an OpenAI assistant message that issued tool_calls
-    (minimal dict shape, pydantic v1/v2 compatible).
+def _anthropic_text_from_content(content: Any) -> str:
+    """Concatenate the text blocks of an Anthropic Messages ``content`` array.
 
     Args:
-        msg: The OpenAI assistant message object carrying ``content`` and
-            ``tool_calls``.
+        content: The ``content`` field of an Anthropic Messages response (a
+            list of ``{"type": ..., "text": ...}`` blocks), or anything else.
 
     Returns:
-        A minimal assistant-message dict with role, content, and a normalized
-        ``tool_calls`` list suitable for re-sending to the API.
+        The joined text of every ``type == "text"`` block, stripped; empty when
+        ``content`` is not a list or has no text blocks.
     """
-    return {
-        "role": "assistant",
-        "content": getattr(msg, "content", None),
-        "tool_calls": [
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments,
-                },
-            }
-            for tc in (getattr(msg, "tool_calls", None) or [])
-            if tc.function is not None
-        ],
-    }
+    if not isinstance(content, list):
+        return ""
+    parts = [
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    return "".join(parts).strip()
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
@@ -158,7 +152,6 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
             raise BackendError("commit-review invocation missing --review path")
         extra_args = ["--review", str(call.review_path)]
 
-    # Exit codes: 0 success; 2 adapter bug (host → needs_review).
     invoke_runtime_cli(
         call,
         module="hyperloom.agents.critic.runtime.cli",
@@ -168,7 +161,6 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
     )
 
 
-# Cross-domain enrichment helper for cross-domain (scope=domains) proposals.
 def _reviewed_msg_ids_from_bundle(judge_bundle: dict[str, Any]) -> list[str] | None:
     """Pull the proposal ``msg_id``s out of a judge bundle, or ``None``.
 
@@ -271,42 +263,33 @@ class CriticAgentBackend:
     Parameters
     ----------
     critic_agent_root:
-        Directory containing ``runtime/cli.py`` (``src/hyperloom/agents/critic/``).
-        The CLI is invoked as the package-qualified
-        ``python -m hyperloom.agents.critic.runtime.cli``, resolved via the
-        normal installed ``hyperloom`` namespace; ``cwd=critic_agent_root``
-        is still set so relative asset reads (``SKILL.md``, ``actions/*.md``)
-        resolve without an absolute path.
+        Directory containing ``runtime/cli.py``. The CLI is invoked as
+        ``python -m hyperloom.agents.critic.runtime.cli`` with
+        ``cwd=critic_agent_root`` so relative asset reads resolve.
     session_dir:
-        Coordinator session directory. Used to scope per-turn workdirs
-        and the per-session critic memory store.
+        Coordinator session directory. Scopes per-turn workdirs and the
+        per-session critic memory store.
     codex_model:
         OpenAI / Codex chat-completion model id (e.g. ``gpt-5.4``).
     codex_client_factory:
-        Optional callable returning an ``AsyncOpenAI``-compatible client.
-        Mirrors :class:`CodexBackend.client_factory` for tests.
+        Optional callable returning an ``AsyncOpenAI``-compatible client
+        (test seam).
     kb_mode:
-        ``inmemory`` (default) keeps KB writes / reads off the wire so
-        the optimizer doesn't need a real KB service. ``live`` requires
-        ``kb_env`` (or the surrounding process env) to provide
-        ``KB_BASE_URL``.
+        ``inmemory`` (default) keeps KB writes / reads off the wire.
+        ``live`` requires ``kb_env`` (or process env) to provide ``KB_BASE_URL``.
     kb_env:
         Extra env vars merged into the runtime.cli subprocess env when
-        ``kb_mode == "live"``. Caller is responsible for filling
-        ``KB_BASE_URL`` / ``KB_TIMEOUT_MS`` / ``KB_DEAD_LETTER_DIR`` etc.
+        ``kb_mode == "live"``.
     cortex_kb_url:
-        Optional cortex kb-service base URL (the ``--cortex-kb-url`` flag).
-        When set, it is exported as ``CORTEX_KB_URL`` into the runtime.cli
-        subprocess env (unless already present) so the critic runtime's
-        optional ``/v2/reasoning/assess`` enrichment can reach the same KB
-        recipe-snapshot uses. ``None`` leaves env-based config untouched.
+        Optional cortex kb-service base URL. When set, exported as
+        ``CORTEX_KB_URL`` into the runtime.cli subprocess env for the critic
+        runtime's optional ``/v2/reasoning/assess`` enrichment.
     runtime_caller_factory:
-        Test seam returning a :data:`RuntimeCaller`. Tests override this
-        to bypass the real Python subprocess.
+        Test seam returning a :data:`RuntimeCaller`.
     static_context:
-        Optional explicit per-session context injected as
-        ``request.context``. When ``None``, derived from ``manifest.json``
-        under ``session_dir``; ``{}`` is a valid "no context" override.
+        Optional explicit per-session context injected as ``request.context``.
+        When ``None``, derived from ``manifest.json``; ``{}`` is a valid
+        "no context" override.
     name:
         Backend instance name surfaced in the Coordinator startup banner.
     """
@@ -321,34 +304,36 @@ class CriticAgentBackend:
     runtime_caller_factory: Callable[[], RuntimeCaller] | None = None
     static_context: dict[str, Any] | None = None
     known_actions: tuple[str, ...] = ()
-    # Per-action verdict policy (action_name -> archival/exploration/promotion)
-    # enriched onto ``review_constraints.action_verdict_policy`` post prepare-review.
+    # Per-action verdict policy enriched onto
+    # ``review_constraints.action_verdict_policy`` post prepare-review.
     action_verdict_policy: dict[str, str] = field(default_factory=dict)
     # Substrate KB assess injection switch. ``None`` reads the
-    # ``CORTEX_KB_ASSESS_INJECT`` env at turn time (default OFF = dry-run: the
-    # assess verdicts are still fetched + traced, but withheld from the LLM
-    # prompt so they don't steer the decision). ``True``/``False`` force it.
+    # ``CORTEX_KB_ASSESS_INJECT`` env at turn time (default OFF = dry-run).
     kb_assess_inject: bool | None = None
     name: str = "critic-agent"
-    # Optional web tools (web_search / web_fetch). ``web_tools_config``
-    # None reads from env; ``web_tool_clients_factory`` injects test clients.
-    web_tools_config: "WebToolsConfig | None" = None
-    web_tool_clients_factory: Callable[["WebToolsConfig"], "WebToolClients"] | None = None
+    # Review inference protocol. ``openai`` drives Codex chat.completions;
+    # ``anthropic`` drives the native Anthropic ``/v1/messages`` API.
+    protocol: Literal["openai", "anthropic"] = "openai"
+    # Claude model id used when ``protocol == "anthropic"`` (falls back to
+    # ``codex_model`` when unset).
+    claude_model: str | None = None
+    # Anthropic transport (protocol == "anthropic"); resolved from env when
+    # empty. ``anthropic_client_factory`` injects a test client.
+    anthropic_base_url: str = ""
+    anthropic_api_key: str = ""
+    anthropic_client_factory: Callable[[], Any] | None = None
 
-    # Runtime state. ``_runtime_caller`` is assigned on the instance in
-    # __post_init__ (not as a dataclass field) to avoid descriptor binding
-    # of a module-level function as a method.
+    # ``_runtime_caller`` is assigned on the instance in __post_init__ (not as a
+    # dataclass field) to avoid descriptor binding as a method.
     _client: Any = field(default=None, init=False, repr=False)
     _turn_idx: int = field(default=0, init=False, repr=False)
-    # Trace context (tick / phase) the Coordinator sets before each reactor
-    # ``run()`` so the critic's self-written llm_calls row carries the same
-    # timeline keys the in-process reactor trace would have stamped, instead of
-    # relying on ts-window backfill.
+    # Trace context (tick / phase) the Coordinator stamps before each reactor
+    # ``run()`` so the critic's self-written llm_calls row carries the timeline
+    # keys.
     _trace_tick: int | None = field(default=None, init=False, repr=False)
     _trace_phase: str | None = field(default=None, init=False, repr=False)
-    # Proposal msg_ids reviewed by the current turn, snapshotted from the
-    # judge bundle so the self-written llm_calls row can be attributed (via
-    # proposal_task_map) to the decision the reviewed proposal became.
+    # Proposal msg_ids reviewed by the current turn, snapshotted for llm_calls
+    # attribution.
     _trace_reviewed_msg_ids: list[str] | None = field(
         default=None, init=False, repr=False,
     )
@@ -358,29 +343,23 @@ class CriticAgentBackend:
         init=False,
         repr=False,
     )
-    _web_tool_clients: Any = field(default=None, init=False, repr=False)
-    _web_tool_schemas: list[dict[str, Any]] = field(
-        default_factory=list,
-        init=False,
-        repr=False,
-    )
-    _web_tool_max_turns: int = field(default=0, init=False, repr=False)
+    # Resolved review model id (protocol-aware).
+    _review_model: str = field(default="", init=False, repr=False)
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate config, wire transports, and resolve static context.
 
         Normalises paths, verifies ``runtime/cli.py`` exists under
-        ``critic_agent_root`` (used as the subprocess ``cwd`` for
-        ``runtime.cli`` invocations and to load ``SKILL.md`` / action
-        prompts), validates ``kb_mode``, selects the real or test runtime
-        caller, constructs the Codex/OpenAI client (or its factory), resolves
-        the per-session static context (explicit or from ``manifest.json``), and
-        initialises optional web tools.
+        ``critic_agent_root``, validates ``kb_mode``, selects the real or test
+        runtime caller, constructs the review client (Codex/OpenAI, or the native
+        Anthropic Messages client when ``protocol == "anthropic"``), and resolves
+        the per-session static context (explicit or from ``manifest.json``).
 
         Raises:
             BackendError: If ``runtime/cli.py`` is missing, ``kb_mode`` is
-                invalid, the OpenAI SDK is unavailable, or no API key is set.
+                invalid, the review SDK/transport is unavailable, or no API key
+                is set.
         """
         self.critic_agent_root = Path(self.critic_agent_root)
         self.session_dir = Path(self.session_dir)
@@ -394,7 +373,6 @@ class CriticAgentBackend:
             raise BackendError(f"CriticAgentBackend: kb_mode={self.kb_mode!r} not in {{'inmemory','live'}}")
 
         if self.runtime_caller_factory is not None:
-            # Assign on the instance to avoid descriptor binding as a method.
             object.__setattr__(
                 self,
                 "_runtime_caller",
@@ -407,7 +385,14 @@ class CriticAgentBackend:
                 _default_runtime_caller,
             )
 
-        if self.codex_client_factory is not None:
+        self._review_model = (
+            (self.claude_model or self.codex_model)
+            if self.protocol == "anthropic"
+            else self.codex_model
+        )
+        if self.protocol == "anthropic":
+            self._init_anthropic_client()
+        elif self.codex_client_factory is not None:
             self._client = self.codex_client_factory()
         else:
             try:
@@ -426,8 +411,7 @@ class CriticAgentBackend:
             try:
                 import httpx
             except ImportError:
-                # Keep best-effort fallback to SDK defaults if httpx isn't
-                # importable in this environment.
+                # Best-effort fallback to SDK default timeouts.
                 log.warning(
                     "critic_agent_backend: httpx unavailable; "
                     "falling back to AsyncOpenAI default timeouts"
@@ -449,8 +433,7 @@ class CriticAgentBackend:
                         pool=rw_timeout_s,
                     )
                 except (TypeError, ValueError) as exc:
-                    # Keep best-effort fallback to SDK defaults when timeout
-                    # values are rejected by the local httpx version.
+                    # Best-effort fallback to SDK defaults on rejected timeouts.
                     log.warning(
                         "critic_agent_backend: failed to build httpx.Timeout "
                         "(connect=%s rw=%s): %r; falling back to AsyncOpenAI "
@@ -461,8 +444,7 @@ class CriticAgentBackend:
                     )
             self._client = AsyncOpenAI(**kwargs)
 
-        # Resolve static per-session context once; absent model/framework keys
-        # make prepare-review fall back to needs_review + critic_unavailable.
+        # Resolve static per-session context once.
         if self.static_context is not None:
             self._static_context = dict(self.static_context)
         else:
@@ -473,62 +455,64 @@ class CriticAgentBackend:
             sorted(self._static_context.keys()),
         )
 
-        # Initialize web tools (no-op by default).
-        self._init_web_tools()
+    def _init_anthropic_client(self) -> None:
+        """Build the native Anthropic Messages client (protocol='anthropic').
 
-    def _init_web_tools(self) -> None:
-        """Resolve :class:`WebToolsConfig` + build clients + freeze schemas;
-        never raises (failure falls back to no-tool reasoning)."""
+        An httpx client with ``x-api-key`` + ``anthropic-version`` headers,
+        resolving base URL / key from the fields or the ``ANTHROPIC_*`` env.
+        Optional ``ANTHROPIC_CUSTOM_HEADERS`` are merged in.
+
+        Raises:
+            BackendError: If httpx is unavailable or no Anthropic API key can
+                be resolved.
+        """
+        if self.anthropic_client_factory is not None:
+            self._client = self.anthropic_client_factory()
+            return
         try:
-            from hyperloom.agents.critic.runtime.web_tools import (
-                WebToolsConfig as _Cfg,
-                build_clients as _build_clients,
-                build_tool_schemas as _build_schemas,
+            import httpx
+        except ImportError as exc:  # pragma: no cover
+            raise BackendError(
+                "httpx not installed; required for the Anthropic critic-agent review path"
+            ) from exc
+        base_url = (
+            self.anthropic_base_url
+            or os.environ.get("ANTHROPIC_BASE_URL", "")
+            or "https://api.anthropic.com"
+        ).strip().rstrip("/")
+        api_key = (
+            self.anthropic_api_key
+            or os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+        ).strip()
+        if not api_key:
+            raise BackendError(
+                "CriticAgentBackend(protocol=anthropic) requires ANTHROPIC_API_KEY "
+                "or ANTHROPIC_AUTH_TOKEN for review reasoning"
             )
-        except ImportError as exc:
-            log.warning(
-                "critic_agent_backend: hyperloom.agents.critic.runtime.web_tools not importable (%s); web tools disabled",
-                exc,
-            )
-            return
-
-        cfg = self.web_tools_config or _Cfg.from_env()
-        if not cfg.critic_web_tools_enabled:
-            log.info("critic_agent_backend: web tools disabled by config")
-            return
-
-        try:
-            clients = (
-                self.web_tool_clients_factory(cfg) if self.web_tool_clients_factory is not None else _build_clients(cfg)
-            )
-        except Exception as exc:  # noqa: BLE001 — never let setup kill critic
-            log.warning(
-                "critic_agent_backend: failed to construct web tool clients (%s); web tools disabled",
-                exc,
-            )
-            return
-
-        schemas = _build_schemas(cfg)
-        available_names: set[str] = set()
-        if clients.search is not None:
-            available_names.add("web_search")
-        if clients.fetch is not None:
-            available_names.add("web_fetch")
-        schemas = [s for s in schemas if s.get("function", {}).get("name") in available_names]
-        if not schemas or (clients.search is None and clients.fetch is None):
-            log.info(
-                "critic_agent_backend: web tools enabled by config but no "
-                "usable client/schema; falling back to no-tool reasoning",
-            )
-            return
-
-        self._web_tool_clients = clients
-        self._web_tool_schemas = schemas
-        self._web_tool_max_turns = cfg.critic_web_max_tool_turns
-        log.info(
-            "critic_agent_backend: web tools enabled tools=%s max_turns=%d",
-            [s["function"]["name"] for s in schemas],
-            self._web_tool_max_turns,
+        connect_timeout_s = parse_call_timeout_env(
+            "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
+            default=CRITIC_AGENT_LLM_CONNECT_TIMEOUT_SEC,
+        )
+        rw_timeout_s = parse_call_timeout_env(
+            "CRITIC_AGENT_LLM_RW_TIMEOUT_S",
+            default=CRITIC_AGENT_LLM_RW_TIMEOUT_SEC,
+        )
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+        headers.update(parse_custom_headers(os.environ.get("ANTHROPIC_CUSTOM_HEADERS")))
+        self._client = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=httpx.Timeout(
+                connect=connect_timeout_s,
+                read=rw_timeout_s,
+                write=rw_timeout_s,
+                pool=rw_timeout_s,
+            ),
+            headers=headers,
         )
 
     # Public API — Backend.run
@@ -613,9 +597,7 @@ class CriticAgentBackend:
         except (OSError, json.JSONDecodeError) as exc:
             raise BackendError(f"CriticAgentBackend: failed to read judge_bundle from {judge_path}: {exc}") from exc
 
-        # Snapshot the reviewed proposal msg_ids for trace attribution: the
-        # reasoning loop writes its token row mid-``run()`` (before the verdict
-        # intents exist), so we stash them here for ``_trace_critic_llm_call``.
+        # Snapshot the reviewed proposal msg_ids for trace attribution.
         self._trace_reviewed_msg_ids = _reviewed_msg_ids_from_bundle(judge_bundle)
 
         # Layer per-action verdict policy onto review_constraints.
@@ -714,8 +696,7 @@ class CriticAgentBackend:
             }
         )
 
-        # Author-time breakdown capture: record this critic iteration before the
-        # workdir can be pruned (composed into critic_robustness at assembly).
+        # Record this critic iteration before the workdir can be pruned.
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -731,8 +712,7 @@ class CriticAgentBackend:
         except Exception:  # noqa: BLE001
             pass
 
-        # Second sink: mirror the KB integration trace into Langfuse (opt-in,
-        # best-effort) so it lands on the same trace as the critic generations.
+        # Mirror the KB integration trace into Langfuse (opt-in, best-effort).
         self._mirror_kb_trace_to_langfuse(
             turn_idx=turn_idx,
             kb_assess=kb_assess_trace,
@@ -743,7 +723,7 @@ class CriticAgentBackend:
             intents=intents,
             raw_text=llm_text,
             metadata={
-                "model": self.codex_model,
+                "model": self._review_model,
                 "finish_reason": llm_finish,
                 "judge_bundle_path": str(judge_path),
                 "kb_read_skipped_reason": kb_skipped,
@@ -830,8 +810,7 @@ class CriticAgentBackend:
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))
         env["CRITIC_KB_CLIENT_MODE"] = self.kb_mode
 
-        # Point the runtime at the sibling robustness findings JSONL;
-        # set here because the robustness CLI's env never reaches us.
+        # Point the runtime at the sibling robustness findings JSONL.
         env.setdefault(
             "ROBUSTNESS_AGENT_SESSION_DIR",
             str(self.session_dir),
@@ -841,11 +820,10 @@ class CriticAgentBackend:
         dlq_dir = self.session_dir / "critic-kb-dead-letter"
         env.setdefault("KB_DEAD_LETTER_DIR", str(dlq_dir))
 
-        # Propagate the --cortex-kb-url flag into the subprocess so the critic
-        # runtime's optional /v2/reasoning/assess enrichment can reach the same
-        # cortex KB recipe-snapshot uses. An explicit env var still wins.
+        # Propagate the --cortex-kb-url flag into the subprocess env; the flag is
+        # the single source of truth (no env fallback in the parent).
         cortex_kb_url = (self.cortex_kb_url or "").strip()
-        if cortex_kb_url and not env.get("CORTEX_KB_URL"):
+        if cortex_kb_url:
             env["CORTEX_KB_URL"] = cortex_kb_url
 
         if self.kb_mode == "live":
@@ -1010,8 +988,8 @@ class CriticAgentBackend:
         """Drive Codex with the judge bundle and parse a review object.
 
         Builds the skill-preamble + judge-bundle + output-format user prompt,
-        runs the (optionally tool-using) reasoning loop, and extracts the review
-        JSON, falling back to an empty verdict list when nothing parses.
+        runs the single-shot reasoning call, and extracts the review JSON,
+        falling back to an empty verdict list when nothing parses.
 
         Args:
             judge_bundle (dict[str, Any]): The prepared judge bundle to reason
@@ -1039,12 +1017,10 @@ class CriticAgentBackend:
             "notes": judge_bundle.get("notes"),
         }
         # Dry-run gate: only feed the substrate assess verdicts to the LLM when
-        # injection is explicitly enabled. When OFF the verdicts are still
-        # fetched + traced (see _build_kb_assess_trace) but kept out of the
-        # prompt so they cannot steer the decision.
+        # injection is explicitly enabled.
         if self._kb_assess_inject_enabled():
             bundle_view["kb_assess_by_proposal"] = judge_bundle.get("kb_assess_by_proposal")
-        bundle_text = json.dumps(bundle_view, ensure_ascii=False, indent=2)
+        bundle_text = json.dumps(bundle_view, ensure_ascii=False, separators=(",", ":"))
         user_prompt = (
             f"{preamble}\n\n"
             f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n"
@@ -1054,12 +1030,8 @@ class CriticAgentBackend:
 
         text, finish = await self._run_reasoning_loop(messages)
 
-        # Full-trace conversation: the reasoning loop already folded token
-        # spend onto llm_calls.jsonl; mirror the full prompt + reply onto
-        # conversations.jsonl so the critic turn is replayable alongside the
-        # orchestration / specialist turns. The system + user prompt is the
-        # full request the critic saw; ``text`` is its externally-visible
-        # reply. Best-effort and never raised into the review path.
+        # Mirror the full prompt + reply onto conversations.jsonl so the critic
+        # turn is replayable. Best-effort; never raised into the review path.
         self._record_critic_conversation(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -1081,94 +1053,154 @@ class CriticAgentBackend:
         self,
         messages: list[dict[str, Any]],
     ) -> tuple[str, str | None]:
-        """Run the Codex chat-completions loop, optionally interleaving
-        web_search / web_fetch up to ``self._web_tool_max_turns`` before a
-        final text-only reply. Returns ``(text, finish_reason)``; tool-exec
-        failures are reported back to the model, never raised.
+        """Issue one review inference call and return ``(text, finish_reason)``.
+
+        The critic reasons single-shot over the judge bundle (no tool use),
+        dispatching to the OpenAI/Codex or native Anthropic transport per
+        :attr:`protocol`.
 
         Args:
-            messages: The running chat-completions message list; tool-use turns
-                are appended in place.
+            messages: The chat-completions message list (system + user).
 
         Returns:
-            A tuple of the final reply text and the final finish reason.
+            A tuple of the reply text and the finish/stop reason.
 
         Raises:
-            BackendError: If any Codex chat-completions API call fails.
+            BackendError: If the review API call fails.
         """
-        tools = self._web_tool_schemas
-        max_turns = self._web_tool_max_turns if tools else 0
-        # Accumulate token usage across every Codex call in
-        # this reasoning loop (initial + tool-use rounds + forced final).
-        # OpenAI has no prompt-cache split, so only in/out counters move.
+        if self.protocol == "anthropic":
+            return await self._run_anthropic_reasoning(messages)
+        return await self._run_openai_reasoning(messages)
+
+    async def _run_openai_reasoning(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[str, str | None]:
+        """Issue one Codex chat-completions call and return ``(text, finish_reason)``.
+
+        Args:
+            messages: The chat-completions message list (system + user).
+
+        Returns:
+            A tuple of the reply text and the finish reason.
+
+        Raises:
+            BackendError: If the Codex chat-completions API call fails.
+        """
+        kwargs: dict[str, Any] = {
+            "model": self._review_model,
+            "messages": messages,
+            "max_completion_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+        }
+        apply_reasoning_effort(kwargs)
         usage_acc = {"input_tokens": 0, "output_tokens": 0}
-        # Sum the wall-clock of every Codex call in this reasoning loop so the
-        # trace reports the critic's real end-to-end latency (tool turns incl.).
-        latency_ms_acc = 0
-
-        for turn in range(max_turns + 1):
-            kwargs: dict[str, Any] = {
-                "model": self.codex_model,
-                "messages": messages,
-                "max_completion_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
-            }
-            if tools and turn < max_turns:
-                kwargs["tools"] = tools
-                kwargs["tool_choice"] = "auto"
-
-            _t0 = time.perf_counter()
-            try:
-                resp = await self._client.chat.completions.create(**kwargs)
-            except Exception as exc:  # noqa: BLE001
-                raise BackendError(
-                    f"Codex API call failed (critic-agent reasoning): {exc!r}",
-                ) from exc
-            latency_ms_acc += int((time.perf_counter() - _t0) * 1000)
-
-            self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
-            choice = resp.choices[0]
-            msg = choice.message
-            finish = getattr(choice, "finish_reason", None)
-            tool_calls = getattr(msg, "tool_calls", None) or []
-
-            if not tool_calls:
-                self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms_acc)
-                return msg.content or "", finish
-
-            log.info(
-                "critic_agent_backend tool-call turn=%d count=%d tools=%s",
-                turn,
-                len(tool_calls),
-                [tc.function.name for tc in tool_calls if tc.function],
-            )
-            messages.append(_assistant_message_with_tool_calls(msg))
-            for tc in tool_calls:
-                tool_result = await self._execute_tool_call(tc)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": tool_result,
-                    }
-                )
-
-        # Exhausted max_turns mid-tool-use: force a final no-tool reply.
         _t0 = time.perf_counter()
         try:
-            resp = await self._client.chat.completions.create(
-                model=self.codex_model,
-                messages=messages,
-                max_completion_tokens=CRITIC_AGENT_MAX_COMPLETION_TOKENS,
-            )
+            resp = await self._client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001
             raise BackendError(
-                f"Codex API call failed (critic-agent reasoning final turn): {exc!r}",
+                f"Codex API call failed (critic-agent reasoning): {exc!r}",
             ) from exc
-        latency_ms_acc += int((time.perf_counter() - _t0) * 1000)
+        latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._accumulate_usage(usage_acc, getattr(resp, "usage", None))
-        self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms_acc)
-        final = resp.choices[0]
-        return final.message.content or "", getattr(final, "finish_reason", None)
+        self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
+        choice = resp.choices[0]
+        return choice.message.content or "", getattr(choice, "finish_reason", None)
+
+    async def _run_anthropic_reasoning(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[str, str | None]:
+        """Issue one native Anthropic ``/v1/messages`` call.
+
+        Splits the OpenAI-style ``messages`` into a top-level ``system`` string
+        and the user/assistant turns Anthropic expects, POSTs a single request,
+        and extracts the concatenated text blocks. Token usage
+        (``input_tokens`` / ``output_tokens``) is folded into the same trace as
+        the OpenAI path.
+
+        Args:
+            messages: The chat-completions message list (system + user).
+
+        Returns:
+            A tuple of the reply text and the Anthropic ``stop_reason``.
+
+        Raises:
+            BackendError: If the Anthropic Messages API call fails or returns a
+                non-2xx status.
+        """
+        system_text = "\n\n".join(
+            str(m.get("content") or "") for m in messages if m.get("role") == "system"
+        ).strip()
+        turns = [
+            {
+                "role": "assistant" if m.get("role") == "assistant" else "user",
+                "content": str(m.get("content") or ""),
+            }
+            for m in messages
+            if m.get("role") != "system"
+        ]
+        payload: dict[str, Any] = {
+            "model": self._review_model,
+            "messages": turns,
+            "max_tokens": CRITIC_AGENT_MAX_COMPLETION_TOKENS,
+        }
+        if system_text:
+            payload["system"] = system_text
+        usage_acc = {"input_tokens": 0, "output_tokens": 0}
+        _t0 = time.perf_counter()
+        try:
+            resp = await self._client.post("/v1/messages", json=payload)
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(
+                f"Anthropic API call failed (critic-agent reasoning): {exc!r}",
+            ) from exc
+        latency_ms = int((time.perf_counter() - _t0) * 1000)
+        status = int(getattr(resp, "status_code", 200) or 200)
+        if status >= 400:
+            body_txt = str(getattr(resp, "text", ""))[:200]
+            raise BackendError(
+                f"Anthropic API call failed (critic-agent reasoning): status={status} body={body_txt}"
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise BackendError(
+                f"Anthropic API returned non-JSON body (critic-agent reasoning): {exc!r}"
+            ) from exc
+        self._accumulate_anthropic_usage(
+            usage_acc, body.get("usage") if isinstance(body, dict) else None
+        )
+        self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
+        text = _anthropic_text_from_content(body.get("content") if isinstance(body, dict) else None)
+        stop_reason = body.get("stop_reason") if isinstance(body, dict) else None
+        return text, stop_reason
+
+    @staticmethod
+    def _accumulate_anthropic_usage(
+        acc: dict[str, int],
+        usage: Any,
+    ) -> None:
+        """Fold one Anthropic ``usage`` block into the running token accumulator.
+
+        Anthropic reports ``input_tokens`` / ``output_tokens`` directly. Missing
+        / bad values contribute 0 so a malformed response never corrupts the sum.
+
+        Args:
+            acc: The running accumulator with ``input_tokens`` /
+                ``output_tokens`` keys, updated in place.
+            usage: An Anthropic usage dict (or ``None``) to fold into ``acc``.
+        """
+        if not isinstance(usage, dict):
+            return
+        try:
+            acc["input_tokens"] += int(usage.get("input_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            acc["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            pass
 
     @staticmethod
     def _accumulate_usage(
@@ -1191,12 +1223,10 @@ class CriticAgentBackend:
         try:
             acc["input_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
         except (TypeError, ValueError):
-            # Malformed usage value; skip this token count.
             pass
         try:
             acc["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
         except (TypeError, ValueError):
-            # Malformed usage value; skip this token count.
             pass
 
     def set_trace_context(
@@ -1221,10 +1251,8 @@ class CriticAgentBackend:
         """Append one ``llm_calls.jsonl`` row for a critic reasoning loop.
 
         Records the accumulated Codex token spend (and summed wall-clock
-        ``latency_ms``) under ``component=critic``. tick/phase come from the
-        trace context the Coordinator stamped via :meth:`set_trace_context`
-        before the reactor ``run()`` (``None`` when unset → collector ts-window
-        backfill). Best-effort: never raises into the review path.
+        ``latency_ms``) under ``component=critic``, using the tick/phase from
+        :meth:`set_trace_context`. Best-effort: never raises into the review path.
 
         Args:
             usage_acc: Accumulated token counts with ``input_tokens`` /
@@ -1237,7 +1265,7 @@ class CriticAgentBackend:
                 session_id=self.session_dir.name,
                 component="critic",
                 role="critic",
-                model=self.codex_model,
+                model=self._review_model,
                 tick=self._trace_tick,
                 phase=self._trace_phase,
                 input_tokens=usage_acc.get("input_tokens"),
@@ -1261,13 +1289,9 @@ class CriticAgentBackend:
     ) -> None:
         """Append one ``conversations.jsonl`` row for a critic reasoning loop.
 
-        Persists the full (redacted) prompt + reply under
-        ``component=critic``. The prompt is the system message (when present)
-        joined to the judge-bundle user message — the complete request the
-        critic reasoned over. tick/phase are unknown to the critic backend
-        (it runs as its own reactor); the collector backfills from the ts
-        window. Best-effort: never raises into the review path. No-op when
-        both prompt and reply are empty.
+        Persists the full (redacted) prompt + reply under ``component=critic``.
+        Best-effort: never raises into the review path. No-op when both prompt
+        and reply are empty.
 
         Args:
             system_prompt: Optional system prompt prepended to the recorded
@@ -1283,7 +1307,7 @@ class CriticAgentBackend:
                 session_id=self.session_dir.name,
                 component="critic",
                 role="critic",
-                model=self.codex_model,
+                model=self._review_model,
                 prompt=prompt or "",
                 response=response or "",
             )
@@ -1293,37 +1317,6 @@ class CriticAgentBackend:
                 "full-trace: critic conversation append failed",
                 exc_info=True,
             )
-
-    async def _execute_tool_call(self, tool_call: Any) -> str:
-        """Dispatch one OpenAI tool_call to the configured web client.
-
-        Args:
-            tool_call (Any): The OpenAI tool-call object carrying the function
-                name and JSON-encoded arguments.
-
-        Returns:
-            str: The tool's result text, or an ``Error: ...`` string when the
-            arguments are malformed or the tool is unknown/disabled.
-        """
-        fn = getattr(tool_call, "function", None)
-        name = getattr(fn, "name", "") if fn else ""
-        raw_args = getattr(fn, "arguments", "") if fn else ""
-        try:
-            args = json.loads(raw_args) if raw_args else {}
-        except json.JSONDecodeError as exc:
-            return f"Error: tool arguments are not valid JSON: {exc}"
-        if not isinstance(args, dict):
-            return "Error: tool arguments must be a JSON object"
-
-        clients = self._web_tool_clients
-        if clients is None:
-            return f"Error: tool {name!r} is not available (web tools disabled)"
-
-        if name == "web_search" and clients.search is not None:
-            return await asyncio.to_thread(clients.search.execute, args)
-        if name == "web_fetch" and clients.fetch is not None:
-            return await asyncio.to_thread(clients.fetch.execute, args)
-        return f"Error: unknown or disabled tool {name!r}"
 
     def _load_skill_preamble(self) -> str:
         """Load and cache the critic-agent skill/action markdown preamble.
@@ -1356,7 +1349,6 @@ __all__ = [
     "CriticAgentBackend",
     "RuntimeCall",
     "RuntimeCaller",
-    "_assistant_message_with_tool_calls",
     "_default_runtime_caller",
     "_extract_review_json",
 ]

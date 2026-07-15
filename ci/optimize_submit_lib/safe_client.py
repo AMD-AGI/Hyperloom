@@ -19,15 +19,10 @@ from . import config as _config
 
 globals().update({k: v for k, v in vars(_config).items() if not k.startswith("__")})
 
-# ── SaFE client ─────────────────────────────────────────────────────────────────
-
-
 class SafeOptimizeClient:
     """Thin wrapper for SaFE playground/optimization endpoints.
 
-    Reuses the same bearer token as the rest of Hyperloom CI. The API contract
-    here mirrors SaFE/scripts/optimize_submit.py (2026-05-06), in particular
-    the ``target.volume`` field added to /api/v1/playground/models.
+    Reuses the same bearer token as the rest of Hyperloom CI.
     """
 
     def __init__(
@@ -59,8 +54,7 @@ class SafeOptimizeClient:
         self.register_workspace = register_workspace
         # Where the task is created (needs Sandbox scope); may equal register.
         self.submit_workspace = submit_workspace
-        # Optional round-robin pool: each submit_task picks the next workspace,
-        # letting a batch span multiple workspaces without manual splitting.
+        # Optional round-robin pool: each submit_task picks the next workspace.
         self.submit_workspaces_pool = [w.strip() for w in (submit_workspaces_pool or []) if w and w.strip()] or None
         self._submit_ws_counter = 0
         self.volume = volume
@@ -99,7 +93,7 @@ class SafeOptimizeClient:
 
     def find_model(self, repo_id: str) -> dict | None:
         """Look up an existing SaFE Model by HF source URL, scoped to
-        register_workspace (where the canonical Model CR + LocalPaths live).
+        register_workspace.
 
         Args:
             repo_id (str): HuggingFace repo id to match by source URL.
@@ -132,10 +126,8 @@ class SafeOptimizeClient:
     ) -> str:
         """Register a model record with SaFE so submit_task has a model_id.
 
-        local_path set → accessMode=local_path: SaFE skips its Download Job
-        (phase=Ready immediately) since files are already on disk (prewarm path).
-        local_path empty → accessMode=local: SaFE downloads from HF (slow
-        fallback when prewarm can't run).
+        local_path set → accessMode=local_path: SaFE skips its Download Job.
+        local_path empty → accessMode=local: SaFE downloads from HF.
 
         Args:
             repo_id (str): HuggingFace repo id to register.
@@ -147,10 +139,8 @@ class SafeOptimizeClient:
             str: The registered SaFE model id (empty string when absent).
         """
         if local_path:
-            # local_path mode bypasses SaFE's HF metadata fetch, so we MUST
-            # provide displayName. SaFE feeds it into GenerateName → K8s
-            # metadata.name, which must satisfy RFC 1123 (lowercase [a-z0-9-.],
-            # 1-63 chars); sanitize here since the backend doesn't.
+            # local_path mode requires displayName, sanitized to RFC 1123
+            # (lowercase [a-z0-9-.], 1-63 chars) since the backend doesn't.
 
             raw = repo_id.split("/")[-1] or repo_id
             cleaned = re.sub(r"[^a-z0-9.-]+", "-", raw.lower()).strip(".-") or "model"
@@ -283,9 +273,7 @@ class SafeOptimizeClient:
         Returns:
             The decoded API response for the submitted task.
         """
-        # Pick the workspace: single submit_workspace, or round-robin across the
-        # pool. Counter is per-instance, not thread-safe — fine since submit_task
-        # runs serially (only wait_and_collect is parallel, after submit returns).
+        # Pick the workspace: single submit_workspace, or round-robin the pool.
         if self.submit_workspaces_pool:
             chosen_ws = self.submit_workspaces_pool[self._submit_ws_counter % len(self.submit_workspaces_pool)]
             self._submit_ws_counter += 1
@@ -319,23 +307,21 @@ class SafeOptimizeClient:
             body["resultsPath"] = results_path
         if image:
             body["image"] = image
-        # Override SaFE's wrong-for-core42 MI355X default (see DEFAULT_GPU_TYPE).
+        # Override SaFE's wrong-for-core42 MI355X default.
         if gpu_type:
             body["gpuType"] = gpu_type
-        # Always send inferencexPath (even empty) to suppress SaFE's Zod default
-        # "/hyperloom/InferenceX"; empty lets install.sh clone a writable copy.
+        # Always send inferencexPath (even empty) to suppress SaFE's Zod default;
+        # empty lets install.sh clone a writable copy.
         body["inferencexPath"] = inferencex_path or ""
         if oob_path:
             body["oobPath"] = oob_path
         if tracelens_root:
             body["tracelensRoot"] = tracelens_root
-        # Long-run tuning: when the optimizer budget exceeds 24h, ask the agent
-        # to enable phase interleaving + cyclic phases so the extra wall-clock is
-        # spent re-tuning in cycles instead of stalling after the first pass.
-        # Injected as shell exports (same prelude mechanism as HYPERLOOM_SOURCE_*).
-        if max_hours and max_hours > 24:
+        # Long-run tuning (budget >= 24h): enable phase interleaving + cyclic
+        # phases via shell exports so extra wall-clock is spent re-tuning.
+        if max_hours and max_hours >= 24:
             longrun_hint = (
-                "LONG-RUN TUNING (optimizer budget > 24h) — also run these exports "
+                "LONG-RUN TUNING (optimizer budget >= 24h) — also run these exports "
                 "in the shell prelude before launching the optimizer:\n"
                 "  export INFERENCE_OPTIMIZER_PHASE_INTERLEAVE=1\n"
                 "  export INFERENCE_OPTIMIZER_CYCLIC_PHASES=1\n"
@@ -347,24 +333,19 @@ class SafeOptimizeClient:
             body["promptPrefix"] = prompt_prefix
         if prompt_suffix:
             body["promptSuffix"] = prompt_suffix
-        # Optional session-scoped env forwarded to SaFE (body.env). SaFE relays
-        # it to Claw as session_env, injected into the sandbox so the
-        # inference_optimizer process sees it (e.g. CLAUDE_MODEL override).
-        # Logged so each CI job records exactly which session env it submitted,
-        # making "did the env reach Claw" verifiable from the job log alone.
+        # Optional session-scoped env forwarded to SaFE (body.env); relayed to
+        # Claw as session_env and injected into the sandbox. Logged for audit.
         if env:
             body["env"] = env
             log.info("[%s] session env forwarded to SaFE: %s", display_name, env)
         attempts = 8
         # Captured before the first POST so the dedup lookup only matches a task
-        # this call created (not an unrelated older one for the same model).
+        # this call created.
         submit_started_at = time.time()
         for attempt in range(1, attempts + 1):
             try:
-                # The submit POST can be slow when the core42 apiserver is
-                # under load from many parallel daily jobs. Give it a generous
-                # read timeout so a busy-but-alive backend doesn't trip the
-                # default 30s and get misreported as a hard submit failure.
+                # Generous read timeout so a busy-but-alive backend isn't
+                # misreported as a hard submit failure.
                 return self._request("POST", "api/v1/optimization/tasks", body, timeout=120)
             except Exception as e:
                 msg = str(e)
@@ -381,10 +362,8 @@ class SafeOptimizeClient:
                 if not transient:
                     raise
                 # The POST is NOT idempotent: a slow/dropped response can hide a
-                # task the backend actually created. Blindly retrying then spawns
-                # a SECOND Claw session for the same model (the duplicate /
-                # abandoned-PRELUDE dirs). Before retrying, look the task up by
-                # modelId+workspace; if it already exists, reuse it.
+                # task the backend created. Before retrying, look it up by
+                # modelId+workspace and reuse it if it exists.
                 existing = self._find_recent_submitted_task(model_id, chosen_ws, submit_started_at)
                 if existing and existing.get("id"):
                     log.warning(
@@ -413,10 +392,8 @@ class SafeOptimizeClient:
     def _find_recent_submitted_task(self, model_id: str, workspace: str, since_ts: float) -> dict | None:
         """Find a task this submit call may have created before its POST failed.
 
-        A transient submit failure (slow/timeout/dropped response) can hide a
-        task the backend actually created. Look it up by ``modelId`` +
-        ``workspace`` so the retry path can reuse it instead of creating a
-        duplicate Claw session.
+        A transient submit failure can hide a task the backend actually created.
+        Look it up by ``modelId`` + ``workspace`` so the retry path can reuse it.
 
         Args:
             model_id (str): Registered SaFE model id used in the submit body.
@@ -441,7 +418,7 @@ class SafeOptimizeClient:
         items = data.get("items") if isinstance(data, dict) else None
         if not isinstance(items, list):
             return None
-        floor = since_ts - 120.0  # 2-min slack for client/server clock skew
+        floor = since_ts - 120.0  # 2-min slack for clock skew
         best = None
         best_ct = floor
         for it in items:
@@ -456,8 +433,6 @@ class SafeOptimizeClient:
                 best_ct = ct
                 best = it
         return best
-
-    # ── Task lifecycle ──
 
     # Lifecycle states from SaFE types.go OptimizationTaskStatus.
     TERMINAL_TASK_STATUSES = {"Succeeded", "Failed", "Interrupted"}
@@ -497,8 +472,7 @@ class SafeOptimizeClient:
         log.info("[task %s] waiting for completion (timeout=%dm, poll=%ds)", task_id, timeout_min, poll_s)
         deadline = time.time() + timeout_min * 60
 
-        # Wait briefly (cap 60s) for clawSessionId to materialize, else fall
-        # through to polling.
+        # Wait briefly (cap 60s) for clawSessionId, else fall through to polling.
         sid = None
         for _ in range(12):
             sid = self._claw_session_id_for(task_id)
@@ -508,17 +482,12 @@ class SafeOptimizeClient:
 
         sse_used = False
         sf_status = ""
-        # On idle_timeout/stream_error the Claw SSE merely went quiet (a long tool
-        # call, or the agent paused between phases). SaFE often *prematurely* marks
-        # such a task Failed/Interrupted ("optimization report not found") even
-        # though it is still well within budget and may resume to finalize (and
-        # write session_breakdown.json). Do NOT accept an idle-induced terminal as
-        # final: resubscribe and keep waiting, up to a bounded number of
-        # consecutive idle re-entries, before concluding. Only a real Stopped
-        # (sandbox exit), a Succeeded, the deadline, or exhausted retries end it.
+        # On idle_timeout/stream_error the SSE merely went quiet; SaFE may
+        # prematurely mark such a task terminal. Resubscribe and keep waiting
+        # (bounded) instead of accepting an idle-induced terminal. Only a real
+        # Stopped, a Succeeded, the deadline, or exhausted retries end it.
         idle_retries = 0
-        # Default 0: a single 1h idle window (idle_grace_s) is the whole budget;
-        # no resubscribe. Raise SAFE_OPTIMIZE_SSE_IDLE_RETRIES to re-enable retries.
+        # Default 0: a single idle window is the whole budget; no resubscribe.
         max_idle_retries = int(_env_float("SAFE_OPTIMIZE_SSE_IDLE_RETRIES", 0.0))
         while sid and time.time() < deadline:
             sse_used = True
@@ -533,8 +502,8 @@ class SafeOptimizeClient:
             # A real success is always final.
             if sf_status == "Succeeded":
                 return sf_status, last_task
-            # Stopped = sandbox pod exited (real end-of-task). SaFE's controller
-            # lags shutdown by 10-180s, so short-poll up to 5min for its verdict.
+            # Stopped = sandbox pod exited. SaFE's controller lags shutdown, so
+            # short-poll up to 5min for its verdict.
             if sse_reason == "Stopped":
                 log.info("[task %s] sandbox stopped — short-polling SaFE for terminal status (up to 5min)", task_id)
                 for _ in range(30):
@@ -550,7 +519,7 @@ class SafeOptimizeClient:
                         log.info("[task %s] SaFE settled on %s after sandbox stop", task_id, sf_status)
                         return sf_status, last_task
                 # Sandbox gone but SaFE hasn't settled — treat as Succeeded so
-                # collect_artifacts can still read whatever the agent wrote.
+                # collect_artifacts can still read what the agent wrote.
                 log.info(
                     "[task %s] SaFE never settled within 5min after "
                     "sandbox stop — returning Succeeded (collect "
@@ -560,8 +529,7 @@ class SafeOptimizeClient:
                 return "Succeeded", last_task
             if sse_reason == "deadline":
                 return "Timeout", last_task
-            # idle_timeout / stream_error: inconclusive. Resubscribe and keep
-            # waiting (bounded) instead of accepting an idle-induced terminal.
+            # idle_timeout / stream_error: inconclusive. Resubscribe (bounded).
             if sse_reason in ("idle_timeout", "stream_error") and idle_retries < max_idle_retries and time.time() < deadline:
                 idle_retries += 1
                 log.info(
@@ -575,8 +543,8 @@ class SafeOptimizeClient:
                 )
                 time.sleep(min(poll_s, 60))
                 continue
-            # Retries exhausted (or another reason): accept a terminal SaFE
-            # verdict if one exists, else fall through to SaFE polling.
+            # Retries exhausted: accept a terminal SaFE verdict if one exists,
+            # else fall through to SaFE polling.
             if sf_status in self.TERMINAL_TASK_STATUSES:
                 return sf_status, last_task
             log.info(
@@ -620,20 +588,16 @@ class SafeOptimizeClient:
     def _sse_wait_until_done(self, session_id: str, deadline: float) -> str:
         """Subscribe to the Claw session SSE stream, return when the agent ends.
 
-        IMPORTANT: do NOT return on ResultMessage — it fires at the end of EVERY
-        agent turn (dozens over 1-3h), so the first turn was being mistaken for
-        completion. The only reliable signal is sandboxStatus
-        phase=Stopped/Terminated/Failed (sandbox pod actually exits).
+        Do NOT return on ResultMessage — it fires at the end of every agent turn.
+        The only reliable signal is sandboxStatus phase=Stopped/Terminated/Failed.
 
-        Returns: "Stopped" | "idle_timeout" (no events > idle_grace_s, default
-        1h) | "deadline" (per-task wall clock) | "stream_error" (caller falls
-        back).
+        Returns: "Stopped" | "idle_timeout" (no events > idle_grace_s) |
+        "deadline" (per-task wall clock) | "stream_error" (caller falls back).
         """
         url = f"{self.base_url}/claw-api/v1/chat/sessions/{session_id}/messages"
         last_evt = time.time()
-        # Idle grace: how long the SSE may be silent (keepalive-only) before we
-        # treat it as idle. Default 1h to cover slow model download + inference
-        # server startup, which emit no agent events. Configurable via env.
+        # How long the SSE may be silent (keepalive-only) before we treat it as
+        # idle. Default 1h to cover slow model download + server startup.
         idle_grace_s = int(_env_float("SAFE_OPTIMIZE_SSE_IDLE_GRACE_S", 3600.0))
         try:
             with self._sess.get(url, stream=True, timeout=(10, 60)) as r:
@@ -666,8 +630,7 @@ class SafeOptimizeClient:
                         continue
                     last_evt = now
                     et = d.get("type") or current_event
-                    # ResultMessage is intentionally not a return signal (see
-                    # docstring); it still refreshes last_evt above.
+                    # ResultMessage is intentionally not a return signal.
                     if et == "sandboxStatus":
                         ph = (d.get("phase") or "").lower()
                         if ph in ("stopped", "terminated", "failed"):
@@ -682,8 +645,7 @@ class SafeOptimizeClient:
         return "idle_timeout"
 
     def _claw_session_id_for(self, task_id: str) -> str | None:
-        """Resolve clawSessionId for a task (per-instance cached). None when
-        SaFE has no session attached (e.g. task failed before session creation).
+        """Resolve clawSessionId for a task (per-instance cached).
 
         Args:
             task_id (str): SaFE optimization task id.
@@ -709,8 +671,6 @@ class SafeOptimizeClient:
         """List task artifacts via the SaFE standard endpoint.
 
         Returns items shaped {path, size, lastModified, downloadPath}.
-        downloadPath is server-relative; download_artifact() uses it when present,
-        else builds the /artifacts/download?path= URL from path.
 
         Args:
             task_id (str): SaFE optimization task id.
@@ -732,8 +692,10 @@ class SafeOptimizeClient:
         return items
 
     def download_artifact(self, task_id: str, path_or_item: "str | dict") -> bytes:
-        """Download a single task artifact. Accepts a string path or a
-        list_artifacts item dict; prefers the item's downloadPath when present.
+        """Download a single task artifact.
+
+        Accepts a string path or a list_artifacts item dict; prefers the item's
+        downloadPath when present.
 
         Args:
             task_id (str): SaFE optimization task id.

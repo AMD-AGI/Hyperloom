@@ -41,7 +41,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             preview = ", ".join(str(x) for x in v[:3]) if v else "—"
             rows.append([k, len(v), preview])
         elif v in (None, "", []):
-            # Skip empty entries rather than render noisy ``—`` rows.
+            # Skip empty entries.
             continue
         else:
             rows.append([k, "1", str(v)])

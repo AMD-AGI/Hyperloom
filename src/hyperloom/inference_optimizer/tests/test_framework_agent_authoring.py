@@ -128,8 +128,7 @@ class _Stub:
     _framework_agent_audit_skip_confident = staticmethod(Coordinator._framework_agent_audit_skip_confident)
     _framework_agent_roots_have_git = staticmethod(Coordinator._framework_agent_roots_have_git)
     _pump_framework_agent_phase = Coordinator._pump_framework_agent_phase
-    # The stub has no GPU pool, so ``_framework_gpu_params`` degrades to ``{}``
-    # and the authoring task stays on research_lane only (asserted below).
+    # Stub has no GPU pool, so ``_framework_gpu_params`` degrades to ``{}``.
     _coerce_needs_gpu = staticmethod(Coordinator._coerce_needs_gpu)
     _framework_authoring_lanes_ttl = Coordinator._framework_authoring_lanes_ttl
 
@@ -144,8 +143,7 @@ class _Stub:
         self.backends: dict[str, Any] = {"critic": _ApproveCritic()}
         self.state = SimpleNamespace(pending_proposals={})
         self.bus = _BusStub()
-        # Audit verdict the pump's _audit_framework_agent_candidate returns; default
-        # unknown (empty recommended_next_step) preserves legacy both-tracks.
+        # Audit verdict _audit_framework_agent_candidate returns.
         self._audit_verdict: dict[str, Any] = {"recommended_next_step": ""}
 
     async def _record_observation(self, *_a: Any, **_k: Any) -> None:
@@ -154,7 +152,7 @@ class _Stub:
     async def _rank_framework_agent_candidates_llm(
         self, candidates: list[dict[str, Any]]
     ) -> dict[str, Any] | None:
-        # Hermetic: force deterministic discovery-order fallback (no LLM call).
+        # Force deterministic discovery-order fallback (no LLM call).
         return None
 
     async def _audit_framework_agent_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
@@ -162,12 +160,10 @@ class _Stub:
         try:
             candidate["_audit"] = v
         except Exception:
-            # Test double may reject attribute assignment; ignore.
             pass
         return v
 
     async def _warm_specialist_params(self, params: dict[str, Any]) -> None:
-        # No-op: avoid pulling in KnowledgePlane in the unit test.
         return None
 
     def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
@@ -197,10 +193,9 @@ def _pump(stub: _Stub) -> None:
 def _pump_then_materialize(stub: _Stub) -> None:
     """Run the pump (resolves audit route + submits a candidate proposal) then materialise it.
 
-    Mirrors the live async gate: the pump submits the candidate carrying its
-    resolved ``audit_step``; an approve verdict materialises it via
-    ``_materialize_framework_agent_candidate``, which performs the apply/author
-    dispatch (the routing that used to live inline in the pump).
+    The pump submits the candidate carrying its resolved ``audit_step``; an
+    approve verdict materialises it via ``_materialize_framework_agent_candidate``,
+    which performs the apply/author dispatch.
     """
     asyncio.run(Coordinator._pump_framework_agent_phase(stub))  # type: ignore[arg-type]
     pendings = [
@@ -273,7 +268,6 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     assert _CANDIDATE["diff_url"] in params["notes"]
     assert "Write" in spec["allowed_tools"]
     assert "Edit" in spec["allowed_tools"]
-    # Worktree authoring lane, not the serving lane.
     assert spec["requires_lanes"] == ["research_lane"]
 
 
@@ -290,14 +284,13 @@ def test_materialize_authoring_disabled_runs_diff_track_only(
 
 def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
-    # Set up a batch with one unprocessed candidate so the signal has a valid target.
+    # One unprocessed candidate so the signal has a valid target.
     _CAND_ID = "https://github.com/ROCm/vllm/pull/999"
     stub.shared_state.framework_agent_batches = [
         {"batch_id": "b1", "candidates": [{"candidate_id": _CAND_ID}]}
     ]
     stub.shared_state.framework_agent_phase_progress = []
 
-    # Nothing in flight.
     assert (
         asyncio.run(
             Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
@@ -461,8 +454,7 @@ def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
     """A non-keep terminal status (apply_failed) MUST still be recorded.
 
     Without a terminal row the FRAMEWORK pump re-selects the same candidate
-    every tick (the authoring specialist's ``patches_written`` is non-empty so
-    the empty-outcome bridge does not fire). Only empty/in-progress is skipped.
+    every tick. Only empty/in-progress is skipped.
     """
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(task_id="i-2", params={"framework_batch_id": "b1"})
@@ -513,12 +505,9 @@ def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path:
 
 
 def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
-    """A specialist authors a patch (proposal_set non-empty) that safety-vetting
-    then DROPS as unusable (missing_target), emptying patches_written. Autosubmit
-    keys off patches_written so it creates NO integrate_patch — the authored
-    bridge never fires. The empty-outcome bridge MUST stamp a terminal row
-    (gate on patches_written, NOT proposal_set), else the FRAMEWORK pump
-    re-dispatches the candidate forever (livelock).
+    """A patch dropped by safety-vetting (empty patches_written) must still stamp
+    a terminal row (gate on patches_written, NOT proposal_set), else the FRAMEWORK
+    pump re-dispatches the candidate forever (livelock).
     """
     stub = _Stub(tmp_path, authoring=True)
     cand = "https://github.com/sgl-project/sglang/pull/28067"
@@ -533,7 +522,7 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
     )
     done_payload = {
         "empty": False,
-        "patches_written": [],  # dropped by safety vetting
+        "patches_written": [],
         "proposal_set": [{"name": "serving-gc-off-critical-path"}],
         "summary": "patch target file absent from framework tree",
     }
@@ -578,7 +567,6 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_progress == []
 
 
-# Relaxed rule — config-lever deliverable is first-class -------------------
 def test_config_levers_helper_extracts_from_proposal_set():
     """A proposal_set entry carrying extra_args / extra_envs is flattened into
     a config_changes dict; patches take precedence (returns {})."""
@@ -642,7 +630,6 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_progress == []
 
 
-# Audit-routed dispatch ----------------------------------------------------
 def test_pump_audit_skip_records_terminal_row_no_tasks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -689,7 +676,7 @@ def test_pump_audit_direct_apply_dispatches_executor_only(
 
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     stub = _Stub(tmp_path, authoring=True)
-    stub._framework_agent_roots_have_git = lambda: True  # hermetic: pretend git checkout
+    stub._framework_agent_roots_have_git = lambda: True  # pretend git checkout
     stub._audit_verdict = {
         "semantic_status": "not_present",
         "applicability": "direct_apply",
@@ -952,10 +939,8 @@ def test_discover_batch_tags_cross_repo_candidates_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A candidate discovered from
-    a DIFFERENT framework's repo (already queried via the pr_intel_specialist
-    cross-repo set) gets tagged with its origin framework WITHOUT any env opt-in;
-    the session's own-repo candidates are left untagged, exactly as before."""
+    """A candidate discovered from a DIFFERENT framework's repo gets tagged with
+    its origin framework without any env opt-in; own-repo candidates stay untagged."""
     monkeypatch.delenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", raising=False)
     sglang_url = _fa_client.repo_url_for_framework("sglang")
     vllm_url = _fa_client.repo_url_for_framework("vllm")
@@ -1021,18 +1006,14 @@ def test_discover_batch_overrides_misdefaulted_cross_repo_framework(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Design #5-P2 regression: fa phase-discover defaults a cross-repo candidate's
-    ``framework`` to the SESSION framework (e.g. a sgl-project PR surfaced under a
-    vllm session's pr_intel query comes back framework="vllm"). Filling blanks only
-    (the prior behaviour) left it mis-tagged and audited as same-framework, so the
-    sglang->vllm port never fired. The candidate's OWN repo must win and re-tag it
-    "sglang" so it routes to the cross-framework specialist."""
+    """When fa phase-discover defaults a cross-repo candidate's ``framework`` to
+    the SESSION framework, the candidate's OWN repo must win and re-tag it so it
+    routes to the cross-framework specialist."""
     monkeypatch.delenv("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", raising=False)
     vllm_url = _fa_client.repo_url_for_framework("vllm")
 
     async def _discover(*, repo_url: str, **_: Any) -> dict[str, Any]:
-        # A vllm session: fa returns a sgl-project PR under the vllm query with
-        # framework mis-defaulted to the session framework ("vllm").
+        # fa returns a sgl-project PR framework mis-defaulted to the session framework.
         return {
             "batch_id": "b1",
             "candidates": [
@@ -1060,9 +1041,7 @@ def test_discover_batch_overrides_misdefaulted_cross_repo_framework(
     assert ok
     candidates = stub.shared_state.framework_agent_batches[-1]["candidates"]
     by_ref = {c["ref"]: c for c in candidates}
-    # sgl-project PR re-tagged to its own origin framework -> cross-framework route.
     assert by_ref["PR:29322"]["framework"] == "sglang"
-    # Genuine same-framework vllm candidate is left as vllm.
     assert by_ref["PR:9"]["framework"] == "vllm"
 
 
@@ -1089,9 +1068,6 @@ def test_pump_audit_author_with_authoring_disabled_falls_back_to_raw(
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["framework_agent"]
-
-
-# --- cross-framework authoring seed / provenance --------------------
 
 
 def test_authoring_specialist_cross_framework_seed(tmp_path: Path):
@@ -1138,11 +1114,9 @@ def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):
 
 
 def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
-    """A specialist that returns NO source patch and NO config lever but a
-    non-diff tuned artifact (``artifacts_written`` with a real source file) is a
-    FULL result: autosubmit routes it to ``integrate_patch`` (which installs the
-    artifact + runs the gate), so the empty-outcome bridge must NOT stamp an
-    authored_empty row for it (regression: aiter#4130 tuned FMOE CSV dropped)."""
+    """A non-diff tuned artifact (``artifacts_written`` with a real source file)
+    is a FULL result: autosubmit routes it to ``integrate_patch``, so the
+    empty-outcome bridge must NOT stamp an authored_empty row for it."""
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
     stub = _Stub(tmp_path, authoring=True)
@@ -1186,8 +1160,7 @@ def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
 def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
     """``artifacts_written`` present but the source file does NOT exist:
     autosubmit cannot route it to ``integrate_patch``, so the empty-outcome
-    bridge MUST still stamp a terminal row (else the FRAMEWORK pump livelocks
-    re-dispatching the candidate). Guards the shared routable-signal."""
+    bridge MUST still stamp a terminal row (else the FRAMEWORK pump livelocks)."""
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="spec-art-missing",
@@ -1225,11 +1198,8 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
 
 def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Path):
     """A RELATIVE artifact ``source`` that resolves (via ``..``) to a real file
-    OUTSIDE the specialist sandbox is NOT routable: autosubmit cannot route it
-    (integrate_patch would reject it as ``source_outside_workspace``), so the
-    empty-outcome bridge MUST stamp a terminal row. Guards the source-
-    containment tightening on the FRAMEWORK side (parity with autosubmit; not
-    just absolute sources)."""
+    OUTSIDE the specialist sandbox is NOT routable, so the empty-outcome bridge
+    MUST stamp a terminal row."""
     import os
 
     from hyperloom.inference_optimizer.session.session_paths import runs_dir

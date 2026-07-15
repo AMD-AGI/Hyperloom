@@ -19,7 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 TRACE_TOOL = ROOT / "tools" / "tracelens_analysis.py"
 OPT_TOOL = ROOT / "tools" / "kernel_optimization.py"
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
-RAY_RUNTIME = ROOT / "tools" / "backends" / "ray_runtime.py"
 
 
 def run_json(cmd: list[str], *, workspace: Path) -> dict:
@@ -40,16 +39,10 @@ def run_json_allow_fail(cmd: list[str], *, workspace: Path) -> tuple[int, dict]:
     return proc.returncode, payload
 
 
-# ``classify_patchability`` only routes a candidate to optimization
-# backends when its ``source_file`` resolves under a reusable framework
-# root (sglang / vllm / aiter / FlyDSL checkouts) — see
-# ``tracelens_analysis.classify_patchability``. The synthetic fixtures
-# below therefore live under ``/sgl-workspace/sglang/...`` so the trace
-# tool classifies them as routable; arbitrary paths like
-# ``/src/kernels/rmsnorm.py`` are (correctly) rejected as "source not
-# under a reusable framework root" and short-circuit to a skipped REVERT.
-# The files need not exist on disk: the gate keys off the path prefix +
-# source_type, not file contents.
+# ``classify_patchability`` only routes a candidate when its ``source_file``
+# resolves under a reusable framework root, so the synthetic fixtures live under
+# ``/sgl-workspace/sglang/...`` to be classified as routable. The files need not
+# exist on disk: the gate keys off the path prefix + source_type, not contents.
 _FRAMEWORK_ROOT = "/sgl-workspace/sglang/python/sglang/srt/layers"
 
 
@@ -205,7 +198,7 @@ class KernelAgentToolTests(unittest.TestCase):
             timeout=30,
             env={
                 **os.environ,
-                # Missing paths make the "not found" warning deterministic.
+                # Missing paths make the warning deterministic.
                 "TRACELENS_ROOT": str(ROOT / "missing-tracelens-root"),
                 "TRACELENS_INTERNAL_ROOT": str(ROOT / "missing-tracelens"),
                 "HYPERLOOM_BUNDLE": str(ROOT / "missing-bundle"),
@@ -219,10 +212,8 @@ class KernelAgentToolTests(unittest.TestCase):
         install_text = INSTALL_SCRIPT.read_text(encoding="utf-8")
         trace_tool_text = TRACE_TOOL.read_text(encoding="utf-8")
         skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-        ray_runtime_text = RAY_RUNTIME.read_text(encoding="utf-8")
 
-        # Open-source deps default to a pod-local base, decoupled from USER_DATA_PATH,
-        # with HYPERLOOM_OPEN_SOURCE_ROOT as an optional override.
+        # Open-source deps default to a pod-local base with an optional override.
         self.assertIn(
             '_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"',
             install_text,
@@ -231,61 +222,20 @@ class KernelAgentToolTests(unittest.TestCase):
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
         # Internal extension is opt-in: no default path.
         self.assertIn('TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"', install_text)
-        # GEAK has a dedicated root so moving it to pod-local storage does not
-        # implicitly move TraceLens via HYPERLOOM_ROOT.
+        # GEAK has a dedicated root, independent of TraceLens.
         self.assertIn('GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"', install_text)
         # Override is read but never written into a generated env file.
         self.assertNotIn("export HYPERLOOM_OPEN_SOURCE_ROOT", install_text)
-        # Assert the override pattern, not the exact pin, so ref bumps don't break this.
+        # Assert the override pattern, not the exact pin.
         self.assertIn('GEAK_REF="${GEAK_REF:-', install_text)
-        self.assertIn("ensure_rocm_torch_for_geak()", install_text)
-        self.assertIn("KERNEL_AGENT_SKIP_TORCH_GATE", install_text)
-        self.assertIn("rocm-smi --showid", install_text)
         # Prefix match on `_PIP_FLAGS` allows future flag additions.
         self.assertIn('_PIP_FLAGS="-q --no-cache-dir', install_text)
-        self.assertIn(
-            'python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} "${GEAK_V3_ROOT}"',
-            install_text,
-        )
-        # GEAK v3.2.1 ships 4 MCP tool folders (metrix-mcp removed; transitive via profiler-mcp).
-        for _mcp in (
-            "rag-mcp",
-            "profiler-mcp",
-            "cross-session-memory-mcp",
-            "automated-test-discovery",
-        ):
-            self.assertIn(_mcp, install_text)
-        # Pin the v3.2.1 install-loop ordering so re-adding metrix-mcp regresses this.
-        self.assertIn(
-            "for _geak_mcp in rag-mcp profiler-mcp \\\n"
-            "                    cross-session-memory-mcp automated-test-discovery; do",
-            install_text,
-        )
-        # Keep this resilient to shell-formatting indentation changes.
-        self.assertIn(
-            "python3 -m pip install ${_PIP_FLAGS} ${_PIP_CONSTRAINT_ARGS} \\",
-            install_text,
-        )
-        self.assertIn('"${GEAK_V3_ROOT}/mcp_tools/${_geak_mcp}"', install_text)
-        # Auto-detect block: cuda stays the preferred default, env var still overrides.
-        self.assertIn('if [ -z "${GEAK_RAG_INDEX_DEVICE:-}" ]; then', install_text)
-        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cuda"', install_text)
-        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="cpu"', install_text)
-        self.assertIn('GEAK_RAG_INDEX_DEVICE_VAL="${GEAK_RAG_INDEX_DEVICE}"', install_text)
-        self.assertIn("python3 scripts/build_index.py --force --device", install_text)
-        self.assertIn("GEAK_RAG_INDEX_DEVICE=cuda", skill_text)
-        self.assertIn("tools:", install_text)
-        self.assertIn("  rag: true", install_text)
-        self.assertIn("GEAK_MEMORY_STORE_PATH", install_text)
         self.assertNotIn("GEAK_MEMORY_KB_PATH", install_text)
         self.assertIn('"click<8.3.0" "ray[default]==2.44.1"', install_text)
         self.assertIn('chmod 600 "$env_file"', install_text)
-        self.assertIn("GEAK_MEMORY_STORE_PATH", ray_runtime_text)
-        self.assertIn("GEAK_SAVE_TO_KNOWLEDGE_BASE", ray_runtime_text)
-        # No hard-coded /wekafs TRACELENS_ROOT fallback; tool fails loudly when missing.
+        # No hard-coded TRACELENS_ROOT fallback; tool fails loudly when missing.
         self.assertNotIn("DEFAULT_TRACELENS_ROOT", trace_tool_text)
-        # Robust to the add_argument(...) call being split across lines: assert
-        # the flag and its TRACELENS_ROOT env default independently.
+        # Assert the flag and its TRACELENS_ROOT env default independently.
         self.assertIn('"--tracelens-root"', trace_tool_text)
         self.assertIn('default=os.environ.get("TRACELENS_ROOT", "")', trace_tool_text)
         self.assertIn(
@@ -297,7 +247,7 @@ class KernelAgentToolTests(unittest.TestCase):
             'TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-/hyperloom/TraceLens-internal}"', install_text
         )
         self.assertNotIn("Executor asks", skill_text)
-        # Public TraceLens is cloned into the pod-local repo tree by default; TRACELENS_ROOT overrides.
+        # Public TraceLens is cloned into the pod-local repo tree by default.
         self.assertIn(
             'TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"',
             install_text,
@@ -313,7 +263,7 @@ class KernelAgentToolTests(unittest.TestCase):
             env = {
                 **os.environ,
                 "USER_DATA_PATH": td,
-                "KERNEL_OPT_BACKEND_ORDER": "geak_v3",
+                "KERNEL_OPT_BACKEND_ORDER": "forge",
                 "TRACELENS_ROOT": str(ROOT / "missing-tracelens-root"),
                 "TRACELENS_INTERNAL_ROOT": str(ROOT / "missing-tracelens-internal"),
             }
@@ -326,22 +276,17 @@ class KernelAgentToolTests(unittest.TestCase):
             )
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         self.assertIn("would install Node.js/npm + @anthropic-ai/claude-code", proc.stdout)
-        self.assertIn('TRACELENS_REF="48f7cf6d1cc7c6d3e0aaee06c9689639021d11e3"', install_text)
+        self.assertIn('TRACELENS_REF="4d6e0d9f03bab0541f04a68952dcf13988475708"', install_text)
         self.assertIn('TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"', install_text)
- # clone AND pin the ref inside the temp sibling, then atomically
-        # rename — never publish an unpinned/half-cloned $TRACELENS_ROOT.
+ # Clone and pin the ref in a temp sibling, then atomically rename.
         self.assertIn('git clone --depth 1 "$TRACELENS_REPO" "$_tl_tmp"', install_text)
         self.assertIn('git -C "$_tl_tmp" fetch --depth 1 origin "$TRACELENS_REF"', install_text)
         self.assertIn('git -C "$_tl_tmp" checkout -q FETCH_HEAD', install_text)
         self.assertIn('mv "$_tl_tmp" "$TRACELENS_ROOT"', install_text)
-        # Per-kernel GEAK (geak_v3) existing-checkout path must realign to
-        # GEAK_V3_REF (ensure_geak_v3) — not just log "already present".
-        self.assertIn('git -C "${GEAK_V3_ROOT}" fetch --depth 1 origin "$GEAK_V3_REF"', install_text)
-        self.assertIn('git -C "${GEAK_V3_ROOT}" checkout -q --force FETCH_HEAD', install_text)
         self.assertNotIn(
             'TRACELENS_PUBLIC_MIRROR_DIR="${TRACELENS_PUBLIC_MIRROR_DIR:-${HYPERLOOM_ROOT}/TraceLens}"', install_text
         )
-        # Read-only internal root may trigger a writable mirror (optional extension).
+        # Read-only internal root may trigger a writable mirror.
         self.assertIn(
             'TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"',
             install_text,
@@ -436,8 +381,8 @@ class KernelAgentToolTests(unittest.TestCase):
             self.assertEqual(result["trace_input_type"], "capture_dir")
             self.assertGreaterEqual(len(result["hot_kernels"]), 2)
 
-    def test_default_backends_include_geak_without_benchmark(self) -> None:
-        """Auto-pick includes GEAK even with no benchmark; decision stays NEEDS_REVIEW."""
+    def test_default_backends_forge_without_benchmark(self) -> None:
+        """Auto-pick is forge even with no benchmark; decision stays NEEDS_REVIEW."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             trace = workspace / "trace.json"
@@ -476,19 +421,13 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            # Default ladder converged to forge then GEAK; OOB backends removed.
-            self.assertIn("geak_v3", result["selected_backends"])
-            self.assertEqual(result["selected_backends"][0], "forge")
-            self.assertEqual(
-                result["selected_backends"][:2], ["forge", "geak_v3"]
-            )
-            # No bench → flagged for downstream verification gates.
-            self.assertTrue(result["backend_selection"]["geak_without_benchmark"])
+            # Default ladder converged to forge-only.
+            self.assertEqual(result["selected_backends"], ["forge"])
             # E2E evidence still missing, so still NEEDS_REVIEW.
             self.assertEqual(result["proposal"]["decision"], "NEEDS_REVIEW")
             self.assertIn("E2E evidence missing", result["proposal"]["reasons"])
 
-    def test_user_specified_geak_without_benchmark_is_marked(self) -> None:
+    def test_user_specified_forge_disables_rag_and_xs_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             trace = workspace / "trace.json"
@@ -523,18 +462,13 @@ class KernelAgentToolTests(unittest.TestCase):
                     "--session-id",
                     "s4",
                     "--backends",
-                    "geak_v3",
-                    "--disable-rag",
-                    "--disable-xs-memory",
+                    "forge",
                     "--dry-run",
                 ],
                 workspace=workspace,
             )
 
-            self.assertEqual(result["selected_backends"], ["geak_v3"])
-            self.assertTrue(result["backend_selection"]["geak_without_benchmark"])
-            self.assertFalse(result["backend_selection"]["rag_enabled"])
-            self.assertFalse(result["backend_selection"]["xs_memory_enabled"])
+            self.assertEqual(result["selected_backends"], ["forge"])
             self.assertEqual(result["rag_hits"], [])
             self.assertEqual(result["xs_memory_hits"], [])
 
@@ -576,7 +510,7 @@ class KernelAgentToolTests(unittest.TestCase):
                     "1.5",
                     "--accuracy-passed",
                     "true",
-                    # Well above the 1.05x KEEP threshold.
+                    # Above the 1.05x KEEP threshold.
                     "--micro-speedup",
                     "1.6",
                     "--dry-run",
@@ -584,7 +518,7 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            self.assertIn("geak_v3", result["selected_backends"])
+            self.assertIn("forge", result["selected_backends"])
             self.assertEqual(result["proposal"]["decision"], "KEEP")
             self.assertIn("rag_hits", result)
             self.assertIn("xs_memory_hits", result)
@@ -645,13 +579,9 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            # A vendor BLAS binary (hipblasLt) carries no rewritable source,
-            # so ``classify_patchability`` marks it non-routable. The
-            # optimizer now short-circuits *before* backend selection
-            # into a skipped/REVERT
-            # result instead of running an empty backend ladder. The
-            # invariant remains: no backend is dispatched and the proposal
-            # is REVERT.
+            # A vendor BLAS binary (hipblasLt) carries no rewritable source, so it is
+            # marked non-routable and short-circuits into a skipped/REVERT before backend
+            # selection: no backend is dispatched and the proposal is REVERT.
             self.assertEqual(result["status"], "skipped")
             self.assertEqual(result["reason"], "non_routable_candidate")
             self.assertEqual(result["error_class"], "missing_native_source")
@@ -690,12 +620,8 @@ class KernelAgentToolTests(unittest.TestCase):
                 workspace=workspace,
             )
 
-            # A hallucinated kernel_id is now a *graceful skip* rather than
-            # a hard failure (commit bdeac3ce "survive hallucinated
-            # kernel_id"): the optimizer exits 0 with status=skipped so the
-            # orchestrator moves to the next decision instead of burning the
-            # whole run. The invariant this test pins is that no fabricated /
-            # partial optimization result is emitted for an unknown id.
+            # A hallucinated kernel_id is a graceful skip: the optimizer exits 0 with
+            # status=skipped and emits no fabricated/partial result for an unknown id.
             self.assertEqual(code, 0)
             self.assertEqual(result["status"], "skipped")
             self.assertEqual(result["reason"], "kernel_id_not_in_candidates")
@@ -741,7 +667,7 @@ class KernelAgentToolTests(unittest.TestCase):
 
 
 class AuthFailureDetectionTests(unittest.TestCase):
-    """Cover :func:`_count_auth_failures` and the partial-promotion guard (r24 custom_allreduce 401-loop regression)."""
+    """Cover :func:`_count_auth_failures` and the partial-promotion guard."""
 
     def test_count_auth_failures_recognises_401_loop(self) -> None:
         sys.path.insert(0, str(ROOT / "tools"))
@@ -782,128 +708,8 @@ class AuthFailureDetectionTests(unittest.TestCase):
         self.assertEqual(ko._count_auth_failures(log), 3)
 
 
-class GeakConfigEnvTimeoutInjectionTests(unittest.TestCase):
-    """GEAK config ``env.timeout`` must be >= harness budget (else SIGKILL at mini-swe-agent's 30s default)."""
-
-    def _import_ko(self):
-        sys.path.insert(0, str(ROOT / "tools"))
-        try:
-            import kernel_optimization as ko  # type: ignore[import-not-found]
-
-            return ko
-        finally:
-            sys.path.pop(0)
-
-    def test_injects_env_timeout_when_missing(self) -> None:
-        ko = self._import_ko()
-        base = "model:\n  model_class: litellm\ntools:\n  rag: true\n"
-        injected = ko._ensure_yaml_env_timeout(base)
-        self.assertIn("env:", injected)
-        self.assertRegex(injected, r"timeout:\s*3600")
-        # Idempotent.
-        self.assertEqual(injected, ko._ensure_yaml_env_timeout(injected))
-
-    def test_preserves_existing_env_block_when_already_large_enough(self) -> None:
-        ko = self._import_ko()
-        base = (
-            "model:\n  model_class: litellm\n"
-            "env:\n"
-            "  env:\n    PAGER: cat\n"
-            "  timeout: 7200\n"  # already >= the 3600s default
-            "tools:\n  rag: true\n"
-        )
-        self.assertEqual(ko._ensure_yaml_env_timeout(base), base)
-
-    def test_upgrades_too_small_explicit_timeout(self) -> None:
-        """A too-small env.timeout must be rewritten up to the harness budget."""
-        ko = self._import_ko()
-        base = "model:\n  model_class: litellm\nenv:\n  env:\n    PAGER: cat\n  timeout: 30\ntools:\n  rag: true\n"
-        out = ko._ensure_yaml_env_timeout(base, timeout=2100)
-        self.assertRegex(out, r"timeout:\s*2100")
-        self.assertNotRegex(out, r"timeout:\s*30\b")
-        # Still only one env block / one timeout line.
-        self.assertEqual(out.count("\nenv:\n"), 1)
-        self.assertEqual(out.count("timeout:"), 1)
-
-    def test_appends_timeout_to_existing_env_without_one(self) -> None:
-        ko = self._import_ko()
-        base = "model:\n  model_class: litellm\nenv:\n  env:\n    PAGER: cat\ntools:\n  rag: true\n"
-        out = ko._ensure_yaml_env_timeout(base, timeout=2100)
-        self.assertRegex(out, r"timeout:\s*2100")
-        self.assertEqual(out.count("\nenv:\n"), 1)
-
-    def test_geak_config_for_run_falls_back_to_3600(self) -> None:
-        ko = self._import_ko()
-        import tempfile
-        import argparse
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            base = tmp / "local.yaml"
-            base.write_text(
-                "model:\n  model_class: litellm\ntools:\n  rag: true\n",
-                encoding="utf-8",
-            )
-            prompt = tmp / "prompt.md"
-            prompt.write_text("placeholder", encoding="utf-8")
-            previous = os.environ.get("GEAK_CONFIG")
-            os.environ["GEAK_CONFIG"] = str(base)
-            try:
-                args = argparse.Namespace(disable_rag=False)
-                override = ko._geak_config_for_run(args, prompt)
-            finally:
-                if previous is None:
-                    os.environ.pop("GEAK_CONFIG", None)
-                else:
-                    os.environ["GEAK_CONFIG"] = previous
-
-            text = Path(override).read_text(encoding="utf-8")
-            self.assertRegex(text, r"timeout:\s*3600")
-
-
-class GeakCostLimitDefaultTests(unittest.TestCase):
-    """Lock in the GEAK cost-limit contract: Hyperloom passes 0.0 (unlimited) so GEAK skips its 3.0 fallback."""
-
-    def setUp(self) -> None:
-        import tempfile
-
-        # _resolve_geak_config() needs GEAK_CONFIG pointing at a litellm stub.
-        self._cfg_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
-        self._cfg_file.write("model:\n  model_class: litellm\n")
-        self._cfg_file.flush()
-        self._cfg_file.close()
-        self._prev_geak_config = os.environ.get("GEAK_CONFIG")
-        os.environ["GEAK_CONFIG"] = self._cfg_file.name
-
-    def tearDown(self) -> None:
-        if self._prev_geak_config is None:
-            os.environ.pop("GEAK_CONFIG", None)
-        else:
-            os.environ["GEAK_CONFIG"] = self._prev_geak_config
-        Path(self._cfg_file.name).unlink(missing_ok=True)
-
-    # Assert the exact add_argument expression since --help doesn't show defaults.
-    _EXPECTED_DEFAULT_EXPR = 'default=float(os.environ.get("HYPERLOOM_GEAK_COST_LIMIT", "0.0"))'
-
-    def test_kernel_optimization_default_is_zero(self) -> None:
-        src = OPT_TOOL.read_text(encoding="utf-8")
-        self.assertIn('"--geak-cost-limit"', src)
-        self.assertIn(
-            self._EXPECTED_DEFAULT_EXPR,
-            src,
-            "kernel_optimization.py --geak-cost-limit default must be 0.0 (matching GEAK geak.yaml `cost_limit: 0.`)",
-        )
-
-    def test_parallel_e2e_runner_default_is_zero(self) -> None:
-        tool = ROOT / "tools" / "parallel_e2e_runner.py"
-        src = tool.read_text(encoding="utf-8")
-        self.assertIn('"--geak-cost-limit"', src)
-        self.assertIn(
-            self._EXPECTED_DEFAULT_EXPR,
-            src,
-            "parallel_e2e_runner.py --geak-cost-limit default "
-            "must mirror kernel_optimization.py (0.0 / env-overridable)",
-        )
+class ParallelE2ERunnerTests(unittest.TestCase):
+    """Smoke tests for the whole-pipeline e2e runner helper."""
 
     def test_parallel_e2e_runner_run_json_invokes_subprocess(self) -> None:
         """run_json must have its subprocess dependency imported."""
@@ -928,83 +734,6 @@ class GeakCostLimitDefaultTests(unittest.TestCase):
                 log_path=Path(td) / "run.log",
             )
         self.assertEqual(result, {"ok": True})
-
-    def test_env_var_overrides_default(self) -> None:
-        """HYPERLOOM_GEAK_COST_LIMIT must override the argparse default."""
-        # AST fallback: evaluate the default expression in a controlled namespace.
-        import ast
-
-        src = OPT_TOOL.read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        default_node = None
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and getattr(node.func, "attr", None) == "add_argument"
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and node.args[0].value == "--geak-cost-limit"
-            ):
-                for kw in node.keywords:
-                    if kw.arg == "default":
-                        default_node = kw.value
-                        break
-                break
-        self.assertIsNotNone(default_node, "--geak-cost-limit add_argument not found")
-        os.environ["HYPERLOOM_GEAK_COST_LIMIT"] = "12.5"
-        try:
-            value = eval(  # noqa: S307 — controlled expression from our own source
-                compile(ast.Expression(default_node), filename="<test>", mode="eval"),
-                {"os": os, "float": float, "int": int, "str": str},
-            )
-        finally:
-            os.environ.pop("HYPERLOOM_GEAK_COST_LIMIT", None)
-        self.assertEqual(
-            value, 12.5, f"HYPERLOOM_GEAK_COST_LIMIT env var must override --geak-cost-limit default; got {value!r}"
-        )
-
-    def _import_geak_submit(self):
-        # backends/ must be on sys.path for geak_submit's bare sibling import.
-        backends_dir = ROOT / "tools" / "backends"
-        sys.path.insert(0, str(backends_dir))
-        try:
-            import importlib
-
-            if "geak_submit" in sys.modules:
-                return importlib.reload(sys.modules["geak_submit"])
-            return importlib.import_module("geak_submit")
-        finally:
-            sys.path.pop(0)
-
-    def test_geak_submit_build_cmd_propagates_zero(self) -> None:
-        """``_build_cmd(cost_limit=0.0)`` must emit ``--cost-limit 0.0`` to override the $3 default."""
-        geak_submit = self._import_geak_submit()
-        cmd = geak_submit._build_cmd(
-            prompt_file=Path("/tmp/p.md"),
-            output_dir=Path("/tmp/out"),
-            kernel_path="/tmp/k.cu",
-            gpu_ids="0",
-            cost_limit=0.0,
-        )
-        self.assertIn(
-            "--cost-limit",
-            cmd,
-            "cost_limit=0.0 must emit --cost-limit (without it GEAK falls back to AgentConfig.cost_limit = 3.0)",
-        )
-        idx = cmd.index("--cost-limit")
-        self.assertEqual(cmd[idx + 1], "0.0", f"--cost-limit must carry the explicit 0.0 value: {cmd}")
-
-    def test_geak_submit_build_cmd_omits_when_none(self) -> None:
-        """``cost_limit=None`` must NOT add the flag, so GEAK uses its config-file value."""
-        geak_submit = self._import_geak_submit()
-        cmd = geak_submit._build_cmd(
-            prompt_file=Path("/tmp/p.md"),
-            output_dir=Path("/tmp/out"),
-            kernel_path="/tmp/k.cu",
-            gpu_ids="0",
-            cost_limit=None,
-        )
-        self.assertNotIn("--cost-limit", cmd, f"cost_limit=None must omit --cost-limit: {cmd}")
 
 
 if __name__ == "__main__":

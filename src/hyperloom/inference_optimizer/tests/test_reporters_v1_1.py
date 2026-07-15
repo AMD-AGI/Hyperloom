@@ -8,7 +8,7 @@ from pathlib import Path
 
 from hyperloom.inference_optimizer.breakdown.reporters import render_session_report
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.decision_journal import render as render_dj
-from hyperloom.inference_optimizer.breakdown.reporters._renderers.invocations import render_geak, render_oob
+from hyperloom.inference_optimizer.breakdown.reporters._renderers.invocations import render_forge, render_geak
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.kernel_profiling import render as render_kp
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.phase_timeline import render as render_phase_timeline
 
@@ -171,7 +171,7 @@ def test_invocation_renderer_normalizes_and_caps_attempt_rows() -> None:
         ]
     )
 
-    sec = render_geak({"invocations": {"geak": attempts}})
+    sec = render_geak({"geak_invocations": attempts})
 
     assert not sec.skipped
     assert any("30 invocation(s), 1 KEEP, 2 FAILED" in fact for fact in sec.key_facts)
@@ -183,15 +183,12 @@ def test_invocation_renderer_normalizes_and_caps_attempt_rows() -> None:
     assert "x" * 80 in sec.markdown_block
     assert "x" * 81 not in sec.markdown_block
 
+    forge_sec = render_forge({"forge_invocations": attempts})
 
-def test_oob_invocation_renderer_uses_legacy_top_level_key() -> None:
-    sec = render_oob({"oob_invocations": [{"kernel_id": "k-oob", "decision": "ERROR"}]})
-
-    assert not sec.skipped
-    assert sec.section_id == "oob_invocations"
-    assert sec.decisions[0].kind == "attempted"
-    assert "0 KEEP / 1 FAILED across 1 attempts" in sec.decisions[0].rationale
-    assert "k-oob" in sec.markdown_block
+    assert not forge_sec.skipped
+    assert forge_sec.section_id == "forge_invocations"
+    assert any("30 invocation(s), 1 KEEP, 2 FAILED" in fact for fact in forge_sec.key_facts)
+    assert "named-kernel" in forge_sec.markdown_block
 
 
 def test_phase_timeline_renderer_renders_capped_histogram() -> None:
@@ -245,7 +242,7 @@ def test_compose_includes_v1_1_sections_in_report() -> None:
         sweep={},
         kernel_lifecycle={"detected": []},
         geak_invocations=[],
-        oob_invocations=[],
+        forge_invocations=[],
         phase_timeline=[],
         attribution={"method": "missing"},
         source_files={},

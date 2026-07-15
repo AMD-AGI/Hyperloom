@@ -1,21 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""CLI ``_preflight`` cluster — auto-install/env-hygiene checks run before ``optimize`` starts.
-
-Extracted from ``cli/__init__.py`` (tree-reform.MD P2.4 follow-up). Four
-functions in this cluster (``_load_dotenv_fallback``,
-``_load_kernel_agent_env_fallback``, ``_clone_inferencex``, and — still in
-``__init__.py`` — ``_probe_llm_catalog``) are directly monkeypatched by name
-in ``test_preflight_auth_override.py`` via
-``monkeypatch.setattr(cli, "<name>", ...)``. Per tree-reform-lessons.MD §3.2/
-§3.3, a bare-name call from inside this module would resolve THIS module's
-own binding and silently bypass such a patch — even for a function defined in
-this same file (verified empirically; see the inline comments at each call
-site below). Every call to one of those four names is therefore a lazy,
-package-qualified ``from . import <name>`` read at call time instead of a
-bare-name reference, so the patched value on the ``cli`` package is always
-picked up (same technique used for coordinator.py's cross-collaborator calls).
-"""
+"""CLI ``_preflight`` cluster — auto-install/env-hygiene checks run before ``optimize`` starts."""
 
 from __future__ import annotations
 
@@ -30,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .credentials import (  # noqa: F401 - re-exported for callers/tests
+from .credentials import (
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
@@ -46,7 +31,48 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
-# /dev/shm threshold: below this, next launch collides with stale vLLM/NCCL shm segments and hangs in zmq.
+_PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_CUSTOM_HEADERS",
+    "SAFE_API_KEY",
+    "LLM_GATEWAY_KEY",
+    "DEEPSEEK_BASE_URL",
+    "GEAK_BASE_URL",
+    "LLM_API_BASE",
+)
+
+
+def _provider_only_mode_before_fallback() -> str:
+    """Detect explicit single-provider intent before installer env fallback runs."""
+    has_anthropic = bool(
+        os.environ.get("ANTHROPIC_BASE_URL")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        or os.environ.get("DEEPSEEK_API_KEY")
+        or os.environ.get("DEEPSEEK_BASE_URL")
+    )
+    has_openai = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_KEY"))
+    has_gateway = bool(os.environ.get("SAFE_API_KEY") or os.environ.get("LLM_GATEWAY_KEY"))
+    if has_anthropic and not has_openai and not has_gateway:
+        return "anthropic"
+    if has_openai and not has_anthropic and not has_gateway:
+        return "openai"
+    return ""
+
+
+def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
+    """Undo stale cross-provider credentials loaded from installer env fallback."""
+    if provider_mode != "anthropic":
+        return
+    for key in _PROVIDER_FALLBACK_KEYS:
+        original = snapshot.get(key)
+        if original is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = original
+
+# /dev/shm threshold: below this, a launch can collide with stale vLLM/NCCL shm segments.
 _DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
 
 
@@ -77,12 +103,9 @@ def _is_placeholder_tracelens_path(value: str) -> bool:
 def _load_dotenv_fallback() -> None:
     """Source missing vars from ``$REPO_ROOT/.env``; env always wins (no-clobber).
 
-    Always parses ``.env`` and loads any key that is not already present in the
-    environment, regardless of whether LLM credentials are already set. Removing
-    the former URL+KEY early-return fixes silent misconfiguration: exporting only
-    ``OPENAI_BASE_URL`` and ``SAFE_API_KEY`` previously skipped unrelated
-    operational vars (e.g. ``TRACELENS_ROOT``, ``FORGE_PATH``,
-    ``KERNEL_OPT_BACKEND_ORDER``) that are also stored in ``.env``.
+    Always parses ``.env`` and loads any key not already present in the
+    environment, regardless of whether LLM credentials are already set (so
+    operational vars like ``TRACELENS_ROOT`` / ``FORGE_PATH`` are also picked up).
     """
     repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
     env_file = Path(repo_root) / ".env"
@@ -167,8 +190,7 @@ def _load_kernel_agent_env_fallback() -> None:
     Must source before any orchestrator import (trace_analyze reads
     HYPERLOOM_KERNEL_AGENT_ROOT at module load). When HYPERLOOM_KERNEL_AGENT_ROOT
     is already set, bootstrapping is skipped but the env file is still consulted
-    to CORRECT a stale/invalid inherited TRACELENS_ROOT — the fix for issue
-    #722 where a bad inherited TRACELENS_ROOT survived. Hard-fail contract
+    to correct a stale/invalid inherited TRACELENS_ROOT. Hard-fail contract
     (root unset only): sys.exit(2) if missing/0-vars/still-unset.
     """
     candidate = os.environ.get("KERNEL_AGENT_ENV")
@@ -178,8 +200,8 @@ def _load_kernel_agent_env_fallback() -> None:
             candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
 
     if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
-        # Root is set: no bootstrap needed, but still correct invalid path vars
-        # from the env file when resolvable. Silent no-op otherwise.
+        # Root is set: no bootstrap, but still correct invalid path vars from the
+        # env file when resolvable.
         if not candidate:
             return
         env_path = Path(candidate)
@@ -262,7 +284,7 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
             install`` invocation (e.g. index flags).
     """
     candidates = (
-        ("claude_agent_sdk", "claude-agent-sdk>=0.1.65"),
+        ("claude_agent_sdk", "claude-agent-sdk>=0.2.110"),
         ("openai", "openai>=1.50"),
         ("httpx", "httpx>=0.27"),
     )
@@ -280,6 +302,94 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
             check=True,
         )
         print(f"Preflight: installed {pip_spec}")
+
+
+def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
+    """Probe-then-install Ray using the interpreter that will import it.
+
+    Ray is used broadly (multi-node scheduling, kernel/profile/recover
+    executors), not only by Magpie. The probe imports ``ray`` with
+    ``python_exe`` instead of a PATH-only ``which ray`` lookup on purpose: a
+    bypass-only host may have a stray ``ray`` executable on ``PATH`` from an
+    unrelated venv while ``python_exe`` still cannot ``import ray``, so a
+    PATH-only check would false-positive and the Ray-backed executors would
+    then fail at runtime.
+
+    Args:
+        python_exe (str): The interpreter that will import Ray (and run the
+            probe / install).
+        pip_extra (list[str]): Extra arguments threaded into the ``pip
+            install`` invocation (e.g. ``--break-system-packages``).
+    """
+    check = subprocess.run([python_exe, "-c", "import ray"], capture_output=True)
+    if check.returncode == 0:
+        print("Preflight: ray OK")
+        return
+    print("Preflight: ray not importable, installing ray[default]==2.44.1 + click<8.3.0 ...")
+    subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
+        check=True,
+    )
+    print("Preflight: ray installed OK")
+
+
+# InferenceX benchmark_serving client-side deps. Mirrors the ``_BENCH_SERVING_DEPS``
+# list in assets/install.sh (keep in sync). ``benchmark_serving.py`` lives under
+# InferenceX (not Magpie's pyproject), so ``pip install -e Magpie`` never pulls
+# these; every bypass/Magpie client launch imports them before hitting the server.
+_BENCH_SERVING_DEPS = (
+    "aiohttp",
+    "tqdm",
+    "numpy",
+    "requests",
+    "transformers",
+    "huggingface_hub",
+    "datasets",
+    "pandas",
+)
+
+
+def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
+    """Probe-then-install the InferenceX benchmark_serving client deps in python_exe.
+
+    ``assets/install.sh:ensure_bench_serving_deps`` installs these into the
+    install-time ``$PYTHON`` (often ``/opt/venv``). The bypass runner, however,
+    launches ``benchmark_serving.py`` with the ACTIVE benchmark interpreter
+    (``sys.executable``); when that differs from the install-time interpreter the
+    client dies with a missing-module error even though Ray reported OK. Route the
+    ensure through ``python_exe`` (the resolved benchmark interpreter) so the two
+    stay aligned. Detection uses ``importlib.util.find_spec`` (no heavy import) in
+    a single probe subprocess, then pip-installs only the missing modules.
+
+    Args:
+        python_exe (str): The interpreter that will import the client deps.
+        pip_extra (list[str]): Extra ``pip install`` arguments (e.g.
+            ``--break-system-packages``).
+    """
+    mods = list(_BENCH_SERVING_DEPS)
+    probe = (
+        "import importlib.util, sys; "
+        "print('\\n'.join(m for m in sys.argv[1:] "
+        "if importlib.util.find_spec(m) is None))"
+    )
+    result = subprocess.run(
+        [python_exe, "-c", probe, *mods], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        # Probe itself failed unexpectedly; fall back to attempting all so a
+        # genuinely missing client is not silently left uninstalled.
+        missing = mods
+    else:
+        missing = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if not missing:
+        print("Preflight: benchmark_serving client deps OK")
+        return
+    print(f"Preflight: installing benchmark_serving client deps: {' '.join(missing)} ...")
+    subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, *missing],
+        check=True,
+    )
+    print("Preflight: benchmark_serving client deps installed OK")
 
 
 def _unset_hip_visible_devices() -> None:
@@ -312,7 +422,7 @@ def _check_gpu_visibility() -> None:
         return
     if proc.returncode != 0:
         return
-    # rocm-smi --showid emits multiple GPU[ lines per GPU (~6x overcount); deduplicate by GPU index.
+    # rocm-smi --showid emits multiple GPU[ lines per GPU; deduplicate by GPU index.
     visible_indices: set[str] = set()
     for line in (proc.stdout or "").splitlines():
         stripped = line.strip()
@@ -405,7 +515,7 @@ def _check_tracelens_cli() -> None:
 
 
 def _check_tracelens_root_exists() -> None:
-    """Hard-gate an explicitly set ``TRACELENS_ROOT`` at preflight (issue #722).
+    """Hard-gate an explicitly set ``TRACELENS_ROOT`` at preflight.
 
     An operator-supplied TRACELENS_ROOT that points at a missing checkout (stale
     path or unedited template placeholder) otherwise only surfaces ~10h later in
@@ -485,9 +595,9 @@ def _emit_preflight_diagnostics(
     print(f"  aiter jit cache     = {cache_line}")
     print(f"  cold_start_timeout  = {cold_cap}s")
     print(f"  warm_timeout        = {BASELINE_DEFAULT_TIMEOUT_SEC}s")
-    # Surface the hard GPU-reset arming state up front: `recover` (robustness-
-    # delegated) may shell out to `rocm-smi --gpureset` on gpu_memory_leaked.
-    # It is opt-in and scoped to ROCR_VISIBLE_DEVICES (never implicit --gpu=all).
+    # Surface the hard GPU-reset arming state: `recover` may shell out to
+    # `rocm-smi --gpureset` on gpu_memory_leaked (opt-in, scoped to
+    # ROCR_VISIBLE_DEVICES, never implicit --gpu=all).
     _gpureset_on = os.environ.get(
         "HYPERLOOM_RECOVER_ALLOW_GPU_RESET",
         "",
@@ -526,7 +636,7 @@ def _emit_preflight_diagnostics(
         print(f"  kb_degraded_reason  = {kb_reason}")
         print(f"  pr_degraded_reason  = {pr_reason}")
 
-    # Surface Cortex KB offline-queue state; dead-letter pile-up signals a cold-start session.
+    # Surface Cortex KB offline-queue state; dead-letter pile-up signals a cold start.
     try:
         _print_cortex_kb_queue_status()
     except Exception as exc:  # noqa: BLE001 — defensive
@@ -670,30 +780,27 @@ def _preflight(
         tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
             ``None`` when neither base URL is configured.
     """
-    # Lazy, package-qualified lookups (not bare-name calls): tests monkeypatch
-    # these by name on the ``cli`` package (``monkeypatch.setattr(cli,
-    # "_load_dotenv_fallback", ...)``), and since this function now lives in a
-    # sibling module, a bare-name call would resolve this module's own
-    # (un-patched) binding and silently bypass the patch. Re-reading the
-    # current package attribute at call time picks up the patched version.
-    from . import _load_dotenv_fallback as _load_dotenv_fallback_current
-    from . import _load_kernel_agent_env_fallback as _load_kernel_agent_env_fallback_current
+    # Capture explicit single-provider intent before the installer env fallbacks
+    # run, then undo any cross-provider credentials they inject.
+    provider_mode = _provider_only_mode_before_fallback()
+    provider_snapshot = {key: os.environ.get(key) for key in _PROVIDER_FALLBACK_KEYS}
+    _load_dotenv_fallback()
+    _load_kernel_agent_env_fallback()
+    _restore_provider_only_mode(provider_mode, provider_snapshot)
 
-    _load_dotenv_fallback_current()
-    _load_kernel_agent_env_fallback_current()
-
-    # Fail fast on missing credentials after the fallback loaders, before any cycle-burning work.
+    # Fail fast on missing credentials after the fallback loaders.
     _validate_credentials()
 
     # --- Auth alias export ---
-    # SAFE_API_KEY only FILLS gaps now: an operator who set a provider-specific
-    # key (OPENAI_API_KEY / ANTHROPIC_API_KEY) for split entrypoints keeps it.
+    # SAFE_API_KEY only fills gaps: a provider-specific key set for split
+    # entrypoints (OPENAI_API_KEY / ANTHROPIC_API_KEY) is kept.
     safe_key = os.environ.get("SAFE_API_KEY", "")
     if safe_key:
         for alias in (
             "OPENAI_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
             "GEAK_API_KEY",
             "LLM_API_KEY",
             "AMD_LLM_API_KEY",
@@ -702,9 +809,20 @@ def _preflight(
                 os.environ[alias] = safe_key
                 print(f"Preflight: filled {alias} from SAFE_API_KEY")
     # --- Resolve install interpreters ---
-    from hyperloom.orchestrator.actions.executors._grid_runner import _resolve_magpie_python
+    # Resolve the ACTIVE benchmark backend first so a bypass-only environment
+    # (no Magpie / no /opt/venv) never routes installs through Magpie's
+    # interpreter. ``resolve_benchmark_interpreter()`` returns the current
+    # interpreter for bypass and the Magpie-importable venv for Magpie, so the
+    # bypass path never resolves the Magpie venv.
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+        resolve_backend_name as _resolve_active_backend_name,
+        resolve_benchmark_interpreter as _resolve_benchmark_interpreter,
+    )
 
-    magpie_python = _resolve_magpie_python()
+    _magpie_backend_active = _resolve_active_backend_name() == "magpie"
+    # Interpreter used for benchmark-runtime installs (Ray). For bypass this is
+    # sys.executable; for Magpie it's the Magpie-importable venv.
+    benchmark_python = _resolve_benchmark_interpreter()
 
     # Outside a venv, add --break-system-packages so pip installs on bare-metal Debian/Ubuntu.
     pip_extra: list[str] = []
@@ -712,12 +830,12 @@ def _preflight(
         pip_extra = ["--break-system-packages"]
 
     # --- Python SDK auto-install (claude-agent-sdk / openai / httpx) ---
-    # Must precede Coordinator import (ClaudeBackend lazy-imports the SDK); sys.executable matches imports.
+    # Must precede Coordinator import (ClaudeBackend lazy-imports the SDK).
     _ensure_python_sdks(sys.executable, pip_extra)
 
     # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
     # Explicit operator values on each side are preserved; a missing side falls
-    # back to the other (legacy single-gateway stays one URL).
+    # back to the other.
     resolved_urls: tuple[str, str] | None = None
     anthropic_url, openai_url = _resolve_llm_endpoints()
     if anthropic_url or openai_url:
@@ -732,28 +850,34 @@ def _preflight(
                 os.environ[var] = want
                 print(f"Preflight: {var} {prev or '<unset>'} -> {want} (resolved endpoint)")
         # Claude CLI primary key: prefer the explicit Anthropic-side key so a
-        # split-entrypoint deploy auths Claude with its own key; SAFE_API_KEY
-        # (single-gateway) is the fallback.
+        # split-entrypoint deploy auths Claude with its own key; SAFE_API_KEY is the fallback.
         claude_primary_key = (
             os.environ.get("ANTHROPIC_API_KEY", "")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+            or os.environ.get("DEEPSEEK_API_KEY", "")
             or safe_key
         )
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
+        if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
+            geak_claude_model = (
+                os.environ.get("CLAUDE_MODEL", "").strip()
+                or os.environ.get("DEEPSEEK_MODEL", "").strip()
+                or ("deepseek-chat" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
+                or "claude-opus-4-8"
+            )
+            os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
+            print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
         resolved_urls = (anthropic_url, openai_url)
 
         # GEAK / LLM_API_BASE default to the resolved OpenAI-compatible gateway
-        # URL, but an INTENTIONAL operator override is preserved (#521:
-        # GEAK runs in a separate network namespace reached via a host-local
-        # reverse tunnel).
+        # URL, but an intentional operator override is preserved.
         gateway_url = openai_url or anthropic_url
         if gateway_url:
             for alias in ("GEAK_BASE_URL", "LLM_API_BASE"):
                 current = os.environ.get(alias, "").strip()
                 if current and current != gateway_url:
                     # A genuine operator override is preserved, but a leftover
-                    # install-time 127.0.0.1:4002 proxy is unreachable and must
-                    # be force-rewritten to the gateway.
+                    # install-time proxy is unreachable and force-rewritten.
                     if _is_stale_proxy_url(current):
                         os.environ[alias] = gateway_url
                         print(
@@ -768,9 +892,8 @@ def _preflight(
                     os.environ[alias] = gateway_url
                     print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
 
-        # #521: GEAK reads its endpoint from $GEAK_CONFIG (written at install
-        # time), not from $GEAK_BASE_URL at runtime. Sync the yaml so the
-        # resolved GEAK_BASE_URL above actually reaches the kernel agent.
+        # A supplied GEAK_CONFIG yaml may carry its own endpoint; sync it so an
+        # operator GEAK_BASE_URL override reaches GEAK.
         geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
         geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
         if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
@@ -784,21 +907,35 @@ def _preflight(
     _check_shm_disk()
 
     # --- Runtime dep install ---
-    # 1. Ray — needed by Magpie for task scheduling even without kernel-agent.
-    if shutil.which("ray") is None:
-        print("Preflight: ray not found, installing ray[default]==2.44.1 + click<8.3.0 ...")
-        subprocess.run(
-            [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
-            check=True,
-        )
-        print("Preflight: ray installed OK")
+    # 1. Ray — used broadly (multi-node scheduling, kernel/profile/recover
+    # executors), not only by Magpie, so it is installed regardless of backend.
+    # Install it with the active backend's interpreter so a bypass-only box
+    # gets Ray in its own venv instead of Magpie's.
+    _ensure_ray(benchmark_python, pip_extra)
 
-    # 2. Magpie — the benchmark engine all executors shell out to ($MAGPIE_PATH override; auto-clones if missing).
-    check = subprocess.run(
-        [magpie_python, "-c", "import Magpie"],
-        capture_output=True,
-    )
-    if check.returncode != 0:
+    # 1b. InferenceX benchmark_serving client deps — required by every serving
+    # benchmark client launch. install.sh installs these into the install-time
+    # $PYTHON, but the bypass runner launches the client with the active
+    # benchmark interpreter; ensure them there too so a bypass-only box whose
+    # sys.executable differs from /opt/venv can still import the client.
+    _ensure_bench_serving_deps(benchmark_python, pip_extra)
+
+    # 2. Magpie — the benchmark engine the Magpie backend shells out to
+    # ($MAGPIE_PATH override; auto-clones if missing). Skipped entirely when the
+    # active benchmark backend does not need Magpie (e.g. bypass): for the
+    # Magpie backend ``benchmark_python`` already resolves to the
+    # Magpie-importable venv (via resolve_benchmark_interpreter), so a
+    # bypass-only environment never resolves the Magpie venv / /opt/venv.
+    magpie_python = benchmark_python
+    if not _magpie_backend_active:
+        print(
+            f"Preflight: benchmark backend is "
+            f"{_resolve_active_backend_name()!r}; skipping Magpie install/import"
+        )
+        check = None
+    else:
+        check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
+    if _magpie_backend_active and check is not None and check.returncode != 0:
         magpie_env = os.environ.get("MAGPIE_PATH")
         magpie_env_explicit = bool(magpie_env)
         if magpie_env:
@@ -806,10 +943,10 @@ def _preflight(
         else:
             from ..session.paths import magpie_dir as _magpie_default
 
-            magpie_dir = _magpie_default(_session_dir_resolve())
+            magpie_dir = _magpie_default()
         magpie_dir.parent.mkdir(parents=True, exist_ok=True)
         if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
-            # Refuse-to-clobber: don't clone Magpie main over an explicit $MAGPIE_PATH (would destroy local work).
+            # Refuse-to-clobber: don't clone Magpie over an explicit $MAGPIE_PATH.
             if magpie_env_explicit:
                 print(
                     f"Preflight: ERROR — $MAGPIE_PATH={magpie_dir} has no "
@@ -842,7 +979,7 @@ def _preflight(
 
         open_source_root = _open_source_default()
         _magpie_env = os.environ.get("MAGPIE_PATH")
-        magpie_root = Path(_magpie_env) if _magpie_env else _magpie_default(_session_dir_resolve())
+        magpie_root = Path(_magpie_env) if _magpie_env else _magpie_default()
         # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
@@ -857,23 +994,14 @@ def _preflight(
                     f"InferenceX checkout at {candidate}; cloning a "
                     "writable checkout instead."
                 )
-    # When no writable checkout was found (e.g. a brain-launched run that
-    # skipped install.sh's ensure_inferencex), clone one ourselves rather
-    # than falling back to a read-only host mount. baseline cannot run
-    # without InferenceX, so a clone failure is a hard error.
+    # When no writable checkout was found, clone one ourselves. baseline cannot
+    # run without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
         from ..session.paths import open_source_root as _open_source_default
 
         dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
-        # Lazy package-qualified lookup (see the comment above the
-        # _load_dotenv_fallback/_load_kernel_agent_env_fallback calls): tests
-        # monkeypatch ``cli._clone_inferencex`` directly, and a bare-name call
-        # -- even to a function defined in this same module -- resolves this
-        # module's own binding and misses that patch (verified empirically).
-        from . import _clone_inferencex as _clone_inferencex_current
-
-        inferencex_path = _clone_inferencex_current(dest)
+        inferencex_path = _clone_inferencex(dest)
         if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
             print(
                 "Preflight: ERROR — InferenceX checkout missing and clone "
@@ -883,9 +1011,8 @@ def _preflight(
                 file=sys.stderr,
             )
             sys.exit(2)
-    # Guard against a read-only selection (shared mount handed to us via
-    # INFERENCEX_PATH): Magpie stages benchmark scripts there, so a
-    # non-writable tree fails the run before server boot.
+    # Guard against a read-only INFERENCEX_PATH: Magpie stages benchmark scripts
+    # there, so a non-writable tree fails the run before server boot.
     if not os.access(inferencex_path, os.W_OK):
         print(
             f"Preflight: ERROR — INFERENCEX_PATH={inferencex_path} is not "
@@ -896,22 +1023,21 @@ def _preflight(
             file=sys.stderr,
         )
         sys.exit(2)
-    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH that
-    # triggered the clone above must not survive into the child env, or Magpie
-    # still reads the bad path. The validated value wins.
+    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not
+    # survive into the child env. The validated value wins.
     os.environ["INFERENCEX_PATH"] = inferencex_path
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
 
     # --- TraceLens CLI presence (HARD-FAIL unless --no-kernel AND roofline off) ---
-    # Catches launchers that skip install.sh, else missing-CLI only surfaces at the tick ~6 robustness probe.
+    # Catches launchers that skip install.sh before a missing CLI surfaces mid-run.
     no_kernel = getattr(args, "no_kernel", False) if args else False
     enable_roofline = getattr(args, "enable_roofline", True) if args else True
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
         _check_tracelens_cli()
         # Fail fast on a stale/placeholder TRACELENS_ROOT before the Coordinator
-        # starts, rather than ~10h later in trace_analyze (issue #722).
+        # starts, rather than ~10h later in trace_analyze.
         _check_tracelens_root_exists()
     else:
         _missing_tl = [n for n in _TRACELENS_REQUIRED_CLIS if shutil.which(n) is None]
@@ -964,10 +1090,20 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
     marker_path = user_data / "runtime" / "cortex" / ".kb_preflight.json"
     script = Path(__file__).resolve().parent.parent / "assets" / "preflight_kb.sh"
     env = os.environ.copy()
-    # Inject --cortex-kb-url into env so the probe script sees it; empty URL means skip the KB branch.
+    # The Cortex KB endpoint is a CLI-flag concern (no env fallback): drop any
+    # inherited CORTEX_KB_URL, then inject the flag when set.
+    env.pop("CORTEX_KB_URL", None)
     cortex_url = (getattr(args, "cortex_kb_url", None) or "").strip()
     if cortex_url:
         env["CORTEX_KB_URL"] = cortex_url
+    # PR Monitor endpoint is a CLI-flag concern: compute the probe's healthz base
+    # from the resolved flag. The REST base omits /v1 (the client appends it) but
+    # healthz lives under /v1, so normalise the probe base to end with /v1.
+    env.pop("PR_MONITOR_URL", None)
+    pr_url = (getattr(args, "pr_monitor_url", None) or "").strip().rstrip("/")
+    if pr_url:
+        probe_base = pr_url if pr_url.endswith("/v1") else pr_url + "/v1"
+        env["PR_MONITOR_URL"] = probe_base
     if explicit_kb:
         env["SKIP_KB_PROBE"] = "1"
     if explicit_pr:

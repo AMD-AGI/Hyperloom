@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
+
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
@@ -32,10 +34,10 @@ from .symptom import Symptom, SymptomSeverity
 class StateIntegrityConfig:
     """Tunables for :func:`evaluate_state_integrity_signals`."""
 
-    # I2 — WAL size warn/crit; Robustness only nags, Coordinator owns checkpointing.
+    # I2 — WAL size warn/crit.
     wal_bytes_warn_threshold: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     wal_bytes_critical_threshold: int = 4 * 1024 * 1024 * 1024  # 4 GiB
-    # I3 — min stale-lease age before firing, to avoid racing the reaper.
+    # I3 — min stale-lease age before firing.
     stale_lease_min_age_s: float = 60.0
     # I4 — agent-file thresholds.
     inbox_bloat_warn_bytes: int = 100 * 1024 * 1024  # 100 MiB
@@ -98,8 +100,8 @@ def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
     if state.get("valid"):
         return []
     error = str(state.get("error") or "unknown")
-    # "missing" is normal pre-first-persist; stay silent so a fresh
-    # sandbox doesn't false-fire (I5 covers the should-exist-but-died case).
+    # "missing" is normal pre-first-persist; stay silent (I5 covers the
+    # should-exist-but-died case).
     if error == "missing":
         return []
     return [
@@ -217,9 +219,9 @@ def _stale_lease_symptoms(
             continue
         if entry.get("alive") is not False:
             continue
-        # Skip recently-acquired leases (reaper hasn't run); coerce
-        # unix-seconds or ISO ``acquired_at``.
-        acquired_unix = _coerce_unix(entry.get("acquired_at"))
+        # Skip recently-acquired leases; coerce unix-seconds or ISO
+        # ``acquired_at``.
+        acquired_unix = to_unix(entry.get("acquired_at"))
         age_s = (now - acquired_unix) if acquired_unix is not None and now > 0 else cfg.stale_lease_min_age_s + 1.0
         if age_s < cfg.stale_lease_min_age_s:
             continue
@@ -251,38 +253,6 @@ def _stale_lease_symptoms(
             )
         )
     return out
-
-
-def _coerce_unix(value: Any) -> float | None:
-    """Coerce a timestamp value to unix seconds.
-
-    Accepts numeric epoch seconds or an ISO-8601-ish string (``Z`` suffix
-    tolerated). Booleans are rejected.
-
-    Args:
-        value (Any): The raw timestamp value.
-
-    Returns:
-        float | None: Unix seconds, or ``None`` when the value cannot be
-            interpreted as a timestamp.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            from datetime import datetime
-
-            try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                return None
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +342,7 @@ def _coordinator_zombie_symptoms(si: dict[str, Any]) -> list[Symptom]:
         return []
     pid = coord.get("recorded_pid")
     alive = coord.get("alive")
-    # Skip cases we can't judge: no PID file or alive==None (probe didn't run).
+    # Skip cases we can't judge: no PID file or alive==None.
     if pid is None or alive is None:
         return []
     if alive:
@@ -381,7 +351,7 @@ def _coordinator_zombie_symptoms(si: dict[str, Any]) -> list[Symptom]:
     if isinstance(state, dict) and state.get("valid"):
         stop_reason = str(state.get("stop_reason") or "")
     if stop_reason:
-        # Clean wind-down — terminal stop_reason already written.
+        # Clean wind-down.
         return []
     return [
         Symptom(

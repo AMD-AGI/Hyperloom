@@ -3,8 +3,8 @@
 
 """GEAK e2e optimizer submission (whole-pipeline; GEAK@GEAK main).
 
-This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like the legacy
-per-kernel GEAK single-kernel loop, now ``geak_v3``). Its code lives in GEAK
+This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like
+``forge``). Its code lives in GEAK
 (``interface/run_e2e.py`` + ``e2e_workflow/``). Hyperloom invokes it ONCE at the
 KERNEL_AGENT phase via the stable ``interface/run_e2e.py`` contract: we write a
 ``handoff.json`` (Hyperloom best config + workload), call the runner, and read
@@ -33,14 +33,22 @@ def _resolve_runner() -> str:
     runner = os.environ.get("GEAK_E2E_RUNNER", "").strip()
     if runner and Path(runner).is_file():
         return runner
+    roots: list[str] = []
     root = os.environ.get("GEAK_ROOT", "").strip()
     if root:
+        roots.append(root)
+    open_source_root = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT", "").strip()
+    if open_source_root:
+        roots.append(str(Path(open_source_root) / "GEAK"))
+    roots.append("/opt/hyperloom/open-source-repos/GEAK")
+    for root in dict.fromkeys(roots):
         cand = Path(root) / "interface" / "run_e2e.py"
         if cand.is_file():
             return str(cand)
     raise FileNotFoundError(
         "e2e runner not found. Set GEAK_E2E_RUNNER to "
-        "<GEAK checkout>/interface/run_e2e.py (the installer exports it)."
+        "<GEAK checkout>/interface/run_e2e.py (the installer exports it), "
+        "or set GEAK_ROOT/HYPERLOOM_OPEN_SOURCE_ROOT."
     )
 
 
@@ -70,17 +78,9 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
     cmd = [py, runner, str(handoff_path), str(result_path)]
 
     env = dict(os.environ)
-    # The resolved ``timeout_s`` is AUTHORITATIVE for the delegated director run:
-    # run_e2e.py reads GEAK_E2E_TIMEOUT_S to self-stop (anyio.fail_after)
-    # before our outer subprocess kill. Assign (not setdefault) so a value
-    # inherited from the parent env (e.g. a stale export / ray passthrough) can
-    # never override the caller's budget — when Hyperloom drives, GEAK's
-    # time MUST come from Hyperloom (the --timeout-s it passes). Standalone runs
-    # resolve timeout_s to the 12h default (or an explicit env, see _main).
-    # Split the inner SOFT deadline from the outer HARD kill so run_e2e can
-    # self-stop (anyio.fail_after) and FLUSH result.json (recover-from-disk)
-    # before we SIGKILL. Previously both were timeout_s, so the flush was killed
-    # mid-write -> "no_result_json" and the measured win was lost.
+    # ``timeout_s`` is authoritative: run_e2e.py reads GEAK_E2E_TIMEOUT_S to
+    # self-stop before the outer subprocess kill. Split the inner SOFT deadline
+    # from the outer HARD kill so run_e2e can flush result.json before SIGKILL.
     flush_grace = int(os.environ.get("GEAK_FLUSH_GRACE_S", "180"))
     inner_timeout = max(60, timeout_s - flush_grace)
     env["GEAK_E2E_TIMEOUT_S"] = str(inner_timeout)  # run_e2e's anyio budget
@@ -104,8 +104,7 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
         stdout, stderr = proc.communicate(timeout=timeout_s)
         returncode = proc.returncode
     except subprocess.TimeoutExpired:
-        # Be polite first: SIGTERM lets run_e2e's handler flush result.json,
-        # then escalate to SIGKILL if it overruns the grace window.
+        # SIGTERM lets run_e2e flush result.json, then escalate to SIGKILL.
         _killpg(signal.SIGTERM)
         try:
             stdout, stderr = proc.communicate(timeout=flush_grace)
@@ -146,9 +145,7 @@ def _main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Run GEAK e2e once.")
     ap.add_argument("handoff_json")
     ap.add_argument("output_dir")
-    # Sentinel default: an explicit --timeout-s (Hyperloom always passes one) is
-    # authoritative. Without it (standalone runner invocation) fall back to an
-    # explicitly-exported GEAK_E2E_TIMEOUT_S, else the 12h default.
+    # Explicit --timeout-s wins; else fall back to GEAK_E2E_TIMEOUT_S, else 12h.
     ap.add_argument("--timeout-s", type=int, default=None)
     args = ap.parse_args(argv)
 

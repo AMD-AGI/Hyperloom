@@ -1,60 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""FrameworkAgentExecutor — FRAMEWORK_AGENT phase per-candidate executor.
-
-Counterpart to :class:`IntegratePatchExecutor`. The Coordinator pump
-enumerates PR candidates via ``fa phase-discover``, gates each through
-the Critic, and dispatches this executor per approved candidate to::
-
-  1. Fetch the unified diff (explicit ``params.patches`` or
-     ``curl candidate.diff_url``; apply happens in the live source root).
-  2. Snapshot pre-apply HEAD SHA so REVERT can ``git reset --hard`` back
-     without disturbing prior KEEP commits.
-  3. Apply via ``git apply`` (single integration channel).
-  4. Bench the patched server (``run_grid([GridVariant])``, size=1).
-  5. KEEP commits to the live tree (next candidate stacks); REVERT runs
-     ``git reset --hard <pre_apply_sha>`` + ``git clean -fd``.
-
-Coordinator-internal: ``framework`` is absent from
-``PHASE_LLM_PROPOSABLE_ACTIONS`` so PolicyGate R1 denies LLM proposals.
-
-Inputs (``ctx.task.params``)::
-
-    candidate (dict, required) — PR metadata row:
-        ``{repo, pr_number, ref, title, diff_url, pr_url?, framework?}``
-    framework (str, optional) — ``"sglang"`` / ``"vllm"``. Falls back to
-        ``candidate["framework"]`` then ``$INFERENCE_OPTIMIZER_FRAMEWORK``.
-    batch_id (str, optional) — passed back in the result so the phase
-        loop can group ``framework_agent_phase_progress`` entries.
-    patches (list[str], optional) — explicit patch paths. When omitted,
-        the executor curls ``candidate.diff_url`` into the per-task
-        workspace and applies that.
-    keep_threshold_pct (float, optional) — default DEFAULT_KEEP_THRESHOLD_PCT
-        (1.0; imported from integrate_patch).
-    base_tput (float, optional) — baseline throughput; falls back to
-        ``SharedState.baseline_tput``.
-    accuracy_baseline (float, optional) — forwarded to the accuracy gate.
-    benchmark_script / result_dir / variant_timeout_sec / base_extra_args
-        — same semantics as ``integrate_patch``.
-    framework_source_root (str, optional) — explicit ``git apply`` target;
-        defaults to first existing entry of ``resolve_source_file_allowlist()``.
-    apply_only (bool, optional) — skip the bench step (test / smoke).
-
-Outputs (dict returned to the bus as ``delegated_result.result``)::
-
-    status: "kept" | "reverted" | "apply_failed" | "no_patch" |
-            "fetch_failed" | "applied_no_bench" | "failed"
-    output_throughput: float | None
-    delta_pct: float | None
-    accuracy_pass: bool | None
-    candidate: dict (echoes the input row)
-    batch_id: str
-    patches_applied: list[str]
-    patches_reverted: list[str]
-    reason: str
-    workspace: str
-    bench_result: dict | None
-"""
+"""Apply one discovered framework PR candidate and KEEP or REVERT by benchmark."""
 
 from __future__ import annotations
 
@@ -88,11 +34,12 @@ from ._workload_envs import (
 from .integrate_patch import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_VARIANT_TIMEOUT_SEC,
-    _git_apply,
+    _git_apply_collect_feedback,
     _git_stash_if_dirty,
     _with_stash_restore,
     _resolve_framework_root,
 )
+from ._apply_feedback import ApplyFeedback
 from ._nogit_patch import (
     _apply_patch_no_git,
     _is_git_tree,
@@ -111,9 +58,8 @@ log = logging.getLogger(__name__)
 DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
 
 
-# Git checkpoint helpers — candidates are processed serially in the same
-# framework_root; every KEEP is committed (new HEAD) and every REJECT/failure
-# resets HEAD to the pre-apply sha so a failed REJECT can't clobber prior KEEPs.
+# Git checkpoint helpers: every KEEP is committed; every REJECT/failure resets
+# HEAD to the pre-apply sha so a failed REJECT can't clobber prior KEEPs.
 def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
     """``git rev-parse HEAD`` in ``framework_root``; ``(sha, stderr)``,
     sha None on failure.
@@ -138,9 +84,8 @@ def _git_reset_hard(framework_root: Path, sha: str) -> tuple[bool, str]:
     ``git clean -fd`` (discards untracked files the candidate added) so a
     failed candidate can't leak state into the next candidate's baseline.
 
-    NOTE: User-change preservation (stash) should happen BEFORE candidate
-    apply, not here. This function is purely destructive; the caller
-    ``_run_single_candidate`` stashes at the correct time.
+    Purely destructive; user-change preservation (stash) must happen before
+    candidate apply, not here.
 
     Args:
         framework_root: The git checkout to reset.
@@ -169,8 +114,7 @@ def _git_commit_keep(
 ) -> tuple[str | None, str]:
     """``git add -A && git commit`` with a forced hyperloom identity (``-c``,
     Magpie clones may lack user.email), returning the new HEAD sha. ``add -A``
-    (not ``commit -am``) so add-only PRs' new files land in the KEEP commit
-    instead of polluting the next candidate's baseline.
+    (not ``commit -am``) so add-only PRs' new files land in the KEEP commit.
 
     Args:
         framework_root: The git checkout to commit into.
@@ -237,8 +181,8 @@ def _fetch_diff_to_path(
     timeout_sec: float,
 ) -> tuple[bool, str]:
     """Curl ``diff_url`` into ``dest`` (.patch path); returns ``(ok, stderr)``.
-    Uses curl (not aiohttp) for consistent HTTPS_PROXY behaviour in
-    restricted-network sessions.
+    Uses curl for consistent HTTPS_PROXY behaviour in restricted-network
+    sessions.
 
     Args:
         diff_url: The unified-diff URL to download.
@@ -294,7 +238,6 @@ def _normalize_repo_id(url_or_slug: str) -> str:
     s = s.rstrip("/")
     if s.endswith(".git"):
         s = s[:-4]
-    # Strip scheme/host so only the trailing owner/name remains.
     for sep in ("github.com/", "github.com:"):
         if sep in s:
             s = s.split(sep, 1)[1]
@@ -334,8 +277,7 @@ def _candidate_is_same_repo(
     if not ok or not out.strip():
         return True
     origin_raw = out.strip()
-    # Only a GitHub origin yields a comparable owner/name token; a
-    # local-path / non-GitHub origin is inconclusive → fail open.
+    # Only a GitHub origin yields a comparable owner/name token; otherwise fail open.
     if "github.com" not in origin_raw.lower():
         return True
     return _normalize_repo_id(origin_raw) == cand_repo
@@ -352,8 +294,7 @@ def _materialize_pr_diff_via_worktree(
 
     Fetches the PR head into ``framework_root``, checks it out into an
     isolated worktree (the live KEPT stack is undisturbed), computes the
-    PR's net diff against its merge-base, and writes it to ``dest``. Only
-    changes where the patch text comes from, not how it's applied/measured.
+    PR's net diff against its merge-base, and writes it to ``dest``.
     Worktree always removed in ``finally``. Returns ``(ok, err)``.
 
     Head ref order: ``candidate.head_sha`` → ``candidate.ref`` →
@@ -545,9 +486,7 @@ class FrameworkAgentExecutor:
             }
 
         # Patch source modes, in priority order: explicit ``params.patches``
-        # → checkout-head (net diff from an isolated worktree at the PR head)
-        # → diff_url (curl GitHub's served diff). All produce a .patch
-        # applied + benched identically.
+        # → checkout-head (net diff from a worktree at the PR head) → diff_url.
         explicit_patches = params.get("patches") or None
         patch_paths: list[Path] = []
         patch_source_mode = ""
@@ -586,8 +525,7 @@ class FrameworkAgentExecutor:
                 .lower()
             )
             prefer_checkout = bool(params.get("prefer_checkout") or candidate.get("prefer_checkout"))
-            # Checkout-headable only with a resolvable head ref
-            # (head_sha / ref / pr_number).
+            # Checkout-headable only with a resolvable head ref.
             has_checkout_ref = bool(
                 str(candidate.get("head_sha") or "").strip()
                 or str(candidate.get("ref") or "").strip()
@@ -677,10 +615,8 @@ class FrameworkAgentExecutor:
                     }
                 patch_paths.append(dest.resolve())
 
-        # Preserve user's uncommitted changes BEFORE applying the candidate.
-        # This ensures the stash contains only user state (not candidate
-        # patches), so `git stash pop` after the run cleanly restores the
-        # user's original modifications without mixing in Hyperloom artifacts.
+        # Preserve user's uncommitted changes BEFORE applying the candidate so
+        # the stash holds only user state and `git stash pop` restores it cleanly.
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
         if stash_state == "failed":
             log.error(
@@ -703,10 +639,9 @@ class FrameworkAgentExecutor:
         git_tree = _is_git_tree(framework_root)
         self._nogit_patch_backups: list[dict] = []
 
-        # Capture HEAD before apply so REVERT/REJECT can reset cleanly;
-        # prior KEEPs are committed past this sha and survive a reset.
-        # Non-git source trees skip this step entirely — revert uses
-        # backup-based _revert_patches_no_git instead of git reset.
+        # Capture HEAD before apply so REVERT/REJECT can reset cleanly; prior
+        # KEEPs are committed past this sha and survive a reset. Non-git trees
+        # revert via backup-based _revert_patches_no_git instead of git reset.
         pre_apply_sha: str | None = None
         if git_tree:
             pre_apply_sha, sha_err = _git_head_sha(framework_root)
@@ -726,22 +661,18 @@ class FrameworkAgentExecutor:
         # backup-based apply for non-git roots like pip wheel installs).
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
+        apply_feedbacks: list[ApplyFeedback] = []
         for patch in patch_paths:
             if git_tree:
-                ok, err = _git_apply(framework_root, patch, three_way=False)
+                ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
                 if not ok:
-                    ok2, err2 = _git_apply(framework_root, patch, three_way=True)
-                    if not ok2:
-                        apply_errors.append(
-                            {
-                                "patch": str(patch),
-                                "stderr": err + " | -3 retry: " + err2,
-                            }
-                        )
-                        break
+                    apply_errors.append({"patch": str(patch), "stderr": err})
+                    if fb is not None:
+                        apply_feedbacks.append(fb)
+                    break
             else:
                 nogit_backup_root = output_root / "patch_backups"
-                ok, err, backups = _apply_patch_no_git(
+                ok, err, backups, fb = _apply_patch_no_git(
                     framework_root,
                     patch,
                     nogit_backup_root,
@@ -750,6 +681,8 @@ class FrameworkAgentExecutor:
                 self._nogit_patch_backups.extend(backups)
                 if not ok:
                     apply_errors.append({"patch": str(patch), "stderr": err})
+                    if fb is not None:
+                        apply_feedbacks.append(fb)
                     break
             applied.append(patch)
         if apply_errors:
@@ -769,6 +702,9 @@ class FrameworkAgentExecutor:
                 "patch_source_mode": patch_source_mode,
                 "reason": "git apply failed (see error)",
                 "workspace": str(output_root),
+                "lane": "perf_framework",
+                "retry_feedback": [fb.to_dict() for fb in apply_feedbacks],
+                "prior_patches": [str(p) for p in patch_paths],
             })
 
         if params.get("apply_only"):
@@ -840,9 +776,9 @@ class FrameworkAgentExecutor:
             delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
 
         accuracy_pass = gate_evidence.get("accuracy_pass")
-        # Source patches require the accuracy gate for a KEEP. A
-        # measured regression always blocks; a missing verdict blocks only when
-        # a baseline accuracy was available (else degrade to throughput-only).
+        # Source patches require the accuracy gate for a KEEP: a measured
+        # regression always blocks; a missing verdict blocks only when a
+        # baseline accuracy was available (else degrade to throughput-only).
         acc_required = bool(params.get("require_accuracy_for_keep", require_framework_accuracy_default()))
         acc_block, acc_reason, acc_degraded = accuracy_keep_block(
             accuracy_pass,
@@ -900,11 +836,8 @@ class FrameworkAgentExecutor:
                 "workspace": str(output_root),
             })
 
-        # KEEP: commit the patches so they survive the next candidate's
-        # REJECT (whose pre_apply_sha already includes this commit).
-        # Non-git source trees skip the commit step — the patches are kept
-        # in-place as working-tree edits (no git durability guarantee, but
-        # the same outcome as integrate_patch's non-git KEEP path).
+        # KEEP: commit the patches so they survive the next candidate's REJECT.
+        # Non-git trees keep the patches in-place as working-tree edits.
         keep_message = f"framework KEEP {slug}"
         keep_sha: str | None = None
         if git_tree:
@@ -1109,8 +1042,7 @@ class FrameworkAgentExecutor:
         override_script = sanitize_script_name(params.get("benchmark_script"))
         override_result_dir = sanitize_result_dir(params.get("result_dir"))
         # When the accuracy gate is required and a baseline accuracy exists,
-        # force RUN_EVAL=true so a stale config / process env can't silently
-        # disable eval and leave the gate unable to produce a verdict.
+        # force RUN_EVAL=true so a stale config can't silently disable eval.
         bench_extra_envs: dict[str, Any] = {}
         acc_required = bool(params.get("require_accuracy_for_keep", require_framework_accuracy_default()))
         try:
@@ -1178,13 +1110,9 @@ class FrameworkAgentExecutor:
                     bench["result_dir"],
                     framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
                 )
-                # parse_eval_results returns {"accuracy": float, ...}; the prior
-                # ``score`` key never existed so this gate silently no-op'd
-                # (accuracy_pass stayed None -> KEEP always allowed). Mirror
-                # integrate_patch._grade_accuracy: read ``accuracy`` and pass
-                # (baseline, new) in the order accuracy_passed expects. The
-                # framework hint lets scriptable (xDiT) quality-gate reports
-                # resolve onto the accuracy contract.
+                # Read ``accuracy`` and pass (baseline, new) in the order
+                # accuracy_passed expects; the framework hint lets scriptable
+                # (xDiT) quality-gate reports resolve onto the accuracy contract.
                 new_accuracy = eval_results.get("accuracy")
                 if new_accuracy is not None:
                     accuracy_pass = accuracy_passed(

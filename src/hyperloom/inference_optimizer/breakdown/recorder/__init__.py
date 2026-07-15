@@ -39,11 +39,12 @@ from .instrument import (
     record_tool_version,
     snapshot_state_sections,
 )
-from .recorder import Recorder, get_recorder
-from .sections import (
+from .recorder import (
     DERIVED_SECTIONS,
     SECTION_SHAPES,
+    Recorder,
     SectionShape,
+    get_recorder,
     section_shape,
 )
 
@@ -68,6 +69,6 @@ __all__ = [
     "record_singleton_section",
     "record_specialist_round",
     "record_tool_version",
-    "section_shape",
     "snapshot_state_sections",
+    "section_shape",
 ]

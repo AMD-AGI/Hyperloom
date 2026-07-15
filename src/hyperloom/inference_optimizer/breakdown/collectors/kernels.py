@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import safe_mtime
 
 from ._common import (
     _load_json_safe,
@@ -25,9 +26,9 @@ from ._common import (
 
 
 
-# GEAK / OOB invocations
+# Kernel backend invocations
 def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
-    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts, so historical sessions still render.
+    """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts.
 
     Args:
         session_dir (Path): Absolute session root.
@@ -37,19 +38,19 @@ def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
         two legacy layouts. Empty when none exist.
     """
     candidates: list[Path] = []
-    # Canonical (current): <sd>/kernel-agent/runs/<sid>/
+    # Canonical: <sd>/kernel-agent/runs/<sid>/
     new_root = session_dir / "kernel-agent" / "runs"
     if new_root.is_dir():
         for sub in new_root.glob("*"):
             if sub.is_dir() and sub not in candidates:
                 candidates.append(sub)
-    # Legacy double-nested: <sd>/kernel-agent-workspace/kernel-agent/runs/<sid>/
+    # Legacy double-nested layout.
     legacy_root = session_dir / "kernel-agent-workspace"
     if legacy_root.is_dir():
         for sub in (legacy_root / "kernel-agent" / "runs").glob("*"):
             if sub.is_dir() and sub not in candidates:
                 candidates.append(sub)
-        # Even older per-kernel form: <sd>/kernel-agent-workspace/<kid>/kernel-agent/runs/<sid>/
+        # Even older per-kernel form.
         for kid_dir in legacy_root.glob("*/kernel-agent/runs/*"):
             if kid_dir.is_dir() and kid_dir not in candidates:
                 candidates.append(kid_dir)
@@ -89,7 +90,6 @@ def _parse_invocation_attempt(
         attempt.get("attempt_id") or attempt.get("id") or attempt.get("run_id") or "",
     )
 
-    # Resolve auxiliary paths
     prompt_path: Path | None = None
     for p in (run_dir / "prompts").glob(f"{attempt_id}*") if attempt_id else []:
         prompt_path = p
@@ -111,7 +111,6 @@ def _parse_invocation_attempt(
             decision = "FAILED"
         # otherwise leave empty; kernel-level decision is stamped later
 
-    # Per-attempt speedup (preferred) — falls back to None if not recorded.
     micro_speedup = _to_float(attempt.get("speedup") or attempt.get("micro_speedup"))
 
     return {
@@ -145,7 +144,7 @@ def _stamp_kernel_level_decisions(
     session_dir: Path,
     warnings: list[str],
 ) -> None:
-    """Stamp the kernel-level KEEP/PARTIAL/REVERT decision onto the single BEST attempt per kernel.
+    """Stamp the kernel-level KEEP/PARTIAL/REVERT decision onto the single best attempt per kernel.
 
     Reads kernel-level ``results/<kid>.json`` + ``verification/<kid>.json``;
     the best attempt is chosen by backend hint, else highest micro_speedup
@@ -203,8 +202,8 @@ def _stamp_kernel_level_decisions(
             )
 
         # Attribute the KEEP to the adopted backend via
-        # ``verification.best_attempt_id`` then ``best_backend``; the bare
-        # micro/ts heuristic is only a last resort (it can pick a FAILED lane).
+        # ``verification.best_attempt_id`` then ``best_backend``; the micro/ts
+        # heuristic is a last resort (it can pick a FAILED lane).
         best = None
         if isinstance(verification, dict):
             want_id = str(verification.get("best_attempt_id") or "")
@@ -233,7 +232,6 @@ def _stamp_kernel_level_decisions(
             )
         if isinstance(result, dict) and result.get("cli_log_path"):
             best["cli_log_path"] = result["cli_log_path"]
-        # Refresh metadata from the richer result file.
         best["kernel_metadata"] = _shape_kernel_metadata(
             result,
             {
@@ -278,7 +276,7 @@ def _shape_kernel_metadata(
 
 
 def _infer_run_dir_kernel_id(run_dir: Path) -> str:
-    """Recover the kernel id for a run dir whose attempts omit ``kernel_id``; only when the dir holds a single kid.
+    """Recover the kernel id for a run dir whose attempts omit ``kernel_id``, only when the dir holds a single kid.
 
     Args:
         run_dir (Path): A kernel-agent run directory.
@@ -301,16 +299,16 @@ def _infer_run_dir_kernel_id(run_dir: Path) -> str:
 def collect_kernel_invocations(
     session_dir: Path,
     warnings: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return ``(geak_invocations, oob_invocations, forge_invocations)`` from each run dir's ``optimization_attempts.jsonl``, split by ``backend`` into three independent lanes.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``(geak_invocations, forge_invocations)`` from optimization attempts.
 
     Args:
         session_dir (Path): Absolute session root.
         warnings (list[str]): Shared warnings list (mutated in place).
 
     Returns:
-        tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-        The ``(geak, oob, forge)`` invocation lanes, each sorted by
+        tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        The ``(geak, forge)`` invocation lanes, each sorted by
         ``(kernel_id, ts)``.
     """
     all_invocations: list[dict[str, Any]] = []
@@ -318,8 +316,7 @@ def collect_kernel_invocations(
     for run_dir in run_dirs:
         attempts = _load_jsonl_safe(run_dir / "optimization_attempts.jsonl", warnings)
         parsed = [_parse_invocation_attempt(att, run_dir, session_dir, warnings) for att in attempts]
-        # Backfill kernel_id when the jsonl row omitted it, else the
-        # invocation can't be attributed or get its decision stamped.
+        # Backfill kernel_id when the jsonl row omitted it.
         if any(not (inv.get("kernel_id") or "") for inv in parsed):
             inferred = _infer_run_dir_kernel_id(run_dir)
             if inferred:
@@ -343,7 +340,6 @@ def collect_kernel_invocations(
     _stamp_kernel_level_decisions(all_invocations, run_dirs, session_dir, warnings)
 
     geak: list[dict[str, Any]] = []
-    oob: list[dict[str, Any]] = []
     forge: list[dict[str, Any]] = []
     for inv in all_invocations:
         backend = inv.get("backend") or ""
@@ -351,15 +347,9 @@ def collect_kernel_invocations(
             geak.append(inv)
         elif backend == "forge":
             forge.append(inv)
-        elif backend in ("claude", "codex"):
-            oob.append(inv)
-        else:
-            # Unknown / legacy backends fall back to the oob lane (forge keeps
-            # its own lane above so it is never mislabeled as oob).
-            oob.append(inv)
-    for lane in (geak, oob, forge):
+    for lane in (geak, forge):
         lane.sort(key=lambda e: (e.get("kernel_id") or "", e.get("ts") or ""))
-    return geak, oob, forge
+    return geak, forge
 
 
 def _read_kernel_candidates(
@@ -367,7 +357,7 @@ def _read_kernel_candidates(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Return the ``hot_kernels`` array from ``kernel_candidates.json`` (duration/call-count source the report needs).
+    """Return the ``hot_kernels`` array from ``kernel_candidates.json``.
 
     Resolves via the orchestrator-recorded path, then the new and legacy
     on-disk layouts (glob fallbacks), then ``last_trace_analyze.hot_kernels_top15``.
@@ -385,8 +375,8 @@ def _read_kernel_candidates(
     raw_path = sk.get("candidates_path") if isinstance(sk, dict) else None
     candidate_paths: list[Path] = []
     if raw_path:
-        # Recorded path is usually a container path; re-root it under
-        # session_dir via the kernel-agent[-workspace] anchors before glob.
+        # Re-root the (usually container) path under session_dir via the
+        # kernel-agent[-workspace] anchors before glob.
         p = Path(str(raw_path))
         candidate_paths.append(p)
         for anchor in ("kernel-agent-workspace", "kernel-agent"):
@@ -424,7 +414,7 @@ def _read_kernel_candidates(
 def _index_invocations_by_kernel(
     invs: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Fold per-attempt invocations into a per-kernel ``{attempts, best_speedup, decision, last_status}`` summary.
+    """Fold per-attempt invocations into a per-kernel summary.
 
     Args:
         invs (list[dict[str, Any]]): Per-attempt invocation records.
@@ -464,7 +454,6 @@ def _collect_detected_kernels(
     session_dir: Path,
     state: dict[str, Any],
     geak: list[dict[str, Any]],
-    oob: list[dict[str, Any]],
     warnings: list[str],
     *,
     forge: list[dict[str, Any]] | None = None,
@@ -474,14 +463,13 @@ def _collect_detected_kernels(
 
     Merges static profile fields (from ``kernel_candidates.json``,
     preferred, else ``benchmark_report.kernel_summary``),
-    ``selected_for_optimization``, per-lane ``geak`` / ``oob`` / ``forge``
+    ``selected_for_optimization``, per-lane ``geak`` / ``forge``
     summaries, ``adopted_by`` (from integrate KEEPs), and ``final_decision``.
 
     Args:
         session_dir (Path): Absolute session root.
         state (dict[str, Any]): Parsed ``state.json``.
         geak (list[dict[str, Any]]): GEAK-lane invocations.
-        oob (list[dict[str, Any]]): OOB-lane invocations.
         warnings (list[str]): Shared warnings list (mutated in place).
         forge (list[dict[str, Any]] | None): Forge-lane invocations. Defaults
             to ``None`` (treated as empty).
@@ -520,13 +508,9 @@ def _collect_detected_kernels(
             "optimization_notes": str(k.get("optimization_notes") or ""),
         }
 
-    # 2) benchmark_report.kernel_summary fallback — pulls in the long
-    #    tail of trace kernels that didn't make the top-N candidates
-    #    list. We dedupe by name against the candidates entries (so
-    #    k001..k0NN absorb their fallback rows instead of producing
-    #    twin entries), and any genuinely new fallback entry gets a
-    #    short ``rNNN`` alias as ``kernel_id`` so the table column
-    #    stays narrow.
+    # 2) benchmark_report.kernel_summary fallback for the tail of trace kernels
+    #    that didn't make the top-N candidates. Dedupe by name against the
+    #    candidates entries; new fallback entries get a short ``rNNN`` alias.
     name_to_kid = {e["name"]: kid for kid, e in by_kid.items() if e.get("name")}
     residual_counter = 0
     for task_dir, report_path in _scan_profile_reports(session_dir):
@@ -546,8 +530,7 @@ def _collect_detected_kernels(
                 continue
             existing_kid = name_to_kid.get(name_str)
             if existing_kid is not None:
-                # Merge missing fields into the candidates-side entry
-                # rather than appending a duplicate row.
+                # Merge missing fields into the candidates-side entry.
                 entry = by_kid[existing_kid]
                 if entry.get("gpu_pct") is None:
                     entry["gpu_pct"] = _to_float(k.get("gpu_pct"))
@@ -562,11 +545,8 @@ def _collect_detected_kernels(
                 continue
 
             input_kid = str(k.get("kernel_id") or "")
-            # Keep the input kernel_id when it's already a short alias
-            # (orchestrator-assigned, e.g. ``k002``) instead of clobbering
-            # it with a residual alias. Mangled C++ symbols (input_kid ==
-            # name, len ≫ 16) get a generated alias to keep the table
-            # narrow.
+            # Keep the input kernel_id when it's already a short alias (e.g.
+            # ``k002``); mangled C++ symbols get a generated ``rNNN`` alias.
             is_short_alias = input_kid and input_kid != name_str and len(input_kid) <= 8 and input_kid not in by_kid
             if is_short_alias:
                 alias = input_kid
@@ -596,14 +576,13 @@ def _collect_detected_kernels(
             }
             name_to_kid[name_str] = alias
 
-    # 3) lifecycle stamps (selected / geak / oob / adopted_by / final_decision)
+    # 3) lifecycle stamps (selected / geak / forge / adopted_by / final_decision)
     selected_ids = {
         str(e.get("kernel_id") or "")
         for e in ((state.get("last_trace_analyze") or {}).get("hot_kernels_top15") or [])
         if isinstance(e, dict)
     }
     geak_idx = _index_invocations_by_kernel(geak)
-    oob_idx = _index_invocations_by_kernel(oob)
     forge_idx = _index_invocations_by_kernel(forge)
 
     integ = state.get("kernel_integrate_attempts") or {}
@@ -629,7 +608,6 @@ def _collect_detected_kernels(
     for kid, entry in by_kid.items():
         entry["selected_for_optimization"] = kid in selected_ids
         entry["geak"] = geak_idx.get(kid)  # None if lane never touched this kid
-        entry["oob"] = oob_idx.get(kid)
         entry["forge"] = forge_idx.get(kid)
         # e2e (integrate) gain so the table shows why a micro-KEPT kernel reverted.
         if kid in integ_gain_by_kid:
@@ -639,7 +617,7 @@ def _collect_detected_kernels(
             # the KEPT lane with the highest micro-speedup; fall back to
             # 'kernel_agent' when integrate KEPT but no single lane shows a KEEP.
             kept_lanes: list[tuple[str, float]] = []
-            for lane in ("geak", "oob", "forge"):
+            for lane in ("geak", "forge"):
                 row = entry.get(lane)
                 if row and row.get("decision") in ("KEEP", "PARTIAL"):
                     kept_lanes.append((lane, row.get("best_speedup") or 0.0))
@@ -655,7 +633,7 @@ def _collect_detected_kernels(
         elif kid in rejected_kids:
             entry["adopted_by"] = None
             entry["final_decision"] = "rejected"
-        elif entry["geak"] or entry["oob"] or entry["forge"]:
+        elif entry["geak"] or entry["forge"]:
             entry["adopted_by"] = None
             entry["final_decision"] = "attempted"
         else:
@@ -709,7 +687,6 @@ def _collect_recommended_kernels(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _collect_optimized_kernels(
     geak: list[dict[str, Any]],
-    oob: list[dict[str, Any]],
     state: dict[str, Any],
     forge: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -722,7 +699,6 @@ def _collect_optimized_kernels(
 
     Args:
         geak (list[dict[str, Any]]): GEAK-lane invocations.
-        oob (list[dict[str, Any]]): OOB-lane invocations.
         state (dict[str, Any]): Parsed ``state.json``.
         forge (list[dict[str, Any]] | None): Forge-lane invocations.
 
@@ -731,7 +707,7 @@ def _collect_optimized_kernels(
         ``kernel_id``.
     """
     by_kid: dict[str, dict[str, Any]] = {}
-    for invs in (geak, oob, forge or []):
+    for invs in (geak, forge or []):
         for inv in invs:
             kid = inv.get("kernel_id") or ""
             if not kid:
@@ -885,7 +861,6 @@ def collect_kernel_lifecycle(
     session_dir: Path,
     state: dict[str, Any],
     geak: list[dict[str, Any]],
-    oob: list[dict[str, Any]],
     warnings: list[str],
     forge: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -898,7 +873,6 @@ def collect_kernel_lifecycle(
         session_dir (Path): Absolute session root.
         state (dict[str, Any]): Parsed ``state.json``.
         geak (list[dict[str, Any]]): GEAK-lane invocations.
-        oob (list[dict[str, Any]]): OOB-lane invocations.
         warnings (list[str]): Shared warnings list (mutated in place).
         forge (list[dict[str, Any]] | None): Forge-lane invocations (own lane).
 
@@ -908,9 +882,9 @@ def collect_kernel_lifecycle(
     """
     forge = forge or []
     return {
-        "detected": _collect_detected_kernels(session_dir, state, geak, oob, warnings, forge=forge),
+        "detected": _collect_detected_kernels(session_dir, state, geak, warnings, forge=forge),
         "recommended": _collect_recommended_kernels(state),
-        "optimized": _collect_optimized_kernels(geak, oob, state, forge),
+        "optimized": _collect_optimized_kernels(geak, state, forge),
         "adopted": _collect_adopted_kernels(state),
         "rejected": _collect_rejected_kernels(state),
     }
@@ -988,19 +962,6 @@ _CONC_SWEEP_SUMMARY_REL_PATH = "reports/conc_sweep_summary.json"
 _CONC_SWEEP_VARIANT_RE = re.compile(r"^(baseline|optimized)_conc(\d+)$")
 
 
-def _safe_mtime(p: Path) -> float:
-    """mtime for sort keys; 0.0 when the entry vanished mid-scan.
-
-    Breakdown collectors must never raise, so a concurrent workspace cleanup
-    that removes a path between enumeration and ``stat`` must not surface as
-    an exception out of ``collect_conc_sweep_summary``.
-    """
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
 def _conc_sweep_successful_pairs(summary: dict[str, Any]) -> int:
     try:
         return int((summary.get("summary") or {}).get("successful_pairs") or 0)
@@ -1012,7 +973,7 @@ def _load_conc_variant_point(variant_dir: Path, *, arm: str, conc: int) -> dict[
     """Best-effort point extraction from a conc_sweep variant workspace."""
     result_paths = sorted(
         variant_dir.rglob("inferencex_result.json"),
-        key=_safe_mtime,
+        key=safe_mtime,
         reverse=True,
     )
     for result_path in result_paths:
@@ -1124,7 +1085,7 @@ def _recover_conc_sweep_summary_from_runs(
         return {}
     tasks = sorted(
         (p for p in runs_dir.iterdir() if p.is_dir()),
-        key=_safe_mtime,
+        key=safe_mtime,
         reverse=True,
     )
     best_payload: dict[str, Any] = {}
@@ -1213,10 +1174,8 @@ def collect_conc_sweep_summary(
 
     out["report_path"] = _rel(path, session_dir) or _CONC_SWEEP_SUMMARY_REL_PATH
 
-    # Only fall back to run-workspace recovery when the authoritative report
-    # has no successful pairs. A healthy report is authoritative and must not
-    # be overridden by the weaker throughput-only recompute (also skips the
-    # full runs/ scan on the healthy path).
+    # Fall back to run-workspace recovery only when the authoritative report
+    # has no successful pairs (also skips the full runs/ scan on the healthy path).
     if _conc_sweep_successful_pairs(out) == 0:
         recovered = _recover_conc_sweep_summary_from_runs(session_dir, warnings)
         if _conc_sweep_successful_pairs(recovered) > 0:
@@ -1226,9 +1185,8 @@ def collect_conc_sweep_summary(
     return out
 
 
-# Optimization stack — raw KEEP ledger passthrough so consumers get the
-# full per-entry evidence (tuned_file / workspace / etc.) the summarised
-# sections drop, reading sbd alone without a state.json walk.
+# Optimization stack — raw KEEP ledger passthrough with the full per-entry
+# evidence the summarised sections drop.
 def collect_optimization_stack(
     state: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -1264,7 +1222,7 @@ def _normalize_optimization_stack_entry(
     *,
     validated: bool,
 ) -> dict[str, Any]:
-    """Coerce one stack entry to the schema shape; unknown fields pass through verbatim (Inv-10.1 fact-layer compat).
+    """Coerce one stack entry to the schema shape; unknown fields pass through verbatim.
 
     Args:
         raw (dict[str, Any]): One raw ``optimization_stack`` entry.
@@ -1311,11 +1269,8 @@ def _normalize_optimization_stack_entry(
 def _resolve_gemm_engine(record: dict[str, Any]) -> str:
     """Resolve the GEMM-tuning engine label for a run/stack record.
 
-    The forge lane records its tuner under ``backend`` (e.g. ``forge``) and
-    leaves ``engine`` unset, while the legacy GEAK path sets ``engine``
-    directly. Reading only ``engine`` therefore mislabeled every forge run as
-    ``geak``. Prefer ``engine``, then ``backend``, then fall back to ``geak``
-    for older records that carry neither.
+    Prefer ``engine``, then ``backend`` (the forge lane records its tuner
+    there), then fall back to ``geak`` for records that carry neither.
     """
     return str(record.get("engine") or record.get("backend") or "geak")
 
@@ -1417,11 +1372,10 @@ def collect_gemm_tuning(state: dict[str, Any]) -> dict[str, Any]:
                 try:
                     run[knob] = int(chosen)
                 except (TypeError, ValueError):
-                    continue  # best-effort int coercion; skip non-numeric knob values
+                    continue  # skip non-numeric knob values
         if raw.get("libtype"):
             run["libtype"] = str(raw.get("libtype"))
-        # Surface why a run skipped (e.g. dense fp8 missing GEMM shapes) so the
-        # breakdown explains the outcome instead of an opaque "skipped".
+        # Surface why a run skipped (e.g. dense fp8 missing GEMM shapes).
         if raw.get("skip_reason"):
             run["skip_reason"] = str(raw.get("skip_reason"))
         if isinstance(raw.get("tuners_skipped"), list) and raw.get("tuners_skipped"):

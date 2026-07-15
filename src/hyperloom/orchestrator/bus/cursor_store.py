@@ -2,8 +2,7 @@
 
 """CursorStore
 
-Per-agent ``last_processed_seq`` cursor via a single SQL UPSERT, giving the
-cross-table atomicity ADR-42 promises.
+Per-agent ``last_processed_seq`` cursor via a single SQL UPSERT.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from hyperloom.common.timeutil import now_iso
 
 from .storage.connection import SqliteConnection
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = now_iso
 
 
@@ -161,20 +159,5 @@ class CursorStore:
                 last_processed_msg_id=msg_id,
                 processed_at=now,
             )
-
-    async def is_already_processed(self, agent: str, seq: int) -> bool:
-        """Return whether a sequence has already been processed.
-
-        Args:
-            agent (str): Identifier of the agent.
-            seq (int): Bus sequence to test.
-
-        Returns:
-            bool: ``True`` when ``seq`` is at or below the agent's last
-            processed sequence.
-        """
-        cur = await self.load(agent)
-        return seq <= cur.last_processed_seq
-
 
 __all__ = ["CursorState", "CursorStore"]

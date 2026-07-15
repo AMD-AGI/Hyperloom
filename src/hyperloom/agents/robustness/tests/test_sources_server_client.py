@@ -38,40 +38,6 @@ def _client(handler) -> RobustnessServerClient:
     return RobustnessServerClient("http://server.test", client=http)
 
 
-# ---------------------------------------------------------------------------
-# Client low-level behaviour
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_get_session_returns_none_on_404():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, json={"detail": "session not found"})
-
-    client = _client(handler)
-    try:
-        result = await client.get_session("missing")
-    finally:
-        await client.aclose()
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_get_session_returns_dict_on_200():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={"session_id": "sess-1", "model_name": "qwen3-8b"},
-        )
-
-    client = _client(handler)
-    try:
-        result = await client.get_session("sess-1")
-    finally:
-        await client.aclose()
-    assert result == {"session_id": "sess-1", "model_name": "qwen3-8b"}
-
-
 @pytest.mark.asyncio
 async def test_list_session_events_unwraps_envelope():
     def handler(request: httpx.Request) -> httpx.Response:
@@ -106,40 +72,9 @@ async def test_connect_error_raises_source_unavailable():
     client = _client(handler)
     try:
         with pytest.raises(SourceUnavailable):
-            await client.list_sessions(limit=10)
+            await client.list_session_pods("sess-1")
     finally:
         await client.aclose()
-
-
-@pytest.mark.asyncio
-async def test_metrics_window_query_params_are_unix_seconds():
-    seen: dict[str, str] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"] = str(request.url)
-        return httpx.Response(200, json={"pods": []})
-
-    client = _client(handler)
-    from hyperloom.agents.robustness.sources.server_client import _MetricsWindow
-
-    try:
-        await client.get_session_metrics(
-            "sess-1",
-            _MetricsWindow(start_unix=100, end_unix=200),
-            categories=["gpu", "cpu"],
-            step="15s",
-        )
-    finally:
-        await client.aclose()
-    assert "start=100" in seen["url"]
-    assert "end=200" in seen["url"]
-    assert "categories=gpu%2Ccpu" in seen["url"] or "categories=gpu,cpu" in seen["url"]
-    assert "step=15s" in seen["url"]
-
-
-# ---------------------------------------------------------------------------
-# Source adapter behaviour
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -221,11 +156,6 @@ async def test_source_skips_summary_when_now_unix_is_zero():
     assert data.session_summary == {}
 
 
-# ---------------------------------------------------------------------------
-# M2: cluster proxy methods + RobustnessServerSource cluster_faults fetch
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_get_cluster_pod_metrics_forwards_window_and_categories():
     seen: dict[str, str] = {}
@@ -253,28 +183,6 @@ async def test_get_cluster_pod_metrics_forwards_window_and_categories():
     assert "step=15s" in seen["query"]
     assert "categories=gpu" in seen["query"]
     assert body == {"data": {"pods": []}}
-
-
-@pytest.mark.asyncio
-async def test_list_cluster_pod_metric_categories_unwraps_available():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "namespace": "ns1",
-                "name": "podA",
-                "available": [{"name": "gpu_temp", "category": "gpu"}],
-            },
-        )
-
-    client = _client(handler)
-    from hyperloom.agents.robustness.sources.server_client import _MetricsWindow
-
-    try:
-        out = await client.list_cluster_pod_metric_categories("ns1", "podA", _MetricsWindow(start_unix=10, end_unix=20))
-    finally:
-        await client.aclose()
-    assert out == [{"name": "gpu_temp", "category": "gpu"}]
 
 
 @pytest.mark.asyncio
@@ -436,11 +344,6 @@ async def test_source_can_disable_cluster_faults():
 
     assert "/api/v1/cluster/faults" not in paths_hit
     assert data.cluster_faults == []
-
-
-# ---------------------------------------------------------------------------
-# M2.5: cluster pod metrics fan-out -> SourceData.local_gpu
-# ---------------------------------------------------------------------------
 
 
 def _gpu_metric_response(value: float, *, gpu_id: str = "0", ts: int = 100):
@@ -664,7 +567,7 @@ async def test_server_pod_metrics_drive_local_health_gpu_signal():
         if request.url.path == "/api/v1/cluster/faults":
             return httpx.Response(200, json={"faults": []})
         if request.url.path == "/api/v1/cluster/pods/ns1/podA/metrics":
-            # 95 C  -> warn (>= 90) but below crit (100) -> medium
+            # 95 C: warn (>= 90) but below crit (100) -> medium.
             return httpx.Response(200, json=_gpu_metric_response(95.0))
         return httpx.Response(404)
 
@@ -686,11 +589,6 @@ async def test_server_pod_metrics_drive_local_health_gpu_signal():
     assert len(thermal) == 1
     assert thermal[0].severity is SymptomSeverity.MEDIUM
     assert thermal[0].evidence["temperature_c"] == 95.0
-
-
-# ---------------------------------------------------------------------------
-# M2 multi-node: workload_uid -> /cluster/workloads/{uid}/hierarchy fan-out
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -750,8 +648,7 @@ async def test_source_workload_uid_drives_multi_node_pod_metric_fan_out():
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "/sessions/sess-1/pods" in request.url.path:
-            # Session only knows the head pod; workers exist only in the
-            # cluster hierarchy view.
+            # Session only knows the head pod; workers exist only in the cluster hierarchy view.
             return httpx.Response(
                 200,
                 json=[{"pod": {"namespace": "ns1", "name": "head"}}],

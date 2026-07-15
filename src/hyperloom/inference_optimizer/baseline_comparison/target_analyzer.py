@@ -28,33 +28,100 @@ concatenation under the session dir.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import re
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_float
+from hyperloom.common.timeutil import now_iso
+
 from .inferencex_client import DEFAULT_BASE_URL
-from .name_mapping import to_inferencex_name
 from .types import BaselinePoint, BaselineQuery, BaselineSummary
 
 
 LLM_AUTHORED_SOURCE = "llm_authored"
 
 
-def _iso_utc_now() -> str:
-    """Return the current UTC time as a second-precision ISO string.
+# --- InferenceX model name mapping -------------------------------------------
+#
+# InferenceX (https://inferencex.semianalysis.com) refers to models by short
+# human names (``MiniMax-M2.5``, ``DeepSeek-R1-0528``), but local weights
+# typically live at HuggingFace-style paths like
+# ``/wekafs/models/MiniMaxAI-MiniMax-M2.5``. The mapping below owns that
+# translation.
+#
+# Hard rules:
+#
+# * The mapping is **best-effort**. When we are not confident, we return
+#   ``None`` and the caller gracefully skips target_analysis. Never raise.
+# * The known-models list is hardcoded here (it changes ~monthly). We
+#   intentionally do NOT hit ``/filters`` at runtime to keep target_analysis
+#   at < 250 ms total.
+# * Matching is case-insensitive; vendor prefixes from common HF repo
+#   conventions (``MiniMaxAI-``, ``deepseek-ai-``, ``meta-llama-``, ...) are
+#   stripped before comparison.
+#
+# If you add a new model to the upstream you must add it here (and the unit
+# test in ``tests/test_baseline_comparison.py`` will catch out-of-sync drift).
+
+KNOWN_INFERENCEX_MODELS: tuple[str, ...] = (
+    "DeepSeek-R1-0528",
+    "GLM-5",
+    "gpt-oss-120b",
+    "Llama-3.3-70B-Instruct-FP8",
+    "Qwen-3.5-397B-A17B",
+    "Kimi-K2.5",
+    "MiniMax-M2.5",
+)
+
+_VENDOR_PREFIX_RE = re.compile(
+    r"^(MiniMaxAI[-_]|deepseek-ai[-_]|deepseek[-_]|meta-llama[-_]|"
+    r"Qwen[-_]|moonshotai[-_]|openai[-_]|google[-_]|microsoft[-_]|"
+    r"zhipuai[-_]|THUDM[-_])",
+    re.IGNORECASE,
+)
+
+
+def to_inferencex_name(model_path_or_name: str) -> str | None:
+    """Translate a local path / HF repo string into an InferenceX display name.
+
+    Returns the canonical name from :data:`KNOWN_INFERENCEX_MODELS` if a
+    match is found, ``None`` otherwise. Caller treats ``None`` as
+    "skip target_analysis for this run" — never as an error.
+
+    Matching algorithm:
+
+    1. Take the basename (``Path.name``).
+    2. Strip a leading vendor prefix.
+    3. Case-insensitive exact match against the known list.
+
+    Args:
+        model_path_or_name (str): A local weights path, HuggingFace repo
+            string, or bare model name to translate.
 
     Returns:
-        str: Timestamp formatted as ``YYYY-MM-DDTHH:MM:SSZ``.
+        str | None: The canonical InferenceX display name when a confident
+            match is found, otherwise ``None``.
     """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not model_path_or_name:
+        return None
+    raw = str(model_path_or_name).strip()
+    if not raw:
+        return None
+
+    candidate = Path(raw).name if ("/" in raw or "\\" in raw) else raw
+    stripped = _VENDOR_PREFIX_RE.sub("", candidate, count=1)
+    needle = stripped.casefold()
+
+    for known in KNOWN_INFERENCEX_MODELS:
+        if known.casefold() == needle:
+            return known
+
+    return None
 
 
 def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
     """Keep the highest ``tput_per_gpu`` per (conc, decode_tp) combo.
-
-    Upstream sometimes contains multiple rows for the same (conc, tp)
-    (different dates or sweep methods). The report only needs the best
-    one per slot — keeping all of them just clutters the markdown.
 
     Args:
         points (list[BaselinePoint]): Candidate points, possibly with
@@ -76,10 +143,8 @@ def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
 def _format_report_md(summary: BaselineSummary) -> str:
     """Render a 10-15 line human-readable markdown summary.
 
-    Intentionally avoids printing a gap percentage — the agreed
-    contract is "facts only, no derived KPI" so this section never
-    accidentally becomes an optimisation target (see S2 in the design
-    chat).
+    Intentionally avoids printing a gap percentage — the contract is
+    "facts only, no derived KPI".
 
     Args:
         summary (BaselineSummary): The summary to render.
@@ -199,22 +264,7 @@ def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
         A ``BaselinePoint`` built from the row, or ``None`` when the row has
         no usable positive ``tput_per_gpu``.
     """
-
-    def _fnum(key: str) -> float:
-        """Read a float field from the enclosing ``row``.
-
-        Args:
-            key: Field name to look up.
-
-        Returns:
-            The value as a float, or ``0.0`` if missing or unparseable.
-        """
-        try:
-            return float(row.get(key))
-        except (TypeError, ValueError):
-            return 0.0
-
-    tput = _fnum("tput_per_gpu")
+    tput = to_float(row.get("tput_per_gpu"), default=0.0)
     if tput <= 0:
         return None
     return BaselinePoint(
@@ -223,7 +273,7 @@ def _target_row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
         conc=int(row.get("conc") or 0),
         decode_tp=0,
         mean_ttft_ms=0.0,
-        mean_tpot_ms=_fnum("tpot_ms"),
+        mean_tpot_ms=to_float(row.get("tpot_ms"), default=0.0),
         mean_e2el_ms=0.0,
         date="",
     )
@@ -282,7 +332,7 @@ def analyze(
         isl=int(isl or 0),
         osl=int(osl or 0),
     )
-    now = _iso_utc_now()
+    now = now_iso(timespec="seconds", z_suffix=True)
 
     def _skip(status: str, reason: str, warning: str) -> BaselineSummary:
         """Persist and return a no-data summary (skipped / no_match cases)."""

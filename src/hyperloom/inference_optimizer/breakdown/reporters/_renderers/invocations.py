@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""GEAK + OOB invocation renderer — one ``_render_pair`` feeding two section ids (geak/oob share the shape)."""
+"""Kernel invocation renderers."""
 
 from __future__ import annotations
 
@@ -16,23 +16,21 @@ def _render_pair(
     *,
     section_id: str,
     title: str,
-    invocations_key: str,
-    legacy_key: str,
+    key: str,
 ) -> RenderedSection:
-    """Render either GEAK or OOB invocations (new ``invocations`` key, legacy fallback).
+    """Render a kernel invocation section.
 
     Args:
         breakdown: The full ``session_breakdown.json`` dict.
         section_id: Section identifier for the rendered block.
         title: Human-readable section title.
-        invocations_key: Key under ``invocations`` to read records from.
-        legacy_key: Top-level fallback key for older breakdowns.
+        key: Top-level key to read invocation records from.
 
     Returns:
         The rendered section, or a skipped placeholder when no invocations
         are present.
     """
-    raw = (breakdown.get("invocations") or {}).get(invocations_key) or breakdown.get(legacy_key) or []
+    raw = breakdown.get(key) or []
     # Normalize stray string entries (kernel ids) into dicts.
     invs: list[dict[str, Any]] = []
     for v in raw:
@@ -115,25 +113,25 @@ def render_geak(breakdown: dict[str, Any]) -> RenderedSection:
         breakdown,
         section_id="geak_invocations",
         title="GEAK Invocations",
-        invocations_key="geak",
-        legacy_key="geak_invocations",
+        key="geak_invocations",
     )
 
 
-@register_renderer("oob_invocations")
-def render_oob(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the OOB (out-of-box) invocations section.
+@register_renderer("forge_invocations")
+def render_forge(breakdown: dict[str, Any]) -> RenderedSection:
+    """Render the Forge invocations section.
 
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
 
     Returns:
-        RenderedSection: The rendered OOB invocations section.
+        RenderedSection: The rendered Forge invocations section.
     """
     return _render_pair(
         breakdown,
-        section_id="oob_invocations",
-        title="OOB Invocations",
-        invocations_key="oob",
-        legacy_key="oob_invocations",
+        section_id="forge_invocations",
+        title="Forge Invocations",
+        key="forge_invocations",
     )
+
+

@@ -39,8 +39,7 @@ from hyperloom.orchestrator.bus.storage import SqliteConnection
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    # Point HYPERLOOM_KERNEL_AGENT_ROOT at the repo's kernel-agent tree so
-    # ``integrate_handler`` can resolve ``apply_kernel_patch.py``.
+    # Point HYPERLOOM_KERNEL_AGENT_ROOT at the kernel-agent tree so the handler resolves apply_kernel_patch.py.
     kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver so the unit test never spawns a real probe.
@@ -458,18 +457,16 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
 ):
     """A failed re-baseline must route through the fault retry budget.
 
-    Exercises the *real* handler envelope (not a hand-built dict): an invalid
-    re-baseline yields ``status=failed`` + ``decision=REVERT``. The handler now
-    stamps a top-level fault ``error_class``, and ``record_kernel_integrate_result``
-    must mark it retryable rather than discarding it as a genuine REVERT. This
-    is the regression that bare-envelope unit tests could not catch.
+    An invalid re-baseline yields ``status=failed`` + ``decision=REVERT`` with a
+    top-level fault ``error_class``; ``record_kernel_integrate_result`` must mark
+    it retryable rather than discarding it as a genuine REVERT.
     """
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     target, patch_file = _write_patch_pair(tmp_path)
 
     def _fake_run(cmd, *args, **kwargs):
-        # Produce a workspace with zero throughput -> is_valid_measurement False.
+        # Zero-throughput workspace -> is_valid_measurement False.
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=0.0)
@@ -494,11 +491,8 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
-    # Real handler envelope: failed re-baseline, REVERT for backward-compat,
-    # now also carrying a top-level fault error_class propagated from the
-    # re-baseline (here ``invalid_measurement``, which is deliberately NOT in
-    # the static fault whitelist — proving the status-based check, not the
-    # whitelist, is what saves the patch).
+    # error_class here is deliberately NOT in the fault whitelist, proving the
+    # status-based check saves the patch.
     assert res["status"] == "failed"
     assert res["decision"] == "REVERT"
     assert res["error"] == "re-baseline did not succeed"
@@ -743,8 +737,7 @@ async def test_integrate_handler_injects_extra_server_args(
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "KEEP"
-    # extra_server_args is preserved verbatim and the watchdog timeout is
-    # auto-appended; assert both rather than exact equality.
+    # extra_server_args preserved verbatim; watchdog timeout auto-appended.
     sglang_args = seen["envs"]["EXTRA_SGLANG_ARGS"]
     assert "--cuda-graph-max-bs 8" in sglang_args
     assert "--watchdog-timeout" in sglang_args
@@ -877,11 +870,8 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
     tmp_path,
     monkeypatch,
 ):
-    # This test pins the LEGACY integrate dispatch cap (retire same kernel after N
-    # attempts). The honest-E2E umbrella now defaults ON, which changes the integrate
-    # path (paired same-config A/B + high-impact infra-retry) and widens the cap. Opt
-    # the whole cohort out so we exercise the legacy capping path this test was written
-    # for; honest-E2E integrate behavior is covered in test_honest_e2e_hardening_unit.
+    # Pin the legacy integrate dispatch cap (retire same kernel after N attempts)
+    # by opting out of the honest-E2E path, which widens the cap.
     monkeypatch.setenv("HL_HONEST_E2E", "0")
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -893,7 +883,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
         run_calls += 1
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
-        _fake_workspace(slot, tput=805.0)  # +0.625%, below KEEP threshold
+        _fake_workspace(slot, tput=805.0)  # below KEEP threshold
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=0,
@@ -938,8 +928,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
         )
         integrate_results = [r.payload["result"] for r in responses if r.payload.get("kind") == "integrate_done"]
         assert len(integrate_results) == 4
-        # Cap: first 3 attempts run the integrate path, the 4th is short-circuited.
-        # Assert proportionally since per-attempt subprocess count is an impl detail.
+        # First 3 attempts run the integrate path; the 4th is short-circuited.
         assert run_calls > 0, "first 3 attempts must spawn subprocess"
         assert run_calls % 3 == 0, (
             f"first 3 attempts should contribute equal subprocess counts; "
@@ -1067,228 +1056,3 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path, mo
     assert res.result["status"] == "failed"
     assert "session_dir" in res.result.get("error", "")
 
-
-# ---------------------------------------------------------------------------
-# after_kernel_opt rocprof: KEEP triggers it, REVERT/NEEDS_REVIEW skips it.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_integrate_keep_schedules_after_kernel_opt_rocprof(
-    session_dir,
-    tmp_path,
-    monkeypatch,
-):
-    """On KEEP, after-opt rocprof is scheduled without blocking integrate."""
-    base_yaml = tmp_path / "base.yaml"
-    _write_baseline_yaml(base_yaml)
-    target, patch_file = _write_patch_pair(tmp_path)
-
-    calls: list[dict] = []
-
-    def _fake_rocprof(*, kernel_id, session_dir, log):
-        calls.append({"kernel_id": kernel_id})
-        return {"status": "scheduled", "reason": "stub"}
-
-    def _fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        _fake_workspace(Path(cmd[out_idx + 1]), tput=900.0)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    monkeypatch.setattr(krh, "_schedule_after_kernel_opt_rocprof", _fake_rocprof)
-    payload = {
-        "base_tput": 800.0,
-        "config_path": str(base_yaml),
-        "kernel_id": "k_rocprof_test",
-        "patch_path": str(patch_file),
-        "target_file": str(target),
-        "allow_unknown_target": True,
-        "skip_rebuild": True,
-    }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
-        res = await krh.integrate_handler(payload, session_dir=session_dir)
-
-    assert res["decision"] == "KEEP"
-    assert len(calls) == 1
-    assert calls[0]["kernel_id"] == "k_rocprof_test"
-    assert res["rocprof_after_kernel_opt"]["status"] == "scheduled"
-
-
-@pytest.mark.asyncio
-async def test_integrate_revert_skips_after_kernel_opt_rocprof(
-    session_dir,
-    tmp_path,
-    monkeypatch,
-):
-    """On REVERT, _run_after_kernel_opt_rocprof is NOT called."""
-    base_yaml = tmp_path / "base.yaml"
-    _write_baseline_yaml(base_yaml)
-    target, patch_file = _write_patch_pair(tmp_path)
-
-    calls: list[dict] = []
-
-    def _fake_rocprof(*, kernel_id, session_dir, log):  # pragma: no cover
-        calls.append({"kernel_id": kernel_id})
-        return {"status": "stub"}
-
-    def _fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        # return tput lower than base → REVERT
-        _fake_workspace(Path(cmd[out_idx + 1]), tput=500.0)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    monkeypatch.setattr(krh, "_schedule_after_kernel_opt_rocprof", _fake_rocprof)
-    payload = {
-        "base_tput": 800.0,
-        "config_path": str(base_yaml),
-        "kernel_id": "k_revert_test",
-        "patch_path": str(patch_file),
-        "target_file": str(target),
-        "allow_unknown_target": True,
-        "skip_rebuild": True,
-    }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
-        res = await krh.integrate_handler(payload, session_dir=session_dir)
-
-    assert res["decision"] == "REVERT"
-    assert len(calls) == 0
-    assert "rocprof_after_kernel_opt" not in res
-
-
-@pytest.mark.asyncio
-async def test_after_kernel_opt_rocprof_uses_profile_mode_and_safe_timeout(
-    session_dir,
-    tmp_path,
-    monkeypatch,
-):
-    """After-opt rocprof must be best-effort and profile the same workload as before."""
-    state = SharedState.load_or_init(session_dir)
-    source_file = tmp_path / "kernel.cu"
-    source_file.write_text("// kernel\n", encoding="utf-8")
-    state.kernel_opt_attempts = {
-        "k_after": {
-            "test_command": "python /tmp/run/unittest/harness_moe.py --correctness",
-            "last_source_file": str(source_file),
-        }
-    }
-    state.save(session_dir)
-    sidecar = session_dir / "reports" / "kernel_roofline.json"
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    sidecar.write_text(
-        json.dumps(
-            {
-                "kernels": [
-                    {
-                        "kernel_id": "k_after",
-                        "name": "aiter::moe_kernel",
-                        "rocprof_roofline": {
-                            "before_kernel_opt": {"status": "matched"},
-                            "after_kernel_opt": None,
-                        },
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    captured: dict[str, list[str]] = {}
-
-    async def _fake_run_subprocess(cmd, *, timeout_sec):
-        captured["cmd"] = cmd
-        captured["timeout_sec"] = timeout_sec
-        out_json = Path(cmd[cmd.index("--out-json") + 1])
-        out_json.write_text(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "target_kernel": "aiter::moe_kernel",
-                    "results": [
-                        {
-                            "name": "aiter::moe_kernel",
-                            "matched_kernel_name": "aiter::moe_kernel",
-                            "status": "matched",
-                            "rocprof_roofline": {"bound_type": "memory"},
-                        }
-                    ],
-                }
-            ),
-            encoding="utf-8",
-        )
-        return 0, "ok", ""
-
-    monkeypatch.setenv("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "abc")
-    monkeypatch.setattr(krh, "_run_subprocess", _fake_run_subprocess)
-
-    res = await krh._run_after_kernel_opt_rocprof(
-        kernel_id="k_after",
-        session_dir=session_dir,
-        log=krh.log,
-    )
-
-    cmd = captured["cmd"]
-    assert res["status"] == "ok"
-    assert cmd[cmd.index("--cmd") + 1].endswith("harness_moe.py --profile")
-    assert cmd[cmd.index("--timeout-sec") + 1] == "1800"
-    assert captured["timeout_sec"] == 1830
-    assert cmd[cmd.index("--target-kernel") + 1] == "aiter::moe_kernel"
-
-
-def test_schedule_after_kernel_opt_rocprof_marks_scheduled(
-    session_dir,
-    monkeypatch,
-):
-    sidecar = session_dir / "reports" / "kernel_roofline.json"
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    sidecar.write_text(
-        json.dumps(
-            {
-                "kernels": [
-                    {
-                        "kernel_id": "k_sched",
-                        "name": "aiter::sched_kernel",
-                        "rocprof_roofline": {
-                            "before_kernel_opt": {"status": "matched"},
-                            "after_kernel_opt": None,
-                        },
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    created: list[object] = []
-
-    async def _fake_run_after(**_kwargs):
-        return {"status": "ok"}
-
-    class _DummyTask:
-        def result(self):
-            return {"status": "ok"}
-
-        def add_done_callback(self, callback):
-            callback(self)
-
-    def _fake_create_task(coro):
-        coro.close()
-        task = _DummyTask()
-        created.append(task)
-        return task
-
-    monkeypatch.setattr(krh, "_run_after_kernel_opt_rocprof", _fake_run_after)
-    monkeypatch.setattr(krh.asyncio, "create_task", _fake_create_task)
-
-    res = krh._schedule_after_kernel_opt_rocprof(
-        kernel_id="k_sched",
-        session_dir=session_dir,
-        log=krh.log,
-    )
-
-    updated = json.loads(sidecar.read_text(encoding="utf-8"))
-    after = updated["kernels"][0]["rocprof_roofline"]["after_kernel_opt"]
-    assert res["status"] == "scheduled"
-    assert after == {"status": "scheduled", "reason": "background_task"}
-    assert len(created) == 1

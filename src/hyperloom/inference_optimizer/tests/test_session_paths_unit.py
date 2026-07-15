@@ -1,7 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the per-session path helpers (single source of truth for
-every path inside a session directory)."""
+"""Unit tests for the per-session path helpers."""
 
 from __future__ import annotations
 
@@ -22,7 +21,6 @@ def test_top_level_files():
 
 def test_runs_root_and_dir():
     assert sp.runs_root(SD) == SD / "runs"
-    # baseline is in the runs-workspace action set (fallback or registry)
     p = sp.runs_dir(SD, "baseline", "t1")
     assert p == SD / "runs" / "baseline" / "t1"
     # blank task_id falls back to "unknown"
@@ -39,18 +37,14 @@ def test_validate_action_strips():
 
 
 def test_kernel_and_patch_paths():
-    assert sp.kernel_workspace(SD, "k1") == SD / "kernel-agent-workspace" / "k1"
-    assert sp.kernel_workspace(SD, "").name == "unknown"
     assert sp.kernel_agent_runs_dir(SD, "s1") == SD / "kernel-agent" / "runs" / "s1"
     assert sp.kernel_agent_runs_dir(SD, "").name == "unknown"
     assert sp.patches_dir(SD, "k1") == SD / "patches" / "k1"
     assert sp.patches_dir(SD, "").name == "unknown"
 
 
-def test_reports_and_report_file():
+def test_reports_dir():
     assert sp.reports_dir(SD) == SD / "reports"
-    assert sp.report_file(SD, "20260101") == SD / "reports" / "20260101_final.md"
-    assert sp.report_file(SD, "20260101", "json").name == "20260101_final.json"
 
 
 def test_trace_paths():
@@ -67,22 +61,9 @@ def test_research_and_competitor_paths():
     assert sp.competitor_target_json(SD).name == "competitor_target.json"
 
 
-def test_logs_and_agent_paths():
-    assert sp.logs_dir(SD) == SD / "logs"
-    assert sp.agent_log(SD, "orchestration").name == "orchestration.log"
+def test_agent_paths():
     assert sp.agent_dir(SD, "critic") == SD / "agents" / "critic"
-    assert sp.agent_inbox(SD, "critic").name == "inbox.jsonl"
-    assert sp.agent_outbox(SD, "critic").name == "outbox.jsonl"
-    assert sp.agent_persona(SD, "critic").name == "persona.md"
     assert sp.agent_prompt_snapshot(SD, "critic").name == "system_prompt.snapshot.md"
-
-
-def test_optimizer_run_paths():
-    assert sp.optimizer_runs_dir(SD) == SD / "optimizer_runs"
-    assert sp.optimizer_run_log(SD, "tag").name == "run_tag.log"
-    assert sp.optimizer_run_log(SD, "").name == "run_unknown.log"
-    assert sp.optimizer_run_pidfile(SD, "tag").name == "run_tag.pid"
-    assert sp.optimizer_run_pidfile(SD, "").name == "run_unknown.pid"
 
 
 def test_target_analysis_paths():
@@ -93,7 +74,6 @@ def test_target_analysis_paths():
 
 def test_cortex_paths():
     assert sp.cortex_dir(SD) == SD / "runtime" / "cortex"
-    assert sp.cortex_sid_file(SD).name == ".kb_sid"
     assert sp.cortex_warm_json(SD).name == ".kb_warm.json"
     assert sp.cortex_pitfalls_json(SD).name == ".kb_pitfalls.json"
     assert sp.cortex_pending_ndjson(SD).name == ".kb_pending.ndjson"

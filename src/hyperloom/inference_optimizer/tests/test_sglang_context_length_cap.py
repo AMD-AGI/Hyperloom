@@ -191,9 +191,7 @@ def test_inject_uses_cap_below_native_window(tmp_path):
     assert _context_length_value(out) == 10240
 
 
-# --max-model-len clamp : the injected --context-length must never exceed
-# the run's explicit --max-model-len, otherwise sglang gets a self-contradictory
-# config (context-length above the configured max).
+# --max-model-len clamp: the injected --context-length must never exceed --max-model-len.
 def test_inject_clamps_to_max_model_len(tmp_path):
     """A huge native window + ISL/OSL whose cap exceeds an explicit
     --max-model-len must clamp --context-length down to --max-model-len."""
@@ -348,7 +346,7 @@ def _default_non_amd_gpu(monkeypatch: pytest.MonkeyPatch):
     upstream ``dual_chunk_flash_attn`` assertions hold without real GPU
     hardware. MI30x-path tests override this with their own monkeypatch."""
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.cli._autodetect_gpu_type",
+        "hyperloom.inference_optimizer.cli.model_gate._autodetect_gpu_type",
         lambda: None,
     )
     monkeypatch.delenv("GPU_TYPE", raising=False)
@@ -387,7 +385,7 @@ def test_dual_chunk_on_amd_returns_canonical_backend(tmp_path, monkeypatch):
     """AMD dual-chunk models are blocked by preflight; if inject still runs
     it should return the canonical backend (not triton which sglang rejects)."""
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.cli._autodetect_gpu_type",
+        "hyperloom.inference_optimizer.cli.model_gate._autodetect_gpu_type",
         lambda: "mi300x",
     )
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
@@ -411,7 +409,7 @@ def test_dual_chunk_uses_explicit_gpu_type_before_autodetect(tmp_path):
 def test_dual_chunk_backend_env_override(tmp_path, monkeypatch):
     """HYPERLOOM_DUAL_CHUNK_BACKEND wins over hardware detection."""
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.cli._autodetect_gpu_type",
+        "hyperloom.inference_optimizer.cli.model_gate._autodetect_gpu_type",
         lambda: "mi300x",
     )
     monkeypatch.setenv("HYPERLOOM_DUAL_CHUNK_BACKEND", "flashinfer")

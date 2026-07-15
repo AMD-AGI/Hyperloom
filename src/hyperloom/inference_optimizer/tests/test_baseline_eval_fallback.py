@@ -1,7 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Baseline accuracy-eval handling: ``disable_run_eval`` wiring + the
-eval-failure fallback that salvages the throughput baseline (Q1/Q2 fix)."""
+"""Baseline accuracy-eval handling: ``disable_run_eval`` wiring + the eval-failure fallback that salvages the throughput baseline."""
 
 from __future__ import annotations
 
@@ -15,9 +14,9 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
-    _is_truthy,
 )
 
 
@@ -25,9 +24,6 @@ from hyperloom.orchestrator.actions.executors.baseline import (
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-    # Keep these executor tests single-round so the materialized config is the
-    # one Magpie sees (no warmup/measure split).
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
 
 
 def _write_yaml(path: Path) -> None:
@@ -86,7 +82,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-# --- _is_truthy ------------------------------------------------------------
+# --- is_truthy (baseline's disable_run_eval param interpretation) ----------
 @pytest.mark.parametrize(
     "value,expected",
     [
@@ -104,7 +100,7 @@ def _run(coro):
     ],
 )
 def test_is_truthy(value, expected):
-    assert _is_truthy(value) is expected
+    assert is_truthy(value) is expected
 
 
 # --- _is_eval_rooted_failure ----------------------------------------------
@@ -139,8 +135,8 @@ def test_eval_rooted_failure_scans_logs(tmp_path: Path):
 
 
 def test_eval_rooted_failure_climbs_from_round_subdir(tmp_path: Path):
-    # Double-run: returned result points at measure_round, but the eval marker
-    # lives in the sibling warmup_round. The scan must climb to the task root.
+    # The result points at measure_round but the eval marker lives in the
+    # sibling warmup_round; the scan must climb to the task root.
     task = tmp_path / "task"
     warm_ws = task / "warmup_round" / "benchmark_sglang_x"
     warm_ws.mkdir(parents=True)
@@ -204,8 +200,8 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
         run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
         calls.append({"run_eval": run_eval})
         if run_eval != "false":
-            # Simulate the broken eval: throughput would be fine but run_eval
-            # aborts the script. No valid workspace; marker in stderr.
+            # Simulate a broken eval that aborts the script: no valid workspace,
+            # marker in stderr.
             return subprocess.CompletedProcess(
                 cmd, 1, "", "ERROR: run_eval failed with exit code 1\n"
             )
@@ -231,8 +227,9 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
     ):
         result = _run(executor(ctx))
 
-    # First attempt eval=true (failed), fallback retried eval=false (succeeded).
-    assert [c["run_eval"] for c in calls] == ["true", "false"]
+    # Warmup tries eval=true, falls back to eval=false, then the measured
+    # baseline reuses the eval-disabled config.
+    assert [c["run_eval"] for c in calls] == ["true", "false", "false"]
     assert result["status"] == "succeeded"
     assert result.get("accuracy_source") == "eval_unavailable"
     assert "eval_failed_fallback_no_accuracy" in result.get("nonfatal_warnings", [])
@@ -281,6 +278,7 @@ def test_eval_already_off_does_not_retry(tmp_path):
         calls.append("x")
         # Even with an eval marker, an explicit opt-out must not double-run.
         return subprocess.CompletedProcess(
+
             cmd, 1, "", "ERROR: run_eval failed with exit code 1\n"
         )
 
@@ -304,5 +302,5 @@ def test_eval_already_off_does_not_retry(tmp_path):
     ):
         result = _run(executor(ctx))
 
-    assert len(calls) == 1  # already off -> no fallback
+    assert len(calls) == 1  # already off, no fallback
     assert result["status"] == "failed"

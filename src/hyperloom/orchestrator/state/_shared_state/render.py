@@ -57,13 +57,8 @@ class _RenderMixin:
         from ...policy import gate as _m
         return _m.to_policy_denial_summary(self, top_k=top_k)
 
-    def _format_last_kernel_opt(self) -> str:
-        """Forwarding shim — implementation in :mod:`.kernel_request_handlers`."""
-        from ...kernel import request_handlers as _m
-        return _m._format_last_kernel_opt(self)
-
     def to_intervention_mix_summary(self) -> str:
-        """Render the intervention ledger as neutral telemetry (one-line counts summary; ``""`` when empty). No directive emitted — config-vs-patch is the LLM's choice.
+        """Render the intervention ledger as a one-line counts summary (``""`` when empty).
 
         Returns:
             str: A single-line counts summary, or ``""`` when the ledger is
@@ -92,7 +87,7 @@ class _RenderMixin:
         )
 
     def to_mission_summary(self, *, now: datetime | None = None) -> str:
-        """Mission-progress block printed at the top of every tick (outcome-shaped state: raw/validated gain, time vs budget, stack staleness); distinct from :meth:`to_prompt_summary`.
+        """Mission-progress block printed at the top of every tick (raw/validated gain, time vs budget, stack staleness).
 
         Args:
             now (datetime | None): Reference time for elapsed / remaining
@@ -139,7 +134,7 @@ class _RenderMixin:
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
             f"{unvalidated_tag}{resume_revalidation_tag}{geak_pending_tag}",
         ]
-        # Surface reusable hot kernels still owing a kernel_opt attempt (visible without a checklist).
+        # Surface reusable hot kernels still owing a kernel_opt attempt.
         untried_hot = self.untried_hot_reusable_kernels()
         if untried_hot:
             lines.append(f"untried_hot_kernels: {', '.join(untried_hot)}")
@@ -175,7 +170,7 @@ class _RenderMixin:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block; compact (≤6 lines, incl. the ``cycle`` = macro-cycle number). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
+        """Render the per-tick ``=== Phase ===`` block (≤6 lines). EXPLORE adds a ``force_exit`` line showing runway before the hard force-exit gate.
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -268,7 +263,7 @@ class _RenderMixin:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase) so it can spot budget overruns.
+        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase).
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -309,7 +304,7 @@ class _RenderMixin:
         mm = float(self.max_minutes or 0.0)
         total_budget_sec = mm * 60.0
         lines: list[str] = []
-        # Stable order — iterate PHASE_NAMES so new phases render automatically.
+        # Iterate PHASE_NAMES for stable order.
         for phase in PHASE_NAMES:
             if phase not in elapsed_per_phase:
                 continue
@@ -322,7 +317,7 @@ class _RenderMixin:
         return "\n".join(lines) or "(no phase history yet)"
 
     def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
-        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section; empty when no recipe/pitfalls. Capped; full JSON at runtime/cortex/.kb_warm.json / .kb_pitfalls.json.
+        """Render T0 warm-start snapshot for the ``=== Warm start ===`` prompt section; empty when no recipe/pitfalls.
 
         Args:
             max_lines (int): Cap on rendered lines before truncation.
@@ -341,7 +336,7 @@ class _RenderMixin:
         if workload or hw:
             out.append(f"recipe: workload={workload or '?'} hw={hw or '?'}")
         raw = str(recipe.get("raw") or "") if isinstance(recipe, dict) else ""
-        # Trim recipe raw text — at most 5 lines, 240 chars each.
+        # Trim recipe raw text to at most 5 lines, 240 chars each.
         if raw.strip():
             kept = 0
             for line in raw.splitlines():
@@ -382,7 +377,7 @@ class _RenderMixin:
         """
         if not self.gaps:
             return ""
-        # Newest first by last_updated_ts (deterministic fallback to first_seen_ts/insertion).
+        # Newest first by last_updated_ts (fallback to first_seen_ts/insertion).
         ordered = list(self.gaps)
         ordered.sort(
             key=lambda g: str(
@@ -413,7 +408,7 @@ class _RenderMixin:
         return "\n".join(rows)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
-        """Render advisory multi-model proposal scores for Orchestration. NO mean/sorting (Inv-9.1: no system-side scoreboard); rater identities anonymized to avoid brand bias. Empty when no recent round carries scores.
+        """Render advisory multi-model proposal scores for Orchestration; no mean/sorting, rater identities anonymized. Empty when no recent round carries scores.
 
         Args:
             max_rounds (int): Maximum number of recent scored rounds to
@@ -433,7 +428,7 @@ class _RenderMixin:
         if not rounds:
             return ""
         shown = rounds[-max_rounds:]
-        # Stable, anonymized rater labels: map each real slug to ``rater_N`` (slug never reaches the prompt).
+        # Map each real slug to an anonymized ``rater_N`` label.
         all_slugs: set[str] = set()
         for r in shown:
             models = r["ensemble_scores"].get("models") or {}
@@ -454,7 +449,7 @@ class _RenderMixin:
             round_id = str(r.get("round_id") or "?")
             domain = str(r.get("domain") or "?")
             rows.append(f"round={round_id} domain={domain} scale={scale}")
-            # Collect variant names across models, preserving proposal_set order when available.
+            # Collect variant names across models, preserving proposal_set order.
             ordered_names: list[str] = []
             seen: set[str] = set()
             for variant in r.get("proposal_set") or []:
@@ -469,7 +464,7 @@ class _RenderMixin:
                         if nm not in seen:
                             ordered_names.append(nm)
                             seen.add(nm)
-            # Render raters in stable label order so a column means the same model across rounds.
+            # Render raters in stable label order.
             ordered_slugs = sorted(
                 (s for s in models if s in rater_label),
                 key=lambda s: rater_label[s],
@@ -504,11 +499,13 @@ class _RenderMixin:
                 audit fields (baseline / current best / gains / kernel-opt
                 queue / attempts history / failures / phase status).
         """
+        from ...kernel import request_handlers as _kernel_request_handlers
+
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
         ]
-        # Advisory architecture profile; prompt-context only (TraceLens analysis_md is ground truth). Omitted when no profile.
+        # Advisory architecture profile; prompt-context only. Omitted when no profile.
         _arch_line = _shared_state_module().render_model_arch_compact(self.model_arch)
         if _arch_line:
             lines.append(f"model_arch(advisory; subordinate to TraceLens analysis_md)={_arch_line}")
@@ -531,17 +528,16 @@ class _RenderMixin:
             f"last_profile_status={self.last_profile_status or '(none)'}",
             f"last_profile_args='{self.last_profile_args}'",
             f"discovered_flags_error={self.discovered_flags_error or '(none)'}",
-            f"last_trace_analyze={self._format_last_trace_analyze()}",
+            f"last_trace_analyze={self._format_trace_analyze_blob(self.last_trace_analyze)}",
             f"profiler_digest={self._format_profiler_digest()}",
-            # Full TraceLens analysis.md so the LLM grounds propose_action in the actual report.
+            # Full TraceLens analysis.md.
             f"analysis_md={self._format_analysis_md_full()}",
-            # Streak counter is a readable fact (KEEP/REVERT counts allowed); plateau judges also consume it on legacy resume.
             f"params_no_promote_streak={self.params_no_promote_streak}",
-            f"explore_search={self._format_explore_search()}",
+            f"explore_search={self._format_search_state(self.explore_search)}",
             f"discovered_flags={self._format_discovered_flags()}",
             f"backend_winners_history={self._format_backend_winners_history()}",
             f"synergy_attempted={len(self.synergy_attempted)} combos",
-            f"last_kernel_opt={self._format_last_kernel_opt()}",
+            f"last_kernel_opt={_kernel_request_handlers._format_last_kernel_opt(self)}",
             # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
             (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
             (f"has_keep_pending_integrate={'true' if self.has_keep_pending_integrate else 'false'}"),
@@ -552,7 +548,8 @@ class _RenderMixin:
             f"last_profile={self._format_attempt(self.last_profile)}",
             f"last_gemm_tuning={self._format_attempt(self.last_gemm_tuning)}",
             f"last_explore={self._format_attempt(self.last_explore)}",
-            f"last_sweep={self._format_attempt(self.last_sweep)}",
+            # last_sweep is already rendered above via the richer
+            # _format_last_sweep() (grid/best/tput); no second generic line.
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
             f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
@@ -563,7 +560,7 @@ class _RenderMixin:
         ]
         return "\n".join(lines)
 
-    # Audit-trail renderers (per-action attempts + global failure log); compact one-liners.
+    # Audit-trail renderers (per-action attempts + global failure log).
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
         """Render one ``last_<action>`` snapshot or ``attempts[-1]`` entry.
@@ -590,7 +587,7 @@ class _RenderMixin:
         )
 
     def _format_attempts_history(self) -> str:
-        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``) so the LLM gauges reliability without 6x20 rows.
+        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``).
 
         Returns:
             str: A per-action totals summary, or ``"(no attempts recorded)"``
@@ -609,7 +606,7 @@ class _RenderMixin:
         return " ".join(parts) if parts else "(no attempts recorded)"
 
     def _format_last_action_failures(self) -> str:
-        """Render up to the 3 most-recent global failures (rich-context companion to crash_count/baseline_failure_streak); full list on disk.
+        """Render up to the 3 most-recent global failures; full list on disk.
 
         Returns:
             str: A pipe-joined render of the last 3 failures (with an
@@ -693,7 +690,7 @@ class _RenderMixin:
         entry: dict[str, Any],
         tested: dict[str, Any],
     ) -> dict[str, Any]:
-        """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]`` at render time (some accepted entries don't persist gain_pct; avoids a second writer).
+        """Backfill ``gain_pct``/``tput`` from the matching ``tested[fp]`` at render time.
 
         Args:
             entry (dict[str, Any]): The accepted-variant entry to enrich.
@@ -719,7 +716,7 @@ class _RenderMixin:
         return out
 
     def _format_backend_winners_history(self) -> str:
-        """Multi-line render of the explore-round winners history (last 5 rounds: per-winner gain_pct/tput/flags); older rounds collapse to an elision line.
+        """Multi-line render of the explore-round winners history (last 5 rounds); older rounds collapse to an elision line.
 
         Returns:
             str: The multi-line winners-history render, or
@@ -751,18 +748,9 @@ class _RenderMixin:
             out.append(f"    [+{len(self.backend_winners_history) - 5} earlier rounds elided]")
         return "\n".join(out)
 
-    def _format_explore_search(self) -> str:
-        """Render the unified ``explore_search`` ledger for the prompt.
-
-        Returns:
-            str: The :meth:`_format_search_state` render of
-                :attr:`explore_search`.
-        """
-        return self._format_search_state(self.explore_search)
-
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
-        """Multi-line render of a ``*_search`` dedup ledger; each entry surfaces real ``gain_pct``. Counts on the head line; bodies show last 5 per bucket (only the prompt body is truncated).
+        """Multi-line render of a ``*_search`` dedup ledger; counts on the head line, bodies show last 5 per bucket.
 
         Args:
             search (dict[str, Any] | None): The search ledger to render.
@@ -814,7 +802,7 @@ class _RenderMixin:
 
     @staticmethod
     def _strip_base64_data_urls(text: str) -> str:
-        """Drop base64 image payloads before prompt injection (in-memory only; on-disk file intact). Delegates to ``hyperloom.inference_optimizer.tracelens_md``.
+        """Drop base64 image payloads before prompt injection (in-memory only). Delegates to ``hyperloom.inference_optimizer.tracelens_md``.
 
         Args:
             text (str): The markdown text to scrub of base64 data URLs.
@@ -830,7 +818,7 @@ class _RenderMixin:
         return strip_base64_data_urls(text)
 
     def _format_analysis_md_full(self) -> str:
-        """Inject TraceLens analysis.md verbatim (no truncation/interpretation) between ``=== TraceLens Analysis ... ===`` bookends; header carries snapshot id + gain. Empty cache → one-line hint to propose ``roofline``.
+        """Inject TraceLens analysis.md verbatim between ``=== TraceLens Analysis ... ===`` bookends. Empty cache → one-line hint to propose ``roofline``.
 
         Returns:
             str: The verbatim analysis.md wrapped in bookends, or a one-line
@@ -857,13 +845,12 @@ class _RenderMixin:
             gain_str = f"{float(gain):.2f}"
         except (TypeError, ValueError):
             gain_str = "?"
-        # When inline injection is disabled, surface the structured digest above
-        # (profiler_digest=) and point at the show_analysis_md tool for the full
-        # report — saves context on long runs. Default keeps the verbatim md.
+        # By default point at the show_analysis_md tool; set
+        # INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline the verbatim md.
         if os.getenv(
             "INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE",
-            "1",
-        ).strip().lower() in ("0", "false", "off", "no"):
+            "0",
+        ).strip().lower() not in ("1", "true", "on", "yes"):
             return (
                 f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
                 "full report not inlined; see profiler_digest above or call the "
@@ -877,7 +864,7 @@ class _RenderMixin:
         )
 
     def _format_profiler_digest(self) -> str:
-        """Compact bottleneck-focused profiler block (saturation mix + cross-snapshot delta + hot kernels + lever); ``(none)`` until a snapshot lands.
+        """Compact bottleneck-focused profiler block; ``(none)`` until a snapshot lands.
 
         Returns:
             str: The profiler digest block, or ``"(none)"`` until a roofline
@@ -892,14 +879,6 @@ class _RenderMixin:
         if not digest:
             return "(none)"
         return f"\n{digest}\n"
-
-    def _format_last_trace_analyze(self) -> str:
-        """Render the most recent trace-analyze blob for the prompt.
-
-        Returns:
-            A formatted summary of ``last_trace_analyze``.
-        """
-        return self._format_trace_analyze_blob(self.last_trace_analyze)
 
     def _format_trace_analyze_blob(self, blob: dict[str, Any] | None) -> str:
         """Render a trace-analyze cache blob as a compact prompt line.
@@ -928,7 +907,7 @@ class _RenderMixin:
             f"candidates_path={blob.get('candidates_path', '?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
-        # With no routable candidates, surface skipped operators so the LLM doesn't echo invalid kernel_ids.
+        # With no routable candidates, surface skipped operators.
         skipped_suffix = ""
         if not ids:
             sk = blob.get("skipped_kernels_top") or []
@@ -939,7 +918,7 @@ class _RenderMixin:
             ]
             if rendered_sk:
                 skipped_suffix = f" skipped_kernels_top=[{'; '.join(rendered_sk)}]"
-        # Surface TraceLens routing signals inline so the LLM grounds the next action; omitted in steady-state.
+        # Surface TraceLens routing signals inline; omitted in steady-state.
         warnings = blob.get("trace_health_warnings") or []
         if not warnings:
             return base + skipped_suffix

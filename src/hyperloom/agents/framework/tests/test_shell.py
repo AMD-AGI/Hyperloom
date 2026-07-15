@@ -39,8 +39,7 @@ def test_render_template_shell_quote_neutralises_metachars() -> None:
         {"dir": "/tmp;rm -rf /"},
         shell_quote=True,
     )
-    # The whole substituted value must be inside a single-quoted span so
-    # the semicolon cannot start a new command.
+    # Substituted value must be inside a single-quoted span.
     assert "/tmp;rm -rf /" in out
     assert "'/tmp;rm -rf /'" in out
 

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for ``signals/cluster_fault.py`` (M2)."""
+"""Unit tests for ``signals/cluster_fault.py``."""
 
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ def test_string_counts_are_coerced():
     """robust-api emits ints, but be defensive against str-typed envs."""
 
     fault = _fault(phase="Isolating", affected_gpus=1)
-    fault["affected_workload_count"] = "5"  # promote to high via string
+    fault["affected_workload_count"] = "5"  # promotes to high via string coercion
     data = SourceData(cluster_faults=[fault])
     out = evaluate_cluster_fault_signals(_ctx(), data, config=ClusterFaultConfig(high_workload_threshold=4))
     assert len(out) == 1

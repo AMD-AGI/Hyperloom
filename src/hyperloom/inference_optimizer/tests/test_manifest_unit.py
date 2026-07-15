@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session import manifest as mf
 
 
@@ -22,7 +23,7 @@ class _Proc:
 
 # ---- small helpers --------------------------------------------------------
 def test_utc_now_compact_and_session_id():
-    assert mf._utc_now_compact().endswith("Z")
+    assert utc_now_compact().endswith("Z")
     sid = mf.build_session_id("meta/llama")
     assert sid.startswith("meta_llama_")
     assert mf.build_session_id("").startswith("session_")
@@ -42,7 +43,6 @@ def test_read_first_line_blank_only(tmp_path):
 
 
 def test_read_first_line_oserror(tmp_path):
-    # A directory exists() True but read_text raises IsADirectoryError (OSError).
     assert mf._read_first_line(tmp_path) == ""
 
 
@@ -77,7 +77,6 @@ def test_detect_stack_fingerprint_env_and_marker(monkeypatch, tmp_path):
     monkeypatch.delenv("HIP_VERSION", raising=False)
     monkeypatch.delenv("AITER_COMMIT", raising=False)
     monkeypatch.delenv("AITER_VERSION", raising=False)
-    # rocm marker file read
     marker = tmp_path / "version"
     marker.write_text("6.2.0\n", encoding="utf-8")
     monkeypatch.setattr(mf, "_read_first_line", lambda p: "6.2.0" if "version" in str(p) else "")
@@ -85,7 +84,7 @@ def test_detect_stack_fingerprint_env_and_marker(monkeypatch, tmp_path):
     assert out["sglang"] == "0.4.1"
     assert out["vllm"] == "0.6.0"
     assert out["rocm"] == "6.2.0"
-    assert out["aiter"] == "unknown"  # no env, no pkg
+    assert out["aiter"] == "unknown"
 
 
 # ---- git helpers ----------------------------------------------------------
@@ -127,7 +126,6 @@ def test_path_is_relative_to(tmp_path):
 
 def test_warn_if_dependency_escapes_no_user_data(monkeypatch):
     monkeypatch.delenv(mf._paths.ENV_USER_DATA_PATH, raising=False)
-    # no USER_DATA_PATH -> early return, no raise
     mf._warn_if_dependency_escapes_user_data("MAGPIE_PATH", "/workspace/x")
 
 
@@ -138,7 +136,7 @@ def test_warn_if_dependency_inside_user_data(monkeypatch, tmp_path):
 
 def test_warn_if_dependency_pod_local(monkeypatch):
     monkeypatch.setenv(mf._paths.ENV_USER_DATA_PATH, "/data/persist")
-    # /workspace is pod-local and outside user_data -> warns (no raise)
+    # /workspace is pod-local and outside user_data -> warns.
     mf._warn_if_dependency_escapes_user_data("MAGPIE_PATH", "/workspace/dep")
 
 
@@ -187,7 +185,6 @@ def test_detect_image_marker(monkeypatch, tmp_path):
     marker = tmp_path / "image"
     marker.write_text("frommarker:1\n", encoding="utf-8")
     monkeypatch.setattr(mf, "Path", Path)  # keep real Path
-    # Point the marker scan at our temp file via monkeypatching the tuple
     import hyperloom.inference_optimizer.session.manifest as mod
 
     real_path = mod.Path
@@ -354,7 +351,6 @@ def test_build_manifest_user_data_path_falls_back_to_workspace_root(monkeypatch)
     monkeypatch.setattr(mf, "_detect_stack_fingerprint", lambda: {})
     monkeypatch.delenv(mf._paths.ENV_USER_DATA_PATH, raising=False)
     m = mf.build_manifest(Path("/tmp/sd"))
-    # Unset env -> resolved workspace_root() default (never empty).
     assert m["user_data_path"] == str(mf._paths.workspace_root())
     assert m["user_data_path"]
 

@@ -2,7 +2,7 @@
 myst:
   html_meta:
     "description": "Hyperloom release notes"
-    "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, Local Mode, kernel optimization"
+    "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
@@ -37,21 +37,14 @@ core of the current runtime:
 
 - **Kernel optimization** — Hot kernels are optimized asynchronously in parallel
   with the main loop, so kernel work doesn't block forward progress. The default
-  backend order is KernelForge (deterministic forge) first, then GEAK
-  (Triton / HIP / FlyDSL).
+  backend order is GEAK (Triton / HIP / FlyDSL) first, then KernelForge
+  (deterministic forge).
 
 - **Session artifacts and `session_breakdown.json`** — Each run produces
   reproducible session artifacts and a machine-readable `session_breakdown.json`
-  that records the final throughput, cumulative validated gain, and the ordered
+  file that records the final throughput, cumulative validated gain, and the ordered
   action path — designed for dashboard and downstream delivery integrations.
 
-- **Primus-Claw hosted UI** — AMD-internal users and approved partners can run
-  Hyperloom from a browser with no local GPU setup. Jobs run in isolated
-  sandboxed containers; multi-node workloads fan out using RayJob. Every run feeds
-  results back through a data flywheel that continuously improves the agent's KB
-  and scoring heuristics.
-
-- **Local Mode for self-hosted deployments** — External users can install
+- **Bare-metal and Docker setup for self-hosted deployments** — Users can install
   Hyperloom on their own AMD GPU hardware and run the full optimization loop
-  locally, with Cursor as the agent interface and the same phase structure as the
-  hosted tier.
+  with an agent-driven setup flow.

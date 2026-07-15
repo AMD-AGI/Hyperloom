@@ -19,40 +19,36 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     INTERNAL_ONLY_ACTION_NAMES as SURFACE_INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS as SURFACE_KERNEL_AGENT_OWNED_ACTIONS,
     NO_KERNEL_AGENT_ENABLED_ACTIONS as SURFACE_NO_KERNEL_AGENT_ENABLED_ACTIONS,
-    PHASE_ALLOWLIST_BYPASS_ACTIONS as SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS,
 )
 
 
 # Expected action catalogue.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
-    # prep (3)
+    # prep
     "target_analysis": "prep",
     "baseline": "prep",
-    # GAP 1 — Coordinator-internal one-shot warm-recipe replay.
     "replay_warm_recipe": "prep",
-    # analysis (2) — Coordinator-internal, selected by enable_roofline.
+    # analysis
     "roofline": "analysis",
     "profile": "analysis",
-    # shallow (5) — ``explore`` is the merged grid-runner entry.
+    # shallow
     "explore": "shallow",
     "integrate_patch": "shallow",
-    # FRAMEWORK_AGENT phase: per-candidate Coordinator-internal executor.
     "framework_agent": "shallow",
     "sweep": "shallow",
-    # SWEEP-phase post-sweep concurrency comparison.
     "conc_sweep": "shallow",
     "report": "shallow",
     "session_breakdown": "shallow",
-    # creative (1) — unified specialist dispatch (scope: domain/domains/freeform).
+    # creative
     "specialist": "creative",
-    # deep_kernel (6)
+    # deep_kernel
     "kernel_opt": "deep_kernel",
     "integrate": "deep_kernel",
     "deep_kernel_analysis": "deep_kernel",
     "operator_tuning": "deep_kernel",
     "vendor_kernel_config": "deep_kernel",
     "gemm_tuning": "deep_kernel",
-    # resilience (1)
+    # resilience
     "recover": "resilience",
 }
 
@@ -82,7 +78,7 @@ def test_kernel_owned_actions_all_in_registry(registry):
 
 def test_action_surface_constants_are_shared():
     """Policy, prompt rendering, and CLI must not carry divergent action lists."""
-    from hyperloom.inference_optimizer.cli import _NOOP_KINDS_KERNEL_ONLY
+    from hyperloom.inference_optimizer.cli.executors import _NOOP_KINDS_KERNEL_ONLY
     from hyperloom.orchestrator.policy import gate as policy
     from hyperloom.orchestrator.prompts import prompt_builder
 
@@ -138,9 +134,9 @@ def test_action_surface_sets_are_phase_aligned():
 
     all_phase_actions = set().union(*PHASE_ALLOWED_ACTIONS.values())
     assert SURFACE_KERNEL_AGENT_OWNED_ACTIONS <= PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT]
-    assert (SURFACE_INTERNAL_ONLY_ACTION_NAMES - SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS) <= all_phase_actions
-    assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS <= SURFACE_INTERNAL_ONLY_ACTION_NAMES
-    assert SURFACE_PHASE_ALLOWLIST_BYPASS_ACTIONS.isdisjoint(all_phase_actions)
+    assert (SURFACE_INTERNAL_ONLY_ACTION_NAMES - {"replay_warm_recipe"}) <= all_phase_actions
+    assert "replay_warm_recipe" in SURFACE_INTERNAL_ONLY_ACTION_NAMES
+    assert "replay_warm_recipe" not in all_phase_actions
     assert SURFACE_FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES <= PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_AGENT]
     assert SURFACE_GRID_INJECTABLE_ACTIONS <= all_phase_actions
 
@@ -159,9 +155,7 @@ def test_gemm_tuning_action_metadata(registry):
     assert m.pipeline_phase == "deep"
     assert set(m.requires_lanes) == {"server_lifecycle", "workspace_mutation", "benchmark_lane"}
     assert "framework in ('sglang', 'vllm', 'vllm-aiter')" in m.applicable_when
-    # forge handles any precision (bf16/fp16/fp8/fp4/mxfp4), dense or MoE; the
-    # action must NOT pre-filter on precision/MoE or bf16 dense (which has real
-    # e2e KEEPs) gets blocked. Gate only on framework + the deep phase.
+    # Gate only on framework + the deep phase, not precision/MoE.
     assert any("phase == 'deep'" in cond for cond in m.applicable_when)
     assert not any("precision" in cond for cond in m.applicable_when)
 
@@ -179,8 +173,6 @@ def test_every_action_has_valid_family(registry):
 
 
 def test_every_action_uses_only_known_lanes(registry):
-    # ``research_lane`` supports the LLM specialist sub-agent; known-lanes set
-    # must include it.
     known = {
         "server_lifecycle",
         "workspace_mutation",
@@ -260,7 +252,7 @@ def test_runs_actions_fallback_matches_registry(registry):
 def test_cli_real_executors_consistent_with_runs_actions():
     """Every real-executor action must be in ``_runs_actions()`` or be a
     special session-root writer (``report``, ``session_breakdown``)."""
-    from hyperloom.inference_optimizer.cli import _REAL_EXECUTORS_FULL
+    from hyperloom.inference_optimizer.cli.executors import _REAL_EXECUTORS_FULL
     from hyperloom.inference_optimizer.session.session_paths import _runs_actions
 
     SESSION_ROOT_WRITERS = {"report", "session_breakdown"}
@@ -286,7 +278,6 @@ def test_cli_real_executors_consistent_with_runs_actions():
     )
 
 
-# Prompt-builder fields — see ActionMetadata docstring.
 def test_every_action_has_non_empty_description(registry):
     for m in registry.all():
         assert m.description, f"{m.name}: description must be non-empty"

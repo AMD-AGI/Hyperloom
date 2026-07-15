@@ -39,14 +39,6 @@ def test_safe_get_none_value_returns_default():
 # ── _patch_baseline ──
 
 
-def test_patch_baseline_legacy_alias():
-    data = {"baseline": {"extra_sglang_args": "--foo"}}
-    notes = tx._patch_baseline(data)
-    assert data["baseline"]["extra_server_args"] == "--foo"
-    assert "extra_sglang_args" not in data["baseline"]
-    assert any("legacy" in n for n in notes)
-
-
 def test_patch_baseline_empty_default():
     data = {"baseline": {}}
     tx._patch_baseline(data)
@@ -112,14 +104,67 @@ def test_patch_phase_timeline_alias_added():
     assert data["phase_timeline"][0]["extras"]["best_extra_server_args"] == "--x"
 
 
-def test_patch_phase_timeline_legacy_candidate_key():
-    data = {"phase_timeline": [{"extras": {"candidate_extra_sglang_args": "--y"}}]}
-    tx._patch_phase_timeline(data)
-    assert data["phase_timeline"][0]["extras"]["best_extra_server_args"] == "--y"
-
-
 def test_patch_phase_timeline_no_pt():
     assert tx._patch_phase_timeline({}) == []
+
+
+def test_patch_baseline_migrates_legacy_sglang_args():
+    """Legacy baseline.extra_sglang_args seeds extra_server_args (no data loss)."""
+    data = {"baseline": {"extra_sglang_args": "--enable-foo"}}
+    tx._patch_baseline(data)
+    assert data["baseline"]["extra_server_args"] == "--enable-foo"
+
+
+def test_patch_baseline_modern_key_takes_precedence_over_legacy():
+    """An explicit extra_server_args is never overwritten by the legacy key."""
+    data = {"baseline": {"extra_server_args": "--modern", "extra_sglang_args": "--legacy"}}
+    tx._patch_baseline(data)
+    assert data["baseline"]["extra_server_args"] == "--modern"
+
+
+def test_patch_phase_timeline_migrates_legacy_candidate_sglang_args():
+    """Legacy candidate_extra_sglang_args maps to best_extra_server_args."""
+    data = {"phase_timeline": [{"extras": {"candidate_extra_sglang_args": "--candidate-foo"}}]}
+    tx._patch_phase_timeline(data)
+    assert data["phase_timeline"][0]["extras"]["best_extra_server_args"] == "--candidate-foo"
+
+
+def test_patch_phase_timeline_modern_candidate_wins_over_legacy():
+    """When both candidate keys exist, the modern one is chosen."""
+    data = {
+        "phase_timeline": [
+            {
+                "extras": {
+                    "candidate_extra_server_args": "--modern",
+                    "candidate_extra_sglang_args": "--legacy",
+                }
+            }
+        ]
+    }
+    tx._patch_phase_timeline(data)
+    assert data["phase_timeline"][0]["extras"]["best_extra_server_args"] == "--modern"
+
+
+def test_is_already_v2_false_for_legacy_candidate_sglang_args():
+    """A phase entry with only the legacy candidate key still needs patching."""
+    doc = _v2_doc()
+    doc["phase_timeline"] = [{"extras": {"candidate_extra_sglang_args": "--x"}}]
+    assert tx.is_already_v2(doc) is False
+
+
+def test_transform_end_to_end_preserves_legacy_args():
+    """Full transform() keeps both legacy baseline + phase-timeline server args."""
+    legacy = {
+        "baseline": {"extra_sglang_args": "--enable-foo"},
+        "capability_summary": {
+            p: {"best_gain_pct": 1.0} for p in ("params", "backends", "sweep", "geak", "oob")
+        },
+        "phase_timeline": [{"extras": {"candidate_extra_sglang_args": "--candidate-foo"}}],
+        "kernel_lifecycle": {"detected": [{"geak": {}, "oob": {}}]},
+    }
+    out = tx.transform(legacy)["data"]
+    assert out["baseline"]["extra_server_args"] == "--enable-foo"
+    assert out["phase_timeline"][0]["extras"]["best_extra_server_args"] == "--candidate-foo"
 
 
 # ── _aggregate_backend ──

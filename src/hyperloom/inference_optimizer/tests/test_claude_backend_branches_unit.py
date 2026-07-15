@@ -2,7 +2,7 @@
 
 """Branch coverage for ClaudeBackend: SDK import, __post_init__ wiring,
 option building (resume / context tools / raw mode), timeout handling, the
-conversational session capture, and the SDK-stream error tolerance."""
+conversational session capture, and SDK-stream error tolerance."""
 
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def test_import_sdk_missing(monkeypatch):
 
 
 def test_import_sdk_incomplete(monkeypatch):
-    monkeypatch.setattr(cl.importlib, "import_module", lambda name: SimpleNamespace())  # no query/options
+    monkeypatch.setattr(cl.importlib, "import_module", lambda name: SimpleNamespace())
     with pytest.raises(BackendError, match="missing query"):
         cl._import_sdk()
 
@@ -106,7 +106,8 @@ def test_post_init_imports_sdk(monkeypatch):
 def test_post_init_emit_intent_setup_failure(monkeypatch):
     monkeypatch.setattr(cl, "build_emit_intent_server", lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
     b = _backend()
-    assert b.has_emit_intent_tool is False
+    assert b.mcp_server_config is None
+    assert b.mcp_tool_name is None
     assert any("emit_intent MCP setup failed" in c.get("warn", "") for c in b.calls)
 
 
@@ -122,14 +123,14 @@ def test_set_context_provider_success(monkeypatch):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: SimpleNamespace(name="ctx"))
     b = _backend()
     b.set_context_provider(SimpleNamespace())
-    assert b.has_context_tools is True
+    assert b._context_server_config is not None
 
 
 def test_set_context_provider_failure(monkeypatch):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: (_ for _ in ()).throw(ValueError("x")))
     b = _backend()
     b.set_context_provider(SimpleNamespace())
-    assert b.has_context_tools is False
+    assert b._context_server_config is None
     assert any("context tools MCP setup failed" in c.get("warn", "") for c in b.calls)
 
 
@@ -160,24 +161,21 @@ def test_build_options_with_context_tools(monkeypatch):
     assert cl.CONTEXT_MCP_SERVER_NAME in opts.kwargs["mcp_servers"]
 
 
-# ---- _instantiate_options resume fallback ---------------------------------
-def test_instantiate_options_resume_fallback():
-    class _PickyOptions:
+# ---- _instantiate_options --------------------------------------------------
+def test_instantiate_options_passthrough():
+    class _Options:
         def __init__(self, **kwargs):
-            if "resume" in kwargs:
-                raise TypeError("unexpected kwarg resume")
             self.kwargs = kwargs
 
-    b = _backend(sdk_options_cls=_PickyOptions)
+    b = _backend(sdk_options_cls=_Options)
     opts = b._instantiate_options({"max_turns": 4, "resume": "s"})
-    assert "resume" not in opts.kwargs
-    assert any("rejected resume" in c.get("warn", "") for c in b.calls)
+    assert opts.kwargs == {"max_turns": 4, "resume": "s"}
 
 
-def test_instantiate_options_typeerror_no_resume():
+def test_instantiate_options_typeerror_propagates():
     class _Boom:
         def __init__(self, **kwargs):
-            raise TypeError("other error")
+            raise TypeError("boom")
 
     b = _backend(sdk_options_cls=_Boom)
     with pytest.raises(TypeError):
@@ -212,9 +210,8 @@ async def test_run_idle_timeout_allows_slow_but_live_stream():
 
     async def _slow_live(*, prompt, options):
         for _ in range(4):
-            # Per-message gap (0.03s) stays under the idle budget (0.05s),
-            # but the cumulative time (~0.12s) exceeds it — proving the guard
-            # is idle-based, not a total wall-clock cap.
+            # Per-message gap stays under the idle budget while cumulative time exceeds it,
+            # proving the guard is idle-based, not a total wall-clock cap.
             await asyncio.sleep(0.03)
             yield _Msg(content=[_emit_tool_block()])
 
@@ -237,12 +234,12 @@ async def test_run_conversational_session_capture(monkeypatch):
     b = _backend(messages=[msg], conversational=True)
     b.sdk_query_factory = _query([msg])
     res = await b.run("hi")
-    assert b.conversation_session_id == "sess-9"
+    assert b._session_id == "sess-9"
     assert res.metadata["input_tokens"] == 5
     assert len(res.intents) == 1
     # reset clears it
     b.reset_conversation()
-    assert b.conversation_session_id is None
+    assert b._session_id is None
 
 
 # ---- run(): no-intent raises ----------------------------------------------

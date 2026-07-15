@@ -2,9 +2,9 @@
 
 """Guard tests for the ``$USER_DATA_PATH`` write-determinism contract.
 
-When set, no resolver yields the pod-local default; when unset, the
-fallback still works but emits a single loud warning. Covers
-``paths.workspace_root`` and the CLI ``_resolve_local_kb_root``.
+When set, no resolver yields the pod-local default; when unset, the fallback
+works but emits a single loud warning. Covers ``paths.workspace_root`` and the
+CLI ``_resolve_local_kb_root``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.session import paths
-from hyperloom.inference_optimizer.cli import _resolve_local_kb_root
+from hyperloom.inference_optimizer.cli.kb import _resolve_local_kb_root
 
 _DEFAULT = "/workspace/hyperloom"
 

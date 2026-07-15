@@ -57,7 +57,7 @@ def wait_and_collect_one(
         SubmissionRecord: The same ``rec``, mutated in place with results.
     """
     if not rec.task_id:
-        return rec  # nothing to wait for (skipped/failed during submit)
+        return rec
 
     final_status, last_task = safe.wait_task_done(rec.task_id, timeout_min=task_timeout_min, poll_s=poll_s)
     rec.final_status = final_status
@@ -82,8 +82,7 @@ def wait_and_collect_one(
         rec.delivery_reason = "artifact collection disabled"
         return rec
 
-    # Stage 1: SaFE artifacts API (most reliable when the agent copied files to
-    # /workspace/hyperloom). Retry — terminal status can beat Claw's file index.
+    # Stage 1: SaFE artifacts API. Retry — terminal status can beat Claw's index.
     items = []
     wanted = []
     for attempt in range(3):
@@ -94,8 +93,7 @@ def wait_and_collect_one(
             items = []
         wanted = [it for it in items if _is_wanted_artifact(it.get("path", ""), all_artifacts)]
         wanted_paths = [it.get("path", "").lower() for it in wanted]
-        # session_breakdown.json is the CI delivery contract (cli.finally always
-        # writes it, even on abort), so retry only until it shows up.
+        # session_breakdown.json is the CI delivery contract; retry until it shows.
         has_safe_breakdown = any(p.endswith("session_breakdown.json") for p in wanted_paths)
         if has_safe_breakdown:
             break
@@ -122,7 +120,6 @@ def wait_and_collect_one(
             poll_s=poll_s,
         )
         if waited_session:
-            # The SaFE artifact index may lag behind the agent's final writes.
             # Re-list once after the grace wait before falling back to NFS.
             try:
                 items = safe.list_artifacts(rec.task_id)
@@ -160,9 +157,7 @@ def wait_and_collect_one(
         except Exception as e:
             log.warning("[task %s] failed to download %s: %s", rec.task_id, path, e)
 
-    # Stage 2: NFS fallback when Stage 1 didn't deliver session_breakdown.json
-    # (the CI delivery contract). ci_metrics.json / optimization_report.md no
-    # longer gate the fallback.
+    # Stage 2: NFS fallback when Stage 1 didn't deliver session_breakdown.json.
     has_breakdown = any(p.endswith("session_breakdown.json") for p in rec.artifact_files)
     if not has_breakdown:
         log.info("[task %s] missing session_breakdown.json — trying NFS fallback", rec.task_id)
@@ -182,8 +177,8 @@ def wait_and_collect_one(
     if rec.ci_status:
         log.info("[task %s] CI delivery status: %s (%s)", rec.task_id, rec.ci_status, rec.delivery_reason or "-")
 
-    # Stage 3: reverse-backfill audit fields into the wekafs SOURCE files so
-    # operators see them without the GHA artifact zip. No-op when wekafs unmounted.
+    # Stage 3: reverse-backfill audit fields into the wekafs SOURCE files
+    # (no-op when wekafs unmounted).
     if rec.artifact_count:
         try:
             n_wkfs = _backfill_wekafs_in_place(rec)

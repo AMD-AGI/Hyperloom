@@ -26,11 +26,6 @@ def _ctx() -> ReactorContext:
     )
 
 
-# ---------------------------------------------------------------------------
-# F1 — RayPendingDetector
-# ---------------------------------------------------------------------------
-
-
 def test_f1_ray_pending_fires_after_consecutive_ticks():
     det = RayPendingDetector(
         KernelPipelineConfig(
@@ -76,7 +71,6 @@ def test_f1_ray_pending_resets_on_clear_tick():
     det.evaluate(_ctx(), busy)
     det.evaluate(_ctx(), busy)
     out = det.evaluate(_ctx(), busy)
-    # 3 consecutive busies since reset → fire.
     assert any(s.name == "ray_pending_starvation" for s in out)
 
 
@@ -92,11 +86,6 @@ def test_f1_ray_pending_silent_when_ray_unhealthy():
     det.evaluate(_ctx(), data)
     out = det.evaluate(_ctx(), data)
     assert all(s.name != "ray_pending_starvation" for s in out)
-
-
-# ---------------------------------------------------------------------------
-# F2 — geak_budget_starvation
-# ---------------------------------------------------------------------------
 
 
 def test_f2_geak_budget_starvation_fires():
@@ -143,12 +132,6 @@ def test_f2_silent_when_marker_missing():
     assert all(s.name != "geak_budget_starvation" for s in out)
 
 
-# ---------------------------------------------------------------------------
-# F3 (auth_proxy_unhealthy) was retired with the auth-proxy; the gateway
-# now accepts ``x-api-key`` directly, so the detector was removed.
-# ---------------------------------------------------------------------------
-
-
 def test_unreachable_local_servers_do_not_resurrect_auth_proxy_signal():
     """Sanity-check: no symptom named ``auth_proxy_unhealthy`` survives."""
     data = SourceData(
@@ -158,11 +141,6 @@ def test_unreachable_local_servers_do_not_resurrect_auth_proxy_signal():
     )
     out = evaluate_kernel_pipeline_signals(_ctx(), data)
     assert all(s.name != "auth_proxy_unhealthy" for s in out)
-
-
-# ---------------------------------------------------------------------------
-# F5 — kernel_opt_no_progress
-# ---------------------------------------------------------------------------
 
 
 def test_f5_kernel_opt_no_progress_fires():
@@ -211,7 +189,6 @@ def test_f5_silent_when_one_kernel_has_keep():
         }
     )
     out = evaluate_kernel_pipeline_signals(_ctx(), data)
-    # Only 2 bad kernels (k1, k3) → below default threshold of 3.
     assert all(s.name != "kernel_opt_no_progress" for s in out)
 
 
@@ -231,7 +208,7 @@ def test_f5_silent_when_too_few_backends_per_kernel():
 
 
 def test_f5_integrate_keep_excludes_kernel():
-    """A KEEP'd integrate decision counts as progress even without oob hit."""
+    """A KEEP'd integrate decision counts as progress even without forge hit."""
     data = SourceData(
         local_decision_audit={
             "oob_attempts": [
@@ -244,5 +221,4 @@ def test_f5_integrate_keep_excludes_kernel():
         }
     )
     out = evaluate_kernel_pipeline_signals(_ctx(), data)
-    # Only k1, and it has a KEEP. Below threshold.
     assert all(s.name != "kernel_opt_no_progress" for s in out)

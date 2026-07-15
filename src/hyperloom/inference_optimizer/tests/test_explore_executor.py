@@ -25,7 +25,6 @@ from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     apply_compatibility_filter,
-    variant_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
@@ -108,7 +107,6 @@ def sub_agent_runner(tmp_path):
     db.close()
 
 
-# canonical_fingerprint — content addressing, rename-resistant
 def test_canonical_fingerprint_collapses_renames():
     """Two variants with identical content collapse to the same fingerprint."""
     fp_a = canonical_fingerprint("--max-num-seqs 256", {})
@@ -130,14 +128,6 @@ def test_canonical_fingerprint_distinguishes_envs():
     assert fp_args != fp_args_envs
 
 
-def test_canonical_fingerprint_matches_variant_fingerprint():
-    """Identity with legacy ``variant_fingerprint`` is preserved during migration."""
-    args = "--attention-backend aiter"
-    envs = {"VLLM_ROCM_USE_AITER": "1"}
-    assert canonical_fingerprint(args, envs) == variant_fingerprint(args, envs)
-
-
-# SharedState — record_explore_accepted / apply_explore_search_update
 def test_record_explore_accepted_dedup_by_fingerprint():
     state = SharedState()
     variant = {
@@ -149,9 +139,8 @@ def test_record_explore_accepted_dedup_by_fingerprint():
         "provenance": "llm_direct",
     }
     state.record_explore_accepted(variant)
-    state.record_explore_accepted(variant)  # second promote with same content
+    state.record_explore_accepted(variant)
     assert len(state.explore_search["accepted"]) == 1
-    # winners_history grows on each call (history vs accepted bucket).
     assert len(state.explore_search["winners_history"]) == 2
 
 
@@ -165,8 +154,7 @@ def test_apply_explore_search_update_preserves_accepted():
             "gain_pct": 3.0,
         }
     )
-    # Executor update arrives with tested/rejected but NOT accepted —
-    # the bucket should survive the merge.
+    # Update arrives with tested/rejected but NOT accepted; the bucket survives the merge.
     state.apply_explore_search_update(
         {
             "schema_version": 1,
@@ -195,7 +183,6 @@ def test_apply_explore_search_update_preserves_accepted():
     assert "bb" * 8 in state.explore_search["tested"]
 
 
-# _compute_explore_variant_timeout — auto-derive helper
 def test_compute_explore_variant_timeout_floor_when_no_baseline():
     """No baseline yet (cold start / failed baseline) → floor."""
     assert _compute_explore_variant_timeout(0.0, 1.10) == DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC
@@ -205,45 +192,37 @@ def test_compute_explore_variant_timeout_floor_when_no_baseline():
 
 def test_compute_explore_variant_timeout_scales_with_baseline():
     """Hard cap auto-scales above the soft kill (kill_ratio + safety_margin)."""
-    # Qwen3-32B TP=1 BF16 example: 4140 s baseline × (1.10 + 0.5) = 6624 s.
     derived = _compute_explore_variant_timeout(4140.0, 1.10)
     assert derived == 6624
 
-    # 7B TP=1 example: 300 s baseline × 1.6 = 480 s → floored to 2400.
     derived_small = _compute_explore_variant_timeout(300.0, 1.10)
     assert derived_small == DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC
 
 
 def test_compute_explore_variant_timeout_ceiling_caps_runaway():
     """Pathological baseline value can't push the cap past the ceiling."""
-    # Hypothetical 2.5 h baseline × 1.6 = 14400 s → exactly at ceiling.
     at_ceiling = _compute_explore_variant_timeout(9000.0, 1.10)
     assert at_ceiling == DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
 
-    # Above ceiling clamps.
     over = _compute_explore_variant_timeout(20000.0, 1.10)
     assert over == DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
 
 
 def test_compute_explore_variant_timeout_kill_ratio_below_one_clamps():
     """A non-positive / sub-1 kill_ratio still gives a sensible cap (clamped to max(1.0, kill_ratio))."""
-    # kill_ratio=0 (gate disabled) → effective_kill_ratio=1.0, derived = 1.5 × baseline.
     derived = _compute_explore_variant_timeout(4140.0, 0.0)
     assert derived == int(4140.0 * 1.5)
 
 
 def test_compute_explore_variant_timeout_safety_margin_override():
     """Operator can shrink/expand the safety margin (e.g. for torch.compile AOTI cold-start tax)."""
-    # safety_margin=1.0 (very generous) → 4140 × 2.10 = 8694 s.
     generous = _compute_explore_variant_timeout(4140.0, 1.10, safety_margin=1.0)
     assert generous == 8694
 
-    # safety_margin=0.0 (no headroom) → 4140 × 1.10 = 4554 s, equal to soft kill.
     tight = _compute_explore_variant_timeout(4140.0, 1.10, safety_margin=0.0)
     assert tight == 4554
 
 
-# ExploreExecutor wires the auto-derived timeout through run_grid
 @pytest.mark.asyncio
 async def test_explore_executor_auto_derives_variant_timeout(
     sub_agent_runner,
@@ -259,7 +238,6 @@ async def test_explore_executor_auto_derives_variant_timeout(
 
     async def _spy_run_grid(*args, **kwargs):
         captured_timeouts.append(int(kwargs.get("variant_timeout_sec")))
-        # Return one fake successful result so the executor proceeds.
         from hyperloom.orchestrator.actions.executors._grid_runner import (
             VariantResult,
         )
@@ -293,7 +271,6 @@ async def test_explore_executor_auto_derives_variant_timeout(
             "output_dir": str(output_dir),
             "base_tput": 800.0,
             "grid": grid,
-            # NO variant_timeout_sec → auto-derive should fire.
             "baseline_runtime_sec": 4140.0,
             "explore_overtime_kill_ratio": 1.10,
         },
@@ -307,7 +284,6 @@ async def test_explore_executor_auto_derives_variant_timeout(
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
-    # Auto-derived: 4140 × (1.10 + 0.5) = 6624.
     assert captured_timeouts, "run_grid was not invoked"
     assert captured_timeouts[0] == 6624
 
@@ -362,7 +338,6 @@ async def test_explore_executor_safety_margin_param_overrides_default(
             "grid": grid,
             "baseline_runtime_sec": 4140.0,
             "explore_overtime_kill_ratio": 1.10,
-            # Generous headroom (1.0) → 4140 * 2.10 = 8694 s.
             "variant_timeout_safety_margin": 1.0,
         },
         idempotency_key="ex-margin",
@@ -426,7 +401,7 @@ async def test_explore_executor_explicit_variant_timeout_wins(
             "output_dir": str(output_dir),
             "base_tput": 800.0,
             "grid": grid,
-            "variant_timeout_sec": 9000,  # explicit pin
+            "variant_timeout_sec": 9000,
             "baseline_runtime_sec": 4140.0,
             "explore_overtime_kill_ratio": 1.10,
         },
@@ -443,7 +418,6 @@ async def test_explore_executor_explicit_variant_timeout_wins(
     assert captured_timeouts and captured_timeouts[0] == 9000
 
 
-# ExploreExecutor — happy path (KEEP + REVERT + dedup)
 @pytest.mark.asyncio
 async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, tmp_path):
     sub, tr, _ = sub_agent_runner
@@ -451,14 +425,11 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     _write_baseline_yaml(base)
     output_dir = tmp_path / "explore-out"
 
-    # Tput map: v_keep returns +5%, v_revert returns +0.05%, v_fail
-    # returns +3% (above threshold, but accuracy-gated route).
     call_counter = {"i": 0}
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
-        # Slot's parent dir name carries the variant slug so we can branch.
         slug = slot.parent.name + "/" + slot.name
         if "v00_v_keep" in slug:
             tput = 840.0  # +5% vs base 800
@@ -515,7 +486,6 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     assert {w["name"] for w in out["winners"]} == {"v_keep"}
     assert {lr["name"] for lr in out["losers"]} == {"v_revert"}
     assert out["keep_unstable_in_stack"] == []
-    # explore_search_update populated with three buckets.
     ledger = out["explore_search_update"]
     assert set(ledger["tested"].keys()) == {
         canonical_fingerprint("--keep-flag", {}),
@@ -524,12 +494,62 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     outcomes = {v["name"]: v["outcome"] for v in ledger["tested"].values()}
     assert outcomes["v_keep"] == "KEEP"
     assert outcomes["v_revert"] == "REVERT"
-    # Best variant + best gain reflect the v_keep result (post-rebench).
     assert out["best_variant"]["name"] == "v_keep"
     assert out["best_gain_pct"] >= 4.0
-    # Provenance from input is preserved on the ledger entries.
     rejected_provenance = {r["provenance"] for r in ledger["rejected"]}
     assert rejected_provenance == {"llm_direct"}
+
+
+@pytest.mark.asyncio
+async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_runner, tmp_path):
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-out"),
+            "base_tput": 800.0,
+            "base_extra_args": "--bad-base 1 --keep-base 2",
+            "enable_stack_rebench": False,
+            "grid": [
+                {
+                    "name": "remove_bad_base",
+                    "extra_args": "--variant 4",
+                    "remove_args": ["--bad-base"],
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-remove-keep",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path, enable_stack_rebench=False))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    winner = res.result["winners"][0]
+    assert winner["remove_args"] == ["--bad-base"]
+    assert "--bad-base" not in winner["extra_server_args"]
+    assert "--keep-base 2" in winner["extra_server_args"]
+    assert "--variant 4" in winner["extra_server_args"]
+    assert res.result["best_variant"]["extra_server_args"] == winner["extra_server_args"]
 
 
 @pytest.mark.asyncio
@@ -539,7 +559,6 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
 ):
     """Regression: when params omits ``base_tput``, the executor recovers it from SharedState (else real wins are discarded)."""
     sub, tr, _ = sub_agent_runner
-    # Wire a SharedState carrying an established baseline, as Coordinator.__init__ does.
     state = SharedState()
     state.baseline_tput = 800.0
     sub.shared_state = state
@@ -572,7 +591,7 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
         params={
             "config_path": str(base),
             "output_dir": str(output_dir),
-            # ``base_tput`` intentionally OMITTED to exercise SharedState recovery.
+            # base_tput intentionally omitted to exercise SharedState recovery.
             "grid": grid,
             "variant_timeout_sec": 10,
         },
@@ -587,7 +606,6 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
 
     out = res.result
     assert out["status"] == "succeeded"
-    # The win is KEPT — proving base_tput was recovered (840 vs 800 = +5%).
     assert {w["name"] for w in out["winners"]} == {"v_keep"}
     fp = canonical_fingerprint("--keep-flag", {})
     tested = out["explore_search_update"]["tested"][fp]
@@ -652,7 +670,6 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
     assert out["winners"] == []
     fp = canonical_fingerprint("--below-best-flag", {})
     tested = out["explore_search_update"]["tested"][fp]
-    # Anchored on current_best (900), not baseline (800).
     assert tested["base_tput"] == 900.0
     assert tested["outcome"] == "REVERT"
 
@@ -660,8 +677,6 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
 @pytest.mark.asyncio
 async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path, monkeypatch):
     """A variant whose fingerprint already lives in explore_search.tested lands in ``skipped_dup``, not re-benched."""
-    # Legacy single-decision path: dedup is orthogonal to warm-decision; the
-    # warm-decision 3-round flow is covered by its own dedicated test below.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
@@ -711,7 +726,7 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
                 "name_index": {},
             },
             "variant_timeout_sec": 10,
-            # disable stack rebench so bench calls count only single-variant runs.
+            # Disable stack rebench so bench calls count only single-variant runs.
             "enable_stack_rebench": False,
         },
         idempotency_key="ex-dedup",
@@ -725,20 +740,18 @@ async def test_explore_executor_dedups_against_ledger(sub_agent_runner, tmp_path
 
     out = res.result
     assert {d["name"] for d in out["skipped_dup"]} == {"v_dup"}
-    # Only one Magpie subprocess fired — for v_fresh.
     assert len(bench_calls) == 1
-    # v_fresh KEEP'd (900 vs 800 = +12.5%).
     assert {w["name"] for w in out["winners"]} == {"v_fresh"}
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_warm_decision_runs_three_rounds_on_keep(
+async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     sub_agent_runner,
     tmp_path,
     monkeypatch,
 ):
-    """Q4-a: warm-decision KEEP path runs warmup + decision + stack_rebench (3 Magpie runs)."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "1")
+    """Default EXPLORE measures hot decisions, matching default hot baseline."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", raising=False)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -784,7 +797,6 @@ async def test_explore_executor_warm_decision_runs_three_rounds_on_keep(
     out = res.result
     # warmup (discarded) + decision + stack_rebench == 3 Magpie runs.
     assert len(bench_calls) == 3, bench_calls
-    # Exactly one run went through the discarded warmup slot.
     assert sum("warmup_round" in c for c in bench_calls) == 1
     assert sum("stack_rebench" in c for c in bench_calls) == 1
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
@@ -838,7 +850,6 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
         res = await sub.run_task(task)
 
     out = res.result
-    # Only the warmup round ran; no decision round after the failure.
     assert len(calls) == 1, calls
     assert out["winners"] == []
     fp = canonical_fingerprint("--warmfail-flag", {})
@@ -862,7 +873,6 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         slug = slot.parent.name + "/" + slot.name
-        # Single-variant run looks great:
         if "v00_unstable" in slug and "stack_rebench" not in slug:
             tput = 850.0  # +6.25%
         elif "stack_rebench" in slug:
@@ -906,7 +916,6 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
     out = res.result
     assert {k["name"] for k in out["keep_unstable_in_stack"]} == {"unstable"}
     assert out["winners"] == []
-    # Ledger reflects the eviction.
     ledger = out["explore_search_update"]
     fp = canonical_fingerprint("--unstable-flag", {})
     assert ledger["tested"][fp]["outcome"] == "KEEP_UNSTABLE"
@@ -923,7 +932,6 @@ def test_default_keep_and_stack_stable_thresholds():
 
     assert DEFAULT_KEEP_THRESHOLD_PCT == 1.0
     assert DEFAULT_STACK_STABLE_PCT == 0.5
-    # The rebench floor must not exceed the single-variant KEEP gate.
     assert DEFAULT_STACK_STABLE_PCT <= DEFAULT_KEEP_THRESHOLD_PCT
 
 
@@ -950,15 +958,12 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     monkeypatch,
 ):
     """Fix E (Q3c): a fired soft deadline records KILLED_OVERTIME (no tput, no KEEP/REVERT, stack unchanged)."""
-    # Legacy single-decision path: this exercises the cold-anchor soft deadline
-    # (==11.0). The warm-decision anchor is covered by its own test below.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXPLORE_WARM_DECISION", "0")
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
     output_dir = tmp_path / "explore-overtime"
 
-    # Return the OVERTIME_KILL_RETURNCODE sentinel directly to bypass the poll loop.
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         OVERTIME_KILL_RETURNCODE,
     )
@@ -1001,7 +1006,6 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
         res = await sub.run_task(task)
 
     out = res.result
-    # KILLED_OVERTIME is a useful signal for the LLM, not a hard task failure.
     assert out["status"] == "succeeded"
     assert out["winners"] == []
     assert out["keep_unstable_in_stack"] == []
@@ -1013,7 +1017,6 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     assert loser["gain_pct"] is None
     assert loser["runtime_sec"] is not None
     assert loser["wall_clock_ratio_vs_baseline"] is not None
-    # Ledger row carries the diagnostic fields.
     fp = canonical_fingerprint("--slow-flag", {})
     ledger = out["explore_search_update"]
     te = ledger["tested"][fp]
@@ -1024,7 +1027,6 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     assert te["wall_clock_ratio_vs_baseline"] is not None
     assert te["baseline_runtime_sec"] == pytest.approx(10.0)
     assert te["overtime_kill_ratio"] == pytest.approx(1.10)
-    # Rejected ledger picks the variant up so re-proposals hit ledger.dedup.
     rejected_reasons = {r["reason"] for r in ledger["rejected"]}
     assert "killed_overtime" in rejected_reasons
     outcomes = {row["variant_name"]: row["outcome"] for row in out["per_variant_outcomes"]}
@@ -1073,7 +1075,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
             ],
             "variant_timeout_sec": 60,
             "baseline_runtime_sec": 10.0,
-            "explore_overtime_kill_ratio": 0.0,  # disabled
+            "explore_overtime_kill_ratio": 0.0,
         },
         idempotency_key="ex-overtime-off",
     )
@@ -1084,7 +1086,6 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
     ):
         res = await sub.run_task(task)
 
-    # Every Magpie call must have received ``soft_deadline_sec=None``.
     assert received_deadlines, "no Magpie calls were made"
     assert all(d is None for d in received_deadlines)
     out = res.result
@@ -1107,12 +1108,10 @@ async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     res = await sub.run_task(task)
-    # Empty grid returns a "failed" result, not a crash.
     assert res.result["status"] == "failed"
     assert res.result["error_class"] == "empty_grid"
 
 
-# breakdown.capability_summary — explore row + legacy compat rows
 def test_capability_summary_has_explore_row_with_legacy_aliases():
     state = {
         "explore_search": {
@@ -1131,7 +1130,7 @@ def test_capability_summary_has_explore_row_with_legacy_aliases():
     assert cap["explore"]["best_gain_pct"] == 4.2
     assert cap["explore"]["keep_unstable_count"] == 1
     assert cap["explore"]["winners_history"] == 1
-    # Legacy compat rows stay emitted so archived sessions render (not_attempted now).
+    # Legacy compat rows stay emitted so archived sessions render.
     assert "backends" in cap
     assert "params" in cap
     assert "validate_stack" in cap
@@ -1139,7 +1138,6 @@ def test_capability_summary_has_explore_row_with_legacy_aliases():
     assert cap["params"]["status"] == "not_attempted"
 
 
-# _atom_default_grid + framework dispatch
 def _names(variants):
     return [v.name for v in variants]
 
@@ -1155,7 +1153,6 @@ def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
     names = _names(grid)
     assert len(grid) >= 5, f"too few variants: {names}"
     assert "atom_level_2" in names
-    # atom_level_3 not emitted: atom_mi*x.sh injects --level 3 as the bare baseline.
     assert "atom_level_3" not in names
     assert "atom_prefix_cache" in names
     assert "atom_ep" in names, "MoE branch missing for moe_mla"
@@ -1292,7 +1289,6 @@ async def test_explore_executor_atom_empty_grid_seeds_default_grid(
 
     received_grid: list[list[str]] = []
 
-    # Patch ``run_grid`` bound INSIDE the explore module (imported at module load).
     from hyperloom.orchestrator.actions.executors import (
         explore as explore_mod,
     )
@@ -1317,7 +1313,6 @@ async def test_explore_executor_atom_empty_grid_seeds_default_grid(
 
     await sub.run_task(task)
 
-    # run_grid is called once per variant (variants stream one at a time).
     assert received_grid, "run_grid was not invoked by the seed path"
     flat_names = [n for sub in received_grid for n in sub]
     assert all(n.startswith("atom_") for n in flat_names), (
@@ -1375,10 +1370,7 @@ def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
 
 
 def test_grid_variants_from_payload_coerces_list_extra_args():
-    """Regression: the LLM may emit ``extra_args`` as a JSON list. It must be
-    space-joined into a shell-arg string, not stringified into a Python repr
-    (which Magpie would splice verbatim into ``vllm serve`` -> the server
-    rejects it as ``unrecognized arguments`` and the variant aborts)."""
+    """A JSON-list ``extra_args`` must be space-joined into a shell-arg string, not stringified into a Python repr."""
     from hyperloom.orchestrator.actions.executors.explore import (
         _grid_variants_from_payload,
     )
@@ -1394,3 +1386,25 @@ def test_grid_variants_from_payload_coerces_list_extra_args():
     assert "[" not in by_name["list_args"].extra_server_args
     assert by_name["str_args"].extra_server_args == "--block-size 64"
     assert by_name["tuple_server_args"].extra_server_args == "--distributed-executor-backend mp"
+
+
+def test_grid_variants_from_payload_carries_removal_controls():
+    from hyperloom.orchestrator.actions.executors.explore import (
+        _grid_variants_from_payload,
+    )
+
+    payload = [
+        {
+            "name": "without_cache",
+            "remove_args": "--enable-prefix-caching",
+            "unset_envs": ["SGLANG_ENABLE_FOO"],
+            "args_mode": "replace",
+            "extra_args": "--max-num-seqs 256",
+        }
+    ]
+
+    variant = _grid_variants_from_payload(payload)[0]
+    assert variant.remove_args == ["--enable-prefix-caching"]
+    assert variant.unset_envs == ["SGLANG_ENABLE_FOO"]
+    assert variant.args_mode == "replace"
+    assert variant.extra_server_args == "--max-num-seqs 256"

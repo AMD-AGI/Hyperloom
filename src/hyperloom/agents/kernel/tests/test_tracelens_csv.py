@@ -18,6 +18,7 @@ if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
 import tracelens_analysis as tla  # noqa: E402
+import _idle_gate as idle_gate  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
 
 
@@ -324,13 +325,8 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         assert "synchronize" not in n.lower()
 
 
-# Regression: the torch.profiler Chrome-trace category for a GPU
-# kernel is literally "kernel". A global rename (#734 / commit 33ac6cc) once
-# replaced this data-format literal with "kernel_agent", so is_kernel_event
-# matched nothing and count_gpu_kernel_events returned 0 for every healthy
-# trace -> tracelens_analysis raised "Trace contains zero GPU kernel events".
-# These assertions pin the torch convention so a future rename cannot silently
-# break GPU-kernel detection again.
+# The torch.profiler Chrome-trace category for a GPU kernel is literally
+# "kernel". Pin the torch convention so a rename cannot break GPU-kernel detection.
 def test_issue_769_kernel_event_uses_torch_cat_kernel():
     """A real GPU kernel uses cat=='kernel'; the renamed 'kernel_agent' is not a trace category."""
     real_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel", "dur": 5.0}
@@ -400,34 +396,33 @@ def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
         is False
     )
     assert tla.is_reusable_native_kernel(candidate) is True
-    # Ladder converged to forge then GEAK; OOB backends (claude/codex/cursor) removed.
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
+    assert tla.recommend_backends(candidate) == ["forge"]
 
 
-def test_recommend_backends_includes_geak_for_python_source():
-    """GEAK must be in the ladder for ``python`` source_type too (pre-fix it was dropped)."""
+def test_recommend_backends_for_python_source():
+    """forge must be recommended for ``python`` source_type too."""
     candidate = {
         "name": "some_python_dispatcher",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/dispatcher.py",
         "source_type": "python",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
+    assert tla.recommend_backends(candidate) == ["forge"]
 
 
-def test_recommend_backends_includes_geak_for_unknown_source():
-    """Unknown source_type: GEAK must still be in the ladder (let GEAK decide, don't pre-filter by extension)."""
+def test_recommend_backends_for_unknown_source():
+    """Unknown source_type: forge is still recommended (don't pre-filter by extension)."""
     candidate = {
         "name": "some_unrecognised_kernel",
         "source_file": "/some/path/kernel.xyz",
         "source_type": "unknown",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge", "geak_v3"]
+    assert tla.recommend_backends(candidate) == ["forge"]
 
 
-def test_recommend_backends_geak_precedes_llm_backends():
-    """Invariant: forge leads, then the per-kernel GEAK backend."""
+def test_recommend_backends_is_forge_only():
+    """Invariant: forge is the sole per-kernel backend in the ladder."""
     candidate = {
         "name": "some_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/x.py",
@@ -435,7 +430,7 @@ def test_recommend_backends_geak_precedes_llm_backends():
         "reusable_native_kernel": True,
     }
     ladder = tla.recommend_backends(candidate)
-    assert ladder[:2] == ["forge", "geak_v3"], f"forge then GEAK must lead the ladder, got {ladder}"
+    assert ladder == ["forge"], f"forge must be the sole per-kernel backend, got {ladder}"
 
 
 def test_unknown_source_root_is_not_reusable_native():
@@ -769,8 +764,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         "shapes": [[1, 32, 128]],
         "is_multigpu": False,
         "num_gpus_recommended": 1,
- # hot_kernels carries only routable candidates; set the marker
-        # explicitly since this test bypasses _finalize_candidates.
+        # Set the routable marker explicitly since this test bypasses _finalize_candidates.
         "reusable_native_kernel": True,
     }
     args = Namespace(
@@ -808,56 +802,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["runtime_flags"]["target_platform"] == "MI300X"
     assert enriched["runtime_flags"]["is_multigpu"] is False
     assert enriched["runtime_flags"]["num_gpus_recommended"] == 1
-
-
-def test_write_reports_does_not_run_rocprof_enrich_by_default(tmp_path, monkeypatch):
-    """Trace analysis must not synchronously profile every hot kernel by default."""
-    import json as _json
-    from argparse import Namespace
-    import rocprof_roofline as rr
-
-    trace = tmp_path / "trace.json"
-    trace.write_text("{}", encoding="utf-8")
-    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
-    analysis_md.parent.mkdir(parents=True, exist_ok=True)
-    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
-    candidate = {
-        "kernel_id": "k001",
-        "name": "paged_attention",
-        "duration_us": 100.0,
-        "call_count": 2,
-        "reusable_native_kernel": True,
-    }
-    args = Namespace(
-        trace_input=str(trace),
-        model_name="llama",
-        framework="sglang",
-        target_platform="MI300X",
-        analysis_mode="inference",
-        runtime_env="local",
-        dry_run=False,
-    )
-    called = {"value": False}
-
-    def _boom(*_args, **_kwargs):
-        called["value"] = True
-        raise AssertionError("batch enrich should be opt-in")
-
-    monkeypatch.delenv("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", raising=False)
-    monkeypatch.setattr(rr, "enrich_kernel_roofline_sidecar", _boom)
-
-    artifacts = tla.write_reports(
-        tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
-        candidates=[candidate],
-        args=args,
-        existing_report_path=analysis_md,
-    )
-
-    assert called["value"] is False
-    payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
-    assert payload["hot_kernels"][0]["kernel_id"] == "k001"
 
 
 def test_load_model_kernel_params_reads_head_dim(tmp_path):
@@ -958,7 +902,6 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         "gpu_pct": 10.0,
         "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
- # Per AMD-AGI/Hyperloom#314, see twin fixture above.
         "reusable_native_kernel": True,
     }
     args = Namespace(
@@ -1088,12 +1031,9 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
 
 
-# P0 contract: ``kernel_candidates.json`` exposes ``hot_kernels`` as the FULL
-# ranked hotspot set (routable + non-routable) while ``routable_kernels`` /
-# ``skipped_kernels`` carry the reusable / non-reusable subsets. This locks the
-# TraceLens-side disk contract (twin of the bypass ``build_candidates`` tests)
-# so read-disk consumers (breakdown collectors, ``_all_kernel_candidates``) can
-# rely on the routable-only -> full change staying intentional and stable.
+# ``kernel_candidates.json`` exposes ``hot_kernels`` as the FULL ranked hotspot
+# set (routable + non-routable) while ``routable_kernels`` / ``skipped_kernels``
+# carry the reusable / non-reusable subsets.
 def _contract_candidates():
     return [
         {"kernel_id": "k001", "name": "fused_moe", "duration_us": 300.0, "gpu_pct": 30.0,
@@ -1329,7 +1269,6 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
         captured["options"] = options.kwargs
         output_dir.mkdir(parents=True, exist_ok=True)
         # TraceLens contract: orchestrator writes ``analysis.md``.
- # The legacy ``standalone_analysis.md`` fallback was dropped in #203.
         (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
         yield _Message(content=[_TextBlock("done")])
 
@@ -1357,11 +1296,226 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     assert "Task" in captured["options"]["allowed_tools"]
 
 
+def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
+    """TraceLens SDK runner must not inherit stale global Claude settings.
+
+    Passing ``env`` and ``setting_sources=[]`` keeps the SDK child tied to the
+    active run contract rather than a stale ``~/.claude/settings.json`` token.
+    """
+    import asyncio
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class _TextBlock:
+        text: str
+
+    @dataclass
+    class _Message:
+        content: list[Any]
+
+    class _FakeOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-token-active")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+
+    output_dir = tmp_path / "out"
+    captured: dict[str, Any] = {}
+
+    async def _fake_query(*, prompt, options):
+        captured["options"] = options.kwargs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        yield _Message(content=[_TextBlock("done")])
+
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=1,
+            model="claude-sonnet-4-5-20250929",
+            sdk_query_factory=_fake_query,
+            sdk_options_cls=_FakeOptions,
+        )
+    )
+
+    opts = captured["options"]
+    assert opts["setting_sources"] == []
+    child_env = opts["env"]
+    assert child_env["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert child_env["_".join(("ANTHROPIC", "API", "KEY"))] == "anthropic-token-active"
+    assert child_env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "anthropic-token-active"
+    assert child_env["ANTHROPIC_MODEL"] == "claude-sonnet-4-5-20250929"
+    assert child_env["ANTHROPIC_SMALL_FAST_MODEL"] == "claude-sonnet-4-5-20250929"
+
+
+def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkeypatch):
+    """OpenAI-only deployments must run TraceLens without Claude SDK."""
+    import asyncio
+    from types import SimpleNamespace
+
+    output_dir = tmp_path / "out"
+    calls: list[dict] = []
+
+    class _Completions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            tool_calls = [
+                SimpleNamespace(
+                    id="call_write",
+                    function=SimpleNamespace(
+                        name="write_file",
+                        arguments=json.dumps(
+                            {
+                                "path": str(output_dir / "analysis.md"),
+                                "content": "# Codex TraceLens report\n",
+                            }
+                        ),
+                    ),
+                )
+            ]
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="", tool_calls=tool_calls),
+                        finish_reason="tool_calls",
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=3, completion_tokens=5),
+            )
+
+    class _Client:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=_Completions())
+
+    def _no_claude_query(**_kwargs):
+        raise AssertionError("OpenAI-only TraceLens path must not use Claude SDK")
+
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("DEEPSEEK", "API", "KEY")), raising=False)
+
+    res = asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=None,
+            budget_minutes=1,
+            model="gpt-5.5",
+            sdk_query_factory=_no_claude_query,
+            sdk_options_cls=object,
+            openai_client_factory=_Client,
+        )
+    )
+
+    assert res.report_path == output_dir / "analysis.md"
+    assert res.report_path.read_text(encoding="utf-8") == "# Codex TraceLens report\n"
+    assert calls
+    assert calls[0]["model"] == "gpt-5.5"
+    assert calls[0]["tools"]
+    assert "tracelens_agent_report" in res.artifact_paths
+    assert "tracelens_agent_transcript" in res.artifact_paths
+
+
+def test_openai_tool_runner_rejects_out_of_scope_files_and_shell_strings(tmp_path):
+    scope = tlr._OpenAIToolScope(
+        tracelens_root=tmp_path / "tracelens",
+        output_dir=tmp_path / "out",
+        read_roots=(tmp_path / "tracelens", tmp_path / "out"),
+    )
+    scope.tracelens_root.mkdir()
+    scope.output_dir.mkdir()
+
+    read_out = json.loads(
+        tlr._execute_openai_tool(
+            "read_file",
+            json.dumps({"path": "/etc/passwd"}),
+            scope=scope,
+        )
+    )
+    write_out = json.loads(
+        tlr._execute_openai_tool(
+            "write_file",
+            json.dumps({"path": str(tmp_path / "escape.md"), "content": "bad"}),
+            scope=scope,
+        )
+    )
+    shell_out = json.loads(
+        tlr._execute_openai_tool(
+            "run_shell",
+            json.dumps({"command": "rm -rf /"}),
+            scope=scope,
+        )
+    )
+
+    assert read_out["ok"] is False
+    assert "outside allowed roots" in read_out["error"]
+    assert write_out["ok"] is False
+    assert "outside allowed roots" in write_out["error"]
+    assert shell_out["ok"] is False
+    assert "argv" in shell_out["error"]
+    assert not (tmp_path / "escape.md").exists()
+
+
+def test_openai_tool_runner_allows_output_write_and_tracelens_python(tmp_path):
+    scope = tlr._OpenAIToolScope(
+        tracelens_root=tmp_path / "tracelens",
+        output_dir=tmp_path / "out",
+        read_roots=(tmp_path / "tracelens", tmp_path / "out"),
+    )
+    scope.tracelens_root.mkdir()
+    scope.output_dir.mkdir()
+    script = scope.tracelens_root / "ok.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    write_out = json.loads(
+        tlr._execute_openai_tool(
+            "write_file",
+            json.dumps({"path": "analysis.md", "content": "# ok\n"}),
+            scope=scope,
+        )
+    )
+    shell_out = json.loads(
+        tlr._execute_openai_tool(
+            "run_shell",
+            json.dumps({"argv": ["python3", str(script)]}),
+            scope=scope,
+        )
+    )
+
+    assert write_out["ok"] is True
+    assert (scope.output_dir / "analysis.md").read_text(encoding="utf-8") == "# ok\n"
+    assert shell_out["ok"] is True
+    assert "ok" in shell_out["stdout"]
+
+
 def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):
-    """Sandbox-hang RCA: a gateway stream that goes silent mid-response must
-    abort on the per-message idle timeout instead of blocking forever on
-    socket.read(). The runner records the idle-timeout error and, since
-    analysis.md was already written, still returns it as the report."""
+    """A gateway stream that goes silent mid-response must abort on the
+    per-message idle timeout instead of blocking forever. The runner records
+    the idle-timeout error and, since analysis.md was already written, still
+    returns it as the report."""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -1425,14 +1579,9 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
 
 def test_266_run_tracelens_skill_writes_agent_transcript(tmp_path):
     """The SDK runner must persist a full stream-JSON transcript
-    (text + tool_use/tool_result blocks) next to ``analysis.md`` so an
-    operator can inspect the agent's lifecycle and the artifacts it
-    produced *during* execution. The transcript path is surfaced via
-    ``artifact_paths`` so it flows into the kernel-agent status sidecar.
-
-    Granularity is top-level orchestrator only: ``Task``-tool subagent
-    turns are collapsed by the SDK into a single tool_use/tool_result
-    pair at this level, which is sufficient for lifecycle visibility.
+    (text + tool_use/tool_result blocks) next to ``analysis.md``, surfaced
+    via ``artifact_paths`` so it flows into the kernel-agent status sidecar.
+    Granularity is top-level orchestrator only.
     """
     import asyncio
     import json as _json
@@ -2446,7 +2595,7 @@ def test_parse_analysis_md_rejects_reordered_canonical_columns(tmp_path):
 
 # classify_patchability gate + skip_reason audit field.
 def test_classify_patchability_accepts_stable_triton_source():
-    """Previously-reusable candidate stays reusable; skip_reason is empty."""
+    """A stable Triton source is reusable; skip_reason is empty."""
     cand = {
         "name": "triton_attention_decode_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/attn.py",
@@ -2466,8 +2615,8 @@ def test_classify_patchability_rejects_missing_source_file():
 
 
 def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
-    """RCA root cause 2: a csrc/cpp_itfs/*.py host launcher (device code is in a
-    sibling .cuh/.cpp.jinja) must be skipped, not edited."""
+    """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling
+    .cuh/.cpp.jinja) must be skipped, not edited."""
     src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
     # Make the reusable-root gate pass deterministically regardless of host env.
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/wekafs/aiter/",))
@@ -2479,7 +2628,7 @@ def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
 
 
 def test_library_token_pairing():
-    """RCA root cause 2: library detection keeps kernel<->benchmark same-lib."""
+    """Library detection keeps kernel<->benchmark same-lib."""
     assert tla._library_token("/sgl-workspace/aiter/op_tests/test_activation.py") == "aiter"
     # sgl-kernel / sgl_kernel normalize to sglang.
     assert tla._library_token("/sgl-workspace/sglang/sgl-kernel/include/hip/x.cuh") == "sglang"
@@ -2626,7 +2775,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
             "skip_reason": "",
             "gpu_pct": 12.5,
             "tracelens_pitem_rank": 1,
-            "recommended_backends": ["forge", "geak_v3"],
+            "recommended_backends": ["forge"],
         },
         {
             "kernel_id": "k002",
@@ -2669,7 +2818,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
     aten_entry = next(s for s in summary["skipped"] if s["name"] == "aten::mm")
     assert "source file" in aten_entry["skip_reason"]
     # Reusable tasks carry recommended_backends so the audit shows routing without reloading candidates.
-    assert summary["tasks"][0]["recommended_backends"] == ["forge", "geak_v3"]
+    assert summary["tasks"][0]["recommended_backends"] == ["forge"]
 
 
 def test_build_audit_summary_handles_empty_input():
@@ -3256,15 +3405,11 @@ def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
 
 
 # ===========================================================================
-# task-group over-splitting — one device kernel fragmented across
-# multiple groups, each costing a redundant GEAK dispatch. Two fragmentation
-# sources:
-#   (1) native (.cu/.hip/.cpp) kernels have no Python AST def-line, so
-#       TraceLens reports the per-call ``#L`` line that differs per call site;
-#   (2) C++ template/dtype mangling (``rmsnorm_kernel<bf16>`` vs ``<fp16>``).
-# The fix keys native sources on ``(normalized_op, canonical_path)`` only and
-# normalizes the operation name, while preserving the Q1 invariant that
-# distinct base-name kernels sharing a wrapper never merge.
+# task-group over-splitting: native (.cu/.hip/.cpp) kernels have no Python AST
+# def-line (TraceLens reports the per-call ``#L`` line), and C++ template/dtype
+# mangling varies the name. Native sources key on ``(normalized_op,
+# canonical_path)`` only, preserving the invariant that distinct base-name
+# kernels sharing a wrapper never merge.
 # ===========================================================================
 def test_normalize_operation_key_strips_templates():
     """Template/dtype args are dropped; distinct base names stay distinct;
@@ -3291,11 +3436,9 @@ def test_is_native_source_detects_device_extensions():
 
 
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
-    """A native .cu kernel invoked from two call sites reports
-    two different ``#L`` lines (no Python AST def-line exists, so the
-    reported line is the call site). The OLD key ``(op, path, line, fn)``
-    split one kernel into two task_groups — two redundant GEAK dispatches.
-    Native sources must key on ``(op, path)`` only and collapse to one."""
+    """A native .cu kernel invoked from two call sites reports two different
+    ``#L`` lines (no Python AST def-line exists). Native sources must key on
+    ``(op, path)`` only and collapse to one task_group."""
     src = tmp_path / "rmsnorm.cu"
     src.write_text(
         "__global__ void rmsnorm_kernel(float* x) { /* ... */ }\n",
@@ -3328,20 +3471,11 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
 
 
 def test_aggregate_merges_native_template_instances_by_source(tmp_path):
-    """Real-world Qwen3-32B rmsnorm_quant case:
-    k005/k006/k007 are three instantiations of ONE ``__global__`` template
-    (``add_rmsnorm_quant_kernel``) living in ONE .cu. TraceLens names them
-    with DIFFERENT Itanium-mangled operation symbols — a mangled symbol,
-    NOT a ``<...>`` spelling — and the candidates autoresolve to the SAME
-    bare .cu path (no ``(line): func`` suffix), so resolution yields the
-    file stem as ``function``. They MUST collapse into ONE composite
-    task_group: the mangled operation and the per-call line are NOT part of
-    the native key, so 3 instantiations don't become 3 redundant GEAK
-    dispatches that each edit the same template body from the same baseline.
-
-    Regression guard for the original fix that wrongly kept a normalized
-    operation in the native key — since the real symbols carry no ``<...>``
-    to strip, that left k005/k006/k007 in three separate groups."""
+    """Three instantiations of ONE ``__global__`` template
+    (``add_rmsnorm_quant_kernel``) in ONE .cu, named with DIFFERENT
+    Itanium-mangled symbols and autoresolving to the SAME bare .cu path, must
+    collapse into ONE task_group: the mangled operation and per-call line are
+    NOT part of the native key."""
     src = tmp_path / "rmsnorm_quant_kernels.cu"
     src.write_text(
         "template <typename DTYPE_I, typename DTYPE_O, int BlockSize,\n"
@@ -3597,23 +3731,23 @@ def test_extract_idle_pct_against_llama70b_fixture():
 
 
 def test_resolve_idle_pct_threshold_uses_default_when_env_unset(monkeypatch):
-    monkeypatch.delenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.delenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
 
 
 def test_resolve_idle_pct_threshold_honours_env_override(monkeypatch):
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "35.5")
-    assert tla._resolve_idle_pct_threshold() == pytest.approx(35.5)
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "35.5")
+    assert idle_gate.resolve_idle_pct_threshold() == pytest.approx(35.5)
 
 
 def test_resolve_idle_pct_threshold_rejects_nonsense_env_value(monkeypatch):
     """Garbage / negative / empty env values fall back to the default, not a crash."""
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "not-a-float")
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "-5")
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
-    monkeypatch.setenv(tla.HIGH_IDLE_PCT_THRESHOLD_ENV, "")
-    assert tla._resolve_idle_pct_threshold() == tla.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "not-a-float")
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "-5")
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
+    monkeypatch.setenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, "")
+    assert idle_gate.resolve_idle_pct_threshold() == idle_gate.HIGH_IDLE_PCT_THRESHOLD_DEFAULT
 
 
 def test_build_high_idle_warning_shape(tmp_path):

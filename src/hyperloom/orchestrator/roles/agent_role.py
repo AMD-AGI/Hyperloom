@@ -48,15 +48,13 @@ class BackendType(str, Enum):
     CODEX = "codex"  # no-tools, validated_json_output only (KB Bash exception)
 
 
-# Built-in default model + API key env table
-DEFAULT_CLAUDE_MODEL = "claude-opus-4-7"
-DEFAULT_CODEX_MODEL = "gpt-5.4"  # litellm support pending for 5.5
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+DEFAULT_CODEX_MODEL = "gpt-5.5"
 
 DEFAULT_CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
 DEFAULT_CODEX_API_KEY_ENV = "OPENAI_API_KEY"
 
 
-# Role permission catalogue
 _BASE_INTENTS: frozenset[IntentType] = frozenset(
     {
         IntentType.SEND_MESSAGE,
@@ -65,7 +63,7 @@ _BASE_INTENTS: frozenset[IntentType] = frozenset(
 )
 
 
-# Orchestration — only role with REQUEST authority; holds PRUNE_BRANCH + ESCALATE_STRATEGY_CHANGE.
+# Orchestration — only role with REQUEST authority.
 _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.PROPOSE_ACTION,
@@ -87,7 +85,7 @@ _KERNEL_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 )
 
 
-# Critic — review verdicts only; devil's advocate via send_message(topic="advice").
+# Critic — review verdicts only.
 _CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.REVIEW_VERDICT,
@@ -95,7 +93,7 @@ _CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 )
 
 
-# Robustness — always-on health monitoring + RCA + recovery; holds the scheduling-police set + KILL_TASK exclusively.
+# Robustness — health monitoring + RCA + recovery; holds KILL_TASK exclusively.
 _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.UPDATE_STATE,  # crash_count / current_action only
@@ -107,7 +105,6 @@ _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 )
 
 
-# AgentRole dataclass
 @dataclass(frozen=True)
 class AgentRole:
     """Static role record. Backend instances are created elsewhere.
@@ -147,7 +144,6 @@ class AgentRole:
         return self.system_prompt_path.read_text(encoding="utf-8")
 
 
-# Default registry
 def default_role_registry() -> dict[str, AgentRole]:
     """Return the canonical 4-agent role registry.
 

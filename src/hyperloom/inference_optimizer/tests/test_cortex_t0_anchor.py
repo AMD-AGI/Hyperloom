@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.knowledge.cortex_t0 import (
-    T0Result,
     _warm_recipe_source,
     run_t0_anchor,
 )
@@ -24,19 +23,6 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 
 class GbrainRemoteRecipeClient:  # name matches the real client for the type check
     enabled = True
-
-
-def test_warm_recipe_source_prefers_best_config_provenance() -> None:
-    row = {
-        "_sources": ["gbrain", "cortex"],
-        "_field_sources": {"best_config": "cortex", "best_throughput": "gbrain"},
-    }
-    assert _warm_recipe_source(row, kb=None) == "cortex"
-
-
-def test_warm_recipe_source_falls_back_to_first_source() -> None:
-    row = {"_sources": ["gbrain", "cortex"], "_field_sources": {}}
-    assert _warm_recipe_source(row, kb=None) == "gbrain"
 
 
 def test_warm_recipe_source_falls_back_to_remote_type() -> None:
@@ -98,40 +84,6 @@ def _expected_cid(state: _FakeSharedState, workload: str, hw: str) -> str:
     )
 
 
-# happy path
-def test_t0_anchor_writes_recipe_row_with_arbor_schema(
-    kb: RecipeKB,
-    session_dir: Path,
-) -> None:
-    """First T0 anchor writes a recipe row whose on-disk JSON matches the arbor schema."""
-    state = _FakeSharedState()
-    result = run_t0_anchor(
-        kb,
-        state,
-        workload="DeepSeek-R1",
-        hw="MI300X",
-        image_digest="img-sha-abc",
-        stack_fingerprint={"vllm": "0.6.0", "rocm": "7.2", "aiter": "abc1234"},
-        extra_attrs={
-            "framework_name": "sglang",
-            "model_class": "moe",
-        },
-        session_dir=session_dir,
-    )
-    assert isinstance(result, T0Result)
-    assert result.workload == "DeepSeek-R1"
-    cid = _expected_cid(state, "DeepSeek-R1", "MI300X")
-    row = kb.get_recipe(canonical_id=cid)
-    assert row is not None
-    # arbor-shape top-level identity
-    assert row["model"] == "DeepSeek-R1"
-    assert row["hardware"] == "MI300X"
-    # extras splatted at the top level (arbor convention)
-    assert row.get("model_class") == "moe"
-    assert row.get("image_digest") == "img-sha-abc"
-    assert row.get("tp") == 8
-
-
 def test_t0_anchor_accepts_legacy_framework_extra_attr(
     kb: RecipeKB,
     session_dir: Path,
@@ -159,6 +111,38 @@ def test_t0_anchor_accepts_legacy_framework_extra_attr(
     assert "unknown_framework" not in state.warm_start_recipe.get("workload", "")
 
 
+# happy path
+def test_t0_anchor_writes_recipe_row_with_arbor_schema(
+    kb: RecipeKB,
+    session_dir: Path,
+) -> None:
+    """First T0 anchor writes a recipe row whose on-disk JSON matches the arbor schema."""
+    state = _FakeSharedState()
+    run_t0_anchor(
+        kb,
+        state,
+        workload="DeepSeek-R1",
+        hw="MI300X",
+        image_digest="img-sha-abc",
+        stack_fingerprint={"vllm": "0.6.0", "rocm": "7.2", "aiter": "abc1234"},
+        extra_attrs={
+            "framework_name": "sglang",
+            "model_class": "moe",
+        },
+        session_dir=session_dir,
+    )
+    cid = _expected_cid(state, "DeepSeek-R1", "MI300X")
+    row = kb.get_recipe(canonical_id=cid)
+    assert row is not None
+    # arbor-shape top-level identity
+    assert row["model"] == "DeepSeek-R1"
+    assert row["hardware"] == "MI300X"
+    # extras splatted at the top level (arbor convention)
+    assert row.get("model_class") == "moe"
+    assert row.get("image_digest") == "img-sha-abc"
+    assert row.get("tp") == 8
+
+
 def test_t0_anchor_writes_warm_start_snapshot_to_disk(
     kb: RecipeKB,
     session_dir: Path,
@@ -178,7 +162,7 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
     import json
 
     payload = json.loads(warm_path.read_text())
-    # Bare T0 anchor row (identity but no best_config) is present after put_recipe but NOT actionable: classified seed_only/conf 0.0 so warm-replay won't apply an empty config.
+    # Bare T0 anchor row is classified seed_only/conf 0.0 (not actionable).
     assert payload["tier"] == "seed_only"
     assert payload["confidence"] == 0.0
     assert state.warm_start_context.get("status") == "seed_only"
@@ -247,7 +231,7 @@ def test_t0_anchor_short_circuits_when_already_anchored(
         cortex_session_id="prior-sid",
         warm_start_ts="2026-05-28T00:00:00Z",
     )
-    result = run_t0_anchor(
+    run_t0_anchor(
         kb,
         state,
         workload="m",
@@ -256,7 +240,6 @@ def test_t0_anchor_short_circuits_when_already_anchored(
         session_dir=session_dir,
         resume=False,
     )
-    assert result.status == "skipped_already"
     cid = _expected_cid(state, "m", "mi300x")
     assert kb.get_recipe(canonical_id=cid) is None
 
@@ -270,7 +253,7 @@ def test_t0_anchor_resume_does_not_short_circuit(
         cortex_session_id="prior-sid",
         warm_start_ts="2026-05-28T00:00:00Z",
     )
-    result = run_t0_anchor(
+    run_t0_anchor(
         kb,
         state,
         workload="m",
@@ -279,7 +262,6 @@ def test_t0_anchor_resume_does_not_short_circuit(
         session_dir=session_dir,
         resume=True,
     )
-    assert result.status in ("ok", "resumed")
     cid = _expected_cid(state, "m", "mi300x")
     assert kb.get_recipe(canonical_id=cid) is not None
 
@@ -393,14 +375,13 @@ def test_t0_anchor_tolerates_missing_extra_attrs(
     session_dir: Path,
 ) -> None:
     state = _FakeSharedState()
-    result = run_t0_anchor(
+    run_t0_anchor(
         kb,
         state,
         workload="m",
         hw="mi300x",
         session_dir=session_dir,
     )
-    assert result.status in ("ok", "resumed")
 
 
 def test_t0_anchor_requires_explicit_session_dir(

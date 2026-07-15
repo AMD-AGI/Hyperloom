@@ -14,13 +14,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.timeutil import iso_z
 from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
 )
 
 from ._common import (
-    _iso_z,
     _load_jsonl_safe,
     _load_optimization_journal,
     _parse_iso_unix,
@@ -29,12 +29,9 @@ from ._common import (
 
 
 
-# ---------------------------------------------------------------------------
-# Full-trace: unified token + decision timeline (FULL_TRACE_DESIGN §6)
-# ---------------------------------------------------------------------------
-# Token-counter keys, shared with orchestrator.trace.llm_trace. Re-declared
-# here (not imported) so the breakdown package stays free of orchestrator
-# deps — collectors must run offline against a session_dir tarball.
+# Unified token + decision timeline.
+# Token-counter keys, re-declared here (not imported) so the breakdown package
+# stays free of orchestrator deps — collectors run offline against a tarball.
 _TOKEN_IN_KEY = "input_tokens"
 
 
@@ -58,9 +55,7 @@ _TOKEN_KEYS_ALL: tuple[str, ...] = (
 def _coerce_token(value: Any) -> int:
     """Coerce a token counter to int, treating ``None`` / bad as 0.
 
-    The rollup sums tokens, so a missing counter contributes 0 here (the
-    ``None``-vs-0 distinction matters only on the raw per-call rows, which
-    we preserve verbatim in ``decision_trace.jsonl``).
+    The rollup sums tokens, so a missing counter contributes 0 here.
 
     Args:
         value (Any): A raw token-counter value.
@@ -110,7 +105,7 @@ def _load_llm_calls(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Read every LLM-call row from ``reports/trace/llm_calls.jsonl``.
+    """Read every LLM-call row from the trace ledger and ext shards.
 
     Merges ``reports/trace/llm_calls.jsonl`` with every
     ``reports/trace/ext/*.jsonl`` shard written by out-of-process children.
@@ -140,6 +135,22 @@ def _load_llm_calls(
     return [r for r in rows if isinstance(r, dict)]
 
 
+def aggregate_session_cache_tokens(
+    session_dir: Path,
+    warnings: list[str] | None = None,
+) -> tuple[int, int]:
+    """Sum (cache_creation, cache_read) over ``reports/trace/llm_calls.jsonl``.
+
+    Reuses the same ledger read + fold as the token rollup, so the figures match
+    ``session_breakdown.json``. Best-effort: missing trace files yield ``(0, 0)``.
+    """
+    warns = warnings if warnings is not None else []
+    bucket = _empty_token_bucket()
+    for call in _load_llm_calls(session_dir, warns):
+        _fold_call_into_bucket(bucket, call)
+    return bucket["total_cache_creation"], bucket["total_cache_read"]
+
+
 def _load_proposal_task_map(
     session_dir: Path, warnings: list[str],
 ) -> dict[str, str]:
@@ -167,21 +178,13 @@ def _load_proposal_task_map(
 def _attribute_critic_calls(
     calls: list[dict[str, Any]], msg_to_task: dict[str, str],
 ) -> None:
-    """Backfill ``task_id`` on Critic review calls from the proposal→task map.
+    """Backfill ``task_id`` on Critic review calls from the proposal->task map.
 
     A Critic reasoning call records the proposal ``msg_id``s it reviewed but not
-    a ``task_id`` (the task is materialized only after approval). We only
-    attribute a call that reviewed exactly ONE proposal which resolves to
-    exactly one task, so it joins that decision through the normal key path.
-
-    A *batch* review (several reviewed msg_ids) judged all of those proposals
-    together, so folding its whole token spend onto a single decision — even
-    when only one of the batch was later materialized (the others rejected /
-    not materialized, so absent from the map) — would over-attribute that
-    decision's cost and under-count overhead. Such batch reviews, plus
-    ambiguous (multiple distinct tasks) or unresolvable reviews, are left
-    unkeyed (→ overhead). The call dicts are mutated in place. No-op when the
-    map is empty.
+    a ``task_id``. Only a call that reviewed exactly ONE proposal resolving to
+    exactly one task is attributed; batch, ambiguous, or unresolvable reviews
+    are left unkeyed (→ overhead), so a batch's cost is not collapsed onto one
+    decision. The call dicts are mutated in place. No-op when the map is empty.
     """
     if not msg_to_task:
         return
@@ -301,10 +304,9 @@ def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
     return phase
 
 
-# Components whose unjoined LLM spend is *legitimately* not tied to a single
+# Components whose unjoined LLM spend is legitimately not tied to a single
 # decision (planning / review / monitoring), bucketed as ``overhead`` rather
-# than ``unattributed`` so the attribution ledger separates "expected shared
-# cost" from "a real attribution gap to chase".
+# than ``unattributed``.
 _OVERHEAD_COMPONENTS: frozenset[str] = frozenset({
     "orchestration",
     "critic",
@@ -334,7 +336,7 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
     return None
 
 
-def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
+def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
     """Copy a token bucket and add ``total_in_out`` + ``grand_total``.
 
     Handles both bucket shapes: the rollup view (split
@@ -360,6 +362,9 @@ def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, int]:
     )
     b["total_in_out"] = ti + to
     b["grand_total"] = ti + to + cache
+    cc = int(b.get("total_cache_creation", 0) or 0)
+    cr = int(b.get("total_cache_read", 0) or 0)
+    b["cache_hit_rate"] = round(cr / (cc + cr), 4) if (cc + cr) else 0.0
     return b
 
 
@@ -601,12 +606,11 @@ def collect_decision_trace(
 ) -> dict[str, Any]:
     """Join the token ledger to the decision streams into one timeline.
 
-    Implements FULL_TRACE_DESIGN §6: read the per-call token rows
-    (``reports/trace/llm_calls.jsonl``), read the
-    decision rows (``optimization_journal.json`` KEEP/REVERT entries +
-    every dynamic_action ``dispatch_history.jsonl``), then attach each
-    decision's LLM calls by the shared ``task_id`` / ``dyn_id`` key, with a
-    ``ts``-window phase fallback for calls that carry neither.
+    Reads the per-call token rows (``reports/trace/llm_calls.jsonl``) and the
+    decision rows (``optimization_journal.json`` KEEP/REVERT entries + every
+    dynamic_action ``dispatch_history.jsonl``), then attaches each decision's
+    LLM calls by the shared ``task_id`` / ``dyn_id`` key, with a ``ts``-window
+    phase fallback for calls that carry neither.
 
     Side effect (best-effort): writes the joined timeline to
     ``reports/trace/decision_trace.jsonl``. A write failure is swallowed —
@@ -631,12 +635,10 @@ def collect_decision_trace(
     phase_windows = _build_phase_windows(state)
     scores_by_variant = _proposal_scores_by_variant(state)
 
-    # Item 2: attribute Critic review calls to the decision their reviewed
-    # proposal became (msg_id -> task_id), so critic spend that served a single
-    # materialized proposal joins that decision instead of landing in overhead.
+    # Attribute Critic review calls to the decision their reviewed proposal became.
     _attribute_critic_calls(calls, _load_proposal_task_map(session_dir, warnings))
 
-    # ── Index calls by decision key; orphans (no key) go to a ts list ──
+    # Index calls by decision key; orphans (no key) go to a ts list.
     calls_by_key: dict[str, list[dict[str, Any]]] = {}
     orphan_calls: list[dict[str, Any]] = []
     for call in calls:
@@ -649,20 +651,18 @@ def collect_decision_trace(
         else:
             calls_by_key.setdefault(key, []).append(call)
 
-    # ── Gather decisions from the journal + dispatch_history ──
+    # Gather decisions from the journal + dispatch_history.
     decisions: list[dict[str, Any]] = []
     for e in _load_optimization_journal(session_dir, warnings):
         if not isinstance(e, dict):
             continue
         task_id = str(e.get("task_id") or "")
         key = _decision_key(task_id, "")
-        ts = _iso_z(e.get("ts"))
+        ts = iso_z(e.get("ts"))
         phase = str(e.get("phase") or "").strip() or _phase_at(ts, phase_windows)
         provenance = str(e.get("provenance") or "")
         change_kind = str(e.get("kind") or "")
-        # ``component`` is now the real proposer (specialist:<domain> / grid /
-        # orchestration) derived from provenance, not a hard-coded constant, so
-        # the decision timeline answers "who proposed this".
+        # ``component`` is the real proposer derived from provenance.
         decision: dict[str, Any] = {
             "component": proposer_for(provenance) if provenance else "orchestration",
             "change": str(e.get("change") or ""),
@@ -671,8 +671,7 @@ def collect_decision_trace(
             "task_id": task_id,
             "operation_kind": operation_kind_for("", change_kind),
         }
-        # Predicted (pre-measurement) gain, when the proposer supplied one, so
-        # the decision row carries predicted-vs-realized for calibration.
+        # Predicted (pre-measurement) gain, when the proposer supplied one.
         predicted_gain = _to_float(e.get("predicted_gain_pct"))
         if predicted_gain is not None:
             decision["predicted_gain_pct"] = predicted_gain
@@ -692,8 +691,7 @@ def collect_decision_trace(
         variant_name = str(e.get("variant_name") or "")
         if variant_name:
             decision["variant_name"] = variant_name
-            # Attach the proposal_scorer signal (who rated this proposal, how)
-            # so the decision step answers "was it scored, by whom, how high".
+            # Attach the proposal_scorer signal (who rated this proposal, how).
             scored = scores_by_variant.get(variant_name)
             if scored:
                 decision["proposal_scores"] = scored
@@ -710,7 +708,7 @@ def collect_decision_trace(
     for row in _load_dispatch_history_all(session_dir, warnings):
         dyn_id = str(row.get("dyn_id") or "")
         key = _decision_key(str(row.get("task_id") or ""), dyn_id)
-        ts = _iso_z(row.get("ts"))
+        ts = iso_z(row.get("ts"))
         phase = _phase_at(ts, phase_windows)
         decisions.append(
             {
@@ -731,11 +729,9 @@ def collect_decision_trace(
             }
         )
 
-    # ── Attach calls to decisions; build the joined trace ──
-    # A given key's calls attach to exactly ONE decision — the first by ts
-    # (e.g. a dynamic_action's DISPATCHED event anchors all its sub-agent
-    # turns). Later same-key events (CRITIC_VERDICT / INTEGRATE_RESULT) get
-    # empty token buckets so the per-decision sums don't double-count.
+    # Attach calls to decisions; build the joined trace. A given key's calls
+    # attach to exactly ONE decision — the first by ts. Later same-key events
+    # get empty token buckets so the per-decision sums don't double-count.
     consumed_keys: set[str] = set()
     decision_trace: list[dict[str, Any]] = []
     for dec in sorted(decisions, key=lambda d: d.get("ts") or ""):
@@ -768,16 +764,10 @@ def collect_decision_trace(
             }
         )
 
-    # ── Unjoined calls: keyed calls with no matching decision + orphans ──
-    # These still count toward the session total + phase/component rollup so
-    # the books balance, but they don't anchor to a decision row. We split
-    # them two ways for an honest attribution ledger:
-    #   * ``overhead``      — inherently cross-decision LLM spend (planning /
-    #                         review / monitoring) that legitimately has no
-    #                         single owning decision (orchestration / critic /
-    #                         robustness reactor turns).
-    #   * ``unattributed``  — everything else that *should* have carried a
-    #                         decision key but didn't (a real gap to chase).
+    # Unjoined calls: keyed calls with no matching decision + orphans. These
+    # still count toward the session/phase/component rollup but anchor to no
+    # decision row. Split into ``overhead`` (legitimately cross-decision spend)
+    # and ``unattributed`` (should have carried a key but didn't).
     unattributed = _empty_token_bucket()
     overhead = _empty_token_bucket()
 
@@ -793,7 +783,7 @@ def collect_decision_trace(
     for call in orphan_calls:
         _fold_call_into_bucket(_route_unjoined(call), call)
 
-    # ── Rollups: by_phase + by_component + session_total (ALL calls) ──
+    # Rollups: by_phase + by_component + session_total (ALL calls).
     by_phase: dict[str, dict[str, int]] = {}
     by_component_roll: dict[str, dict[str, int]] = {}
     session_total = _empty_token_bucket()
@@ -811,7 +801,7 @@ def collect_decision_trace(
         "session_total": session_total,
     }
 
-    # ── Best-effort side write of the joined timeline (design §6.4) ──
+    # Best-effort side write of the joined timeline.
     _write_decision_trace_jsonl(session_dir, decision_trace, warnings)
 
     return {

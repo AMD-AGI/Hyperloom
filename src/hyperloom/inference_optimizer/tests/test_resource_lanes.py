@@ -29,7 +29,6 @@ from hyperloom.orchestrator.bus.storage.schema import (
 )
 
 
-# Fixtures
 @pytest.fixture
 def db_path(tmp_path):
     return tmp_path / "coordinator.db"
@@ -48,7 +47,6 @@ def locks(conn):
     return ResourceLockManager(SqliteLeaseBackend(conn))
 
 
-# 1. Schema — v1 → v2 migration + defaults
 def test_schema_version_is_v3():
     """v3 adds the specialist GPU pool leases table."""
     assert SCHEMA_VERSION == 3
@@ -108,7 +106,7 @@ def test_v1_to_v2_migration_preserves_rows(tmp_path):
             "bench",
             12345,
             "2026-05-19T18:00:00+00:00",
-            "2099-12-31T23:59:59+00:00",  # very far future
+            "2099-12-31T23:59:59+00:00",
             "2026-05-19T18:00:00+00:00",
         ),
     )
@@ -152,7 +150,6 @@ def test_v2_ensure_schema_is_idempotent(conn):
     assert int(cur.fetchone()["n"]) == 1
 
 
-# 2. acquire_many: capacity, LaneFull vs LaneBusy
 @pytest.mark.asyncio
 async def test_serving_lane_capacity_1_raises_LaneBusy(locks):
     a = await locks.acquire_many(
@@ -296,7 +293,6 @@ async def test_same_holder_retry_is_idempotent(conn, locks):
         action="specialist",
         ttl_sec=30,
     )
-    # Same holder retries with a fresh TTL → succeeds (refresh).
     b = await locks.acquire_many(
         ["research_lane"],
         holder_id="s0",
@@ -305,13 +301,11 @@ async def test_same_holder_retry_is_idempotent(conn, locks):
         ttl_sec=120,
     )
     assert a.holder_id == b.holder_id
-    # Only one row in DB.
     cur = conn.raw.execute("SELECT COUNT(*) AS n FROM leases WHERE lane=?", ("research_lane",))
     assert int(cur.fetchone()["n"]) == 1
     await locks.release(b)
 
 
-# 3. Cross-lane conflicts (Inv-7.2): research_lane independent of serving
 @pytest.mark.asyncio
 async def test_research_lane_independent_of_benchmark_lane(conn, locks):
     """Inv-7.2: research_lane has no LANE_CONFLICTS, so a benchmark task and a specialist coexist."""
@@ -342,7 +336,6 @@ def test_lane_conflicts_research_lane_isolated():
         assert "research_lane" not in conflicts
 
 
-# 4. try_acquire_many: non-blocking variant
 @pytest.mark.asyncio
 async def test_try_acquire_many_returns_lease_on_success(locks):
     lease = await locks.try_acquire_many(
@@ -366,7 +359,6 @@ async def test_try_acquire_many_returns_none_on_conflict(conn, locks):
         action="bench",
         ttl_sec=60,
     )
-    # Cross-lane mutex.
     result = await locks.try_acquire_many(
         ["profile_lane"],
         holder_id="hp",
@@ -404,7 +396,6 @@ async def test_try_acquire_many_returns_none_on_full(conn, locks):
         await locks.release(l)
 
 
-# 5. Multi-holder heartbeat / release / reap_expired
 @pytest.mark.asyncio
 async def test_heartbeat_only_extends_own_holder_row(conn, locks):
     set_lane_capacity(conn.raw, "research_lane", 2)
@@ -429,7 +420,7 @@ async def test_heartbeat_only_extends_own_holder_row(conn, locks):
     )
     rows = list(cur.fetchall())
     by_holder = {r["holder_id"]: r["expires_at"] for r in rows}
-    assert by_holder["s0"] > by_holder["s1"]  # only s0 refreshed
+    assert by_holder["s0"] > by_holder["s1"]
     await locks.release(a)
     await locks.release(b)
 
@@ -474,7 +465,7 @@ async def test_reap_expired_keys_on_holder_id(conn, locks):
             "specialist",
             1,
             "2026-01-01T00:00:00+00:00",
-            "2026-01-01T00:00:01+00:00",  # already expired
+            "2026-01-01T00:00:01+00:00",
             "2026-01-01T00:00:00+00:00",
         ),
     )
@@ -497,7 +488,6 @@ async def test_reap_expired_keys_on_holder_id(conn, locks):
     reaped = await locks.reap_expired()
     assert any(r["holder_id"] == "dead" for r in reaped)
     holders = await locks.lane_holders()
-    # The "live" holder survives the reap.
     assert holders.get("research_lane") == 1
     cur = conn.raw.execute(
         "SELECT holder_id FROM leases WHERE lane=?",
@@ -512,7 +502,6 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks):
     """A not-yet-expired lease whose holder PID is dead is reaped immediately."""
     import os
 
-    # PID 1 is alive (init); a very high PID is (almost certainly) dead.
     dead_pid = 2_147_483_646
     assert dead_pid != os.getpid()
     set_lane_capacity(conn.raw, "benchmark_lane", 1)
@@ -528,7 +517,7 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks):
             "explore",
             dead_pid,
             "2026-01-01T00:00:00+00:00",
-            "2099-12-31T23:59:59+00:00",  # NOT expired
+            "2099-12-31T23:59:59+00:00",
             "2026-01-01T00:00:00+00:00",
         ),
     )
@@ -553,8 +542,8 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks):
     assert any(r["holder_id"] == "zombie" for r in reaped)
     assert all(r["holder_id"] != "alive" for r in reaped)
     holders = await locks.lane_holders()
-    assert "benchmark_lane" not in holders  # freed
-    assert holders.get("profile_lane") == 1  # live holder survives
+    assert "benchmark_lane" not in holders
+    assert holders.get("profile_lane") == 1
 
 
 @pytest.mark.asyncio
@@ -582,10 +571,8 @@ async def test_reap_dead_holders_skips_null_pid(conn, locks):
     assert holders.get("benchmark_lane") == 1
 
 
-# 6. Manager counters + observability
 @pytest.mark.asyncio
 async def test_manager_counters_track_acquire_busy_full(conn, locks):
-    # A multi-holder lane raises LaneFull on overflow (distinct from cross-lane LaneBusy).
     set_lane_capacity(conn.raw, "research_lane", 2)
     a = await locks.acquire_many(
         ["research_lane"],
@@ -609,7 +596,7 @@ async def test_manager_counters_track_acquire_busy_full(conn, locks):
             action="specialist",
             ttl_sec=60,
         )
-    # capacity-1 lanes still raise LaneBusy (not LaneFull), preserving v0.6 semantics.
+    # capacity-1 lanes still raise LaneBusy (not LaneFull).
     b = await locks.acquire_many(
         ["benchmark_lane"],
         holder_id="hb",
@@ -625,12 +612,6 @@ async def test_manager_counters_track_acquire_busy_full(conn, locks):
             action="profile",
             ttl_sec=60,
         )
-    counters = locks.counters_snapshot()
-    assert counters["research_lane"]["acquire_count"] == 2
-    assert counters["research_lane"]["lane_full_count"] == 1
-    assert counters["benchmark_lane"]["acquire_count"] >= 1
-    # The cross-lane conflict shows up on profile_lane (the requested lane).
-    assert "lane_busy_count" in counters.get("profile_lane", {})
     await locks.release(a)
     await locks.release(a2)
     await locks.release(b)
@@ -651,8 +632,6 @@ async def test_lane_holders_distinct(conn, locks):
     ]
     holders = await locks.lane_holders()
     assert holders == {"research_lane": 3}
-    actives = await locks.active_lanes()
-    assert actives == ["research_lane"]  # DISTINCT
     for l in leases:
         await locks.release(l)
 
@@ -660,13 +639,11 @@ async def test_lane_holders_distinct(conn, locks):
 @pytest.mark.asyncio
 async def test_lane_capacities_returns_full_table(conn, locks):
     caps = await locks.lane_capacities()
-    # Every known lane in the defaults.
     for lane in KNOWN_LANES:
         assert lane in caps
     assert caps["research_lane"] == DEFAULT_LANE_CAPACITIES["research_lane"]
 
 
-# 7. breakdown.telemetry.lane_timeline
 def _make_session_with_db(tmp_path: Path) -> tuple[Path, SqliteConnection]:
     session_dir = tmp_path / "session"
     (session_dir / "storage").mkdir(parents=True)
@@ -707,7 +684,6 @@ async def test_collect_lane_timeline_summarises_capacity_and_holders(tmp_path):
     assert by_lane["research_lane"]["live_holders"] == 3
     assert by_lane["benchmark_lane"]["capacity"] == 1
     assert by_lane["benchmark_lane"]["live_holders"] == 1
-    # __total__ summary row.
     assert by_lane["__total__"]["live_holders"] >= 4
     assert warnings == []
     for l in leases:
@@ -749,13 +725,11 @@ def test_collect_lane_timeline_legacy_db_without_lane_capacity(tmp_path):
     raw.close()
     warnings: list[str] = []
     rows = _collect_lane_timeline(session_dir, warnings)
-    # All defaults should be present (capacity 1 each).
     by_lane = {r["lane"]: r for r in rows if r["lane"] != "__total__"}
     for lane, cap in DEFAULT_LANE_CAPACITIES.items():
         assert by_lane[lane]["capacity"] == cap
 
 
-# 8. Concurrent acquire_many under asyncio.gather
 @pytest.mark.asyncio
 async def test_concurrent_acquires_respect_capacity(conn, locks):
     """Three async acquires racing for capacity=2; exactly one fails."""
@@ -784,12 +758,10 @@ async def test_concurrent_acquires_respect_capacity(conn, locks):
         await locks.release(lease)
 
 
-# 7. WS2 — gpu_research_lane: serving mutex + multi-holder
 def test_gpu_research_lane_known_and_conflicts_are_symmetric():
-    """WS2: gpu_research_lane is a known lane, mutually exclusive with serving.
+    """gpu_research_lane is a known lane, mutually exclusive with serving.
 
-    Conflicts must be declared symmetrically — ``_expand_lanes`` only expands the
-    requested lane's own conflict set, so each serving lane must list
+    Conflicts must be declared symmetrically — each serving lane must list
     gpu_research_lane and vice versa.
     """
     assert "gpu_research_lane" in KNOWN_LANES
@@ -798,13 +770,12 @@ def test_gpu_research_lane_known_and_conflicts_are_symmetric():
     )
     for serving in ("benchmark_lane", "profile_lane", "server_lifecycle"):
         assert "gpu_research_lane" in LANE_CONFLICTS[serving]
-    # Not self-conflicting → multiple holders may coexist up to capacity.
     assert "gpu_research_lane" not in LANE_CONFLICTS["gpu_research_lane"]
 
 
 @pytest.mark.asyncio
 async def test_gpu_research_lane_blocks_serving(locks):
-    """Holding gpu_research_lane blocks every serving lane (GPU spec ⊥ serving)."""
+    """Holding gpu_research_lane blocks every serving lane."""
     gpu = await locks.acquire_many(
         ["gpu_research_lane"],
         holder_id="g0",
@@ -849,11 +820,10 @@ async def test_serving_blocks_gpu_research_lane(locks):
 
 @pytest.mark.asyncio
 async def test_gpu_research_lane_is_strictly_serial(locks):
-    """WS2: a second GPU specialist is blocked while the first holds the lane.
+    """A second GPU specialist is blocked while the first holds the lane.
 
-    The co-acquisition model can't express a multi-holder lane that also mutexes
-    the cap-1 serving lanes, so gpu_research_lane is capacity-1 / strictly serial
-    (one GPU specialist holds the whole machine at a time).
+    gpu_research_lane is capacity-1 / strictly serial (one GPU specialist holds
+    the whole machine at a time).
     """
     first = await locks.acquire_many(
         ["gpu_research_lane"],

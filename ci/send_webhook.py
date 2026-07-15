@@ -303,8 +303,7 @@ def _build_payload(
         }
     )
 
-    # Footer: perf-leaderboard publish count on the LAST card only (avoid repeating across chunks).
-    # Counts come from the workflow's count step via PERF_PUBLISH_OK / PERF_PUBLISH_TOTAL env vars.
+    # Footer: perf-leaderboard publish count on the last card only.
     if part == total_parts:
         try:
             perf_ok = int(os.environ.get("PERF_PUBLISH_OK") or 0)

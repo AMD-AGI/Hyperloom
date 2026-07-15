@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Smoke tests for the ``breakdown.reporters`` compose pipeline (cross-section + section invariants that historically broke)."""
+"""Smoke tests for the ``breakdown.reporters`` compose pipeline."""
 
 from __future__ import annotations
 
@@ -64,7 +64,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "params": {"status": "not_attempted", "attempts": 0, "keeps": 0},
             "sweep": {"status": "not_attempted", "attempts": 0, "keeps": 0, "grid_size": 9},
             "geak": {"status": "not_attempted", "attempts": 0, "keeps": 0},
-            "oob": {"status": "not_attempted", "attempts": 0, "keeps": 0},
             "validate_stack": {"status": "not_attempted", "attempts": 0, "keeps": 0},
         },
         "kernel_lifecycle": {
@@ -127,7 +126,7 @@ def test_all_renderers_register_in_stable_order() -> None:
         "kernel_decision_path",
         "roofline",
         "geak_invocations",
-        "oob_invocations",
+        "forge_invocations",
         "param_search",
         "decision_journal",
         "sweep",
@@ -140,7 +139,7 @@ def test_all_renderers_register_in_stable_order() -> None:
 
 
 def test_telemetry_renderer_is_not_registered() -> None:
-    """Telemetry section is intentionally dropped from the report layout (anti-regression for re-adding it)."""
+    """Telemetry section is intentionally dropped from the report layout."""
     assert "telemetry" not in [sid for sid, _ in REGISTRY]
 
 
@@ -151,21 +150,17 @@ def test_deterministic_only_path_produces_complete_report() -> None:
     assert "## Executive Summary" in md
     assert "10.99%" in md
     assert "MI300X" in md
-    # GEAK + OOB sections must mark themselves as not attempted
     geak = next(s for s in r.sections if s.section_id == "geak_invocations")
     assert geak.skipped
     assert any(d.kind == "not_attempted" for d in geak.decisions)
-    oob = next(s for s in r.sections if s.section_id == "oob_invocations")
-    assert oob.skipped
 
 
 def test_skipped_sections_do_not_emit_placeholders() -> None:
-    """Skipped sections must emit no placeholder filler (no ``Section skipped`` / ``no data captured`` / skipped-section H3 titles)."""
+    """Skipped sections must emit no placeholder filler or H3 titles."""
     r = render_session_report(_fixture_breakdown())
     md = r.markdown
     assert "Section skipped" not in md
     assert "no data captured" not in md
-    # The H3 title for a skipped section must also be absent.
     assert "### GEAK Invocations" not in md
     assert "### Sweep" not in md
     assert "### Phase Timeline" not in md
@@ -174,17 +169,14 @@ def test_skipped_sections_do_not_emit_placeholders() -> None:
 def test_section_groups_use_h2_titles_with_h3_subsections() -> None:
     r = render_session_report(_fixture_breakdown())
     md = r.markdown
-    # H2 group titles for any group that has at least one live section.
     assert "## Session & Workload" in md
     assert "## Performance Results" in md
     assert "## Capability Search" in md
     assert "## Kernel Optimization" in md
-    # H3 subsections live underneath the H2 groups.
     assert "### Session" in md
     assert "### Baseline" in md
     assert "### Capability Summary" in md
     assert "### Kernel Lifecycle" in md
-    # Groups with all-skipped sections must NOT emit their H2 title (Run Trace is phase_timeline-only).
     assert "## Run Trace" not in md
 
 
@@ -197,7 +189,7 @@ def test_telemetry_section_is_absent_from_markdown() -> None:
 
 
 def test_geak_not_attempted_never_emits_kept_decision() -> None:
-    """Anti-regression: GEAK must not be attributed gain on a session it never ran on."""
+    """GEAK must not be attributed gain on a session it never ran on."""
     r = render_session_report(_fixture_breakdown())
     for sec in r.sections:
         if sec.section_id != "geak_invocations":
@@ -235,7 +227,6 @@ def test_legacy_source_buckets_survive_alongside_explore() -> None:
             "backends_pct_of_total": 4.5,
             "params_pct_of_total": 0.0,
             "geak_pct_of_total": 0.0,
-            "oob_pct_of_total": 0.0,
             "sweep_pct_of_total": 0.0,
         },
         "notes": [],
@@ -255,7 +246,6 @@ def test_attribution_missing_when_no_gain() -> None:
     assert r.global_facts.gain_attribution_lines == []
 
 
-# LLM integration smoke
 @dataclass
 class _GoodLLM:
     def complete(self, *, system: str, user: str) -> str:
@@ -285,34 +275,28 @@ def test_llm_path_inserts_narratives_for_non_skipped_sections() -> None:
     r = render_session_report(_fixture_breakdown(), llm_client=_GoodLLM())
     assert r.used_llm
     assert "Validated +10.99% via explore KEEP" in r.markdown
-    # Narratives must appear for non-skipped sections only.
     assert "narr-session" in r.markdown
     assert "narr-capability_summary" in r.markdown
-    # Skipped sections get no narratives and aren't shown in the user prompt.
     assert "narr-geak_invocations" not in r.markdown
     assert "narr-sweep" not in r.markdown
-    # Skipped sections must not appear under "sections" in the LLM prompt.
     prompt = json.loads(r.llm_user_prompt)
     section_ids = {s["section_id"] for s in prompt["sections"]}
     assert "geak_invocations" not in section_ids
-    assert "oob_invocations" not in section_ids
     assert "sweep" not in section_ids
 
 
 def test_llm_broken_json_falls_back_to_deterministic_exec_summary() -> None:
     r = render_session_report(_fixture_breakdown(), llm_client=_BrokenLLM())
-    # Deterministic exec summary must still appear (no crash).
     assert "## Executive Summary" in r.markdown
     assert "baseline 2205.00 tok/s/GPU → final" in r.markdown
 
 
 def test_llm_exception_does_not_crash_compose() -> None:
     r = render_session_report(_fixture_breakdown(), llm_client=_RaisingLLM())
-    assert r.markdown  # non-empty
+    assert r.markdown
     assert "<llm_error" in r.llm_raw_response
 
 
-# Section-level invariants worth pinning
 def test_kernel_lifecycle_funnel_propagates_to_global_facts() -> None:
     r = render_session_report(_fixture_breakdown())
     f = r.global_facts.kernel_pipeline_funnel
@@ -344,9 +328,8 @@ def test_capability_decision_kind_round_trips(
     assert decisions.get("sweep") == expected_kind
 
 
-# A1 / B4: attribution method + invocation rendering
 def test_attribution_method_renders_from_field() -> None:
-    """The attribution renderer surfaces ``attribution.method`` verbatim, with no hard-coded "single-source" fallback."""
+    """The attribution renderer surfaces ``attribution.method`` verbatim."""
     bd = _fixture_breakdown()
     bd["attribution"] = {
         "method": "reconstructed",
@@ -356,7 +339,6 @@ def test_attribution_method_renders_from_field() -> None:
             "backends_pct_of_total": 0.0,
             "params_pct_of_total": 0.0,
             "geak_pct_of_total": 0.0,
-            "oob_pct_of_total": 0.0,
             "sweep_pct_of_total": 0.0,
         },
         "notes": [],
@@ -368,7 +350,7 @@ def test_attribution_method_renders_from_field() -> None:
 
 
 def test_invocation_section_renders_when_present() -> None:
-    """Baseline/final renderers surface an ``### Invocation`` block with framework_args + image; secret-shaped envs are filtered out."""
+    """Baseline/final renderers surface an ``### Invocation`` block; secret-shaped envs are filtered out."""
     bd = _fixture_breakdown()
     bd["session"]["image"] = "registry.example/hyperloom:abc123"
     bd["baseline"]["invocation"] = {
@@ -386,14 +368,13 @@ def test_invocation_section_renders_when_present() -> None:
     assert "TP=8" in md
     assert "VLLM_FLASH_ATTN=1" in md
     assert "OPENAI_API_KEY" not in md
-    # The invocation must NOT reach the LLM user prompt (command lines carry transient values).
     prompt = json.loads(r.llm_user_prompt)
     user_text = json.dumps(prompt)
     assert "sglang.launch_server" not in user_text, "framework_args leaked into LLM prompt"
 
 
 def test_invocation_renders_framework_args_source() -> None:
-    """When ``invocation.framework_args_source`` is set, the renderer surfaces the lineage label under the command line (gap2 anti-regression)."""
+    """When ``invocation.framework_args_source`` is set, the renderer surfaces the lineage label under the command line."""
     bd = _fixture_breakdown()
     bd["session"]["image"] = "registry.example/hyperloom:src"
     bd["baseline"]["invocation"] = {

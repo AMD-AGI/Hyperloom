@@ -16,9 +16,12 @@ single owner. Bad/partial fragments are skipped and noted in ``warnings``.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.jsonio import read_json
+
+_UNREADABLE = object()
 
 
 def parts_dir(session_dir: Path | str) -> Path:
@@ -61,10 +64,12 @@ def _load(path: Path, warnings: list[str]) -> dict[str, Any] | None:
         dict[str, Any] | None: the parsed fragment record, or ``None`` when it
             cannot be read or is not a JSON object.
     """
-    try:
-        rec = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"recorder: failed to read {path.name}: {exc!r}")
+    rec = read_json(
+        path,
+        default=_UNREADABLE,
+        on_error=lambda exc: warnings.append(f"recorder: failed to read {path.name}: {exc!r}"),
+    )
+    if rec is _UNREADABLE:
         return None
     if not isinstance(rec, dict):
         warnings.append(f"recorder: {path.name} is not an object")
@@ -128,8 +133,7 @@ def assemble_parts(
 
 def _compose_versions(out: dict[str, Any]) -> None:
     """Fold the ``versions`` item substream into a top-level ``{tool: meta}``
-    map (last write per tool wins; the substream is already deduped by tool key
-    at record time). No-op when nothing was recorded.
+    map (last write per tool wins). No-op when nothing was recorded.
 
     Args:
         out: The assembled section mapping mutated in place.
@@ -148,8 +152,7 @@ def _compose_versions(out: dict[str, Any]) -> None:
 
 def _compose_critic_robustness(out: dict[str, Any]) -> None:
     """Fold the ``critic_iterations`` / ``robustness_signals`` item substreams
-    into the ``critic_robustness`` singleton (shape mirrors
-    ``collectors.collect_critic_robustness``). Pops the raw substreams so they
+    into the ``critic_robustness`` singleton. Pops the raw substreams so they
     don't leak into the breakdown envelope.
 
     Args:
@@ -159,7 +162,7 @@ def _compose_critic_robustness(out: dict[str, Any]) -> None:
     rob_signals = out.pop("robustness_signals", None)
     if critic_iters is None and rob_signals is None:
         return
-    # A directly-recorded singleton (if any) takes precedence over substreams.
+    # A directly-recorded singleton takes precedence over substreams.
     if "critic_robustness" in out:
         return
     critic_iters = critic_iters if isinstance(critic_iters, list) else []
@@ -174,9 +177,8 @@ def _compose_critic_robustness(out: dict[str, Any]) -> None:
 def _compose_kernel_journey(out: dict[str, Any]) -> None:
     """Fold the four kernel-lifecycle item substreams into a single
     kernel-major ``kernel_journey`` view (discovery -> dispatch -> backend
-    attempts -> e2e), then pop the raw substreams so they don't leak into the
-    envelope. No-op (and ``kernel_journey`` stays absent) when no substream was
-    recorded, preserving historical breakdowns byte-for-byte.
+    attempts -> e2e), then pop the raw substreams. No-op when no substream was
+    recorded.
 
     Args:
         out: The assembled section mapping mutated in place.
@@ -187,7 +189,7 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
     e2e = out.pop("kernel_e2e", None)
     if discovery is None and dispatch is None and backend is None and e2e is None:
         return
-    # A directly-recorded singleton (if any) takes precedence over substreams.
+    # A directly-recorded singleton takes precedence over substreams.
     if "kernel_journey" in out:
         return
 
@@ -268,9 +270,7 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
 def _best_micro_speedup(attempts: list[dict[str, Any]]) -> float | None:
     """Best (max) micro_speedup across a kernel's attempts, or None.
 
-    Surfaces the kernel-level achieved speedup at the journey-entry top level so
-    the dashboard can correlate it with ``e2e.e2e_gain_pct`` without digging
-    through the attempt ladder.
+    Surfaces the kernel-level achieved speedup at the journey-entry top level.
 
     Args:
         attempts: A kernel's backend attempt rows.

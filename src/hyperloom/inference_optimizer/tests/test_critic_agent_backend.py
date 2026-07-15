@@ -23,6 +23,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.roles.base import BackendError
 from hyperloom.orchestrator.roles.critic_agent import (
+    _anthropic_text_from_content,
     _extract_review_json,
     _reviewed_msg_ids_from_bundle,
     _verdict_references_kb,
@@ -30,7 +31,7 @@ from hyperloom.orchestrator.roles.critic_agent import (
 from hyperloom.inference_optimizer.protocol.intent import IntentType
 
 
-# Fakes — Codex client (mirrors test_p1_7_codex_backend.py)
+# Fakes — Codex client
 @dataclass
 class FakeMessage:
     content: str
@@ -74,7 +75,7 @@ def _build_envelope_from_review(
     review: dict[str, Any],
     session_id: str,
 ) -> dict[str, Any]:
-    """Mirror critic-agent's commit-review envelope construction so the fake produces the real runtime's shape."""
+    """Mirror critic-agent's commit-review envelope construction."""
     verdicts = review.get("review_verdicts") or review.get("verdicts") or []
     intents: list[dict[str, Any]] = []
     for item in verdicts:
@@ -225,7 +226,11 @@ def test_cortex_kb_url_propagated_to_runtime_env(fake_critic_root, fake_session_
     assert env["CORTEX_KB_URL"] == "http://kb.local/"
 
 
-def test_explicit_cortex_kb_url_env_wins(fake_critic_root, fake_session_dir, monkeypatch):
+def test_explicit_cortex_kb_url_flag_wins_over_inherited_env(fake_critic_root, fake_session_dir, monkeypatch):
+    # The --cortex-kb-url flag is authoritative: the endpoint is a CLI concern
+    # with no env fallback, so the flag value overrides any inherited
+    # CORTEX_KB_URL in the parent env when building the subprocess env.
+    # The --cortex-kb-url flag is authoritative and overrides inherited env.
     monkeypatch.setenv("CORTEX_KB_URL", "http://from-env.local")
     backend = CriticAgentBackend(
         critic_agent_root=fake_critic_root,
@@ -235,7 +240,7 @@ def test_explicit_cortex_kb_url_env_wins(fake_critic_root, fake_session_dir, mon
         cortex_kb_url="http://from-flag.local",
     )
     env = backend._build_runtime_env()
-    assert env["CORTEX_KB_URL"] == "http://from-env.local"
+    assert env["CORTEX_KB_URL"] == "http://from-flag.local"
 
 
 def test_no_cortex_kb_url_leaves_env_unset(fake_critic_root, fake_session_dir, monkeypatch):
@@ -361,7 +366,7 @@ def test_construct_invalid_kb_mode(fake_critic_root: Path, fake_session_dir: Pat
 
 
 def test_construct_no_creds_no_factory_raises(monkeypatch, tmp_path: Path):
-    """No codex_client_factory and no Codex creds → construction fails fast."""
+    """No codex_client_factory and no Codex creds -> construction fails fast."""
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     root = tmp_path / "critic-agent"
@@ -378,7 +383,7 @@ def test_construct_no_creds_no_factory_raises(monkeypatch, tmp_path: Path):
 
 
 def test_construct_prefers_explicit_openai_key_over_anthropic_token(monkeypatch, tmp_path: Path):
-    """Plan B: explicit OPENAI_API_KEY wins over SAFE-filled ANTHROPIC_AUTH_TOKEN for Codex auth."""
+    """Explicit OPENAI_API_KEY wins over SAFE-filled ANTHROPIC_AUTH_TOKEN for Codex auth."""
     import openai
 
     monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
@@ -403,7 +408,7 @@ def test_construct_prefers_explicit_openai_key_over_anthropic_token(monkeypatch,
 def test_reviewed_msg_ids_from_bundle_dedups_and_orders():
     bundle = {"proposals": [
         {"msg_id": "m1"}, {"msg_id": "m2"}, {"msg_id": "m1"},  # dup dropped
-        {"no_id": True}, {"msg_id": ""},                        # skipped
+        {"no_id": True}, {"msg_id": ""},  # skipped
     ]}
     assert _reviewed_msg_ids_from_bundle(bundle) == ["m1", "m2"]
 
@@ -414,7 +419,7 @@ def test_reviewed_msg_ids_from_bundle_none_when_empty():
     assert _reviewed_msg_ids_from_bundle({"proposals": "nope"}) is None
 
 
-# Case 1: Single proposal → one approve verdict matching the msg_id
+# Case 1: Single proposal -> one approve verdict matching the msg_id
 @pytest.mark.asyncio
 async def test_single_proposal_yields_matching_verdict(
     fake_critic_root: Path,
@@ -482,8 +487,7 @@ async def test_single_proposal_yields_matching_verdict(
     assert (fake_session_dir / "critic-workdir" / "000000" / "review.json").is_file()
     assert (fake_session_dir / "critic-workdir" / "000000" / "emit.json").is_file()
 
-    # The critic's token row records the reviewed proposal msg_id(s)
-    # so the collector can attribute the review cost to that decision.
+    # The critic's token row records the reviewed proposal msg_id(s).
     import json as _json
     from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
     token_rows = [
@@ -502,7 +506,7 @@ async def test_single_proposal_yields_matching_verdict(
     assert env["CRITIC_SESSION_MEMORY_DIR"].endswith("critic-session-memory")
 
 
-# Case 2: Multiple proposals → one verdict each
+# Case 2: Multiple proposals -> one verdict each
 @pytest.mark.asyncio
 async def test_multiple_proposals_yield_one_verdict_each(
     fake_critic_root: Path,
@@ -553,7 +557,7 @@ async def test_multiple_proposals_yield_one_verdict_each(
     assert {v.payload["verdict"] for v in verdicts} == {"approve", "advise"}
 
 
-# Case 3: Empty inbox → heartbeat (LLM never called)
+# Case 3: Empty inbox -> heartbeat (LLM never called)
 @pytest.mark.asyncio
 async def test_empty_proposals_yields_heartbeat_no_llm(
     fake_critic_root: Path,
@@ -585,7 +589,7 @@ async def test_empty_proposals_yields_heartbeat_no_llm(
     assert client.completions.calls == []
 
 
-# Case 4: LLM returns garbage → empty review → heartbeat
+# Case 4: LLM returns garbage -> empty review -> heartbeat
 @pytest.mark.asyncio
 async def test_unparseable_llm_reply_falls_back_to_heartbeat(
     fake_critic_root: Path,
@@ -623,7 +627,7 @@ async def test_unparseable_llm_reply_falls_back_to_heartbeat(
     assert res.intents[0].payload["topic"] == "heartbeat"
 
 
-# Case 5: required_context non-empty → needs_review + critic_unavailable
+# Case 5: required_context non-empty -> needs_review + critic_unavailable
 @pytest.mark.asyncio
 async def test_missing_critical_context_yields_needs_review(
     fake_critic_root: Path,
@@ -671,7 +675,7 @@ async def test_missing_critical_context_yields_needs_review(
     assert res.metadata["kb_read_skipped_reason"] == "missing_critical_context"
 
 
-# Case 6: subprocess exit code 2 → BackendError
+# Case 6: subprocess exit code 2 -> BackendError
 @pytest.mark.asyncio
 async def test_prepare_review_subprocess_failure_raises(
     fake_critic_root: Path,
@@ -725,7 +729,7 @@ async def test_commit_review_subprocess_failure_raises(
         await backend.run("prompt")
 
 
-# Case 7: kb_mode=live + kb_unreachable → still emits, surfaces reason
+# Case 7: kb_mode=live + kb_unreachable -> still emits, surfaces reason
 @pytest.mark.asyncio
 async def test_kb_unreachable_still_emits_verdict(
     fake_critic_root: Path,
@@ -887,7 +891,7 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     assert '"abc"' in user_text  # proposal msg_id from judge bundle
 
 
-# Static context propagation — root-cause fix for the "every verdict is needs_review/critic_unavailable" loop bug; backend sources model/framework from manifest.json or explicit static_context.
+# Static context propagation — backend sources model/framework from manifest.json or explicit static_context.
 def _write_manifest(session_dir: Path, payload: dict[str, Any]) -> Path:
     """Write a minimal manifest.json the backend can ingest."""
     target = session_dir / "manifest.json"
@@ -1129,12 +1133,10 @@ async def test_required_context_surfaces_in_metadata(
     assert backend.calls[-1]["required_context"] == ["model", "framework"]
 
 
-# Merged from test_p2_critic_agent_e2e.py
-
 """End-to-end test: real critic-agent runtime + mocked Codex + Coordinator.
 
-This shells out to the real ``critic-agent/runtime/cli.py`` (only Codex is
-faked). Marker ``critic_agent_e2e`` lets devs without the checkout skip it.
+Shells out to the real ``critic-agent/runtime/cli.py`` (only Codex is faked).
+Marker ``critic_agent_e2e`` lets devs without the checkout skip it.
 """
 
 
@@ -1144,11 +1146,10 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import _resolve_critic_agent_root
+from hyperloom.inference_optimizer.cli.credentials import _resolve_critic_agent_root
 from hyperloom.orchestrator.roles import (
     CriticAgentBackend,
     MockBackend,
-    MockKernelBackend,
     MockRobustnessBackend,
     MockTurn,
     ScriptedPlan,
@@ -1160,7 +1161,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 pytestmark = pytest.mark.critic_agent_e2e
 
 
-# Fake Codex (only the LLM layer; the runtime is real)
+# Fake Codex (only the LLM layer; the runtime is real).
 @dataclass
 class _Msg:
     content: str
@@ -1244,13 +1245,13 @@ def _heartbeat() -> Intent:
     )
 
 
-# scripted Orchestration → real CriticAgentBackend → approved
+# scripted Orchestration -> real CriticAgentBackend -> approved
 @pytest.mark.asyncio
 async def test_critic_agent_real_runtime_clears_proposal(
     session_dir: Path,
     critic_agent_root: Path,
 ):
-    """Orchestration proposes baseline → real runtime emits review_verdict{approve} → Coordinator materializes the task."""
+    """Orchestration proposes baseline -> real runtime emits review_verdict{approve} -> Coordinator materializes the task."""
     propose = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={
@@ -1276,7 +1277,7 @@ async def test_critic_agent_real_runtime_clears_proposal(
             ),
             name="orchestration",
         ),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="kernel_agent"),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }
@@ -1317,7 +1318,7 @@ async def test_critic_agent_real_runtime_clears_proposal(
     finally:
         await c.stop()
 
-    # --- Filesystem assertions: real runtime wrote session memory ---
+    # Filesystem assertions: real runtime wrote session memory.
     workdir = session_dir / "critic-workdir"
     assert workdir.is_dir()
     turn0 = workdir / "000000"
@@ -1361,7 +1362,7 @@ async def test_critic_agent_heartbeat_when_no_proposal(
             ScriptedPlan(turns=[], default_intent=_heartbeat()),
             name="orchestration",
         ),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="kernel_agent"),
         "critic": critic_backend,
         "robustness": MockRobustnessBackend(),
     }
@@ -1380,9 +1381,7 @@ async def test_critic_agent_heartbeat_when_no_proposal(
         await c.stop()
 
 
-# -----------------------------------------------------------------
 # KB trace + dry-run injection gate
-# -----------------------------------------------------------------
 def test_verdict_references_kb_helper():
     assert _verdict_references_kb(None) is False
     assert _verdict_references_kb({"review_verdicts": []}) is False
@@ -1615,3 +1614,170 @@ async def test_run_skips_langfuse_mirror_when_disabled(
     )
     await backend.run("prompt")
     assert fake_em.spans == []
+
+
+# Native Anthropic review path (protocol="anthropic")
+class FakeAnthropicResponse:
+    """Minimal httpx-Response stand-in for the Anthropic Messages API."""
+
+    def __init__(self, *, status_code: int = 200, body: dict[str, Any] | None = None, text: str = ""):
+        self.status_code = status_code
+        self._body = body if body is not None else {}
+        self.text = text
+
+    def json(self) -> dict[str, Any]:
+        return self._body
+
+
+class FakeAnthropicClient:
+    """Records ``/v1/messages`` POSTs and returns queued fake responses."""
+
+    def __init__(self, responses: list[FakeAnthropicResponse]):
+        self._responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    async def post(self, path: str, *, json: dict[str, Any]) -> FakeAnthropicResponse:
+        self.calls.append({"path": path, "json": json})
+        if self._responses:
+            return self._responses.pop(0)
+        return FakeAnthropicResponse(body={"content": [], "stop_reason": "end_turn"})
+
+
+def _anthropic_review_body(review_json: str) -> dict[str, Any]:
+    return {
+        "content": [{"type": "text", "text": review_json}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 21, "output_tokens": 7},
+    }
+
+
+def _make_anthropic_backend(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    *,
+    responses: list[FakeAnthropicResponse],
+    judge_bundle: dict[str, Any],
+    claude_model: str = "claude-opus-4-8",
+) -> tuple[CriticAgentBackend, FakeAnthropicClient]:
+    fake_client = FakeAnthropicClient(responses)
+    fake_caller = _make_fake_runtime(judge_bundle=judge_bundle)
+    backend = CriticAgentBackend(
+        critic_agent_root=fake_critic_root,
+        session_dir=fake_session_dir,
+        protocol="anthropic",
+        claude_model=claude_model,
+        codex_model="gpt-5.4",
+        anthropic_client_factory=lambda: fake_client,
+        runtime_caller_factory=lambda: fake_caller,
+    )
+    return backend, fake_client
+
+
+@pytest.mark.asyncio
+async def test_anthropic_protocol_single_proposal_yields_verdict(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "merged_context": {"model": "Llama-3.1-8B", "framework": "sglang"},
+        "missing_context": [],
+        "required_context": [],
+        "proposals": [
+            {
+                "msg_id": "abc1",
+                "from_agent": "orchestration",
+                "action_name": "baseline",
+                "predicted_gain_pct": 0.0,
+                "payload": {"action_name": "baseline"},
+            }
+        ],
+        "kb_priors_by_proposal": {"abc1": []},
+        "kb_read_skipped_reason": None,
+        "review_constraints": {"allowed_verdicts": ["approve", "reject"]},
+        "notes": [],
+    }
+    review_json = (
+        '{"review_verdicts": [{"target_proposal_msg_id": "abc1", '
+        '"verdict": "approve", "source": "critic", "reasoning": "canonical baseline"}]}'
+    )
+    backend, fake_client = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        responses=[FakeAnthropicResponse(body=_anthropic_review_body(review_json))],
+        judge_bundle=judge_bundle,
+    )
+
+    res = await backend.run("prompt-with-proposal-abc1", system_prompt="critic system")
+
+    # Full KB+tools critic-agent produced the verdict via the native Anthropic path.
+    assert len(res.intents) == 1
+    assert res.intents[0].type == IntentType.REVIEW_VERDICT
+    assert res.intents[0].payload["target_proposal_msg_id"] == "abc1"
+    assert res.intents[0].payload["verdict"] == "approve"
+    # The review ran on the Claude model over /v1/messages with a system field.
+    assert res.metadata["model"] == "claude-opus-4-8"
+    assert len(fake_client.calls) == 1
+    assert fake_client.calls[0]["path"] == "/v1/messages"
+    payload = fake_client.calls[0]["json"]
+    assert payload["model"] == "claude-opus-4-8"
+    assert payload["system"]
+    assert payload["messages"][-1]["role"] == "user"
+    assert all(m["role"] != "system" for m in payload["messages"])
+
+    # Token usage from the Anthropic usage block landed on the critic trace row.
+    import json as _json
+    from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+
+    critic_rows = [
+        _json.loads(line)
+        for line in llm_calls_path(fake_session_dir).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    critic_rows = [r for r in critic_rows if r["component"] == "critic"]
+    assert critic_rows
+    assert critic_rows[0]["input_tokens"] == 21
+    assert critic_rows[0]["output_tokens"] == 7
+    assert critic_rows[0]["model"] == "claude-opus-4-8"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_protocol_non_2xx_raises(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+):
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "merged_context": {"model": "m", "framework": "sglang"},
+        "proposals": [
+            {"msg_id": "p1", "from_agent": "orchestration", "action_name": "baseline", "payload": {}}
+        ],
+        "review_constraints": {},
+    }
+    backend, _ = _make_anthropic_backend(
+        fake_critic_root,
+        fake_session_dir,
+        responses=[FakeAnthropicResponse(status_code=401, body={}, text="unauthorized")],
+        judge_bundle=judge_bundle,
+    )
+    with pytest.raises(BackendError, match="Anthropic API call failed"):
+        await backend.run("prompt", system_prompt="critic system")
+
+
+def test_anthropic_text_from_content_joins_text_blocks():
+    content = [
+        {"type": "text", "text": "hello "},
+        {"type": "tool_use", "id": "x"},
+        {"type": "text", "text": "world"},
+    ]
+    assert _anthropic_text_from_content(content) == "hello world"
+    assert _anthropic_text_from_content(None) == ""
+    assert _anthropic_text_from_content("nope") == ""
+
+
+def test_accumulate_anthropic_usage_folds_tokens_and_tolerates_garbage():
+    acc = {"input_tokens": 0, "output_tokens": 0}
+    CriticAgentBackend._accumulate_anthropic_usage(acc, {"input_tokens": 3, "output_tokens": 4})
+    CriticAgentBackend._accumulate_anthropic_usage(acc, {"input_tokens": "x", "output_tokens": None})
+    CriticAgentBackend._accumulate_anthropic_usage(acc, None)
+    assert acc == {"input_tokens": 3, "output_tokens": 4}

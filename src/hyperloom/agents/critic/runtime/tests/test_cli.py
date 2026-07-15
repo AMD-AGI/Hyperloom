@@ -124,10 +124,7 @@ def test_invalid_request_returns_exit_code_2(tmp_path):
     assert rc == 2
 
 
-# ---------------------------------------------------------------------------
-# Low-level KB commands (inmemory client): these exercise the tooling
-# subcommands the SKILL bash allowlist keeps around for operators.
-# ---------------------------------------------------------------------------
+# Low-level KB commands (inmemory client).
 
 _PACKET = {
     "context": {
@@ -267,8 +264,7 @@ def test_replay_dead_letter_dispatches_queued_records(tmp_path):
     dlq_dir = tmp_path / "dlq_dispatch"
     dlq = DeadLetter(root=dlq_dir)
     common = {"attempts": 1, "last_error": "boom"}
-    # Endpoints stored in the DLQ use filesystem-safe names (no "/"); edges
-    # failures are recorded under "upsert", so those are the retryable files.
+    # Endpoints stored in the DLQ use filesystem-safe names (no "/").
     dlq.append("upsert", {"id": "kb_x", "kind": "pitfall", "scope": {}}, **common)
     dlq.append("batch_insert", {"items": [{"id": "kb_y", "kind": "recipe", "scope": {}}]}, **common)
     dlq.append("list", {"scope_filter": {}, "limit": 5}, **common)
@@ -288,7 +284,6 @@ def test_replay_dead_letter_dispatches_queued_records(tmp_path):
     summary = json.loads(out_path.read_text("utf-8"))
     assert isinstance(summary, dict)
 
-    # Directly exercise the remaining _replay_dispatch branches.
     client = InMemoryKBClient()
     _replay_dispatch(client, "edges/add", {"edges": []})
     with pytest.raises(RuntimeAdapterError):
@@ -300,20 +295,6 @@ def test_commit_review_rejects_non_object_review(tmp_path):
     review = _write(tmp_path / "review.json", ["not", "a", "dict"])
     rc = main(["commit-review", "--request", str(request), "--review", str(review)])
     assert rc == 2
-
-
-def test_resolve_kb_client_cortex_requires_url(monkeypatch, tmp_path):
-    from hyperloom.agents.critic.runtime.cli import _resolve_kb_client
-    from hyperloom.agents.critic.runtime.errors import RuntimeAdapterError
-
-    monkeypatch.setenv("CRITIC_KB_CLIENT_MODE", "cortex")
-    monkeypatch.delenv("CORTEX_KB_URL", raising=False)
-    with pytest.raises(RuntimeAdapterError, match="CORTEX_KB_URL"):
-        _resolve_kb_client()
-
-    monkeypatch.setenv("CORTEX_KB_URL", "http://cortex.invalid")
-    client = _resolve_kb_client()
-    assert client is not None
 
 
 def test_resolve_kb_client_live_requires_url(monkeypatch):

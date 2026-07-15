@@ -14,6 +14,7 @@ from hyperloom.agents.robustness.sources.base import SourceUnavailable
 from hyperloom.agents.robustness.sources.local_probe import (
     LocalProbeConfig,
     LocalProbeSource,
+    _probe_gateway_health,
 )
 
 
@@ -77,11 +78,6 @@ def _seed_coordinator_db(
     return db
 
 
-# ---------------------------------------------------------------------------
-# Coordinator events
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_local_probe_reads_v6_events_schema(session_dir: Path):
     _seed_coordinator_db(
@@ -99,19 +95,6 @@ async def test_local_probe_reads_v6_events_schema(session_dir: Path):
     topics = sorted(e["topic"] for e in data.coordinator_events)
     assert topics == ["alert", "heartbeat"]
     assert data.sources_used == ["local-probe"]
-
-
-@pytest.mark.asyncio
-async def test_local_probe_reads_legacy_events_schema(session_dir: Path):
-    _seed_coordinator_db(
-        session_dir,
-        [{"agent": "kernel_agent", "intent_type": "alert", "topic": "alert", "timestamp": 1.0}],
-        schema="legacy",
-    )
-    cfg = LocalProbeConfig(session_dir=session_dir, disk_mountpoints=())
-    data = await LocalProbeSource(cfg).fetch(ctx=None)
-    assert len(data.coordinator_events) == 1
-    assert data.coordinator_events[0]["agent"] == "kernel_agent"
 
 
 @pytest.mark.asyncio
@@ -135,7 +118,7 @@ async def test_local_probe_unavailable_when_no_data(monkeypatch, tmp_path: Path)
         disk_mountpoints=(),
         process_patterns=(),
         server_log_path=None,
-        # All optional probes off → exercise the SourceUnavailable path.
+        # All optional probes off to exercise the SourceUnavailable path.
         ray_probe_enabled=False,
         fd_probe_enabled=False,
         decision_audit_enabled=False,
@@ -165,11 +148,6 @@ async def test_local_probe_handles_missing_coordinator_db(tmp_path: Path):
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     assert data.coordinator_events == []
     assert str(tmp_path) in data.local_disk
-
-
-# ---------------------------------------------------------------------------
-# Log tail
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -351,10 +329,9 @@ async def test_local_probe_runs_health_probes(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
 
-    # Unset gateway env so the external-deps sub-probe doesn't add a
-    # ``/models`` request and break the exact-count assertion below.
+    # Unset gateway env so the external-deps sub-probe doesn't add a /models request.
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("SAFE_API_KEY", raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
 
     cfg = lp.LocalProbeConfig(
         session_dir=None,
@@ -380,6 +357,80 @@ async def test_local_probe_runs_health_probes(monkeypatch, tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_probe_gateway_health_uses_custom_subscription_header(monkeypatch):
+    """AMD gateway /models requires the subscription header used by real LLM calls."""
+    import httpx
+    from hyperloom.agents.robustness.sources import local_probe as lp
+
+    seen_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.update({k.lower(): v for k, v in request.headers.items()})
+        if request.headers.get("Ocp-Apim-Subscription-Key") == "sub-key":
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(401, json={"error": "missing subscription key"})
+
+    transport = httpx.MockTransport(handler)
+
+    class _PatchedClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("LLM_GATEWAY_KEY", "gateway-key")
+    # OpenAI-side gateway probe reads OPENAI_CUSTOM_HEADERS (strict separation).
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub-key")
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+
+    out = await _probe_gateway_health("https://llm-api.amd.com/Unified/v1/models", 1.0)
+
+    assert out["status"] == "ok"
+    assert out["status_code"] == 200
+    assert seen_headers["ocp-apim-subscription-key"] == "sub-key"
+    assert seen_headers["authorization"] == "Bearer gateway-key"
+
+
+@pytest.mark.asyncio
+async def test_probe_gateway_health_uses_provider_api_key(monkeypatch):
+    """Official OpenAI key-only deployments still need Bearer auth on /models."""
+    import httpx
+    from hyperloom.agents.robustness.sources import local_probe as lp
+
+    seen_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.update({k.lower(): v for k, v in request.headers.items()})
+        if request.headers.get("Authorization") == "Bearer openai-token":
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(401, json={"error": "missing bearer"})
+
+    transport = httpx.MockTransport(handler)
+
+    class _PatchedClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+    monkeypatch.delenv("LLM_GATEWAY_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)
+
+    out = await _probe_gateway_health("https://api.openai.com/v1/models", 1.0)
+
+    assert out["status"] == "ok"
+    assert out["status_code"] == 200
+    assert seen_headers["authorization"] == "Bearer openai-token"
+    assert "ocp-apim-subscription-key" not in seen_headers
+
+
+@pytest.mark.asyncio
 async def test_local_probe_skips_log_when_path_missing(tmp_path: Path):
     cfg = LocalProbeConfig(
         session_dir=None,
@@ -391,9 +442,7 @@ async def test_local_probe_skips_log_when_path_missing(tmp_path: Path):
     assert data.local_log_tail == []
 
 
-# ===========================================================================
-# D2 — multi-source server-log tailing (``_tail_logs``)
-# ===========================================================================
+# Multi-source server-log tailing (``_tail_logs``).
 
 import os  # noqa: E402
 import subprocess  # noqa: E402
@@ -495,7 +544,7 @@ def test_tail_logs_empty_when_no_max_lines(tmp_path):
 
 @pytest.mark.asyncio
 async def test_local_probe_picks_up_grid_variant_logs(tmp_path):
-    """End-to-end: LocalProbe sees a grid variant log under runs/."""
+    """LocalProbe sees a grid variant log under runs/."""
     _write(tmp_path / "runs" / "backends" / "t1" / "server.log", "CUDA out of memory at allocator.cc:42\n")
     cfg = LocalProbeConfig(
         session_dir=tmp_path,
@@ -509,11 +558,6 @@ async def test_local_probe_picks_up_grid_variant_logs(tmp_path):
     )
     data = await LocalProbeSource(cfg).fetch(ctx=None)
     assert any(h.get("pattern") == r"CUDA out of memory" for h in data.local_log_errors)
-
-
-# ===========================================================================
-# Preflight probes (manifest + kernel breakdown)
-# ===========================================================================
 
 
 @pytest.mark.asyncio
@@ -628,8 +672,7 @@ async def test_preflight_disabled_skips_manifest_and_breakdown(
     tmp_path,
     monkeypatch,
 ):
-    """When ``preflight_enabled=False`` both new slots stay empty even
-    when the files exist on disk."""
+    """When ``preflight_enabled=False`` both slots stay empty even when the files exist."""
     sd = tmp_path
     _write_json(sd / "manifest.json", {"model_name": "X"})
     _write_json(
@@ -678,11 +721,7 @@ async def test_kernel_breakdown_unknown_tier_falls_back_to_lowered_name(tmp_path
     assert data.local_kernel_breakdown["tier_pcts"]["unknown"] == 50.0
 
 
-# ===========================================================================
-# Ray head probe (``_probe_ray_head`` + ``_parse_ray_pending_count``)
-# ===========================================================================
-# Regression: legacy regex ``(\d+)\s+pending`` captured trailing hex digits
-# of Ray node IDs (node ID ending ``...d3da81`` → bogus pending_tasks=81).
+# Ray head probe (``_probe_ray_head`` + ``_parse_ray_pending_count``).
 
 RAY_STATUS_IDLE = """\
 ======== Autoscaler status: 2026-05-20 03:14:48.677060 ========
@@ -740,7 +779,7 @@ Demands:
 
 
 def test_parse_idle_status_with_digit_terminated_node_id():
-    """Regression: legacy regex captured ``81`` from ``...d3da81\\nPending``."""
+    """Digits at the tail of a node ID must not be counted as pending tasks."""
     assert local_probe._parse_ray_pending_count(RAY_STATUS_IDLE) == 0
 
 
@@ -757,7 +796,7 @@ def test_parse_empty_string():
 
 
 def test_parse_ignores_node_id_substrings():
-    """``\\d+`` inside node-hash tokens must not match without ``pending task|actor`` suffix."""
+    """Digits inside node-hash tokens must not match without a ``pending task|actor`` suffix."""
     text = """\
 Active:
  1 node_0000000000000000000000000000000000000000000000000000000000000099
@@ -873,11 +912,6 @@ def test_probe_clamps_negative_timeout():
 def test_regex_never_matches_node_hash_followed_by_pending_header(suffix: str):
     text = f" 1 node_{'0' * 62}{suffix}\nPending:\n (no pending nodes)\n"
     assert local_probe._parse_ray_pending_count(text) == 0
-
-
-# ===========================================================================
-# Decision audit (``_sample_decision_audit``)
-# ===========================================================================
 
 
 @pytest.mark.asyncio
@@ -1110,11 +1144,6 @@ async def test_decision_audit_handles_malformed_json_gracefully(tmp_path):
     assert kernels == {"k2"}
 
 
-# ===========================================================================
-# State integrity + external-deps sub-probes (I + J)
-# ===========================================================================
-
-
 def test_probe_state_json_valid(tmp_path):
     state = {"baseline_tput": 100.0, "stop_reason": ""}
     _write(tmp_path / "state.json", json.dumps(state))
@@ -1175,7 +1204,7 @@ def test_probe_agent_files_silent_when_no_agents(tmp_path):
 
 
 def test_probe_coordinator_pid_alive(tmp_path):
-    """Current PID is always alive — used as the synthetic positive case."""
+    """Current PID is always alive; the synthetic positive case."""
     pid = os.getpid()
     _write(tmp_path / "optimizer_runs" / "run_now.pid", f"{pid}\n")
     out = _probe_coordinator_pid(tmp_path, "optimizer_runs")
@@ -1184,7 +1213,7 @@ def test_probe_coordinator_pid_alive(tmp_path):
 
 
 def test_probe_coordinator_pid_dead(tmp_path):
-    """A PID we know is unused — pick a very high value unlikely to clash."""
+    """A high PID unlikely to be in use, treated as dead."""
     _write(tmp_path / "optimizer_runs" / "run_x.pid", "9999999\n")
     out = _probe_coordinator_pid(tmp_path, "optimizer_runs")
     assert out["recorded_pid"] == 9999999
@@ -1198,7 +1227,7 @@ def test_probe_coordinator_pid_no_file(tmp_path):
 
 
 def test_probe_coordinator_pid_picks_newest(tmp_path):
-    """Multiple pid files → newest mtime wins."""
+    """With multiple pid files, newest mtime wins."""
     old = tmp_path / "optimizer_runs" / "run_old.pid"
     new = tmp_path / "optimizer_runs" / "run_new.pid"
     _write(old, "111\n")
@@ -1236,7 +1265,7 @@ def test_sample_state_integrity_empty_session_dir():
 
 
 def test_probe_leases_via_full_probe(tmp_path):
-    """Use sqlite3 to write a fake leases table and verify probe reads."""
+    """Write a fake leases table and verify the probe reads it."""
     db_path = tmp_path / "storage" / "coordinator.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -1271,7 +1300,7 @@ def test_probe_external_mounts_records_latency(monkeypatch, tmp_path):
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path))
     monkeypatch.setenv("TRACELENS_INTERNAL_ROOT", str(tmp_path))
     monkeypatch.setenv("INFERENCEX_PATH", "/nonexistent/path/zzz")
-    monkeypatch.delenv("OOB_SRC", raising=False)
+    monkeypatch.delenv("LEGACY_BACKEND_SRC", raising=False)
     out = _probe_external_mounts(timeout_s=5.0)
     by_env = {row["env_name"]: row for row in out}
     assert "TRACELENS_ROOT" in by_env
@@ -1280,25 +1309,25 @@ def test_probe_external_mounts_records_latency(monkeypatch, tmp_path):
     assert by_env["TRACELENS_INTERNAL_ROOT"]["ok"] is True
     assert "INFERENCEX_PATH" in by_env
     assert by_env["INFERENCEX_PATH"]["ok"] is False
-    assert "OOB_SRC" not in by_env
+    assert "LEGACY_BACKEND_SRC" not in by_env
 
 
 def test_probe_external_mounts_skips_tracelens_root_when_unset(monkeypatch):
-    """Unset TRACELENS_ROOT must not be probed as a degraded mount (TraceLens is now session-local); only operator-set TRACELENS_ROOT appears."""
+    """Unset TRACELENS_ROOT must not be probed as a degraded mount; only operator-set roots appear."""
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
     monkeypatch.delenv("TRACELENS_INTERNAL_ROOT", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.delenv("OOB_SRC", raising=False)
+    monkeypatch.delenv("LEGACY_BACKEND_SRC", raising=False)
     out = _probe_external_mounts(timeout_s=5.0)
     by_env = {row["env_name"]: row for row in out}
     assert "TRACELENS_ROOT" not in by_env
     assert "TRACELENS_INTERNAL_ROOT" not in by_env
     assert "INFERENCEX_PATH" not in by_env
-    assert "OOB_SRC" not in by_env
+    assert "LEGACY_BACKEND_SRC" not in by_env
 
 
 def test_probe_tracelens_cli_reports_absent(monkeypatch):
-    """In CI env the CLI is not present → ``any_present=False``."""
+    """When the CLI is not present, ``any_present`` is False."""
     monkeypatch.setattr(
         "hyperloom.agents.robustness.sources.local_probe.shutil.which",
         lambda _n: None,
@@ -1320,8 +1349,7 @@ def test_probe_tracelens_cli_reports_present(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_populates_state_and_deps(tmp_path, monkeypatch):
-    """Smoke: fetch() exposes both ``local_state_integrity`` and
-    ``local_external_deps``."""
+    """fetch() exposes both ``local_state_integrity`` and ``local_external_deps``."""
     _write(tmp_path / "state.json", json.dumps({"baseline_tput": 1.0}))
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path))

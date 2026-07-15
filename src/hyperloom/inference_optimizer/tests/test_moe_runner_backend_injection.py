@@ -2,12 +2,8 @@
 
 """sglang ``--moe-runner-backend`` injection tests.
 
-MoE models served by sglang on MI300X/MI355X (aiter) route through aiter's CK
-2-stage fused-MoE kernel by default (``--moe-runner-backend auto``); its
-first-request JIT build is broken in some ROCm images (missing cub header ->
-hipcc fail -> stale lock -> 600s warmup timeout -> baseline_failed). Hyperloom
-injects ``--moe-runner-backend triton`` for MoE sglang models on AMD unless the
-operator already pinned one. Exercised at both the pure-helper and
+Hyperloom injects ``--moe-runner-backend triton`` for MoE sglang models on AMD
+unless the operator already pinned one. Exercised at both the pure-helper and
 ``materialize_config_with_envs`` layers.
 """
 
@@ -19,7 +15,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND,
@@ -40,9 +35,7 @@ def _hermetic_env(monkeypatch):
     monkeypatch.delenv(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, raising=False)
     monkeypatch.delenv("GPU_TYPE", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    # Without an explicit/env GPU type, _resolve_amd_gpu_type falls back to
-    # autodetect; pin it OFF so non-AMD test cases never see real hardware.
-    # Lives in cli_model_gate after the phase-6D fold; patch the real call site.
+    # Pin autodetect OFF so non-AMD test cases never see real hardware.
     monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
     for key in (
         "CONC",
@@ -102,7 +95,7 @@ def dense_model(tmp_path) -> str:
 )
 def test_model_is_moe_true(tmp_path, config):
     path = _write_model_config(tmp_path / "m", config)
-    assert cli._model_is_moe(path) is True
+    assert cli_model_gate._model_is_moe(path) is True
 
 
 @pytest.mark.parametrize(
@@ -116,11 +109,11 @@ def test_model_is_moe_true(tmp_path, config):
 )
 def test_model_is_moe_false(tmp_path, config):
     path = _write_model_config(tmp_path / "m", config)
-    assert cli._model_is_moe(path) is False
+    assert cli_model_gate._model_is_moe(path) is False
 
 
 def test_model_is_moe_missing_config_is_false(tmp_path):
-    assert cli._model_is_moe(str(tmp_path / "does-not-exist")) is False
+    assert cli_model_gate._model_is_moe(str(tmp_path / "does-not-exist")) is False
 
 
 # inject_sglang_moe_runner_backend (pure helper)

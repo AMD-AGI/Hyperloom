@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import framework_registry
+from hyperloom.common.env import env_bool
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     CodexBackend,
@@ -29,14 +30,100 @@ from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 _KERNEL_AGENT_DEFAULT_MAX_TURNS = 5
 
 
+def _official_anthropic_only() -> bool:
+    """True when only the Anthropic-side endpoint is available."""
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    return has_anthropic and not has_openai
+
+
+def _official_openai_only() -> bool:
+    """True when only the OpenAI-side endpoint is available."""
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    has_anthropic = bool(
+        (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    return has_openai and not has_anthropic
+
+
+def _deepseek_only() -> bool:
+    """True for a DeepSeek-keyed provider-only config with no Anthropic key.
+
+    DeepSeek is natively OpenAI-compatible, so its critic review runs over the
+    DeepSeek OpenAI endpoint. An explicit Anthropic key takes precedence.
+    """
+    has_deepseek = bool(
+        (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
+        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    )
+    has_anthropic_key = bool(
+        (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+    )
+    has_openai = bool(
+        (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+    )
+    return has_deepseek and not has_anthropic_key and not has_openai
+
+
+def _deepseek_openai_client_factory() -> Any:
+    """Build a factory that points the critic's OpenAI client at DeepSeek.
+
+    DeepSeek exposes an OpenAI-compatible ``/chat/completions`` API, so the
+    critic-agent's OpenAI review path works once the client base URL / key are
+    set to DeepSeek, without mutating the process env. The OpenAI SDK appends
+    the route to ``base_url`` verbatim, so the default carries the ``/v1``
+    suffix; an explicit ``DEEPSEEK_BASE_URL`` is respected as-is.
+    """
+    base_url = (os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/v1").strip().rstrip("/")
+    api_key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+
+    def _factory() -> Any:
+        from openai import AsyncOpenAI  # local import: keep module import-light
+
+        return AsyncOpenAI(base_url=base_url, api_key=api_key)
+
+    return _factory
+
+
+def _load_action_verdict_policy() -> dict[str, str]:
+    """Return the registry-derived per-action verdict policy (or empty on error).
+
+    Feeds ``review_constraints.action_verdict_policy[<action_name>]`` so the
+    critic-agent approves exploration / archival actions without demanding the
+    before/after evidence they themselves produce.
+    """
+    try:
+        from hyperloom.orchestrator.actions.registry import ActionRegistry
+
+        _reg = ActionRegistry().load()
+        return {a.name: a.verdict_class for a in _reg.all()}
+    except Exception:  # noqa: BLE001 — degrade to empty policy
+        return {}
+
+
 def _resolve_kernel_agent_max_turns() -> int:
     """Resolve the kernel_agent Claude turn budget.
 
     Reads ``INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS`` (a positive int);
-    falls back to ``_KERNEL_AGENT_DEFAULT_MAX_TURNS`` (5, unchanged default)
-    on unset/invalid/<=0. Lets an operator raise the budget to avoid a
-    "Reached maximum number of turns" failure on complex kernel tasks
-    without editing the reactor logic.
+    falls back to ``_KERNEL_AGENT_DEFAULT_MAX_TURNS`` on unset/invalid/<=0.
     """
     raw = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "").strip()
     if not raw:
@@ -63,6 +150,7 @@ def _build_backends(
     robustness_agent_root: Path | None = None,
     robustness_options: dict[str, Any] | None = None,
     no_kernel: bool = False,
+    codex_follows_claude: bool = False,
 ) -> dict[str, Any]:
     """Construct all per-role backends.
 
@@ -99,32 +187,54 @@ def _build_backends(
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
+    provider_anthropic_only = codex_follows_claude or _official_anthropic_only()
+    provider_openai_only = (not codex_follows_claude) and _official_openai_only()
+
     if critic_choice == "mock":
         critic_backend: Any = MockCriticBackend()
+    elif provider_anthropic_only and critic_agent_root is not None:
+        # Provider-only: keep the full KB+tools critic-agent, driving review
+        # inference over the native provider endpoint (DeepSeek OpenAI-compatible
+        # or Anthropic /v1/messages).
+        _policy = _load_action_verdict_policy()
+        if _deepseek_only():
+            critic_backend = CriticAgentBackend(
+                critic_agent_root=critic_agent_root,
+                session_dir=session_dir,
+                protocol="openai",
+                codex_model=claude_model,
+                codex_client_factory=_deepseek_openai_client_factory(),
+                kb_mode=critic_kb_mode,
+                cortex_kb_url=cortex_kb_url,
+                action_verdict_policy=_policy,
+            )
+        else:
+            critic_backend = CriticAgentBackend(
+                critic_agent_root=critic_agent_root,
+                session_dir=session_dir,
+                protocol="anthropic",
+                claude_model=claude_model,
+                codex_model=codex_model,
+                kb_mode=critic_kb_mode,
+                cortex_kb_url=cortex_kb_url,
+                action_verdict_policy=_policy,
+            )
+    elif provider_anthropic_only:
+        # Fallback: critic-agent runtime unresolved, degrade to Claude tool-use.
+        critic_backend = ClaudeBackend(
+            model=claude_model,
+            max_turns_default=4,
+        )
     else:  # "agent"
         if critic_agent_root is None:
             raise ValueError("_build_backends: critic_choice='agent' requires critic_agent_root")
-        # Feed the registry-derived per-action verdict policy so the
-        # critic-agent runtime sees
-        # ``review_constraints.action_verdict_policy[<action_name>]`` and
-        # approves exploration / archival actions without demanding the
-        # before/after evidence they themselves produce.
-        try:
-            from hyperloom.orchestrator.actions.registry import (
-                ActionRegistry,
-            )
-
-            _reg = ActionRegistry().load()
-            _policy = {a.name: a.verdict_class for a in _reg.all()}
-        except Exception:  # noqa: BLE001 — degrade to empty policy
-            _policy = {}
         critic_backend = CriticAgentBackend(
             critic_agent_root=critic_agent_root,
             session_dir=session_dir,
             codex_model=codex_model,
             kb_mode=critic_kb_mode,
             cortex_kb_url=cortex_kb_url,
-            action_verdict_policy=_policy,
+            action_verdict_policy=_load_action_verdict_policy(),
         )
 
     if robustness_choice not in ("mock", "agent"):
@@ -140,29 +250,39 @@ def _build_backends(
             options=robustness_options,
         )
 
-    backends: dict[str, Any] = {
-        # Orchestration runs as a persistent ReAct conversation: the same
-        # Claude session is resumed across ticks so the
-        # model's plan / chain-of-thought persists instead of being
-        # re-derived from a full state dump each turn. The conversational
-        # floors (max_turns / call_timeout) are applied inside
-        # ClaudeBackend.__post_init__. kernel / critic / robustness keep
-        # the stateless per-tick reactor mode.
-        "orchestration": ClaudeBackend(
+    if provider_openai_only:
+        # Official OpenAI has no Claude endpoint; use the Codex backend for
+        # Orchestration so an OpenAI-only config can drive the coordinator.
+        orchestration_backend: Any = CodexBackend(model=codex_model)
+    else:
+        # Orchestration runs as a persistent ReAct conversation: the Claude
+        # session is resumed across ticks so the plan persists.
+        orchestration_backend = ClaudeBackend(
             model=claude_model,
             max_turns_default=4,
             conversational=True,
-        ),
+        )
+
+    backends: dict[str, Any] = {
+        "orchestration": orchestration_backend,
         "critic": critic_backend,
         "robustness": robustness_backend,
     }
     if not no_kernel:
-        if kernel_codex:
-            backends["kernel_agent"] = CodexBackend(model=codex_model)
-        else:
+        if provider_anthropic_only:
             backends["kernel_agent"] = ClaudeBackend(
                 model=claude_model,
                 max_turns_default=_resolve_kernel_agent_max_turns(),
+            )
+        elif provider_openai_only or kernel_codex:
+            backends["kernel_agent"] = CodexBackend(model=codex_model)
+        else:
+            # Opt-in (default off): resume the kernel Claude session across LLM
+            # turns for prompt-cache continuity.
+            backends["kernel_agent"] = ClaudeBackend(
+                model=claude_model,
+                max_turns_default=_resolve_kernel_agent_max_turns(),
+                conversational=env_bool("INFERENCE_OPTIMIZER_KERNEL_CLAUDE_CONVERSATIONAL", False),
             )
     return backends
 
@@ -173,16 +293,18 @@ def _build_proposal_scorer(
 ) -> ProposalScorer | None:
     """Construct the advisory specialist-proposal scorer, or ``None``.
 
-    Returns ``None`` when ``--no-proposal-scoring`` is set or the resolved
+    Disabled by default: returns ``None`` unless ``--proposal-scoring`` is
+    passed. Even when enabled, still returns ``None`` in Anthropic-only
+    deployments (the scorer is OpenAI-compatible only) or when the resolved
     model list is empty (defaults to :data:`DEFAULT_SCORER_MODELS`). The
-    scorer is purely advisory and never gates anything.
+    scorer is purely advisory and never gates anything. The flag is not
+    persisted across ``--resume``.
 
     ``session_dir`` is forwarded so the scorer can append its per-model
-    token usage to the full-trace ledger (component=proposal_scorer); when
-    omitted the scorer simply skips trace writes.
+    token usage to the full-trace ledger; when omitted trace writes are skipped.
 
     Args:
-        args: Parsed CLI args (``no_proposal_scoring`` /
+        args: Parsed CLI args (``proposal_scoring`` /
             ``proposal_scorer_models``).
         session_dir: Optional session directory for token-usage trace writes.
 
@@ -190,7 +312,10 @@ def _build_proposal_scorer(
         A configured :class:`ProposalScorer`, or ``None`` when scoring is
         disabled or no models resolve.
     """
-    if getattr(args, "no_proposal_scoring", False):
+    if not getattr(args, "proposal_scoring", False):
+        return None
+    if _official_anthropic_only():
+        # ProposalScorer is OpenAI-compatible only.
         return None
     raw = getattr(args, "proposal_scorer_models", None)
     if raw is None:
@@ -239,21 +364,15 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
     Only emits keys the operator actually passed so the runtime CLI falls
     back to its own defaults / env-discovery for the rest.
 
-    Multi-node policy (``--nodes >= 2``): the agent must source signals
-    from the cluster (robustness-server) rather than the local sandbox,
-    else the per-pod LocalProbe trips false ``ray_head_dead`` /
-    ``local_server_unreachable`` symptoms. We therefore default
-    ``disable_local_probe`` + ``enable_cluster_pod_metrics`` to True,
-    forward a workload_uid hint, disable the 127.0.0.1:8888 auto-probe,
-    and lift the ``no_levers_found`` floor to 60 min.
+    Multi-node (``--nodes >= 2``): defaults ``disable_local_probe`` +
+    ``enable_cluster_pod_metrics`` to True, forwards a workload_uid hint,
+    disables the 127.0.0.1:8888 auto-probe, and lifts the ``no_levers_found``
+    floor to 60 min so cluster-sourced signals replace the local sandbox.
 
     Single-node opt-in: ``--robustness-disable-server-probe`` sets
-    ``auto_probe_inference_server=False`` so the 127.0.0.1:8888 /health
-    probe is silenced (the optimizer's per-benchmark server restarts
-    otherwise trip the same false ``local_server_unreachable``), while the
-    rest of LocalProbe keeps running. All other single-node semantics stay
-    untouched. Scriptable (server-less) frameworks (e.g. xDiT) default the
-    same probe OFF since they never run an inference server.
+    ``auto_probe_inference_server=False`` to silence the 127.0.0.1:8888 /health
+    probe while the rest of LocalProbe keeps running. Scriptable (server-less)
+    frameworks (e.g. xDiT) default the same probe OFF.
 
     Args:
         args: Parsed CLI args carrying the robustness-related flags.
@@ -307,23 +426,10 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
         if cat_list:
             options["pod_metrics_categories"] = cat_list
 
-    # ``auto_probe_inference_server`` controls the 127.0.0.1:8888 /health
-    # auto-probe inside LocalProbe.
-    #   * Multi-node: the inference server lives in the head pod, so the probe
-    #     can never succeed and would flood the bus with false-positive
-    #     ``local_server_unreachable`` symptoms — default it OFF.
-    #   * Single-node: the optimizer restarts the inference server between
-    #     benchmarks; those restart windows trip the SAME false positive (and
-    #     can escalate to a premature skip_to_close / robustness_escalated stop).
-    #     Operators opt in via ``--robustness-disable-server-probe``. Unlike
-    #     ``--robustness-disable-local-probe`` this is surgical: only the
-    #     127.0.0.1:8888 probe is silenced; the rest of LocalProbe (gpu-leak,
-    #     gateway 401, coordinator-zombie, aiter-JIT, disk/fd) keeps running.
-    #   * Scriptable (server-less) frameworks (e.g. xDiT diffusion): there is
-    #     never an inference server, so the 127.0.0.1:8888 probe can never
-    #     succeed and would false-fire local_server_unreachable every tick —
-    #     default it OFF (like multi-node). FRAMEWORK is exported before this
-    #     call; --framework wins, then $FRAMEWORK.
+    # ``auto_probe_inference_server`` controls the 127.0.0.1:8888 /health probe
+    # in LocalProbe. Default it OFF for multi-node (server lives in the head pod)
+    # and scriptable server-less frameworks; single-node operators opt in via
+    # ``--robustness-disable-server-probe``. --framework wins, then $FRAMEWORK.
     fw = (getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")).strip()
     scriptable_fw = framework_registry.is_scriptable(fw) if fw else False
     disable_server_probe = getattr(args, "robustness_disable_server_probe", None)
@@ -333,11 +439,8 @@ def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
         options["auto_probe_inference_server"] = not bool(disable_server_probe)
 
     if multi_node:
-        # B3 no_levers_found floor — multi-node large-model spends
-        # 35-50 min on sglang cold start + baseline + profile +
-        # turnaround alone before the first explore family runs, so lift
-        # the elapsed-time floor from 45 to 60 minutes (single-node
-        # default 45.0 stays untouched).
+        # Lift the no_levers_found elapsed-time floor to 60 min for multi-node
+        # (single-node default 45.0 stays untouched).
         options["progress_no_levers_min_minutes"] = 60.0
 
     return options

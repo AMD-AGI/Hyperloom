@@ -50,8 +50,7 @@ class _FakeChunk:
 
 
 class _FakeStream:
-    """Async iterator emulating an OpenAI streaming response: content deltas
-    followed by a final usage-only chunk (``include_usage``)."""
+    """Async iterator emulating an OpenAI streaming response: content deltas then a usage-only chunk."""
 
     def __init__(self, text: str, usage: _FakeUsage):
         self._chunks = [
@@ -187,11 +186,7 @@ async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
     assert row["component"] == "proposal_scorer"
     assert row["role"] == "proposal_scorer"
     assert row["model"] == "claude-opus-4-7"
-    # task_id threads onto the conversation row so its pair key matches the
-    # token row (and the collector can attribute the scoring spend).
     assert row["task_id"] == "spec-7"
-    # The prompt carries the scoring instructions + proposals; the reply is
-    # the model's verbatim (fenced) scores JSON.
     assert "cuda_graph_bs_512" in row["prompt"]
     assert "cuda_graph_bs_512" in row["response"]
 
@@ -200,7 +195,6 @@ async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
     assert scorer_rows
     r = scorer_rows[0]
     assert r["input_tokens"] == 120 and r["output_tokens"] == 30
-    # Attribution key + measured latency now land on the token row.
     assert r["task_id"] == "spec-7"
     assert r["latency_ms"] is not None and r["latency_ms"] >= 0
 
@@ -210,7 +204,6 @@ async def test_scoring_without_session_dir_writes_no_trace(tmp_path: Path):
     """The default (tests / no full-trace) path writes no conversation file."""
     scorer = _make_scorer({"m1": _scores_json(("cuda_graph_bs_512", 7.0, "x"))})
     await scorer.score(gap=_GAP, proposals=_PROPOSALS)
-    # session_dir is None → nothing on disk (and no crash).
     assert scorer.session_dir is None
 
 
@@ -459,7 +452,7 @@ def test_render_shows_per_model_side_by_side():
     text = st.to_proposal_scores_summary()
     assert "Advisory only" in text
     assert "cuda_graph_bs_512" in text
-    # Model slugs are anonymized to rater_N (sorted, stable).
+    # Model slugs are anonymized to rater_N.
     assert "claude-opus-4-7" not in text
     assert "gpt-5.4" not in text
     assert "rater_1=8.0" in text
@@ -482,7 +475,7 @@ def test_render_reports_unavailable_models():
         }
     ]
     text = st.to_proposal_scores_summary()
-    # Anonymized: failing slug "bad" -> rater_1, must not leak.
+    # Failing slug is anonymized and must not leak.
     assert "bad" not in text
     assert "raters unavailable this round: rater_1" in text
 
@@ -511,7 +504,7 @@ def test_render_rater_labels_stable_across_rounds():
             "ensemble_scores": {
                 "scale": "0-10",
                 "models": {
-                    # Different dict order: the label keys on slug, not order.
+                    # Different dict order: labels key on slug, not order.
                     "gpt-5.5": {"v2": {"score": 5.0, "reason": "c"}},
                     "claude-opus-4-8": {"v2": {"score": 9.0, "reason": "d"}},
                 },
@@ -522,7 +515,7 @@ def test_render_rater_labels_stable_across_rounds():
     text = st.to_proposal_scores_summary(max_rounds=2)
     for slug in ("claude-opus-4-8", "gpt-5.5", "claude", "gpt"):
         assert slug not in text, f"model slug {slug!r} leaked into prompt"
-    # claude-opus-4-8 sorts first → rater_1, stable across rounds.
+    # claude-opus-4-8 sorts first -> rater_1, stable across rounds.
     assert "rater_1=8.0" in text
     assert "rater_2=6.0" in text
     assert "rater_2=5.0" in text
@@ -551,16 +544,12 @@ async def test_resume_idempotent_on_round_id(tmp_path):
     assert len(c.shared_state.specialist_rounds) == 1
 
 
-# ---------------------------------------------------------------------------
-# Streaming behaviour: the Primus-Safe proxy requires stream=True, and the
-# per-call deadline must cover the full stream body (not just creation).
-# ---------------------------------------------------------------------------
+# Streaming: stream=True is required and the per-call deadline covers the full body.
 
 
 class _ScriptedStream:
-    """Async iterator yielding a caller-supplied list of chunks. If
-    ``stall`` is set, it hangs forever after the scripted chunks instead of
-    stopping — emulating a proxy that opens the stream then stalls mid-body."""
+    """Async iterator yielding caller-supplied chunks; with ``stall`` set it hangs
+    forever after them, emulating a proxy that opens the stream then stalls mid-body."""
 
     def __init__(self, chunks: list[Any], *, stall: bool = False):
         self._chunks = chunks
@@ -624,7 +613,7 @@ async def test_stream_flag_is_passed():
 
 @pytest.mark.asyncio
 async def test_multiple_content_chunks_are_accumulated():
-    # Split a valid scores JSON across several content deltas.
+    # Split a valid scores JSON across content deltas.
     body = _scores_json(("p", 7, "good"))
     third = len(body) // 3
     chunks = [
@@ -640,8 +629,7 @@ async def test_multiple_content_chunks_are_accumulated():
 
 @pytest.mark.asyncio
 async def test_stalled_stream_body_times_out():
-    # One content chunk, then the stream stalls forever: the deadline must
-    # cover the consumption loop, not just stream creation.
+    # Stream stalls after one chunk: the deadline must cover the consumption loop.
     chunks = [_content_chunk('{"scores": {')]
     scorer, _ = _scripted_scorer(chunks, stall=True, call_timeout_s=0.05)
     with pytest.raises(RuntimeError, match="timed out"):
@@ -650,7 +638,7 @@ async def test_stalled_stream_body_times_out():
 
 @pytest.mark.asyncio
 async def test_missing_usage_chunk_degrades_cleanly():
-    # No usage-bearing chunk at all: scoring still succeeds.
+    # No usage-bearing chunk: scoring still succeeds.
     chunks = [_content_chunk(_scores_json(("p", 4, "fine")))]
     scorer, _ = _scripted_scorer(chunks)
     out = await scorer._score_one_model("m", "prompt", ["p"])

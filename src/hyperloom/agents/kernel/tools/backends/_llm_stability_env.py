@@ -1,28 +1,17 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Shared LLM-transport stability env for claude-CLI / claude-agent-sdk / oob children.
+"""Shared LLM-transport stability env for claude-CLI / claude-agent-sdk / forge children.
 
-Hyperloom RCA (Sandbox hang): a streaming request to the SaFE/LiteLLM gateway
-can return a partial response (``stop_reason=None``) and then stop pushing
-chunks while the TCP connection stays alive. Hyperloom-owned idle monitors
-(process-log/heartbeat stale checks, or per-message SDK ``wait_for``) should
-decide whether that stream is stalled.
-
-``API_TIMEOUT_MS`` is opt-in because external clients may interpret it as a
-total request timeout, which could kill a legitimate long streaming response.
-The default helper only cuts non-essential / auto-update traffic that can also
-block in headless containers.
-
-This is the single source of truth for those knobs; ``forge_submit`` already
-applied them inline (its original RCA fix) and now delegates here. ``setdefault``
-semantics keep any operator-provided override authoritative.
+``API_TIMEOUT_MS`` is opt-in; the default helper only cuts non-essential /
+auto-update traffic that can block in headless containers. ``setdefault``
+keeps any operator-provided override authoritative.
 """
 
 from __future__ import annotations
 
 from typing import MutableMapping
 
-# Match forge's original mitigation (Hyperloom forge RCA root cause 4): 5 min.
+# 5 min.
 DEFAULT_API_TIMEOUT_MS = "300000"
 
 __all__ = ["DEFAULT_API_TIMEOUT_MS", "apply_llm_stability_env"]

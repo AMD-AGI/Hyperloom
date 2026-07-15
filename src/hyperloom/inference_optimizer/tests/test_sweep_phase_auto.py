@@ -2,10 +2,8 @@
 
 """SWEEP phase auto-dispatch tests.
 
-SWEEP entry must auto-construct a grid and enqueue the
-``sweep`` action (recipe grid wins over SKILL.md defaults). Covers the
-grid-builder helper, the enqueue + ``_on_enter_sweep`` hook, the e2e
-Coordinator path, and the PolicyGate ``sweep_phase_singleton`` rule.
+SWEEP entry dispatches ``conc_sweep`` directly; the full-workload ``sweep``
+helper is covered as a manual compatibility path.
 """
 
 from __future__ import annotations
@@ -41,11 +39,24 @@ class _BareState:
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     last_sweep: dict[str, Any] = field(default_factory=dict)
+    last_conc_sweep: dict[str, Any] = field(default_factory=dict)
+    last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
     cumulative_gain_validated: float = 0.0
+    conc_sweep_enabled: bool = True
+    conc_sweep_concs: list[int] = field(default_factory=lambda: [1, 2, 4])
+    conc_sweep_total_budget_sec: int = 60
+    conc_sweep_variant_timeout_sec: int = 30
     save_count: int = 0
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1
+
+    def record_conc_sweep(self, result: dict[str, Any]) -> None:
+        self.last_conc_sweep = {
+            "status": str(result.get("status") or "succeeded"),
+            "skip_reason": str(result.get("skip_reason") or ""),
+            "was_skipped": bool(result.get("was_skipped", False)),
+        }
 
 
 class _StubTaskRegistry:
@@ -239,7 +250,7 @@ def _patch_stack_validation_internals(monkeypatch, *, new_tput: float):
 def _stack_validation_coordinator(tmp_path: Path) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
-    # current_best already banks a +10% KEEP'd kernel, applied on disk.
+    # current_best already banks a +10% KEEP'd kernel
     c.shared_state = SharedState(
         baseline_tput=100.0,
         baseline_config_path=str(tmp_path / "base.yaml"),
@@ -271,9 +282,9 @@ async def test_stack_validation_reverts_when_no_gain_over_current_best(
 ):
     """Stack worse than current_best (110) but above baseline (100) must REVERT.
 
-    Regression guard: the KEEP decision is incremental over current_best, not
-    total over the original baseline. new_tput=109 is +9% vs baseline yet -0.9%
-    vs current_best, so the stack adds no value and must be reverted.
+    The KEEP decision is incremental over current_best, not total over baseline:
+    new_tput=109 is +9% vs baseline yet -0.9% vs current_best, so the stack adds
+    no value and must be reverted.
     """
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
@@ -369,9 +380,7 @@ async def test_positive_needs_review_stack_validation_promotes_combo(tmp_path: P
     assert all(entry["stack_resolved"] is True for entry in resolved_entries)
     assert {entry["stack_validation_kernel_id"] for entry in resolved_entries} == {"k001+k004"}
 
-    # Re-invoking must be a no-op (idempotent): the stack is already validated,
-    # so the call count must not advance. Compare against the snapshot rather
-    # than the literal so the idempotency intent is explicit.
+    # Re-invoking must be a no-op (idempotent): the call count must not advance.
     calls_before_recall = validation_calls
     await c._maybe_validate_positive_needs_review_stack()
 
@@ -493,7 +502,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     c.role_registry = {"kernel_agent": object()}
-    # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP
+    # All KEEPs already integrated as NEEDS_REVIEW — no pending KEEP.
     for kid, gain in (("k001", 0.6), ("k004", 0.8)):
         c.shared_state.record_kernel_integrate_result(
             {
@@ -590,7 +599,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
     await c._drain_pending_keep_integrates()
 
     assert len(captured_payloads) == 1
-    # Should use current_best.tput (110.0), not baseline (100.0)
+    # use current_best.tput (110.0), not baseline (100.0)
     assert captured_payloads[0]["base_tput"] == 110.0
 
 
@@ -734,7 +743,7 @@ async def test_enqueue_internal_sweep_task_inherits_baseline_config(coord):
     assert task.params["config_path"] == "/tmp/baseline.yaml"
     assert task.params["base_extra_args"] == "--mla 1"
     assert task.params["benchmark_script"] == "sglang_mi300x.sh"
-    # Grid params present so executor doesn't fall back to its own defaults.
+    # Grid params present so executor doesn't fall back to its own defaults
     assert isinstance(task.params["conc_values"], list)
     assert isinstance(task.params["isl_osl_configs"], list)
     assert isinstance(task.params["num_prompts_factor"], int)
@@ -768,26 +777,24 @@ async def test_enqueue_internal_sweep_task_cortex_recipe_propagates(coord):
 # 3. _on_enter_sweep hook
 @pytest.mark.asyncio
 async def test_on_enter_sweep_enqueues_and_stamps_evidence(coord):
-    """Happy path: the hook enqueues a sweep task and stamps the phase_history evidence."""
+    """Happy path: the hook enqueues conc_sweep and stamps phase evidence."""
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
     await coord._on_enter_sweep(from_phase="KERNEL")
-    assert "internal-sweep-phase_entry" in coord.tasks._tasks
-    task = coord.tasks._tasks["internal-sweep-phase_entry"]
-    assert task.kind == "sweep"
+    assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
+    task = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
+    assert task.kind == "conc_sweep"
 
     evidence = coord.shared_state.phase_history[-1]["evidence"]
-    assert evidence["auto_sweep_enqueued"] is True
-    assert evidence["auto_sweep_task_id"] == task.task_id
-    assert evidence["auto_sweep_grid_source"] == "skill_md_default"
-    # combos = |conc_values| × |isl_osl_configs| = 3 × 3 (SKILL.md defaults)
-    assert evidence["auto_sweep_combos"] == 9
+    assert evidence["auto_conc_sweep_enqueued"] is True
+    assert evidence["auto_conc_sweep_task_id"] == task.task_id
+    assert evidence["auto_conc_sweep_concs"] == [1, 2, 4]
 
 
 @pytest.mark.asyncio
-async def test_on_enter_sweep_cortex_recipe_evidence(coord):
-    """Recipe-driven grid surfaces grid_source='cortex_recipe' + a recipe-derived combos count."""
+async def test_on_enter_sweep_ignores_full_sweep_recipe_for_auto_path(coord):
+    """The automatic path goes straight to conc_sweep; recipe sweep_grid is manual-only."""
     coord.shared_state.warm_start_recipe = {
         "sweep_grid": {
             "conc_values": [8, 32],
@@ -798,54 +805,95 @@ async def test_on_enter_sweep_cortex_recipe_evidence(coord):
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
     await coord._on_enter_sweep(from_phase="KERNEL")
+    assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
+    assert "internal-sweep-phase_entry" not in coord.tasks._tasks
     evidence = coord.shared_state.phase_history[-1]["evidence"]
-    assert evidence["auto_sweep_grid_source"] == "cortex_recipe"
-    assert evidence["auto_sweep_combos"] == 6  # 2 × 3
+    assert evidence["auto_conc_sweep_concs"] == [1, 2, 4]
+    assert "auto_sweep_grid_source" not in evidence
 
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_idempotent_on_reentry(coord):
-    """Re-entering SWEEP twice hits the same idempotency_key and reuses the task."""
+    """Re-entering SWEEP twice hits the same conc_sweep idempotency_key."""
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
     await coord._on_enter_sweep(from_phase="KERNEL")
-    task1 = coord.tasks._tasks["internal-sweep-phase_entry"]
+    task1 = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
     coord.shared_state.phase_history.append(
         {"to_phase": "SWEEP", "reason": "re_entry_test", "evidence": {}},
     )
     await coord._on_enter_sweep(from_phase="SWEEP")
-    task2 = coord.tasks._tasks["internal-sweep-phase_entry"]
+    task2 = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
     assert task1 is task2
     assert len(coord.tasks._tasks) == 1
 
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
-    """If the enqueue raises, the hook records ``auto_sweep_error`` and returns without propagating."""
+    """If conc_sweep enqueue raises, the hook records a terminal skip."""
 
     async def _boom(*args, **kwargs):
         raise RuntimeError("simulated DB outage")
 
-    monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_sweep_task", _boom)
+    monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _boom)
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
-    # Should not raise:
+    # Should not raise
     await coord._on_enter_sweep(from_phase="KERNEL")
     evidence = coord.shared_state.phase_history[-1]["evidence"]
-    assert "auto_sweep_error" in evidence
-    assert "simulated DB outage" in evidence["auto_sweep_error"]
-    # No task was enqueued.
+    assert "auto_conc_sweep_error" in evidence
+    assert "simulated DB outage" in evidence["auto_conc_sweep_error"]
+    # No task was enqueued
     assert coord.tasks._tasks == {}
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_failed"
+    assert coord.shared_state.save_count >= 1
 
 
-# Skip auto-sweep on cyclic reloop when no validated gain landed.
 @pytest.mark.asyncio
-async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_sweep(coord):
-    """Reloop SWEEP with an unchanged validated gain must skip the auto-sweep + conc_sweep."""
+async def test_on_enter_sweep_none_records_terminal_skip(coord, monkeypatch):
+    """If the enqueue helper returns None, SWEEP records a terminal skip."""
+
+    async def _none(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _none)
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    await coord._on_enter_sweep(from_phase="KERNEL")
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence["auto_conc_sweep_error"] == "enqueue_returned_none"
+    assert coord.tasks._tasks == {}
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_returned_none"
+
+
+@pytest.mark.asyncio
+async def test_on_enter_sweep_skips_when_conc_sweep_disabled(coord):
+    """If conc_sweep is disabled, SWEEP records a terminal skip instead of idling."""
+    coord.shared_state.conc_sweep_enabled = False
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
+    ]
+    await coord._on_enter_sweep(from_phase="KERNEL")
+    assert coord.tasks._tasks == {}
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence["auto_conc_sweep_skipped"] == "disabled"
+    assert "auto_sweep_enqueued" not in evidence
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "disabled"
+    assert coord.shared_state.last_conc_sweep["was_skipped"] is True
+    assert coord.shared_state.save_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_conc_sweep(coord):
+    """Cyclic reloop does not rerun conc_sweep without a new validated gain."""
     coord.shared_state.cumulative_gain_validated = 12.5
-    coord.shared_state.last_sweep = {
+    coord.shared_state.last_conc_sweep_watermark = {
         "ts": "2026-01-01T00:00:00Z",
         "cumulative_gain_validated_at_record": 12.5,
     }
@@ -853,18 +901,20 @@ async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_sweep(coor
         {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
     ]
     await coord._on_enter_sweep(from_phase="KERNEL")
-    # No sweep task enqueued.
     assert coord.tasks._tasks == {}
     evidence = coord.shared_state.phase_history[-1]["evidence"]
-    assert evidence["auto_sweep_skipped"] == "no_validated_gain_since_last_sweep"
-    assert "auto_sweep_enqueued" not in evidence
+    assert evidence["auto_conc_sweep_skipped"] == "no_validated_gain_since_last_conc_sweep"
+    assert evidence["auto_conc_sweep_skipped_validated_gain"] == 12.5
+    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "no_validated_gain_since_last_conc_sweep"
+    assert coord.shared_state.save_count >= 1
 
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_runs_when_validated_gain_improved(coord):
-    """A validated gain above the last-sweep watermark must still run the auto-sweep."""
+    """A new validated gain after the last conc_sweep watermark dispatches conc_sweep."""
     coord.shared_state.cumulative_gain_validated = 15.0
-    coord.shared_state.last_sweep = {
+    coord.shared_state.last_conc_sweep_watermark = {
         "ts": "2026-01-01T00:00:00Z",
         "cumulative_gain_validated_at_record": 12.5,
     }
@@ -872,27 +922,27 @@ async def test_on_enter_sweep_runs_when_validated_gain_improved(coord):
         {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
     ]
     await coord._on_enter_sweep(from_phase="KERNEL")
-    assert "internal-sweep-phase_entry" in coord.tasks._tasks
+    assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
     evidence = coord.shared_state.phase_history[-1]["evidence"]
-    assert evidence["auto_sweep_enqueued"] is True
+    assert evidence["auto_conc_sweep_enqueued"] is True
 
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_first_sweep_runs_without_prior_watermark(coord):
-    """The first sweep (no prior last_sweep) must always run."""
+    """The first SWEEP entry dispatches conc_sweep directly."""
     coord.shared_state.cumulative_gain_validated = 0.0
     coord.shared_state.last_sweep = {}
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
     await coord._on_enter_sweep(from_phase="KERNEL")
-    assert "internal-sweep-phase_entry" in coord.tasks._tasks
+    assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
 
 
 # 4. End-to-end via real Coordinator
 @pytest.mark.asyncio
-async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
-    """End-to-end: a SWEEP transition + hook dispatcher persists the sweep task under the idempotency_key."""
+async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Path):
+    """End-to-end: a SWEEP transition persists the conc_sweep task."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -909,7 +959,7 @@ async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
         cortex_kb=None,
         knowledge_plane=None,
     )
-    # Seed state at KERNEL boundary as if a plateau_kernel just fired.
+    # Seed state at KERNEL boundary as if a plateau_kernel just fired
     coord.shared_state.phase = "KERNEL"
     coord.shared_state.kernel_enabled = True
     coord.shared_state.baseline_tput = 100.0
@@ -920,7 +970,6 @@ async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
         {"to_phase": "KERNEL", "evidence": {}, "reason": "plateau_explore"},
     ]
 
-    # Simulate a real KERNEL_AGENT → SWEEP transition.
     coord.shared_state.record_phase_transition(
         to_phase="SWEEP",
         reason="plateau_kernel",
@@ -930,26 +979,22 @@ async def test_phase_transition_into_sweep_enqueues_sweep_e2e(tmp_path: Path):
 
     rows = await coord.tasks.db.fetchall(
         "SELECT * FROM tasks WHERE idempotency_key=?",
-        ("internal-sweep-phase_entry",),
+        ("internal-conc_sweep-phase_entry",),
     )
     assert len(rows) == 1
-    assert rows[0]["kind"] == "sweep"
+    assert rows[0]["kind"] == "conc_sweep"
     assert rows[0]["state"] == "queued"
 
     last_history = coord.shared_state.phase_history[-1]
     assert last_history["to_phase"] == "SWEEP"
     evidence = last_history.get("evidence") or {}
-    assert evidence.get("auto_sweep_enqueued") is True
-    assert evidence.get("auto_sweep_task_id")
-    assert evidence.get("auto_sweep_grid_source") in (
-        "cortex_recipe",
-        "skill_md_default",
-    )
+    assert evidence.get("auto_conc_sweep_enqueued") is True
+    assert evidence.get("auto_conc_sweep_task_id")
 
 
 @pytest.mark.asyncio
 async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
-    """``--no-kernel`` runs go EXPLORE → SWEEP directly; the SWEEP entry hook must still enqueue."""
+    """``--no-kernel`` runs go EXPLORE → SWEEP directly; conc_sweep still enqueues."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -973,16 +1018,16 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
     await coord._on_phase_entered(from_phase="EXPLORE", to_phase="SWEEP")
     rows = await coord.tasks.db.fetchall(
         "SELECT * FROM tasks WHERE idempotency_key=?",
-        ("internal-sweep-phase_entry",),
+        ("internal-conc_sweep-phase_entry",),
     )
-    assert len(rows) == 1, "SWEEP auto-enqueue must run in --no-kernel mode too"
+    assert len(rows) == 1, "conc_sweep auto-enqueue must run in --no-kernel mode too"
 
 
 # 5. Idempotency key structural cross-check
 def test_internal_sweep_idempotency_key_does_not_collide_with_llm_path():
-    """The internal hook's ``internal-sweep-<reason>`` key must never collide with the LLM's ``approved-<msg_id>`` key."""
+    """The manual sweep helper key must never collide with the LLM approved key."""
     internal_key = "internal-sweep-phase_entry"
-    # Mirror the format _materialize_approved_proposal builds.
+    # Mirror the format _materialize_approved_proposal builds
     llm_key = "approved-msg_abc123"
     assert internal_key != llm_key
     assert not llm_key.startswith("internal-")
@@ -998,11 +1043,11 @@ class _SweepSingletonState:
 
 
 def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
-    """Build a phase_history row mirroring what ``record_phase_transition`` produces on SWEEP entry."""
+    """Build a SWEEP phase row carrying the auto conc_sweep evidence."""
     evidence: dict = {}
     if auto_sweep_task_id:
-        evidence["auto_sweep_task_id"] = auto_sweep_task_id
-        evidence["auto_sweep_enqueued"] = True
+        evidence["auto_conc_sweep_task_id"] = auto_sweep_task_id
+        evidence["auto_conc_sweep_enqueued"] = True
     return {
         "to_phase": "SWEEP",
         "from_phase": "EXPLORE",
@@ -1025,7 +1070,7 @@ def _make_policy_gate(*, shared_state):
 
 
 def test_sweep_singleton_denies_delegate_after_auto_enqueue_stamped():
-    """Once the SWEEP row carries ``evidence.auto_sweep_task_id``, an LLM ``delegate{action='sweep'}`` is denied via ``sweep_phase_singleton``."""
+    """Once auto conc_sweep is stamped, LLM full sweep is denied."""
     from hyperloom.orchestrator.policy.gate import PolicyDenied
 
     state = _SweepSingletonState(
@@ -1039,7 +1084,7 @@ def test_sweep_singleton_denies_delegate_after_auto_enqueue_stamped():
             intent_kind="delegate",
         )
     assert excinfo.value.rule == "sweep_phase_singleton"
-    # Hint must mention the bypass switch so the operator-debug path is discoverable.
+    # Hint must mention the bypass switch
     assert "bypass_sweep_singleton" in (excinfo.value.hint or "")
 
 
@@ -1061,7 +1106,7 @@ def test_sweep_singleton_denies_propose_action_after_auto_enqueue_stamped():
 
 
 def test_sweep_singleton_inert_before_auto_enqueue_stamps_evidence():
-    """Race-window: a SWEEP row without a stamped ``auto_sweep_task_id`` keeps the rule inert so the Coordinator's auto-enqueue isn't falsely blocked."""
+    """Race-window: a SWEEP row without auto conc_sweep evidence keeps the rule inert."""
     state = _SweepSingletonState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="")],
     )
@@ -1080,11 +1125,11 @@ def test_sweep_singleton_inert_outside_sweep_phase():
         "to_phase": "EXPLORE",
         "from_phase": "PRELUDE",
         "reason": "prelude_done",
-        "evidence": {"auto_sweep_task_id": "stale"},
+        "evidence": {"auto_conc_sweep_task_id": "stale"},
     }
     state = _SweepSingletonState(phase_history=[explore_row])
     gate = _make_policy_gate(shared_state=state)
-    # The rule keys on phase_history[-1].to_phase=="SWEEP", so the stale id is inert.
+    # rule keys on phase_history[-1].to_phase=="SWEEP", so the stale id is inert
     gate._validate_sweep_singleton(
         payload={"action_name": "sweep"},
         intent_kind="delegate",
@@ -1130,8 +1175,7 @@ def test_sweep_singleton_self_clears_at_sweep_to_close_transition():
         ],
     )
     gate = _make_policy_gate(shared_state=state)
-    # Must NOT raise — the singleton rule looks at phase_history[-1],
-    # which is now CLOSE.
+    # Must NOT raise — the singleton rule looks at phase_history[-1] (now CLOSE)
     gate._validate_sweep_singleton(
         payload={"action_name": "sweep"},
         intent_kind="delegate",

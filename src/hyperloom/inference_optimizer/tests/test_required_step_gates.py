@@ -12,7 +12,6 @@ import pytest
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockKernelBackend,
     MockRobustnessBackend,
     ScriptedPlan,
 )
@@ -25,7 +24,6 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 
 
-# Fixtures
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -43,7 +41,7 @@ def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -68,7 +66,6 @@ def _seed_post_baseline(coord: Coordinator) -> None:
     }
 
 
-# target_analysis is no longer sequence-gated (only baseline-first remains)
 def test_baseline_allowed_without_target_analysis(session_dir):
     """``baseline`` is no longer blocked on a missing target_baseline.json."""
     coord = Coordinator(
@@ -91,11 +88,10 @@ def test_baseline_first_still_blocks_other_actions(session_dir):
     assert coord._sequence_denial_for_action("target_analysis") is None
 
 
-# integrate gate
 def test_integrate_gate_inactive_without_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    assert coord._kernel_opt_keep_pending() == ""
+    assert coord.shared_state.next_pending_keep_kernel_id() == ""
 
 
 def _seed_kernel_opt_state(
@@ -128,7 +124,7 @@ def test_integrate_gate_inactive_when_decision_not_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(coord, kernel_id="k-1", decision="REVERT")
-    assert coord._kernel_opt_keep_pending() == ""
+    assert coord.shared_state.next_pending_keep_kernel_id() == ""
 
 
 def test_integrate_gate_fires_when_keep_pending(session_dir):
@@ -141,7 +137,7 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
         micro=4.13,
         source_file="/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
     )
-    assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
+    assert coord.shared_state.next_pending_keep_kernel_id() == "k-rmsnorm"
 
 
 def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
@@ -156,7 +152,7 @@ def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
     coord.shared_state.optimization_stack = [
         {"action": "integrate", "kernel_id": "k-rmsnorm", "target_file": "/p/rmsnorm.py"},
     ]
-    assert coord._kernel_opt_keep_pending() == ""
+    assert coord.shared_state.next_pending_keep_kernel_id() == ""
 
 
 def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
@@ -164,7 +160,7 @@ def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(coord, kernel_id="k-bad", decision="KEEP")
     coord.shared_state.rejected_kernel_ids = ["k-bad"]
-    assert coord._kernel_opt_keep_pending() == ""
+    assert coord.shared_state.next_pending_keep_kernel_id() == ""
 
 
 def test_pending_keep_no_longer_blocks_other_actions(session_dir):
@@ -177,14 +173,13 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
         decision="KEEP",
         source_file="/p/rmsnorm.py",
     )
-    assert coord._kernel_opt_keep_pending() == "k-rmsnorm"
+    assert coord.shared_state.next_pending_keep_kernel_id() == "k-rmsnorm"
     for action in ("explore", "sweep", "integrate", "report"):
         assert coord._sequence_denial_for_action(action) is None, (
             f"{action!r} must not be sequence-denied by a pending KEEP"
         )
 
 
-# Hot-kernel report gate.
 def _seed_trace_analyze(coord, *, hot_kernels, task_groups=None):
     coord.shared_state.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz",
@@ -235,7 +230,7 @@ def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
     assert "untried_hot_kernels" in summary
     assert "k001" in summary
     assert "k002" in summary
-    assert summary.find("k002") < summary.find("k001"), summary  # highest gpu_pct first
+    assert summary.find("k002") < summary.find("k001"), summary
 
 
 def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
@@ -252,7 +247,6 @@ def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
     assert coord._sequence_denial_for_action("report") is None
 
 
-# trace_analyze gate — DEMOTED to a data-contract check in the handler.
 def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
     """An empty ``last_trace_analyze`` cache must not action-layer-deny explore actions."""
     coord = Coordinator(session_dir, backends=_backends_full())

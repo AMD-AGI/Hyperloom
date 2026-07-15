@@ -3,10 +3,10 @@
 """Critic-driven specialist re-author loop.
 
 A ``needs_review`` verdict carrying non-empty ``required_evidence`` for a
-framework_agent candidate / authoring proposal triggers exactly one re-authoring
-round, seeded with that evidence and dispatched under an idempotency key with a
-``reauthor:{n}`` suffix. ``advise`` proceeds and never re-authors; the per-candidate
-cap is the loop guard.
+framework_agent candidate / authoring proposal triggers one re-authoring round,
+seeded with that evidence and dispatched under an idempotency key with a
+``reauthor:{n}`` suffix. ``advise`` proceeds and never re-authors; the
+per-candidate cap is the loop guard.
 """
 
 from __future__ import annotations
@@ -128,10 +128,10 @@ async def test_needs_review_with_evidence_reauthors_once(coord: Coordinator) -> 
 
 @pytest.mark.asyncio
 async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
-    """The loop guard: the first needs_review re-authors with a ``reauthor:1``
-    idempotency suffix + evidence seed; subsequent ones hit the cap (=1) and do
-    not re-author."""
+    """The first 3 needs_review verdicts re-author with incrementing
+    ``reauthor:{n}`` idempotency suffixes; the 4th hits the cap and does not re-author."""
     from types import SimpleNamespace
+    from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
 
     created: list[dict[str, Any]] = []
 
@@ -148,7 +148,7 @@ async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
 
     coord.tasks.create_or_return_existing = _fake_create  # type: ignore[method-assign]
 
-    for _ in range(3):
+    for _ in range(_AUTHORED_LANE_MAX_ATTEMPTS + 1):
         await coord._handle_single_verdict(
             source="critic",
             pending=_framework_agent_pending(),
@@ -157,13 +157,15 @@ async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
             advisory=dict(_ADVISORY),
         )
 
-    assert len(created) == 1
+    assert len(created) == _AUTHORED_LANE_MAX_ATTEMPTS
     assert created[0]["idempotency_key"].endswith(":reauthor:1")
+    assert created[-1]["idempotency_key"].endswith(f":reauthor:{_AUTHORED_LANE_MAX_ATTEMPTS}")
     notes = created[0]["params"]["notes"]
     assert "profile showing the kernel is the bottleneck" in notes
     assert "narrow the patch to the MoE gemm path" in notes
     assert (
-        coord.shared_state.specialist_reauthor_attempts[_CANDIDATE["candidate_id"]] == 1
+        coord.shared_state.specialist_reauthor_attempts[_CANDIDATE["candidate_id"]]
+        == _AUTHORED_LANE_MAX_ATTEMPTS
     )
 
 
@@ -270,7 +272,7 @@ async def test_advise_verdict_does_not_reauthor(coord: Coordinator) -> None:
         advisory=dict(_ADVISORY),
     )
 
-    # advise = proceed: it materialises but never re-authors.
+    # advise = proceed: materialises but never re-authors.
     assert len(materialized) == 1
     assert calls == []
     assert coord.shared_state.specialist_reauthor_attempts == {}
@@ -303,7 +305,7 @@ async def test_non_framework_agent_proposal_does_not_reauthor(coord: Coordinator
         from_agent="coordinator",
         action_name="integrate_patch",
         predicted_gain_pct=0.0,
-        payload={"params": {"specialist_task_id": "s-1"}},  # not framework_agent authoring
+        payload={"params": {"specialist_task_id": "s-1"}},
     )
 
     await coord._maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))

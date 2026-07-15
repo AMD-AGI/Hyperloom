@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
     GridVariant,
@@ -46,7 +47,7 @@ SCHEMA_VERSION = "1.0"
 # Default ladder (override via ``--conc-sweep-concs``).
 DEFAULT_CONCS: list[int] = [1, 2, 4, 8, 16, 32, 64, 128]
 
-# Mirrors ``sweep.py``'s adaptive NUM_PROMPTS heuristic.
+# Multiplier applied to each CONC for NUM_PROMPTS.
 DEFAULT_NUM_PROMPTS_FACTOR = 5
 
 # Per-variant timeout (seconds); override via ``--conc-sweep-timeout-sec``.
@@ -75,12 +76,9 @@ def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
 def _order_concs_anchor_first(concs: list[int], anchor: int) -> list[int]:
     """Reorder the ladder so the operating-point CONC runs first, de-duplicated.
 
-    The optimization's operating point (``state.conc``) is the single most
-    decision-relevant load level. Running it first means a budget-truncated
-    sweep still yields the pair that matters most, then expands outward. When
-    the anchor is unset (``<=0``) or absent from the ladder this is a no-op that
-    preserves the caller's order, so the behaviour is fully general — it never
-    hard-codes a specific concurrency.
+    Running the operating point (``state.conc``) first means a budget-truncated
+    sweep still yields the most decision-relevant pair, then expands outward. A
+    no-op preserving caller order when the anchor is unset (``<=0``) or absent.
 
     Args:
         concs: Requested concurrency ladder (caller order preserved for the tail).
@@ -114,9 +112,8 @@ def _build_grid(
     """Two-arm grid: ``baseline`` × ``optimized`` crossed with every requested CONC.
 
     Emission order is CONC-major (anchor-first) with the two arms interleaved as
-    an adjacent ``baseline``/``optimized`` pair per CONC. This guarantees that a
-    budget-truncated run leaves *complete* A/B pairs — starting at the operating
-    point — instead of a full baseline arm with no optimized counterpart.
+    an adjacent ``baseline``/``optimized`` pair per CONC, so a budget-truncated
+    run leaves complete A/B pairs starting at the operating point.
 
     Args:
         concs: Concurrency values to sweep.
@@ -134,12 +131,8 @@ def _build_grid(
         ("baseline", "", {}),
         ("optimized", optimized_args, dict(optimized_envs)),
     ]
-    # Accuracy eval is concurrency-invariant, so skip it per conc point by
-    # default — a full GSM8K pass per point is pure waste and at low CONC takes
-    # 30+ min, blowing the per-variant timeout / total budget (every optimized
-    # pair then fails -> successful_pairs=0). Opt back in via
-    # INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1. extra_envs wins in
-    # _build_variant_yaml, so this overrides the RUN_EVAL=true default.
+    # Accuracy eval is concurrency-invariant; skip per conc point by default
+    # (opt back in via INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1).
     skip_eval = not sweep_run_eval_enabled()
     out: list[GridVariant] = []
     for conc in _order_concs_anchor_first(concs, anchor_conc):
@@ -279,7 +272,6 @@ def _build_comparison(
         "mean_speedup": None,
     }
     if speedups:
-        # Best = arg-max speedup over per-conc pairs.
         best_idx, best_val = max(
             ((i, r["speedup"]) for i, r in enumerate(rows) if isinstance(r.get("speedup"), float)),
             key=lambda x: x[1],
@@ -296,6 +288,31 @@ def _build_comparison(
             }
         )
     return rows, summary
+
+
+def _budget_limited_without_valid_pair(
+    *,
+    budget_exhausted: bool,
+    summary: dict[str, Any],
+    baseline_points: list[dict[str, Any]],
+    optimized_points: list[dict[str, Any]],
+) -> bool:
+    """Return true when budget gating, not benchmark failure, prevented all pairs."""
+    if not budget_exhausted or int(summary.get("successful_pairs") or 0) > 0:
+        return False
+    points = baseline_points + optimized_points
+    if not points:
+        return False
+    saw_budget_skip = False
+    for point in points:
+        status = str(point.get("status") or "").lower()
+        error_class = str(point.get("error_class") or "")
+        if error_class == "budget_exhausted":
+            saw_budget_skip = True
+            continue
+        if status not in ("succeeded", "skipped"):
+            return False
+    return saw_budget_skip
 
 
 def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
@@ -336,7 +353,10 @@ def _build_roofline_ceiling(
     baseline_points: list[dict[str, Any]],
     optimized_points: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Per-conc decode roofline alongside the measured curves (T_cmp once, T_mem per CONC; MBU% = measured/T_peak×100). ``None`` when model meta / GPU spec is unavailable.
+    """Per-conc decode roofline alongside the measured curves.
+
+    T_cmp is computed once, T_mem per CONC; MBU% = measured/T_peak×100. Returns
+    ``None`` when model meta / GPU spec is unavailable.
 
     Args:
         state: Shared run state providing model path, precision, GPU type, TP.
@@ -390,9 +410,8 @@ def _build_roofline_ceiling(
             osl=osl,
             concurrency=c,
         )
-        # Resolve T_peak / binding (mirrors compute_roofline_breakdown_from_state).
         t_peak, bound_kind = select_peak_and_bound(t_mem, t_cmp)
-        # Local import avoids a module-level conc_sweep -> roofline_snapshot cycle.
+        # Local import avoids a module-level import cycle.
         from .roofline_snapshot import within_roofline_pct
 
         def _mbu_pct(measured: Any) -> float | None:
@@ -490,7 +509,7 @@ async def run_conc_sweep(
         The sweep payload dict (a skip envelope when prerequisites are unmet).
     """
     session_dir = Path(session_dir)
-    # ``None`` → default ladder; an explicit empty list short-circuits via ``empty_conc_list`` below.
+    # ``None`` → default ladder; an explicit empty list short-circuits below.
     concs = list(concs) if concs is not None else list(DEFAULT_CONCS)
     isl = int(getattr(state, "isl", 0) or 0)
     osl = int(getattr(state, "osl", 0) or 0)
@@ -507,13 +526,13 @@ async def run_conc_sweep(
     if not concs:
         return _skip("empty_conc_list")
 
-    # Prefer the session's materialized baseline config; fall back to the shipped asset.
+    # Prefer the materialized baseline config; fall back to the shipped asset.
     base_yaml_raw = str(getattr(state, "baseline_config_path", "") or "").strip() or str(default_baseline_config())
     base_yaml_path = Path(base_yaml_raw)
     if not base_yaml_path.exists():
         return _skip("baseline_config_missing", config_path=base_yaml_raw)
 
-    task_id = time.strftime("conc_sweep_%Y%m%dT%H%M%SZ", time.gmtime())
+    task_id = f"conc_sweep_{utc_now_compact()}"
     workspace = runs_root(session_dir) / "conc_sweep" / task_id
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -523,7 +542,7 @@ async def run_conc_sweep(
     # canonicalizes mi325x/mi308x -> mi300x), fall back to state.gpu_type, then
     # canonicalize through _gpu_runner_type so the selected Magpie script is a
     # shipped runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
-    from hyperloom.inference_optimizer.cli.model_gate import _gpu_runner_type
+    from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
 
     resolved_gpu = _gpu_runner_type(
         os.environ.get("GPU_TYPE", "").strip().lower()
@@ -555,7 +574,7 @@ async def run_conc_sweep(
         anchor_conc=int(getattr(state, "conc", 0) or 0),
     )
 
-    # Independent total wall-clock budget (<=0 disables); variants run one at a time so we can stop cleanly when exhausted.
+    # Variants run one at a time so the budget (<=0 disables) can stop cleanly.
     has_budget = total_budget_sec > 0
     started_at = time.time()
     deadline = started_at + total_budget_sec if has_budget else None
@@ -569,10 +588,14 @@ async def run_conc_sweep(
     )
     results: list[VariantResult] = []
     budget_exhausted = False
+    budget_skip_reason = ""
+    budget_remaining_sec: float | None = None
     for idx, variant in enumerate(grid):
         remaining = (deadline - time.time()) if has_budget else None
         if has_budget and remaining is not None and remaining <= 0:
             budget_exhausted = True
+            budget_skip_reason = "total_budget_exhausted"
+            budget_remaining_sec = max(0.0, float(remaining))
             log.warning(
                 "conc_sweep: total budget exhausted (%ds); marking %d remaining variants as skipped",
                 total_budget_sec,
@@ -581,11 +604,22 @@ async def run_conc_sweep(
             for v in grid[idx:]:
                 results.append(_budget_skip_result(v))
             break
+        if has_budget and remaining is not None and remaining < float(variant_timeout_sec):
+            budget_exhausted = True
+            budget_skip_reason = "insufficient_remaining_for_variant"
+            budget_remaining_sec = max(0.0, float(remaining))
+            log.warning(
+                "conc_sweep: remaining budget %.1fs is below per-variant timeout %ds; "
+                "marking %d remaining variants as skipped",
+                remaining,
+                variant_timeout_sec,
+                len(grid) - idx,
+            )
+            for v in grid[idx:]:
+                results.append(_budget_skip_result(v))
+            break
 
-        # Per-variant cap = min(timeout, remaining budget) so the last variant doesn't blow the wall-clock.
         effective_timeout = variant_timeout_sec
-        if has_budget and remaining is not None:
-            effective_timeout = max(1, min(variant_timeout_sec, int(remaining)))
 
         sub_results = await run_grid(
             base_yaml_path=base_yaml_path,
@@ -599,7 +633,7 @@ async def run_conc_sweep(
         results.extend(sub_results)
     elapsed_sec = time.time() - started_at
 
-    # Split by arm via the variant name prefix we set in ``_build_grid``.
+    # Split by arm via the variant name prefix.
     baseline_points: list[dict[str, Any]] = []
     optimized_points: list[dict[str, Any]] = []
     for v in results:
@@ -611,6 +645,13 @@ async def run_conc_sweep(
     optimized_points.sort(key=lambda p: p["conc"])
 
     comparison, summary = _build_comparison(baseline_points, optimized_points)
+    budget_limited_no_pair = _budget_limited_without_valid_pair(
+        budget_exhausted=budget_exhausted,
+        summary=summary,
+        baseline_points=baseline_points,
+        optimized_points=optimized_points,
+    )
+    status = "succeeded" if summary["successful_pairs"] else ("skipped" if budget_limited_no_pair else "failed")
 
     ceiling = _build_roofline_ceiling(
         state,
@@ -623,7 +664,7 @@ async def run_conc_sweep(
 
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "status": "succeeded" if summary["successful_pairs"] else "failed",
+        "status": status,
         "session_id": str(getattr(state, "session_id", "") or session_dir.name),
         "isl": isl,
         "osl": osl,
@@ -646,6 +687,12 @@ async def run_conc_sweep(
         "total_budget_sec": total_budget_sec if has_budget else None,
         "budget_exhausted": budget_exhausted,
     }
+    if budget_limited_no_pair:
+        payload["was_skipped"] = True
+        payload["skip_reason"] = "budget_exhausted_no_successful_pairs"
+    if budget_exhausted:
+        payload["budget_skip_reason"] = budget_skip_reason
+        payload["budget_remaining_sec"] = round(float(budget_remaining_sec or 0.0), 2)
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
 
@@ -654,7 +701,7 @@ async def run_conc_sweep(
         rdir.mkdir(parents=True, exist_ok=True)
         json_path = rdir / "conc_sweep_summary.json"
         csv_path = rdir / "conc_sweep_raw.csv"
-        # Set self-referential paths BEFORE the dump so the on-disk JSON carries them (consumers read the file, not the in-memory payload).
+        # Set self-referential paths before the dump so the JSON carries them.
         payload["report_json_path"] = json_path.as_posix()
         payload["report_csv_path"] = csv_path.as_posix()
         json_path.write_text(
@@ -662,7 +709,7 @@ async def run_conc_sweep(
             encoding="utf-8",
         )
         _write_csv(csv_path, baseline_points + optimized_points)
-        # Author-time breakdown capture: mirror the summary into the recorder.
+        # Mirror the summary into the breakdown recorder.
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -672,9 +719,8 @@ async def run_conc_sweep(
                 payload,
                 producer="conc_sweep",
             )
-        except Exception:  # noqa: BLE001 — author-time capture must never break the sweep
+        except Exception:  # noqa: BLE001 — capture must never break the sweep
             log.debug("conc_sweep breakdown capture failed", exc_info=True)
-        # final.json pointer is added by report.py at CLOSE (this action runs before CLOSE).
 
     log.info(
         "conc_sweep: done — successful_pairs=%d failed_pairs=%d best_speedup=%s",

@@ -17,7 +17,6 @@ import pytest
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
-# Stubs — minimal SharedState + TaskRegistry doubles.
 @dataclass
 class _BareState:
     baseline_tput: float = 100.0
@@ -86,12 +85,6 @@ class _StubTaskRegistry:
             t.state = new_state  # type: ignore[assignment]
 
 
-@pytest.fixture(autouse=True)
-def _isolate_watermark_env(monkeypatch: pytest.MonkeyPatch):
-    """Clear ``HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` so inherited values don't shift the default-1.10 threshold."""
-    monkeypatch.delenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", raising=False)
-
-
 @pytest.fixture
 def coord(tmp_path: Path) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
@@ -103,7 +96,7 @@ def coord(tmp_path: Path) -> Coordinator:
     return c
 
 
-# 1. _needs_roofline_for_watermark — guards + threshold
+# _needs_roofline_for_watermark — guards + threshold
 def test_watermark_check_false_before_first_roofline(coord: Coordinator):
     """Bootstrap guard: with ``last_roofline_tput=0`` the watermark never fires."""
     coord.shared_state.baseline_tput = 100.0
@@ -143,71 +136,16 @@ def test_watermark_check_false_when_already_pending(coord: Coordinator):
     assert coord._needs_roofline_for_watermark() is False
 
 
-# 1b. Watermark ratio env-var override
-class TestWatermarkRatioEnvOverride:
-    """``HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` tunes the threshold (default 1.10); invalid values fall back."""
+def test_watermark_ratio_resolver_returns_default():
+    """The module-level resolver returns the fixed 1.10 ratio."""
+    from hyperloom.orchestrator.loop.coordinator import (
+        _resolve_roofline_watermark_ratio,
+    )
 
-    def test_env_var_lowers_threshold_to_5pct(
-        self,
-        coord: Coordinator,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "1.05")
-        coord.shared_state.baseline_tput = 100.0
-        coord.shared_state.last_roofline_tput = 100.0
-        coord.shared_state.cumulative_gain_validated = 6.0
-        assert coord._needs_roofline_for_watermark() is True
-
-    def test_env_var_raises_threshold_to_20pct(
-        self,
-        coord: Coordinator,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", "1.20")
-        coord.shared_state.baseline_tput = 100.0
-        coord.shared_state.last_roofline_tput = 100.0
-        coord.shared_state.cumulative_gain_validated = 15.0
-        assert coord._needs_roofline_for_watermark() is False
-
-    def test_unset_env_var_defaults_to_1_10(
-        self,
-        coord: Coordinator,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        monkeypatch.delenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", raising=False)
-        coord.shared_state.baseline_tput = 100.0
-        coord.shared_state.last_roofline_tput = 100.0
-        coord.shared_state.cumulative_gain_validated = 10.0
-        assert coord._needs_roofline_for_watermark() is True
-
-    @pytest.mark.parametrize("bad_value", ["abc", "", "0.95", "1.0", "-1.5"])
-    def test_invalid_or_unsafe_value_falls_back_to_default(
-        self,
-        coord: Coordinator,
-        monkeypatch: pytest.MonkeyPatch,
-        bad_value: str,
-    ):
-        """Invalid/unsafe values fall back to 1.10, so 9% gain → False."""
-        monkeypatch.setenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", bad_value)
-        coord.shared_state.baseline_tput = 100.0
-        coord.shared_state.last_roofline_tput = 100.0
-        coord.shared_state.cumulative_gain_validated = 9.0
-        assert coord._needs_roofline_for_watermark() is False
-
-    def test_resolver_returns_default_when_unset(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        """The module-level resolver returns 1.10 when the env var is unset."""
-        from hyperloom.orchestrator.loop.coordinator import (
-            _resolve_roofline_watermark_ratio,
-        )
-
-        monkeypatch.delenv("HYPERLOOM_ROOFLINE_WATERMARK_RATIO", raising=False)
-        assert _resolve_roofline_watermark_ratio() == 1.10
+    assert _resolve_roofline_watermark_ratio() == 1.10
 
 
-# 2. _maybe_enqueue_watermark_roofline — enqueue + pending stamp
+# _maybe_enqueue_watermark_roofline — enqueue + pending stamp
 @pytest.mark.asyncio
 async def test_maybe_enqueue_watermark_skips_when_not_needed(coord: Coordinator):
     coord.shared_state.last_roofline_tput = 100.0

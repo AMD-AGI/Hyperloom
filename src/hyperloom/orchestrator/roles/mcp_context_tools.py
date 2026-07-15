@@ -1,10 +1,9 @@
 """In-process MCP server exposing read-only ``context`` tools.
 
-Context by pull, not push: instead of a full ``SharedState``
-dump each tick, the agent pulls context via these tools, each re-exposing an
-existing ``SharedState.to_*_summary`` projection (the single source of truth).
-Unlike ``emit_intent``, these handlers return the real data as the tool
-result. ``build_context_tools_server`` accepts factory overrides for tests.
+The agent pulls context via these tools, each re-exposing an existing
+``SharedState.to_*_summary`` projection. Unlike ``emit_intent``, these handlers
+return the real data as the tool result. ``build_context_tools_server`` accepts
+factory overrides for tests.
 """
 
 from __future__ import annotations
@@ -48,8 +47,7 @@ class ContextProvider:
     analysis_reader: Callable[[], str] | None = None
     denial_reader: Callable[[int], str] | None = None
     recent_outcomes_reader: Callable[[int], str] | None = None
-    # Run a whitelisted lane-light action inline (gated side effect, so
-    # the Coordinator injects a bridge callable). ``None`` => unavailable.
+    # Whitelisted lane-light action runner; ``None`` => unavailable.
     action_runner: Callable[[str, dict[str, Any]], str] | None = None
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
@@ -70,7 +68,6 @@ class ContextProvider:
             return f"(context tool {label} unavailable: {exc!r})"
         return out if isinstance(out, str) and out else f"({label}: empty)"
 
-    # Projections backed by SharedState.to_*_summary.
     def mission_status(self) -> str:
         """Return the mission-status summary projection.
 
@@ -196,8 +193,7 @@ class ContextProvider:
         )
 
 
-# Tool descriptors: (tool_name, description, input_schema, provider-method);
-# methods resolved by name at server-build time.
+# Tool descriptors: (tool_name, description, input_schema, provider-method).
 _NO_ARGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {},
@@ -387,7 +383,6 @@ def _make_handler(
             }
         if not isinstance(text, str):
             text = json.dumps(text, default=str)
-        # Observability: make on-demand context pulls visible.
         log.info(
             "context_tool pull: %s args=%s -> %d chars",
             method_name,

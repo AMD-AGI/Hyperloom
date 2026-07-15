@@ -2,8 +2,6 @@
 
 """Unit tests for the forge backend (parse_backends gate, gpu_target, fellow
 map, report anchors roundtrip, and skip paths). No GPU / gateway required.
-
-Design ref: claw-dev/docs-zh/forge-as-hyperloom-backend-integration.md
 """
 
 from __future__ import annotations
@@ -26,7 +24,9 @@ import kernel_optimization as ko  # noqa: E402
 
 def test_parse_backends_accepts_forge():
     assert ko.parse_backends("forge") == ["forge"]
-    assert ko.parse_backends("geak_v3,forge") == ["geak_v3", "forge"]
+    # forge is now the sole per-kernel backend; other names are rejected.
+    with pytest.raises(ValueError):
+        ko.parse_backends("other,forge")
 
 
 def test_parse_backends_still_rejects_unknown():
@@ -35,17 +35,14 @@ def test_parse_backends_still_rejects_unknown():
 
 
 def test_parse_backends_tolerates_stringified_list():
-    # An upstream dispatch slip can hand the repr() of a Python
-    # list to --backends ("['geak_v3']") instead of a bare name. parse_backends
-    # must recover the inner token rather than rejecting a valid backend.
-    assert ko.parse_backends("['geak_v3']") == ["geak_v3"]
-    assert ko.parse_backends('["geak_v3"]') == ["geak_v3"]
-    assert ko.parse_backends("['geak_v3', 'forge']") == ["geak_v3", "forge"]
+    # A stringified list ("['forge']") must recover the inner token.
+    assert ko.parse_backends("['forge']") == ["forge"]
+    assert ko.parse_backends('["forge"]') == ["forge"]
+    assert ko.parse_backends("['forge', 'forge']") == ["forge", "forge"]
 
 
 def test_parse_backends_stringified_list_still_rejects_unknown():
-    # The recovery must not weaken validation: a genuinely-unknown name inside
-    # a stringified list is still rejected.
+    # An unknown name inside a stringified list is still rejected.
     with pytest.raises(ValueError):
         ko.parse_backends("['bogus']")
 
@@ -74,9 +71,9 @@ def test_fellow_compiled_enabled_by_default(monkeypatch):
     assert forge_submit._fellow_for_source_type("ck") == "ck-fellow"
     assert forge_submit._fellow_for_source_type("aiter") == "aiter-fellow"
     assert forge_submit._fellow_for_source_type("hipblaslt") == "hipblaslt-fellow"
-    # Still None for genuinely unsupported types.
+    # None for unsupported types.
     assert forge_submit._fellow_for_source_type("vendor_binary") is None
-    # Opt-out disables compiled fellows (revert to triton-only -> geak_v3 fallback).
+    # Opt-out disables compiled fellows.
     monkeypatch.setenv("FORGE_DISABLE_COMPILED_FELLOWS", "1")
     assert forge_submit._fellow_for_source_type("hip_cpp") is None
     assert forge_submit._fellow_for_source_type("ck") is None
@@ -88,31 +85,15 @@ def _backends_args(backends=""):
 
 
 def test_choose_backends_respects_forge_only_order(monkeypatch):
-    # KERNEL_OPT_BACKEND_ORDER / --backends is authoritative: forge means
-    # strict forge-only, no hidden GEAK fallback.
+    # --backends is authoritative: forge means strict forge-only.
     selected, notes = ko.choose_backends(_backends_args("forge"), {})
     assert selected == ["forge"]
     assert "geak_fallback_appended" not in notes
 
 
-def test_choose_backends_no_double_geak(monkeypatch):
-    selected, _ = ko.choose_backends(_backends_args("forge,geak_v3"), {})
-    assert selected == ["forge", "geak_v3"]
-
-
-def test_choose_backends_legacy_env_degrades_without_crash(monkeypatch):
-    # A stale KERNEL_OPT_BACKEND_ORDER with removed OOB backends must degrade to
-    # the surviving backends instead of raising ValueError from parse_backends.
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge,geak,claude,codex")
-    selected, _ = ko.choose_backends(_backends_args(""), {})
-    assert selected == ["forge"]
-
-
-def test_choose_backends_legacy_env_all_removed_falls_back_to_default(monkeypatch):
-    # When every token is a removed/delegate backend, fall back to the default ladder.
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak,claude,codex,cursor")
-    selected, _ = ko.choose_backends(_backends_args(""), {})
-    assert selected == ["forge", "geak_v3"]
+def test_choose_backends_forge_only_when_repeated(monkeypatch):
+    selected, _ = ko.choose_backends(_backends_args("forge,forge"), {})
+    assert selected == ["forge", "forge"]
 
 
 def test_report_anchors_roundtrip(tmp_path):
@@ -176,13 +157,13 @@ def test_submit_rederives_aiter_cu_source_type(tmp_path, monkeypatch):
     """An aiter .cu kernel arriving with source_type='unknown' is re-derived to
     hip_cpp so forge maps it to hip-fellow (compiled fellows enabled by default)."""
     monkeypatch.delenv("FORGE_DISABLE_COMPILED_FELLOWS", raising=False)
-    # unknown + .cu -> hip_cpp -> hip-fellow (not the triton-only skip).
+    # unknown + .cu -> hip_cpp -> hip-fellow.
     res = forge_submit.submit(
         source_file="/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu",
         prompt_file=tmp_path / "p.txt", output_dir=tmp_path / "out",
         test_command="", source_type="unknown", candidate={"operation": "attention"},
         kernel_repo="")
-    # It must NOT be the "supports triton only" skip (rc=2 with that message).
+    # Must NOT be the "supports triton only" skip.
     assert "supports triton only" not in (res.get("stderr_tail") or "")
 
 
@@ -353,9 +334,8 @@ def test_apply_fellow_env_keeps_existing_proxy_and_operator_overrides():
 
 
 def test_apply_fellow_env_does_not_mutate_os_environ(monkeypatch):
-    """Finding-1 regression guard: the rewrite is scoped to the passed child env
-    dict and never leaks into the parent os.environ (which sibling ladder
-    backends claude/codex read)."""
+    """The rewrite is scoped to the passed child env dict and never leaks into
+    the parent os.environ (which sibling backends claude/codex read)."""
     import os as _os
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://host/llm-gateway")
     env = dict(_os.environ)
@@ -368,7 +348,7 @@ def test_apply_fellow_env_does_not_mutate_os_environ(monkeypatch):
 
 def test_adapter_bench_mode_rewrites_correctness_to_benchmark(tmp_path):
     """Bench mode must run the harness's --benchmark path (which emits timing),
-    not reuse --correctness which prints no latency (RCA root cause 3)."""
+    not reuse --correctness which prints no latency."""
     # Fake harness: prints latency only under --benchmark, nothing under
     # --correctness, so the adapter must rewrite the flag to measure anything.
     harness = tmp_path / "fake_harness.py"
@@ -388,7 +368,7 @@ def test_adapter_bench_mode_rewrites_correctness_to_benchmark(tmp_path):
 
 
 def test_adapter_bench_parses_aiter_us_per_iter(tmp_path):
-    """B: aiter op_tests have no --benchmark flag (benchmark by default) and log
+    """aiter op_tests have no --benchmark flag (benchmark by default) and log
     'avg: N us/iter'. The adapter must run them verbatim and convert us->ms."""
     harness = tmp_path / "aiter" / "op_tests" / "test_activation.py"
     harness.parent.mkdir(parents=True)
@@ -421,9 +401,9 @@ def test_report_informational_timing_not_kept_does_not_trigger_keep(tmp_path):
 
 
 def test_apply_fellow_env_claude_path_and_stability_flags(tmp_path, monkeypatch):
-    """G3+G4: child env gets FORGE_CLAUDE_BIN + claude dir on PATH, plus the
-    low-risk fellow stability flags. API_TIMEOUT_MS is opt-in because external
-    clients may treat it as a total request timeout."""
+    """Child env gets FORGE_CLAUDE_BIN + claude dir on PATH, plus the low-risk
+    fellow stability flags. API_TIMEOUT_MS is opt-in because external clients
+    may treat it as a total request timeout."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     claude = bindir / "claude"
@@ -501,7 +481,7 @@ def _capture_cli_env(tmp_path, monkeypatch, worktree_kernel):
 
 
 def test_cli_sets_aiter_rebuild_for_aiter_kernel(tmp_path, monkeypatch):
-    """C: an aiter kernel forces AITER_REBUILD=1 so edits recompile."""
+    """An aiter kernel forces AITER_REBUILD=1 so edits recompile."""
     env = _capture_cli_env(tmp_path, monkeypatch, "/sgl-workspace/aiter/csrc/x.cuh")
     assert env.get("AITER_REBUILD") == "1"
 
@@ -556,8 +536,7 @@ def test_sidecar_usage_surfaced_without_calls(tmp_path):
     """The parser only needs token counters; ``calls`` is optional metadata.
 
     A sidecar that reports aggregate token counters with NO ``calls`` field
-    must still surface so ``submit`` emits FORGE_LLM_USAGE — the previous gate
-    (``usage.get("calls")``) silently dropped it, losing the forge token row.
+    must still surface so ``submit`` emits FORGE_LLM_USAGE.
     """
     out_dir = _write_forge_sidecar(tmp_path, {
         "baseline_ms": 10, "best_ms": 8, "improved": True,
@@ -728,10 +707,6 @@ def test_prepare_worktree_nogit_uses_kernel_repo_when_provided(tmp_path):
 def test_prepare_worktree_nogit_copies_only_target_package(tmp_path):
     """Without an explicit kernel_repo, only the target top-level package is
     copied — NOT the whole dist-packages/site-packages dir with its siblings.
-
-    Regression: a naive walk-to-parent would set copy_root to the dist-packages
-    dir and shutil.copytree the entire tree (torch, vllm, ...) — 5-15 GB per
-    submit, risking ENOSPC.
     """
     # Simulate a dist-packages dir with two installed packages.
     dist = tmp_path / "dist-packages"

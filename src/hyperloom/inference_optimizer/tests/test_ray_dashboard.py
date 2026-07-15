@@ -8,7 +8,7 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
-# ray_dashboard imports httpx at module load; provide a lightweight stub.
+# Stub httpx, imported by ray_dashboard at module load.
 _httpx_stub = types.ModuleType("httpx")
 _httpx_stub.Timeout = lambda **kwargs: kwargs
 _httpx_stub.Client = MagicMock()
@@ -52,9 +52,9 @@ def test_submit_job_includes_runtime_env_payload():
         with ray_dashboard.RayDashboardClient("10.0.0.2") as client:
             sub = client.submit_job(
                 "echo hi",
-                runtime_env={"env_vars": {"OOB_SRC": "/weka/oob"}},
+                runtime_env={"env_vars": {"REMOVED_BACKEND_SRC": "/weka/legacy-backend"}},
             )
         assert sub == "sub-1"
         payload = mock_client.post.call_args.kwargs["json"]
-        assert payload["runtime_env"] == {"env_vars": {"OOB_SRC": "/weka/oob"}}
+        assert payload["runtime_env"] == {"env_vars": {"REMOVED_BACKEND_SRC": "/weka/legacy-backend"}}
         assert "entrypoint" in payload

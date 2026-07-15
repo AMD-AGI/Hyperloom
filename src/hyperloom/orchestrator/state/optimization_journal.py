@@ -10,14 +10,13 @@ incrementally (atomic tmp + ``os.replace``) so a mid-session crash leaves a usab
 from __future__ import annotations
 
 import dataclasses
-import functools
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import atomic_write_text
 from hyperloom.common.timeutil import now_iso
 
 
@@ -27,33 +26,26 @@ log = logging.getLogger(__name__)
 # Stable filename so dashboards / report scripts can hard-code it.
 JOURNAL_FILENAME: str = "optimization_journal.json"
 
-# Outcome literals — keep stable (consumed by render scripts + KB fact-write hooks).
+# Outcome literals consumed by render scripts + KB fact-write hooks.
 OUTCOME_KEEP: str = "KEEP"
 OUTCOME_REVERT: str = "REVERT"
 OUTCOME_NO_PROMOTE: str = "no_promote"
 
-# Task kinds whose result carries an authoritative per-status verdict
-# (kept / reverted / …) that the journal outcome must follow rather than the
-# coarse dispatcher ``promotable`` flag. For these, ``status != "failed"`` (the
-# ``_is_promotable_result`` rule) is NOT the same as "the optimization was
-# adopted": a ``reverted`` patch is promotable (it still runs the pending-
-# integrate cleanup) yet was rolled back, so recording it as KEEP is a lie.
+# Task kinds whose result carries an authoritative per-status verdict the
+# journal outcome must follow rather than the coarse dispatcher ``promotable``
+# flag (a ``reverted`` patch is promotable yet was rolled back).
 _STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch", "framework_agent"})
 
-# For the status-driven kinds: the only status that means "the change was
-# adopted into current_best".
+# The only status meaning the change was adopted into current_best.
 _JOURNAL_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
 
-# Statuses that mean "a real change was tested / applied and then rolled back
-# or rejected on measured grounds" → REVERT. Everything else for these kinds
-# (apply_failed / no_patch / fetch_failed / applied_no_bench / rejected_by_critic
-# / skipped / failed / terminal progress stamps …) never reached a KEEP/REVERT
-# measurement, so it is ``no_promote`` — neither a win nor a regression signal.
+# Statuses meaning a real change was tested/applied then rolled back or rejected
+# on measured grounds → REVERT. Everything else is ``no_promote``.
 _JOURNAL_REVERT_STATUSES: frozenset[str] = frozenset(
     {"reverted", "accuracy_unavailable_reject", "regression"}
 )
 
-# Change-kind vocabulary — coarse dashboard grouping. Extend by appending; don't reuse old strings.
+# Change-kind vocabulary for coarse dashboard grouping.
 KIND_BACKEND: str = "backend"  # --attention-backend, kv_cache_dtype, ...
 KIND_PARAM: str = "param"  # --max-num-batched-tokens, --gpu-memory-utilization, ...
 KIND_ENV: str = "env"  # ROCm / vLLM env vars
@@ -68,10 +60,8 @@ KIND_OTHER: str = "other"
 def _optional_int(value: Any) -> int | None:
     """Coerce a value to int, or ``None`` on absence / bad type.
 
-    Used to load the optional ``tick`` field tolerantly: a journal missing
-    the ``tick`` key or carrying a corrupted value must not crash
-    :meth:`JournalEntry.from_dict` (the journal is a best-effort audit
-    artifact loaded on resume).
+    Used to load the optional ``tick`` field tolerantly so a journal missing
+    or carrying a corrupted value does not crash :meth:`JournalEntry.from_dict`.
 
     Args:
         value: The value to coerce to an int.
@@ -101,34 +91,21 @@ class JournalEntry:
     throughput_after: float | None = None
     error_class: str | None = None
     reason: str | None = None
-    # Predicted (pre-measurement) gain for this change, when the proposer
-    # supplied one (PendingProposal / critic verdict). Persisted alongside the
-    # measured ``gain_pct`` so the decision-trace collector can surface a
-    # predicted-vs-realized calibration signal. ``None`` (stripped by
-    # ``to_dict``) when no prediction was available (e.g. default-grid sweeps).
+    # Predicted (pre-measurement) gain when the proposer supplied one; ``None``
+    # (stripped by ``to_dict``) when no prediction was available.
     predicted_gain_pct: float | None = None
     task_id: str = ""
     variant_name: str = ""
     ts: str = ""
-    # Proposer attribution (who proposed this change). ``provenance`` is the raw
-    # explore label (``llm_direct`` / ``default_grid`` / ``specialist:<domain>``);
-    # ``scope`` is the orthogonal specialist dial (domain / domains / freeform);
-    # ``fingerprint`` is the variant join key into ``explore_search``. All
-    # default empty and are stripped by ``to_dict`` when unset (e.g. on
-    # non-explore rows).
+    # Proposer attribution: ``provenance`` is the raw explore label, ``scope``
+    # the specialist dial, ``fingerprint`` the join key into ``explore_search``.
     provenance: str = ""
     scope: str = ""
     fingerprint: str = ""
-    # Per-variant measurement detail beyond the headline gain/throughput
-    # (runtime_sec / wall_clock_ratio_vs_baseline / stack_rebench_tput /
-    # estimated_output_throughput). Empty dict stripped by ``to_dict``.
+    # Per-variant measurement detail beyond the headline gain/throughput.
     metrics: dict[str, Any] = field(default_factory=dict)
-    # Orchestrator tick at the moment of decision. Lets the
-    # decision-trace collector join this KEEP/REVERT row to the LLM calls
-    # recorded for the same tick. Defaults to ``None`` (not 0) so older
-    # journals — and call sites that don't know the tick — are stripped by
-    # ``to_dict`` and remain indistinguishable from "tick unknown" rather
-    # than masquerading as the pre-first-increment tick 0.
+    # Orchestrator tick at the moment of decision; joins this row to LLM calls
+    # for the same tick. ``None`` (not 0) so unknown ticks are stripped.
     tick: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -139,8 +116,7 @@ class JournalEntry:
                 removed.
         """
         raw = dataclasses.asdict(self)
-        # Strip None, empty strings, and empty containers ({} / []) so the file
-        # stays compact and byte-diffable (an unset ``metrics`` dict vanishes).
+        # Strip None, empty strings, and empty containers to stay compact.
         return {k: v for k, v in raw.items() if v is not None and v != "" and v != {} and v != []}
 
     @classmethod
@@ -287,7 +263,7 @@ class Journal:
             row with the same dedupe key already exists.
         """
         if not entry.ts:
-            entry.ts = _now_iso()
+            entry.ts = now_iso("seconds", z_suffix=True)
         key = entry.dedupe_key()
         for existing in self.entries:
             if existing.dedupe_key() == key:
@@ -331,14 +307,11 @@ class Journal:
     def _flush(self) -> None:
         """Atomic write (tmp + os.replace); best-effort — IOError logged and swallowed (forensic aid, not a correctness invariant)."""
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = self.to_dict()
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            tmp.write_text(
-                json.dumps(payload, indent=2, sort_keys=False) + "\n",
-                encoding="utf-8",
+            atomic_write_text(
+                self.path,
+                json.dumps(self.to_dict(), indent=2, sort_keys=False) + "\n",
+                make_parents=True,
             )
-            os.replace(tmp, self.path)
         except OSError as exc:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)
 
@@ -362,20 +335,16 @@ class Journal:
 
 
 # helpers
-# seconds + ``Z`` suffix (canonical helper; kept importable for callers).
-_now_iso = functools.partial(now_iso, "seconds", z_suffix=True)
-
-
 def _variant_args(variant: dict[str, Any]) -> str:
-    """Read a variant's server-arg string, canonical (``extra_server_args``) first with a legacy ``extra_sglang_args`` fallback.
+    """Read a variant's canonical server-arg string.
 
     Args:
         variant: The variant dict to read server args from.
 
     Returns:
-        The server-arg string, or an empty string when neither key is present.
+        The server-arg string, or an empty string when the key is absent.
     """
-    return str(variant.get("extra_server_args") or variant.get("extra_sglang_args") or "")
+    return str(variant.get("extra_server_args") or "")
 
 
 def derive_journal_outcome(
@@ -386,21 +355,16 @@ def derive_journal_outcome(
 ) -> str:
     """Derive the journal ``outcome`` for a settled per-task result.
 
-    Fixes the "fake KEEP" bug: for source-patch kinds (``integrate_patch`` /
-    ``framework_agent``) the dispatcher's ``promotable`` flag is
-    ``status != "failed"``, which is TRUE for a ``reverted`` patch — so the old
-    ``if promotable: KEEP`` recorded rolled-back patches as KEEP. Here the
-    outcome follows the executor's authoritative per-status verdict instead:
+    For source-patch kinds (``integrate_patch`` / ``framework_agent``) the
+    outcome follows the executor's authoritative per-status verdict:
 
-    - ``status == "kept"``                                  → ``OUTCOME_KEEP``
-    - ``status in {reverted, accuracy_unavailable_reject,
-      regression}``                                         → ``OUTCOME_REVERT``
-    - any other status (apply_failed / no_patch / failed /
-      applied_no_bench / rejected_by_critic / …)            → ``OUTCOME_NO_PROMOTE``
+    - ``status == "kept"`` → ``OUTCOME_KEEP``
+    - ``status in {reverted, accuracy_unavailable_reject, regression}`` →
+      ``OUTCOME_REVERT``
+    - any other status → ``OUTCOME_NO_PROMOTE``
 
-    For every other task kind the historical binary behaviour is preserved
-    (``promotable`` → KEEP, else REVERT) so non-patch journalling never
-    regresses.
+    For every other task kind the binary behaviour applies (``promotable`` →
+    KEEP, else REVERT).
 
     Args:
         task_kind: The settled task's kind.
@@ -452,10 +416,8 @@ def classify_change_kind(task_kind: str, variant: dict[str, Any] | None = None) 
     return KIND_OTHER
 
 
-# operation_kind: a single stable, filterable label for "what this step did".
-# Reuses the change-kind vocabulary but renames the two kernel kinds to the
-# action names dashboards/traces filter on, and falls back to the raw action
-# for non-explore steps (baseline / profile / roofline / sweep / framework).
+# operation_kind: stable filterable label for "what this step did"; renames the
+# two kernel kinds to the action names dashboards/traces filter on.
 _OP_KIND_RENAME: dict[str, str] = {
     KIND_KERNEL_FILE: "kernel_opt",
     KIND_INTEGRATE: "kernel_integrate",

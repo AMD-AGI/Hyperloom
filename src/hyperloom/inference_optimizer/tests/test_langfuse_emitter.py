@@ -28,9 +28,6 @@ from hyperloom.orchestrator.trace import langfuse_mapping as lfmap
 from hyperloom.orchestrator.trace import langfuse_emitter as lfe
 
 
-# ---------------------------------------------------------------------------
-# Fake langfuse SDK
-# ---------------------------------------------------------------------------
 class _FakeObservation:
     """A span or generation; can spawn children (nested spans/generations)."""
 
@@ -66,8 +63,8 @@ class _FakeClient:
         self.observations: list[_FakeObservation] = []
         self.generations: list[_FakeObservation] = []
         self.spans: list[_FakeObservation] = []
-        self.scores: list[dict] = []  # trace-level
-        self.observation_scores: list[dict] = []  # span-level
+        self.scores: list[dict] = []
+        self.observation_scores: list[dict] = []
         self.trace_updates: list[dict] = []
         self.flushed = 0
         self._raise_on_generation = raise_on_generation
@@ -169,9 +166,6 @@ def _conv_row(**over) -> dict:
     return base
 
 
-# ---------------------------------------------------------------------------
-# Gate logic
-# ---------------------------------------------------------------------------
 def test_disabled_by_default(tmp_path, monkeypatch):
     """No env set -> emitter is a no-op and never builds a client."""
     monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
@@ -194,7 +188,6 @@ def test_enabled_flag_but_missing_creds_is_noop(tmp_path, monkeypatch):
 
 def test_enabled_but_sdk_missing_is_noop(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
-    # Ensure import fails.
     monkeypatch.setitem(sys.modules, "langfuse", None)
     em = lfe.LangfuseEmitter(tmp_path)
     assert em.enabled is False
@@ -208,16 +201,14 @@ def test_all_gates_pass_enables(tmp_path, monkeypatch):
     _write_manifest(sd, claw_session_id="claw-XYZ")
     em = lfe.LangfuseEmitter(sd)
     assert em.enabled is True
-    # trace_id derives from claw_session_id (not the dir name) so live + backfill
-    # of one claw session collapse onto one trace.
+    # trace_id derives from claw_session_id so live + backfill collapse onto one trace.
     assert em._trace_id == lfmap.derive_trace_id("claw-XYZ")
     assert em._session_label == "claw-XYZ"
 
 
 def test_enabling_seeds_default_flush_interval(tmp_path, monkeypatch):
-    # When the operator has not pinned a flush cadence, building the client
-    # tightens the SDK auto-flush interval so a killed run still lands its
-    # latest observations.
+    # With no pinned flush cadence, building the client tightens the SDK
+    # auto-flush interval so a killed run still lands its latest observations.
     _enable_env(monkeypatch)
     monkeypatch.delenv("LANGFUSE_FLUSH_INTERVAL", raising=False)
     monkeypatch.delenv("LANGFUSE_FLUSH_AT", raising=False)
@@ -228,7 +219,7 @@ def test_enabling_seeds_default_flush_interval(tmp_path, monkeypatch):
     import os
 
     assert os.environ["LANGFUSE_FLUSH_INTERVAL"] == "1"
-    # flush_at is intentionally left to the SDK default (no per-event HTTP).
+    # flush_at is left to the SDK default (no per-event HTTP).
     assert "LANGFUSE_FLUSH_AT" not in os.environ
 
 
@@ -277,7 +268,6 @@ def test_session_start_emits_marker_with_provenance(tmp_path, monkeypatch):
     marker = client.span_named("session_start")
     assert marker is not None
     out = marker.kwargs.get("output") or {}
-    # The full manifest is carried verbatim.
     assert out["claw_session_id"] == "claw-XYZ"
     assert out["sandbox_user_id"] == "alice"
     assert out["code_revision"] == "abc1234"
@@ -299,7 +289,7 @@ def test_session_start_emits_marker_with_provenance(tmp_path, monkeypatch):
     meta = marker.kwargs.get("metadata") or {}
     assert meta["code_revision"] == "abc1234"
     assert meta["user_data_path"] == "/weka/users/alice"
-    # Trace is grouped on the claw session id from the first observation.
+    # Trace is grouped on the claw session id.
     assert marker.trace_update is not None
     assert marker.trace_update["session_id"] == "claw-XYZ"
     assert client.flushed >= 1
@@ -366,14 +356,11 @@ def test_trace_session_id_set_from_claw_on_first_generation(tmp_path, monkeypatc
     em = lfe.LangfuseEmitter(sd)
     em.record_llm_call(_llm_row())
     em.record_conversation(_conv_row())
-    # update_trace stamped the Langfuse session_id grouping with the claw id.
+    # update_trace stamped the session_id grouping with the claw id.
     assert client.trace_updates, "expected update_trace to be called once"
     assert client.trace_updates[0]["session_id"] == "claw-XYZ"
 
 
-# ---------------------------------------------------------------------------
-# Pairing + usage mapping
-# ---------------------------------------------------------------------------
 def test_token_and_conversation_pair_into_one_generation(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -381,7 +368,7 @@ def test_token_and_conversation_pair_into_one_generation(tmp_path, monkeypatch):
     em = lfe.LangfuseEmitter(tmp_path)
 
     em.record_llm_call(_llm_row())
-    assert client.generations == []  # waiting for its text half
+    assert client.generations == []
     em.record_conversation(_conv_row())
 
     assert len(client.generations) == 1
@@ -413,9 +400,6 @@ def test_conversation_first_then_token_also_pairs(tmp_path, monkeypatch):
     assert len(client.generations) == 1
 
 
-# ---------------------------------------------------------------------------
-# Span hierarchy: trace -> phase span -> agent span -> generation
-# ---------------------------------------------------------------------------
 def test_generation_nests_under_phase_and_agent_spans(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -465,9 +449,6 @@ def test_flush_closes_all_spans(tmp_path, monkeypatch):
         assert s.ended is True, f"span {s.kwargs.get('name')} not ended"
 
 
-# ---------------------------------------------------------------------------
-# record_session_breakdown: full SBD JSON attached to the trace
-# ---------------------------------------------------------------------------
 def test_record_session_breakdown_attaches_full_json(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -508,9 +489,8 @@ def test_record_session_breakdown_is_idempotent(tmp_path, monkeypatch):
 
 
 def test_record_session_breakdown_cross_process_idempotent(tmp_path, monkeypatch):
-    # A second, fresh emitter (simulating an offline `recover-session` process)
-    # must skip re-attaching the document because the persisted receipt records
-    # breakdown_recorded=1.
+    # A second, fresh emitter skips re-attaching because the persisted receipt
+    # records breakdown_recorded=1.
     _enable_env(monkeypatch)
     client1 = _FakeClient()
     _install_fake_sdk(monkeypatch, client1)
@@ -519,7 +499,6 @@ def test_record_session_breakdown_cross_process_idempotent(tmp_path, monkeypatch
     em1 = lfe.LangfuseEmitter(sd)
     em1.record_session_breakdown({"schema_version": "v3.0"})
     assert em1._counts["breakdown_recorded"] == 1
-    # Receipt persisted on disk with the flag set.
     assert (lfe.read_receipt(sd) or {}).get("counts", {}).get("breakdown_recorded")
 
     client2 = _FakeClient()
@@ -533,7 +512,6 @@ def test_record_session_breakdown_cross_process_idempotent(tmp_path, monkeypatch
 def test_record_session_breakdown_disabled_is_noop(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
     em = lfe.LangfuseEmitter(tmp_path)
-    # No client built; must not raise.
     em.record_session_breakdown({"schema_version": "v3.0"})
     assert em._counts["breakdown_recorded"] == 0
 
@@ -554,9 +532,6 @@ def test_module_record_session_breakdown_reads_file(tmp_path, monkeypatch):
     assert span.kwargs["output"]["schema_version"] == "v3.0"
 
 
-# ---------------------------------------------------------------------------
-# flush_session: leftovers + audit spans + decision scores
-# ---------------------------------------------------------------------------
 def _seed_trace_dir(tmp_path: Path) -> Path:
     sd = tmp_path / "SID"
     (sd / "reports" / "trace" / "ext").mkdir(parents=True)
@@ -570,7 +545,7 @@ def test_flush_emits_unpaired_token_only_generation(tmp_path, monkeypatch):
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
     em = lfe.LangfuseEmitter(sd)
-    em.record_llm_call(_llm_row())  # never gets a conversation half
+    em.record_llm_call(_llm_row())
     assert client.generations == []
     em.flush_session()
     assert len(client.generations) == 1
@@ -583,38 +558,38 @@ def test_flush_backfills_ext_shards(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    shard = sd / "reports" / "trace" / "ext" / "geak_v3-123.jsonl"
+    shard = sd / "reports" / "trace" / "ext" / "forge-123.jsonl"
     shard.write_text(
-        json.dumps(_llm_row(component="geak_v3", role=None, input_tokens=500, output_tokens=60)) + "\n",
+        json.dumps(_llm_row(component="forge", role=None, input_tokens=500, output_tokens=60)) + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
     em.flush_session()
-    geak_gens = [g for g in client.generations if g.kwargs["metadata"]["component"] == "geak_v3"]
+    geak_gens = [g for g in client.generations if g.kwargs["metadata"]["component"] == "forge"]
     assert len(geak_gens) == 1
     assert geak_gens[0].kwargs["usage_details"]["input"] == 500
     assert geak_gens[0].kwargs["metadata"]["has_text"] is False
 
 
 def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
-    """A second flush_session() must NOT re-scan the leftovers / decision_trace
-    and re-emit -- otherwise Langfuse gets duplicate Generations/Scores."""
+    """A second flush_session() must NOT re-scan leftovers / decision_trace and
+    re-emit (would duplicate Generations/Scores)."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    (sd / "reports" / "trace" / "ext" / "geak_v3-1.jsonl").write_text(
-        json.dumps(_llm_row(component="geak_v3", role=None, input_tokens=500, output_tokens=60)) + "\n",
+    (sd / "reports" / "trace" / "ext" / "forge-1.jsonl").write_text(
+        json.dumps(_llm_row(component="forge", role=None, input_tokens=500, output_tokens=60)) + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
-    em.record_llm_call(_llm_row())  # unpaired token half, flushed once
+    em.record_llm_call(_llm_row())  # unpaired token half
 
     em.flush_session()
     gens_after_first = len(client.generations)
     assert gens_after_first >= 1
 
-    # Second call: receipt re-written, but no new Generation emitted.
+    # Second call: no new Generation emitted.
     em.flush_session()
     assert len(client.generations) == gens_after_first
 
@@ -662,13 +637,13 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
-    # Create an agent span for (KERNEL, kernel) so its step span parents there.
+    # Create an agent span so its step span parents there.
     em.record_llm_call(_llm_row(phase="KERNEL_AGENT", component="kernel_agent", role="kernel_agent"))
     em.record_conversation(_conv_row(phase="KERNEL_AGENT", component="kernel_agent", role="kernel_agent"))
     em.flush_session()
 
-    # Each decision now opens an ``optimization_step:<operation_kind>`` span,
-    # tagged with operation_kind in metadata, and its scores attach to it.
+    # Each decision opens an optimization_step:<operation_kind> span whose
+    # scores attach to it.
     kernel_step = client.span_named("optimization_step:kernel_opt")
     param_step = client.span_named("optimization_step:param")
     assert kernel_step is not None
@@ -677,7 +652,6 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     assert param_step.kwargs["metadata"]["operation_kind"] == "param"
     assert param_step.kwargs["metadata"]["provenance"] == "default_grid"
 
-    # KERNEL KEEP w/ gain -> decision_outcome + gain_pct; EXPLORE REVERT -> 1.
     span_score_names = sorted(s["name"] for s in client.observation_scores)
     assert span_score_names == ["decision_outcome", "decision_outcome", "gain_pct"]
     gain = [s for s in client.observation_scores if s["name"] == "gain_pct"][0]
@@ -686,9 +660,6 @@ def test_flush_creates_decision_scores(tmp_path, monkeypatch):
     assert gain["metadata"]["operation_kind"] == "kernel_opt"
 
 
-# ---------------------------------------------------------------------------
-# KB trace spans (record_kb_span + recipe-snapshot audit flush)
-# ---------------------------------------------------------------------------
 def test_flush_emits_proposal_score_calibration(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()
@@ -723,7 +694,7 @@ def test_flush_emits_proposal_score_calibration(tmp_path, monkeypatch):
               if s["name"] == "proposal_score"][0]
     assert pscore["value"] == 8.0           # mean(7, 9)
     assert pscore["data_type"] == "NUMERIC"
-    # Realized gain emitted alongside so a trace can compute calibration error.
+    # Realized gain emitted alongside for calibration error.
     assert "gain_pct" in names
 
 
@@ -782,7 +753,6 @@ def test_record_kb_span_nests_under_agent(tmp_path, monkeypatch):
     assert span is not None
     assert span.kwargs["output"] == {"mode": "dry_run", "verdict_count": 1}
     assert span.kwargs["metadata"]["kind"] == "kb_assess"
-    # nested under agent:critic
     assert client.span_named("agent:critic") is not None
     assert span.ended is True
     assert em._counts["kb_spans_sent"] == 1
@@ -930,7 +900,7 @@ def test_flush_backfills_gemm_tuning(tmp_path, monkeypatch):
     assert forge_span.kwargs["metadata"]["engine"] == "forge"
     assert forge_span.kwargs["metadata"]["best_speedup"] == 1.12
     assert client.span_named("gemm_tuning:geak") is not None
-    # Attributed to its own ``gemm_tuning`` source agent span.
+    # Attributed to its own gemm_tuning source agent span.
     assert client.span_named("agent:gemm_tuning") is not None
     persisted = lfe.read_receipt(sd)
     assert persisted["counts"]["gemm_tuning_read"] == 2
@@ -956,9 +926,6 @@ def test_generation_uses_latency_for_duration(tmp_path, monkeypatch):
     assert (end - start).total_seconds() == pytest.approx(2.0, abs=0.01)
 
 
-# ---------------------------------------------------------------------------
-# Best-effort fault posture
-# ---------------------------------------------------------------------------
 def test_send_exception_is_swallowed(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient(raise_on_generation=True)
@@ -967,7 +934,7 @@ def test_send_exception_is_swallowed(tmp_path, monkeypatch):
     # Must not raise even though start_observation blows up.
     em.record_llm_call(_llm_row())
     em.record_conversation(_conv_row())
-    em.flush_session()  # also exercises flush path with a raising client
+    em.flush_session()
 
 
 def test_get_emitter_is_cached_per_session(tmp_path, monkeypatch):
@@ -977,9 +944,6 @@ def test_get_emitter_is_cached_per_session(tmp_path, monkeypatch):
     assert a is b
 
 
-# ---------------------------------------------------------------------------
-# Receipt (session_breakdown ``langfuse`` section)
-# ---------------------------------------------------------------------------
 def test_receipt_disabled_records_reason_and_redacts(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
     em = lfe.LangfuseEmitter(tmp_path)
@@ -987,7 +951,6 @@ def test_receipt_disabled_records_reason_and_redacts(tmp_path, monkeypatch):
     assert r["enabled"] is False
     assert r["disabled_reason"] == "disabled"
     assert r["config"]["enable_flag"] is False
-    # No secret material ever appears in the receipt.
     blob = json.dumps(r)
     assert "sk-" not in blob and "pk-" not in blob
 
@@ -1026,7 +989,6 @@ def test_receipt_counts_and_redaction_when_enabled(tmp_path, monkeypatch):
     assert r["counts"]["generations_paired"] == 1
     # Pre-flush: not final yet.
     assert r["counts_final"] is False
-    # host is a URL (not secret); raw keys never present.
     blob = json.dumps(r)
     assert "pk-test" not in blob and "sk-test" not in blob
 
@@ -1036,10 +998,9 @@ def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    # one ext shard (out-of-process) + one unpaired token half + one decision
-    # so flush counts move.
-    (sd / "reports" / "trace" / "ext" / "geak_v3-1.jsonl").write_text(
-        json.dumps(_llm_row(component="geak_v3", role=None)) + "\n",
+    # one ext shard + one unpaired token half + one decision so flush counts move.
+    (sd / "reports" / "trace" / "ext" / "forge-1.jsonl").write_text(
+        json.dumps(_llm_row(component="forge", role=None)) + "\n",
         encoding="utf-8",
     )
     (sd / "reports" / "trace" / "decision_trace.jsonl").write_text(
@@ -1081,13 +1042,10 @@ def test_disabled_flush_still_writes_receipt(tmp_path, monkeypatch):
     assert persisted["disabled_reason"] == "disabled"
 
 
-# ---------------------------------------------------------------------------
-# pair_key: token <-> conversation join identity
-# ---------------------------------------------------------------------------
 def test_pair_key_distinguishes_same_second_burst():
     """Two calls in the same (component, tick, role) and same UTC second but
-    different turns must NOT collide -- otherwise a token row pairs with the
-    wrong conversation row in a burst (e.g. multi-turn specialist/critic)."""
+    different turns must NOT collide (otherwise a token row pairs with the wrong
+    conversation row in a burst)."""
     base = {
         "component": "specialist",
         "tick": 3,
@@ -1097,7 +1055,7 @@ def test_pair_key_distinguishes_same_second_burst():
         "ts": "2026-06-11T10:00:00.100Z",
     }
     turn_a = {**base, "turn": 1}
-    turn_b = {**base, "turn": 2, "ts": "2026-06-11T10:00:00.800Z"}  # same second
+    turn_b = {**base, "turn": 2, "ts": "2026-06-11T10:00:00.800Z"}
     assert lfmap.pair_key(turn_a) != lfmap.pair_key(turn_b)
 
 
@@ -1113,14 +1071,13 @@ def test_pair_key_matches_token_and_text_halves_of_one_call():
         "dyn_id": "dy",
         "ts": "2026-06-11T10:00:01.020Z",
     }
-    text = {**token, "ts": "2026-06-11T10:00:01.450Z"}  # same second, +430ms
+    text = {**token, "ts": "2026-06-11T10:00:01.450Z"}
     assert lfmap.pair_key(token) == lfmap.pair_key(text)
 
 
 def test_pair_key_distinguishes_concurrent_models_same_second():
-    """ProposalScorer fires several models via asyncio.gather; their rows land
-    in the same UTC second with identical keys except model -> must not collide
-    (otherwise usage of model A pairs with the prompt/response of model B)."""
+    """Concurrent models land in the same UTC second with identical keys except
+    model -> must not collide (usage of model A pairing with model B's text)."""
     base = {
         "component": "proposal_scorer",
         "tick": None,
@@ -1137,28 +1094,25 @@ def test_pair_key_distinguishes_concurrent_models_same_second():
 
 def test_pair_key_scorer_token_and_text_pair_when_roles_match():
     """The scorer's token row and conversation row must share role+model so
-    their pair_key matches (the bug: token row had role=None)."""
+    their pair_key matches."""
     token = {
         "component": "proposal_scorer",
         "role": "proposal_scorer",
         "model": "qwen-32b",
         "ts": "2026-06-11T10:00:00.100Z",
     }
-    text = {**token, "ts": "2026-06-11T10:00:00.900Z"}  # same second
+    text = {**token, "ts": "2026-06-11T10:00:00.900Z"}
     assert lfmap.pair_key(token) == lfmap.pair_key(text)
 
 
 def test_pair_key_degrades_when_turn_absent():
-    """Legacy rows without turn/task_id/dyn_id still produce a stable key
-    (all the new slots are None) rather than raising."""
-    row = {"component": "oob", "tick": 1, "role": None, "ts": "2026-06-11T10:00:00Z"}
+    """Rows without turn/task_id/dyn_id still produce a stable key rather than
+    raising."""
+    row = {"component": "forge", "tick": 1, "role": None, "ts": "2026-06-11T10:00:00Z"}
     k = lfmap.pair_key(row)
-    assert lfmap.pair_key(dict(row)) == k  # stable / deterministic
+    assert lfmap.pair_key(dict(row)) == k
 
 
-# ---------------------------------------------------------------------------
-# record_status — live state.json mirror
-# ---------------------------------------------------------------------------
 def _status(**over) -> dict:
     base = {"phase": "EXPLORE", "stop_reason": "", "cumulative_gain": 12.5}
     base.update(over)
@@ -1183,11 +1137,11 @@ def test_record_status_emits_observation_and_trace_metadata(tmp_path, monkeypatc
 
     em.record_status(_status(phase="PRELUDE"))
 
-    # A session_status observation was appended (the timeline half).
+    # A session_status observation was appended.
     status_spans = [s for s in client.spans if s.kwargs.get("name") == "session_status"]
     assert len(status_spans) == 1
     assert status_spans[0].kwargs.get("output", {}).get("phase") == "PRELUDE"
-    # Trace-level metadata was upserted (the current-snapshot half).
+    # Trace-level metadata was upserted.
     assert client.trace_updates, "expected update_trace to stamp trace metadata"
     assert client.trace_updates[-1]["metadata"]["phase"] == "PRELUDE"
     assert em._counts["status_updates_sent"] == 1
@@ -1202,7 +1156,7 @@ def test_record_status_throttles_unchanged_snapshots(tmp_path, monkeypatch):
     em = lfe.LangfuseEmitter(sd)
 
     em.record_status(_status(phase="EXPLORE"))
-    em.record_status(_status(phase="EXPLORE"))  # identical -> throttled
+    em.record_status(_status(phase="EXPLORE"))  # throttled
     assert em._counts["status_updates_sent"] == 1
 
     em.record_status(_status(phase="SWEEP"))  # changed -> sent
@@ -1217,7 +1171,7 @@ def test_record_status_refreshes_after_min_interval(tmp_path, monkeypatch):
     _write_manifest(sd)
     em = lfe.LangfuseEmitter(sd)
 
-    # min_refresh_sec=0 makes even an unchanged snapshot re-send (slow heartbeat).
+    # min_refresh_sec=0 makes even an unchanged snapshot re-send.
     em.record_status(_status(), min_refresh_sec=0.0)
     em.record_status(_status(), min_refresh_sec=0.0)
     assert em._counts["status_updates_sent"] == 2

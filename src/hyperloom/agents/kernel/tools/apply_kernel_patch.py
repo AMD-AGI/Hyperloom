@@ -17,13 +17,12 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-# Sibling import works whether run as a script or loaded via importlib.
+# Sibling import works whether run as a script or via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import source_text_looks_complete  # noqa: E402
+from _io_utils import source_text_looks_complete, utc_now  # noqa: E402
 
 sys.path.pop(0)
 
@@ -78,16 +77,14 @@ def known_target_roots() -> tuple[str, ...]:
     return _CACHED_KNOWN_TARGET_ROOTS
 
 
-# Backward-compat alias for tests / external imports.
+# Alias for tests / external imports.
 KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS
 
 
-# Pod-local multi-node backup dir; survives sglang restarts.
-# Overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR for tests.
+# Pod-local multi-node backup dir; overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR.
 _MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
 
-# Multi-node signal file (nodes >= 2) written by multi_node create-rayjob.
-# $MULTI_NODE_STATE_FILE wins; env override keeps test runs isolated.
+# Multi-node signal file (nodes >= 2); $MULTI_NODE_STATE_FILE overrides.
 _MN_STATE_FILE_DEFAULT = "/tmp/multi_node_state.json"
 
 
@@ -103,7 +100,7 @@ def _mn_state_path() -> Path:
     return Path(os.environ.get("MULTI_NODE_STATE_FILE", _MN_STATE_FILE_DEFAULT))
 
 
-# Legacy module attribute kept for direct importers; runtime uses _mn_state_path.
+# Module attribute kept for direct importers; runtime uses _mn_state_path.
 _MN_STATE_FILE = Path(_MN_STATE_FILE_DEFAULT)
 
 
@@ -241,15 +238,6 @@ def _dispatch_multinode_revert(
         "stdout_tail": out[-2000:],
         "stderr_tail": (proc.stderr or "")[-2000:],
     }
-
-
-def _now() -> str:
-    """Return the current UTC timestamp as an ISO8601 string.
-
-    Returns:
-        str: The current UTC time formatted as an ISO8601 string.
-    """
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_name(value: str) -> str:
@@ -522,8 +510,7 @@ def _contained_dest(repo_root: Path, rel_path: str) -> Path:
     """Resolve ``rel_path`` under ``repo_root``, rejecting any escape.
 
     Rejects absolute paths and any ``..`` traversal, and confirms the resolved
-    destination stays inside ``repo_root`` (closes the path-traversal hole the
-    review flagged, applied at the deploy boundary).
+    destination stays inside ``repo_root``.
 
     Args:
         repo_root (Path): The framework repo root that destinations must stay in.
@@ -645,7 +632,7 @@ def apply_snapshot(
     for desc, dest, src in staged:
         try:
             existed = dest.exists() or dest.is_symlink()
-            # Back up (disposition drives revert): record before mutating.
+            # Back up before mutating (disposition drives revert).
             if desc["op"] == "delete" or existed:
                 disposition = "deleted" if desc["op"] == "delete" else "modified"
                 bp = None
@@ -661,8 +648,7 @@ def apply_snapshot(
             if desc["op"] == "delete":
                 dest.unlink(missing_ok=True)
             else:
-                # Re-validate containment on the final dest right before the
-                # write (close the TOCTOU window) and never follow a symlink.
+                # Re-validate containment right before the write (close TOCTOU window).
                 _contained_dest(root, desc["path"])
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 if dest.is_symlink():
@@ -676,11 +662,7 @@ def apply_snapshot(
                         try:
                             dest.chmod(int(desc["mode"], 8))
                         except (ValueError, OSError):
-                            # Restoring mode bits is best-effort: a bad/garbled
-                            # mode string (ValueError) or a target filesystem
-                            # that rejects chmod (OSError) must not fail the
-                            # apply. The copied content is what matters, so keep
-                            # the default mode and proceed.
+                            # Restoring mode bits is best-effort.
                             pass
             touched.append(str(dest))
         except (OSError, ValueError) as exc:
@@ -831,7 +813,7 @@ def _invalidate_aiter_jit_build(
         "status": "ok",
         "src": str(jit_build),
         "backup_path": str(backup_path),
-        "moved_at": _now(),
+        "moved_at": utc_now(),
     }
 
 
@@ -896,7 +878,6 @@ def _restore_aiter_jit_build(jit_build_backup: dict[str, Any]) -> dict[str, Any]
 
 
 # aiter cpp_itfs kernels are runtime-compiled into parameter-keyed caches.
-# Move matching cache dirs aside so patched sources rebuild, then restore on revert.
 _AITER_CPP_ITFS_MARKER = "/aiter/csrc/cpp_itfs/"
 _MD_NAME_RE = re.compile(r"""(?m)^\s*MD_NAME\s*=\s*["']([^"']+)["']""")
 
@@ -996,11 +977,8 @@ def _invalidate_aiter_cpp_itfs_cache(
         build_dir_override: Test-only override for the cpp_itfs build root.
 
     Returns:
-        A status dict recording what was moved and the invalidation metadata.
-
-    Returns one of ``ok`` / ``skipped`` / ``failed`` mirroring
-    :func:`_invalidate_aiter_jit_build`. ``build_dir_override`` is a
-    test-only hook.
+        A status dict (``ok`` / ``skipped`` / ``failed``) recording what was
+        moved and the invalidation metadata.
     """
     if not _target_is_in_aiter_cpp_itfs(target_file):
         return {
@@ -1016,12 +994,11 @@ def _invalidate_aiter_cpp_itfs_cache(
         "build_dir": str(build_dir),
         "module_names": module_names,
         "scope": scope,
-        "invalidated_at": _now(),
+        "invalidated_at": utc_now(),
         "invalidated_unix": time.time(),
     }
     if not build_dir.exists():
-        # Nothing cached yet -> the re-baseline server will build fresh into
-        # this dir on first kernel call. No stale binary to mask.
+        # Nothing cached yet -> the re-baseline server builds fresh.
         record.update(
             {
                 "status": "skipped",
@@ -1147,7 +1124,7 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
     or after the invalidation. If no such fresh ``lib.so`` exists, the server
     dlopened a stale binary (or the kernel was never exercised) and the
     measured gain is meaningless -- the integrate KEEP/REVERT gate uses this
-    to flag/abort instead of scoring a stale binary (GH #458 point 2).
+    to flag/abort instead of scoring a stale binary.
 
     Args:
         cache_backup: The invalidation record from
@@ -1357,9 +1334,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             restored.append(str(dst))
-    # Disposition-aware multi-file revert (snapshot deploy): added -> unlink,
-    # modified/deleted -> restore old bytes. Falls back to the legacy singular
-    # ``source_backup`` for manifests written before snapshot deploy.
+    # Disposition-aware multi-file revert (added -> unlink, else restore old bytes).
     source_backups = manifest.get("source_backups")
     cache_cleared = False
     if source_backups:
@@ -1397,7 +1372,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         if jit_build_restore.get("status") == "ok" and jit_build_restore.get("restored_to"):
             restored.append(str(jit_build_restore["restored_to"]))
 
-    # Restore the aiter cpp_itfs runtime cache moved aside during apply so a non-KEEP decision serves v0 (only present when apply moved cpp_itfs cache dirs).
+    # Restore the aiter cpp_itfs runtime cache moved aside during apply.
     cpp_itfs_cache_backup = manifest.get("cpp_itfs_cache_backup") or {}
     if cpp_itfs_cache_backup.get("status") == "ok":
         cpp_itfs_cache_restore = _restore_aiter_cpp_itfs_cache(cpp_itfs_cache_backup)
@@ -1405,7 +1380,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
         if cpp_itfs_cache_restore.get("status") == "ok":
             restored.extend(cpp_itfs_cache_restore.get("restored", []))
 
-    # Multi-node: fan-out a revert to every pod that received the apply (best-effort) so pod-side sglang loads v0 on next restart.
+    # Multi-node: fan-out a revert to every pod that received the apply (best-effort).
     multinode_info = manifest.get("multinode") or {}
     mn_revert: dict[str, Any] = {}
     if multinode_info and multinode_info.get("host_backup_map"):
@@ -1420,7 +1395,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001
                 mn_revert = {"status": "failed", "error": str(exc)}
 
-    reverted_at = _now()
+    reverted_at = utc_now()
     manifest["status"] = "reverted"
     manifest["reverted_at"] = reverted_at
     manifest["restored_paths"] = restored
@@ -1578,7 +1553,7 @@ def apply_kernel_patch(
             "compiled": strategy["compiled"],
             "root": strategy["root"],
         },
-        "created_at": _now(),
+        "created_at": utc_now(),
     }
     backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1607,11 +1582,10 @@ def apply_kernel_patch(
                 backup_dir_on_pod=pod_backup_dir,
             )
         except Exception as exc:  # noqa: BLE001
-            # Pod fan-out failed: revert sandbox copy to v0.
+            # Pod fan-out failed: revert sandbox copy.
             try:
                 shutil.copy2(source_backup["backup_path"], target)
             except OSError:
-                # Best-effort backup restore; a filesystem error here is non-fatal.
                 pass
             return {
                 "status": "failed",
@@ -1663,11 +1637,10 @@ def apply_kernel_patch(
         # Move aiter jit/build/ aside so post-rebuild import re-JITs cleanly.
         jit_build_backup = _invalidate_aiter_jit_build(target, backup_dir)
         if jit_build_backup.get("status") == "failed":
-            # Refuse to rebuild against an inconsistent jit cache: restore v0 and bail.
+            # Refuse to rebuild against an inconsistent jit cache: restore and bail.
             try:
                 shutil.copy2(source_backup["backup_path"], target)
             except OSError:
-                # Best-effort backup restore; a filesystem error here is non-fatal.
                 pass
             return {
                 "status": "failed",
@@ -1684,22 +1657,14 @@ def apply_kernel_patch(
                 encoding="utf-8",
             )
 
-        # aiter cpp_itfs kernels (e.g. paged_attention -> pa_ragged)
-        # are runtime-compiled into $HOME/.aiter/build/<md_name>_<hash>/ on
-        # first call, NOT by setup.py develop, and the dir name hashes
-        # params (not source) so pristine + patched collide -> the next
-        # server reuses the stale .so. Move the affected runtime-cache dirs
-        # aside so the re-baseline recompiles from clean state (GH #458).
-        # No-op for non-cpp_itfs targets (sglang / vllm / other aiter csrc).
+        # aiter cpp_itfs kernels runtime-compile into $HOME/.aiter/build/ with a param-hashed
+        # dir name, so pristine + patched collide; move the cache aside for a clean re-baseline.
         cpp_itfs_cache_backup = _invalidate_aiter_cpp_itfs_cache(target, backup_dir)
         if cpp_itfs_cache_backup.get("status") == "failed":
-            # Refuse to re-baseline against a stale runtime cache: restore
-            # source + jit/build (if moved) so on-disk state matches v0,
-            # then bail rather than score a possibly-stale binary.
+            # Refuse to re-baseline against a stale runtime cache: restore and bail.
             try:
                 shutil.copy2(source_backup["backup_path"], target)
             except OSError:
-                # Best-effort backup restore; a filesystem error here is non-fatal.
                 pass
             if jit_build_backup.get("status") == "ok":
                 _restore_aiter_jit_build(jit_build_backup)
@@ -1711,8 +1676,7 @@ def apply_kernel_patch(
                 "cpp_itfs_cache_backup": cpp_itfs_cache_backup,
             }
         if cpp_itfs_cache_backup.get("status") == "ok":
-            # Persist BEFORE rebuild so a rebuild failure can restore the
-            # moved-aside runtime cache via revert_kernel_patch.
+            # Persist before rebuild so a failure can restore the moved-aside cache.
             manifest["cpp_itfs_cache_backup"] = cpp_itfs_cache_backup
             manifest_path.write_text(
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -1732,16 +1696,16 @@ def apply_kernel_patch(
             }
 
     manifest["status"] = "applied"
-    manifest["applied_at"] = _now()
+    manifest["applied_at"] = utc_now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
     if jit_build_backup.get("status") in {"ok", "skipped"}:
-        # Surface skipped reason too so manifest readers can audit it.
+        # Surface skipped reason too for manifest auditing.
         manifest["jit_build_backup"] = jit_build_backup
     if cpp_itfs_cache_backup.get("status") in {"ok", "skipped"}:
-        # Surface the cpp_itfs record (is_cpp_itfs + build_dir + module_names + invalidated_unix) so integrate can verify a rebuild and revert can restore the runtime cache.
+        # Surface the cpp_itfs record for integrate verification and revert.
         manifest["cpp_itfs_cache_backup"] = cpp_itfs_cache_backup
-    # multinode block already persisted at fan-out time; don't rewrite it here.
+    # multinode block already persisted at fan-out time.
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     result: dict[str, Any] = {
         "status": "ok",
@@ -1806,11 +1770,8 @@ def _apply_kernel_patch_snapshot(
     except ValueError as exc:
         return {"status": "failed", "error": str(exc)}
 
-    # The repo root is authoritative for resolving the patch's repo-relative
-    # paths. Prefer the explicitly-threaded root (captured at verify time where
-    # kernel_repo is known); fall back to the strategy root. Never silently guess
-    # ``target.parent`` — a wrong root would resolve every manifest path into a
-    # nested subdir, violating the byte-for-byte contract.
+    # Resolve repo-relative patch paths against the explicit root, else the strategy
+    # root. Never guess ``target.parent`` — a wrong root breaks the byte-for-byte contract.
     resolved_root = str(repo_root or "") or primary_strategy["root"]
     if not resolved_root:
         return {
@@ -1857,7 +1818,7 @@ def _apply_kernel_patch_snapshot(
         "descriptors": descriptors,
         "artifacts": artifacts,
         "strategy": {"compiled": compiled, "root": str(repo_root)},
-        "created_at": _now(),
+        "created_at": utc_now(),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if dry_run:
@@ -1874,15 +1835,15 @@ def _apply_kernel_patch_snapshot(
                 "manifest_path": str(manifest_path)}
 
     manifest["source_backups"] = applied["source_backups"]
-    # Keep a singular source_backup for the primary so legacy manifest readers work.
+    # Keep a singular source_backup for the primary (legacy manifest readers).
     for entry in applied["source_backups"]:
         if Path(entry["path"]) == target and entry.get("backup_path"):
             manifest["source_backup"] = {"path": entry["path"], "backup_path": entry["backup_path"]}
             break
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    # Post-apply verification: every written path must be byte-identical to its
-    # snapshot source, every deleted path gone. Any mismatch -> full restore.
+    # Post-apply verification: written paths byte-identical to snapshot, deleted paths
+    # gone. Any mismatch -> full restore.
     snap = Path(snapshot_dir)
     for desc in descriptors:
         dest = _contained_dest(repo_root, desc["path"])
@@ -1982,7 +1943,7 @@ def _apply_kernel_patch_snapshot(
         rebuild = rebuild_records[-1] if rebuild_records else rebuild
 
     manifest["status"] = "applied"
-    manifest["applied_at"] = _now()
+    manifest["applied_at"] = utc_now()
     manifest["rebuild"] = rebuild
     manifest["cache_clear"] = cache_clear
     if jit_build_backup.get("status") in {"ok", "skipped"}:

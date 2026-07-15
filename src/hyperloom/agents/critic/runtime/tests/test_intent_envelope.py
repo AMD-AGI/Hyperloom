@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Validation + parity tests for :mod:`runtime.intent_envelope`; mirrors the Coordinator schema so drift fails loudly here."""
+"""Validation + parity tests for :mod:`runtime.intent_envelope`."""
 
 from __future__ import annotations
 
@@ -144,23 +144,6 @@ def test_validate_envelope_rejects_missing_payload_key():
 def test_validate_envelope_rejects_empty_list():
     with pytest.raises(IntentEnvelopeValidationError, match="non-empty"):
         validate_envelope({"intents": []})
-
-
-def test_validate_envelope_rejects_unknown_verdict():
-    with pytest.raises(IntentEnvelopeValidationError, match="verdict"):
-        validate_envelope(
-            {
-                "intents": [
-                    {
-                        "intent_type": "review_verdict",
-                        "payload": {
-                            "target_proposal_msg_id": "x",
-                            "verdict": "yes",
-                        },
-                    }
-                ]
-            }
-        )
 
 
 def test_advice_intent_carries_optional_target():

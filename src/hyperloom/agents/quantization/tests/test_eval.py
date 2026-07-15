@@ -52,7 +52,7 @@ def test_resolve_threshold_empty_file_falls_to_default(tmp_path):
 
 
 def test_resolve_threshold_arg_zero_is_respected(tmp_path):
-    # 0.0 is a valid (strict) threshold — arg path must not collapse to None.
+    # 0.0 is a valid threshold; arg path must not collapse to None.
     t, src = resolve_threshold(tmp_path, acceptable_eval_gap=0.0)
     assert t == 0.0
     assert src == "arg"
@@ -129,7 +129,7 @@ def test_decide_uses_default_threshold_when_nothing_set(tmp_path):
 
 
 def test_decide_negative_gap_is_within(tmp_path):
-    # Quantized scored higher than source (rare but possible with noisy evals).
+    # Quantized scored higher than source.
     d = decide(_report(-0.01), workspace=tmp_path, acceptable_eval_gap=0.03)
     assert d.status == "within"
     assert d.relative_gap == -0.01

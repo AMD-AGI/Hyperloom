@@ -2,10 +2,8 @@
 
 """Tests for the diffusion workload-level roofline aggregator.
 
-``diffusion_roofline`` (under ``src/hyperloom/agents/kernel/tools``) aggregates
-a per-kernel TraceLens CSV dir into a single workload roofline (kernel
-efficiency, gpu busy ratio, per denoise-step timings) — the compute-bound dual
-of the LLM decode memory roofline.
+``diffusion_roofline`` aggregates a per-kernel TraceLens CSV dir into a single
+workload roofline (kernel efficiency, gpu busy ratio, per denoise-step timings).
 """
 
 from __future__ import annotations
@@ -153,10 +151,10 @@ def test_fmt_pct_none_and_value():
     assert dr._fmt_pct(0.5) == "50.0%"
 
 
-def test_to_float_non_numeric_is_zero():
-    assert dr._to_float("not-a-number") == 0.0
-    assert dr._to_float(None) == 0.0
-    assert dr._to_float("12.5") == pytest.approx(12.5)
+def test_safe_float_non_numeric_is_zero():
+    assert dr.safe_float("not-a-number") == 0.0
+    assert dr.safe_float(None) == 0.0
+    assert dr.safe_float("12.5") == pytest.approx(12.5)
 
 
 def test_aggregate_unified_memory_bound_split():

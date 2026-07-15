@@ -2,9 +2,9 @@
 
 """GEAK-dispatch correctness regressions.
 
-* A ``backends`` payload supplied as a JSON list (``["geak_v3"]``) must be
-  serialized into a bare ``--backends geak_v3`` token, never ``str(["geak_v3"])`` →
-  ``"['geak_v3']"`` (which the kernel-agent validator rightly rejects).
+* A ``backends`` payload supplied as a JSON list (``["forge"]``) must be
+  serialized into a bare ``--backends forge`` token, never ``str(["forge"])`` →
+  ``"['forge']"`` (which the kernel-agent validator rightly rejects).
 * A non-GEAK attempt (e.g. a Claude subprocess that times out) must not
   be silently bucketed under the GEAK invocation lane; the backend that ran is
   stamped on the result and an unattributable failure never defaults to GEAK.
@@ -27,13 +27,12 @@ from hyperloom.orchestrator.kernel import request_handlers as krh
 # --backends serialization
 # --------------------------------------------------------------------------- #
 def test_backends_cli_arg_list_is_comma_joined_bare_names():
-    assert krh._backends_cli_arg(["geak_v3"]) == "geak_v3"
-    assert krh._backends_cli_arg(["geak_v3", "claude"]) == "geak_v3,claude"
-    assert krh._backends_cli_arg("geak_v3") == "geak_v3"
-    assert krh._backends_cli_arg("geak_v3,claude") == "geak_v3,claude"
+    assert krh._backends_cli_arg(["forge"]) == "forge"
+    assert krh._backends_cli_arg(["forge", "claude"]) == "forge,claude"
+    assert krh._backends_cli_arg("forge") == "forge"
+    assert krh._backends_cli_arg("forge,claude") == "forge,claude"
     assert krh._backends_cli_arg(None) == ""
-    # The repr of a list must never be what reaches --backends.
-    assert krh._backends_cli_arg(["geak_v3"]) != "['geak_v3']"
+    assert krh._backends_cli_arg(["forge"]) != "['forge']"  # never the list repr
 
 
 def _bypass_single_kernel_guards(monkeypatch):
@@ -49,8 +48,7 @@ def _bypass_single_kernel_guards(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_optimization_single_serializes_list_backends(tmp_path: Path, monkeypatch):
-    # A list backends payload must hit the subprocess as a
-    # bare "geak_v3" token, not the repr "['geak_v3']".
+    # A list backends payload reaches the subprocess as bare "forge", not "['forge']".
     _bypass_single_kernel_guards(monkeypatch)
     captured: dict[str, list[str]] = {}
 
@@ -60,14 +58,14 @@ async def test_run_optimization_single_serializes_list_backends(tmp_path: Path, 
 
     monkeypatch.setattr(krh, "_run_subprocess", _fake_run_subprocess)
 
-    payload = {"kernel_id": "k001", "backends": ["geak_v3"], "_single_kernel": True}
+    payload = {"kernel_id": "k001", "backends": ["forge"], "_single_kernel": True}
     await krh._run_optimization_single(payload, session_dir=tmp_path)
 
     cmd = captured["cmd"]
     assert "--backends" in cmd
     val = cmd[cmd.index("--backends") + 1]
-    assert val == "geak_v3"
-    assert val != "['geak_v3']"
+    assert val == "forge"
+    assert val != "['forge']"
 
 
 # --------------------------------------------------------------------------- #
@@ -75,9 +73,8 @@ async def test_run_optimization_single_serializes_list_backends(tmp_path: Path, 
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_timeout_result_is_attributed_to_dispatched_backend(tmp_path: Path, monkeypatch):
- # a claude subprocess that overruns the outer timeout
-    # must be shaped into a failed result that carries backend="claude" (not
-    # left backend-less for the GEAK fallback to claim).
+    # A claude subprocess that overruns the timeout is shaped into a failed
+    # result carrying backend="claude", not left for the GEAK fallback to claim.
     _bypass_single_kernel_guards(monkeypatch)
 
     async def _fake_timeout(cmd, *, timeout_sec):
@@ -94,9 +91,9 @@ async def test_timeout_result_is_attributed_to_dispatched_backend(tmp_path: Path
     assert result["backend"] == "claude"
 
 
-def test_record_kernel_invocations_claude_timeout_routes_to_oob(tmp_path: Path):
-    # A backend-stamped (claude) no-attempts failure lands on the oob lane,
- # never the geak lane. Hyperloom#602.
+def test_record_kernel_invocations_claude_timeout_is_not_recorded_as_kernel_lane(tmp_path: Path):
+    # A backend-stamped (claude) no-attempts failure must not contaminate
+    # kernel backend lanes.
     result = {
         "kernel_id": "k008",
         "status": "failed",
@@ -107,13 +104,12 @@ def test_record_kernel_invocations_claude_timeout_routes_to_oob(tmp_path: Path):
     }
     instrument.record_kernel_invocations(tmp_path, result)
     sections = assemble_parts(tmp_path)
-    assert sections.get("oob_invocations"), "claude failure must be on the oob lane"
     assert not sections.get("geak_invocations"), "must NOT contaminate the geak lane"
+    assert not sections.get("forge_invocations"), "must NOT contaminate the forge lane"
 
 
 def test_record_kernel_invocations_unknown_backend_is_not_geak(tmp_path: Path):
-    # A genuine pre-dispatch failure with no resolvable backend must NOT be
- # fabricated as a GEAK invocation. Hyperloom#602.
+    # A pre-dispatch failure with no resolvable backend must NOT be fabricated as GEAK.
     result = {
         "kernel_id": "k001",
         "status": "failed",
@@ -124,7 +120,6 @@ def test_record_kernel_invocations_unknown_backend_is_not_geak(tmp_path: Path):
     instrument.record_kernel_invocations(tmp_path, result)
     sections = assemble_parts(tmp_path)
     assert not sections.get("geak_invocations"), "unknown backend must not default to geak"
-    assert not sections.get("oob_invocations")
     assert not sections.get("forge_invocations")
 
 
@@ -157,8 +152,7 @@ def test_kernel_ladder_budget_sec_priority(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ladder_continues_to_fallback_after_timeout(tmp_path: Path, monkeypatch):
-    # Option A: a timed-out backend (failed, not KEEP) does not abort the
- # ladder — the next backend still runs (within budget). Hyperloom#602.
+    # A timed-out backend does not abort the ladder; the next backend still runs.
     calls: list[str] = []
 
     async def _fake_single(payload, *, session_dir, timeout_override_sec=None):
@@ -168,17 +162,16 @@ async def test_ladder_continues_to_fallback_after_timeout(tmp_path: Path, monkey
     monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
     deadline = time.monotonic() + 10_000  # plenty of budget left
     best, attempts = await krh._run_backend_ladder(
-        {}, {"kernel_id": "k1", "source_file": "x"}, "k1", ["forge", "geak_v3"],
+        {}, {"kernel_id": "k1", "source_file": "x"}, "k1", ["forge", "claude"],
         session_dir=tmp_path, deadline=deadline,
     )
-    assert calls == ["forge", "geak_v3"], "fallback must run after a forge timeout"
+    assert calls == ["forge", "claude"], "fallback must run after a forge timeout"
     assert len(attempts) == 2
 
 
 @pytest.mark.asyncio
 async def test_ladder_caps_backend_timeout_to_remaining_budget(tmp_path: Path, monkeypatch):
-    # Each backend's subprocess timeout is capped to the time left in the
- # per-kernel budget. Hyperloom#602.
+    # Each backend's subprocess timeout is capped to the remaining per-kernel budget.
     seen: list[int | None] = []
 
     async def _fake_single(payload, *, session_dir, timeout_override_sec=None):
@@ -197,9 +190,7 @@ async def test_ladder_caps_backend_timeout_to_remaining_budget(tmp_path: Path, m
 
 @pytest.mark.asyncio
 async def test_ladder_skips_backends_when_budget_exhausted(tmp_path: Path, monkeypatch):
-    # When the per-kernel budget is already spent (e.g. forge hung to its hard
-    # timeout), the remaining backends are skipped rather than overshooting the
- # budget. Hyperloom#602.
+    # When the per-kernel budget is already spent, remaining backends are skipped.
     calls: list[str] = []
 
     async def _fake_single(payload, *, session_dir, timeout_override_sec=None):
@@ -209,7 +200,7 @@ async def test_ladder_skips_backends_when_budget_exhausted(tmp_path: Path, monke
     monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
     deadline = time.monotonic() - 1  # budget already exhausted
     best, attempts = await krh._run_backend_ladder(
-        {}, {"kernel_id": "k1"}, "k1", ["geak_v3"],
+        {}, {"kernel_id": "k1"}, "k1", ["forge"],
         session_dir=tmp_path, deadline=deadline,
     )
     assert calls == [], "no backend should run once the budget is exhausted"

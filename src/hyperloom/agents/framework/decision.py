@@ -1,10 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Winner-decision gates (throughput / accuracy / completed) split out of ``explorer.py`` for isolated testing and reuse by ``runtime/tools_api.evaluate_candidate_outcome``."""
+"""Winner-decision gates (throughput / accuracy / completed) for candidate evaluation."""
 
 from __future__ import annotations
 
 from typing import Any, Iterable
+
+from hyperloom.common.coerce import to_float
 
 from .models import Candidate, ExploreRequest
 
@@ -27,14 +29,6 @@ def _jaccard(left: set[str], right: set[str]) -> float:
         return 0.0
     union = left | right
     return len(left & right) / len(union) if union else 0.0
-
-
-def _float_value(value: Any, default: float = 0.0) -> float:
-    """Coerce a ledger numeric field without letting bad rows abort ranking."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def prior_score(
@@ -120,7 +114,7 @@ def prior_score(
     weights = [score for score, _ in associated]
     weight_sum = sum(weights) or 1.0
     avg_association = sum(weights) / len(weights)
-    gain = sum(_float_value(rec.get("tps_delta_pct")) * w for w, rec in associated) / weight_sum
+    gain = sum(to_float(rec.get("tps_delta_pct"), default=0.0) * w for w, rec in associated) / weight_sum
     gain_score = max(0.0, min(1.0, gain / 20.0))
     param_score = 0.0
     if candidate_params:

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import (
+from hyperloom.inference_optimizer.cli.kb import (
     _build_recipe_kb_dispatcher,
     _resolve_local_kb_root,
 )
@@ -23,7 +23,6 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 )
 
 
-# Fixtures
 @pytest.fixture
 def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear the env vars the resolver consults so each test owns its own precedence tier."""
@@ -50,7 +49,6 @@ def _ns(**overrides: Any) -> argparse.Namespace:
     return argparse.Namespace(**fields)
 
 
-# Canonical id is generated correctly from the 5-tuple.
 def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
     cid = recipe_canonical_id(
         model="DeepSeek-R1",
@@ -65,14 +63,12 @@ def test_item1_canonical_id_is_5tuple_with_inference_prefix() -> None:
 
 def test_item1_canonical_id_keyword_only_no_positional_drift() -> None:
     """Positional args must raise so a future caller can't re-order the 5-tuple."""
-    # Splat a runtime-built arg list so the intentional positional drift stays a
-    # runtime check; CodeQL can't statically count *args, so no false arity alert.
+    # Splat a runtime-built arg list so the positional drift stays a runtime check.
     bad_positional_args = ["m", "h", "fw", "v", "p"]
     with pytest.raises(TypeError):
         recipe_canonical_id(*bad_positional_args)  # type: ignore[misc]
 
 
-# Local KB root is ${USER_DATA_PATH}/kb.
 def test_item2_default_local_kb_root_is_user_data_path_kb(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -95,7 +91,6 @@ def test_item2_explicit_flag_wins_over_user_data_path(
     assert _resolve_local_kb_root(args) == tmp_path / "alt-root"
 
 
-# No centralized KB configured: both reads and writes go local.
 def test_item3_no_central_url_reads_and_writes_go_local(
     env_clean: None,
     tmp_path: Path,
@@ -126,7 +121,6 @@ def test_item3_no_central_url_reads_and_writes_go_local(
     assert row["best_throughput"] == 12345.0
 
 
-# Centralized KB available: reads go centralized, writes still local.
 def test_item4_central_kb_reads_central_writes_local(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -141,7 +135,6 @@ def test_item4_central_kb_reads_central_writes_local(
         precision="fp8",
     )
 
-    # The remote (gbrain) holds a stale row for this cid.
     central_payload = {
         "canonical_id": cid,
         "version": 9,
@@ -168,7 +161,7 @@ def test_item4_central_kb_reads_central_writes_local(
     kb = _build_recipe_kb_dispatcher(_ns(local_kb_root=str(tmp_path)))
     assert kb.remote is not None
 
-    # WRITE goes local only (the remote exposes no write methods by construction).
+    # WRITE goes local only.
     kb.put_recipe(
         canonical_id=cid,
         model="m",
@@ -182,14 +175,13 @@ def test_item4_central_kb_reads_central_writes_local(
     assert local_row is not None
     assert local_row["best_throughput"] == 11111.0
 
-    # READ returns the REMOTE row (wider corpus when reachable), not the local one.
+    # READ returns the REMOTE row, not the local one.
     out = kb.get_recipe(canonical_id=cid)
     assert out is not None
     assert out["version"] == 9
     assert out["best_throughput"] == 99999.0  # remote wins
 
 
-# Centralized KB unavailable: reads fall back to local, writes still local.
 def test_item5_unreachable_central_falls_back_to_local(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -231,7 +223,7 @@ def test_item5_unreachable_central_falls_back_to_local(
         best_throughput=22222.0,
     )
 
-    # WRITE still goes local (the remote is read-only by design).
+    # WRITE still goes local.
     kb.put_recipe(
         canonical_id=cid,
         model="m",
@@ -241,13 +233,12 @@ def test_item5_unreachable_central_falls_back_to_local(
         precision="fp8",
         best_throughput=33333.0,
     )
-    # READ: remote raises → fall through to local (RemoteRecipeClientError absorbed).
+    # READ: remote raises → fall through to local.
     out = kb.get_recipe(canonical_id=cid)
     assert out is not None
     assert out["best_throughput"] == 33333.0  # local hit
 
 
-# Local recipe files or directories can disambiguate the 5-tuple.
 def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
     """Two recipes differing in any single dimension land in distinct on-disk locations."""
     store = LocalRecipeStore(root=tmp_path)
@@ -288,7 +279,6 @@ def test_item6_local_path_distinguishes_5tuple(tmp_path: Path) -> None:
     assert parts_v1 != parts_v2
     assert (tmp_path.joinpath(*parts_v1) / "recipe.json").is_file()
     assert (tmp_path.joinpath(*parts_v2) / "recipe.json").is_file()
-    # And they don't shadow each other — both rows are independently readable.
     row_v1 = store.get_recipe(canonical_id=cid_v1)
     row_v2 = store.get_recipe(canonical_id=cid_v2)
     assert row_v1 is not None and row_v2 is not None
@@ -318,7 +308,6 @@ def test_item6_path_levels_match_5_dimensions(tmp_path: Path) -> None:
     assert expected.is_file()
 
 
-# When model contains '/', the local path is still safe.
 def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
     """A model arg like ``/hyperloom/models/Qwen-...`` must NOT split into path segments (slug basenames it first)."""
     store = LocalRecipeStore(root=tmp_path)
@@ -329,7 +318,6 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
         framework_version="0.4.5",
         precision="bf16",
     )
-    # Slug rule: basename + lowercase + space → underscore.
     assert cid == ("inference:qwen-qwen3-30b-a3b-base:mi355x:sglang:unknown_model_type:unknown_arch:0.4.5:bf16")
     store.put_recipe(
         canonical_id=cid,
@@ -340,7 +328,7 @@ def test_item7_model_with_slash_is_path_safe(tmp_path: Path) -> None:
         precision="bf16",
         best_throughput=42.0,
     )
-    # Recipe lives at exactly 7 levels below root; model component is the basename only.
+    # Recipe lives at 7 levels below root; model component is the basename only.
     expected = (
         tmp_path
         / "qwen-qwen3-30b-a3b-base"
@@ -378,7 +366,6 @@ def test_item7_model_with_double_slash_normalises(tmp_path: Path) -> None:
     assert expected.is_file()
 
 
-# Session writes merge with existing recipe history.
 def test_item8_second_put_preserves_what_worked_when_not_overridden(
     tmp_path: Path,
 ) -> None:
@@ -410,7 +397,6 @@ def test_item8_second_put_preserves_what_worked_when_not_overridden(
         ],
     )
 
-    # Safe read-modify-write: read live + only override the changed field.
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     store.put_recipe(
@@ -469,13 +455,12 @@ def test_item8_history_archives_prior_version(tmp_path: Path) -> None:
         precision="p",
         best_throughput=2.0,
     )
-    history = store.get_history(canonical_id=cid)
-    assert len(history) == 1
-    assert history[0]["version"] == 1
-    assert history[0]["snapshot"]["best_throughput"] == 1.0
+    archived = store.get_recipe(canonical_id=cid, version=1)
+    assert archived is not None
+    assert archived["version"] == 1
+    assert archived["best_throughput"] == 1.0
 
 
-# Final local KB file data fields stay consistent with the Arbor recipe.
 def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
     """The persisted ``recipe.json`` uses arbor field names, NOT the v2 wire spec's findings/failures/gaps/body/metrics."""
     store = LocalRecipeStore(root=tmp_path)
@@ -515,7 +500,6 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
         )
     )
 
-    # Arbor field names present at the top level.
     assert "best_config" in on_disk
     assert "best_throughput" in on_disk
     assert "what_worked" in on_disk
@@ -528,27 +512,24 @@ def test_item9_on_disk_json_uses_arbor_field_names(tmp_path: Path) -> None:
     assert "model" in on_disk
     assert "hardware" in on_disk
 
-    # Stack fingerprint sub-shape matches arbor's StackFingerprint.
     assert set(on_disk["stack_fingerprint"]) >= {
         "vllm_version",
         "aiter_commit",
         "rocm_version",
     }
-    # Sessions row sub-shape matches arbor's SessionSummary.
     assert set(on_disk["sessions"][0]) >= {
         "date",
         "throughput_before",
         "throughput_after",
         "actions_taken",
     }
-    # Finding / Failure / Gap sub-shapes (pure arbor).
     assert set(on_disk["what_worked"][0]) == {"description", "measured_impact"}
     assert set(on_disk["what_failed"][0]) == {"description", "reason"}
     assert set(on_disk["remaining_gaps"][0]) == {"description", "metrics"}
-    # Pitfall is arbor's ``description`` plus hyperloom's optional ``severity`` superset.
+    # Pitfall is arbor's ``description`` plus an optional ``severity``.
     assert set(on_disk["pitfalls"][0]) >= {"description"}
     assert set(on_disk["pitfalls"][0]) <= {"description", "severity"}
 
-    # The v2 wire-spec key names MUST NOT appear on disk (arbor-pure).
+    # The v2 wire-spec key names MUST NOT appear on disk.
     for v2_only_key in ("findings", "failures", "gaps", "body", "metrics"):
         assert v2_only_key not in on_disk, f"unexpected v2 wire-spec key {v2_only_key!r} in arbor on-disk recipe.json"

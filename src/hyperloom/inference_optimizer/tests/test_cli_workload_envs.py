@@ -12,8 +12,6 @@ import yaml
 
 from hyperloom.inference_optimizer.cli import (
     _export_workload_envs_for_optimize,
-    _parse_conc_env_default,
-    _parse_conc_sweep_default,
     _resolve_run_max_model_len,
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -41,7 +39,7 @@ def _write_yaml_with_envs(path, framework, envs):
 
 
 def test_framework_script_mismatch_fails_fast(tmp_path):
-    """vllm framework + sglang script must raise before server boot (QRWKV-72B bug)."""
+    """vllm framework + sglang script must raise before server boot."""
     src = tmp_path / "cfg.yaml"
     _write_yaml(src, "vllm", benchmark_script="sglang_mi300x.sh")
     with pytest.raises(FrameworkScriptMismatchError, match="framework/script mismatch"):
@@ -151,13 +149,12 @@ def test_operator_server_args_dedup_vllm_single_value_flags(tmp_path, monkeypatc
     assert "--trust-remote-code" in args
 
 
-def test_conc_env_ladder_materializes_as_single_baseline_and_sweep_ladder(
+def test_conc_env_ladder_materializes_as_single_baseline_conc(
     tmp_path,
     monkeypatch,
 ):
     """CONC=4,16,128 is recognized as a ladder, not crashed by int()."""
     monkeypatch.setenv("CONC", "4,16,128")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", raising=False)
     src = tmp_path / "cfg.yaml"
     _write_yaml(src, "vllm")
 
@@ -165,23 +162,6 @@ def test_conc_env_ladder_materializes_as_single_baseline_and_sweep_ladder(
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
 
     assert envs["CONC"] == 4
-    assert os.environ["INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS"] == "4,16,128"
-
-
-def test_conc_env_ladder_parser_default_exports_sweep_ladder(monkeypatch):
-    monkeypatch.setenv("CONC", "4,16,128")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", raising=False)
-
-    assert _parse_conc_env_default() == 4
-    assert os.environ["CONC"] == "4,16,128"
-
-
-def test_conc_env_ladder_parser_default_feeds_sweep_without_env_mutation(monkeypatch):
-    monkeypatch.setenv("CONC", "4,16,128")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_CONCS", raising=False)
-
-    assert _parse_conc_sweep_default() == "4,16,128"
-    assert os.environ["CONC"] == "4,16,128"
 
 
 def test_explicit_max_model_len_wins_over_auto(tmp_path, monkeypatch):

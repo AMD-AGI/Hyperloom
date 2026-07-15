@@ -2,20 +2,18 @@
 myst:
     html_meta:
         "description": "Step-by-step guide to running a Hyperloom optimization. Covers launching from Cursor, monitoring, resuming, and reading output artifacts."
-        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Local Mode, Cursor, GEAK, TraceLens, session, throughput"
+        "keywords": "Hyperloom, optimization, how-to, LLM inference, AMD GPU, ROCm, Cursor, GEAK, TraceLens, session, throughput"
 ---
 # Run a Hyperloom optimization
 
 This topic assumes you have already completed installation. If you haven't:
 
-- **Hosted UI** — see [Quickstart — hosted UI](../install/quickstart.md). No
-  local setup needed; launch directly from the browser.
-- **Local Mode** — see [Local Mode quickstart](../install/local-mode.md), then
-  return here to launch your first run.
-- **Bare-metal** — see [Bare-metal quickstart](../install/bare-metal.md), then
+- **Docker Container** — see [Docker quickstart](../install/local-mode.md) to 
+  get Hyperloom running in a Docker container.
+- **Bare-metal** — see [Bare-metal quickstart](../install/setup.md), then
   return here to launch your first run.
 
-## Launch from Cursor (Local Mode)
+## Launch from Cursor
 
 Open the Hyperloom workspace in Cursor, then paste the following prompt into
 Cursor Chat, filling in your workload details:
@@ -51,11 +49,6 @@ Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
 2. Monitor the process every 300s until the optimization is complete or failed.
 ```
-
-If you explicitly set `KERNEL_OPT_BACKEND_ORDER` to include `forge`, first run
-`local_setup.sh --no-next-steps` and source
-`/path/to/hyperloom-run/runtime/local-setup.env.sh` so `FORGE_PATH` points at
-KernelForge.
 
 | Field | Meaning | How to choose |
 |-------|---------|---------------|

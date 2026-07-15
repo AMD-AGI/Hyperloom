@@ -2,9 +2,7 @@
 
 """Unit tests for the non-git patch apply/revert path in FrameworkAgentExecutor.
 
-Mirrors the style of test_framework_agent_git_helpers_coverage_unit.py but
-exercises the _is_git_tree=False branch introduced in the nongit-patch-symmetry
-plan.  No GPU / gateway / real framework required.
+Exercises the _is_git_tree=False branch. No GPU / gateway / real framework required.
 """
 
 from __future__ import annotations
@@ -17,10 +15,6 @@ import pytest
 from hyperloom.orchestrator.actions.executors import framework_agent as fp
 from hyperloom.orchestrator.actions.executors import _nogit_patch as ng
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 class _Executor:
     """Minimal FrameworkAgentExecutor stand-in exposing just _revert_patches."""
@@ -52,10 +46,6 @@ SIMPLE_DIFF = """\
 """
 
 
-# ---------------------------------------------------------------------------
-# _revert_patches — non-git branch
-# ---------------------------------------------------------------------------
-
 def test_revert_patches_uses_nogit_backups_when_not_git_tree(tmp_path, monkeypatch):
     """When _nogit_patch_backups is populated and the root is not a git tree,
     _revert_patches must call _revert_patches_no_git and return all applied."""
@@ -70,9 +60,7 @@ def test_revert_patches_uses_nogit_backups_when_not_git_tree(tmp_path, monkeypat
         {"target": str(target), "existed": True, "backup_path": str(bak)},
     ]
 
-    # Ensure _is_git_tree returns False (non-git directory)
     monkeypatch.setattr(ng, "_is_git_tree", lambda p: False)
-    # Also patch the import inside framework_agent module namespace
     monkeypatch.setattr(fp, "_is_git_tree", lambda p: False)
 
     applied = [tmp_path / "fix.patch"]
@@ -130,10 +118,6 @@ def test_revert_patches_empty_applied_is_noop(tmp_path):
     assert exe._revert_patches(tmp_path, [], pre_apply_sha="sha") == []
 
 
-# ---------------------------------------------------------------------------
-# _apply_patch_no_git integration: apply into a non-git dir, then revert
-# ---------------------------------------------------------------------------
-
 def test_nogit_apply_revert_via_executor_roundtrip(tmp_path):
     """End-to-end: apply a patch via _apply_patch_no_git, collect backups,
     then revert via _revert_patches with non-git path — file must be restored."""
@@ -144,7 +128,7 @@ def test_nogit_apply_revert_via_executor_roundtrip(tmp_path):
     patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")
 
     backup_root = tmp_path / "bak"
-    ok, err, backups = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
+    ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
     if not ok:
         pytest.skip(f"patch CLI unavailable: {err}")
 
@@ -153,7 +137,6 @@ def test_nogit_apply_revert_via_executor_roundtrip(tmp_path):
     exe = _Executor()
     exe._nogit_patch_backups = backups
 
-    # Monkeypatch _is_git_tree so the revert takes the nogit branch
     import hyperloom.orchestrator.actions.executors.framework_agent as fa_mod
     original_fn = fa_mod._is_git_tree
     try:
@@ -165,10 +148,6 @@ def test_nogit_apply_revert_via_executor_roundtrip(tmp_path):
     assert reverted == [patch_file]
     assert target.read_text() == "original\n"
 
-
-# ---------------------------------------------------------------------------
-# is_git_tree import (smoke: framework_agent module exports it via _nogit_patch)
-# ---------------------------------------------------------------------------
 
 def test_framework_agent_imports_is_git_tree():
     """_is_git_tree must be importable from the framework_agent module namespace."""

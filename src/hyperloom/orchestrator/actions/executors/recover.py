@@ -122,28 +122,17 @@ def _session_gpu_ids() -> list[int] | None:
         try:
             ids.append(int(tok))
         except ValueError:
-            return None  # UUID / non-int token -> cannot safely scope a reset
+            return None  # non-int token -> cannot safely scope a reset
     return sorted(set(ids)) or None
 
 
 def _is_multi_node_sandbox() -> bool:
     """True when running in multi-node mode (nodes >= 2).
 
-    In multi-node mode (both Dynamo and RayJob), the optimizer sandbox does
-    NOT own the inference server GPUs — those live in remote pods (Dynamo
-    worker pods or RayJob head/worker pods). The sandbox may be scheduled on
-    a GPU node and see local ``/dev/kfd`` + ``rocm-smi``, but:
-      - The local GPUs run OTHER workloads (not ours).
-      - ``rocm-smi --showmeminfo`` reports those workloads' VRAM usage.
-      - ``_all_recovered`` sees low free_mb and returns False.
-      - The orchestration LLM then proposes ``recover`` every tick forever.
-
-    In multi-node mode the local GPU probe is skipped entirely; remote GPU
-    health is handled by the Dynamo restart-server / kill-inference path
-    (SSH to the actual pods).
-
-    Single-node (``is_multi_node() == False``) is unaffected — the sandbox
-    IS the GPU pod, so local rocm-smi / gpureset are meaningful.
+    In multi-node mode the optimizer sandbox does not own the inference server
+    GPUs (they live in remote pods), so the local GPU probe is skipped entirely;
+    remote GPU health is handled by the Dynamo restart-server / kill-inference
+    path. Single-node is unaffected — the sandbox is the GPU pod.
 
     Returns:
         ``True`` when running in multi-node mode (nodes >= 2); ``False`` for
@@ -205,11 +194,9 @@ class RecoverExecutor:
             allow_reset,
         )
 
-        # Dynamo CPU-only sandbox: no local GPUs to reclaim (they live on remote
-        # pods reached over SSH). Calling rocm-smi here deadlocks on the kfd
-        # ioctl and makes recover loop. Short-circuit to success so the
-        # orchestrator stops proposing recover; remote VRAM cleanup, when
-        # needed, is handled by the dynamo restart-server / kill-inference path.
+        # Dynamo CPU-only sandbox: no local GPUs to reclaim. Short-circuit to
+        # success so the orchestrator stops proposing recover; remote VRAM
+        # cleanup is handled by the dynamo restart-server / kill-inference path.
         if _is_multi_node_sandbox():
             log.info(
                 "recover_executor: dynamo CPU-only sandbox detected; skipping "
@@ -248,8 +235,8 @@ class RecoverExecutor:
         # 3) Probe after kills.
         mid = await asyncio.to_thread(self._probe_gpu_free_mb)
 
-        # 4) Hard cleanup (gpureset) — opt-in env gate + force_cleanup, and
-        # ALWAYS scoped to this session's own GPUs (never implicit --gpu=all).
+        # 4) Hard cleanup (gpureset) — opt-in env gate + force_cleanup, always
+        # scoped to this session's own GPUs (never implicit --gpu=all).
         gpu_ids = _session_gpu_ids()
         gpureset_result: dict[str, Any] | None = None
         gpureset_skipped_reason: str | None = None
@@ -455,7 +442,7 @@ class RecoverExecutor:
             ``free_mb`` is at least :attr:`FREE_MB_HEALTHY`.
         """
         if not gpus:
-            # No probe → can't claim recovery; treat as unhealthy.
+            # No probe -> treat as unhealthy.
             return False
         return all(
             isinstance(snap.get("free_mb"), (int, float)) and snap["free_mb"] >= self.FREE_MB_HEALTHY for snap in gpus
@@ -482,7 +469,7 @@ class RecoverExecutor:
                 killed.append(entry)
         if not killed:
             return []
-        # Wait then SIGKILL survivors of exactly the TERMed set (no re-discover).
+        # Wait then SIGKILL survivors of the TERMed set (no re-discover).
         time.sleep(self.SERVER_KILL_WAIT_S)
         for entry in killed:
             pid = entry["pid"]
@@ -531,8 +518,7 @@ class RecoverExecutor:
                 cmd = parts[1]
                 if pid == own_pid:
                     continue
-                # Defence-in-depth: confirm the pattern via plain substring
-                # (pgrep's regex engine is permissive on some platforms).
+                # Confirm the pattern via plain substring (pgrep's regex is permissive).
                 if pattern not in cmd:
                     continue
                 seen[pid] = {"pid": pid, "cmd": cmd, "pattern": pattern}

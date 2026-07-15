@@ -1,11 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit coverage for the HL_HONEST_E2E v4-parity hardening helpers:
+"""Unit coverage for the HL_HONEST_E2E hardening helpers:
 umbrella-flag resolution, VRAM util guard, import-grep source confirmation,
 op-fanout de-dup in candidate batching, and umbrella-driven GEAK promotion.
 
-Honest-E2E now defaults ON (umbrella). The "off" tests opt out explicitly with
-HL_HONEST_E2E=0 to pin the legacy/opt-out contract.
+Honest-E2E defaults ON (umbrella); the "off" tests opt out with HL_HONEST_E2E=0.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from hyperloom.orchestrator.kernel import request_handlers as krh
 
 # -- _honest_flag (umbrella + per-fix override) ---------------------------
 def test_honest_flag_default_off(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
+    monkeypatch.setenv("HL_HONEST_E2E", "0")
     monkeypatch.delenv("HL_KERNEL_OPFANOUT_DEDUP", raising=False)
     assert krh._honest_flag("HL_KERNEL_OPFANOUT_DEDUP") is False
 
@@ -43,7 +42,7 @@ def test_honest_flag_specific_falsey_overrides_umbrella(monkeypatch) -> None:
 
 # -- _vram_guarded_server_args -------------------------------------------
 def test_vram_guard_off_is_identity(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
+    monkeypatch.setenv("HL_HONEST_E2E", "0")
     monkeypatch.delenv("HL_INTEGRATE_VRAM_GUARD", raising=False)
     assert krh._vram_guarded_server_args("--foo bar") == "--foo bar"
     assert krh._vram_guarded_server_args("") == ""
@@ -115,40 +114,33 @@ def test_confirm_source_present_no_cue_is_unknown(tmp_path: Path) -> None:
     assert krh._confirm_source_imported("my_kernel.py", tmp_path) is None
 
 
-# -- _kernel_result_rank: umbrella-driven GEAK promotion ------------------
-def _geak_nr_result() -> dict:
+# -- _kernel_result_rank ---------------------------------------------------
+def _needs_review_result() -> dict:
     return {
         "status": "ok",
         "proposal": {"decision": "NEEDS_REVIEW"},
         "verification": {
-            "best_backend": "geak_v3",
             "correctness_passed": True,
             "micro_speedup": 1.5,
         },
     }
 
 
-def test_rank_geak_nr_not_promoted_when_off(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
-    monkeypatch.delenv("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW", raising=False)
-    keep, verified_nr, micro = krh._kernel_result_rank(_geak_nr_result())
-    assert (keep, verified_nr) == (0, 0)
+def test_rank_needs_review_keeps_micro_speedup() -> None:
+    keep, micro = krh._kernel_result_rank(_needs_review_result())
+    assert keep == 0
     assert micro == 1.5
 
 
-def test_rank_geak_nr_promoted_via_umbrella(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "1")
-    monkeypatch.delenv("HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW", raising=False)
-    keep, verified_nr, micro = krh._kernel_result_rank(_geak_nr_result())
-    assert (keep, verified_nr) == (0, 1)
+def test_rank_keep_beats_needs_review() -> None:
+    keep_result = _needs_review_result()
+    keep_result["proposal"]["decision"] = "KEEP"
+    keep_result["verification"]["micro_speedup"] = 1.1
+    assert krh._kernel_result_rank(keep_result) > krh._kernel_result_rank(_needs_review_result())
 
 
-def test_rank_nongeak_nr_never_promoted(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "1")
-    r = _geak_nr_result()
-    r["verification"]["best_backend"] = "claude"
-    keep, verified_nr, _ = krh._kernel_result_rank(r)
-    assert (keep, verified_nr) == (0, 0)
+def test_rank_invalid_result_is_zero() -> None:
+    assert krh._kernel_result_rank(None) == (0, 0.0)
 
 
 # -- C2a op-fanout de-dup in _batch_kernel_candidates ---------------------
@@ -177,7 +169,7 @@ def _write_candidates(tmp_path: Path) -> str:
 
 
 def test_opfanout_off_keeps_both_rows(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
+    monkeypatch.setenv("HL_HONEST_E2E", "0")
     monkeypatch.delenv("HL_KERNEL_OPFANOUT_DEDUP", raising=False)
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "1.0")
     sel = krh._batch_kernel_candidates({"candidates_path": _write_candidates(tmp_path)})
@@ -216,7 +208,7 @@ def _infra_entry(failure_count: int, gpu_pct: float) -> dict:
 
 
 def test_infra_retry_off_retires_at_max_failures(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "0")  # umbrella now default-on; opt out explicitly
+    monkeypatch.setenv("HL_HONEST_E2E", "0")
     monkeypatch.delenv("HL_INFRA_RETRY_HIGH_IMPACT", raising=False)
     # failure_count == max_failures => legacy retires (cap collapses to default 1).
     cap = krh._kernel_dispatch_attempt_cap(_infra_entry(2, 26.7), max_failures=2)

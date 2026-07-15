@@ -1,30 +1,19 @@
 """aiter cpp_itfs RUNTIME-compiled cache invalidation tests.
 
-Background
-----------
-aiter ``csrc/cpp_itfs`` kernels (e.g. ``paged_attention`` ->
-``csrc/cpp_itfs/pa/pa_kernels.cuh``) are NOT built by ``setup.py develop``;
-they are runtime-compiled on first call by ``compile_template_op``
-(``csrc/cpp_itfs/utils.py``) into
-``$AITER_ROOT_DIR/build/<md_name>_<md5(params)>/lib.so`` (default
-``$HOME/.aiter/build``). The cache folder name hashes kernel *parameters*,
-NOT source content, so a pristine and a patched build of the same kernel
-collide on the SAME directory; ``compile_template_op`` only rebuilds when
-``lib.so`` is missing, so after :mod:`apply_kernel_patch` lands the new
-``.cuh`` (and runs the no-op-for-this-class ``setup.py develop``), the next
-server reuses the STALE pristine ``lib.so`` and integrate measures ~0% gain
-on a genuinely-good kernel (observed -0.17% on a +2.5% pa kernel, RUN2).
-
-These tests cover the fix:
+aiter ``csrc/cpp_itfs`` kernels are runtime-compiled on first call by
+``compile_template_op`` into ``$AITER_ROOT_DIR/build/<md_name>_<md5(params)>/lib.so``.
+The cache dir name hashes kernel parameters, not source content, so a pristine
+and a patched build collide; the cache must be invalidated on patch. These tests
+cover that fix:
 
 * ``_target_is_in_aiter_cpp_itfs`` recognizes cpp_itfs editable + dist layouts
   and rejects non-cpp_itfs aiter csrc / sglang / vllm targets.
 * ``_cpp_itfs_module_names`` scrapes ``MD_NAME`` from the drivers next to the
   patched source so invalidation can be scoped to the impacted module(s).
 * ``_invalidate_aiter_cpp_itfs_cache`` moves only the matching
-  ``<md_name>_*`` cache dirs aside (leaving unrelated modules intact), falls
-  back to the whole build root when no MD_NAME is determinable, skips when
-  the build dir is absent, and refuses to clobber a pre-existing backup.
+  ``<md_name>_*`` cache dirs aside, falls back to the whole build root when no
+  MD_NAME is determinable, skips when the build dir is absent, and refuses to
+  clobber a pre-existing backup.
 * ``_restore_aiter_cpp_itfs_cache`` round-trips the move, clearing any dir
   the re-baseline regenerated first.
 * ``verify_cpp_itfs_rebuilt`` is a no-op for non-cpp_itfs, reports ``stale``
@@ -64,16 +53,14 @@ def apply_tool() -> types.ModuleType:
     return module
 
 
-# ---------------------------------------------------------------------------
 # _target_is_in_aiter_cpp_itfs
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "target_path,expected",
     [
         ("/sgl-workspace/aiter/csrc/cpp_itfs/pa/pa_kernels.cuh", True),
         ("/sgl-workspace/aiter/csrc/cpp_itfs/pa/pa_ragged.cpp.jinja", True),
         ("/usr/local/lib/python3.12/dist-packages/aiter/csrc/cpp_itfs/mha/x.cuh", True),
-        # Negative — aiter csrc but NOT cpp_itfs, plus sglang / vllm.
+        # Negative: aiter csrc but not cpp_itfs, plus sglang / vllm.
         ("/sgl-workspace/aiter/csrc/ck_gemm_moe_2stages_codegen/gemm.cu", False),
         ("/sgl-workspace/aiter/csrc/include/foo.cuh", False),
         ("/sgl-workspace/sglang/sgl-kernel/csrc/cpp_itfs/foo.cu", False),
@@ -84,9 +71,7 @@ def test_target_is_in_aiter_cpp_itfs(apply_tool, target_path: str, expected: boo
     assert apply_tool._target_is_in_aiter_cpp_itfs(Path(target_path)) is expected
 
 
-# ---------------------------------------------------------------------------
 # _cpp_itfs_module_names
-# ---------------------------------------------------------------------------
 def test_cpp_itfs_module_names_scrapes_md_name(apply_tool, tmp_path: Path) -> None:
     pa_dir = tmp_path / "aiter" / "csrc" / "cpp_itfs" / "pa"
     pa_dir.mkdir(parents=True)
@@ -106,9 +91,7 @@ def test_cpp_itfs_module_names_empty_when_no_driver(apply_tool, tmp_path: Path) 
     assert apply_tool._cpp_itfs_module_names(d / "kernel.cuh") == []
 
 
-# ---------------------------------------------------------------------------
 # _invalidate_aiter_cpp_itfs_cache
-# ---------------------------------------------------------------------------
 def _make_cache_dir(build_dir: Path, name: str, content: bytes = b"v0") -> Path:
     d = build_dir / name
     d.mkdir(parents=True)
@@ -147,7 +130,7 @@ def test_invalidate_scopes_to_module_md_names(apply_tool, tmp_path: Path) -> Non
     build_dir = tmp_path / "build"
     _make_cache_dir(build_dir, "pa_ragged_HASHA")
     _make_cache_dir(build_dir, "pa_HASHB")
-    _make_cache_dir(build_dir, "gemm_HASHC")  # unrelated module — must survive
+    _make_cache_dir(build_dir, "gemm_HASHC")  # unrelated module
 
     backup = tmp_path / "backup"
     out = apply_tool._invalidate_aiter_cpp_itfs_cache(
@@ -244,9 +227,7 @@ def test_invalidate_refuses_to_clobber_existing_backup(
     assert (build_dir / "pa_ragged_HASHA" / "lib.so").is_file()
 
 
-# ---------------------------------------------------------------------------
 # _restore_aiter_cpp_itfs_cache
-# ---------------------------------------------------------------------------
 def test_restore_round_trip(apply_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pa_dir = tmp_path / "aiter" / "csrc" / "cpp_itfs" / "pa"
     pa_dir.mkdir(parents=True)
@@ -254,9 +235,8 @@ def test_restore_round_trip(apply_tool, tmp_path: Path, monkeypatch: pytest.Monk
     target.write_text("// fake\n")
     (pa_dir / "pa_ragged.py").write_text('MD_NAME = "pa_ragged"\n')
 
-    # Restore now requires each recorded src to live under the resolved aiter
-    # cpp_itfs build dir (blocks a forged manifest redirecting the rmtree), so
-    # point $AITER_ROOT_DIR at the synthetic root: build dir == tmp_path/build.
+    # Restore requires each recorded src to live under the resolved aiter
+    # cpp_itfs build dir, so point $AITER_ROOT_DIR at the synthetic root.
     monkeypatch.setenv("AITER_ROOT_DIR", str(tmp_path))
     build_dir = tmp_path / "build"
     _make_cache_dir(build_dir, "pa_ragged_HASHA", b"v0")
@@ -290,9 +270,7 @@ def test_restore_skips_when_no_backup(apply_tool) -> None:
     assert apply_tool._restore_aiter_cpp_itfs_cache({})["status"] == "skipped"
 
 
-# ---------------------------------------------------------------------------
 # verify_cpp_itfs_rebuilt
-# ---------------------------------------------------------------------------
 def test_verify_noop_for_non_cpp_itfs(apply_tool) -> None:
     out = apply_tool.verify_cpp_itfs_rebuilt({"is_cpp_itfs": False})
     assert out["verified"] is True
@@ -339,9 +317,7 @@ def test_verify_ok_when_fresh_lib_so(apply_tool, tmp_path: Path) -> None:
     assert any("pa_ragged_HASHA" in p for p in out["fresh_lib_so"])
 
 
-# ---------------------------------------------------------------------------
 # End-to-end apply_kernel_patch → revert_kernel_patch.
-# ---------------------------------------------------------------------------
 _CUH_V0 = "#include <hip/hip_runtime.h>\n__global__ void pa_kernel_v0() {}\n"
 _CUH_V1 = "#include <hip/hip_runtime.h>\n__global__ void pa_kernel_v1() {}\n"
 
@@ -377,11 +353,8 @@ def test_apply_then_revert_invalidates_and_restores_cpp_itfs_cache(
     _make_cache_dir(build_dir, "pa_ragged_HASHA", b"stale-pristine")
     _make_cache_dir(build_dir, "gemm_HASHC", b"unrelated")
 
-    # Make the orthogonal @compile_ops jit/build invalidation a clean skip
-    # (and never touch the real /sgl-workspace/aiter) by stubbing the jit
-    # build-dir resolver to "aiter not importable". Patching the narrow
-    # helper avoids globally mocking importlib.find_spec, which would break
-    # unrelated lazy imports during apply.
+    # Stub the jit build-dir resolver so the orthogonal jit/build invalidation
+    # is a clean skip without touching the real /sgl-workspace/aiter.
     with (
         patch.object(apply_tool, "_aiter_jit_build_dir", return_value=None),
         patch.object(apply_tool, "_run_rebuild", return_value=dict(_FAKE_REBUILD_OK)),
@@ -420,7 +393,7 @@ def test_non_cpp_itfs_apply_leaves_cpp_itfs_cache_untouched(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-cpp_itfs (sglang) target must NOT touch $HOME/.aiter/build."""
+    """A non-cpp_itfs (sglang) target must not touch $HOME/.aiter/build."""
     target = tmp_path / "sgl-workspace" / "sglang" / "sgl-kernel" / "csrc" / "x.cu"
     target.parent.mkdir(parents=True)
     target.write_text(_CUH_V0)

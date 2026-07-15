@@ -15,7 +15,7 @@ Mapping (trace -> phase span -> agent span -> generation)::
     Trace                 = one session
       phase span          = PRELUDE / EXPLORE / KERNEL_AGENT / SWEEP / ...
         agent span        = component (orchestration / kernel / specialist /
-                            critic / geak / oob / proposal_scorer / ...)
+                            critic / geak / forge / proposal_scorer / ...)
           Generation      = one LLM call (llm_calls.jsonl; prompt/response
                             paired from conversations.jsonl when available)
       Score               = one decision (decision_trace.jsonl), attached to
@@ -71,6 +71,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.jsonio import read_json, read_jsonl
 from hyperloom.orchestrator.trace import langfuse_mapping as lfmap
 from hyperloom.orchestrator.trace.langfuse_emitter import (
     _end_obs,
@@ -90,57 +91,7 @@ MANIFEST = "manifest.json"
 UNPHASED = lfmap.UNPHASED
 
 
-# ---------------------------------------------------------------------------
-# IO helpers
-# ---------------------------------------------------------------------------
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Load a JSONL file into a list of dict records.
-
-    Args:
-        path: Path to the ``.jsonl`` file.
-
-    Returns:
-        The dict records; a missing file yields ``[]`` and malformed lines are
-        skipped.
-    """
-    out: list[dict[str, Any]] = []
-    if not path.exists():
-        return out
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            out.append(obj)
-    return out
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    """Load a JSON object file.
-
-    Args:
-        path: Path to the JSON file.
-
-    Returns:
-        The parsed object, or ``{}`` when the file is missing, unreadable, or
-        not a JSON object.
-    """
-    if not path.exists():
-        return {}
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        return obj if isinstance(obj, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-# ---------------------------------------------------------------------------
 # Plan building (pure -- no SDK, dry-run friendly)
-# ---------------------------------------------------------------------------
 def build_plan(session_dir: Path) -> dict[str, Any]:
     """Parse the trace files into a Langfuse-shaped plan dict (pure).
 
@@ -152,24 +103,24 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
         hierarchy.
     """
     tdir = session_dir / TRACE_SUBDIR
-    llm = _load_jsonl(tdir / LLM_CALLS)
-    conv = _load_jsonl(tdir / CONVERSATIONS)
-    decisions = _load_jsonl(tdir / DECISION_TRACE)
-    recipe_audit = _load_jsonl(recipe_snapshot_audit_jsonl(session_dir))
-    manifest = _load_json(session_dir / MANIFEST)
+    llm = read_jsonl(tdir / LLM_CALLS, require_dict=True, skip_malformed=True)
+    conv = read_jsonl(tdir / CONVERSATIONS, require_dict=True, skip_malformed=True)
+    decisions = read_jsonl(tdir / DECISION_TRACE, require_dict=True, skip_malformed=True)
+    recipe_audit = read_jsonl(recipe_snapshot_audit_jsonl(session_dir), require_dict=True, skip_malformed=True)
+    manifest = read_json(session_dir / MANIFEST, default={}, require_dict=True)
 
     conv_by_key: dict[tuple, dict[str, Any]] = {}
     for c in conv:
         conv_by_key[lfmap.pair_key(c)] = c
 
     internal_id = str(manifest.get("session_id") or (llm[0].get("session_id") if llm else "") or session_dir.name)
-    # Correlate on claw_session_id (fallback internal id) so backfill and the
-    # live emitter land on one Langfuse trace.
+    # Correlate on claw_session_id so backfill and the live emitter land on one
+    # Langfuse trace.
     seed = lfmap.correlation_seed(manifest, internal_id)
     session_label = lfmap.langfuse_session_id(manifest, internal_id)
 
-    # phase -> agent -> [generation parts]; the span hierarchy mirrors the
-    # live emitter (trace -> phase span -> agent span -> generation).
+    # phase -> agent -> [generation parts]; mirrors the live emitter's
+    # trace -> phase span -> agent span -> generation hierarchy.
     phases: "OrderedDict[str, OrderedDict[str, list[dict]]]" = OrderedDict()
     paired = 0
     for row in llm:
@@ -244,9 +195,7 @@ def _phase_time_bounds(
     return _time_bounds(flat)
 
 
-# ---------------------------------------------------------------------------
 # Dry-run printer
-# ---------------------------------------------------------------------------
 def print_plan(plan: dict[str, Any]) -> None:
     """Print a human-readable dry-run summary of a backfill plan.
 
@@ -288,9 +237,7 @@ def print_plan(plan: dict[str, Any]) -> None:
     print(f"  Recipe-snapshot reads: {len(plan.get('recipe_audit') or [])} audit row(s)")
 
 
-# ---------------------------------------------------------------------------
 # Real ingest (needs the langfuse SDK)
-# ---------------------------------------------------------------------------
 def ingest(plan: dict[str, Any]) -> int:
     """Emit a backfill plan to Langfuse as a full trace tree.
 
@@ -327,7 +274,7 @@ def ingest(plan: dict[str, Any]) -> int:
         trace_context={"trace_id": trace_id},
         metadata=plan["metadata"],
     )
-    # Version-tolerant (v2/v3 update_trace -> v4 OTEL attrs); never raises.
+    # Version-tolerant across SDK versions; never raises.
     _set_trace_attrs(
         root,
         name=plan["name"],
@@ -335,8 +282,7 @@ def ingest(plan: dict[str, Any]) -> int:
         metadata=plan["metadata"],
     )
 
-    # trace -> phase span -> agent span -> generation. Keep the agent spans so
-    # decision scores can attach to the agent that produced them.
+    # Keep the agent spans so decision scores can attach to their producer.
     agent_spans: dict[tuple[str, str], Any] = {}
     last_end = trace_start
     for phase, agents in plan["phases"].items():
@@ -382,7 +328,7 @@ def ingest(plan: dict[str, Any]) -> int:
         if p_hi is not None:
             last_end = p_hi
 
-    # Recipe-snapshot / gbrain remote reads -> spans under a recipe_kb agent.
+    # Recipe-snapshot remote reads -> spans under a recipe_kb agent.
     recipe_audit = plan.get("recipe_audit") or []
     if recipe_audit:
         ra_times = [lfmap.parse_ts(r.get("ts")) for r in recipe_audit]
@@ -416,10 +362,8 @@ def ingest(plan: dict[str, Any]) -> int:
             _end_obs(obs, r_start)
         _end_obs(ra_span, (max(ra_times) if ra_times else None) or trace_start)
 
-    # Decision scores -> the owning agent span (trace-level fallback).
-    # ``component`` is the resolved proposer (specialist:<domain> / grid /
-    # orchestration); normalise it back to a span-attachable agent so the score
-    # still lands under a real agent span. operation_kind rides in score metadata.
+    # Decision scores -> the owning agent span (trace-level fallback). Normalise
+    # the resolved ``component`` proposer back to a span-attachable agent.
     def _span_agent_for(proposer: str) -> str:
         """Normalize a resolved proposer name to a span-attachable agent name.
 
@@ -472,9 +416,7 @@ def ingest(plan: dict[str, Any]) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
 # CLI
-# ---------------------------------------------------------------------------
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser.
 
