@@ -3708,13 +3708,40 @@ class FrameworkPhase(PhaseHandler):
         grid: list[dict[str, Any]] = []
         seen_names: set[str] = set()
 
-        def _add(name: str, args: str, envs: dict[str, str], note: str) -> None:
+        def _controls(raw: Any) -> dict[str, Any]:
+            if not isinstance(raw, dict):
+                return {}
+            out: dict[str, Any] = {}
+            for key in ("remove_args", "unset_envs"):
+                value = raw.get(key)
+                if isinstance(value, str):
+                    vals = [value.strip()] if value.strip() else []
+                elif isinstance(value, (list, tuple, set)):
+                    vals = [str(v).strip() for v in value if str(v).strip()]
+                else:
+                    vals = []
+                if vals:
+                    out[key] = vals
+            mode = str(raw.get("args_mode") or "append").strip().lower()
+            if mode == "replace":
+                out["args_mode"] = "replace"
+            return out
+
+        def _add(
+            name: str,
+            args: str,
+            envs: dict[str, str],
+            note: str,
+            controls: dict[str, Any] | None = None,
+        ) -> None:
             nm = (name or "").strip()
             if not nm or nm in seen_names:
                 return
+            controls = dict(controls or {})
             # A variant with neither a server-arg nor an env override has
-            # nothing for the restart to apply; drop it.
-            if not args and not envs:
+            # nothing for the restart to apply unless it removes inherited
+            # args/envs.
+            if not args and not envs and not controls:
                 return
             seen_names.add(nm)
             grid.append(
@@ -3722,6 +3749,7 @@ class FrameworkPhase(PhaseHandler):
                     "name": nm,
                     "extra_args": args,
                     "extra_envs": envs,
+                    **controls,
                     "provenance": provenance,
                     "note": (note or "")[:200],
                 }
@@ -3744,6 +3772,7 @@ class FrameworkPhase(PhaseHandler):
                 args,
                 envs,
                 str(raw.get("note") or raw.get("provenance") or ""),
+                _controls(raw),
             )
 
         # ``explicit_grid=[]`` means the caller harvested an empty set --
@@ -3811,6 +3840,20 @@ class FrameworkPhase(PhaseHandler):
             cb_args = str(cb.get("extra_server_args") or "")
             if cb_args:
                 params["base_extra_args"] = cb_args
+            _raw_remove = cb.get("remove_args")
+            _raw_unset = cb.get("unset_envs")
+            cb_remove = [_raw_remove] if isinstance(_raw_remove, str) and _raw_remove.strip() else [
+                str(v) for v in (_raw_remove or []) if str(v).strip()
+            ]
+            cb_unset = [_raw_unset] if isinstance(_raw_unset, str) and _raw_unset.strip() else [
+                str(v) for v in (_raw_unset or []) if str(v).strip()
+            ]
+            if cb_remove:
+                params["base_remove_args"] = cb_remove
+            if cb_unset:
+                params["base_unset_envs"] = cb_unset
+            if str(cb.get("args_mode") or "").strip().lower() == "replace":
+                params["base_args_mode"] = "replace"
         base_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
         if base_tput:
             params["base_tput"] = base_tput
@@ -3939,13 +3982,42 @@ class FrameworkPhase(PhaseHandler):
         es = getattr(self.shared_state, "explore_search", None)
         if isinstance(es, dict) and isinstance(es.get("tested"), dict):
             tested = es["tested"]
+        cb = getattr(self.shared_state, "current_best", None) or {}
+        base_remove_args: list[str] = []
+        base_unset_envs: list[str] = []
+        if isinstance(cb, dict):
+            raw_remove = cb.get("remove_args")
+            raw_unset = cb.get("unset_envs")
+            base_remove_args = [raw_remove] if isinstance(raw_remove, str) and raw_remove.strip() else [
+                str(v) for v in (raw_remove or []) if str(v).strip()
+            ]
+            base_unset_envs = [raw_unset] if isinstance(raw_unset, str) and raw_unset.strip() else [
+                str(v) for v in (raw_unset or []) if str(v).strip()
+            ]
         out: list[dict[str, Any]] = []
         for v in grid or []:
             if not isinstance(v, dict):
                 continue
+            v_remove = v.get("remove_args")
+            v_unset = v.get("unset_envs")
+            remove_args = list(
+                dict.fromkeys(
+                    base_remove_args
+                    + ([v_remove] if isinstance(v_remove, str) and v_remove.strip() else [str(x) for x in (v_remove or []) if str(x).strip()])
+                )
+            )
+            unset_envs = list(
+                dict.fromkeys(
+                    base_unset_envs
+                    + ([v_unset] if isinstance(v_unset, str) and v_unset.strip() else [str(x) for x in (v_unset or []) if str(x).strip()])
+                )
+            )
             fp = canonical_fingerprint(
                 str(v.get("extra_args") or v.get("extra_server_args") or ""),
                 dict(v.get("extra_envs") or {}),
+                remove_args=remove_args,
+                unset_envs=unset_envs,
+                args_mode=str(v.get("args_mode") or "append"),
             )
             if fp in tested:
                 continue
@@ -4182,7 +4254,21 @@ class FrameworkPhase(PhaseHandler):
                 if isinstance(envs_raw, dict)
                 else {}
             )
-            if not args and not envs:
+            controls: dict[str, Any] = {}
+            for key in ("remove_args", "unset_envs"):
+                raw = p.get(key)
+                if isinstance(raw, str):
+                    vals = [raw.strip()] if raw.strip() else []
+                elif isinstance(raw, (list, tuple, set)):
+                    vals = [str(v).strip() for v in raw if str(v).strip()]
+                else:
+                    vals = []
+                if vals:
+                    controls[key] = vals
+            mode = str(p.get("args_mode") or "append").strip().lower()
+            if mode == "replace":
+                controls["args_mode"] = "replace"
+            if not args and not envs and not controls:
                 continue
             name = str(p.get("name") or "").strip() or f"framework-config-{i}"
             out.append(
@@ -4190,6 +4276,7 @@ class FrameworkPhase(PhaseHandler):
                     "name": name,
                     "extra_args": args,
                     "extra_envs": envs,
+                    **controls,
                     "provenance": "framework_agent:config",
                     "note": str(p.get("reason") or "")[:200],
                 }

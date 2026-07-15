@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from types import SimpleNamespace
 import urllib.error
 
 import pytest
@@ -206,3 +210,268 @@ def test_hf_missing_tokenizer_rate_limit_and_http_fallbacks(monkeypatch) -> None
 
     monkeypatch.setattr(model_compat.urllib.request, "urlopen", _server_error)
     assert model_compat.hf_missing_tokenizer("org/model", ["tok"]) is None
+
+
+def test_gpu_type_resolution_env_probe_and_runner(monkeypatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    assert gpu_types._gpu_runner_type("MI325X") == "mi300x"
+    assert gpu_types._gpu_runner_type("mi355x") == "mi355x"
+
+    resolved, warnings = gpu_types._resolve_gpu_type("mi300x", "mi355x")
+    assert resolved == "mi355x"
+    assert "disagrees" in warnings[0]
+    assert gpu_types._resolve_gpu_type("mi300x", "") == ("mi300x", [])
+
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+    assert gpu_types._resolve_amd_gpu_type("mi308x") == "mi308x"
+    assert gpu_types._resolve_amd_gpu_type("nvidia") is None
+
+    monkeypatch.setenv("GPU_TYPE", " MI325X ")
+    assert gpu_types._resolve_amd_gpu_type() == "mi325x"
+    monkeypatch.setenv("GPU_TYPE", "unknown")
+    assert gpu_types._resolve_amd_gpu_type() is None
+
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: "mi355x")
+    assert gpu_types._resolve_amd_gpu_type() == "mi355x"
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: "gfx000")
+    assert gpu_types._resolve_amd_gpu_type() is None
+
+
+def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    class _Completed:
+        stdout = "GPU[0] : Card series: AMD Instinct MI325X"
+
+    def _rocm_ok(cmd, capture_output, text, timeout):
+        assert cmd == ["rocm-smi", "--showproductname"]
+        assert capture_output is True
+        assert text is True
+        assert timeout == 5
+        return _Completed()
+
+    monkeypatch.setattr(subprocess, "run", _rocm_ok)
+    assert gpu_types._autodetect_gpu_type() == "mi325x"
+
+    def _rocm_missing(*_args, **_kwargs):
+        raise FileNotFoundError("rocm-smi")
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            get_device_properties=lambda _idx: SimpleNamespace(gcnArchName="gfx950:sramecc+:xnack-")
+        )
+    )
+    monkeypatch.setattr(subprocess, "run", _rocm_missing)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert gpu_types._autodetect_gpu_type() == "mi355x"
+
+    fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
+    assert gpu_types._autodetect_gpu_type() is None
+
+
+def test_action_registry_names_all_and_lazy_load(tmp_path) -> None:
+    from hyperloom.orchestrator.actions.registry import ActionRegistry
+
+    meta_dir = tmp_path / "_meta"
+    meta_dir.mkdir()
+    (meta_dir / "_ignored.yaml").write_text("name: ignored\n", encoding="utf-8")
+    (meta_dir / "target_analysis.yaml").write_text(
+        "\n".join(
+            [
+                "name: target_analysis",
+                "family: prep",
+                "cost_minutes_p50: 0.1",
+                "cost_minutes_p75: 0.2",
+                "expected_gain_pct: [0, 0]",
+                "accuracy_risk: 0",
+                "crash_risk: 0",
+                "requires_lanes: []",
+                "allowed_tools: [Read]",
+                "side_effects: [writes_state]",
+                "pipeline_phase: prep",
+                "verdict_class: archival",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    reg = ActionRegistry(tmp_path)
+    assert reg.names() == ["target_analysis"]
+    assert [meta.name for meta in reg.all()] == ["target_analysis"]
+    meta = reg.get("target_analysis")
+    assert meta is not None
+    assert meta.description == "target_analysis"
+    assert reg.get("missing") is None
+
+
+def test_kernel_decision_retry_budget_env(monkeypatch) -> None:
+    from hyperloom.orchestrator.state import kernel_decision_settings as settings
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", raising=False)
+    assert settings.resolve_kernel_opt_max_failures() == 2
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "0")
+    assert settings.resolve_kernel_opt_max_failures() == 1
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "bad")
+    assert settings.resolve_kernel_opt_max_failures() == 2
+
+
+def test_dispatcher_inline_whitelist_filters_and_registry_errors(monkeypatch) -> None:
+    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+
+    reg = SimpleNamespace(names=lambda: ["report", "missing", "lane_action", "ok_action"])
+    coord = SimpleNamespace(
+        action_registry=reg,
+        sub=SimpleNamespace(executor_registry={"lane_action": object(), "ok_action": object()}),
+        _INLINE_ACTION_DENY=frozenset({"report"}),
+    )
+    disp = DispatcherCollaborator(coord)
+    monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda name: (["gpu"] if name == "lane_action" else [], 60))
+    assert disp._inline_action_whitelist() == frozenset({"ok_action"})
+
+    coord.action_registry = SimpleNamespace(names=lambda: (_ for _ in ()).throw(RuntimeError("bad registry")))
+    assert disp._inline_action_whitelist() == frozenset()
+
+    coord.action_registry = None
+    assert disp._inline_action_whitelist() == frozenset()
+
+
+def test_dispatcher_inline_whitelist_all_fallback(monkeypatch) -> None:
+    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+
+    reg = SimpleNamespace(all=lambda: [SimpleNamespace(name="from_all")])
+    coord = SimpleNamespace(
+        action_registry=reg,
+        sub=SimpleNamespace(executor_registry={"from_all": object()}),
+        _INLINE_ACTION_DENY=frozenset(),
+    )
+    disp = DispatcherCollaborator(coord)
+    monkeypatch.setattr(disp, "_registry_lanes_ttl", lambda _name: ([], 60))
+    assert disp._inline_action_whitelist() == frozenset({"from_all"})
+
+
+def test_dispatcher_run_action_now_sync_edge_returns(monkeypatch) -> None:
+    from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod
+    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+
+    coord = SimpleNamespace(
+        _inline_fast_actions_enabled=True,
+        _coordinator_loop=None,
+        _INLINE_ACTION_DENY=frozenset(),
+        action_registry=None,
+        sub=SimpleNamespace(executor_registry={}),
+    )
+    disp = DispatcherCollaborator(coord)
+    assert "action_name required" in disp._run_action_now_sync("  ", {})
+
+    monkeypatch.setattr(disp, "_inline_action_whitelist", lambda: frozenset({"probe"}))
+    assert "coordinator loop not running" in disp._run_action_now_sync("probe", {})
+
+    coord._coordinator_loop = SimpleNamespace(is_closed=lambda: False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "not-a-float")
+    monkeypatch.setattr(disp, "_run_action_now", lambda _name, _params: object())
+
+    class _TimeoutFuture:
+        def result(self, timeout):
+            assert timeout == 120.0
+            raise FuturesTimeoutError()
+
+    monkeypatch.setattr(dispatcher_mod.asyncio, "run_coroutine_threadsafe", lambda _coro, _loop: _TimeoutFuture())
+    assert "still running after 120s" in disp._run_action_now_sync("probe", {})
+
+    class _ErrorFuture:
+        def result(self, timeout):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(dispatcher_mod.asyncio, "run_coroutine_threadsafe", lambda _coro, _loop: _ErrorFuture())
+    assert "errored" in disp._run_action_now_sync("probe", {})
+
+    monkeypatch.setattr(
+        dispatcher_mod.asyncio,
+        "run_coroutine_threadsafe",
+        lambda _coro, _loop: (_ for _ in ()).throw(RuntimeError("closed")),
+    )
+    assert "could not schedule" in disp._run_action_now_sync("probe", {})
+
+
+def test_multi_node_state_paths_resolution_and_migration(monkeypatch, tmp_path) -> None:
+    from hyperloom.inference_optimizer.multi_node import state_paths
+    from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+
+    monkeypatch.delenv("MULTI_NODE_STATE_FILE", raising=False)
+    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
+    with pytest.raises(RuntimeError, match="cannot resolve"):
+        state_paths.resolve_state_file()
+
+    explicit = tmp_path / "explicit.json"
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(explicit))
+    assert state_paths.resolve_state_file() == explicit
+
+    monkeypatch.delenv("MULTI_NODE_STATE_FILE", raising=False)
+    session = tmp_path / "session"
+    monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, str(session))
+    assert state_paths.resolve_state_file() == session / "runtime" / "multi_node_state.json"
+
+    missing = tmp_path / "missing.json"
+    assert state_paths.state_file_safe_to_read(missing) is False
+    unsafe = tmp_path / "unsafe.json"
+    unsafe.write_text("{}", encoding="utf-8")
+    unsafe.chmod(0o666)
+    assert state_paths.state_file_safe_to_read(unsafe) is False
+    unsafe.chmod(0o600)
+    assert state_paths.state_file_safe_to_read(unsafe) is True
+
+    src = tmp_path / "source_state.json"
+    src.write_text('{"nodes": []}', encoding="utf-8")
+    src.chmod(0o600)
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(src))
+    bound = state_paths.bind_state_file_to_session(session)
+    assert bound == session / "runtime" / "multi_node_state.json"
+    assert bound.read_text(encoding="utf-8") == '{"nodes": []}'
+    assert state_paths.resolve_state_file() == bound
+    assert bound.stat().st_mode & 0o777 == 0o600
+    assert bound.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_multi_node_state_paths_warn_on_permission_failures(monkeypatch, tmp_path) -> None:
+    from hyperloom.inference_optimizer.multi_node import state_paths
+
+    messages: list[str] = []
+    monkeypatch.setattr(state_paths, "warn", messages.append)
+
+    class _BadPath:
+        def chmod(self, _mode):
+            raise OSError("chmod denied")
+
+    state_paths._chmod_state_file(_BadPath())
+    assert "could not chmod state file" in messages[-1]
+
+    runtime_dir = tmp_path / "runtime"
+    original_chmod = type(runtime_dir).chmod
+
+    def _bad_chmod(self, mode):
+        if self == runtime_dir:
+            raise OSError("runtime chmod denied")
+        return original_chmod(self, mode)
+
+    monkeypatch.setattr(type(runtime_dir), "chmod", _bad_chmod)
+    state_paths._ensure_runtime_dir(runtime_dir)
+    assert runtime_dir.is_dir()
+    assert "could not chmod runtime dir" in messages[-1]
+
+
+def test_llm_prompt_parse_response_edges() -> None:
+    from hyperloom.inference_optimizer.breakdown.reporters.llm_prompt import parse_llm_response
+
+    fenced = """```json
+{"executive_summary": "  ok  ", "section_narratives": {"a": "  first  ", "2": "two"}}
+```"""
+    parsed = parse_llm_response(fenced)
+    assert parsed["executive_summary"] == "ok"
+    assert parsed["section_narratives"] == {"a": "first", "2": "two"}
+
+    assert parse_llm_response("not json") == {"executive_summary": "", "section_narratives": {}}
+    assert parse_llm_response("[]") == {"executive_summary": "", "section_narratives": {}}
