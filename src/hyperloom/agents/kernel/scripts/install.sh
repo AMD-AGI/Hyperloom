@@ -985,10 +985,8 @@ write_env_file() {
   log "updated ${DOTENV} with kernel-agent runtime env"
 }
 
-# Clone the e2e optimizer ("geak"; GEAK@GEAK_v4, formerly PerfSkills): SHA pins
-# use a shallow fetch-checkout; tags/branches use git clone --branch. Not
-# pip-installed (it's a JS workflow dir); after the checkout we run GEAK's
-# setup.sh (Claude Code CLI + py deps) plus claude_agent_sdk.
+# Clone the e2e optimizer ("geak", formerly PerfSkills) for its
+# interface/run_e2e.py runner, then pip-install the GEAK package + claude_agent_sdk.
 ensure_geak() {
   log "ensuring e2e optimizer geak (GEAK@${GEAK_REF}, formerly PerfSkills)"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -1014,19 +1012,18 @@ ensure_geak() {
     fi
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    # GEAK's own installer: upgrades the Claude Code CLI to the dynamic Workflow
-    # floor (>= 2.1.177) and installs its py deps. Idempotent.
-    # `env -u REPO_ROOT`: we export REPO_ROOT (Hyperloom's checkout) for our own
-    # steps, but GEAK's setup.sh keys its requirements.txt path off REPO_ROOT too
-    # (${REPO_ROOT:-...}), so leaking ours makes it look for requirements.txt in
-    # the Hyperloom tree and die. Strip it so setup.sh derives its own repo root.
-    if [ -x "${GEAK_ROOT}/setup.sh" ]; then
-      run env -u REPO_ROOT bash "${GEAK_ROOT}/setup.sh" || warn "GEAK setup.sh failed; Claude Code may be < 2.1.177"
-    else
-      warn "GEAK setup.sh missing at ${GEAK_ROOT}/setup.sh; using the npm claude from ensure_forge_claude_cli"
-    fi
-    # setup.sh installs the CLI, not the SDK; run_e2e.py prefers the SDK.
     _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
+    # GEAK is a pip package now: install from the checkout above so the package
+    # matches the interface/run_e2e.py we run and honours any GEAK_REPO/GEAK_REF
+    # override (local mirror, fork, SSH URL). Its bootstrap installs deps + the
+    # Claude Code CLI (>= 2.1.177); GEAK_HOME reuses our checkout so bootstrap
+    # skips a second clone.
+    if [ -f "${GEAK_ROOT}/pyproject.toml" ] || [ -f "${GEAK_ROOT}/setup.py" ]; then
+      run env GEAK_HOME="${GEAK_ROOT}" python3 -m pip install ${_PIP_FLAGS} "${GEAK_ROOT}" || \
+        warn "GEAK pip install failed; Claude Code may be < 2.1.177"
+    else
+      warn "GEAK package metadata missing at ${GEAK_ROOT}; skipping pip install (Claude Code may be < 2.1.177)"
+    fi
     run python3 -m pip install ${_PIP_FLAGS} claude-agent-sdk anyio || \
       warn "claude-agent-sdk install failed; run_e2e.py will fall back to the claude CLI"
     if [ ! -f "${GEAK_E2E_RUNNER}" ]; then
