@@ -884,10 +884,7 @@ class DecisionReviewer:
         findings_path = _discover_robustness_findings_path(bundle.session_id)
         if findings_path is None:
             return
-        try:
-            limit = int(os.environ.get("CRITIC_ROBUSTNESS_PRIORS_LIMIT", "5"))
-        except ValueError:
-            limit = 5
+        limit = int(os.environ.get("CRITIC_ROBUSTNESS_PRIORS_LIMIT") or 5)
         # Severity floor: HIGH by default; drop to MEDIUM via the env knob.
         min_severity = os.environ.get("CRITIC_ROBUSTNESS_PRIORS_MIN_SEVERITY", "high").lower()
         try:
@@ -1014,7 +1011,7 @@ class DecisionReviewer:
         for p in proposals:
             cls = classify_proposal_action(p.action_name)
             per_proposal[p.msg_id] = cls
-            rank = _CLASS_RANK.get(cls, _CLASS_RANK[ACTION_CLASS_EVIDENCE_PRODUCER])
+            rank = _CLASS_RANK[cls]
             if rank > max_rank:
                 max_rank = rank
                 max_class = cls
@@ -1087,8 +1084,6 @@ class DecisionReviewer:
             ReviewValidationError: If verdicts are malformed or invalid.
         """
         verdicts_raw = review.get("review_verdicts")
-        if verdicts_raw is None:
-            verdicts_raw = review.get("verdicts")
         if not isinstance(verdicts_raw, list):
             raise ReviewValidationError("coordinator_inbox commit expects review.review_verdicts to be a list")
 
@@ -1096,7 +1091,7 @@ class DecisionReviewer:
         for advisory in review.get("advice") or []:
             if not isinstance(advisory, dict):
                 continue
-            body = advisory.get("body_md") or advisory.get("text")
+            body = advisory.get("body_md")
             advice_target = advisory.get("target_proposal_msg_id")
             if not body or not isinstance(advice_target, str) or not advice_target:
                 continue
@@ -1156,7 +1151,7 @@ class DecisionReviewer:
         for advisory in review.get("advice") or []:
             if not isinstance(advisory, dict):
                 continue
-            body = advisory.get("body_md") or advisory.get("text")
+            body = advisory.get("body_md")
             if not body:
                 continue
             intents.append(build_advice_intent(body, target_proposal_msg_id=advisory.get("target_proposal_msg_id")))

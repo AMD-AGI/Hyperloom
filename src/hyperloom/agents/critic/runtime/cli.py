@@ -159,7 +159,7 @@ def _cmd_list_priors(args: argparse.Namespace) -> None:
             ``topic``, ``limit``, ``session``, ``out``).
     """
     packet = _read_json(args.packet) or {}
-    context = packet.get("context") or packet.get("environment") or {}
+    context = packet.get("context") or {}
     scope = build_scope(context, require_critical=False)
     scope_filter = {k: v for k, v in scope.items() if v != "unknown"}
     client = _resolve_kb_client()
@@ -197,7 +197,7 @@ def _cmd_write_verdict(args: argparse.Namespace) -> None:
     )
     res = writer.write_verdict(
         verdict=verdict,
-        packet_context=packet.get("context") or packet.get("environment") or {},
+        packet_context=packet.get("context") or {},
         session_context=ctx_raw.get("session_context") or {},
         ctx=ctx,
     )
@@ -225,7 +225,7 @@ def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
     )
     res = writer.write_kb_drafts(
         kb_drafts=kb_draft.get("kb_drafts") or [],
-        packet_context=packet.get("context") or packet.get("environment") or {},
+        packet_context=packet.get("context") or {},
         session_context=ctx_raw.get("session_context") or {},
         ctx=ctx,
     )
