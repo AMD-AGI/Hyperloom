@@ -2282,6 +2282,12 @@ async def _run_geak_gemm_tuning(
     }
     if geak_config:
         input_payload["config"] = geak_config
+    elif not payload.get("dry_run"):
+        result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
+        result.setdefault("requested_backend", "geak")
+        result.setdefault("fallback_backend", "forge")
+        result.setdefault("fallback_reason", "legacy_geak_config_missing")
+        return result
     if payload.get("dry_run"):
         input_payload["dry_run"] = True
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")

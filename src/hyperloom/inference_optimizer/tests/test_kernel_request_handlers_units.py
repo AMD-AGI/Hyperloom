@@ -1194,6 +1194,47 @@ class TestRunGemmTuningHandler:
 
         assert result["status"] == "ok"
 
+    def test_geak_without_config_falls_back_to_forge(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("GEAK_CONFIG", raising=False)
+        root = tmp_path / "kernel-agent"
+        root.mkdir()
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path="/models/qwen-fp8",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            baseline_tput=4479.0,
+        )
+        state.save(tmp_path)
+        called: dict[str, object] = {}
+
+        async def fake_forge(payload: dict, *, session_dir: Path):
+            called["payload"] = payload
+            called["session_dir"] = session_dir
+            return {"status": "complete", "backend": "forge", "engine": "forge"}
+
+        async def fail_geak_subprocess(cmd, *, timeout_sec):
+            raise AssertionError("legacy GEAK subprocess should not run without config")
+
+        monkeypatch.setattr(krh, "_run_forge_gemm_tuning", fake_forge)
+        monkeypatch.setattr(krh, "_run_subprocess", fail_geak_subprocess)
+
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler({"task_id": "legacy-geak"}, session_dir=tmp_path)
+        )
+
+        assert called["session_dir"] == tmp_path
+        assert result["backend"] == "forge"
+        assert result["requested_backend"] == "geak"
+        assert result["fallback_backend"] == "forge"
+        assert result["fallback_reason"] == "legacy_geak_config_missing"
+
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         state = SharedState(
