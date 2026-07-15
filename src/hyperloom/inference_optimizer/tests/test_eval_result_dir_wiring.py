@@ -393,3 +393,33 @@ def test_baseline_skips_accuracy_when_run_eval_off_in_base_yaml(tmp_path):
 
     assert result["status"] == "succeeded"
     assert result.get("accuracy") is None
+
+
+# --- integrate_patch grade layer: warmup round must never gate the patch ---
+
+
+def test_integrate_patch_grade_ignores_discarded_warmup_round(tmp_path):
+    """``IntegratePatchExecutor._grade_accuracy`` grades from the grid slot (the
+    parent of the measured ``benchmark_*`` workspace). ``run_grid`` writes the
+    discarded warmup eval under ``warmup_round/``; if it were graded instead of
+    the measured round, a good patch could be wrongly reverted. Grading must use
+    the measured round's score.
+    """
+    from hyperloom.orchestrator.actions.executors.integrate_patch import (
+        IntegratePatchExecutor,
+    )
+
+    slot = tmp_path / "variant_00_integrate-patch"
+    # Measured round (slot root): high score that PASSES the gate vs baseline.
+    _write_results_score(
+        slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.95
+    )
+    # Discarded warmup round (nested): low score that would FAIL the gate, and a
+    # path that sorts last so a pre-fix sorted(...)[-1] would grade it.
+    _write_results_score(
+        slot / "warmup_round" / "Qwen__model" / "results_2026-07-15T09-00-00.000000.json",
+        0.50,
+    )
+    # baseline 0.90: measured 0.95 is within tolerance (pass); warmup 0.50 is not.
+    passed = IntegratePatchExecutor._grade_accuracy(str(slot), 0.90, framework="vllm")
+    assert passed is True
