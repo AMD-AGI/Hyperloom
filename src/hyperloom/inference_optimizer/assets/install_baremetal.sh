@@ -12,22 +12,17 @@
 # Phase 3  ROCm hotfix     — install ROCclr HIP runtime + roctracer profiler fix
 # Phase 4  credentials     — resolve LLM gateway creds (single-gateway SAFE_API_KEY
 #                            or split Anthropic/OpenAI keys) into .env
-# Phase 5  dependencies + runtime install
-#                          — install.sh installs open-source deps/runtime:
-#                            io pkg, Magpie, InferenceX deps,
-#                            chained kernel-agent Ray/GEAK/TraceLens, and fa
-# Phase 6  combined env  — write runtime/hyperloom.env.sh
-# Phase 7  verify + print launch prompt
+# Phase 5  combined env    — write runtime/hyperloom.env.sh
 #
-# Scope: core (native optimizer). The GEAK e2e optimizer, live Langfuse, Quark,
-# and gbrain KB are NOT installed here. It STOPS before launching.
+# Scope: bare-metal base setup only. Open-source deps and the optimizer runtime
+# (io pkg, Magpie, InferenceX, kernel-agent Ray/GEAK/TraceLens, fa) are installed
+# by the inference_optimizer skill, not here. It STOPS before launching.
 
 set -euo pipefail
 
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../../../.." && pwd)}"
 
-INSTALL_SH="${_script_dir}/install.sh"
 ENV_TEMPLATE="${REPO_ROOT}/.env.template"
 DOTENV="${HYPERLOOM_ENV_FILE:-${REPO_ROOT}/.env}"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
@@ -81,9 +76,9 @@ usage() {
   cat <<'EOF'
 Usage: src/hyperloom/inference_optimizer/assets/install_baremetal.sh [options]
 
-Install Hyperloom dependencies on a bare-metal host with ROCm + ROCm torch. Verifies
-the base, optionally installs SGLang/vLLM, resolves credentials, then chains
- install.sh. Stops BEFORE launching.
+Set up a bare-metal host with ROCm + ROCm torch for Hyperloom. Verifies the base,
+optionally installs SGLang/vLLM, resolves credentials, and writes the combined
+runtime env. Stops BEFORE launching.
 
 Options:
   --safe-api-key KEY     LLM gateway key (ak-...); overrides env / .env
@@ -1121,7 +1116,7 @@ resolve_credentials() {
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
 
   # In the interactive setup flow, .env is the source of truth the user just
-  # confirmed. Do not let stale OpenAI/SaFE values leak into the chained
+  # confirmed. Do not let stale OpenAI/SaFE values leak into the downstream
   # installers, because those scripts source env with "env wins" and may persist
   # or propagate the wrong provider back into runtime env files.
   if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
@@ -1165,7 +1160,8 @@ resolve_credentials() {
     fi
   fi
 
-  # Export resolved credentials for the chained install.sh.
+  # Export resolved credentials and persist them to .env for the downstream
+  # inference_optimizer skill install and CLI preflight.
   [ -n "$safe_key" ] && export SAFE_API_KEY="$safe_key"
   [ -n "$openai_key" ] && export OPENAI_API_KEY="$openai_key"
   [ -n "$anthropic_key" ] && export ANTHROPIC_API_KEY="$anthropic_key"
@@ -1327,7 +1323,6 @@ EOF
 }
 
 main() {
-  [ -f "$INSTALL_SH" ] || die "install.sh not found at ${INSTALL_SH}"
   case "$FRAMEWORK_ENV" in
     shared|isolated) ;;
     *) die "FRAMEWORK_ENV must be one of: shared, isolated" ;;
@@ -1376,34 +1371,13 @@ main() {
 
   resolve_credentials
 
-  # Runtime install. The GEAK e2e optimizer is always installed (whether it runs
-  # is chosen per-session via KERNEL_OPT_BACKEND_ORDER); Langfuse stays off
-  # unless HYPERLOOM_LANGFUSE_ENABLE is already set in the environment/.env.
-  local in_args=()
-  [ "$DRY_RUN" -eq 1 ] && in_args+=(--dry-run)
-  [ "$CHECK_ONLY" -eq 1 ] && in_args+=(--check-only)
-  log "Phase 5: install.sh ${in_args[*]}"
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    bash "$INSTALL_SH" "${in_args[@]}" || warn "install.sh (preview) reported issues"
-  else
-    bash "$INSTALL_SH" "${in_args[@]}"
-  fi
   if [ -f "$ka_env" ]; then
     log "sourcing ${ka_env}"
     # shellcheck disable=SC1090
     . "$ka_env"
-  elif [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    warn "expected ${ka_env} after install.sh but it is missing"
   fi
 
-  # Phase 6: combined env.
   write_combined_env "$combined_env" "$ka_env"
-
-  # Phase 7: verification pass.
-  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    log "Phase 7: verifying (--check-only)"
-    bash "$INSTALL_SH" --check-only || warn "install.sh --check-only reported issues"
-  fi
 
   if [ "$DRY_RUN" -eq 1 ]; then log "done (dry-run: no changes made)"; return 0; fi
   if [ "$CHECK_ONLY" -eq 1 ]; then log "done (check-only: verification pass complete)"; return 0; fi
