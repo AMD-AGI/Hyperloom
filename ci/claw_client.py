@@ -213,8 +213,7 @@ class ClawClient:
             "tools": tools if tools is not None else self.default_tools,
             "workspaceId": self.sandbox_workspace or os.environ.get("SANDBOX_WORKSPACE", ""),
         }
-        # Omit pluginId when None so the Claw backend uses the agent_id default
-        # (matches GUI behavior for remote-mode multi-node sessions).
+        # Omit pluginId when None so the backend uses the agent_id default.
         if plugin_id is not None:
             body["pluginId"] = plugin_id
         if resource:
@@ -350,9 +349,8 @@ class ClawClient:
     def _sse_background(self, session_id: str, on_event: Any, stop_event: threading.Event):
         """Background thread body that streams SSE events for real-time logging.
 
-        Runs until the SSE stream closes or ``stop_event`` is set.
-        Does NOT reconnect — when the stream ends, the thread exits silently.
-        The main polling loop handles completion detection independently.
+        Runs until the SSE stream closes or ``stop_event`` is set; does not
+        reconnect. Completion detection is handled by the main polling loop.
 
         Args:
             session_id (str): Session id to stream events for.
@@ -373,7 +371,7 @@ class ClawClient:
                     try:
                         on_event(event_data)
                     except Exception:
-                        # User callback errors must not break the SSE event stream.
+                        # User callback errors must not break the stream.
                         pass
 
                 if event_type == "toolUsed":
@@ -479,8 +477,7 @@ class ClawClient:
                             agent_status,
                         )
 
-                    # Agent is done when: explicitly stopped, session completed,
-                    # or agent returned to idle after having run (normal completion path)
+                    # Done when stopped, session completed, or idle after running.
                     if agent_status == "stopped" or sess_status in ("completed", "stopped"):
                         log.info(
                             ">>> SESSION COMPLETED <<< %s after %.0fs (status=%s, agent=%s)",

@@ -17,8 +17,7 @@ import _kernel_category as kc  # noqa: E402
 
 
 def test_casing_normalized_across_routes():
-    # The exact inconsistency observed on Qwen3-4B: bypass "Elementwise" vs
-    # deterministic raw "gemm"/"elementwise" -> one canonical TitleCase label.
+    # Different-cased inputs collapse to one canonical TitleCase label.
     assert kc.canonical_category("gemm") == "GEMM"
     assert kc.canonical_category("GEMM") == "GEMM"
     assert kc.canonical_category("elementwise") == "Elementwise"
@@ -26,14 +25,13 @@ def test_casing_normalized_across_routes():
 
 
 def test_marginal_vocabularies_unified():
-    # bypass "Others" and GEAK "Other" collapse to one label.
+    # "Others"/"other" collapse to one label.
     assert kc.canonical_category("Others") == "Other"
     assert kc.canonical_category("other") == "Other"
-    # bypass "Normalization" and GEAK "LayerNorm"/rmsnorm collapse to one label.
+    # Normalization aliases collapse to one label.
     assert kc.canonical_category("Normalization") == "Normalization"
     assert kc.canonical_category("LayerNorm") == "Normalization"
     assert kc.canonical_category("rmsnorm") == "Normalization"
-    # deterministic-only bucket keeps a stable canonical label.
     assert kc.canonical_category("reduce") == "Reduction"
 
 
@@ -48,5 +46,5 @@ def test_empty_and_unknown():
     assert kc.canonical_category(None) is None
     assert kc.canonical_category("") is None
     assert kc.canonical_category("   ") is None
-    # unknown category surfaced verbatim (stripped), never silently dropped
+    # Unknown category surfaced verbatim (stripped).
     assert kc.canonical_category("SomethingNew") == "SomethingNew"

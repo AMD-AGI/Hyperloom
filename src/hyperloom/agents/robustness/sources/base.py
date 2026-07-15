@@ -217,7 +217,7 @@ class DegradeRouter:
             except SourceUnavailable as exc:
                 self._record_failure(primary_state, str(exc))
             except Exception:
-                # Count unexpected errors as failures so we eventually degrade.
+                # Count unexpected errors as failures.
                 self._record_failure(primary_state, "unexpected_exception")
                 log.exception("primary source %s raised unexpectedly", self._primary.name)
             else:

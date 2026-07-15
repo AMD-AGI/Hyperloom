@@ -16,7 +16,7 @@ from __future__ import annotations
 
 try:  # Python 3.11+
     from enum import StrEnum
-except ImportError:  # Python 3.10 fallback — mirror 3.11 StrEnum semantics
+except ImportError:  # Python 3.10 fallback
     from enum import Enum
 
     class StrEnum(str, Enum):
@@ -79,9 +79,8 @@ class OutcomeId(StrEnum):
     unclassified_failure = "unclassified_failure"  # #30  Auto-recover* (runtime-classified)
 
     # Narrative / derived tags (not in the 30-row table):
-    #   eval_gap_accepted — success with gap-within-threshold, worth surfacing
-    #   upstream_change_required — #30 diagnosed as "needs quark_root edit";
-    #                              promoted to Auto-fail by the retry policy
+    #   eval_gap_accepted — success with gap within threshold
+    #   upstream_change_required — #30 diagnosed as needing a quark_root edit
     eval_gap_accepted = "eval_gap_accepted"
     upstream_change_required = "upstream_change_required"
 
@@ -135,14 +134,13 @@ ASK: frozenset[OutcomeId] = frozenset(
 UNCLASSIFIED_FAILURE: OutcomeId = OutcomeId.unclassified_failure  # #30 sentinel
 
 # Outcomes that count as ``recovered=True`` when a multi-attempt trail ends on
-# them. ``None`` is the clean-success marker; ``eval_gap_accepted`` is the
-# narrative tag emitted when the user/threshold accepted a gap that earlier
-# attempts exceeded. (Plain success with no story is just ``None``.)
+# them. ``None`` is clean success; ``eval_gap_accepted`` marks a gap accepted
+# after earlier attempts exceeded it.
 SUCCESS_TAGS: frozenset[OutcomeId | None] = frozenset({None, OutcomeId.eval_gap_accepted})
 
 
-# Ask-class IDs that participate in Python-driven retry.
-# These are the only outcomes that increment ``requantize_attempts.txt``.
+# Ask-class IDs that participate in Python-driven retry (the only outcomes that
+# increment ``requantize_attempts.txt``).
 ASK_RETRYABLE: frozenset[OutcomeId] = frozenset(
     {
         OutcomeId.exec_oom,  # #3
@@ -153,11 +151,8 @@ ASK_RETRYABLE: frozenset[OutcomeId] = frozenset(
 )
 
 
-# Auto-recover outcomes that should still demote to "failed" (not "partial")
-# when the underlying MUST-have artifact is still missing on the final
-# attempt. The expected fix is `cp` from source; if those files aren't on
-# disk by the end, the model isn't usable even if classification is lenient.
-# Consumed by ``_assessment.derive_status``.
+# Auto-recover outcomes that still demote to "failed" (not "partial") when the
+# MUST-have artifact is missing on the final attempt (model unusable).
 MUST_HAVE_RECOVERS_THAT_FAIL_WITHOUT_ARTIFACT: frozenset[OutcomeId] = frozenset(
     {
         OutcomeId.must_have_config_missing_or_invalid,

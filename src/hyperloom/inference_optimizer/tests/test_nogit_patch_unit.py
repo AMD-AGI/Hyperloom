@@ -17,9 +17,7 @@ from hyperloom.orchestrator.actions.executors import _nogit_patch as ng
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
 
-# ---------------------------------------------------------------------------
 # Public surface re-exported via integrate_patch (backward-compat guard)
-# ---------------------------------------------------------------------------
 
 def test_reexport_from_integrate_patch():
     """All names extracted from integrate_patch must still be importable from it."""
@@ -32,9 +30,7 @@ def test_reexport_from_integrate_patch():
     assert ip._revert_patches_no_git is ng._revert_patches_no_git
 
 
-# ---------------------------------------------------------------------------
 # _strip_path_prefix
-# ---------------------------------------------------------------------------
 
 def test_strip_path_prefix_zero():
     assert ng._strip_path_prefix("a/b/c.py", 0) == "a/b/c.py"
@@ -45,18 +41,16 @@ def test_strip_path_prefix_one():
 
 
 def test_strip_path_prefix_beyond():
-    # More levels than parts → basename
+    # More levels than parts -> basename
     assert ng._strip_path_prefix("a/b.py", 5) == "b.py"
 
 
 def test_strip_path_prefix_p_levels_sane():
-    # _P_LEVELS starts at 1 and covers git-native default first.
+    # _P_LEVELS starts at 1.
     assert ng._P_LEVELS[0] == 1
 
 
-# ---------------------------------------------------------------------------
 # _is_within
-# ---------------------------------------------------------------------------
 
 def test_is_within_same():
     p = Path("/foo/bar")
@@ -75,9 +69,7 @@ def test_is_within_parent():
     assert not ng._is_within(Path("/foo"), Path("/foo/bar"))
 
 
-# ---------------------------------------------------------------------------
 # _is_git_tree
-# ---------------------------------------------------------------------------
 
 class _CP:
     def __init__(self, returncode=0, stdout="", stderr=""):
@@ -118,9 +110,7 @@ def test_is_git_tree_false_on_timeout(monkeypatch):
     assert ng._is_git_tree(Path("/wherever")) is False
 
 
-# ---------------------------------------------------------------------------
 # _apply_patch_no_git + _revert_patches_no_git — round-trip using real patch CLI
-# ---------------------------------------------------------------------------
 
 SIMPLE_DIFF = """\
 --- a/target.py
@@ -157,7 +147,6 @@ def test_apply_patch_no_git_dry_run_failure(tmp_path, monkeypatch):
     patch_file = tmp_path / "bad.patch"
     patch_file.write_text("not a patch\n", encoding="utf-8")
 
-    # Make patch always fail
     import subprocess as _sp
 
     class _FailCP:
@@ -179,9 +168,7 @@ def test_revert_patches_no_git_missing_backup_is_noop(tmp_path):
     ng._revert_patches_no_git(records)  # must not raise
 
 
-# ---------------------------------------------------------------------------
-# #3 — backup name uniqueness across multiple patches sharing a backup_root
-# ---------------------------------------------------------------------------
+# Backup name uniqueness across multiple patches sharing a backup_root
 
 PATCH_A = """\
 --- a/common.py
@@ -202,7 +189,7 @@ PATCH_B = """\
 
 def test_backup_names_unique_across_patches_same_basename(tmp_path):
     """Two patches touching a file with the same basename must not overwrite each
-    other's backup when seq_offset is maintained across calls (#3 fix)."""
+    other's backup when seq_offset is maintained across calls."""
     target = tmp_path / "common.py"
     target.write_text("original_a\n", encoding="utf-8")
 
@@ -228,7 +215,6 @@ def test_backup_names_unique_across_patches_same_basename(tmp_path):
         pytest.skip(f"patch CLI unavailable: {err}")
     accumulated.extend(backups_b)
 
-    # Both patches produced backup records.
     assert len(backups_a) >= 1
     assert len(backups_b) >= 1
 
@@ -239,7 +225,7 @@ def test_backup_names_unique_across_patches_same_basename(tmp_path):
         f"backup paths collide between patches: {bak_paths_a & bak_paths_b}"
     )
 
-    # The patch_a backup must contain the original content (not overwritten by patch_b).
+    # The patch_a backup must retain the original content.
     for bak_path in bak_paths_a:
         content = Path(bak_path).read_text(encoding="utf-8")
         assert content == "original_a\n", (
@@ -259,7 +245,6 @@ def test_seq_offset_zero_gives_deterministic_names(tmp_path):
     if not ok:
         pytest.skip(f"patch CLI unavailable: {err}")
 
-    # Backup name must embed the patch stem and end with .bak.
     for r in backups:
         if r.get("backup_path"):
             name = Path(r["backup_path"]).name
@@ -267,13 +252,8 @@ def test_seq_offset_zero_gives_deterministic_names(tmp_path):
             assert name.endswith(".bak"), f"backup name doesn't end in .bak: {name!r}"
 
 
-# ---------------------------------------------------------------------------
-# #4 — rename/move patch: full revert (new file deleted, old file restored)
-# ---------------------------------------------------------------------------
+# Rename/move patch: full revert (new file deleted, old file restored)
 
-# Simulate a rename by: patch A removes old.py content, patch B creates new.py
-# content (same file, moved). We encode this as two separate diff headers
-# (old=/dev/null for new file creation, new=/dev/null for old file deletion).
 RENAME_DELETE_OLD = """\
 --- a/old_name.py
 +++ /dev/null
@@ -289,10 +269,6 @@ RENAME_CREATE_NEW = """\
 """
 
 # A single diff that truly renames (old != new, neither /dev/null).
-# ``patch`` CLI can apply this as a modification to new_name.py when
-# old_name.py doesn't exist (create) and new_name.py is touched.
-# We rely on the Python-level record logic, not patch CLI execution,
-# for the rename revert_action tracking test.
 RENAME_DIFF = """\
 --- a/old_name.py
 +++ b/new_name.py
@@ -339,39 +315,30 @@ def test_rename_patch_tracked_as_two_records(tmp_path):
     """
     old_file = tmp_path / "old_name.py"
     old_file.write_text("moved_content\n", encoding="utf-8")
-    # new_name.py does not exist yet (patch will create it).
 
     patch_file = tmp_path / "rename.patch"
     patch_file.write_text(RENAME_DIFF, encoding="utf-8")
 
     backup_root = tmp_path / "bk"
 
-    # We only test the record structure produced by _apply_patch_no_git; the
-    # actual patch CLI application may or may not succeed depending on the
-    # target file layout, so we inspect records regardless of ok.
+    # Inspect the record structure regardless of whether the patch CLI succeeds.
     _ok, _err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, backup_root)
 
-    # Find old-source and new-destination records.
     restore_old_records = [r for r in backups if r.get("revert_action") == "restore_old"]
     delete_records = [r for r in backups if r.get("revert_action") == "delete"]
 
-    # The rename must produce at least one restore_old and one delete record.
     assert restore_old_records, "rename patch must produce a restore_old record for the source file"
     assert delete_records, "rename patch must produce a delete record for the destination file"
 
-    # The source record must point at old_name.py and carry a backup.
     src_rec = restore_old_records[0]
     assert "old_name" in src_rec["target"]
     assert src_rec["backup_path"] is not None
 
-    # The destination record must point at new_name.py.
     dst_rec = next((r for r in delete_records if "new_name" in r["target"]), None)
     assert dst_rec is not None, "delete record must target new_name.py"
 
 
-# ---------------------------------------------------------------------------
 # ApplyFeedback structure tests
-# ---------------------------------------------------------------------------
 
 def test_apply_feedback_dry_run_failure_returns_fourth_item(tmp_path, monkeypatch):
     """When all dry-run levels fail, _apply_patch_no_git returns a 4-tuple with
@@ -472,7 +439,7 @@ def test_read_patch_source_context_returns_snippet(tmp_path):
     )
     ctx = af.read_patch_source_context(patch_text, tmp_path, radius=6)
     assert "mod.py" in ctx
-    assert "line" in ctx  # some content from the file
+    assert "line" in ctx
 
 
 def test_read_patch_source_context_returns_empty_for_missing_file(tmp_path):
@@ -488,21 +455,16 @@ def test_read_patch_source_context_returns_empty_for_missing_file(tmp_path):
     assert ctx == ""
 
 
-# ---------------------------------------------------------------------------
 # _bak_name — filename sanitisation
-# ---------------------------------------------------------------------------
 
 def test_bak_name_sanitises_unsafe_chars():
     name = ng._bak_name("my:patch", Path("a/b/c.py"), 7)
     assert name == "my_patch__a_b_c.py__0007.bak"
-    # No path separators or unsafe chars survive.
     assert "/" not in name.replace(".bak", "")
     assert ":" not in name
 
 
-# ---------------------------------------------------------------------------
 # _apply_patch_no_git — patch CLI unavailable during dry-run
-# ---------------------------------------------------------------------------
 
 def test_apply_patch_dry_run_cli_missing(tmp_path, monkeypatch):
     """A FileNotFoundError during the dry-run yields a nogit ApplyFeedback."""
@@ -521,9 +483,7 @@ def test_apply_patch_dry_run_cli_missing(tmp_path, monkeypatch):
     assert "unavailable" in err
 
 
-# ---------------------------------------------------------------------------
 # _apply_patch_no_git — create-file hunk (old = /dev/null)
-# ---------------------------------------------------------------------------
 
 CREATE_DIFF = """\
 --- /dev/null
@@ -551,9 +511,7 @@ def test_apply_create_file_then_revert_deletes(tmp_path):
     assert not created.exists(), "revert of a create hunk must delete the new file"
 
 
-# ---------------------------------------------------------------------------
 # _apply_patch_no_git — delete-file hunk (new = /dev/null)
-# ---------------------------------------------------------------------------
 
 DELETE_DIFF = """\
 --- a/doomed.py
@@ -586,8 +544,7 @@ def test_apply_delete_file_backs_up_and_reverts(tmp_path):
 
 def test_apply_delete_missing_file_records_delete(tmp_path, monkeypatch):
     """A delete hunk whose target is already absent records a delete action."""
-    # Force dry-run to "succeed" so we reach the target-resolution loop without
-    # the real patch CLI needing the file present.
+    # Force dry-run to succeed so we reach the target-resolution loop.
     calls = {"n": 0}
 
     def _fake_run(cmd, *a, **k):
@@ -598,7 +555,6 @@ def test_apply_delete_missing_file_records_delete(tmp_path, monkeypatch):
 
     patch_file = tmp_path / "delete.patch"
     patch_file.write_text(DELETE_DIFF, encoding="utf-8")
-    # doomed.py does NOT exist.
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
     assert ok is True
     delete_recs = [r for r in backups if r.get("revert_action") == "delete"]
@@ -606,9 +562,7 @@ def test_apply_delete_missing_file_records_delete(tmp_path, monkeypatch):
     assert delete_recs[0]["backup_path"] is None
 
 
-# ---------------------------------------------------------------------------
 # _apply_patch_no_git — target escapes framework root
-# ---------------------------------------------------------------------------
 
 ESCAPE_DIFF = """\
 --- a/../../../etc/evil.py
@@ -633,9 +587,7 @@ def test_apply_rejects_target_escaping_root(tmp_path, monkeypatch):
     assert "escapes framework root" in err
 
 
-# ---------------------------------------------------------------------------
 # _apply_patch_no_git — backup copy failure
-# ---------------------------------------------------------------------------
 
 def test_apply_backup_failure_returns_error(tmp_path, monkeypatch):
     """When shutil.copy2 fails during backup, the apply aborts with an error."""
@@ -658,9 +610,7 @@ def test_apply_backup_failure_returns_error(tmp_path, monkeypatch):
     assert "backup of" in err
 
 
-# ---------------------------------------------------------------------------
 # _apply_patch_no_git — real apply failure collects .rej hunks
-# ---------------------------------------------------------------------------
 
 def test_apply_real_failure_collects_rej(tmp_path):
     """When dry-run passes for a level but the real apply fails, we surface a
@@ -675,7 +625,7 @@ def test_apply_real_failure_collects_rej(tmp_path):
     call_state = {"n": 0}
 
     def _run(cmd, *a, **k):
-        # Let dry-run passes through, force the real (non-dry-run) apply to fail.
+        # Let dry-run pass through; force the real apply to fail.
         is_dry = any("--dry-run" in str(c) for c in cmd)
         if is_dry:
             return real_run(cmd, *a, **k)
@@ -723,9 +673,7 @@ def test_apply_real_apply_cli_vanishes(tmp_path):
     assert "patch apply failed" in err
 
 
-# ---------------------------------------------------------------------------
 # _collect_rej_files
-# ---------------------------------------------------------------------------
 
 def test_collect_rej_files_reads_and_removes(tmp_path):
     """A recent .rej file is read into the summary and then removed."""
@@ -756,9 +704,7 @@ def test_collect_rej_files_no_rej_returns_empty(tmp_path):
     assert ng._collect_rej_files(tmp_path, tmp_path / "some.patch") == ""
 
 
-# ---------------------------------------------------------------------------
 # _revert_patches_no_git — error paths are swallowed
-# ---------------------------------------------------------------------------
 
 def test_revert_restore_error_is_logged_not_raised(tmp_path, monkeypatch):
     """A copy failure during restore is logged, never raised."""
@@ -772,7 +718,6 @@ def test_revert_restore_error_is_logged_not_raised(tmp_path, monkeypatch):
         raise OSError("perm denied")
 
     monkeypatch.setattr(ng.shutil, "copy2", _boom)
-    # Must not raise.
     ng._revert_patches_no_git(records)
 
 
@@ -785,17 +730,14 @@ def test_revert_delete_removes_existing(tmp_path):
     assert not t.exists()
 
 
-# ---------------------------------------------------------------------------
 # Deterministic branch coverage via a fake dry-run-succeeds patch runner
-# ---------------------------------------------------------------------------
 
 def _fake_ok_run(cmd, *a, **k):
     """A subprocess.run stand-in that reports every patch invocation as success."""
     return _CP(0, "", "")
 
 
-# A modification diff with identical old/new header tokens (no a//b/ prefix),
-# so _apply_patch_no_git classifies it as a plain modification (not a rename).
+# Modification diff with identical old/new header tokens (plain modification).
 MODIFY_SAME_PATH_DIFF = """\
 --- target.py
 +++ target.py
@@ -825,7 +767,6 @@ def test_modification_missing_file_records_delete(tmp_path, monkeypatch):
     monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
     patch_file = tmp_path / "fix.patch"
     patch_file.write_text(MODIFY_SAME_PATH_DIFF, encoding="utf-8")
-    # target.py does NOT exist.
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
     assert ok is True
     delete = [r for r in backups if r.get("revert_action") == "delete"]
@@ -888,8 +829,7 @@ def test_patch_file_unreadable_after_dry_run(tmp_path, monkeypatch):
     state = {"n": 0}
 
     def _read_text(self, *a, **k):
-        # First read (dry-run source-context) is fine; the post-dry-run read
-        # of the patch body raises to exercise the OSError branch.
+        # The post-dry-run read of the patch body raises to hit the OSError branch.
         if self == patch_file:
             state["n"] += 1
             if state["n"] >= 1:
@@ -926,13 +866,10 @@ def test_collect_rej_files_stat_oserror_skips(tmp_path, monkeypatch):
         return real_stat(self, *a, **k)
 
     monkeypatch.setattr(Path, "stat", _stat)
-    # Must not raise; the unreadable .rej is skipped.
     assert ng._collect_rej_files(tmp_path, tmp_path / "p.patch") == ""
 
 
-# ---------------------------------------------------------------------------
 # Escape / continue edge branches in the create / delete / rename arms
-# ---------------------------------------------------------------------------
 
 def test_create_devnull_both_sides_skipped(tmp_path, monkeypatch):
     """A degenerate /dev/null -> /dev/null header is skipped (create continue)."""

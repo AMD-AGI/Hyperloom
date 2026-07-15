@@ -26,9 +26,6 @@ def _patch_mapping(monkeypatch, mapping):
     monkeypatch.setattr(resolver, "_load_mapping", lambda: mapping)
 
 
-# ── is_editable_source ───────────────────────────────────────────────────────
-
-
 def test_native_sources_are_editable():
     for p in ("/x/act.cu", "/x/attn.cuh", "/x/k.hip", "/x/decl.h"):
         assert resolver.is_editable_source(p) is True
@@ -40,9 +37,6 @@ def test_repo_triton_py_is_editable_but_generated_is_not():
     assert resolver.is_editable_source("/repo/x.py", "triton_inductor_generated") is False
     assert resolver.is_editable_source("/x/notes.txt") is False
     assert resolver.is_editable_source("") is False
-
-
-# ── resolve_source: single / container selection ─────────────────────────────
 
 
 def test_resolve_single_native_source(monkeypatch):
@@ -82,8 +76,8 @@ def test_resolve_skips_non_patchable_and_non_editable(monkeypatch):
         "op::x": {
             "kind": "single",
             "sglang": {
-                "a": {"kernel_source_path": "/s/a.cu", "patchable": False},  # not patchable
-                "b": {"kernel_source_path": "/tmp/torchinductor_x/b.py", "patchable": True},  # generated
+                "a": {"kernel_source_path": "/s/a.cu", "patchable": False},
+                "b": {"kernel_source_path": "/tmp/torchinductor_x/b.py", "patchable": True},
             },
         }
     }
@@ -107,12 +101,8 @@ def test_resolve_framework_hint_selects_container(monkeypatch):
         }
     }
     _patch_mapping(monkeypatch, mapping)
-    # Neither exists on disk -> framework hint breaks the tie.
     assert resolver.resolve_source("op::z", framework="vllm")[0] == "/v/z.cu"
     assert resolver.resolve_source("op::z", framework="sglang")[0] == "/s/z.cu"
-
-
-# ── resolve_source: dispatch kind ────────────────────────────────────────────
 
 
 def test_resolve_dispatch_matches_device_kernel(monkeypatch):
@@ -138,12 +128,8 @@ def test_resolve_dispatch_unknown_kernel_falls_back(monkeypatch):
         }
     }
     _patch_mapping(monkeypatch, mapping)
-    # Unknown device kernel -> falls back to container selection (only editable src).
     src, _ = resolver.resolve_source("op::disp", framework="vllm", device_kernel_name="kernel_ZZZ")
     assert src == "/v/a.cu"
-
-
-# ── editable_trace_source (Triton kernel_file fast-path) ─────────────────────
 
 
 def test_editable_trace_source_repo_py():
@@ -156,6 +142,5 @@ def test_editable_trace_source_rejects_generated_and_empty():
 
 
 def test_missing_json_yields_unresolved(monkeypatch):
-    # A resolver whose data file is absent must degrade to unresolved, not crash.
     _patch_mapping(monkeypatch, {})
     assert resolver.resolve_source("anything", framework="vllm") == ("", "unresolved")

@@ -38,12 +38,12 @@ log = logging.getLogger(__name__)
 DEFAULT_SCORER_MODELS: tuple[str, ...] = (
     "claude-opus-4-8",
     "gpt-5.5",
-    # Kimi K2.6 / Gemini 3.1 Pro are reasoning models needing the larger 4096 token cap; Gemini MUST carry the ``gemini/`` prefix (bare slug routes to a broken Vertex ADC path).
+    # Gemini MUST carry the ``gemini/`` prefix (bare slug routes to a broken Vertex ADC path).
     "dvue-aoai-005-Kimi-K2.6",
     "gemini/gemini-3.1-pro-preview",
 )
 
-# Soft cap on proposals fed to each model so a pathological set can't blow up the prompt.
+# Soft cap on proposals fed to each model.
 _MAX_PROPOSALS_SCORED: int = 16
 _MAX_FIELD_CHARS: int = 600
 
@@ -149,11 +149,10 @@ class ProposalScorer:
     """Advisory multi-model scorer (see module docstring)."""
 
     models: tuple[str, ...] = DEFAULT_SCORER_MODELS
-    # Scorer talks the OpenAI protocol, so prefer the OpenAI-side key/URL; the
-    # AMD single-gateway ANTHROPIC_* vars stay accepted as fallbacks below.
+    # Scorer talks the OpenAI protocol, so prefer the OpenAI-side key/URL.
     api_key_env: str = "OPENAI_API_KEY"
     base_url_env: str = "OPENAI_BASE_URL"
-    # 4096 so reasoning raters (e.g. Kimi K2.6) can finish reasoning and still emit the scores JSON.
+    # Large cap so reasoning raters can finish reasoning and still emit the scores JSON.
     max_completion_tokens: int = 4096
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
@@ -165,10 +164,7 @@ class ProposalScorer:
     # Test seam — set to bypass real OpenAI client construction.
     client_factory: Callable[[], Any] | None = None
 
-    # When set, each model-scoring call appends its token
-    # usage to ``<session_dir>/reports/trace/llm_calls.jsonl`` under
-    # ``component=proposal_scorer``. ``None`` (the default, and the case
-    # in unit tests) disables trace writes entirely.
+    # When set, each call appends token usage to the trace; ``None`` disables trace writes.
     session_dir: Path | None = None
 
     _client: Any = field(default=None, init=False, repr=False)
@@ -185,7 +181,7 @@ class ProposalScorer:
         if self.client_factory is not None:
             self._client = self.client_factory()
             return
-        # Lazy: construct on first use so an unconfigured env degrades per-call, not at boot.
+        # Lazy: construct on first use so an unconfigured env degrades per-call.
         self._client = None
 
     def _ensure_client(self) -> Any:
@@ -211,7 +207,6 @@ class ProposalScorer:
         self._client = AsyncOpenAI(**kwargs)
         return self._client
 
-    # ------------------------------------------------------------------
     def _build_prompt(
         self,
         *,
@@ -281,15 +276,10 @@ class ProposalScorer:
         messages = [{"role": "user", "content": full_prompt}]
         _t0 = time.perf_counter()
 
-        # The Primus-Safe/Vertex proxy rejects non-streaming predictions with an
-        # opaque 400 INVALID_ARGUMENT; only streamed requests are accepted. Stream
-        # and accumulate the deltas, pulling usage from the final chunk.
-        #
-        # The deadline must cover BOTH stream creation and the chunk-consumption
-        # loop: a proxy can establish the stream and then stall mid-body, so a
-        # timeout around creation alone would let this hang indefinitely. We wrap
-        # the whole read in a single ``asyncio.wait_for`` (``asyncio.timeout`` is
-        # 3.11+, and this project still targets 3.10).
+        # The proxy only accepts streamed requests; accumulate the deltas and
+        # pull usage from the final chunk. The deadline wraps both stream
+        # creation and the chunk-consumption loop (a proxy can stall mid-body),
+        # via a single ``asyncio.wait_for`` (``asyncio.timeout`` is 3.11+).
         async def _read_stream() -> tuple[list[str], Any]:
             parts: list[str] = []
             usage_obj = None
@@ -318,8 +308,7 @@ class ProposalScorer:
         except asyncio.TimeoutError as exc:
             raise RuntimeError(f"timed out after {self.call_timeout_s:.0f}s") from exc
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        # Record this model's token spend before parsing (best-effort;
-        # no-op when ``session_dir`` is unset).
+        # Record this model's token spend before parsing (best-effort).
         self._trace_scorer_llm_call(
             model,
             usage,
@@ -329,8 +318,7 @@ class ProposalScorer:
             phase=phase,
         )
         text = "".join(text_parts)
-        # Persist the full (redacted) prompt + reply so the
-        # scorer's conversation lines up with its token row.
+        # Persist the full (redacted) prompt + reply alongside the token row.
         self._record_scorer_conversation(
             model,
             full_prompt,
@@ -356,12 +344,9 @@ class ProposalScorer:
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a proposal-scoring call.
 
-        No-op when ``session_dir`` is unset. OpenAI usage carries
-        ``prompt_tokens`` / ``completion_tokens`` (no cache split). ``task_id``
-        ties the scoring spend back to the specialist round it scored, and
-        ``tick`` / ``phase`` (threaded from the coordinator dispatch point)
-        place it on the timeline instead of relying on ts-window backfill.
-        Best-effort: never raises into the scoring path.
+        No-op when ``session_dir`` is unset. ``task_id`` ties the scoring spend
+        back to the specialist round it scored, and ``tick`` / ``phase`` place
+        it on the timeline. Best-effort: never raises into the scoring path.
 
         Args:
             model: The model slug whose usage is being recorded.
@@ -384,8 +369,8 @@ class ProposalScorer:
             record = LLMCallRecord(
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
-                role="proposal_scorer",  # must match the conversation row's
-                model=str(model),  # role for Langfuse token<->text pairing
+                role="proposal_scorer",  # must match the conversation row's role
+                model=str(model),
                 task_id=task_id,
                 tick=tick,
                 phase=phase,
@@ -415,10 +400,8 @@ class ProposalScorer:
 
         Persists the full (redacted) scoring prompt + model reply under
         ``component=proposal_scorer``, mirroring the per-call token row from
-        :meth:`_trace_scorer_llm_call`. No-op when ``session_dir`` is unset
-        (tests) or when both prompt and reply are empty. tick/phase are
-        unknown here (the scorer runs off the dispatch path); the collector
-        backfills phase from the ts window. Best-effort: never raises into
+        :meth:`_trace_scorer_llm_call`. No-op when ``session_dir`` is unset or
+        when both prompt and reply are empty. Best-effort: never raises into
         the scoring path.
 
         Args:
@@ -462,10 +445,8 @@ class ProposalScorer:
         """Score ``proposals`` against ``gap`` with every configured model (per-model failures land in ``errors``, never raised).
 
         ``task_id`` (the specialist round being scored) is stamped on every
-        per-model trace row so the collector can attribute the scoring spend
-        to that decision instead of dropping it into ``unattributed``;
-        ``tick`` / ``phase`` (threaded from the coordinator dispatch point)
-        place the rows on the timeline.
+        per-model trace row for attribution; ``tick`` / ``phase`` place the rows
+        on the timeline.
 
         Args:
             gap: The gap the proposals are meant to address.

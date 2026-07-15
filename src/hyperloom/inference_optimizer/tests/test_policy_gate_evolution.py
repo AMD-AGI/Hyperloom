@@ -41,7 +41,6 @@ class _State:
         return 1
 
 
-# 1. Tool registry surface
 def test_tool_registry_constants_are_disjoint():
     """The four tool groups are mutually exclusive (Inv-11.3 orthogonality)."""
     pairs = [
@@ -67,7 +66,7 @@ def test_specialist_role_owns_all_readonly_external_tools():
     assert WEB_TOOL_NAMES <= specialist_set
     assert PR_MONITOR_TOOL_NAMES <= specialist_set
     assert CORTEX_KB_READ_TOOL_NAMES <= specialist_set
-    # KB write surfaces never appear in any role whitelist (R4).
+    # KB write surfaces never appear in any role whitelist.
     for tools in TOOL_WHITELIST_BY_ROLE.values():
         assert not (tools & KB_WRITE_TOOL_NAMES)
 
@@ -84,7 +83,6 @@ def test_no_tools_are_phase_restricted():
     assert not hasattr(policy_mod, "PHASE_RESTRICTED_TOOLS")
 
 
-# R4 — intent-level collision via propose_action / delegate / request
 def test_propose_action_with_kb_write_name_denied():
     """A ``propose_action`` whose ``action_name`` is a KB write tool is denied with R4."""
     gate = _gate()
@@ -124,7 +122,6 @@ def test_request_kind_with_kb_write_name_denied():
     assert excinfo.value.rule == "kb_write_unauthorized"
 
 
-# 6. R5 — intent-level collision (external readonly tool as action_name)
 def test_propose_action_with_external_readonly_tool_name_denied():
     """A ``propose_action`` whose ``action_name`` is a readonly external tool is denied with R5."""
     gate = _gate()
@@ -151,17 +148,14 @@ def test_delegate_with_websearch_action_name_denied():
     assert excinfo.value.rule == "tool_whitelist_role"
 
 
-# 7. Specialist runner imports stay closed against policy.py
 def test_specialist_runner_constants_derive_from_policy():
     """Specialist runner re-exports the canonical tool sets via :mod:`policy`."""
     from hyperloom.orchestrator.specialists import runner as sr
 
     assert set(sr.PR_MONITOR_MCP_TOOLS) == PR_MONITOR_TOOL_NAMES
     assert set(sr.CORTEX_KB_READONLY_MCP_TOOLS) == CORTEX_KB_READ_TOOL_NAMES
-    # Default whitelist includes emit_intent + web + PR Monitor MCP + the
-    # read-only Cortex KB-graph MCP tools, and excludes KB write surfaces.
-    # (The cortex_kb read tools are stripped at resolve time when the KB-graph
-    # MCP server is not wired; see KnowledgePlane.cortex_enabled.)
+    # Default whitelist: emit_intent + web + PR Monitor MCP + read-only Cortex
+    # KB-graph MCP tools, excluding KB write surfaces.
     default_set = set(sr.DEFAULT_SPECIALIST_TOOLS)
     assert "emit_intent" in default_set
     assert WEB_TOOL_NAMES <= default_set
@@ -171,7 +165,6 @@ def test_specialist_runner_constants_derive_from_policy():
     assert KB_WRITE_TOOL_NAMES <= sr.SPECIALIST_TOOL_DENYLIST
 
 
-# 8. Inv-11.3 — R4 + R5 are orthogonal (a single intent never trips both)
 def test_kb_write_tool_does_not_trip_r5_role_check():
     """A KB write tool in the intent fires ONLY R4; rule order returns R4 first."""
     gate = _gate()
@@ -185,5 +178,4 @@ def test_kb_write_tool_does_not_trip_r5_role_check():
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_intent("orchestration", intent)
     assert excinfo.value.rule == "kb_write_unauthorized"
-    # The wording calls out KB writes, not tool-whitelist vocabulary.
     assert "cannot invoke tool" not in str(excinfo.value)

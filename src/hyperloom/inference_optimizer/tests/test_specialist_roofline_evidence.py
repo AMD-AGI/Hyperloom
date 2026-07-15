@@ -21,7 +21,6 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
 )
 
 
-# Coordinator-warmer integration
 @dataclass
 class _BareState:
     """Minimal SharedState double used by _warm_specialist_params."""
@@ -54,7 +53,6 @@ def _make_coord(tmp_path: Path, *, state: _BareState) -> Coordinator:
 @pytest.mark.asyncio
 async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
     """``_warm_specialist_params`` mirrors ``last_trace_analyze`` into ``params['roofline_evidence']``."""
-    # Synthetic analysis.md so extract_workload_summary can parse the table.
     analysis_path = tmp_path / "analysis.md"
     analysis_path.write_text(
         "## Executive Summary\n"
@@ -80,7 +78,6 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
                     "bottleneck": "compute",
                     "source_file": "/sgl-workspace/aiter/aiter/ops/topk.py",
                 },
-                # 9 entries — the warmer should slice to top 8.
                 *[
                     {
                         "kernel_id": f"k{i}",
@@ -103,10 +100,8 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
     ev = params["roofline_evidence"]
     assert ev["analysis_md_path"] == str(analysis_path)
     assert ev["roofline_snapshot_id"] == 3
-    # Sliced to top 8.
     assert len(ev["hot_kernels_top15"]) == 8
     assert ev["hot_kernels_top15"][0]["kernel_id"] == "k1"
-    # Executive summary parsed from disk.
     assert ev["executive_summary"]["compute_pct"] == pytest.approx(32.1, rel=0.01)
     assert ev["executive_summary"]["idle_pct"] == pytest.approx(17.5, rel=0.01)
     assert ev["executive_summary"]["comm_pct"] == pytest.approx(41.8, rel=0.01)
@@ -160,7 +155,6 @@ async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
     assert params["roofline_evidence"] == {"sentinel": True}
 
 
-# Prompt rendering
 def _make_inp(roofline_evidence: dict[str, Any]) -> SpecialistPromptInputs:
     return SpecialistPromptInputs(
         task_id="t-1",

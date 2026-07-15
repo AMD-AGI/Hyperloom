@@ -13,7 +13,6 @@ from typing import Any
 from hyperloom.orchestrator.trace import langfuse_emitter as lfe
 
 
-# -- _to_ns ----------------------------------------------------------------
 def test_to_ns_none_and_non_datetime() -> None:
     assert lfe._to_ns(None) is None
     assert lfe._to_ns("not-a-datetime") is None
@@ -25,7 +24,6 @@ def test_to_ns_datetime() -> None:
     assert ns == int(dt.timestamp() * 1_000_000_000)
 
 
-# -- _start_obs ------------------------------------------------------------
 class _ParentRejectsStartTime:
     """start_observation that rejects start_time once (v4 behaviour)."""
 
@@ -43,7 +41,6 @@ def test_start_obs_retries_without_start_time() -> None:
     parent = _ParentRejectsStartTime()
     out = lfe._start_obs(parent, name="x", start_time=datetime.now())
     assert out == "obs"
-    # second (successful) call dropped start_time
     assert "start_time" not in parent.calls[-1]
 
 
@@ -55,7 +52,6 @@ def test_start_obs_passthrough_when_accepted() -> None:
     assert lfe._start_obs(_Parent(), name="x") == "ok"
 
 
-# -- _end_time_wants_int / _end_obs ---------------------------------------
 class _ObsIntEnd:
     """v4-style observation: end(end_time: int) signature."""
 
@@ -83,7 +79,7 @@ def test_end_time_wants_int_detects_v4() -> None:
 
 def test_end_time_wants_int_unreadable_signature_defaults_false() -> None:
     class _Weird:
-        end = 123  # not callable -> signature() raises
+        end = 123  # not callable
 
     assert lfe._end_time_wants_int(_Weird()) is False
 
@@ -127,7 +123,6 @@ def test_end_obs_typed_call_rejected_falls_back_to_bare() -> None:
     assert obs.bare == 1
 
 
-# -- _otel_attr_value ------------------------------------------------------
 def test_otel_attr_value_scalars_and_none() -> None:
     assert lfe._otel_attr_value(None) is None
     assert lfe._otel_attr_value("s") == "s"
@@ -146,12 +141,10 @@ def test_otel_attr_value_falls_back_to_str_on_unserialisable() -> None:
         def __repr__(self) -> str:
             return "no-json-obj"
 
-    # json.dumps default=str handles it -> string form
     out = lfe._otel_attr_value(_NoJson())
     assert "no-json-obj" in out
 
 
-# -- _set_trace_attrs ------------------------------------------------------
 class _SpanV3:
     """v2/v3 span exposing update_trace."""
 
@@ -198,9 +191,9 @@ def test_set_trace_attrs_v4_falls_back_to_otel_attributes() -> None:
     assert attrs["langfuse.trace.name"] == "n"
     assert attrs["session.id"] == "s"
     assert attrs["langfuse.trace.metadata.good"] == "v"
-    # None metadata values are dropped (OTEL rejects them)
+    # None metadata values are dropped (OTEL rejects them).
     assert "langfuse.trace.metadata.skip_none" not in attrs
-    # complex values are JSON-stringified
+    # complex values are JSON-stringified.
     assert attrs["langfuse.trace.metadata.obj"] == '{"x": 1}'
 
 
@@ -212,7 +205,6 @@ def test_set_trace_attrs_v4_no_otel_span_is_noop() -> None:
     lfe._set_trace_attrs(_SpanNoOtel(), name="n")  # must not raise
 
 
-# -- _load_jsonl / _load_json ---------------------------------------------
 def test_load_jsonl_missing_file(tmp_path: Path) -> None:
     assert lfe._load_jsonl(tmp_path / "absent.jsonl") == []
 
@@ -223,7 +215,7 @@ def test_load_jsonl_skips_blank_and_malformed(tmp_path: Path) -> None:
         '{"a": 1}\n\n  \nnot-json\n[1,2,3]\n{"b": 2}\n',
         encoding="utf-8",
     )
-    # blank lines skipped, malformed skipped, non-dict ([1,2,3]) skipped
+    # blank / malformed / non-dict lines skipped
     assert lfe._load_jsonl(p) == [{"a": 1}, {"b": 2}]
 
 

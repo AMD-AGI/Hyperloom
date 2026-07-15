@@ -2,11 +2,9 @@
 
 """Tests for the model-config compatibility preflight.
 
-Policy: fail fast (with a persisted stop reason) when config.json is present
-but statically known to crash vLLM/transformers at load — a corrupt config, or
-a RoPE block without any max-position field (the DeepSeek-V3.2-Exp shape that
-dies with "'PreTrainedConfig' object has no attribute 'max_position_embeddings'"
-deep in engine init). A fully absent config is NOT blocked (soft-degrade).
+Policy: fail fast (with a persisted stop reason) when config.json is present but
+statically known to crash vLLM/transformers at load (corrupt config, or a RoPE
+block without any max-position field). A fully absent config is NOT blocked.
 """
 
 from __future__ import annotations
@@ -51,9 +49,7 @@ def _seed_state(session_dir: Path, monkeypatch):
 def _default_non_amd_gpu(monkeypatch):
     """Keep config checks hermetic unless a test passes gpu_type explicitly."""
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    # _detect_incompatible_model_config -> _resolve_amd_gpu_type ->
-    # _autodetect_gpu_type all live in cli_model_gate after the phase-6D fold;
-    # patch the real call site (cli re-exports the same object).
+    # Patch the real GPU autodetect call site (cli re-exports the same object).
     monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
 
 
@@ -318,10 +314,7 @@ def test_detect_mimo_v2_flash_unrecognized_blocked(tmp_path):
 
 
 def test_detect_deepseek_v4_now_recognized(tmp_path):
-    # DeepSeek-V4: the current runtime (transformers 5.8.1 + vLLM 0.21.0 rocm722)
-    # resolves DeepseekV4Config via AutoConfig and vLLM get_config, so it was
-    # removed from the unrecognized blocklist and is no longer fail-fasted by the
-    # model-config gate.
+    # DeepSeek-V4 resolves via AutoConfig/vLLM get_config; not fail-fasted.
     m = tmp_path / "deepseek_v4"
     _write_config(
         m,
@@ -334,11 +327,7 @@ def test_detect_deepseek_v4_now_recognized(tmp_path):
 
 
 def test_detect_glm_moe_dsa_now_recognized(tmp_path):
-    # zai-org GLM-5.x (glm_moe_dsa): the current stack (transformers 5.12.1 +
-    # vLLM 0.24.0) registers it (AutoConfig resolves GlmMoeDsaConfig, vLLM
-    # ModelRegistry registers GlmMoeDsaForCausalLM; gfx942 sparse-MLA falls back
- # to Triton via vllm-project/vllm#45782). It was removed from the
-    # unrecognized blocklist, so it is no longer fail-fasted by the gate.
+    # glm_moe_dsa is registered by AutoConfig/vLLM ModelRegistry; not fail-fasted.
     m = tmp_path / "glm_moe_dsa"
     _write_config(
         m,
@@ -351,11 +340,7 @@ def test_detect_glm_moe_dsa_now_recognized(tmp_path):
 
 
 def test_detect_gemma4_now_recognized(tmp_path):
-    # google-gemma-4-26B-A4B-it: the current pinned stack (transformers 5.5.0 +
-    # vLLM 0.18.2rc1) registers gemma4 (CONFIG_MAPPING has "gemma4", AutoConfig
-    # resolves Gemma4Config, vLLM ModelConfig resolves Gemma4ForCausalLM). It was
-    # removed from the unrecognized blocklist, so a plain text Gemma4 config is no
-    # longer fail-fasted by the model-config gate.
+    # gemma4 is registered by AutoConfig/vLLM ModelConfig; not fail-fasted.
     m = tmp_path / "gemma4"
     _write_config(
         m,
@@ -368,7 +353,7 @@ def test_detect_gemma4_now_recognized(tmp_path):
 
 
 def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
- # #649 does not add Bailing filters; keep these out of the fail-fast gate.
+    # Bailing filters are out of scope for the fail-fast gate.
     for model_type, arch in (
         ("bailing_moe", "BailingMoeV2ForCausalLM"),
         ("bailing_hybrid", "BailingMoeV2_5ForCausalLM"),
@@ -385,7 +370,7 @@ def test_detect_bailing_ling_left_to_runtime_scope(tmp_path):
 
 
 def test_detect_ovis_next_left_to_runtime_scope(tmp_path):
- # #649 does not add Ovis filters; keep this out of the fail-fast gate.
+    # Ovis filters are out of scope for the fail-fast gate.
     m = tmp_path / "ovis"
     _write_config(
         m,
@@ -437,11 +422,8 @@ def test_detect_pure_nested_ministral3_blocked(tmp_path):
 
 
 def test_detect_nested_qwen3_5_moe_text_not_blocked(tmp_path):
-    # The Qwen3.5-MoE wrapper exposes text_config.model_type=qwen3_5_moe_text.
-    # The current runtime registers Qwen3_5MoeConfig/Qwen3_5MoeTextConfig and
-    # vLLM ModelRegistry knows Qwen3_5MoeForConditionalGeneration, so the nested
-    # type is no longer gated and falls through to the text_coercible degraded
-    # path.
+    # Nested qwen3_5_moe_text is registered by the runtime and falls through to
+    # the text_coercible degraded path; not gated.
     m = tmp_path / "wrapper_nested_qwen3_5_moe_text"
     _write_config(
         m,
@@ -537,10 +519,8 @@ def test_detect_rope_without_maxpos_blocks(tmp_path):
     assert "RoPE" in reason
 
 
-# Phi-3 su/longrope rope_scaling: even a canonical 3-key rope_scaling crashes,
-# because transformers folds the top-level rope_theta into it at load so the
-# Phi3Config validator sees 4 keys and raises before any override can apply.
-# This mirrors the real failing checkpoints (Seacom/anakin87/ReDiX/SciPhi).
+# Phi-3 su/longrope: transformers folds top-level rope_theta into rope_scaling,
+# so Phi3Config sees 4 keys and raises before any override can apply.
 def test_detect_phi3_su_canonical_three_fields_blocks(tmp_path):
     m = tmp_path / "phi3_su"
     _write_config(
@@ -621,9 +601,8 @@ def test_detect_non_phi3_su_rope_not_blocked(tmp_path):
     assert cli._detect_incompatible_model_config(str(m)) is None
 
 
-# Gemma2 missing hidden_act: sglang's gemma2 runtime reads config.hidden_act
-# unconditionally; some checkpoints ship only hidden_activation (the HF name)
-# and crash with AttributeError in engine init. Hardware-agnostic.
+# sglang's gemma2 runtime reads config.hidden_act unconditionally; checkpoints
+# shipping only hidden_activation crash with AttributeError. Hardware-agnostic.
 def test_detect_gemma2_missing_hidden_act_blocks(tmp_path):
     m = tmp_path / "gemma2_bad"
     _write_config(
@@ -1299,10 +1278,8 @@ def test_llama_sentencepiece_with_tokenizer_config_ok(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Langfuse parity on fail-fast — the pre-flight gates exit before
-# coordinator.run()'s finally (the normal Langfuse flush point), so each must
-# push the breakdown to Langfuse itself or early-aborted sessions land on disk
-# (collector) but never in Langfuse.
+# Langfuse parity on fail-fast — pre-flight gates exit before the normal
+# Langfuse flush point, so each must push the breakdown to Langfuse itself.
 # ---------------------------------------------------------------------------
 def _spy_langfuse_emit(monkeypatch) -> dict[str, list]:
     calls: dict[str, list] = {"flush": [], "patch": [], "record": []}

@@ -32,11 +32,6 @@ def _ctx() -> ReactorContext:
     )
 
 
-# ---------------------------------------------------------------------------
-# Server unreachable
-# ---------------------------------------------------------------------------
-
-
 def test_one_target_down_emits_medium_alert():
     data = SourceData(
         local_server_health=[
@@ -74,11 +69,6 @@ def test_no_unreachable_targets_is_silent():
     assert all(s.name != "local_server_unreachable" for s in out)
 
 
-# ---------------------------------------------------------------------------
-# Log error patterns
-# ---------------------------------------------------------------------------
-
-
 def test_oom_pattern_is_high_severity():
     data = SourceData(local_log_errors=[{"pattern": "CUDA out of memory", "line": "torch ... CUDA out of memory ..."}])
     out = evaluate_local_health_signals(_ctx(), data)
@@ -98,12 +88,7 @@ def test_log_error_groups_samples_by_pattern():
     out = evaluate_local_health_signals(_ctx(), data)
     matched = next(s for s in out if s.name == "log_error_pattern")
     assert matched.evidence["count"] == 5
-    assert len(matched.evidence["samples"]) == 3  # capped at 3
-
-
-# ---------------------------------------------------------------------------
-# GPU thermal
-# ---------------------------------------------------------------------------
+    assert len(matched.evidence["samples"]) == 3
 
 
 def test_gpu_at_warn_threshold_is_medium():
@@ -132,11 +117,6 @@ def test_no_local_gpu_data_silent():
     assert out == []
 
 
-# ---------------------------------------------------------------------------
-# Classifier integration
-# ---------------------------------------------------------------------------
-
-
 def test_classifier_includes_local_health_rule():
     from hyperloom.agents.robustness.signals import Classifier
 
@@ -151,11 +131,7 @@ def test_classifier_includes_local_health_rule():
     assert {"log_error_pattern", "local_server_unreachable", "gpu_thermal_high"} <= names
 
 
-# ===========================================================================
-# D1 — log-pattern extension coverage
-# ===========================================================================
-# Patterns live in local_probe._DEFAULT_LOG_ERROR_PATTERNS and
-# local_health._HIGH_SEVERITY_PATTERNS; verify each is detected + routed.
+# D1 — log-pattern extension coverage: verify each pattern is detected + routed.
 
 
 @pytest.mark.parametrize(
@@ -221,11 +197,6 @@ def test_d1_medium_severity_pattern_emits_medium(line, expected_pattern):
     out = evaluate_local_health_signals(_ctx(), data)
     sym = next(s for s in out if s.name == "log_error_pattern")
     assert sym.severity is SymptomSeverity.MEDIUM
-
-
-# ===========================================================================
-# disk / shm / fd / ray_head signals (A3 / A4 / A5 / A6)
-# ===========================================================================
 
 
 def test_disk_pressure_silent_below_warn():

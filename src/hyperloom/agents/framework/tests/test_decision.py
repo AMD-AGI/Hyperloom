@@ -50,7 +50,7 @@ def test_winner_decision_throughput_below_ratio() -> None:
 
 
 def test_winner_decision_zero_baseline_throughput_rejects() -> None:
-    """Baseline throughput == 0 rejects (defence-in-depth; from_dict enforces >0, but a programmatic Baseline could bypass it)."""
+    """Baseline throughput == 0 rejects (defence-in-depth)."""
     req = _req()
     bad_baseline = replace(req.baseline, throughput=0.0)
     bad_req = replace(req, baseline=bad_baseline)

@@ -28,7 +28,6 @@ class _FakeMcp:
     """Fake MCP serving canned search/get_page and recording put_page."""
 
     def __init__(self, pages: dict[str, str], *, search_hits: list[str] | None = None) -> None:
-        # pages: slug -> full markdown content
         self.pages = pages
         self.search_hits = search_hits if search_hits is not None else list(pages)
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -79,7 +78,6 @@ _CONFLICT_BODY = """# Conflicts
 """
 
 
-# -- fence parsing ---------------------------------------------------------
 def test_parse_facts_fence_extracts_triples() -> None:
     facts = parse_facts_fence(_RECIPE_BODY, source_slug="recipe/x")
     assert len(facts) == 4
@@ -112,7 +110,6 @@ def test_format_fact_line_roundtrip() -> None:
     assert parsed[0].predicate == "IMPROVES"
 
 
-# -- query_facts -----------------------------------------------------------
 def _client(pages: dict[str, str], **kw: Any) -> tuple[KGClient, _FakeMcp]:
     mcp = _FakeMcp(pages, **kw)
     return KGClient(mcp), mcp
@@ -160,7 +157,6 @@ def test_query_facts_respects_limit() -> None:
     assert len(facts) == 2
 
 
-# -- graph_traverse --------------------------------------------------------
 def test_graph_traverse_outbound_one_hop() -> None:
     kg, _ = _client({"arch": _page(_ARCH_BODY)})
     nodes = kg.graph_traverse(start_entity="qwen3-8b", predicate_filter=["USES_ARCH", "VARIANT_OF"], max_hops=1)
@@ -177,7 +173,6 @@ def test_graph_traverse_two_hops_reaches_base_arch() -> None:
     assert "llamaforcausallm" in entities
 
 
-# -- find_conflicts --------------------------------------------------------
 def test_find_conflicts_detects_pair_in_stack() -> None:
     kg, _ = _client({"c": _page(_CONFLICT_BODY)})
     conflicts = kg.find_conflicts(knobs=["aiter_backend", "flash_attention_v2", "torch_compile"])
@@ -193,8 +188,8 @@ def test_find_conflicts_skips_when_endpoint_not_in_stack() -> None:
 
 
 def test_find_conflicts_detected_even_with_hw_fw_conditions() -> None:
-    # Regression: CONFLICTS_WITH facts carry no hw/fw props; passing
-    # hardware/framework must NOT filter them out (would disable detection).
+    # CONFLICTS_WITH facts carry no hw/fw props; passing hardware/framework must
+    # not filter them out.
     kg, _ = _client({"c": _page(_CONFLICT_BODY)})
     conflicts = kg.find_conflicts(
         knobs=["aiter_backend", "flash_attention_v2"],
@@ -205,7 +200,6 @@ def test_find_conflicts_detected_even_with_hw_fw_conditions() -> None:
     assert conflicts[0]["knob"] == "flash_attention_v2"
 
 
-# -- emit_fact / retract_fact (read-modify-write) --------------------------
 def test_emit_fact_appends_to_existing_fence() -> None:
     pages = {"recipe/x": _page(_RECIPE_BODY)}
     kg, mcp = _client(pages)
@@ -284,9 +278,8 @@ class _StructuredMcp:
 
 
 def test_emit_fact_preserves_frontmatter_on_structured_page() -> None:
-    # Regression: when get_page returns {frontmatter: dict, body} with no raw
-    # content field, emit_fact must NOT write a body-only page (which would
-    # drop type/tags/attrs and corrupt the recipe).
+    # When get_page returns {frontmatter: dict, body} with no raw content field,
+    # emit_fact must not write a body-only page (which would drop type/tags/attrs).
     mcp = _StructuredMcp()
     kg = KGClient(mcp)
     wrote = kg.emit_fact(
@@ -313,11 +306,10 @@ def test_emit_fact_invalidates_cache() -> None:
     kg, mcp = _client(pages)
     kg.query_facts(subject="torch_compile")  # warms cache (empty result)
     kg.emit_fact(page_slug="recipe/x", subject="torch_compile", predicate="IMPROVES", object="qwen2forcausallm")
-    facts = kg.query_facts(subject="torch_compile")  # must re-search post-write
+    facts = kg.query_facts(subject="torch_compile")  # re-search post-write
     assert any(f.subject == "torch_compile" for f in facts)
 
 
-# -- graceful degradation --------------------------------------------------
 def test_query_facts_safe_returns_empty_on_error() -> None:
     kg = KGClient(_BoomMcp())
     assert kg.query_facts_safe(predicate="IMPROVES") == []
@@ -339,7 +331,6 @@ def test_is_available_true_and_false() -> None:
     assert KGClient(_BoomMcp()).is_available() is False
 
 
-# -- generate_variants_graph_guided ----------------------------------------
 _VARIANT_BODY = """# KG
 
 ## Facts
@@ -362,8 +353,6 @@ def test_graph_guided_orders_by_gain_and_excludes_in_stack() -> None:
         in_stack=["aiter_backend"],  # exclude top knob
     )
     knobs = [v["knob"] for v in out]
-    # aiter excluded; needs_dep dropped (REQUIRES chunked_prefill not in stack);
-    # decode_patch kept (conflict target flash_attn not in stack); torch_compile kept.
     assert "aiter_backend" not in knobs
     assert "needs_dep" not in knobs
     assert knobs[0] == "decode_patch"  # +20% before torch_compile +8%
@@ -397,7 +386,6 @@ def test_graph_guided_dependency_met() -> None:
     assert knobs[0] == "needs_dep"  # +40% top
 
 
-# -- generate_knob_candidates_graph_guided ---------------------------------
 class _StubKnobKG:
     """Stub KG returning canned facts keyed by predicate (knob path)."""
 
@@ -466,14 +454,12 @@ def test_knob_guided_no_archs_returns_empty() -> None:
     assert generate_knob_candidates_graph_guided(kg, architectures=[]) == []
 
 
-# -- native link graph -----------------------------------------------------
 class _LinkGraphMcp:
     """Fake MCP modeling gbrain's native link graph.
 
-    Mirrors the live contract observed against the cluster: ``add_link``
-    requires both endpoint pages to exist, edges are unique on
-    ``(from, to, link_type)`` (re-add upserts context), and
-    ``remove_link`` deletes every edge between a pair.
+    ``add_link`` requires both endpoint pages to exist, edges are unique on
+    ``(from, to, link_type)`` (re-add upserts context), and ``remove_link``
+    deletes every edge between a pair.
     """
 
     def __init__(self, pages: list[str] | None = None, edges: list[dict[str, Any]] | None = None) -> None:
@@ -660,8 +646,8 @@ def test_native_retract_noop_when_absent() -> None:
 
 
 def test_native_emit_ignores_page_slug() -> None:
-    # In the link-graph model the subject node is the edge source; the legacy
-    # ``page_slug`` must not be created as a page nor used as the edge anchor.
+    # The subject node is the edge source; ``page_slug`` is neither created as a
+    # page nor used as the edge anchor.
     mcp = _LinkGraphMcp(pages=[])
     kg = KGClient(mcp, use_native_kg=True)
     kg.emit_fact(page_slug="recipe/some-page", subject="a", predicate="IMPROVES", object="b")
@@ -680,8 +666,7 @@ class _AddLinkFailsMcp(_LinkGraphMcp):
 
 
 def test_native_emit_returns_false_on_add_link_error() -> None:
-    # gbrain reports some write failures in-band; a failed add_link must not
-    # parse as a false success.
+    # A failed add_link (reported in-band) must not parse as success.
     mcp = _AddLinkFailsMcp(pages=["a", "b"])
     kg = KGClient(mcp, use_native_kg=True)
     assert kg.emit_fact(page_slug="p", subject="a", predicate="IMPROVES", object="b") is False
@@ -699,7 +684,7 @@ class _PutPageFailsMcp(_LinkGraphMcp):
 
 
 def test_native_emit_returns_false_when_node_creation_fails() -> None:
-    # When a missing endpoint cannot be materialized, the edge write is aborted.
+    # A missing endpoint that cannot be materialized aborts the edge write.
     mcp = _PutPageFailsMcp(pages=[])
     kg = KGClient(mcp, use_native_kg=True)
     assert kg.emit_fact(page_slug="p", subject="a", predicate="IMPROVES", object="b") is False

@@ -2,11 +2,9 @@
 
 """Integration test for ``_pump_framework_agent_phase`` (converged async gate).
 
-The pump discovers a batch then submits the chosen candidate as a normal
+The pump discovers a batch then submits the chosen candidate as a
 ``framework_agent`` proposal; the async Critic verdict (handled on a later tick)
-drives the apply/author enqueue or the ``critic_denied`` row. The pump itself
-no longer calls the Critic synchronously nor creates a ``framework_agent`` task
-inline.
+drives the apply/author enqueue or the ``critic_denied`` row.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 _FRAMEWORK_PARAMETRISATION: tuple[str, ...] = ("sglang", "vllm", "atom")
 
 
-# Synthetic per-framework single-candidate batch fixtures (fa phase-discover shape).
+# Synthetic per-framework single-candidate batch fixtures.
 _FRAMEWORK_CANDIDATES: dict[str, dict[str, Any]] = {
     "sglang": {
         "pr_url": "https://github.com/sgl-project/sglang/pull/1",
@@ -129,8 +127,7 @@ class _CoordinatorStub:
     _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
     _discover_next_framework_batch = Coordinator._discover_next_framework_batch
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
-    # cross-framework discovery lane is now default-on; the real discovery
-    # merge calls this reverse-lookup on every repo, so the stub must carry it.
+    # The discovery merge calls this reverse-lookup on every repo.
     _framework_agent_repo_url_origin_framework = staticmethod(
         Coordinator._framework_agent_repo_url_origin_framework
     )
@@ -151,7 +148,7 @@ class _CoordinatorStub:
     async def _rank_framework_agent_candidates_llm(
         self, candidates: list[dict[str, Any]]
     ) -> dict[str, Any] | None:
-        # Hermetic: force the deterministic discovery-order fallback.
+        # Force the deterministic discovery-order fallback.
         return None
 
     async def _audit_framework_agent_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
@@ -159,7 +156,6 @@ class _CoordinatorStub:
         try:
             candidate["_audit"] = v
         except Exception:
-            # Test double may reject attribute assignment; ignore.
             pass
         return v
 
@@ -185,7 +181,6 @@ def _framework_agent_pendings(stub: _CoordinatorStub) -> list[Any]:
     ]
 
 
-# Scenario 1 — discover → submit candidate proposal (parametrised across frameworks)
 @pytest.mark.parametrize("framework", _FRAMEWORK_PARAMETRISATION)
 def test_pump_happy_path_discover_submits_proposal(
     tmp_path: Path,
@@ -209,14 +204,12 @@ def test_pump_happy_path_discover_submits_proposal(
 
     assert captured_framework["framework"] == framework
     assert len(stub.shared_state.framework_agent_batches) == 1
-    # No task is enqueued by the pump; the async verdict drives that later.
     assert stub.tasks.created == []
     pendings = _framework_agent_pendings(stub)
     assert len(pendings) == 1
     payload = pendings[0].payload
     assert payload["candidate"]["pr_url"] == _FRAMEWORK_CANDIDATES[framework]["pr_url"]
     assert payload["framework_agent_candidate_id"] == _FRAMEWORK_CANDIDATES[framework]["pr_url"]
-    # No progress rows yet (verdict/executor write those).
     assert stub.shared_state.framework_agent_phase_progress == []
 
 
@@ -226,7 +219,6 @@ def test_pump_integration_parametrised_over_all_three_frameworks():
     assert set(_FRAMEWORK_CANDIDATES.keys()) == set(_FRAMEWORK_PARAMETRISATION)
 
 
-# Scenario 2 — submit → (async reject) → next tick submits the next candidate
 def test_pump_reject_then_next_tick_submits_next(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -247,7 +239,7 @@ def test_pump_reject_then_next_tick_submits_next(
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     stub = _CoordinatorStub(tmp_path)
 
-    # Tick 1 — discover + submit c1 proposal; no task.
+    # Tick 1 — discover + submit c1 proposal.
     _pump(stub)
     assert discover_calls.n == 1
     assert stub.tasks.created == []
@@ -256,7 +248,7 @@ def test_pump_reject_then_next_tick_submits_next(
     p1 = pendings[0]
     assert p1.payload["framework_agent_candidate_id"] == "https://example.com/pr/1"
 
-    # Async reject arrives: critic_denied row + the proposal is decided.
+    # Async reject: critic_denied row + the proposal is decided.
     asyncio.run(
         Coordinator._record_framework_agent_critic_denied(stub, p1, "out of scope")  # type: ignore[arg-type]
     )
@@ -265,7 +257,7 @@ def test_pump_reject_then_next_tick_submits_next(
     assert len(denied) == 1
     assert denied[0]["candidate_id"] == "https://example.com/pr/1"
 
-    # Tick 2 — selector skips the denied candidate and submits c2 (discover NOT re-called).
+    # Tick 2 — selector skips the denied candidate and submits c2.
     _pump(stub)
     assert discover_calls.n == 1, "discover must not be called again — batch still has work"
     new_pendings = [p for p in _framework_agent_pendings(stub) if not getattr(p, "decided", False)]
@@ -273,7 +265,6 @@ def test_pump_reject_then_next_tick_submits_next(
     assert new_pendings[0].payload["framework_agent_candidate_id"] == "https://example.com/pr/2"
 
 
-# Scenario 3 — already-in-flight task → pump no-op
 def test_pump_is_noop_when_framework_agent_task_already_running(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -299,7 +290,6 @@ def test_pump_is_noop_when_framework_agent_task_already_running(
     assert stub.shared_state.framework_agent_phase_done is False
 
 
-# Scenario 3b — a pending candidate proposal serializes the pump (no second submit)
 def test_pump_is_noop_while_candidate_proposal_pending(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -317,21 +307,18 @@ def test_pump_is_noop_while_candidate_proposal_pending(
     stub = _CoordinatorStub(tmp_path)
 
     _pump(stub)
-    _pump(stub)  # pending proposal -> serialized, no second submit
+    _pump(stub)  # pending proposal -> serialized
     assert len(_framework_agent_pendings(stub)) == 1
     assert discover_called.n == 1
 
 
-# Scenario 4 — discover empty payload → phase_history row + phase_done
 def test_pump_retries_empty_discover_before_marking_phase_done(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A clean empty discover payload is tolerated for up to
-    ``DISCOVER_FAILURE_RETRY_LIMIT`` consecutive ticks (transient upstream
-    blip) before flipping ``framework_agent_phase_done`` and recording a
-    phase_history row. This guards against one momentary empty result silently
-    skipping the entire FRAMEWORK phase.
+    ``DISCOVER_FAILURE_RETRY_LIMIT`` consecutive ticks before flipping
+    ``framework_agent_phase_done`` and recording a phase_history row.
     """
 
     async def _discover(**_: Any) -> dict[str, Any]:
@@ -378,11 +365,11 @@ def test_pump_empty_then_nonempty_discover_resets_streak(
     monkeypatch.setattr(_fa_client, "phase_discover", _discover)
     stub = _CoordinatorStub(tmp_path)
 
-    _pump(stub)  # empty -> retry
+    _pump(stub)  # empty
     assert stub.shared_state.framework_agent_phase_done is False
     assert stub.shared_state.framework_agent_empty_discoveries == 1
 
-    _pump(stub)  # non-empty -> resets streak, submits candidate
+    _pump(stub)  # non-empty -> resets streak
     assert stub.shared_state.framework_agent_empty_discoveries == 0
     assert stub.shared_state.framework_agent_phase_done is False
     assert len(_framework_agent_pendings(stub)) == 1

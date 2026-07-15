@@ -1,27 +1,17 @@
 #!/usr/bin/env python3
 """Pod-side launcher for the Dynamo multi-node backend (idle-pod SSH mode).
 
-Runs INSIDE one LeaderWorkerSet (LWS) worker pod, shipped + invoked over SSH by
-``hyperloom.inference_optimizer.multi_node restart-server --backend dynamo``. Each pod
-self-determines its rank from the LWS-injected env, so the sandbox controller
-issues the SAME command to every worker pod.
-
-Why this script (vs the RayJob ``launch_multinode.py``):
-  * No Ray. sglang multi-node uses torch.distributed
-    (``--dist-init-addr <leader>:5000 --nnodes N --node-rank K``); the LWS
-    controller already injects ``$LWS_LEADER_ADDRESS`` / ``$LWS_WORKER_INDEX``
-    into every pod, so this script just reads them and launches one rank.
-  * We launch ``dynamo.sglang`` (not raw ``sglang.launch_server``) so the
-    worker registers with the Dynamo frontend over NATS — benchmarks then hit
-    ``dynamo.frontend`` (:8000), never sglang rank-0 :8888.
+Runs INSIDE one LeaderWorkerSet (LWS) worker pod, invoked over SSH. Each pod
+self-determines its rank from the LWS-injected env, so the controller issues the
+SAME command to every worker pod. Launches ``dynamo.sglang`` /  ``dynamo.vllm``
+(not raw ``sglang.launch_server``) so the worker registers with the Dynamo
+frontend over NATS.
 
 Responsibilities:
   1. Recover the container env from ``/proc/1/environ`` (an sshd session starts
-     with a minimal env and would otherwise miss LWS_* / NATS_SERVER / DYN_* /
-     NCCL_* / SGLANG_* / PATH).
+     with a minimal env).
   2. PID-file kill of any prior server (IR-5: never ``pkill -f``).
-  3. Launch ``dynamo.sglang`` (or ``dynamo.vllm``) detached via nohup+setsid,
-     wired with ``--nnodes/--node-rank/--dist-init-addr``.
+  3. Launch ``dynamo.sglang`` (or ``dynamo.vllm``) detached via nohup+setsid.
   4. Optional readiness wait on the leader (``LWS_WORKER_INDEX == 0``).
 
 Stdlib only — this runs in the framework pod, not the optimizer venv.
@@ -38,16 +28,12 @@ import sys
 import time
 from pathlib import Path
 
-# Rendezvous port for torch.distributed (matches SaFE
-# common.DynamoMultinodeDistInitPort = 5000). Override via --dist-init-port.
+# Rendezvous port for torch.distributed. Override via --dist-init-port.
 _DEFAULT_DIST_INIT_PORT = 5000
 # Ray GCS port for the vllm multi-node bootstrap.
 _RAY_GCS_PORT = 6379
-# Dynamo system status server port. A positive value enables the in-worker
-# HTTP server hosting the /engine/* routes (incl. /engine/start_profile),
-# which the controller calls to trigger torch profiling for roofline/profile
-# rounds. Dynamo's default is -1 (disabled), leaving those routes
-# unreachable. Pods have distinct IPs so every worker can share one port.
+# Dynamo system status server port; a positive value enables the in-worker HTTP
+# server hosting the /engine/* routes (incl. /engine/start_profile).
 _DEFAULT_DYN_SYSTEM_PORT = 9090
 
 # Keep in sync with multi_node/_internal/server_args_safety.py
@@ -123,9 +109,8 @@ def _log(msg: str) -> None:
     sys.stderr.flush()
 
 
-# Env-var prefixes/names worth recovering from pid1 so the framework child sees
-# the same rendezvous / discovery / tuning config the container was started
-# with. An sshd session would otherwise launch with a bare login env.
+# Env-var prefixes/names recovered from pid1 so the framework child sees the same
+# rendezvous / discovery / tuning config the container was started with.
 _ENV_RECOVER_PREFIXES = (
     "LWS_",
     "POD_",
@@ -143,14 +128,8 @@ _ENV_RECOVER_PREFIXES = (
     "UCX_",
     "NIXL_",
     "MC_",
-    # Hyperloom patch (operator-local): KUBERNETES_* must propagate too,
-    # otherwise dynamo's kubernetes discovery backend fails with
-    #   "Failed to create Kubernetes client: failed to infer config:
-    #    in-cluster: (environment variable not found)"
-    # immediately on dynamo.sglang/dynamo.vllm start, and the SSH-launched
-    # server exits in <1s while the Dynamo frontend (always-up) keeps
-    # returning /health 200 — causing baseline_failed with 0 completed
-    # requests and no obvious sandbox-side log evidence.
+    # KUBERNETES_* must propagate too, else dynamo's kubernetes discovery backend
+    # fails to infer in-cluster config and the SSH-launched server exits.
     "KUBERNETES_",
 )
 _ENV_RECOVER_NAMES = ("PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "VIRTUAL_ENV")
@@ -159,11 +138,9 @@ _ENV_RECOVER_NAMES = ("PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "VIRTUAL_ENV")
 def _recover_container_env() -> dict[str, str]:
     """Merge the current env with pid1's env for the recovered keys.
 
-    sshd sessions get a minimal env; the LWS rendezvous vars
-    (``LWS_LEADER_ADDRESS`` / ``LWS_WORKER_INDEX``) and discovery vars
-    (``NATS_SERVER`` / ``DYN_*``) live only in the container's pid1 env. We
-    read ``/proc/1/environ`` (same uid — we SSH as root, pid1 is root) and
-    overlay the relevant keys onto ``os.environ``.
+    sshd sessions get a minimal env; the LWS rendezvous / discovery vars live
+    only in the container's pid1 env. Reads ``/proc/1/environ`` and overlays the
+    relevant keys onto ``os.environ``.
 
     Returns:
         The current environment merged with pid1's recovered keys, with
@@ -182,8 +159,6 @@ def _recover_container_env() -> dict[str, str]:
         key = k.decode("utf-8", "ignore")
         val = v.decode("utf-8", "ignore")
         if key in _ENV_RECOVER_NAMES or any(key.startswith(p) for p in _ENV_RECOVER_PREFIXES):
-            # pid1 wins for rendezvous/discovery; but keep sshd's PATH augmented
-            # with /opt/venv/bin so python3 resolves to the framework venv.
             env[key] = val
     venv_bin = "/opt/venv/bin"
     parts = env.get("PATH", "").split(":") if env.get("PATH") else []
@@ -195,17 +170,10 @@ def _recover_container_env() -> dict[str, str]:
 def _resolve_pod_ip(env: dict[str, str]) -> str:
     """Return this pod's routable IP (never a loopback address).
 
-    Single-pod PD-disaggregation roles (prefill / decode, nnodes=1) are NOT a
-    LeaderWorkerSet, so ``$LWS_LEADER_ADDRESS`` is unset and the caller would
-    otherwise fall back to ``127.0.0.1``. sglang derives the disaggregation
-    bootstrap host it advertises to peers from ``--dist-init-addr``; a loopback
-    value makes the cross-pod decode->prefill KV handshake fail with
-    ``NIXL KVReceiver Exception`` (decode dials its own localhost). Resolve the
-    real pod IP so the advertised bootstrap host is reachable across pods.
-
-    Resolution order: ``$POD_IP`` (downward API) -> egress-route probe ->
-    hostname lookup. Falls back to ``127.0.0.1`` only if every method yields a
-    loopback / fails (single-pod aggregated runs still work in that case).
+    Single-pod PD-disaggregation roles have no LWS rendezvous, so resolving the
+    real pod IP keeps the advertised bootstrap host reachable across pods.
+    Resolution order: ``$POD_IP`` -> egress-route probe -> hostname lookup,
+    falling back to ``127.0.0.1`` only when every method yields loopback / fails.
 
     Args:
         env: The (recovered) environment, consulted for ``$POD_IP``.
@@ -230,14 +198,12 @@ def _resolve_pod_ip(env: dict[str, str]) -> str:
         if ip and not ip.startswith("127."):
             return ip
     except OSError:
-        # Interface probe failed; try the next method below.
         pass
     try:
         ip = socket.gethostbyname(socket.gethostname())
         if ip and not ip.startswith("127."):
             return ip
     except OSError:
-        # Interface probe failed; fall back to localhost below.
         pass
     return "127.0.0.1"
 
@@ -310,10 +276,8 @@ def _build_sglang_cmd(a: argparse.Namespace, node_rank: int, leader: str) -> lis
         "--host",
         "0.0.0.0",
     ]
-    # Single-node roles: omit --nnodes/--node-rank/--dist-init-addr to mirror the
-    # SaFE native dynamo.sglang launch. Passing them for an nnodes=1 disaggregated
-    # PD role made decode emit 0 output tokens (finish_reason=stop), while the
-    # SaFE deploy (which omits them for single node) generates normally.
+    # Single-node roles: omit --nnodes/--node-rank/--dist-init-addr (passing them
+    # for an nnodes=1 disaggregated PD role makes decode emit 0 output tokens).
     if int(a.nnodes) > 1:
         cmd.extend(
             [
@@ -409,7 +373,6 @@ def _detach_launch(cmd: list[str], log_file: Path, pid_file: Path, env: dict[str
             if log_file.is_file():
                 tail = log_file.read_text(errors="replace")[-4000:]
         except OSError:
-            # Log tail is diagnostic only; ignore read errors.
             pass
         raise RuntimeError(f"server pid={pid} exited within 0.5s: {exc}; log tail:\n{tail}") from exc
     return pid
@@ -466,7 +429,6 @@ def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
                 if 200 <= resp.status < 300:
                     return True
         except (urllib.error.URLError, OSError):
-            # Server not ready yet; retry after the sleep below.
             pass
         if pid is not None and pid > 0:
             try:
@@ -475,7 +437,6 @@ def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
                 _log(f"server pid={pid} died during health wait")
                 return False
             except OSError:
-                # Liveness check failed unexpectedly; keep polling.
                 pass
         time.sleep(5)
     return False
@@ -511,11 +472,8 @@ def main() -> int:
     args = p.parse_args()
 
     env = _recover_container_env()
-    # Enable the Dynamo system status server unless the container already
-    # pinned a positive DYN_SYSTEM_PORT. This exposes /engine/start_profile
-    # on the worker so the controller can drive torch profiling for roofline
-    # rounds (the Dynamo frontend does not propagate /start_profile to
-    # SSH-launched disagg workers). Benign for non-profile rounds.
+    # Enable the Dynamo system status server (exposing /engine/start_profile on
+    # the worker for torch profiling) unless a positive DYN_SYSTEM_PORT is set.
     try:
         _cur_sys_port = int((env.get("DYN_SYSTEM_PORT") or "").strip() or "-1")
     except ValueError:
@@ -526,13 +484,10 @@ def main() -> int:
     node_rank = int(env.get("LWS_WORKER_INDEX", "0") or "0")
     lws_leader = (env.get("LWS_LEADER_ADDRESS", "") or "").strip()
     if lws_leader:
-        # Multi-pod LWS role (TP > one pod's GPUs): the controller-injected
-        # leader address is the torch.distributed rendezvous host.
+        # Multi-pod LWS role: the injected leader is the rendezvous host.
         leader = lws_leader
     else:
-        # Single-pod role (no LWS rendezvous). Use this pod's routable IP rather
-        # than 127.0.0.1 so PD-disaggregation advertises a cross-pod-reachable
-        # bootstrap host (see _resolve_pod_ip).
+        # Single-pod role (no LWS rendezvous): use this pod's routable IP.
         leader = _resolve_pod_ip(env)
     pid_file = Path(args.pid_file)
     log_file = Path(args.log_file)
@@ -568,7 +523,7 @@ def main() -> int:
         # vllm: every pod joins the ray cluster; only rank 0 runs dynamo.vllm.
         _ray_start("head" if node_rank == 0 else "worker", leader, env)
         if node_rank != 0:
-            pid_file.write_text("0")  # sentinel; nothing to kill but the ray node
+            pid_file.write_text("0")  # sentinel
             print(json.dumps({"status": "ok", "node_rank": node_rank, "role": "vllm_ray_worker", "pid": 0}))
             return 0
         cmd = _build_vllm_cmd(args)
@@ -592,7 +547,6 @@ def main() -> int:
             try:
                 summary["log_tail"] = log_file.read_text(errors="replace")[-2000:]
             except OSError:
-                # Log tail is diagnostic only; ignore read errors.
                 pass
 
     print(json.dumps(summary, indent=2))

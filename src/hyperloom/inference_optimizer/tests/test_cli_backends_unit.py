@@ -101,9 +101,7 @@ def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> 
         kernel_codex=True,
     )
     assert b["orchestration"][0] == "claude"
-    # Provider-only keeps the full KB+tools critic-agent, driven over the native
-    # Anthropic Messages protocol with the Claude model (not degraded to Claude
-    # tool-use, not Codex).
+    # Provider-only keeps the critic-agent on the native Anthropic protocol.
     assert b["critic"][0] == "critic_agent"
     assert b["critic"][1]["protocol"] == "anthropic"
     assert b["critic"][1]["claude_model"] == "claude-x"
@@ -114,8 +112,7 @@ def test_build_backends_anthropic_only_degrades_to_claude_without_root(monkeypat
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-    # No critic_agent_root: the runtime is unavailable, so critic degrades to
-    # Claude tool-use rather than raising.
+    # Without critic_agent_root the critic degrades to Claude tool-use.
     b = _build(critic_choice="agent", critic_agent_root=None)
     assert b["critic"][0] == "claude"
 
@@ -127,8 +124,7 @@ def test_build_backends_deepseek_only_uses_openai_compatible_critic_agent(monkey
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
     )
-    # DeepSeek is natively OpenAI-compatible: keep the critic-agent on the
-    # OpenAI review path, pointed at DeepSeek via an injected client factory.
+    # DeepSeek keeps the critic-agent on the OpenAI review path.
     assert b["critic"][0] == "critic_agent"
     assert b["critic"][1]["protocol"] == "openai"
     assert b["critic"][1]["codex_model"] == "claude-x"
@@ -190,9 +186,7 @@ def test_build_backends_robustness_agent_with_root() -> None:
     assert b["robustness"][0] == "rob_agent"
 
 
-# -- _build_proposal_scorer ------------------------------------------------
 def test_proposal_scorer_disabled_by_default(monkeypatch) -> None:
-    # Default is OFF: without --proposal-scoring the scorer is not built.
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     args = argparse.Namespace(proposal_scoring=False, proposal_scorer_models=None)
@@ -242,7 +236,6 @@ def test_proposal_scorer_explicit_models(monkeypatch) -> None:
 
 
 def test_proposal_scoring_flag_parsing() -> None:
-    # Parser-level contract: default OFF, --proposal-scoring on, --no- off.
     from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
@@ -255,8 +248,6 @@ def test_proposal_scoring_flag_parsing() -> None:
 
 
 def test_retired_enable_proposal_scoring_flag_rejected() -> None:
-    # The old --enable-proposal-scoring spelling is retired: it must hard-fail
-    # (exit 2) with a migration hint, not be silently accepted.
     from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     parser = _build_parser()
@@ -265,9 +256,7 @@ def test_retired_enable_proposal_scoring_flag_rejected() -> None:
 
 
 def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
-    # Passing only --proposal-scorer-models (a non-empty list, which is also
-    # the parser default) must NOT turn scoring on: default OFF requires an
-    # explicit --proposal-scoring. Guards the silent-off regression.
+    # Passing only --proposal-scorer-models must not turn scoring on.
     from hyperloom.inference_optimizer.cli.parser import _build_parser
 
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
@@ -276,13 +265,11 @@ def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
     args = parser.parse_args(
         ["optimize", "--model", "x", "--proposal-scorer-models", "m1,m2"]
     )
-    # Sanity: models parsed, but scoring stayed off.
     assert args.proposal_scorer_models == "m1,m2"
     assert args.proposal_scoring is False
     assert clib._build_proposal_scorer(args) is None
 
 
-# -- _robustness_server_configured -----------------------------------------
 def test_robustness_server_configured_via_arg() -> None:
     args = argparse.Namespace(robustness_server_url="http://rob:9000")
     assert clib._robustness_server_configured(args) is True
@@ -296,7 +283,6 @@ def test_robustness_server_configured_via_env(monkeypatch) -> None:
     assert clib._robustness_server_configured(args) is True
 
 
-# -- _build_robustness_options ---------------------------------------------
 def test_robustness_options_single_node_minimal(monkeypatch) -> None:
     for k in clib._MULTI_NODE_WORKLOAD_UID_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
@@ -310,7 +296,6 @@ def test_robustness_options_single_node_minimal(monkeypatch) -> None:
         robustness_pod_metrics_categories=None,
     )
     opts = clib._build_robustness_options(args)
-    # single-node: no multi-node defaults emitted
     assert "auto_probe_inference_server" not in opts
     assert "nodes" not in opts
 
@@ -356,7 +341,6 @@ def test_robustness_options_workload_uid_from_env(monkeypatch) -> None:
     assert opts["workload_uid"] == "ray-42"
 
 
-# ---- _resolve_kernel_agent_max_turns ----
 def test_kernel_agent_max_turns_default(monkeypatch):
     from hyperloom.inference_optimizer.cli import backends as cb
     monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", raising=False)

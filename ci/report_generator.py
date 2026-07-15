@@ -173,7 +173,7 @@ def extract_optimization_data(result_dir: str) -> dict:
         data["report_exists"] = True
         data["report_content"] = report_path.read_text()
 
-    # Priority 1: ci_metrics.json (structured, written by agent per prompt)
+    # Priority 1: ci_metrics.json (structured)
     ci_metrics_path = rd / "ci_metrics.json"
     if ci_metrics_path.exists():
         try:
@@ -198,7 +198,6 @@ def extract_optimization_data(result_dir: str) -> dict:
             )
             gain = _first_of(metrics, "gain_pct", "improvement_pct", "total_improvement_pct")
 
-            # Nested schema fallback
             if bl is None and isinstance(metrics.get("baseline"), dict):
                 b = metrics["baseline"]
                 bl = _first_of(b, "tok_s_per_gpu", "output_throughput_tok_s", "output_tput_per_gpu", "tput_per_gpu")
@@ -239,7 +238,7 @@ def extract_optimization_data(result_dir: str) -> dict:
         except (json.JSONDecodeError, KeyError) as e:
             log.warning("Failed to parse ci_metrics.json in %s: %s", result_dir, e)
 
-    # Priority 2: parse from optimization_report.md (regex)
+    # Priority 2: regex parse from optimization_report.md
     if data.get("report_content"):
         parsed = _parse_metrics_from_report(data["report_content"])
         if parsed:
@@ -248,7 +247,7 @@ def extract_optimization_data(result_dir: str) -> dict:
                 if data.get(k) is None:
                     data[k] = v
 
-    # Priority 3: LLM extraction from report (if regex missed key fields)
+    # Priority 3: LLM extraction from report
     if (data.get("baseline_throughput") is None or data.get("optimized_throughput") is None) and data.get(
         "report_content"
     ):
@@ -503,7 +502,6 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
         lines.append("---")
         lines.append("")
 
-    # Overall summary table
     completed = [r for r in results if r["status"] == "completed"]
     if len(completed) > 1:
         lines.append("## Overall Summary")
