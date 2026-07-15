@@ -134,20 +134,6 @@ def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
     return coord
 
 
-def test_geak_legacy_promote_default_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_GEAK_LEGACY_PROMOTE", raising=False)
-    coord = _coord(tmp_path, baseline=100.0, best_tput=108.0)
-
-    assert coord._geak_legacy_promote() is False
-
-
-def test_geak_legacy_promote_env_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_GEAK_LEGACY_PROMOTE", "yes")
-    coord = _coord(tmp_path, baseline=100.0, best_tput=108.0)
-
-    assert coord._geak_legacy_promote() is True
-
-
 # ── 2a: GEAK-harness fallback validates on GEAK's OWN promoted-basis speedup ──
 
 

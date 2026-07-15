@@ -239,6 +239,16 @@ class DispatcherCollaborator:
         queued = await self.tasks.queued()
         if not queued:
             return []
+        try:
+            cap = int(getattr(self.shared_state, "research_lane_capacity", 0) or 0)
+            if cap >= 0:
+                await self.db.execute(
+                    "INSERT INTO lane_capacity(lane, capacity) VALUES (?, ?) "
+                    "ON CONFLICT(lane) DO UPDATE SET capacity = excluded.capacity",
+                    ("research_lane", cap),
+                )
+        except Exception:  # noqa: BLE001 - stale capacity must not wedge dispatch
+            log.exception("dispatcher: failed to sync research_lane_capacity")
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
         spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
