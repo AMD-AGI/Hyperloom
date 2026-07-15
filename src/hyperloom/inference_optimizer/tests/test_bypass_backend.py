@@ -1572,3 +1572,186 @@ def test_tokenize_extra_args_falls_back_on_bad_quoting():
         {"EXTRA_VLLM_ARGS": '--flag "unterminated'}, "vllm",
     )
     assert args == ["--flag", '"unterminated']
+
+
+def test_server_phase_server_not_ready_terminates_and_fails(tmp_path, monkeypatch):
+    """phase=server: a server that never becomes ready is torn down, no pid/meta
+    is persisted, and the run fails (rc=1)."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+
+    class _FakeServer:
+        pid = 4321
+
+        def wait(self, timeout=None):
+            return 0
+
+    terminated = {"n": 0}
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: terminated.__setitem__("n", terminated["n"] + 1))
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: False)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out", phase="server", pid_dir=str(pid_dir))
+    assert rc == 1
+    assert terminated["n"] == 1  # the not-ready server is torn down
+    assert not bypass_engine.lifecycle_pid_file(str(pid_dir), "sglang", 8888).exists()
+
+
+def test_server_phase_build_command_value_error_fails(tmp_path, monkeypatch):
+    """phase=server: build_server_command raising ValueError emits a failing
+    report and returns rc=2 before any server launch."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+
+    def boom(**kwargs):
+        raise ValueError("bad server args")
+
+    monkeypatch.setattr(bypass_engine, "build_server_command", boom)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out", phase="server", pid_dir=str(pid_dir))
+    assert rc == 2
+
+
+def test_server_phase_pgid_oserror_falls_back_to_pid(tmp_path, monkeypatch):
+    """phase=server: when os.getpgid fails, the pgid falls back to the pid and
+    the server still persists successfully (rc=0)."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+
+    class _FakeServer:
+        pid = 9999
+
+        def wait(self, timeout=None):
+            return 0
+
+    def raise_oserror(_pid):
+        raise OSError("no pgid")
+
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+    monkeypatch.setattr(bypass_runner.os, "getpgid", raise_oserror)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out", phase="server", pid_dir=str(pid_dir))
+    assert rc == 0
+    assert bypass_engine.lifecycle_pid_file(str(pid_dir), "sglang", 8888).exists()
+
+
+def test_lifecycle_all_boot_server_not_ready_fails(tmp_path, monkeypatch):
+    """YAML lifecycle boot round: a server that never becomes ready is torn down
+    and the round fails (rc=1)."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=False, pid_dir=pid_dir)
+
+    class _FakeServer:
+        pid = 5555
+
+        def wait(self, timeout=None):
+            return 0
+
+    terminated = {"n": 0}
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: terminated.__setitem__("n", terminated["n"] + 1))
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)  # no server yet -> BOOT
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: False)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 1
+    assert terminated["n"] == 1
+
+
+def test_scriptable_nonzero_rc_without_error_reports_failure(tmp_path, monkeypatch):
+    """scriptable: run_scriptable returns rc!=0 with no error string and no result
+    file -> the report records both failures and the rc propagates."""
+    inferencex = tmp_path / "InferenceX"
+    inferencex.mkdir()
+    cfg = {
+        "benchmark": {
+            "framework": "xdit",
+            "model": "/models/flux",
+            "runner_type": "mi300x",
+            "inferencex_path": str(inferencex),
+            "timeout_seconds": 60,
+            "envs": {},
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    monkeypatch.setattr(bypass_runner.bypass_scriptable, "run_scriptable", lambda **kwargs: (3, None))
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 3
+    ws = sorted((tmp_path / "out").glob("benchmark_xdit_*"))[-1]
+    rep = json.loads((ws / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert rep["success"] is False
+
+
+def test_lifecycle_all_build_command_value_error_fails(tmp_path, monkeypatch):
+    """YAML lifecycle boot round: build_server_command ValueError -> rc=2."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=False, pid_dir=pid_dir)
+
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)  # BOOT
+
+    def boom(**kwargs):
+        raise ValueError("bad server args")
+
+    monkeypatch.setattr(bypass_engine, "build_server_command", boom)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 2
+
+
+def test_lifecycle_all_boot_cleanup_tears_down_server(tmp_path, monkeypatch):
+    """YAML lifecycle boot round with cleanup=True: after the client runs the
+    server is terminated AND the lifecycle files are torn down."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    cfg_path = _write_cfg_lifecycle(tmp_path, inferencex, cleanup=True, pid_dir=pid_dir)
+
+    class _FakeServer:
+        pid = 6666
+
+        def wait(self, timeout=None):
+            return 0
+
+    terminated = {"n": 0}
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: terminated.__setitem__("n", terminated["n"] + 1))
+    monkeypatch.setattr(bypass_engine, "server_health_ok", lambda *a, **k: False)  # BOOT
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+    monkeypatch.setattr(bypass_runner.os, "getpgid", lambda pid: pid)
+
+    import hyperloom.orchestrator.actions.executors._server_lifecycle as sl
+    teardown = {"called": False}
+    monkeypatch.setattr(sl, "teardown_lifecycle_server", lambda **k: teardown.__setitem__("called", True))
+    _fake_client_run(monkeypatch)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    assert terminated["n"] == 1
+    assert teardown["called"] is True
