@@ -222,10 +222,10 @@ def test_target_summary_and_conc_sweep_parser(caplog) -> None:
         _args(model="/m/foo", target_gain=None, target_tput=None, max_hours=4)
     )
     assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="")) == [
-        1, 2, 4, 8, 16, 32, 64, 128,
+        256, 128, 64, 32, 16, 8, 4, 2,
     ]
     assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="bad,")) == [
-        1, 2, 4, 8, 16, 32, 64, 128,
+        256, 128, 64, 32, 16, 8, 4, 2,
     ]
     assert "ignoring non-integer CONC token" in caplog.text
 
