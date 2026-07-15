@@ -68,6 +68,8 @@ Open `~/hyperloom` in the user's agent and run:
 /hyperloom-setup
 ```
 
+In Cursor and Claude Code, use `/hyperloom-setup`; in Codex, use `$hyperloom-setup`.
+
 The setup skill is interactive. It:
 
 - asks which LLM mode to use: Anthropic or DeepSeek;
