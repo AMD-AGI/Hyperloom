@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 from pathlib import Path
 
+import pytest
+
 from hyperloom.agents.quantization.driver import assessment as A
 from hyperloom.agents.quantization.driver.assessment import (
     Assessment,
@@ -57,9 +59,8 @@ def test_classify_phase_artifact_gap_pyyaml(tmp_path) -> None:
 
 
 def test_build_assessment_empty_and_bad_gap(tmp_path) -> None:
-    # Empty attempts -> unclassified_failure (lines 451-452).
-    a = build_assessment([], workspace=tmp_path)
-    assert a.final == OutcomeId.unclassified_failure
+    with pytest.raises(ValueError, match="attempts must be non-empty"):
+        build_assessment([], workspace=tmp_path)
 
     art = dataclasses.replace(
         _base_artifacts(tmp_path),

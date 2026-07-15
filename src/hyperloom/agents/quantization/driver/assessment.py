@@ -449,7 +449,7 @@ def build_assessment(
     """
 
     if not attempts:
-        attempts = [OutcomeId.unclassified_failure]
+        raise ValueError("attempts must be non-empty")
 
     art = artifacts if artifacts is not None else collect_artifacts(Path(workspace))
     final = attempts[-1]
@@ -520,8 +520,7 @@ def derive_status(assessment: Assessment, artifacts: CollectedArtifacts) -> str:
     if final in ASK or final == OutcomeId.unclassified_failure:
         return "failed"
 
-    # Defensive — partition is exhaustive, but be loud rather than silent.
-    return "failed"
+    raise AssertionError(f"unhandled outcome: {final}")
 
 
 __all__ = [
