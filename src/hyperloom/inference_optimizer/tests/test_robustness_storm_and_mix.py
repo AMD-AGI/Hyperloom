@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""PR-A8 (Arbor-into-Hyperloom): Robustness storm detector + intervention-mix primitives."""
+"""Robustness storm detector + intervention-mix primitives."""
 
 from __future__ import annotations
 

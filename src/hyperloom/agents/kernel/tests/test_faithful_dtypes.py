@@ -14,7 +14,7 @@ import tracelens_analysis as tla  # noqa: E402 - module reads argv at import tim
 def test_split_shape_dtype():
     assert tla._split_shape_dtype("(64,5120) bf16") == ("(64,5120)", "bf16")
     assert tla._split_shape_dtype("(161,512,5120) fp8") == ("(161,512,5120)", "fp8")
-    assert tla._split_shape_dtype("()") == ("()", "")          # scalar, arity kept
+    assert tla._split_shape_dtype("()") == ("()", "")          # scalar
     assert tla._split_shape_dtype("(64,9) int") == ("(64,9)", "int")
     assert tla._split_shape_dtype("(1792,) bf16") == ("(1792,)", "bf16")
     assert tla._split_shape_dtype({"shape": "(8,8) fp16"}) == ("(8,8)", "fp16")
@@ -26,7 +26,7 @@ def test_dtypes_from_shapes_aligned():
 
 
 def test_dtypes_from_shapes_none_present():
-    # no dtype on any entry -> [] (preserves prior empty-default behaviour)
+    # no dtype on any entry -> []
     assert tla._dtypes_from_shapes(["(1,2)", "(3,4)"]) == []
     assert tla._dtypes_from_shapes([]) == []
 
@@ -55,7 +55,7 @@ def test_enrich_no_dtype_stays_empty():
     assert cand["input_dtypes"] == []
 
 
-# --- analysis_remapped.md parse tolerance (extra/inserted column) ---
+# --- analysis_remapped.md parse tolerance (inserted column) ---
 import tracelens_skill_runner as tlr  # noqa: E402
 
 
@@ -65,7 +65,7 @@ _REMAP_TABLE = (
     "<!-- reasoning-candidate tier=compute rank=1 -->\n"
     "#### 🔴 P1: Inserted Source Path column (Tensile)\n\n"
     "**Identification:** stub\n**Data:**\n"
-    # NOTE: 'Source Path' INSERTED between 'Kernel Path' and 'Time (ms)'.
+    # 'Source Path' inserted between 'Kernel Path' and 'Time (ms)'.
     "| Operation | Args | Kernel Path | Source Path | Time (ms) | %E2E | Count | "
     "FLOPS/Byte | Efficiency | Bound |\n"
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
@@ -82,8 +82,6 @@ def test_parse_tolerates_inserted_source_path_column(tmp_path):
     assert len(cands) == 1
     c = cands[0]
     assert c["name"] == "stub_op"
-    # name-keyed read still maps the right cells despite the inserted column:
-    # the 'Kernel Path' cell is captured (under tracelens_launcher_path) and the
-    # Args shape parses — neither is corrupted by the extra 'Source Path' column.
+    # name-keyed read maps the right cells despite the inserted column.
     assert c.get("tracelens_launcher_path") == "/x/k.cu"
     assert c["shapes"] == ["(64,5120) bf16"]

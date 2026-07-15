@@ -8,7 +8,6 @@ from __future__ import annotations
 from hyperloom.inference_optimizer import cli
 
 
-# Parser default — only the explicit flag disables the framework agent.
 def _parse_optimize(argv: list[str]) -> object:
     """Helper: run the cli parser, return the parsed args namespace."""
     parser = cli._build_parser()
@@ -25,8 +24,6 @@ def test_no_framework_agent_explicit_flag_disables():
     assert getattr(args, "no_framework_agent") is True
 
 
-# Resume write-back — exercise just the branch logic, not the full
-# CLI session-resume orchestration which needs a real session dir.
 class _ResumeStateStub:
     """Mirrors the SharedState fields the resume write-back branch reads/writes."""
 
@@ -54,7 +51,6 @@ def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
         cur_phase = (getattr(state, "phase", "") or "").strip().upper()
         if cur_phase in ("", "PRELUDE"):
             state.framework_agent_phase_enabled = False
-            # Persist immediately so a clean resume keeps the toggle on disk.
             state.save("session_dir")
             msg = "DISABLING_RESUME"
         else:
@@ -68,7 +64,6 @@ def test_resume_writeback_disables_state_when_prelude_and_flag_passed():
     msg = _apply_resume_writeback(state, args)
     assert msg == "DISABLING_RESUME"
     assert state.framework_agent_phase_enabled is False
-    # The toggle is persisted unconditionally on the prelude path.
     assert state.save_calls == 1
 
 
@@ -77,7 +72,6 @@ def test_resume_writeback_warns_when_past_prelude_and_flag_passed():
     args = _ArgsStub(no_framework_agent=True)
     msg = _apply_resume_writeback(state, args)
     assert msg == "WARN_IGNORED"
-    # State must not be retroactively flipped or persisted.
     assert state.framework_agent_phase_enabled is True
     assert state.save_calls == 0
 

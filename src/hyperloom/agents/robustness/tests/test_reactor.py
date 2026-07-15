@@ -195,7 +195,7 @@ async def test_reactor_drops_invalid_intents_emitted_by_extra_evaluator(tmp_path
 
 
 # ---------------------------------------------------------------------------
-# Finalizer integration (formerly test_reactor_finalize.py)
+# Finalizer integration
 # ---------------------------------------------------------------------------
 
 

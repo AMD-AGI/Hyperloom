@@ -14,7 +14,6 @@ from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
 
 
-# 1. KnowledgePlane facade basics
 def test_plane_disabled_pr_returns_empty_mcp_url():
     plane = KnowledgePlane.from_clients(
         pr_monitor=PRMonitorClient.from_args(enabled=False),
@@ -51,7 +50,6 @@ def test_plane_reset_round_caches_noop():
     plane.reset_round_caches()  # must not raise
 
 
-# 2. EXPLORE-entry hook — no longer pre-warms; just runs cycle reprofile
 @pytest.mark.asyncio
 async def test_on_enter_explore_runs_without_plane(tmp_path: Path):
     """plane=None must not raise."""
@@ -82,7 +80,6 @@ def _make_bare_shared_state():
     return _SS()
 
 
-# 3. _bootstrap_knowledge_plane status marker
 def _build_args(**overrides) -> argparse.Namespace:
     base = dict(
         pr_monitor_enabled=True,
@@ -130,7 +127,6 @@ def test_bootstrap_marker_records_ir3_auto_degrade(tmp_path: Path, monkeypatch):
     assert "ir3_auto" in payload.get("status_text", "")
 
 
-# 4. breakdown.warnings wiring
 def test_collect_kb_provenance_surfaces_pr_monitor_disabled_warning(tmp_path: Path):
     from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
     from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
@@ -206,7 +202,6 @@ def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
     assert out["warm_start_recipe_source"] == "cortex"
 
 
-# CLI flag plumbing reaches _bootstrap_knowledge_plane.
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
     """Pin the dest-name + default contract the bootstrap reads."""
     from hyperloom.inference_optimizer.cli.parser import _build_parser
@@ -252,8 +247,7 @@ def test_cli_pr_monitor_mcp_url_override_reaches_namespace():
 
 
 def test_cli_pr_monitor_url_defaults_to_primus_cortex_pr_api_env(monkeypatch):
-    """--pr-monitor-url default resolves from the canonical $PRIMUS_CORTEX_PR_API
-    env (the legacy $PR_MONITOR_URL env is removed)."""
+    """--pr-monitor-url default resolves from the canonical $PRIMUS_CORTEX_PR_API env."""
     monkeypatch.setenv("PRIMUS_CORTEX_PR_API", "https://global.example/pr-monitor")
     monkeypatch.delenv("PR_MONITOR_URL", raising=False)
     args = _parse_optimize_args([])
@@ -328,8 +322,5 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
         session_dir=tmp_path,
     )
     assert "my-pr-monitor.example" in constructed_urls[-1]
-    # NOTE: the slimmed KnowledgePlane no longer stores pr_feed_window_days
-    # (the pre-warmed PR feed was removed in favour of on-demand MCP queries);
-    # the --pr-feed-window-days flag is still parsed for backward-compat but is
-    # not plumbed onto the plane. Only the MCP URL round-trips.
+    # The plane does not store pr_feed_window_days; only the MCP URL round-trips.
     assert plane.pr_monitor_mcp_url == "https://my-pr-monitor.example/mcp/"

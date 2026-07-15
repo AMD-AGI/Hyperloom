@@ -33,7 +33,7 @@ from hyperloom.orchestrator.actions.executors._magpie_patcher import (
 
 
 # Reduced fixture capturing the upstream shape the patcher targets.
-# Indentation is load-bearing (patcher matches the exact 12-space prefix).
+# Indentation is load-bearing.
 _UPSTREAM_BENCHMARKER_PY = """\
 \"\"\"Reduced benchmarker.py — only the surface the patcher cares about.\"\"\"
 import shutil
@@ -58,8 +58,8 @@ class _FakeBenchmarker:
 """
 
 
-# Newer upstream Magpie: copy loop delegates to ``_copy_benchmark_script_atomic``
-# (mkstemp + copy2 + chmod + os.replace), so the #C1 patch is a redundant no-op.
+# Upstream Magpie copy loop delegates to a race-safe atomic helper, so the
+# #C1 patch is a redundant no-op.
 _UPSTREAM_ATOMIC_BENCHMARKER_PY = """\
 \"\"\"Reduced benchmarker.py — upstream refactored to an atomic copy helper.\"\"\"
 import os
@@ -96,8 +96,7 @@ class _FakeBenchmarker:
 """
 
 
-# Same race-safe outcome inlined: temp-file + rename directly in
-# ``_prepare_benchmark_scripts`` (region-scoped detection signal).
+# Same race-safe outcome inlined directly in ``_prepare_benchmark_scripts``.
 _INLINE_ATOMIC_BENCHMARKER_PY = """\
 \"\"\"Reduced benchmarker.py — inline atomic copy, no named helper.\"\"\"
 import os
@@ -144,8 +143,8 @@ fi
 """
 
 
-# Genuine layout drift: unrecognisable prepare body + atomic ops only in an
-# unrelated method. Region scoping must keep this out of "already atomic".
+# Layout drift: unrecognisable prepare body + atomic ops only in an unrelated
+# method; region scoping must keep this out of "already atomic".
 _GARBAGE_WITH_UNRELATED_ATOMIC_PY = """\
 \"\"\"Reduced benchmarker.py — drifted prepare; atomic ops live elsewhere.\"\"\"
 import os
@@ -197,7 +196,6 @@ def _write_sglang_script(root: Path, src: str = _UPSTREAM_SGLANG_MI300X_SH) -> P
     return script
 
 
-# Basic shape / sanity
 def test_legacy_block_is_present_in_fixture():
     """Sanity: the fixture must contain the exact block the patcher matches."""
     assert _LEGACY_BLOCK in _UPSTREAM_BENCHMARKER_PY
@@ -221,7 +219,6 @@ def test_env_fallback_resolves_path(monkeypatch, fake_magpie: Path):
     assert ensure_magpie_atomic_scripts_patch(None) is True
 
 
-# Patch application + idempotency
 def test_patch_applied_replaces_legacy_block(fake_magpie: Path):
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
@@ -263,11 +260,8 @@ def test_remote_trust_drift_is_reported_separately(
     tmp_path: Path,
     caplog,
 ):
-    """Atomic copy can be fixed while the SGLang trust patch drifts.
-
-    The status API must expose those as separate bits so install.sh can warn
-    about remote trust specifically instead of blaming the atomic-copy patch.
-    """
+    """Atomic copy can be fixed while the SGLang trust patch drifts; the status
+    API must expose those as separate bits."""
     _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
     script = _write_sglang_script(
         tmp_path,
@@ -286,8 +280,8 @@ def test_remote_trust_drift_is_reported_separately(
     assert _REMOTE_TRUST_SENTINEL not in script.read_text(encoding="utf-8")
     assert any("remote trust patch did not apply" in r.getMessage() for r in caplog.records)
 
-    # The bool compat wrapper reflects the atomic-copy race only (its name /
-    # docstring), so an optional remote-trust drift must NOT flip it to False.
+    # The bool compat wrapper reflects the atomic-copy race only, so a
+    # remote-trust drift must NOT flip it to False.
     assert ensure_magpie_atomic_scripts_patch(tmp_path) is True
 
 
@@ -300,7 +294,6 @@ def test_patch_preserves_file_mode(fake_magpie: Path):
     assert pre_mode == post_mode, f"file mode changed: {oct(pre_mode)} -> {oct(post_mode)}"
 
 
-# Layout-drift fail-soft (install script escalates to fail-loud)
 def test_fail_soft_when_legacy_block_missing(tmp_path: Path):
     """Missing legacy block → patcher returns False, leaves the file alone."""
     bench_dir = tmp_path / "Magpie" / "modes" / "benchmark"
@@ -316,8 +309,7 @@ def test_fail_soft_when_legacy_block_missing(tmp_path: Path):
     assert (bench_dir / "benchmarker.py").read_text(encoding="utf-8") == drifted
 
 
-# Reason classification — distinguish a GENUINE failure (race unmitigated)
-# from a benign no-op, so install.sh can fail-loud only on the former.
+# Reason classification: distinguish a genuine failure from a benign no-op.
 def test_reason_applied_on_legacy_block(fake_magpie: Path):
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_APPLIED
@@ -326,7 +318,6 @@ def test_reason_applied_on_legacy_block(fake_magpie: Path):
 def test_reason_already_patched(fake_magpie: Path):
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_APPLIED
-    # Second pass sees the sentinel.
     assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_ALREADY_PATCHED
 
 
@@ -376,8 +367,6 @@ def test_already_patched_returns_true_without_rewriting(fake_magpie: Path):
 
 
 # Upstream-aware: an already-atomic Magpie is "already fixed", not drifted.
-#   (1) atomic upstream -> no-op True; (2) legacy -> patched; (3) already-patched
-#   -> no-op; (4) neither -> False + warning.
 def _patcher_warnings(caplog) -> list:
     return [r for r in caplog.records if r.levelno >= logging.WARNING and "_magpie_patcher" in r.name]
 
@@ -537,7 +526,6 @@ def test_reader_never_sees_torn_file(fake_magpie: Path):
     try:
         time.sleep(0.05)
         assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
-        # Cover both the during-rename and post-rename window.
         time.sleep(0.1)
     finally:
         stop.set()
@@ -600,7 +588,6 @@ def test_patched_benchmarker_copies_scripts_atomically(
         assert out.stat().st_mode & 0o111, f"exec bit not set on {out}"
 
 
-# Patched-block shape sanity
 def test_patched_block_calls_os_replace():
     """The replacement must end in ``os.replace`` (the atomic rename)."""
     assert "_hyperloom_os.replace(_tmp_name, target_file)" in _PATCHED_BLOCK
@@ -614,7 +601,7 @@ def test_patched_block_uses_unique_aliases():
     assert first_line.startswith("            #") or first_line.strip() == ""
 
 
-# Helper-method unit tests (formerly test_magpie_patcher_units.py)
+# Helper-method unit tests
 from hyperloom.orchestrator.actions.executors import _magpie_patcher as mp
 
 
@@ -708,9 +695,8 @@ class TestEnsurePatch:
         assert target.read_text().count(mp._PATCH_SENTINEL) == 1
 
 
-# Read-only / shared InferenceX/benchmarks deployment.
-# Contract: identical target -> no-op; writable -> atomic os.replace; read-only +
-# stale/missing -> a clear error naming the script + dir, not a bare [Errno 30].
+# Read-only / shared InferenceX/benchmarks deployment: identical -> no-op;
+# writable -> atomic replace; read-only + stale -> clear error.
 def _exec_patched_benchmarker(fake_magpie: Path):
     """Apply the patch, exec the patched benchmarker.py, return ``_FakeBenchmarker``."""
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
@@ -757,7 +743,6 @@ def test_readonly_target_with_uptodate_scripts_is_noop(
     _simulate_readonly_dir(monkeypatch, dst_dir)
 
     inst = cls(src_dir, dst_dir)
-    # Must NOT raise — script already up to date, so no temp write.
     inst._prepare_benchmark_scripts()
 
     assert (dst_dir / "sglang_mi300x.sh").read_text(encoding="utf-8") == body
@@ -780,7 +765,6 @@ def test_readonly_target_with_stale_script_raises_clear_error(
 
     dst_dir = tmp_path / "InferenceX_benchmarks"
     dst_dir.mkdir()
-    # Stale content present -> needs a rewrite.
     (dst_dir / "sglang_mi300x.sh").write_text(
         "#!/usr/bin/env bash\necho stale\n",
         encoding="utf-8",
@@ -870,7 +854,7 @@ class TestStripEvalConcurrencyFlag:
         assert mp._strip_eval_concurrency_flag(_EVAL_SCRIPT_CLEAN) is None
 
     def test_returns_none_on_unrecognised_shape(self):
-        # Marker present but value isn't $CONC -> regex miss -> None (caller warns).
+        # Marker present but value isn't $CONC -> regex miss -> None.
         weird = '    run_eval --framework lm-eval --concurrent-requests 64 || exit $?\n'
         assert mp._strip_eval_concurrency_flag(weird) is None
 

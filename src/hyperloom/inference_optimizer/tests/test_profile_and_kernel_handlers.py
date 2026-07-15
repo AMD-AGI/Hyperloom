@@ -55,8 +55,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     tracelens_root = tmp_path / "TraceLens"
-    # A usable checkout needs .git (completeness gate); a bare dir
-    # is now treated as an incomplete override and fails fast.
+    # A usable checkout needs .git (completeness gate).
     (tracelens_root / ".git").mkdir(parents=True)
     monkeypatch.setenv("TRACELENS_ROOT", str(tracelens_root))
     return make_session_dir()
@@ -166,7 +165,6 @@ def test_profile_yaml_has_torch_profiler_enabled():
     assert cfg["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
 
 
-# Regression: model_path injection beats the YAML's hardcoded fallback (else Magpie silently benchmarks the shipped Qwen3-8B).
 def test_materialize_config_injects_model_path(tmp_path):
     """Default YAML's hardcoded Qwen3-8B must be overridden when caller passes ``model_path``."""
     import yaml
@@ -210,7 +208,6 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     assert rendered["benchmark"]["envs"]["FOO"] == "bar"
 
 
-# Regression: gpu_type injection sets runner_type AND force-pins the generic `{framework}_{gpu_type}.sh` (Magpie priority 1).
 def test_materialize_config_injects_runner_type(tmp_path):
     """gpu_type kwarg must land in benchmark.runner_type as-is."""
     import yaml
@@ -286,7 +283,7 @@ def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
     assert rendered["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
 
 
-# Regression: TP / CONC env override yaml hardcode (DSR1-0528 deadlooped when TP=8 env was silently ignored).
+# TP / CONC env must override yaml hardcode.
 def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch):
     """TP env var must override yaml hardcode (was 1, becomes 8)."""
     import yaml
@@ -392,7 +389,7 @@ def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
     assert envs.get("ROCR_VISIBLE_DEVICES") == "1"
 
 
-# steady-state window must follow the TraceLens magpie skill formulas (max_iters/delay_iters), not the old placeholders.
+# steady-state window follows the TraceLens magpie skill formulas.
 def _profile_yaml(tmp_path, framework: str, envs: dict) -> Path:
     """Synthesize a minimal profile YAML the materializer recognises as PROFILE=1 + torch_profiler.enabled=True."""
     import yaml as _yaml
@@ -517,7 +514,7 @@ def test_materialize_profile_window_clamps_to_skill_floor(
     assert "--profiler-config.max_iterations 128" in extra, extra
 
 
-# Regression: NUM_PROMPTS must be sized to cover the steady-state window (profile mode force-overrides any caller-supplied value).
+# NUM_PROMPTS must cover the steady-state window (profile mode force-overrides caller values).
 def test_materialize_profile_num_prompts_covers_steady_state_window(
     tmp_path,
     monkeypatch,
@@ -597,7 +594,6 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
     assert envs["NUM_PROMPTS"] == 160, envs.get("NUM_PROMPTS")
 
 
-# Regression: when the runtime patcher succeeds, materialize auto-appends the patched-build profiler flags; when it fails-soft, none are injected. HYPERLOOM_ENABLE_PATCH=0 short-circuits the patcher.
 def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
     """Replace the two patcher symbols on `_workload_envs` with stubs that record invocation counts for per-framework dispatch asserts."""
     from hyperloom.orchestrator.actions.executors import _workload_envs
@@ -1047,7 +1043,7 @@ def test_profile_server_args_sanitizer_preserves_json_value_quotes():
     assert "--torch-compile-max-bs" not in sanitized
 
 
-# Regression: $FRAMEWORK env switches the default yaml between sglang/vllm without an explicit config_path (entry-layer fix for vLLM support).
+# $FRAMEWORK env switches the default yaml between sglang/vllm without an explicit config_path.
 def test_default_baseline_config_resolves_sglang_by_default(monkeypatch):
     monkeypatch.delenv("FRAMEWORK", raising=False)
     assert _default_baseline_config().name == "baseline_sglang.yaml"
@@ -1065,20 +1061,19 @@ def test_default_baseline_config_falls_back_on_unknown_value(monkeypatch):
 
 
 def test_default_baseline_config_resolves_atom_when_env_set(monkeypatch):
-    """B1: FRAMEWORK=atom selects baseline_atom.yaml (the single-source-of-truth selector for every executor)."""
+    """FRAMEWORK=atom selects baseline_atom.yaml (the single-source-of-truth selector for every executor)."""
     monkeypatch.setenv("FRAMEWORK", "atom")
     assert _default_baseline_config().name == "baseline_atom.yaml"
 
 
 def test_server_args_env_name_atom():
-    """B1: atom maps to EXTRA_ATOM_ARGS (the atom branch sits before vllm to avoid substring collisions)."""
+    """atom maps to EXTRA_ATOM_ARGS (the atom branch sits before vllm to avoid substring collisions)."""
     from hyperloom.orchestrator.actions.executors._grid_runner import (
         server_args_env_name,
     )
 
     assert server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
     assert server_args_env_name("ATOM") == "EXTRA_ATOM_ARGS"
-    # Regression: sglang/vllm still resolve correctly after the new branch.
     assert server_args_env_name("vllm") == "EXTRA_VLLM_ARGS"
     assert server_args_env_name("sglang") == "EXTRA_SGLANG_ARGS"
 
@@ -1087,7 +1082,7 @@ def test_materialize_config_atom_profile_skips_tracelens_flags(
     tmp_path,
     monkeypatch,
 ):
-    """B1: PROFILE=1 + framework=atom must NOT inject sglang/vllm profiler CLI flags into EXTRA_ATOM_ARGS (atom's argparse rejects them)."""
+    """PROFILE=1 + framework=atom must NOT inject sglang/vllm profiler CLI flags into EXTRA_ATOM_ARGS (atom's argparse rejects them)."""
     import yaml
 
     monkeypatch.setenv("FRAMEWORK", "atom")
@@ -1127,11 +1122,7 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path):
-    """FRAMEWORK=atom now falls through to the normal profile path.
-
-    The atom Magpie wrapper bridges PROFILE=1 to atom's torch profiler,
-    so the historical structured ``skipped`` short-circuit is retired.
-    """
+    """FRAMEWORK=atom falls through to the normal profile path (the atom Magpie wrapper bridges PROFILE=1 to atom's torch profiler)."""
     monkeypatch.setenv("FRAMEWORK", "atom")
     # Anchor session/runs paths under the test tmp dir. Without this the
     # executor falls back to the ``/workspace/hyperloom`` default, which is
@@ -2357,7 +2348,7 @@ async def test_trace_analyze_handler_missing_trace_input(session_dir):
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, monkeypatch):
-    # N15: HYPERLOOM_KERNEL_AGENT_ROOT is a lazy env read; delenv exercises the "not configured" branch.
+    # HYPERLOOM_KERNEL_AGENT_ROOT is a lazy env read; delenv exercises the "not configured" branch.
     monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
     res = await krh.trace_analyze_handler(
         {"trace_input": str(session_dir)},
@@ -2368,7 +2359,7 @@ async def test_trace_analyze_handler_requires_kernel_agent_root(session_dir, mon
     assert "HYPERLOOM_KERNEL_AGENT_ROOT is not set" in res["error"]
 
 
-# TraceLens permanent failure stays failed (no fallback): the handler preserves ``status=failed`` and appends structured diagnostics instead of rewriting to ok+empty kernels.
+# TraceLens permanent failure stays failed (no fallback).
 
 
 @pytest.mark.asyncio
@@ -2465,7 +2456,7 @@ async def test_trace_analyze_handler_t4_defaults_warnings_to_empty_list(
     assert res["trace_health_warnings"] == []
 
 
-# trace_health_warnings must reach the Orchestration LLM: record_trace_analyze keeps the warning list and _format_last_trace_analyze surfaces it inline.
+# trace_health_warnings must reach the Orchestration LLM.
 
 
 def test_record_trace_analyze_persists_trace_health_warnings(session_dir):
@@ -2508,7 +2499,7 @@ def test_record_trace_analyze_defaults_warnings_to_empty_list(session_dir):
 
 
 def test_record_trace_analyze_persists_task_groups(session_dir):
-    """893bc6f: ``task_groups`` must flow into ``last_trace_analyze`` so the multi-KEEP queue collapses members of the same AST function into one slot."""
+    """``task_groups`` must flow into ``last_trace_analyze`` so the multi-KEEP queue collapses members of the same AST function into one slot."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -3173,15 +3164,11 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
             await c.stop()
 
 
-# Batch dispatch enablers: _DEFAULT_KERNEL_BATCH_PARALLEL is sized for a full
-# node, and Coordinator force-injects candidates_path so the batch path fires
-# deterministically (LLM values still win).
+# Batch dispatch enablers: batch-parallel sizing + candidates_path injection.
 def test_default_kernel_batch_parallel_matches_full_node():
-    """Default fanout is sized for a single MI300X / MI355X node (8 GPU)
-    so a typical ``run_optimization`` batch (TraceLens emits 3-8 reusable
-    units) does NOT serialize behind an asyncio semaphore tighter than
-    Ray's view of the cluster. Pre-PR-X value was 3, which throttled even
-    the small batches actually observed in production sessions."""
+    """Default fanout is sized for a single MI300X / MI355X node (8 GPU) so a
+    typical ``run_optimization`` batch does NOT serialize behind an asyncio
+    semaphore tighter than Ray's view of the cluster."""
     assert krh._DEFAULT_KERNEL_BATCH_PARALLEL == 8
 
 
@@ -3195,11 +3182,8 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
     fires instead of silently collapsing to ``_run_optimization_single``
     (which would waste 7 idle GPUs on an 8-GPU node)."""
     c = Coordinator(session_dir, backends=_backends_silent())
-    # ``_sequence_denial_for_request`` requires both baseline_tput > 0
-    # and last_profile_trace to be set (kernel requests are denied with
-    # "baseline must run first" / "profile must run first" otherwise);
-    # simulate the post-baseline + post-profile state so we exercise the
-    # injection branch under realistic ordering preconditions.
+    # ``_sequence_denial_for_request`` needs baseline_tput > 0 and
+    # last_profile_trace set; simulate the post-baseline + post-profile state.
     c.shared_state.baseline_tput = 1234.5
     c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
     cached_path = "/wekafs/cached/kernel_candidates.json"
@@ -3207,9 +3191,7 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": cached_path,
     }
-    # On this branch ``_sequence_denial_for_request`` still consults
-    # ``last_select_kernels`` (the rename to ``trace_analyze`` is
-    # planned for M3); seed it with the same trace so the gate clears.
+    # The gate also consults ``last_select_kernels``; seed it with the same trace.
     c.shared_state.last_select_kernels = {
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": cached_path,
@@ -3244,18 +3226,15 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
             await c.stop()
 
 
-# Multi-KEEP integrate queue + streaming batch record: streaming record_partial
-# callback, batch_mode dedup, and base_tput auto-injection on integrate.
+# Multi-KEEP integrate queue: streaming record_partial, batch_mode dedup, base_tput auto-injection.
 @pytest.mark.asyncio
 async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     session_dir,
 ):
-    """Each batch sub-attempt's result must flow through record_partial
-    the moment _run_kernel_backend_sequence returns, NOT only after
-    asyncio.gather() wait-all releases. Without this, a single slow
-    GEAK sibling delays integrate-queue visibility for all the fast
-    KEEPs (the Qwen3-30B-A3B-Base 20260522T093903Z regression).
-    """
+    """Each batch sub-attempt's result must flow through record_partial the
+    moment _run_kernel_backend_sequence returns, NOT only after
+    asyncio.gather() wait-all releases, so one slow GEAK sibling doesn't
+    delay integrate-queue visibility for the fast KEEPs."""
     candidates = [
         {"kernel_id": "kA", "source_file": "/p/a.py", "reusable_native_kernel": True},
         {"kernel_id": "kB", "source_file": "/p/b.py", "reusable_native_kernel": True},
@@ -3549,7 +3528,7 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
         "trace_input": "/wekafs/trace/x.json.gz",
         "candidates_path": "/wekafs/cached/candidates.json",
     }
-    # The sequence gate still consults ``last_select_kernels`` (to be renamed ``trace_analyze`` in M3).
+    # The sequence gate also consults ``last_select_kernels``.
     c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
     c.shared_state.current_best = {
         "action": "integrate",
@@ -3826,7 +3805,7 @@ def test_batch_candidates_default_min_gpu_pct_matches_sharedstate_gate(
     session_dir,
     _candidates_factory,
 ):
-    """PR-I: ``_batch_kernel_candidates`` default (3.0) must match ``SharedState.untried_hot_reusable_kernels``'s gate so a sub-threshold kernel can't sneak in via task_group fallback."""
+    """``_batch_kernel_candidates`` default (3.0) must match ``SharedState.untried_hot_reusable_kernels``'s gate so a sub-threshold kernel can't sneak in via task_group fallback."""
     cpath = _candidates_factory(
         [
             {"kernel_id": "k001", "gpu_pct": 38.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},

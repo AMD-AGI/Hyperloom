@@ -1,7 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Baseline accuracy-eval handling: ``disable_run_eval`` wiring + the
-eval-failure fallback that salvages the throughput baseline (Q1/Q2 fix)."""
+"""Baseline accuracy-eval handling: ``disable_run_eval`` wiring + the eval-failure fallback that salvages the throughput baseline."""
 
 from __future__ import annotations
 
@@ -136,8 +135,8 @@ def test_eval_rooted_failure_scans_logs(tmp_path: Path):
 
 
 def test_eval_rooted_failure_climbs_from_round_subdir(tmp_path: Path):
-    # Double-run: returned result points at measure_round, but the eval marker
-    # lives in the sibling warmup_round. The scan must climb to the task root.
+    # The result points at measure_round but the eval marker lives in the
+    # sibling warmup_round; the scan must climb to the task root.
     task = tmp_path / "task"
     warm_ws = task / "warmup_round" / "benchmark_sglang_x"
     warm_ws.mkdir(parents=True)
@@ -201,8 +200,8 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
         run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
         calls.append({"run_eval": run_eval})
         if run_eval != "false":
-            # Simulate the broken eval: throughput would be fine but run_eval
-            # aborts the script. No valid workspace; marker in stderr.
+            # Simulate a broken eval that aborts the script: no valid workspace,
+            # marker in stderr.
             return subprocess.CompletedProcess(
                 cmd, 1, "", "ERROR: run_eval failed with exit code 1\n"
             )
@@ -228,8 +227,8 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
     ):
         result = _run(executor(ctx))
 
-    # Warmup first tries eval=true, falls back to eval=false, then the hot
-    # measured baseline reuses the eval-disabled materialized config.
+    # Warmup tries eval=true, falls back to eval=false, then the measured
+    # baseline reuses the eval-disabled config.
     assert [c["run_eval"] for c in calls] == ["true", "false", "false"]
     assert result["status"] == "succeeded"
     assert result.get("accuracy_source") == "eval_unavailable"
@@ -279,6 +278,7 @@ def test_eval_already_off_does_not_retry(tmp_path):
         calls.append("x")
         # Even with an eval marker, an explicit opt-out must not double-run.
         return subprocess.CompletedProcess(
+
             cmd, 1, "", "ERROR: run_eval failed with exit code 1\n"
         )
 
@@ -302,5 +302,5 @@ def test_eval_already_off_does_not_retry(tmp_path):
     ):
         result = _run(executor(ctx))
 
-    assert len(calls) == 1  # already off -> no fallback
+    assert len(calls) == 1  # already off, no fallback
     assert result["status"] == "failed"

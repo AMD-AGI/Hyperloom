@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression tests for the Coordinator -> recipe-snapshot KB write chain.
+"""Tests for the Coordinator -> recipe-snapshot KB write chain.
 
 KEEP/REVERT/CLOSE amend the recipe row via ``_kb_amend_recipe`` ->
 ``_workload_canonical_id``; if that helper is missing every write silently
@@ -71,7 +71,7 @@ def _expected_cid() -> str:
 
 
 def test_workload_canonical_id_defined_and_consistent(tmp_path: Path) -> None:
-    """Regression: ``_workload_canonical_id`` exists and agrees with ``recipe_canonical_id`` and the gap anchor."""
+    """``_workload_canonical_id`` exists and agrees with ``recipe_canonical_id`` and the gap anchor."""
     coord = _make_coordinator(tmp_path)
     assert hasattr(coord, "_workload_canonical_id")
     assert coord._workload_canonical_id() == _expected_cid()
@@ -79,7 +79,7 @@ def test_workload_canonical_id_defined_and_consistent(tmp_path: Path) -> None:
 
 
 def test_kb_amend_recipe_persists_lesson(tmp_path: Path) -> None:
-    """End-to-end: appending a lesson lands in the local KB (previously a silent no-op)."""
+    """Appending a lesson lands in the local KB."""
     coord = _make_coordinator(tmp_path)
     coord._kb_amend_recipe(
         append_lesson={"statement": "raise tp to 8", "measured_impact": "+12%"},
@@ -165,7 +165,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
 
 
 def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
-    """Amend stamps config.json architecture tags (``architectures`` + ``model_type``) into the recipe."""
+    """Amend stamps config.json architecture tags into the recipe."""
     coord = _make_coordinator(tmp_path)
     coord.shared_state.model_architectures = ["LlamaForCausalLM"]
     coord.shared_state.model_type = "llama"
@@ -208,8 +208,8 @@ def test_sdk_fallback_t0_anchors_into_self_cortex_kb(tmp_path: Path) -> None:
     assert row is not None, "SDK-fallback T0 did not anchor into self.cortex_kb"
 
 
-# Schema field fidelity — the on-disk row must preserve severity / dict
-# measured_impact / session provenance, or warm-start + dedup lose data.
+# The on-disk row must preserve severity / dict measured_impact / session
+# provenance, or warm-start + dedup lose data.
 def _put(store: LocalRecipeStore, **kw) -> None:
     store.put_recipe(
         canonical_id=_expected_cid(),
@@ -259,8 +259,8 @@ def test_local_store_preserves_session_provenance(tmp_path: Path) -> None:
     assert s["stack_len"] == 3
 
 
-# _kb_amend_recipe reads the LOCAL row and preserves T0-stamped extras +
-# audit fields; appends accumulate instead of clobbering.
+# _kb_amend_recipe reads the LOCAL row and preserves T0-stamped extras + audit
+# fields; appends accumulate instead of clobbering.
 def test_amend_preserves_t0_extras_and_audit(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
@@ -296,7 +296,7 @@ def test_amend_appends_lessons_cumulatively(tmp_path: Path) -> None:
 
 
 # CLOSE finalize must not clobber a better historical best_config with an
-# empty/worse current result, and must merge (not replace) the fingerprint.
+# empty/worse current result, and must merge the fingerprint.
 def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     cid = _expected_cid()
@@ -320,8 +320,7 @@ def test_close_does_not_clobber_better_best_config(tmp_path: Path) -> None:
 
 
 # KEEP'd kernel optimizations (incl. E2E-verified-but-no-gain) must be
-# persisted. Regression: k006 (micro 1.32x, KEEP, E2E -0.094%) vanished from
-# recipe.json because ``what_worked`` is built only from optimization_stack.
+# persisted, not just what_worked built from optimization_stack.
 def _seed_kept_kernel(coord: Coordinator) -> None:
     """Populate SharedState as a KEEP'd + E2E-integrated kernel leaves it."""
     ss = coord.shared_state
@@ -347,7 +346,7 @@ def _seed_kept_kernel(coord: Coordinator) -> None:
 
 
 def test_build_recipe_attrs_surfaces_kept_kernel(tmp_path: Path) -> None:
-    """``_build_recipe_attrs_from_state`` emits a ``kernel_optimizations`` entry carrying micro_speedup + the E2E outcome."""
+    """``_build_recipe_attrs_from_state`` emits a ``kernel_optimizations`` entry carrying micro_speedup + E2E outcome."""
     coord = _make_coordinator(tmp_path)
     _seed_kept_kernel(coord)
     attrs = coord._build_recipe_attrs_from_state()
@@ -365,7 +364,7 @@ def test_build_recipe_attrs_surfaces_kept_kernel(tmp_path: Path) -> None:
 
 
 def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
-    """End-to-end: after CLOSE finalize, recipe.json carries the KEEP'd kernel under ``kernel_optimizations``."""
+    """After CLOSE finalize, recipe.json carries the KEEP'd kernel under ``kernel_optimizations``."""
     coord = _make_coordinator(tmp_path)
     _seed_kept_kernel(coord)
     coord.cortex_finalize_recipe_and_journal()
@@ -379,9 +378,8 @@ def test_close_finalize_persists_kept_kernel_to_kb(tmp_path: Path) -> None:
     assert k006["e2e_gain_pct"] == -0.094
 
 
-# A bare-baseline CLOSE whose tput happens to exceed a historical
-# best must NOT overwrite the validated best_config. Regression: a flagless
-# baseline clobbered the warm_replay recipe, dropping every extra_server_arg.
+# A bare-baseline CLOSE whose tput exceeds a historical best must NOT overwrite
+# the validated best_config.
 def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     tmp_path: Path,
 ) -> None:
@@ -401,8 +399,8 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
         },
         best_throughput=2532.0,
     )
-    # Bare baseline: no validated stack/gain, but a numerically higher tput
-    # that the better-throughput guard alone would let through.
+    # Bare baseline: no validated stack/gain, but a higher tput the
+    # better-throughput guard alone would let through.
     ss = coord.shared_state
     ss.current_best = {"action": "baseline", "name": "baseline", "tput": 2813.5}
     ss.optimization_stack = []
@@ -419,7 +417,7 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
 def test_best_config_reads_stack_args_from_canonical_server_key(
     tmp_path: Path,
 ) -> None:
-    """best_config reads the canonical ``extra_server_args`` stack key, not the legacy ``*_sglang_args``."""
+    """best_config reads the canonical ``extra_server_args`` stack key."""
     coord = _make_coordinator(tmp_path)
     ss = coord.shared_state
     ss.current_best = {
@@ -478,9 +476,8 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     assert "--page-size 32" in row["best_config"].get("extra_server_args", "")
 
 
-# kernel_optimizations[].e2e_decision must carry the integrate
-# verdict. Regression: k007 integrate REVERT'd (E2E -1.05%) but the row showed
-# only the micro-layer decision=KEEP, hiding the rollback.
+# kernel_optimizations[].e2e_decision must carry the integrate verdict, not
+# only the micro-layer decision.
 def test_kernel_e2e_decision_reflects_integrate_revert(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
     ss = coord.shared_state
@@ -536,8 +533,7 @@ def test_kernel_e2e_decision_micro_only_when_not_integrated(
     assert k["e2e_decision"] == ""
 
 
-# sessions[] entry must carry throughput_before/after, a date, and
-# stack actions. Regression: rows had 0.0 / "" / [] for these fields.
+# sessions[] entry must carry throughput_before/after, a date, and stack actions.
 def test_session_entry_carries_throughput_date_and_actions(
     tmp_path: Path,
 ) -> None:
@@ -565,8 +561,8 @@ def test_session_entry_carries_throughput_date_and_actions(
     assert s["actions_taken"] == ["page32", "stream_interval_4"]
 
 
-# A per-variant pitfall with an empty variant dict must still carry
-# the variant NAME in its description, not collapse to the bare task kind.
+# A per-variant pitfall with an empty variant dict must still carry the variant
+# NAME in its description, not collapse to the bare task kind.
 def test_pitfall_description_uses_variant_name_not_bare_kind(
     tmp_path: Path,
 ) -> None:

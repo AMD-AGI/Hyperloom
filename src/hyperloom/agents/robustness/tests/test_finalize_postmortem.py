@@ -120,7 +120,6 @@ def test_finalize_creates_postmortem_and_decision_trace(tmp_path: Path) -> None:
     assert "budget_exhausted" in md
     assert "gpu_leak_persistent" in md
     assert "HIGH=1" in md
-    # Decision-trace summary table renders per-action counts.
     assert "`integrate`" in md
     assert "`baseline`" in md
 
@@ -139,13 +138,12 @@ def test_finalize_idempotent_via_marker(tmp_path: Path) -> None:
         session_id="sess-x",
     )
     assert finalizer.finalize(stop_reason="r1") is True
-    # Second invocation must not overwrite.
     md_path = tmp_path / "reports" / "robustness_postmortem.md"
     first_body = md_path.read_text(encoding="utf-8")
     md_path.write_text("MUTATED\n", encoding="utf-8")
     assert finalizer.finalize(stop_reason="r2") is False
     assert md_path.read_text(encoding="utf-8") == "MUTATED\n"
-    assert first_body  # sanity: first body was non-empty
+    assert first_body
 
 
 def test_finalize_no_findings_no_runs(tmp_path: Path) -> None:
@@ -234,7 +232,6 @@ def test_finalize_picks_first_high_severity_as_flashpoint(
         encoding="utf-8",
     )
     assert "early_high" in md
-    # Flashpoint section appears before catalogue.
     flash_pos = md.index("Flashpoint")
     catalogue_pos = md.index("Findings catalogue")
     assert flash_pos < catalogue_pos

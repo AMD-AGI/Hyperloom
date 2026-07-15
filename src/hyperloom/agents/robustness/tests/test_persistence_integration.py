@@ -49,7 +49,7 @@ def _fresh_classifier(
         gpu_leak_config=GpuLeakConfig(
             min_consecutive_ticks=gpu_leak_min_ticks,
             free_mb_threshold=500.0,
-            owner_patterns=(),  # disable owner heuristic for the test
+            owner_patterns=(),  # disable owner heuristic
         ),
         kernel_pipeline_config=KernelPipelineConfig(
             pending_count_threshold=0,
@@ -58,7 +58,7 @@ def _fresh_classifier(
         progress_config=ProgressConfig(
             gain_window_ticks=3,
             gain_epsilon_pct=0.1,
-            no_levers_min_minutes=10_000.0,  # disable B3 in this test
+            no_levers_min_minutes=10_000.0,  # disable B3
         ),
         aiter_jit_config=AiterJitConfig(),
     )
@@ -111,7 +111,7 @@ def _ray_pending_data(pending: int = 7) -> SourceData:
 
 
 # ---------------------------------------------------------------------------
-# GpuLeakDetector — consecutive-tick rule (the original motivating bug)
+# GpuLeakDetector — consecutive-tick rule
 # ---------------------------------------------------------------------------
 
 
@@ -124,7 +124,7 @@ def test_gpu_leak_fires_only_after_2_subprocesses_see_leak(
     assert all(s.name != "gpu_memory_leaked" for s in syms1)
     store1.flush_atomic()
 
-    # Tick 2: fresh subprocess; with the state store the prior hit is preserved (original bug lost it) → crosses threshold and fires.
+    # Tick 2: fresh subprocess; state store preserves the prior hit → crosses threshold and fires.
     c2, store2 = _fresh_classifier(tmp_path)
     syms2 = c2.classify(_leak_data(), _ctx_with_tick(2))
     assert any(s.name == "gpu_memory_leaked" for s in syms2)
@@ -144,7 +144,7 @@ def test_gpu_leak_resets_when_owner_reappears(tmp_path: Path):
         ],
         sources_used=["local"],
     )
-    # Rebuild with a matching owner pattern to actually exercise reset (the default test classifier has owner_patterns=()).
+    # Rebuild with a matching owner pattern to exercise reset.
     c2, store2 = _fresh_classifier(tmp_path)
     classifier = Classifier(
         state_store=store2,
@@ -190,7 +190,7 @@ def test_ray_pending_starvation_needs_three_subprocesses(tmp_path: Path):
 def test_gain_plateau_history_survives_subprocess_restarts(
     tmp_path: Path,
 ):
-    # Flat 3-tick window across 3 fresh classifiers. Seed stack_size=1 to bypass the stack_size==0 defer-to-no_levers early-return and hit the plateau path.
+    # Flat 3-tick window across 3 fresh classifiers; stack_size=1 bypasses the no_levers early-return to hit the plateau path.
     for tick in (1, 2, 3):
         c, store = _fresh_classifier(tmp_path)
         ctx = _ctx_with_tick(
@@ -317,7 +317,7 @@ def test_classifier_without_state_store_is_in_memory(tmp_path: Path):
     # Same instance keeps state in-memory → 2nd call fires.
     syms2 = classifier.classify(_leak_data(), _ctx_with_tick(2))
     assert any(s.name == "gpu_memory_leaked" for s in syms2)
-    # A fresh store-less classifier loses the counter (the original M1 bug):
+    # A fresh store-less classifier loses the counter.
     fresh = Classifier(
         state_store=None,
         gpu_leak_config=GpuLeakConfig(

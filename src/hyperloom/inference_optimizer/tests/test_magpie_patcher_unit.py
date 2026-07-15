@@ -55,7 +55,6 @@ def test_resolve_benchmarker_env(monkeypatch, tmp_path):
 
 
 def test_resolve_benchmarker_missing_file(tmp_path):
-    # dir given but file absent
     assert mp._resolve_benchmarker_path(tmp_path) is None
 
 
@@ -81,7 +80,7 @@ def test_file_lock_normal(tmp_path):
 
 
 def test_file_lock_unopenable():
-    # directory path can't be opened "w" -> warn + yield without exclusion
+    # directory path can't be opened "w" -> yield without exclusion
     with mp._file_lock("/nonexistent_dir_zzz/sub/lock"):
         pass
 
@@ -108,9 +107,9 @@ def test_extract_prepare_region_blank_and_dedent():
         "class C:\n"
         "    def _prepare_benchmark_scripts(self):\n"
         "        a = 1\n"
-        "\n"  # blank line inside body -> continue
+        "\n"
         "        b = 2\n"
-        "    def other(self):\n"  # dedent to def_indent -> break
+        "    def other(self):\n"
         "        c = 3\n"
     )
     region = mp._extract_prepare_region(src)
@@ -138,7 +137,6 @@ def test_upstream_not_atomic():
 
 # ---- _apply_patch_atomic_reason -------------------------------------------
 def test_apply_reason_io_error_read(tmp_path):
-    # directory path -> read_text raises OSError
     assert mp._apply_patch_atomic_reason(tmp_path) == mp._ATOMIC_REASON_IO_ERROR
 
 
@@ -184,7 +182,7 @@ def test_apply_reason_write_error(tmp_path, monkeypatch):
 def test_apply_reason_fdopen_write_error(tmp_path, monkeypatch):
     f = tmp_path / "b.py"
     f.write_text(_LEGACY_SRC, encoding="utf-8")
-    # mkstemp succeeds but os.replace fails -> fdopen-path OSError + cleanup
+    # mkstemp succeeds but os.replace fails -> fdopen-path OSError + cleanup.
     monkeypatch.setattr(mp.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
     assert mp._apply_patch_atomic_reason(f) == mp._ATOMIC_REASON_IO_ERROR
 
@@ -288,7 +286,6 @@ def test_patch_status_no_sglang(tmp_path):
 
 
 def test_patch_status_remote_trust_fails(tmp_path):
-    # sglang script present but legacy block absent -> remote_trust_ok False
     _make_magpie(tmp_path, sglang="#!/bin/bash\nunrelated content\n")
     s = mp.magpie_scripts_patch_status(tmp_path)
     assert s.remote_trust_ok is False

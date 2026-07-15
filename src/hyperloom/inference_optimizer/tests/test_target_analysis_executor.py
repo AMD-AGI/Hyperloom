@@ -3,8 +3,7 @@
 """Integration + unit tests for :class:`TargetAnalysisExecutor`.
 
 Integration tests cover the no-flag / no-target / mapping-miss / happy paths;
-unit tests cover the env/ctx helpers and failure branches that lock the
-executor's "never fail" guarantee.
+unit tests cover the env/ctx helpers and the executor's never-fail branches.
 """
 
 from __future__ import annotations
@@ -89,7 +88,7 @@ async def test_no_competitor_target_graceful(session_dir):
 @pytest.mark.asyncio
 async def test_model_mapping_miss_writes_skipped(session_dir, monkeypatch):
     """Unknown model → skipped without any HTTP traffic."""
-    # URL points at a hang-if-hit port; the mapping miss must short-circuit before any fetch.
+    # URL points at a hang-if-hit port; mapping miss must short-circuit before any fetch
     monkeypatch.setenv("INFERENCEX_BASE_URL", "http://127.0.0.1:1")
     monkeypatch.setenv("INFERENCEX_TIMEOUT_SEC", "5.0")
     monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "1")
@@ -233,7 +232,7 @@ async def test_report_executor_renders_external_baseline_section(tmp_path: Path,
     assert final_json["external_baseline"]["status"] == "ok"
 
 
-# Unit tests (formerly test_target_analysis_units.py)
+# Unit tests
 
 
 # env helpers

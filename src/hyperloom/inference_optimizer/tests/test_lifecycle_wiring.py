@@ -1,9 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Lifecycle events are actually emitted at the
-phase/step boundaries.
+"""Lifecycle events are actually emitted at the phase/step boundaries.
 
-Covers the emit points added on top of the lifecycle schema (Task B):
+Covers the emit points:
 
 * ``_lifecycle_paths`` extracts only present, non-empty path-like fields.
 * ``Coordinator._emit_lifecycle`` records AND persists to state.json.
@@ -41,9 +40,6 @@ from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
-# ---------------------------------------------------------------------------
-# fixtures / helpers
-# ---------------------------------------------------------------------------
 def _heartbeat() -> Intent:
     return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
 
@@ -64,9 +60,6 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return make_session_dir()
 
 
-# ===========================================================================
-# _lifecycle_paths pure helper
-# ===========================================================================
 def test_lifecycle_paths_extracts_present_path_keys():
     payload = {
         "trace_input": "/tmp/trace.json.gz",
@@ -85,8 +78,8 @@ def test_lifecycle_paths_extracts_present_path_keys():
 
 
 def test_lifecycle_paths_surfaces_tracelens_report_keys():
-    # trace_analyze_handler returns these analysis outputs; the lifecycle
-    # allowlist must surface them so operators reach analysis.md + sidecars.
+    # The lifecycle allowlist must surface trace_analyze report outputs so
+    # operators reach analysis.md + sidecars.
     payload = {
         "trace_report_path": "/tmp/run/analysis.md",
         "analysis_report_path": "/tmp/run/analysis.md",
@@ -105,9 +98,6 @@ def test_lifecycle_paths_handles_non_dict():
     assert _lifecycle_paths([1, 2]) == {}
 
 
-# ===========================================================================
-# Coordinator._emit_lifecycle records + persists
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_emit_lifecycle_records_and_persists(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -124,7 +114,6 @@ async def test_emit_lifecycle_records_and_persists(session_dir):
         assert ev["status"] == "END"
         assert ev["artifacts"]["md_path"] == "/x/final.md"
 
-        # Persisted so a launcher poll sees it.
         reloaded = SharedState.load_or_init(session_dir)
         assert reloaded.lifecycle[-1]["step"] == "report"
         assert reloaded.lifecycle[-1]["artifacts"]["json_path"] == "/x/final.json"
@@ -137,8 +126,7 @@ async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
     session_dir,
 ):
     # Bursty START markers within the debounce window coalesce to a single
-    # state.json write; the next terminal END must flush the whole tail so an
-    # operator never loses a produced-artifact event to debouncing.
+    # state.json write; the next terminal END flushes the whole tail.
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from unittest.mock import patch as _patch
@@ -150,10 +138,10 @@ async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
             "save",
             autospec=True,
         ) as mock_save:
-            # First START flushes (last_save==0, window elapsed under monotonic).
+            # First START flushes.
             c._emit_lifecycle(step="trace_analyze", status="START")
             saves_after_first = mock_save.call_count
-            # Subsequent STARTs inside the window are debounced (no new write).
+            # Subsequent STARTs inside the window are debounced.
             c._emit_lifecycle(step="trace_analyze", status="START")
             c._emit_lifecycle(step="kernel_optimization", status="START")
             assert mock_save.call_count == saves_after_first
@@ -172,9 +160,6 @@ async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
         await c.stop()
 
 
-# ===========================================================================
-# Coordinator._handle_request brackets a kernel step with START + END
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_path):
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -221,7 +206,6 @@ async def test_handle_request_emits_start_and_end(session_dir, monkeypatch, tmp_
         assert end["status"] == "END"
         assert end["artifacts"]["candidates_path"] == str(candidates_path)
         assert "duration_s" in end and end["duration_s"] >= 0.0
-        # Monotonic ordering preserved.
         assert end["seq"] > start["seq"]
     finally:
         await c.stop()
@@ -234,8 +218,7 @@ async def test_handle_request_end_surfaces_tracelens_report_paths(
     tmp_path,
 ):
     # The lifecycle END for a trace_analyze step must carry every TraceLens
-    # report path the handler returns — not just candidates_path — so the
-    # operator can reach analysis.md and the roofline/summary sidecars.
+    # report path the handler returns, not just candidates_path.
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
@@ -302,9 +285,6 @@ async def test_handle_request_failed_handler_emits_error(session_dir, monkeypatc
         await c.stop()
 
 
-# ===========================================================================
-# RooflineExecutor emits a TraceLens END event (auto-roofline path)
-# ===========================================================================
 def _roofline_ctx(tmp_path: Path) -> RunnerContext:
     task = Task(
         task_id="t-roofline-1",
@@ -344,7 +324,7 @@ async def test_roofline_executor_emits_lifecycle_end(tmp_path):
 
     assert result["status"] == "succeeded"
     rf_events = [e for e in state.lifecycle if e["step"] == "roofline"]
-    # Paired START + END so the operator sees the run begin, not just finish.
+    # Paired START + END.
     assert [e["status"] for e in rf_events] == ["START", "END"], rf_events
     start, ev = rf_events
     assert start["label"] == "TraceLens"
@@ -354,13 +334,9 @@ async def test_roofline_executor_emits_lifecycle_end(tmp_path):
     assert ev["artifacts"]["trace_input"] == "/tmp/trace.gz"
     assert ev["artifacts"]["analysis_md_path"] == str(md)
     assert "duration_s" in ev
-    # END strictly follows START.
     assert ev["seq"] > start["seq"]
 
 
-# ===========================================================================
-# _handle_request short-circuits: cache hit / rejected patch emit a lone END
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_handle_request_cache_hit_emits_lone_end(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -399,8 +375,8 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        # Bypass the execution-order gate: an integrate request is denied in
-        # the initial phase, which would return before reaching the emit.
+        # Bypass the execution-order gate that would deny an integrate request
+        # in the initial phase before reaching the emit.
         monkeypatch.setattr(
             c.gating,
             "_sequence_denial_for_request",
@@ -438,9 +414,6 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
         await c.stop()
 
 
-# ===========================================================================
-# _advance_phase_if_needed emits an ENTER phase-boundary marker
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -476,9 +449,6 @@ async def test_advance_phase_emits_enter_marker(session_dir, monkeypatch):
         await c.stop()
 
 
-# ===========================================================================
-# _on_enter_close emits the final report END event
-# ===========================================================================
 @pytest.mark.asyncio
 async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_silent_backends())

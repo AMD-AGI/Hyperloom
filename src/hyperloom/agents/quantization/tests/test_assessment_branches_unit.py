@@ -21,7 +21,7 @@ def _base_artifacts(tmp_path: Path):
 
 def test_parse_blocked_outcome() -> None:
     assert A._parse_blocked_outcome(None) is None
-    assert A._parse_blocked_outcome("nothing here") is None  # line 177
+    assert A._parse_blocked_outcome("nothing here") is None
     assert A._parse_blocked_outcome("outcome_id: eval_oom") == OutcomeId.eval_oom
     assert A._parse_blocked_outcome("outcome_id: not_a_real_outcome") is None
 
@@ -29,13 +29,13 @@ def test_parse_blocked_outcome() -> None:
 def test_classify_sdk_phase_error() -> None:
     cls = A._classify_sdk_phase_error
     assert cls("cuda out of memory", "exec") == OutcomeId.exec_oom
-    assert cls("safetensorerror loading", "exec") == OutcomeId.exec_model_load_failed  # 251
+    assert cls("safetensorerror loading", "exec") == OutcomeId.exec_model_load_failed
     assert cls("calibration dataloader broke", "exec") == OutcomeId.exec_calibration_data_missing
     assert cls("save_pretrained ioerror", "export") == OutcomeId.export_crashed
-    assert cls("out of memory", "eval") == OutcomeId.eval_oom  # 258
-    assert cls("vllm engine.start failed", "eval") == OutcomeId.quantized_load_failed  # 260
-    assert cls("some generic eval error", "eval") == OutcomeId.eval_env_unavailable  # 262
-    assert cls("config.json: no such file", "intake") == OutcomeId.model_path_unreachable  # 264-265
+    assert cls("out of memory", "eval") == OutcomeId.eval_oom
+    assert cls("vllm engine.start failed", "eval") == OutcomeId.quantized_load_failed
+    assert cls("some generic eval error", "eval") == OutcomeId.eval_env_unavailable
+    assert cls("config.json: no such file", "intake") == OutcomeId.model_path_unreachable
     assert cls("nothing matches", "unknown_phase") is None
 
 
@@ -45,7 +45,7 @@ def test_classify_phase_artifact_gap_pyyaml(tmp_path) -> None:
         manifest_present=True,
         manifest_parse_error="pyyaml_missing",
     )
-    # pyyaml missing -> nice_to_have_skipped (lines 295-297).
+    # pyyaml missing -> nice_to_have_skipped.
     assert A._classify_phase_artifact_gap(art, "exec") == OutcomeId.nice_to_have_skipped
 
     art2 = dataclasses.replace(
@@ -57,7 +57,7 @@ def test_classify_phase_artifact_gap_pyyaml(tmp_path) -> None:
 
 
 def test_build_assessment_empty_and_bad_gap(tmp_path) -> None:
-    # Empty attempts -> unclassified_failure (lines 451-452).
+    # Empty attempts -> unclassified_failure.
     a = build_assessment([], workspace=tmp_path)
     assert a.final == OutcomeId.unclassified_failure
 
@@ -66,7 +66,7 @@ def test_build_assessment_empty_and_bad_gap(tmp_path) -> None:
         eval_report_data={"relative_gap": "not-a-float"},
     )
     a2 = build_assessment([OutcomeId.eval_gap_accepted], workspace=tmp_path, artifacts=art)
-    # Bad relative_gap swallowed (lines 463-464).
+    # Bad relative_gap swallowed.
     assert a2.eval_gap is None
 
 
@@ -84,7 +84,7 @@ def test_derive_status_must_have_recover_fails(tmp_path) -> None:
         eval_gap=None,
         notes=(),
     )
-    # MUST-have recover without artifact on disk -> failed (line 517).
+    # MUST-have recover without artifact on disk -> failed.
     assert derive_status(assessment, art) == "failed"
 
 

@@ -75,8 +75,8 @@ _SAMPLE_ROW = {
         "output_tput_per_gpu": 1390.7,
         "input_tput_per_gpu": 1390.8,
         "mean_ttft": 0.094,  # seconds
-        "mean_tpot": 0.022,  # seconds
-        "mean_e2el": 20.6,  # seconds
+        "mean_tpot": 0.022,
+        "mean_e2el": 20.6,
     },
     "date": "2026-04-17",
     "run_url": "https://example/runs/x",
@@ -145,7 +145,7 @@ def mock_inferencex(monkeypatch):
         )
         state["shutdown"] = shutdown
         monkeypatch.setenv("INFERENCEX_BASE_URL", url)
-        # Keep retry budget short so timeout tests don't hang.
+        # Short retry budget so timeout tests don't hang.
         monkeypatch.setenv("INFERENCEX_TIMEOUT_SEC", "0.5")
         monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "1")
         return url
@@ -363,7 +363,7 @@ def test_analyze_sourceless_target_dropped(tmp_path):
     """Per-conc rows without a source are discarded; all-sourceless degrades to no_match."""
     from hyperloom.orchestrator.knowledge import research_hints
 
-    # Emulate a hand-edited file with a sourceless row to exercise load-time filter.
+    # Hand-edited file with a sourceless row to exercise the load-time filter.
     from hyperloom.inference_optimizer.session import session_paths
 
     path = session_paths.competitor_target_json(tmp_path)
@@ -441,7 +441,7 @@ def test_report_section_renders_no_target_gpu_marker():
     assert "## External baseline (not requested)" in md
     assert "no_target_gpu_configured" in md
     assert "No `--compare-against-gpu`" in md
-    # Must NOT render a fake reference-best line.
+    # Must NOT render a reference-best line.
     assert "Reference best per-GPU throughput" not in md
 
 

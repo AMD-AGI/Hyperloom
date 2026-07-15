@@ -82,8 +82,8 @@ def test_convolution_estimates_bound():
 
 
 def test_vendor_gemm_gets_bound_even_without_source():
-    # The whole point of the xDiT gap fix: a vendor GEMM (non-rewritable) still
-    # gets an analytical bound purely from shapes + measured time.
+    # A vendor GEMM (non-rewritable) still gets an analytical bound purely from
+    # shapes + measured time.
     r = compute_roofline(
         category="GEMM", shape_str="(2048,2240) bf16<br>(2240,2240) bf16",
         gpu_time_us=300.0, call_count=1, gpu_type="mi300x",
@@ -140,9 +140,9 @@ def test_gpu_and_dtype_change_peak():
 
 
 def test_depthwise_conv_uses_group_channels_not_input_channels():
-    # Real Sana k004: input (2,11200,32,32), weight (Cout=11200, Cin/groups=1, 3, 3).
-    # FLOPs must use wc=1 (depthwise), NOT the 11200 input channels -> the dense
-    # formula overcounts by groups=Cin=11200x, faking a compute-bound eff=100%.
+    # Depthwise conv: input (2,11200,32,32), weight (Cout=11200, Cin/groups=1, 3, 3).
+    # FLOPs must use wc=1, not the 11200 input channels (the dense formula
+    # overcounts by groups=Cin, faking compute-bound eff=100%).
     B, C, HW, Cout, wc, R, S = 2, 11200, 32, 11200, 1, 3, 3
     r = compute_roofline(
         category="Convolution",
@@ -155,12 +155,12 @@ def test_depthwise_conv_uses_group_channels_not_input_channels():
     dbytes = 2.0
     nbytes = dbytes * (B * C * out_hw + Cout * wc * R * S + B * Cout * out_hw)
     assert r["arithmetic_intensity"] == round(flops / nbytes, 4)
-    # low AI -> memory-bound (the dense-formula bug made it compute-bound eff=100%).
+    # low AI -> memory-bound.
     assert r["bound_type"] == "memory_bound"
 
 
 def test_dense_conv_flops_unchanged_by_wc_fix():
-    # Guard: a dense conv has wc == Cin, so switching c -> wc must NOT change it.
+    # A dense conv has wc == Cin, so switching c -> wc must not change it.
     B, Cin, HW, Cout, R, S = 2, 320, 64, 320, 3, 3
     r = compute_roofline(
         category="Convolution",
@@ -179,9 +179,8 @@ def test_dense_conv_flops_unchanged_by_wc_fix():
 
 
 def test_sdpa_cross_attention_infers_bshd_layout():
-    # Real Sana k006 cross-attn: Q(B,Sq,H,D), K/V(B,Skv,H,D), score(B,H,Sq,Skv).
-    # The head dim is shared between Q/K middle dims -> layout is resolved exactly
-    # (not the hardcoded B,H,S,D), and FLOPs use Sq*Skv (Skv=300 != Sq=1024).
+    # Cross-attn Q(B,Sq,H,D), K/V(B,Skv,H,D), score(B,H,Sq,Skv). The shared head
+    # dim resolves the layout exactly and FLOPs use Sq*Skv (Skv=300 != Sq=1024).
     B, Sq, H, D, Skv = 2, 1024, 20, 112, 300
     shp = (f"({B},{Sq},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16<br>"
            f"({B},{Skv},{H},{D}) bf16<br>({B},{H},{Sq},{Skv}) bf16")
@@ -211,16 +210,15 @@ def test_sdpa_self_attention_ambiguous_layout_is_marked_inferred():
 
 
 def test_sdpa_score_tensor_disambiguates_shared_seqlen():
-    # Equal-seq cross-attn with different Q/K head counts (Hq=16, Hkv=4): the
-    # only value Q/K middle dims share is the SEQ length, so shared-dim inference
-    # would wrongly treat seq as the head. The authoritative score (B,Hq,Sq,Skv)
-    # must resolve it -> H=Hq, and it must NOT be silently mis-labeled "exact".
+    # Equal-seq cross-attn with different Q/K head counts (Hq=16, Hkv=4): Q/K
+    # middle dims share only the seq length, so the authoritative score
+    # (B,Hq,Sq,Skv) must resolve H=Hq.
     B, S, Hq, Hkv, D = 2, 256, 16, 4, 64
     shp = (f"({B},{S},{Hq},{D}) bf16<br>({B},{S},{Hkv},{D}) bf16<br>"
            f"({B},{S},{Hkv},{D}) bf16<br>({B},{Hq},{S},{S}) bf16")
     r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1, gpu_type="mi300x")
     assert r is not None
-    flops = 4.0 * B * Hq * S * S * D  # NOT 4*B*S*Hq*Hkv*D (the shared-dim mistake)
+    flops = 4.0 * B * Hq * S * S * D
     nbytes = 2.0 * (B * S * Hq * D + B * S * Hkv * D + B * S * Hkv * D)
     assert r["arithmetic_intensity"] == round(flops / nbytes, 4)
 
@@ -240,8 +238,7 @@ def test_sdpa_cross_attention_shared_dim_without_score():
 
 def test_efficiency_uses_achievable_peak_not_vendor():
     # Per-kernel efficiency% must use the max-achievable peak (708 TFLOPS bf16
-    # mi300x) -- the SAME convention as the session roofline ceiling -- NOT the
-    # vendor dense peak (1307.4), which would understate efficiency ~1.85x.
+    # mi300x), not the vendor dense peak (1307.4).
     r = compute_roofline(
         category="GEMM", shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
         gpu_time_us=500.0, call_count=1, gpu_type="mi300x",

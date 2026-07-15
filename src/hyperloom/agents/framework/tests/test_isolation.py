@@ -69,7 +69,6 @@ def test_cleanup_workspace_removes_loser(tmp_path: Path) -> None:
     cleanup_workspace(ws, is_winner=False, keep_winner_only=True)
     assert not worktree.exists()
     assert not venv.exists()
-    # Audit material stays on disk for reviewers.
     assert (candidate_dir / "pr.patches").exists()
 
 
@@ -117,5 +116,5 @@ def test_cleanup_workspace_swallows_oserror(
     monkeypatch.setattr("hyperloom.agents.framework.isolation.shutil.rmtree", boom)
     ws = WorkspacePaths(candidate_dir, worktree, venv)
     cleanup_workspace(ws, is_winner=False, keep_winner_only=True)
-    # No exception escapes; dirs still exist because rmtree was stubbed.
+    # rmtree is stubbed, so dirs still exist and no exception escapes.
     assert worktree.exists()

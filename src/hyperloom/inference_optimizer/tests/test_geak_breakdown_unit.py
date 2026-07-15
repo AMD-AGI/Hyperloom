@@ -39,9 +39,7 @@ def test_collect_geak_not_engaged_returns_empty(tmp_path: Path) -> None:
 
 
 def test_collect_geak_native_with_empty_result_default(tmp_path: Path) -> None:
-    # Regression: SharedState defaults geak_result to ``{}``. An empty dict
-    # must NOT be treated as engaged, or every native session emits a spurious
-    # geak section.
+    # An empty geak_result dict must NOT be treated as engaged.
     state = {"kernel_optimizer": "native", "geak_result": {}}
     out = collect_geak(tmp_path, state, [])
     assert out == {}
@@ -67,10 +65,8 @@ def test_collect_geak_engaged_without_result(tmp_path: Path) -> None:
 def test_collect_geak_reconstructs_from_disk_when_result_missing(
     tmp_path: Path,
 ) -> None:
-    # Reproduce the incident: geak was engaged and the runner produced an
-    # on-disk working tree, but ``geak_result`` never reached state (an
-    # external kill before the tick-boundary save, then resume past KERNEL).
-    # The collector must reconstruct the run from disk instead of a bare miss.
+    # geak engaged with an on-disk tree but no ``geak_result`` in state: the
+    # collector reconstructs the run from disk instead of a bare miss.
     pf = tmp_path / "geak"
     pf.mkdir()
     (pf / "handoff.json").write_text(
@@ -145,10 +141,9 @@ def test_collect_geak_reconstructs_from_disk_when_result_missing(
 def test_collect_geak_reconstruct_surfaces_opbench_logs_and_cause(
     tmp_path: Path,
 ) -> None:
-    # The incident shape: the e2e ran the op-bench bake-off (no editable winner
-    # > 1.0x) and was then killed before flushing a result/journey. The
-    # reconstruction must surface the op-bench verdicts (WHY no win), the runner
-    # log tails (the lost stdout/stderr proxy), and classify the cause.
+    # e2e ran the op-bench bake-off (no editable winner) then was killed before
+    # flushing a result/journey: reconstruction surfaces the op-bench verdicts,
+    # runner log tails, and a classified cause.
     pf = tmp_path / "geak"
     exp = pf / "e2e_run"
     (exp / "baseline").mkdir(parents=True)
@@ -186,9 +181,7 @@ def test_collect_geak_reconstruct_surfaces_opbench_logs_and_cause(
 
 
 def test_collect_geak_reconstruct_cause_killed_before_flush(tmp_path: Path) -> None:
-    # Stages reached (baseline/kernels) but neither a journey nor a result.json
-    # nor any op-bench verdict landed → the in-flight result died with the
-    # process (SIGKILL / budget / hang).
+    # Stages reached but no journey/result.json/op-bench verdict → killed before flush.
     pf = tmp_path / "geak"
     exp = pf / "e2e_run"
     (exp / "baseline").mkdir(parents=True)
@@ -203,8 +196,7 @@ def test_collect_geak_reconstruct_cause_killed_before_flush(tmp_path: Path) -> N
 
 
 def test_collect_geak_reconstruct_cause_runner_reported_failure(tmp_path: Path) -> None:
-    # A non-ok result.json was flushed (the runner itself reported the failure):
-    # the cause is the reported failure, not a silent kill.
+    # A non-ok result.json was flushed → cause is the reported failure, not a silent kill.
     pf = tmp_path / "geak"
     pf.mkdir()
     (pf / "handoff.json").write_text(json.dumps({"framework": "vllm"}), encoding="utf-8")
@@ -220,8 +212,7 @@ def test_collect_geak_reconstruct_cause_runner_reported_failure(tmp_path: Path) 
 
 
 def test_collect_geak_reconstruct_handoff_only(tmp_path: Path) -> None:
-    # Only the handoff landed (runner killed before writing any e2e output):
-    # still recoverable — proves engagement + handoff without an e2e exp_root.
+    # Only the handoff landed → still recoverable without an e2e exp_root.
     pf = tmp_path / "geak"
     pf.mkdir()
     (pf / "handoff.json").write_text(
@@ -326,9 +317,8 @@ def _write_kernel_journey(eval_dir: Path) -> Path:
 
 
 def test_collect_geak_backfills_accepted_kernels_from_journey(tmp_path: Path) -> None:
-    # result.json shipped the aggregate win but an empty accepted_kernels (a
-    # recovered/intermediate flush). The sibling kernel_journey.json holds the
-    # integrated KEEP kernel, so the collector must back-fill it.
+    # result.json shipped the aggregate win with empty accepted_kernels; the
+    # collector back-fills the integrated KEEP kernel from kernel_journey.json.
     eval_dir = tmp_path / "geak" / "eval"
     _write_kernel_journey(eval_dir)
     state = {
@@ -377,8 +367,7 @@ def test_collect_geak_backfill_via_explicit_journey_path(tmp_path: Path) -> None
 
 
 def test_collect_geak_does_not_overwrite_populated_kernels(tmp_path: Path) -> None:
-    # A producer-populated accepted_kernels list must be preserved verbatim and
-    # marked as sourced from the result, never replaced by the journey.
+    # A populated accepted_kernels list is preserved verbatim, never replaced by the journey.
     eval_dir = tmp_path / "geak" / "eval"
     _write_kernel_journey(eval_dir)
     state = {
@@ -452,13 +441,11 @@ def test_collect_geak_speedup_only_gain_and_bad_kernels(tmp_path: Path) -> None:
 
 
 def test_collect_geak_relativize_failure_warns(tmp_path: Path, monkeypatch) -> None:
-    # Force the relativization helper to raise so the best-effort except branch
-    # records a warning instead of swallowing it silently.
+    # Force the relativization helper to raise so the except branch records a warning.
     def _boom(_path, _session_dir):
         raise OSError("relativize boom")
 
-    # collect_geak lives in the ``geak`` submodule, which binds
-    # ``_rel`` from ``collectors._common``; patch it there.
+    # collect_geak binds ``_rel`` in the ``geak`` submodule; patch it there.
     monkeypatch.setattr(collectors.geak, "_rel", _boom)
 
     eval_dir = tmp_path / "runs" / "eval"
@@ -493,8 +480,7 @@ def test_write_benchmark_report_happy_path(tmp_path: Path) -> None:
 
 
 def test_write_benchmark_report_oserror_is_swallowed(tmp_path: Path) -> None:
-    # A file (not a directory) as out_dir makes the nested write raise
-    # NotADirectoryError (an OSError); the best-effort writer must not raise.
+    # A file as out_dir makes the write raise NotADirectoryError; the writer must not raise.
     not_a_dir = tmp_path / "afile"
     not_a_dir.write_text("x", encoding="utf-8")
     _write_benchmark_report(
@@ -537,8 +523,7 @@ def test_read_json_roundtrip_and_missing(tmp_path: Path) -> None:
 
 
 def test_schema_has_geak_contract() -> None:
-    # The exporter emits a top-level ``geak`` section, so the wire schema
-    # must declare it (contract + TypedDict), else readers have no shape to rely on.
+    # The wire schema must declare the top-level ``geak`` section the exporter emits.
     from hyperloom.inference_optimizer.breakdown import schema
 
     assert hasattr(schema, "Geak")

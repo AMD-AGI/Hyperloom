@@ -46,9 +46,7 @@ def _ctx(
     )
 
 
-# ---------------------------------------------------------------------------
 # Stall
-# ---------------------------------------------------------------------------
 
 
 def test_stall_emits_medium_when_agent_silent_past_threshold():
@@ -95,9 +93,7 @@ def test_stall_uses_iso_timestamps_too():
     assert out and out[0].evidence["agent"] == "kernel_agent"
 
 
-# ---------------------------------------------------------------------------
 # Crash
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -121,9 +117,7 @@ def test_crash_signal_thresholds(crash_count, expected_name, expected_severity):
         assert out[0].severity is expected_severity
 
 
-# ---------------------------------------------------------------------------
 # Event
-# ---------------------------------------------------------------------------
 
 
 def test_repeated_policy_denied_emits_medium_alert():
@@ -233,7 +227,6 @@ def test_recover_unsuccessful_silent_when_recover_succeeded():
 
 
 def test_recover_unsuccessful_uses_latest_result_when_multiple_recovers():
-    # Old recover succeeded; newer recover failed → fire on the newer.
     coord_events = [
         {
             "topic": "delegated_result",
@@ -267,7 +260,7 @@ def test_recover_unsuccessful_uses_latest_result_when_multiple_recovers():
 
 
 def test_idempotency_replay_fires_when_same_payload_distinct_keys():
-    """B4: distinct idempotency_keys + same payload hash → MEDIUM alert."""
+    """Distinct idempotency_keys + same payload hash fires a MEDIUM alert."""
     inbox = [
         InboxItem(
             seq=1,
@@ -335,7 +328,7 @@ def test_idempotency_replay_silent_when_payloads_differ():
 
 
 def test_idempotency_replay_silent_when_no_key():
-    """No idempotency_key at all → not a key-bypass attempt, skip."""
+    """No idempotency_key at all is not a key-bypass attempt, so skip."""
     inbox = [
         InboxItem(
             seq=1,
@@ -364,8 +357,7 @@ def test_idempotency_replay_silent_when_no_key():
 
 
 def test_recover_unsuccessful_detected_via_signature_when_kind_missing():
-    # ``kind`` tag elided — still recognised as recover via the
-    # ``force_gpu_cleanup`` + ``gpureset_attempted`` signature.
+    # kind tag elided; recognised as recover via the force_gpu_cleanup + gpureset_attempted signature.
     coord_events = [
         {
             "topic": "delegated_result",
@@ -412,9 +404,7 @@ def test_event_handles_combined_inbox_and_coordinator_events():
     assert any(s.name == "repeated_policy_denied" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # Health
-# ---------------------------------------------------------------------------
 
 
 def test_health_flags_failed_pod_as_high_severity():
@@ -489,9 +479,7 @@ def test_health_does_not_flag_recently_started_pods_with_no_metrics():
     assert evaluate_health_signals(_ctx(now_unix=now), data, config=HealthConfig(no_metrics_warn_s=600)) == []
 
 
-# ---------------------------------------------------------------------------
 # Classifier
-# ---------------------------------------------------------------------------
 
 
 def test_classifier_dedupes_same_subject_keeps_higher_severity():

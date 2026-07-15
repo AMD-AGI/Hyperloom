@@ -32,7 +32,7 @@ def akp() -> types.ModuleType:
     return module
 
 
-# --- manifest parser -------------------------------------------------------
+# manifest parser
 
 def test_parse_manifest_modify_add_delete(akp):
     patch = (
@@ -68,7 +68,7 @@ def test_parse_manifest_empty_raises(akp):
         akp.parse_patch_manifest("   \n")
 
 
-# --- apply_snapshot core ---------------------------------------------------
+# apply_snapshot core
 
 def _mk(tmp_path):
     repo = tmp_path / "repo"
@@ -140,8 +140,8 @@ def test_apply_snapshot_midapply_failure_restores_all(tmp_path, akp, monkeypatch
         {"op": "write", "path": "first.py", "mode": "", "binary": False},
         {"op": "write", "path": "second.py", "mode": "", "binary": False},
     ]
-    # Inject a write failure on the SECOND file's apply copy (after first
-    # succeeded) — robust regardless of uid, unlike a chmod-based block.
+    # Inject a write failure on the second file's apply copy after the first
+    # succeeded.
     real_copy2 = akp.shutil.copy2
 
     def flaky(src, dst, *a, **k):
@@ -156,7 +156,7 @@ def test_apply_snapshot_midapply_failure_restores_all(tmp_path, akp, monkeypatch
     assert not (repo / "second.py").exists()
 
 
-# --- end-to-end apply_kernel_patch snapshot mode + revert ------------------
+# end-to-end apply_kernel_patch snapshot mode + revert
 
 def _patch_text():
     return (
@@ -204,9 +204,8 @@ def test_snapshot_mode_post_verify_mismatch_fails_and_restores(tmp_path, akp, mo
     patch = tmp_path / "p.patch"
     patch.write_text("diff --git a/k.py b/k.py\n--- a/k.py\n+++ b/k.py\n@@ -1 +1 @@\n-V0\n+V1\n")
 
-    # Corrupt the applied file once (during apply only) so post-verify detects a
-    # content mismatch vs the snapshot and must restore. The one-shot guard lets
-    # the subsequent restore copy run cleanly.
+    # Corrupt the applied file once during apply so post-verify detects a
+    # content mismatch vs the snapshot and must restore.
     real_copy2 = akp.shutil.copy2
     state = {"poisoned": False}
 

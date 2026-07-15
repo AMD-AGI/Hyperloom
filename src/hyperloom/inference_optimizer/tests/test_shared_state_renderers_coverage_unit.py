@@ -32,7 +32,6 @@ def test_format_variant_line():
     assert "+5.00%" in line
     assert "tput=120.0" in line
     assert "E=1" in line
-    # no-measurement / no-flag branch
     line2 = SharedState._format_variant_line({"name": "v2"})
     assert "no_meas" in line2
     assert "(no-flag)" in line2

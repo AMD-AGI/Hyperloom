@@ -2,32 +2,17 @@
 
 """Refactor safety net: golden behavioral baseline for the Coordinator.
 
-This test drives a *fixed, deterministic* sequence of intents through a real
-``Coordinator`` (with mock backends) and snapshots the resulting observable
-behavior — the persisted ``SharedState`` and the decision/result message
-topics on the bus. The snapshot is captured once as a golden fixture and
-asserted byte-for-byte (after normalizing non-deterministic fields) on every
-subsequent run.
-
-Why this exists
----------------
-The structural refactor (see the "break four God-objects" plan) extracts the
-Coordinator's ``_handle_*`` intent routing and ``record_*`` state mutations into
-collaborator objects (``IntentRouter``, ``ResultRecorder``) and moves behavior
-off ``SharedState``. Those moves must be *behavior-preserving*. This test is the
-gate: if an extraction changes what the Coordinator does — different state,
-different bus decisions — the golden mismatch fails the build before the change
-can land.
-
-It deliberately exercises the exact methods the refactor touches:
-``_handle_intent`` → ``_handle_propose_action`` / ``_handle_review_verdict`` /
-``_handle_delegate``, plus the ``SharedState`` mutations they trigger.
+Drives a fixed, deterministic sequence of intents through a real ``Coordinator``
+(with mock backends) and snapshots the resulting observable behavior — the
+persisted ``SharedState`` and the decision/result message topics on the bus. The
+snapshot is asserted (after normalizing non-deterministic fields) on every run,
+gating that ``_handle_*`` intent routing and ``record_*`` state mutations stay
+behavior-preserving.
 
 Regenerating the golden
 -----------------------
 Set ``REFRESH_GOLDEN=1`` to rewrite the golden file from current behavior. Only
-do this when a behavior change is *intended* and reviewed — never to silence an
-unexpected diff during a refactor.
+do this when a behavior change is intended and reviewed.
 """
 
 from __future__ import annotations
@@ -53,9 +38,7 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 GOLDEN_PATH = Path(__file__).parent / "golden" / "coordinator_behavior_golden.json"
 
 
-# --------------------------------------------------------------------------- #
-# Backend scaffolding (mirrors tests/test_coordinator_runtime.py)
-# --------------------------------------------------------------------------- #
+# Backend scaffolding.
 def _heartbeat() -> Intent:
     return Intent(type=IntentType.SEND_MESSAGE,
                   payload={"topic": "heartbeat", "body_md": "ok"})
@@ -86,12 +69,9 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return sd
 
 
-# --------------------------------------------------------------------------- #
-# Normalization: strip fields that legitimately vary run-to-run
-# --------------------------------------------------------------------------- #
-# Any key whose name matches one of these is replaced with a stable sentinel
-# wherever it appears (at any depth). These are timestamps, ids, paths, and
-# host/pid facts — none of which encode Coordinator *behavior*.
+# Normalization: strip fields that vary run-to-run.
+# Keys matching these are replaced with a stable sentinel at any depth
+# (timestamps, ids, paths, host/pid facts — none encode Coordinator behavior).
 _VOLATILE_KEY_SUFFIXES = (
     "_ts", "_at", "_at_utc", "_unix", "_msg_id", "_id",
 )
@@ -113,8 +93,8 @@ def _is_volatile_key(key: str) -> bool:
 def _normalize(obj: Any) -> Any:
     """Recursively replace volatile values with a stable sentinel.
 
-    Preserves *presence* and *type-shape* (so a refactor that drops a field
-    still fails) while ignoring run-to-run noise in the value itself.
+    Preserves presence and type-shape (so a dropped field still fails) while
+    ignoring run-to-run noise in the value itself.
     """
     if isinstance(obj, dict):
         out: dict[str, Any] = {}
@@ -149,9 +129,7 @@ def _message_digest(messages: list[Any]) -> list[dict[str, Any]]:
     return rows
 
 
-# --------------------------------------------------------------------------- #
-# The deterministic scenario the golden locks down
-# --------------------------------------------------------------------------- #
+# The deterministic scenario the golden locks down.
 async def _drive_scenario(session_dir: Path) -> dict[str, Any]:
     """Run a fixed propose -> approve -> delegate flow; return observable state.
 
@@ -205,9 +183,6 @@ async def _drive_scenario(session_dir: Path) -> dict[str, Any]:
         await c.stop()
 
 
-# --------------------------------------------------------------------------- #
-# The test
-# --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_coordinator_behavior_matches_golden(session_dir: Path) -> None:
     observed = await _drive_scenario(session_dir)

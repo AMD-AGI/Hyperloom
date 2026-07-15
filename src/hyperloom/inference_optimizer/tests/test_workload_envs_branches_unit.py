@@ -54,7 +54,6 @@ def _materialize(src, out, **kw):
     return yaml.safe_load(res.read_text())["benchmark"]
 
 
-# ---- _visible_gpu_count ---------------------------------------------------
 def test_visible_gpu_count_override_valid(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "4")
@@ -92,7 +91,6 @@ def test_visible_gpu_count_rocm_smi_error(monkeypatch):
     assert we._visible_gpu_count() == 0
 
 
-# ---- default_baseline_config ----------------------------------------------
 def test_default_baseline_config(monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "atom")
     assert we.default_baseline_config().name == "baseline_atom.yaml"
@@ -102,7 +100,6 @@ def test_default_baseline_config(monkeypatch):
     assert we.default_baseline_config().name == "baseline_sglang.yaml"
 
 
-# ---- precision + gpu_type without framework -------------------------------
 def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("PRECISION", "fp8")
@@ -117,7 +114,6 @@ def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     assert "benchmark_script" not in bench
 
 
-# ---- ROCR-derived TP ------------------------------------------------------
 def test_rocr_derives_tp(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -127,12 +123,11 @@ def test_rocr_derives_tp(monkeypatch, tmp_path):
     assert bench["envs"]["TP"] == 3
 
 
-# ---- NUM_PROMPTS factor branches (non-profile) ----------------------------
 @pytest.mark.parametrize(
     "isl,osl,conc,factor",
     [
-        (4000, 2000, 8, 3),  # 1024 < seq <= 16384 region (6000) -> factor 3
-        (3000, 1000, 8, 5),  # 1024 < seq <= 4096 (4000) -> factor 5
+        (4000, 2000, 8, 3),  # 1024 < seq <= 16384 -> factor 3
+        (3000, 1000, 8, 5),  # 1024 < seq <= 4096 -> factor 5
         (20000, 5000, 8, 2),  # > 16384 -> factor 2
     ],
 )
@@ -147,7 +142,6 @@ def test_num_prompts_factor(monkeypatch, tmp_path, isl, osl, conc, factor):
     assert bench["envs"]["NUM_PROMPTS"] == conc * factor
 
 
-# ---- server_args merge into existing --------------------------------------
 def test_server_args_merge_existing(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -233,7 +227,6 @@ def test_inject_vllm_expert_parallel_unit(server_args, framework, ep, expected):
     assert we.inject_vllm_expert_parallel(server_args, framework, ep) == expected
 
 
-# ---- per-model work-around: mimo-v2 ---------------------------------------
 def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -242,7 +235,6 @@ def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     assert "attention-backend triton" in bench["envs"]["EXTRA_SGLANG_ARGS"]
 
 
-# ---- RUN_EVAL from env ----------------------------------------------------
 def test_run_eval_from_env(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -272,17 +264,15 @@ def test_run_eval_explicit_false_warns_not_blocks(monkeypatch, tmp_path, caplog)
     assert any("RUN_EVAL is disabled" in r.message for r in caplog.records)
 
 
-# ---- profile-window math --------------------------------------------------
 def test_profile_negative_delay_clamped(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ISL", "1")
     monkeypatch.setenv("OSL", "1")
     monkeypatch.setenv("CONC", "8")
-    # PROFILE in yaml envs triggers is_profile; bad RANDOM_RANGE_RATIO -> except
+    # PROFILE triggers is_profile; bad RANDOM_RANGE_RATIO hits the except branch.
     src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1", "RANDOM_RANGE_RATIO": "not-a-float"})
     bench = _materialize(src, tmp_path / "out")
-    # profile path forces NUM_PROMPTS; small OSL clamps delay to 0
     assert "NUM_PROMPTS" in bench["envs"]
 
 
@@ -304,7 +294,7 @@ def test_profile_atom_defers(monkeypatch, tmp_path):
         yaml.safe_dump({"benchmark": {"framework": "atom", "model": "/m", "envs": {"PROFILE": "1"}}}), encoding="utf-8"
     )
     bench = _materialize(src, tmp_path / "out")
-    # atom defers NUM_PROMPTS to Magpie (profile_num_prompts None) -> factor path
+    # atom defers NUM_PROMPTS to Magpie, taking the factor path.
     assert "NUM_PROMPTS" in bench["envs"]
 
 
@@ -317,7 +307,6 @@ def test_profile_sglang_bad_extra_body(monkeypatch, tmp_path):
     assert "start_step" in body and "num_steps" in body
 
 
-# ---- profile capture cap + profile-scoped OSL (issue #571 / #570) ---------
 def _profile_num_steps(bench) -> int:
     """Captured-step count the sglang profile path writes into PROFILE_EXTRA_BODY."""
     import json
@@ -326,8 +315,7 @@ def _profile_num_steps(bench) -> int:
 
 
 def test_profile_default_caps_steps_and_osl(monkeypatch, tmp_path):
-    # No PROFILE_OSL: capture is capped at the default 128 and the profile OSL
-    # defaults to min(served OSL, 1024) without touching the served value.
+    # No PROFILE_OSL: capture capped at 128, profile OSL defaults to min(OSL, 1024).
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "8192")
@@ -339,7 +327,7 @@ def test_profile_default_caps_steps_and_osl(monkeypatch, tmp_path):
 
 
 def test_profile_explicit_profile_osl_honored(monkeypatch, tmp_path):
-    # --profile-osl / PROFILE_OSL overrides the profile OSL verbatim.
+    # PROFILE_OSL overrides the profile OSL verbatim.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "8192")
@@ -352,7 +340,6 @@ def test_profile_explicit_profile_osl_honored(monkeypatch, tmp_path):
 
 
 def test_profile_steps_cap_env_override(monkeypatch, tmp_path):
-    # Operators can raise the serialization cap.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "1024")
@@ -364,8 +351,8 @@ def test_profile_steps_cap_env_override(monkeypatch, tmp_path):
 
 
 def test_profile_high_osl_low_conc_auto_lowers_osl(monkeypatch, tmp_path, caplog):
-    # Low CONC pushes the steady-state floor above the cap at OSL=1024, so the
-    # auto path lowers the profile OSL until the floor fits the 128-step cap.
+    # Low CONC pushes the steady-state floor above the cap, so the auto path
+    # lowers the profile OSL until the floor fits the 128-step cap.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "8192")
@@ -380,7 +367,7 @@ def test_profile_high_osl_low_conc_auto_lowers_osl(monkeypatch, tmp_path, caplog
 
 
 def test_profile_manual_max_iters_below_floor_warns(monkeypatch, tmp_path, caplog):
-    # An explicit too-small capture is honored but warned about (steady-state).
+    # An explicit too-small capture is honored but warned about.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "1024")
@@ -394,8 +381,8 @@ def test_profile_manual_max_iters_below_floor_warns(monkeypatch, tmp_path, caplo
 
 
 def test_profile_explicit_osl_over_cap_warns_not_lowered(monkeypatch, tmp_path, caplog):
-    # Explicit PROFILE_OSL whose steady floor exceeds the cap is honored as-is
-    # (operator choice), but a warning is emitted.
+    # Explicit PROFILE_OSL whose steady floor exceeds the cap is honored as-is,
+    # but a warning is emitted.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "1024")
@@ -410,7 +397,7 @@ def test_profile_explicit_osl_over_cap_warns_not_lowered(monkeypatch, tmp_path, 
 
 
 def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog):
-    # An explicit too-large capture is honored but warned about (serialization).
+    # An explicit too-large capture is honored but warned about.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "256")
@@ -423,10 +410,9 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
     assert any("exceeds the serialization-safe cap" in r.message for r in caplog.records)
 
 
-# ---- scriptable quality-reference wiring (xDiT fail-open fix) --------------
 def test_quality_ref_variant_compares(monkeypatch, tmp_path):
     # A non-baseline scriptable variant must COMPARE against the operator
-    # reference (re-injected over the YAML's empty default) and must NOT write.
+    # reference and must NOT write.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
@@ -437,8 +423,7 @@ def test_quality_ref_variant_compares(monkeypatch, tmp_path):
 
 
 def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
-    # The baseline ESTABLISHES the reference: compare off (so a stale file can't
-    # mis-gate the baseline) and write the fresh reference.
+    # The baseline ESTABLISHES the reference: compare off and write it fresh.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
@@ -449,7 +434,7 @@ def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
 
 
 def test_quality_ref_baseline_write_env_override(monkeypatch, tmp_path):
-    # An explicit XDIT_QUALITY_REF_WRITE wins over the derived path on baseline.
+    # Explicit XDIT_QUALITY_REF_WRITE wins over the derived path on baseline.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
@@ -460,8 +445,7 @@ def test_quality_ref_baseline_write_env_override(monkeypatch, tmp_path):
 
 
 def test_quality_ref_profile_disabled_and_no_write(monkeypatch, tmp_path):
-    # Profiling/roofline must never gate AND never write (an inherited write
-    # path could clobber the baseline reference with a reduced-step image).
+    # Profiling/roofline must never gate AND never write.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
@@ -473,8 +457,7 @@ def test_quality_ref_profile_disabled_and_no_write(monkeypatch, tmp_path):
 
 
 def test_quality_ref_untouched_for_serving_framework(monkeypatch, tmp_path):
-    # Serving frameworks (non-scriptable) are unaffected: no XDIT_QUALITY_* keys
-    # are injected even when the env is set.
+    # Serving frameworks inject no XDIT_QUALITY_* keys even when the env is set.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
@@ -485,10 +468,8 @@ def test_quality_ref_untouched_for_serving_framework(monkeypatch, tmp_path):
 
 
 def test_quality_ref_zero_config_variant_defaults_to_session_ref(monkeypatch, tmp_path):
-    # No operator reference configured: a stable per-session reference is
-    # derived (session_dir/storage/quality_ref/baseline.png) so the gate stays
-    # ACTIVE with zero operator setup. A variant COMPAREs against it, never
-    # writes.
+    # No operator reference: a stable per-session reference is derived so the
+    # gate stays active. A variant COMPAREs against it, never writes.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     sess = tmp_path / "sess"
@@ -502,7 +483,7 @@ def test_quality_ref_zero_config_variant_defaults_to_session_ref(monkeypatch, tm
 
 def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_path):
     # The baseline writes the derived per-session reference (compare off) so a
-    # subsequent variant has something to gate against without operator setup.
+    # subsequent variant has something to gate against.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     sess = tmp_path / "sess"

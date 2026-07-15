@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Session_dir layout regression tests (N17 per-model/ts default)."""
+"""Session_dir layout regression tests (per-model/ts default)."""
 
 from __future__ import annotations
 
@@ -35,7 +35,6 @@ from hyperloom.inference_optimizer.session.session_paths import (
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
 
-# paths.session_dir + skeleton
 def test_session_dir_default_is_workspace_hyperloom(monkeypatch):
     monkeypatch.delenv(paths.ENV_USER_DATA_PATH, raising=False)
     assert paths.session_dir() == Path("/workspace/hyperloom")
@@ -61,7 +60,6 @@ def test_make_session_dir_creates_full_skeleton(tmp_path, monkeypatch):
     assert sd2 == sd
 
 
-# N17 per-model/ts layout
 def test_workspace_root_returns_user_data_path(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     assert paths.workspace_root() == tmp_path
@@ -75,7 +73,7 @@ def test_workspace_root_independent_of_session_pin(tmp_path, monkeypatch):
 
 
 def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
-    """N17 default: per-model/per-launch subdir + pin propagation."""
+    """Default: per-model/per-launch subdir + pin propagation."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir(model_name="/wekafs/models/DeepSeek-R1-0528")
     # Layout: <ws>/DeepSeek-R1-0528/<UTC ts>/
@@ -205,17 +203,17 @@ def test_find_latest_per_session_dir_ignores_non_ts_dirs(
 
 
 def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
-    """N17: runtime/ lives under workspace_root, not the per-session subdir."""
+    """runtime/ lives under workspace_root, not the per-session subdir."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
     assert paths.runtime_dir(sd) == tmp_path / "runtime"
-    # Also true when caller passes the historical no-arg form (back-compat)
+    # Also true for the no-arg form.
     assert paths.runtime_dir() == tmp_path / "runtime"
 
 
 def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypatch):
-    # Magpie resolves under the pod-local open-source root (mirrors install.sh),
-    # NOT under $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
+    # Magpie resolves under the pod-local open-source root, not under
+    # $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "shared"))
     monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
@@ -226,8 +224,8 @@ def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypa
 
 
 def test_open_source_root_defaults_to_opt_hyperloom_not_tmp(monkeypatch):
- # default must be the non-ephemeral pod-internal dir and must NOT
-    # follow TMPDIR/tmp (a tmp-reaper wiping /tmp mid-run broke trace_analyze).
+ # Default must be the non-ephemeral pod-internal dir and must NOT follow
+    # TMPDIR/tmp.
     monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
     monkeypatch.setenv("TMPDIR", "/tmp/should-be-ignored")
     assert paths.open_source_root() == Path("/opt/hyperloom/open-source-repos")
@@ -247,8 +245,8 @@ def test_magpie_dir_honours_explicit_override(tmp_path, monkeypatch):
     assert paths.magpie_dir() == tmp_path / "operator-magpie"
 
 
-# TraceLens root resolution: mirrors magpie_dir so trace analysis resolves the
-# same checkout as install.sh even when TRACELENS_ROOT was not inherited.
+# TraceLens root resolution mirrors magpie_dir so trace analysis resolves the
+# same checkout even when TRACELENS_ROOT was not inherited.
 def test_tracelens_root_derives_from_open_source_root_when_env_unset(tmp_path, monkeypatch):
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
     monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
@@ -262,7 +260,6 @@ def test_tracelens_root_honours_explicit_override(tmp_path, monkeypatch):
     assert paths.tracelens_root() == tmp_path / "operator-tracelens"
 
 
-# manifest
 def test_write_manifest_writes_v1_schema(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
@@ -273,8 +270,7 @@ def test_write_manifest_writes_v1_schema(tmp_path, monkeypatch):
     assert on_disk == m
 
 
-# manifest "dependencies" block — records each upstream's SHA/remote so we can
-# answer "which upstream did this run hit?" (install.sh clones fresh per install).
+# manifest "dependencies" block records each upstream's SHA/remote.
 def test_manifest_records_dependencies_block_empty_when_envs_unset(
     tmp_path,
     monkeypatch,
@@ -389,7 +385,6 @@ def test_load_manifest_missing_raises(tmp_path):
         load_manifest(tmp_path / "no-such-session")
 
 
-# session_paths helpers
 def test_runs_dir_layout(tmp_path):
     p = runs_dir(tmp_path, "baseline", "task-abcdef01")
     assert p == tmp_path / "runs" / "baseline" / "task-abcdef01"
@@ -410,7 +405,6 @@ def test_agent_prompt_snapshot_path(tmp_path):
     )
 
 
-# SubAgentRunner pre-mkdir + workspace injection
 @pytest.mark.asyncio
 async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
@@ -469,7 +463,6 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
     assert captured["session_dir"] == str(sd)
 
 
-# PolicyGate strict path-containment
 def _gate(tmp_path: Path, *, strict: bool = True) -> PolicyGate:
     return PolicyGate(
         role_registry=default_role_registry(),
@@ -543,8 +536,8 @@ def test_policy_source_file_outside_allowlist_denied(tmp_path):
 
 
 def test_policy_framework_source_root_outside_allowlist_denied(tmp_path):
-    # An LLM-authored framework_source_root override escaping the source
-    # allowlist (e.g. "/root") must be rejected under strict_paths.
+    # A framework_source_root override escaping the source allowlist must be
+    # rejected under strict_paths.
     gate = _gate(tmp_path)
     intent = Intent(
         type=IntentType.REQUEST,
