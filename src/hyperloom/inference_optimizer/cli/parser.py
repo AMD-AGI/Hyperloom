@@ -258,7 +258,21 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="GPUs per multi-node pod (Infera worker/prefill/decode or RayJob "
-        "head+workers). Default: INFERENCE_OPTIMIZER_GPUS_PER_NODE or 8.",
+        "head+workers). Resolution: flag > INFERENCE_OPTIMIZER_GPUS_PER_NODE > 8.",
+    )
+    opt.add_argument(
+        "--cpus-per-node",
+        type=int,
+        default=None,
+        help="CPU cores requested per multi-node pod (Infera or RayJob). "
+        "Resolution: flag > 96 (default).",
+    )
+    opt.add_argument(
+        "--mem-per-node",
+        type=int,
+        default=None,
+        help="Memory (GiB) requested per multi-node pod (Infera or RayJob). "
+        "Resolution: flag > 1024 (default).",
     )
     # --rayjob-extra-env is a prompt-driven pass-through forwarded verbatim to workload_spec.env; the CLI
     # invents no keys. Reserved RAY_JOB_ENTRYPOINT stripped downstream; credential keys auto-injected elsewhere.
