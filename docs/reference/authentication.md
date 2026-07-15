@@ -187,11 +187,11 @@ explicit path pointing at a missing directory fails preflight.
 
 | Variable                     | Set by operator? | Default / auto-clone target                                | Description                                                                                                         |
 |------------------------------|------------------|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for open-source deps (TraceLens, InferenceX, Magpie, GEAK). Writable `/opt` required unless overridden. |
+| `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for open-source deps (TraceLens, InferenceX, GEAK). Writable `/opt` required unless overridden. |
 | `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX`                | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis; `install.sh` clones it when unset. |
 | `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens`                 | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; the kernel-agent installer clones and pins it when unset. |
 | `TRACELENS_INTERNAL_ROOT`    | optional         | unset (open-source-only)                                   | Internal TraceLens extension (roofline gap, MI355+ MAF). Hyperloom never clones it — set only when you maintain a checkout. |
-| `MAGPIE_PATH`                | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/Magpie`                    | Magpie benchmark wrappers; installed by `install.sh` when missing.                                                  |
+| `MAGPIE_PATH`                | optional override | Resolved from installed `Magpie` package                  | Magpie package root for benchmark wrappers and patch inspection. `install.sh` pip-installs Magpie from `MAGPIE_PACKAGE_SPEC` when it is not importable. |
 
 ```{note}
 `INFERENCE_OPTIMIZER_SESSION_DIR` is no longer read. `WORKSPACE_PATH` is

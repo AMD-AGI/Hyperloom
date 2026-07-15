@@ -339,7 +339,7 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | Component | Provided by |
 |---|---|
 | `inference_optimizer` pkg + `claude_agent_sdk` extras (`pip install -e .[test]`) | `ensure_inference_optimizer` |
-| **Magpie** (`git clone --depth 1 $MAGPIE_REPO $MAGPIE_PATH` + `pip install -e`; default `$MAGPIE_PATH=$HYPERLOOM_OPEN_SOURCE_ROOT/Magpie`) | `ensure_magpie` |
+| **Magpie** (`pip install "$MAGPIE_PACKAGE_SPEC"`; default spec pins `magpie-eval` to `$MAGPIE_REF`) | `ensure_magpie` |
 | `INFERENCEX_PATH` resolution (scans `$MAGPIE_PATH/InferenceX` → `$HYPERLOOM_RUNTIME_DIR/InferenceX`, else clones a fresh writable checkout; read-only host mounts are no longer used) | `ensure_inferencex` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 

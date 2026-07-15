@@ -367,7 +367,7 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
 
 # InferenceX benchmark_serving client-side deps. Mirrors the ``_BENCH_SERVING_DEPS``
 # list in assets/install.sh (keep in sync). ``benchmark_serving.py`` lives under
-# InferenceX (not Magpie's pyproject), so ``pip install -e Magpie`` never pulls
+# InferenceX (not Magpie's pyproject), so installing Magpie never pulls
 # these; every bypass/Magpie client launch imports them before hitting the server.
 _BENCH_SERVING_DEPS = (
     "aiohttp",
@@ -953,8 +953,8 @@ def _preflight(
     # sys.executable differs from /opt/venv can still import the client.
     _ensure_bench_serving_deps(benchmark_python, pip_extra)
 
-    # 2. Magpie — the benchmark engine the Magpie backend shells out to
-    # ($MAGPIE_PATH override; auto-clones if missing). Skipped entirely when the
+    # 2. Magpie — the benchmark engine the Magpie backend shells out to.
+    # Skipped entirely when the
     # active benchmark backend does not need Magpie (e.g. bypass): for the
     # Magpie backend ``benchmark_python`` already resolves to the
     # Magpie-importable venv (via resolve_benchmark_interpreter), so a
@@ -969,38 +969,32 @@ def _preflight(
     else:
         check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
     if _magpie_backend_active and check is not None and check.returncode != 0:
-        magpie_env = os.environ.get("MAGPIE_PATH")
-        magpie_env_explicit = bool(magpie_env)
-        if magpie_env:
-            magpie_dir = Path(magpie_env)
-        else:
-            from ..session.paths import magpie_dir as _magpie_default
-
-            magpie_dir = _magpie_default()
-        magpie_dir.parent.mkdir(parents=True, exist_ok=True)
-        if not (magpie_dir / "setup.py").exists() and not (magpie_dir / "pyproject.toml").exists():
-            # Refuse-to-clobber: don't clone Magpie over an explicit $MAGPIE_PATH.
-            if magpie_env_explicit:
-                print(
-                    f"Preflight: ERROR — $MAGPIE_PATH={magpie_dir} has no "
-                    f"setup.py/pyproject.toml; refusing to clone Magpie "
-                    f"main on top of an operator-supplied path. Fix the "
-                    f"env or unset $MAGPIE_PATH to fall back to the "
-                    f"session-default location.",
-                    file=sys.stderr,
-                )
-                raise FileNotFoundError(f"$MAGPIE_PATH={magpie_dir} is not a valid Magpie checkout")
-            print(f"Preflight: Magpie not importable and not found at {magpie_dir}; cloning ...")
-            subprocess.run(
-                ["git", "clone", "--depth", "1", "https://github.com/AMD-AGI/Magpie.git", str(magpie_dir)],
-                check=True,
-            )
-        print(f"Preflight: installing Magpie from {magpie_dir} ...")
+        magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
+        magpie_ref = os.environ.get("MAGPIE_REF", "0171222c532db6fc5cb174667db66e34f1d9dd98")
+        magpie_spec = os.environ.get(
+            "MAGPIE_PACKAGE_SPEC",
+            f"magpie-eval @ git+{magpie_repo}@{magpie_ref}",
+        )
+        print(f"Preflight: Magpie not importable; installing {magpie_spec} ...")
         subprocess.run(
-            [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, "-e", str(magpie_dir)],
+            [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
             check=True,
         )
         print("Preflight: Magpie installed OK")
+    if _magpie_backend_active and not os.environ.get("MAGPIE_PATH", "").strip():
+        magpie_root = subprocess.run(
+            [
+                magpie_python,
+                "-c",
+                "from pathlib import Path; import Magpie; print(Path(Magpie.__file__).resolve().parent.parent)",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        if magpie_root:
+            os.environ["MAGPIE_PATH"] = magpie_root
+            print(f"Preflight: MAGPIE_PATH resolved from installed package: {magpie_root}")
 
     # 3. InferenceX — required for GSM8K accuracy eval; lm-eval deps auto-install at runtime via benchmark_lib.sh.
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()

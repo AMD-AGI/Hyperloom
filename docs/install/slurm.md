@@ -254,7 +254,7 @@ source → gpu-type casing → orchestration-model allowlist.**
 - The docker path exposes all node GPUs to the container, so TP=8 occupies a
   whole node. Running multiple jobs per node requires isolating devices with
   `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (the scripts do not do this).
-- The installer clones Magpie / InferenceX / GEAK / TraceLens from GitHub, so
+- The installer pip-installs Magpie and clones InferenceX / GEAK / TraceLens from GitHub, so
   nodes need GitHub egress. A fully offline setup must bake these into the image
   and pre-stage model weights on the shared mount.
 - If the gateway's upstream lacks subscription credentials, real completions may
