@@ -58,8 +58,6 @@ subtrees:
     title: Environment variables
   - file: reference/authentication.md
     title: Authentication and credentials
-  - file: reference/integrate-kb.md
-    title: Knowledge base integration
   - file: reference/troubleshooting.md
     title: Troubleshooting
 
