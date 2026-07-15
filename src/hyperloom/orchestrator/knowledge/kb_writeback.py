@@ -32,8 +32,8 @@ def _default_kb_root() -> Path:
     """Resolve the default KB root for framework-PR lessons.
 
     Honours the ``INFERENCE_OPTIMIZER_FA_KB_PATH`` override when set;
-    otherwise derives a repo-relative path so ``framework-agent`` sits
-    next to ``src/hyperloom/inference_optimizer/``.
+    otherwise writes under the operator workspace root so framework-agent
+    lessons never appear in the source checkout during tests or live runs.
 
     Returns:
         Path: The ``framework_optimization`` directory under the resolved
@@ -42,7 +42,8 @@ def _default_kb_root() -> Path:
     override = os.environ.get("INFERENCE_OPTIMIZER_FA_KB_PATH", "").strip()
     if override:
         return Path(override) / "framework_optimization"
-    return Path(__file__).parents[2] / "framework-agent" / "kb" / "framework_optimization"
+    workspace = os.environ.get("USER_DATA_PATH", "").strip() or "/workspace/hyperloom"
+    return Path(workspace) / "kb" / "framework_optimization"
 
 
 KB_ROOT: Path = _default_kb_root()
