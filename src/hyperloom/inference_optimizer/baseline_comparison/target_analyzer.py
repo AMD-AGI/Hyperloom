@@ -354,6 +354,26 @@ def _write_measured_competitor_target(
         pass
 
 
+def _clear_competitor_target(session_dir: Path) -> None:
+    """Remove any existing ``competitor_target.json``. Best-effort, never raises.
+
+    Only a successful, dimension-aligned InferenceX match may leave a
+    competitor target on disk. On every skip / no_match outcome we drop a
+    stale file (e.g. a scout-authored one left by an older run or a resumed
+    session) so the EXPLORE gap advisory can never read a non-API source.
+
+    Args:
+        session_dir: Session directory whose competitor target should be cleared.
+    """
+    try:
+        from ..session import session_paths
+
+        path = session_paths.competitor_target_json(Path(session_dir))
+        path.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 — best-effort cleanup
+        pass
+
+
 def analyze(
     *,
     session_dir: Path,
@@ -412,7 +432,11 @@ def analyze(
     source = base_url()
 
     def _skip(status: str, reason: str, warning: str) -> BaselineSummary:
-        """Persist and return a no-data summary (skipped / no_match cases)."""
+        """Persist and return a no-data summary (skipped / no_match cases).
+
+        Also clears any stale ``competitor_target.json`` so the advisory feed
+        never surfaces a non-API source when there is no measured match.
+        """
         summary = BaselineSummary(
             query=query,
             fetched_at=now,
@@ -424,6 +448,7 @@ def analyze(
             source=source,
         )
         _persist(summary, session_dir=session_dir)
+        _clear_competitor_target(session_dir)
         return summary
 
     if not canonical_model:
