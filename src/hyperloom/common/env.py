@@ -2,17 +2,9 @@
 
 """Environment-variable readers (canonical ``env_*``).
 
-Project-standard boolean token vocabulary (``1/true/yes/on`` → ``True``,
-case-insensitive) plus int/float readers with safe fallbacks. Stdlib-only
-so any package may depend on it without an import cycle.
-
-Divergent readers intentionally NOT delegated here (kept local by design):
-
-* ``ci/optimize_submit._env_truthy`` — additionally accepts ``y``.
-* ``orchestrator/roofline_ceiling._env_int`` — reads from a *dict* mapping, not
-  from ``os.environ``.
-* ``orchestrator/trace/trace_env.env_flag`` — also treats ``0/false/no/off`` as
-  an explicit ``False`` vocabulary (superset semantics).
+Boolean token vocabulary (``1/true/yes/on`` → ``True``, case-insensitive) plus
+int/float readers with safe fallbacks. Stdlib-only so any package may depend on
+it without an import cycle.
 """
 
 from __future__ import annotations

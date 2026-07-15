@@ -2,33 +2,16 @@
 
 """Atomic filesystem writes (canonical ``atomic_write*``).
 
-Single home for the "write to a sibling temp file in the same directory, then
-``os.replace`` into place" idiom that was independently re-implemented across
-the codebase. A reader never observes a half-written file: it sees either the
-old contents or the complete new contents, never a truncated one.
+Write to a sibling temp file in the same directory, then ``os.replace`` into
+place, so a reader never observes a half-written file. Stdlib-only so any
+package may depend on it without creating an import cycle.
 
-Zero first-party imports (stdlib only) so any package may depend on it without
-creating an import cycle (anti-cycle rule: no first-party imports).
-
-Behaviour-preserving flags let each legacy call site delegate here without any
+Behaviour-preserving flags let each call site delegate here without any
 observable change:
 
-* ``make_parents`` — create ``path.parent`` first (some sites did, some did not).
+* ``make_parents`` — create ``path.parent`` first.
 * ``atomic_write_json``: ``indent`` / ``sort_keys`` / ``ensure_ascii`` /
-  ``trailing_newline`` mirror the exact ``json.dump`` shape each site used.
-
-Sites intentionally NOT delegated here (kept local by design):
-
-* ``action_executors/_magpie_patcher.atomic_write_text`` — returns ``bool``,
-  takes keyword args, ``chmod``-mirrors the target, and relies on
-  module-global ``os``/``tempfile`` being monkeypatched by its tests.
-* ``src/hyperloom/agents/kernel/tools/geak_prompt_patcher._atomic_write`` —
-  ``shutil.copystat`` preserves the target's mode.
-* ``recipe_kb/local_store._atomic_write_json`` — best-effort ``fsync`` + DEBUG
-  logging for durability on journaling mounts.
-* ``multi_node/scripts/*._atomic_write_bytes`` — shipped to remote nodes and run
-  standalone, so they must not gain a ``hyperloom`` import dependency (they keep
-  their own bytes writer; this module intentionally has no bytes variant).
+  ``trailing_newline`` mirror the ``json.dump`` shape each site uses.
 """
 
 from __future__ import annotations
@@ -83,8 +66,7 @@ def atomic_write_text(
             if fsync:
                 _best_effort_fsync(fh)
         if mode is not None:
-            # Strip group/other bits: written files may hold sensitive payloads,
-            # so never expose them beyond the owner regardless of caller intent.
+            # Strip group/other bits: never expose written payloads beyond owner.
             os.chmod(tmp, mode & 0o700)
         os.replace(tmp, path)
     except Exception:
