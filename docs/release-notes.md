@@ -37,8 +37,7 @@ core of the current runtime:
 
 - **Kernel optimization** — Hot kernels are optimized asynchronously in parallel
   with the main loop, so kernel work doesn't block forward progress. The default
-  backend order is KernelForge (deterministic forge) first, then GEAK
-  (Triton / HIP / FlyDSL).
+  backend is GEAK (Triton / HIP / FlyDSL).
 
 - **Session artifacts and `session_breakdown.json`** — Each run produces
   reproducible session artifacts and a machine-readable `session_breakdown.json`

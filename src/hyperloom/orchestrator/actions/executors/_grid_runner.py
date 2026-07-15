@@ -45,10 +45,13 @@ from ._grid_base import (
     GridVariant as GridVariant,
     coerce_extra_envs as coerce_extra_envs,
     VariantResult as VariantResult,
+    variant_fingerprint as variant_fingerprint,
 )
 from ._grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
+    compose_server_args as compose_server_args,
+    remove_server_args as remove_server_args,
     compact_json_server_args as compact_json_server_args,
     _SPACE_VALUE_FLAGS as _SPACE_VALUE_FLAGS,
     _MULTI_VALUE_FLAGS as _MULTI_VALUE_FLAGS,
@@ -138,10 +141,22 @@ def _resolve_magpie_python() -> str:
         # Probe Magpie AND ``yaml`` so an interpreter that resolves Magpie via a
         # .pth but lacks PyYAML is skipped in favour of the canonical /opt/venv.
         try:
-            # run_with_session_kill captures output internally and rejects
-            # capture_output.
+            # Probe with ``importlib.util.find_spec`` rather than a bare
+            # ``import`` so a missing module returns a non-zero exit code
+            # WITHOUT the child emitting a ``ModuleNotFoundError`` traceback.
+            # ``run_with_session_kill`` mirrors child stderr to the parent
+            # stream, so a bare ``import Magpie`` on a candidate that lacks it
+            # would leak an alarming traceback into the run log even though the
+            # probe failing is an expected, benign step of interpreter
+            # resolution. ``find_spec`` still checks both Magpie and its
+            # top-level runtime dep ``yaml`` (see the note above).
             proc = run_with_session_kill(
-                [py, "-c", "import Magpie, yaml"],
+                [
+                    py,
+                    "-c",
+                    "import importlib.util as u, sys; "
+                    "sys.exit(0 if u.find_spec('Magpie') and u.find_spec('yaml') else 1)",
+                ],
                 timeout=10,
             )
             return getattr(proc, "returncode", 1) == 0
@@ -497,6 +512,7 @@ def _build_variant_yaml(
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
     server_lifecycle: dict[str, Any] | None = None,
+    base_args_mode: str = "append",
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk.
 
@@ -533,13 +549,19 @@ def _build_variant_yaml(
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
-    combined = merge_server_args(
-        str(envs.get(extra_args_env, "")),
-        base_extra_args,
-        variant.extra_server_args,
+    combined = compose_server_args(
+        inherited_args="" if str(base_args_mode).strip().lower() == "replace" else str(envs.get(extra_args_env, "")),
+        base_extra_args=base_extra_args,
+        variant_extra_args=variant.extra_server_args,
+        remove_args=getattr(variant, "remove_args", []),
+        args_mode=getattr(variant, "args_mode", "append"),
     )
     if combined:
         envs[extra_args_env] = _shell_safe_dedupe(combined)
+    elif extra_args_env in envs:
+        envs.pop(extra_args_env, None)
+    for k in getattr(variant, "unset_envs", []) or []:
+        envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
     # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
@@ -792,6 +814,11 @@ def _run_magpie(
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
+    # InferenceX ``run_lm_eval`` reads ``$EVAL_RESULT_DIR`` for lm-eval's
+    # ``--output_path``; unset it defaults to ``/tmp/eval_out-*`` and the
+    # ``results*.json`` never reach the task slot, so the accuracy gate finds no
+    # eval output. Mirror it to ``$RESULT_DIR`` so eval artifacts land in the slot.
+    env["EVAL_RESULT_DIR"] = env["RESULT_DIR"]
     # Pin SERVER_LOG / GPU_METRICS_CSV per-task so logs land alongside
     # ``benchmark_report.json``. Always overwrite so a stale parent value can't
     # redirect into a prior run's slot.
@@ -832,6 +859,7 @@ async def run_grid(
     result_dir: str | None = None,
     soft_deadline_sec: float | None = None,
     server_lifecycle: dict[str, Any] | None = None,
+    base_args_mode: str = "append",
     warmup_before_measure: bool | None = None,
     preclean_before_run: bool = True,
     server_already_ready: bool = False,
@@ -912,6 +940,7 @@ async def run_grid(
                 gpu_type=gpu_type,
                 benchmark_script=benchmark_script,
                 server_lifecycle=server_lifecycle,
+                base_args_mode=base_args_mode,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -944,6 +973,38 @@ async def run_grid(
                 break
             continue
 
+        try:
+            with cfg_path.open(encoding="utf-8") as _f:
+                _variant_cfg = yaml.safe_load(_f) or {}
+            _variant_bench = _variant_cfg.get("benchmark") or {}
+            _variant_envs = _variant_bench.get("envs") or {}
+            _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
+            _mn_effective_args = str(_variant_envs.get(_variant_framework_env) or "")
+        except Exception:  # noqa: BLE001 - restart path still reports validation errors
+            log.debug(
+                "grid_runner: failed to read materialized variant args from %s",
+                cfg_path,
+                exc_info=True,
+            )
+            try:
+                with base_yaml_path.open(encoding="utf-8") as _f:
+                    _base_cfg = yaml.safe_load(_f) or {}
+                _base_bench = _base_cfg.get("benchmark") or {}
+                _base_envs = _base_bench.get("envs") or {}
+                _base_framework_env = server_args_env_name(_base_bench.get("framework"))
+                _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
+            except Exception:  # noqa: BLE001 - best-effort parity fallback
+                _fallback_inherited_args = ""
+            _mn_effective_args = _shell_safe_dedupe(
+                compose_server_args(
+                    inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
+                    base_extra_args=base_extra_args,
+                    variant_extra_args=variant.extra_server_args,
+                    remove_args=getattr(variant, "remove_args", []),
+                    args_mode=getattr(variant, "args_mode", "append"),
+                )
+            )
+
         if auto_warmup_requested:
             try:
                 from ._server_lifecycle import resolve_lifecycle_params
@@ -964,6 +1025,7 @@ async def run_grid(
                             "pid_dir": str(slot),
                             "port": int(lifecycle.get("port") or 0),
                         },
+                        base_args_mode=base_args_mode,
                     )
                 else:
                     log.info(
@@ -995,6 +1057,7 @@ async def run_grid(
                     gpu_type=gpu_type,
                     benchmark_script=benchmark_script,
                     server_lifecycle=warmup_lifecycle,
+                    base_args_mode=base_args_mode,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
@@ -1183,15 +1246,13 @@ async def run_grid(
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
             await restart_server_for_round(
-                extra_server_args=_shell_safe_dedupe(
-                    merge_server_args(
-                        base_extra_args,
-                        variant.extra_server_args,
-                    )
-                ),
-                # Per-variant env overrides so server-side env knobs take effect
-                # on the restarted sglang.
+                extra_server_args=_mn_effective_args,
+                # Per-variant env overrides (e.g. MORI_* MoE-dispatch
+                # tuning) so server-side env knobs proposed by specialists
+                # actually take effect on the restarted sglang. Empty dict
+                # for arg-only variants → forwarded as a no-op.
                 extra_env=dict(variant.extra_envs),
+                unset_env=[str(k) for k in getattr(variant, "unset_envs", []) or [] if str(k).strip()],
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
             )
@@ -1679,6 +1740,7 @@ __all__ = [
     "inject_sglang_context_length",
     "inject_sglang_watchdog_timeout",
     "merge_server_args",
+    "remove_server_args",
     "resolve_sglang_watchdog_timeout",
     "run_grid",
     "sanitize_result_dir",

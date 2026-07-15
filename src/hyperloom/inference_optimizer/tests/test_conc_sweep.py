@@ -20,9 +20,14 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
+    _build_arm_grid,
     _build_comparison,
     _build_grid,
+    _conc_sweep_single_server_enabled,
+    _flush_conc_sweep_report,
+    _flush_partial_conc_sweep_report,
     _has_optimization,
+    _order_concs_desc,
     run_conc_sweep,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -724,8 +729,8 @@ def test_run_conc_sweep_does_not_touch_final_json(
 
 
 def test_default_concs_is_powers_of_two():
-    """Doc-pin: default ladder is [1,2,4,8,16,32,64,128]."""
-    assert DEFAULT_CONCS == [1, 2, 4, 8, 16, 32, 64, 128]
+    """Doc-pin: default ladder is [256,128,64,32,16,8,4,2] (high-to-low for single-server reuse)."""
+    assert DEFAULT_CONCS == [256, 128, 64, 32, 16, 8, 4, 2]
 
 
 def test_default_total_budget_is_two_and_half_hours():
@@ -1197,3 +1202,861 @@ def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
         {"params": {}},
         intent_kind="propose_action",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Change 2 extras: _order_concs_desc / _build_arm_grid
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_order_concs_desc_deduplicates_and_sorts():
+    assert _order_concs_desc([4, 1, 16, 4, 2]) == [16, 4, 2, 1]
+
+
+def test_order_concs_desc_already_sorted():
+    assert _order_concs_desc([8, 4, 2]) == [8, 4, 2]
+
+
+def test_order_concs_desc_single():
+    assert _order_concs_desc([7]) == [7]
+
+
+def test_build_arm_grid_single_arm_descending():
+    grid = _build_arm_grid(
+        "baseline",
+        [64, 32, 16],
+        isl=512,
+        osl=512,
+        num_prompts_factor=5,
+        arm_args="",
+        arm_envs={},
+    )
+    assert [v.name for v in grid] == ["baseline_conc64", "baseline_conc32", "baseline_conc16"]
+    assert grid[0].extra_envs["CONC"] == "64"
+    assert grid[0].extra_envs["RUN_EVAL"] == "false"
+
+
+def test_build_arm_grid_optimized_arm_carries_args():
+    grid = _build_arm_grid(
+        "optimized",
+        [4],
+        isl=1024,
+        osl=512,
+        num_prompts_factor=3,
+        arm_args="--my-flag",
+        arm_envs={"MY_ENV": "1"},
+    )
+    assert len(grid) == 1
+    assert grid[0].extra_server_args == "--my-flag"
+    assert grid[0].extra_envs["MY_ENV"] == "1"
+    assert grid[0].extra_envs["CONC"] == "4"
+    assert int(grid[0].extra_envs["NUM_PROMPTS"]) >= 4
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Change 1: soft switch + arm-major orchestration
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_conc_sweep_single_server_enabled_default(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    assert _conc_sweep_single_server_enabled() is True
+
+
+def test_conc_sweep_single_server_enabled_off(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", "0")
+    assert _conc_sweep_single_server_enabled() is False
+
+
+def test_conc_sweep_single_server_enabled_false_str(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", "false")
+    assert _conc_sweep_single_server_enabled() is False
+
+
+def test_run_conc_sweep_single_server_arm_major_order(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """In single-server mode optimized arm runs before baseline."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    call_log: list[str] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        for v in grid:
+            call_log.append(v.name)
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    assert payload["status"] == "succeeded"
+    # optimized_ variants should appear before baseline_ variants.
+    first_opt = next((i for i, n in enumerate(call_log) if n.startswith("optimized_")), None)
+    first_base = next((i for i, n in enumerate(call_log) if n.startswith("baseline_")), None)
+    assert first_opt is not None and first_base is not None
+    assert first_opt < first_base, f"expected optimized before baseline; got {call_log}"
+
+
+def test_run_conc_sweep_single_server_concs_descending(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """CONCs within each arm are visited highest-to-lowest."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    call_log: list[str] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        for v in grid:
+            call_log.append(v.name)
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 4, 16]))
+
+    opt_calls = [n for n in call_log if n.startswith("optimized_")]
+    opt_concs = [int(n.split("conc")[1]) for n in opt_calls]
+    assert opt_concs == sorted(opt_concs, reverse=True), f"expected descending, got {opt_concs}"
+
+    base_calls = [n for n in call_log if n.startswith("baseline_")]
+    base_concs = [int(n.split("conc")[1]) for n in base_calls]
+    assert base_concs == sorted(base_concs, reverse=True), f"expected descending, got {base_concs}"
+
+
+def test_run_conc_sweep_legacy_path_with_env_off(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER=0 uses the legacy CONC-major path."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", "0")
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    call_log: list[str] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        for v in grid:
+            call_log.append(v.name)
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    # Legacy: CONC-major interleaving → baseline_ and optimized_ are interleaved per CONC.
+    # The first two calls should be the same CONC (one arm each).
+    assert len(call_log) == 4
+    first_conc = call_log[0].split("conc")[1]
+    second_conc = call_log[1].split("conc")[1]
+    assert first_conc == second_conc, f"expected CONC-major interleaving; got {call_log}"
+
+
+def test_run_conc_sweep_partial_sweep_writes_incremental_checkpoint(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """After each conc point a partial checkpoint is written to disk."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", "0")
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    checkpoints: list[dict] = []
+    json_path = session_dir / "reports" / "conc_sweep_summary.json"
+
+    real_flush = _flush_partial_conc_sweep_report
+
+    def _intercept_flush(*args, **kwargs):
+        real_flush(*args, **kwargs)
+        if json_path.exists():
+            try:
+                checkpoints.append(json.loads(json_path.read_text()))
+            except Exception:
+                pass
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep._flush_partial_conc_sweep_report", side_effect=_intercept_flush),
+    ):
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], write_reports=True))
+
+    # Intermediate checkpoints should carry status=in_progress.
+    assert any(c.get("status") == "in_progress" for c in checkpoints), (
+        f"no in_progress checkpoint found; checkpoints={[c.get('status') for c in checkpoints]}"
+    )
+    # Final file should have a terminal status.
+    final = json.loads(json_path.read_text())
+    assert final["status"] in {"succeeded", "failed", "skipped"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Change 5: _flush_conc_sweep_report / _flush_partial_conc_sweep_report
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
+    rdir = session_dir / "reports"
+    rdir.mkdir(parents=True, exist_ok=True)
+    json_path = rdir / "conc_sweep_summary.json"
+    csv_path = rdir / "conc_sweep_raw.csv"
+    payload: dict[str, Any] = {
+        "schema_version": "1.0",
+        "status": "succeeded",
+        "report_json_path": str(json_path),
+        "report_csv_path": str(csv_path),
+        "baseline": {"points": [{"arm": "baseline", "conc": 4, "status": "succeeded", "output_throughput": 100.0}]},
+        "optimized": {"points": []},
+    }
+    _flush_conc_sweep_report(payload, session_dir)
+    assert json_path.exists()
+    assert csv_path.exists()
+    loaded = json.loads(json_path.read_text())
+    assert loaded["status"] == "succeeded"
+    rows = list(csv.DictReader(csv_path.open()))
+    assert len(rows) == 1
+    assert rows[0]["arm"] == "baseline"
+
+
+def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    """_flush_conc_sweep_report silently catches IO errors."""
+    rdir = session_dir / "reports"
+    rdir.mkdir(parents=True, exist_ok=True)
+    json_path = rdir / "conc_sweep_summary.json"
+    csv_path = rdir / "conc_sweep_raw.csv"
+    payload = {
+        "status": "succeeded",
+        "report_json_path": str(json_path),
+        "report_csv_path": str(csv_path),
+        "baseline": {"points": []},
+        "optimized": {"points": []},
+    }
+    # Should not raise even if atomic_write_text itself raises.
+    from hyperloom.common import io as _common_io
+    monkeypatch.setattr(_common_io, "atomic_write_text", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    _flush_conc_sweep_report(payload, session_dir)  # must not raise
+
+
+def test_flush_partial_conc_sweep_report_marks_in_progress(session_dir: Path):
+    """_flush_partial_conc_sweep_report writes status=in_progress."""
+    rdir = session_dir / "reports"
+    rdir.mkdir(parents=True, exist_ok=True)
+    json_path = rdir / "conc_sweep_summary.json"
+    csv_path = rdir / "conc_sweep_raw.csv"
+    state = _make_state()
+    result = _fake_variant("baseline_conc4", throughput=100.0, envs={"CONC": "4", "ISL": "512", "OSL": "512", "NUM_PROMPTS": "20"})
+    _flush_partial_conc_sweep_report(
+        results=[result],
+        state=state,
+        session_dir=session_dir,
+        json_path=json_path,
+        csv_path=csv_path,
+        concs=[4, 8],
+        isl=512,
+        osl=512,
+        opt_args="--x",
+        opt_envs={},
+        workspace=session_dir / "ws",
+        started_at=0.0,
+        total_budget_sec=9000,
+        has_budget=True,
+        budget_exhausted=False,
+        budget_skip_reason="",
+        budget_remaining_sec=None,
+        partial=True,
+    )
+    assert json_path.exists()
+    loaded = json.loads(json_path.read_text())
+    assert loaded["status"] == "in_progress"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Change 4: session deadline detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_run_conc_sweep_stops_on_closing_phase(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When state.closing_phase is True, remaining variants are skipped."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", "0")
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    calls: list[str] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        for v in grid:
+            calls.append(v.name)
+        # Flip closing_phase after first call so remaining are skipped.
+        state.closing_phase = True
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(
+            run_conc_sweep(state, session_dir, concs=[1, 4, 16, 64])
+        )
+
+    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
+    skipped = [p for p in all_points if p["status"] == "skipped"]
+    assert len(skipped) > 0, "expected some variants to be skipped after closing_phase set"
+    assert payload["budget_exhausted"] is True
+    assert payload["budget_skip_reason"] == "session_deadline_reserve"
+
+
+def test_run_conc_sweep_session_deadline_via_remaining_minutes(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When remaining_minutes() returns a tiny value, variants are skipped."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", "0")
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    # Force remaining_minutes to return 0 (no budget left).
+    monkeypatch.setattr(type(state), "remaining_minutes", lambda self: 0.0)
+    # Override max_minutes so remaining_minutes is called (>0).
+    state.max_minutes = 60.0
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(
+            run_conc_sweep(state, session_dir, concs=[1, 4, 16])
+        )
+
+    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
+    # With remaining=0 and reserve=120s, all points should be skipped.
+    assert all(p["status"] == "skipped" for p in all_points), (
+        f"expected all skipped; statuses={[p['status'] for p in all_points]}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Change 3: plotting
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_render_conc_sweep_curve_no_data_returns_none(tmp_path: Path):
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+    payload = {
+        "baseline": {"points": []},
+        "optimized": {"points": []},
+    }
+    result = render_conc_sweep_curve(payload, tmp_path / "out.png", model_label="M", gpu_label="GPU", tp=1)
+    assert result is None
+
+
+def test_render_conc_sweep_curve_writes_png(tmp_path: Path):
+    pytest.importorskip("matplotlib")
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+    payload = {
+        "baseline": {
+            "points": [
+                {"conc": 16, "output_throughput": 1600.0},
+                {"conc": 4, "output_throughput": 600.0},
+            ]
+        },
+        "optimized": {
+            "points": [
+                {"conc": 16, "output_throughput": 2000.0},
+                {"conc": 4, "output_throughput": 750.0},
+            ]
+        },
+        "roofline_ceiling": {
+            "rows": [
+                {"conc": 4, "t_peak_tok_s": 800.0},
+                {"conc": 16, "t_peak_tok_s": 2500.0},
+            ]
+        },
+    }
+    out_path = tmp_path / "curve.png"
+    result = render_conc_sweep_curve(payload, out_path, model_label="TestModel", gpu_label="MI300X", tp=8)
+    assert result == out_path
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+
+def test_render_conc_sweep_curve_from_file(tmp_path: Path):
+    pytest.importorskip("matplotlib")
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+    payload = {
+        "baseline": {"points": [{"conc": 8, "output_throughput": 800.0}]},
+        "optimized": {"points": []},
+    }
+    json_file = tmp_path / "summary.json"
+    json_file.write_text(json.dumps(payload))
+    result = render_conc_sweep_curve(json_file, tmp_path / "out.png", tp=1)
+    assert result is not None
+    assert result.exists()
+
+
+def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When matplotlib is missing, render_conc_sweep_curve returns None gracefully."""
+    import builtins
+    _real_import = builtins.__import__
+
+    def _mock_import(name, *args, **kwargs):
+        if name == "matplotlib":
+            raise ImportError("no module named matplotlib (mocked)")
+        return _real_import(name, *args, **kwargs)
+
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+    monkeypatch.setattr(builtins, "__import__", _mock_import)
+    result = render_conc_sweep_curve(
+        {"baseline": {"points": [{"conc": 4, "output_throughput": 400.0}]}, "optimized": {"points": []}},
+        tmp_path / "out.png",
+        model_label="M",
+        gpu_label="G",
+        tp=1,
+    )
+    assert result is None
+
+
+def test_format_conc_sweep_curve_section_empty_summary():
+    from hyperloom.orchestrator.actions.executors.report import _format_conc_sweep_curve_section
+
+    assert _format_conc_sweep_curve_section({}) == []
+
+
+def test_format_conc_sweep_curve_section_with_png():
+    from hyperloom.orchestrator.actions.executors.report import _format_conc_sweep_curve_section
+
+    lines = _format_conc_sweep_curve_section({"conc_sweep_curve_png": "reports/conc_sweep_curve.png"})
+    assert any("conc_sweep_curve.png" in line for line in lines)
+    assert any("![" in line for line in lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Change 1: single-server Option A boot/reuse path (lifecycle-eligible)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _patch_lifecycle_eligible(monkeypatch: pytest.MonkeyPatch, teardown_log: list[tuple]):
+    """Patch resolve_lifecycle_params → eligible and track teardown calls."""
+    import hyperloom.orchestrator.actions.executors._server_lifecycle as _sl
+
+    def _fake_resolve(_cfg_path):
+        return {"eligible": True, "framework": "vllm", "port": 8888, "reason": ""}
+
+    def _fake_teardown(*, pid_dir, framework, port):
+        teardown_log.append((str(pid_dir), framework, port))
+
+    monkeypatch.setattr(_sl, "resolve_lifecycle_params", _fake_resolve)
+    monkeypatch.setattr(_sl, "teardown_lifecycle_server", _fake_teardown)
+
+
+def test_single_server_option_a_boot_and_reuse(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Option A: highest-CONC boot round + reuse rounds; one teardown per arm."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    grid_calls: list[dict] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        grid_calls.append(
+            {
+                "name": grid[0].name,
+                "server_lifecycle": kw.get("server_lifecycle"),
+                "server_already_ready": kw.get("server_already_ready"),
+                "preclean_before_run": kw.get("preclean_before_run"),
+            }
+        )
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16, 64]))
+
+    assert payload["status"] == "succeeded"
+    # 2 arms × 3 concs = 6 run_grid calls.
+    assert len(grid_calls) == 6
+    # One teardown per arm.
+    assert len(teardown_log) == 2
+
+    # First call per arm = boot round: highest conc, server_already_ready=False, cleanup=False.
+    opt_calls = [c for c in grid_calls if c["name"].startswith("optimized_")]
+    boot = opt_calls[0]
+    assert boot["name"] == "optimized_conc64", f"boot should be highest conc; got {boot['name']}"
+    assert boot["server_already_ready"] is False
+    assert boot["server_lifecycle"]["cleanup"] is False
+    assert boot["preclean_before_run"] is True
+
+    # Middle reuse round: server_already_ready=True, cleanup=False.
+    mid = opt_calls[1]
+    assert mid["server_already_ready"] is True
+    assert mid["server_lifecycle"]["cleanup"] is False
+    assert mid["preclean_before_run"] is False
+
+    # Last reuse round: cleanup=True.
+    last = opt_calls[-1]
+    assert last["server_lifecycle"]["cleanup"] is True
+
+
+def test_single_server_boot_retry_descend(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """If the highest-CONC boot fails, the next lower CONC is tried as boot."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    boot_attempts: list[str] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        name = grid[0].name
+        is_boot = kw.get("server_already_ready") is False
+        if is_boot:
+            boot_attempts.append(name)
+            # Fail the very first (highest-conc) boot attempt only.
+            if name.endswith("conc64"):
+                return [_fake_variant(name, throughput=None, status="failed", envs=grid[0].extra_envs, error="boot fail")]
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 64]))
+
+    # optimized arm: boot conc64 fails → retries boot at conc16.
+    opt_boots = [b for b in boot_attempts if b.startswith("optimized_")]
+    assert "optimized_conc64" in opt_boots
+    assert "optimized_conc16" in opt_boots
+    assert payload["status"] in {"succeeded", "failed"}
+
+
+def test_single_server_all_boot_fail_falls_back_option_b(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When every boot attempt fails, remaining variants run via Option B."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    option_b_calls: list[str] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        name = grid[0].name
+        # Boot rounds (server_lifecycle set, not already ready) always fail.
+        if kw.get("server_already_ready") is False and kw.get("server_lifecycle"):
+            return [_fake_variant(name, throughput=None, status="failed", envs=grid[0].extra_envs, error="boot fail")]
+        # Option B path = no server_lifecycle kwarg.
+        if kw.get("server_lifecycle") is None:
+            option_b_calls.append(name)
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[8, 16]))
+
+    # After all boots fail, Option B (no server_lifecycle) runs the remaining variants.
+    assert len(option_b_calls) > 0, "expected Option B fallback calls"
+    assert payload["status"] in {"succeeded", "failed"}
+
+
+def test_single_server_not_eligible_uses_option_b(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A non-lifecycle-eligible framework routes straight to Option B."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    import hyperloom.orchestrator.actions.executors._server_lifecycle as _sl
+
+    monkeypatch.setattr(
+        _sl,
+        "resolve_lifecycle_params",
+        lambda _p: {"eligible": False, "framework": "", "port": 8888, "reason": "not a builtin"},
+    )
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    calls: list[dict] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        calls.append({"name": grid[0].name, "server_lifecycle": kw.get("server_lifecycle")})
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    assert payload["status"] == "succeeded"
+    # Option B: no server_lifecycle kwarg on any call.
+    assert all(c["server_lifecycle"] is None for c in calls)
+
+
+def test_single_server_reuse_loop_stops_on_closing_phase(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """closing_phase set mid-arm skips the remaining reuse points."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        # After the boot round (server_already_ready=False), flip closing_phase.
+        if kw.get("server_already_ready") is False:
+            state.closing_phase = True
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16, 64]))
+
+    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
+    skipped = [p for p in all_points if p["status"] == "skipped"]
+    assert len(skipped) > 0
+    assert payload["budget_skip_reason"] == "session_deadline_reserve"
+
+
+def test_single_server_reuse_exception_recorded_as_failed(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An exception in a reuse round is captured as a failed point, not raised."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        # Boot round succeeds; reuse rounds raise.
+        if kw.get("server_already_ready") is True:
+            raise RuntimeError("reuse boom")
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
+    failed = [p for p in all_points if p["status"] == "failed"]
+    # Each arm: boot(conc16) ok, reuse(conc4) raises → at least 2 failed points.
+    assert len(failed) >= 2
+    assert any((p.get("error_class") or "").startswith("single_server_reuse") for p in failed)
+
+
+def test_single_server_reuse_loop_budget_exhausted(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Task budget exhausted mid-arm skips remaining reuse points."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        import time as _t
+
+        # Boot round consumes the whole budget so reuse points get skipped.
+        if kw.get("server_already_ready") is False:
+            _t.sleep(1.2)
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(
+            run_conc_sweep(
+                state,
+                session_dir,
+                concs=[4, 16, 64],
+                variant_timeout_sec=1,
+                total_budget_sec=2,
+            )
+        )
+
+    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
+    skipped = [p for p in all_points if p["status"] == "skipped"]
+    assert len(skipped) > 0
+    assert payload["budget_exhausted"] is True
+
+
+def test_single_server_boot_exception_falls_back(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A boot round raising an exception is caught and boot-retry-descend continues."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        name = grid[0].name
+        # Highest-conc boot raises; lower-conc boot succeeds.
+        if kw.get("server_already_ready") is False and name.endswith("conc64"):
+            raise RuntimeError("boot boom")
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 64]))
+
+    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
+    # conc64 boot exception → recorded as failed; conc16 boots and succeeds.
+    failed = [p for p in all_points if p["status"] == "failed" and p["conc"] == 64]
+    assert len(failed) >= 1
+    assert any((p.get("error_class") or "").startswith("single_server_boot") for p in failed)
+
+
+def test_single_server_pre_arm_skip_on_closing_phase(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """closing_phase set before the sweep skips every arm's variants."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    state.closing_phase = True
+    ran: list[str] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        ran.append(grid[0].name)
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    def _fake_materialize(src, out_dir, **_kw):
+        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+        out.write_text(Path(src).read_text())
+        return out
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    # No run_grid calls; all variants skipped before any arm starts.
+    assert ran == []
+    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
+    assert all(p["status"] == "skipped" for p in all_points)
+    assert payload["budget_skip_reason"] == "session_deadline_reserve"

@@ -57,8 +57,24 @@ DEFAULT_VARIANT_TIMEOUT_SEC = 7800
 ENABLEMENT_ACCURACY_FLOOR = 0.0
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
 
-# Enablement setup replay allowlist of install-only command shapes, matched
-# against the command with leading `sudo `/env-assignments stripped.
+
+def _coerce_str_list(value: Any) -> list[str]:
+    """Normalize optional string/list controls to non-empty strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+# Enablement environment-setup replay: allowlist of install-only command shapes.
+# A specialist may run arbitrary Bash in its own sandboxed session, but the
+# durable *replay* performed here (before applying patches + booting) is limited
+# to package/tool installation so a recorded ``setup_commands`` list can never be
+# a vector for arbitrary side effects (rm, curl|bash, service restarts, etc.).
+# Matched against the command with leading `sudo `/env-assignments stripped.
 _SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
     r"pip3?\s+install\b",
     r"(?:python3?|uv)\s+-m\s+pip\s+install\b",
@@ -2239,6 +2255,9 @@ class IntegratePatchExecutor:
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
             extra_envs=self._framework_run_eval_envs(params),
+            remove_args=params.get("base_remove_args"),
+            unset_envs=params.get("base_unset_envs"),
+            args_mode=str(params.get("base_args_mode") or "append"),
             out_name="integrate_patch.with_envs.yaml",
         )
 
@@ -2247,6 +2266,9 @@ class IntegratePatchExecutor:
             name=f"integrate-patch-{specialist_task_id[:8]}",
             extra_server_args=str(params.get("base_extra_args") or "").strip(),
             extra_envs=dict(config_changes_applied),
+            remove_args=_coerce_str_list(params.get("base_remove_args")),
+            unset_envs=_coerce_str_list(params.get("base_unset_envs")),
+            args_mode=str(params.get("base_args_mode") or "append"),
             note=f"integrate_patch:{specialist_task_id}",
         )
 
@@ -2264,6 +2286,7 @@ class IntegratePatchExecutor:
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
             result_dir=override_result_dir,
+            base_args_mode=str(params.get("base_args_mode") or "append"),
         )
 
         bench: dict[str, Any] = {}
@@ -2282,9 +2305,17 @@ class IntegratePatchExecutor:
             }
 
         accuracy_pass: bool | None = None
+        # lm-eval writes to ``$EVAL_RESULT_DIR`` (== ``RESULT_DIR`` = the grid
+        # slot, i.e. the parent of ``VariantResult.workspace``), not inside the
+        # ``benchmark_*`` workspace. Grade from that slot so the eval output is
+        # found; honor an explicit ``result_dir`` override the same way the grid
+        # subprocess does.
+        eval_search_root = override_result_dir or (
+            str(Path(bench["workspace"]).parent) if bench.get("workspace") else ""
+        )
         if bench.get("status") == "succeeded":
             accuracy_pass = self._grade_accuracy(
-                bench["workspace"],
+                eval_search_root,
                 params.get("accuracy_baseline"),
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
             )
@@ -2294,7 +2325,7 @@ class IntegratePatchExecutor:
         if bool(params.get("enablement")) and bench.get("status") == "succeeded":
             try:
                 eval_results = parse_eval_results(
-                    bench["workspace"],
+                    eval_search_root,
                     framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
                 )
                 acc = eval_results.get("accuracy")
@@ -2402,12 +2433,18 @@ class IntegratePatchExecutor:
             gpu_type=resolved_gpu or None,
             benchmark_script=override_script,
             extra_envs=self._framework_run_eval_envs(params),
+            remove_args=params.get("base_remove_args"),
+            unset_envs=params.get("base_unset_envs"),
+            args_mode=str(params.get("base_args_mode") or "append"),
             out_name="integrate_patch.rebench.yaml",
         )
         variant = GridVariant(
             name=f"integrate-patch-rebench-{specialist_task_id[:8]}",
             extra_server_args=base_extra_args,
             extra_envs=dict(config_changes_applied),
+            remove_args=_coerce_str_list(params.get("base_remove_args")),
+            unset_envs=_coerce_str_list(params.get("base_unset_envs")),
+            args_mode=str(params.get("base_args_mode") or "append"),
             note=f"integrate_patch_rebench:{specialist_task_id}",
         )
         rebench = await measure_stack_rebench(
@@ -2423,10 +2460,16 @@ class IntegratePatchExecutor:
             benchmark_script=override_script,
             result_dir=override_result_dir,
             magpie_python=params.get("magpie_python") or None,
+            base_args_mode=str(params.get("base_args_mode") or "append"),
+        )
+        # See ``_bench_patch``: lm-eval writes to the grid slot (the parent of
+        # ``rebench.workspace``), so grade from there, honoring ``result_dir``.
+        rebench_eval_root = override_result_dir or (
+            str(Path(rebench.workspace).parent) if rebench.workspace else ""
         )
         accuracy_pass = (
             self._grade_accuracy(
-                rebench.workspace,
+                rebench_eval_root,
                 params.get("accuracy_baseline"),
                 framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
             )

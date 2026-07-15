@@ -130,16 +130,16 @@ where = ["src"]
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
 # Demo run skills chained from /hyperloom-setup; installed under every agent's
-# discovery dir so /hyperloom-qwen3-8b-{3h,8h,24h} are visible after install.
+# discovery dir so the local demo skills are visible after install.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".cursor/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
-".agents/skills/hyperloom-qwen3-8b-8h" = ["examples/hyperloom-qwen3-8b-8h/SKILL.md"]
-".claude/skills/hyperloom-qwen3-8b-8h" = ["examples/hyperloom-qwen3-8b-8h/SKILL.md"]
-".cursor/skills/hyperloom-qwen3-8b-8h" = ["examples/hyperloom-qwen3-8b-8h/SKILL.md"]
-".agents/skills/hyperloom-qwen3-8b-24h" = ["examples/hyperloom-qwen3-8b-24h/SKILL.md"]
-".claude/skills/hyperloom-qwen3-8b-24h" = ["examples/hyperloom-qwen3-8b-24h/SKILL.md"]
-".cursor/skills/hyperloom-qwen3-8b-24h" = ["examples/hyperloom-qwen3-8b-24h/SKILL.md"]
+".agents/skills/hyperloom-qwen3-30b-a3b-8h" = ["examples/hyperloom-qwen3-30b-a3b-8h/SKILL.md"]
+".claude/skills/hyperloom-qwen3-30b-a3b-8h" = ["examples/hyperloom-qwen3-30b-a3b-8h/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-30b-a3b-8h" = ["examples/hyperloom-qwen3-30b-a3b-8h/SKILL.md"]
+".agents/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
+".claude/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
+".cursor/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
 
 [tool.setuptools.package-data]
 # tree-reform.MD P2.3: orchestrator/prompts/*.md moved with the
@@ -415,7 +415,6 @@ omit = [
     "ci/optimize_submit.py",
     "ci/optimize_submit_lib/*.py",
     "ci/orchestrator.py",
-    "ci/import_session_breakdown.py",
     "ci/claw_client.py",
     "ci/prewarm_models.py",
     "ci/send_webhook.py",
@@ -469,7 +468,7 @@ relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 # follow-up ratchet, not here.
 [tool.bandit]
 skips = ["B101"]
-exclude_dirs = ["*/tests/*", "*/test/*", "slides", "build", ".venv"]
+exclude_dirs = ["*/tests/*", "*/test/*", "build", ".venv"]
 
 # Pylint: minimal defaults for local runs; CI passes ``--errors-only`` so only
 # fatal/error-severity messages are reported there (see ``lint.yml``).
@@ -485,12 +484,11 @@ jobs = 1
 [tool.ruff]
 target-version = "py310"
 line-length = 120
-# Exclude generated/vendored trees: ``slides`` + audit artifacts, build
-# output, virtualenvs, and the vendored sub-repos (TraceLens-internal /
+# Exclude generated/vendored trees: audit artifacts, build output,
+# virtualenvs, and the vendored sub-repos (TraceLens-internal /
 # InferenceX) that ship their own linting and are not part of this repo's
 # tracked sources.
 extend-exclude = [
-    "slides",
     "_audit_artifacts",
     "build",
     ".venv",
@@ -516,8 +514,6 @@ ignore = ["E501", "E741"]
 # extend-select = ["B", "I", "UP", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
-# matplotlib backend must be set before pyplot import
-"slides/*.py" = ["E402"]
 # Tests routinely re-import inside function bodies (E402), redefine fixtures
 # (F811), and bind setup values they assert on indirectly (F841).
 "**/tests/**/*.py" = ["F811", "E402", "F841"]

@@ -26,18 +26,40 @@ __all__ = [
 ]
 
 
+def _coerce_list(value: Any) -> list[str]:
+    """Normalize optional list-like fingerprint inputs."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v) for v in value if str(v).strip()]
+    return [str(value)] if str(value).strip() else []
+
+
 def canonical_fingerprint(
     extra_args: str | None,
     extra_envs: dict[str, Any] | None,
+    *,
+    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
+    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
+    args_mode: str = "append",
 ) -> str:
     """Return the canonical 16-char fingerprint for a variant.
 
-    Single source of truth for the content hash. Normalization: args ``shlex.split``
-    → sorted tokens; envs ``(str(k), str(v))`` sorted by key; 16-char SHA-1.
+    Single source of truth for the content hash; ``_grid_runner.variant_fingerprint``
+    delegates here. Normalization: args ``shlex.split``
+    → sorted tokens; envs ``(str(k), str(v))`` sorted by key; removal /
+    replacement controls sorted by value; 16-char SHA-1.
 
     Args:
         extra_args: The variant's extra server args string, or ``None``.
         extra_envs: The variant's extra env mapping, or ``None``.
+        remove_args: Base/server args to remove before appending
+            ``extra_args``.
+        unset_envs: Inherited env names to remove before applying
+            ``extra_envs``.
+        args_mode: ``"append"`` (default) or ``"replace"``.
 
     Returns:
         The canonical 16-char SHA-1 content fingerprint for the variant.
@@ -49,8 +71,23 @@ def canonical_fingerprint(
         # Shell-parse failure: fall back to whitespace split.
         args_tokens = sorted(args_text.split())
     env_pairs = sorted((str(k), str(v)) for k, v in (extra_envs or {}).items())
+    mode = str(args_mode or "append").strip().lower()
+    if mode not in {"append", "replace"}:
+        mode = "append"
+    remove_list = sorted(_coerce_list(remove_args))
+    unset_list = sorted(_coerce_list(unset_envs))
+    if not remove_list and not unset_list and mode == "append":
+        payload_obj: Any = [args_tokens, [list(p) for p in env_pairs]]
+    else:
+        payload_obj = [
+            args_tokens,
+            [list(p) for p in env_pairs],
+            remove_list,
+            unset_list,
+            mode,
+        ]
     payload = json.dumps(
-        [args_tokens, [list(p) for p in env_pairs]],
+        payload_obj,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),

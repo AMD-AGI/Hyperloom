@@ -1742,11 +1742,16 @@ class WritebackCollaborator:
             )
 
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
-        """Persist scout output (hints, competitor target, gap seeds, dedup); all steps fail-soft.
+        """Persist scout output (hints, gap seeds, dedup); all steps fail-soft.
+
+        The scout is a text-hints-only collector. Any ``competitor_target``
+        numbers it emits are intentionally ignored here: measured competitor
+        baselines are sourced from InferenceX, not authored by the scout, so
+        LLM-written numbers must never be persisted as a consumable target.
 
         Args:
             done_payload: The completed research-scout task payload; its
-                ``research`` block carries hints, competitor target and PR ids.
+                ``research`` block carries hints and PR ids.
         """
         from ..knowledge import research_hints as _research_hints
 
@@ -1765,12 +1770,6 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: append_hints failed")
             added = 0
-        try:
-            _research_hints.write_competitor_target(
-                self.session_dir, block.get("competitor_target"),
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: competitor_target write failed")
         # Share inspected PR ids with the FRAMEWORK dedup set.
         pr_ids: list[Any] = []
         for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
@@ -1822,12 +1821,26 @@ class WritebackCollaborator:
         full_args = ""
         if isinstance(bv, dict):
             full_args = str(bv.get("extra_server_args") or "").strip()
-        # Build cumulative launch args without double-stacking (helper dedupes repeated --flag pairs).
-        full_args = _merge_cumulative_extra_server_args(
-            base_args,
-            candidate_args,
-            full_args,
+        controls_effective = bool(
+            isinstance(bv, dict)
+            and (
+                bv.get("remove_args")
+                or bv.get("unset_envs")
+                or str(bv.get("args_mode") or "").strip().lower() == "replace"
+            )
         )
+        # Build cumulative launch args without double-stacking; helper dedupes repeated --flag pairs (last wins).
+        if controls_effective:
+            # Removal/replace winners publish their effective cumulative config
+            # from ExploreExecutor. Prepending the prior current_best would
+            # reintroduce flags the variant deliberately removed.
+            full_args = _dedupe_extra_server_args(full_args)
+        else:
+            full_args = _merge_cumulative_extra_server_args(
+                base_args,
+                candidate_args,
+                full_args,
+            )
 
         variant_name = bv.get("name") if isinstance(bv, dict) else None
         if candidate_args or variant_name:
@@ -1842,6 +1855,7 @@ class WritebackCollaborator:
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
+                    "extra_server_args": full_args,
                     "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
                     "tput": float(best_tput),
                     "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
@@ -1863,13 +1877,23 @@ class WritebackCollaborator:
                         fp_val = canonical_fingerprint(
                             candidate_args or full_args,
                             dict(bv.get("extra_envs") or {}),
+                            remove_args=bv.get("remove_args"),
+                            unset_envs=bv.get("unset_envs"),
+                            args_mode=str(bv.get("args_mode") or "append"),
                         )
                     prov_val = str(bv.get("provenance") or "").strip()
                 if fp_val:
                     stack_entry["fingerprint"] = fp_val
                 if prov_val:
                     stack_entry["provenance"] = prov_val
-                # Stable filter label for the optimization kind (backend / param / env).
+                if isinstance(bv, dict):
+                    for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
+                        if bv.get(_ctrl_key):
+                            stack_entry[_ctrl_key] = bv.get(_ctrl_key)
+                    if bv.get("effective_extra_server_args"):
+                        stack_entry["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+                # Stable filter label for "what kind of optimization" (backend /
+                # param / env), so the stack can be sliced like the timeline.
                 _stack_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
                 stack_entry["operation_kind"] = operation_kind_for(
                     task_kind,
@@ -1890,7 +1914,7 @@ class WritebackCollaborator:
                     extra_server_args=full_args,
                 )
 
-        self.shared_state.current_best = {
+        current_best = {
             "action": task_kind,
             "tput": float(best_tput),
             "variant_name": variant_name,
@@ -1902,6 +1926,15 @@ class WritebackCollaborator:
             "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
+        if isinstance(bv, dict):
+            for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
+                if bv.get(_ctrl_key):
+                    current_best[_ctrl_key] = bv.get(_ctrl_key)
+            if bv.get("effective_extra_server_args"):
+                current_best["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+            if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
+                current_best["args_mode"] = "replace"
+        self.shared_state.current_best = current_best
         if self.shared_state.baseline_tput > 0:
             self.shared_state.cumulative_gain = (
                 (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
@@ -2231,9 +2264,9 @@ class WritebackCollaborator:
             best_winner = result.get("best_variant")
             best_tput = result.get("output_throughput")
             promoted = False
-            # A post-resume stack revalidation task confirms the EXISTING
-            # cumulative stack rather than adding a variant, so it never
-            # "promotes". Reconcile the validation watermark + clear the
+            # A post-resume revalidation task confirms the EXISTING stack/current
+            # best rather than adding a variant, so it never "promotes".
+            # Reconcile the validation watermark + clear the
             # ``resume_pending_revalidation`` flag from the measured tput — but
             # ONLY when the rebench actually produced a valid measurement, so a
             # failed/empty rebench leaves the flag set and reports keep warning.
@@ -3229,7 +3262,11 @@ class WritebackCollaborator:
         args = str(rebuilt.get("extra_server_args") or "").strip()
         envs = rebuilt.get("extra_envs") or {}
         overlay = str(rebuilt.get("final_overlay") or "").strip()
-        if not (args or envs):
+        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        cb_remove = cb_now.get("remove_args")
+        cb_unset = cb_now.get("unset_envs")
+        cb_replace = str(cb_now.get("args_mode") or "").strip().lower() == "replace"
+        if not (args or envs or cb_remove or cb_unset or cb_replace):
             return {"skipped": True, "reason": "empty_stack"}
         params: dict[str, Any] = {
             "source": "resume_stack_revalidate",
@@ -3249,6 +3286,12 @@ class WritebackCollaborator:
             "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
             "enable_stack_rebench": False,
         }
+        if cb_remove:
+            params["base_remove_args"] = [cb_remove] if isinstance(cb_remove, str) else list(cb_remove or [])
+        if cb_unset:
+            params["base_unset_envs"] = [cb_unset] if isinstance(cb_unset, str) else list(cb_unset or [])
+        if cb_replace:
+            params["base_args_mode"] = "replace"
         if self.shared_state.baseline_config_path:
             params["config_path"] = self.shared_state.baseline_config_path
         task, existing = await self.tasks.create_or_return_existing(

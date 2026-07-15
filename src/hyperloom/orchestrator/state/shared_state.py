@@ -375,7 +375,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_enabled: bool = True
     # CONC ladder for conc_sweep (mirrors conc_sweep.DEFAULT_CONCS). Empty => skip_reason=empty_conc_list.
     conc_sweep_concs: list[int] = field(
-        default_factory=lambda: [1, 2, 4, 8, 16, 32, 64, 128],
+        default_factory=lambda: [256, 128, 64, 32, 16, 8, 4, 2],
     )
     # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000
@@ -1025,9 +1025,24 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             for entry in source_list:
                 if not isinstance(entry, dict):
                     continue
+                controls: dict[str, Any] = {}
+                for key in ("remove_args", "unset_envs"):
+                    raw = entry.get(key)
+                    if isinstance(raw, str):
+                        vals = [raw.strip()] if raw.strip() else []
+                    elif isinstance(raw, (list, tuple, set)):
+                        vals = [str(v).strip() for v in raw if str(v).strip()]
+                    else:
+                        vals = []
+                    if vals:
+                        controls[key] = vals
+                mode = str(entry.get("args_mode") or "append").strip().lower()
+                if mode == "replace":
+                    controls["args_mode"] = "replace"
                 fp_val = entry.get("fingerprint") or _fp(
                     str(entry.get("extra_server_args") or ""),
                     dict(entry.get("extra_envs") or {}),
+                    **controls,
                 )
                 wh.append(
                     {
@@ -1037,6 +1052,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                         "gain_pct": entry.get("gain_pct"),
                         "extra_args": str(entry.get("extra_args") or entry.get("extra_server_args") or ""),
                         "extra_envs": dict(entry.get("extra_envs") or {}),
+                        **controls,
                         "provenance": str(entry.get("provenance") or ""),
                         "ts": str(entry.get("ts") or ""),
                     }

@@ -26,7 +26,7 @@ def _make_client() -> SafeOptimizeClient:
         token="tok",
         register_workspace="ws-reg",
         submit_workspace="ws-sub",
-        volume="/wekafs",
+        volume="/mnt/shared",
     )
     return c
 
