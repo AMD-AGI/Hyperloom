@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
 """Shared model-compatibility rules for the AMD/ROCm serving stack.
 
 Used by both the offline pool filter (``filter_candidates.py``) and the online

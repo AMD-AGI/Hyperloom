@@ -1222,8 +1222,24 @@ class ExplorePhase(PhaseHandler):
             args = str(p.get("extra_args") or p.get("extra_server_args") or "").strip()
             envs_raw = p.get("extra_envs")
             envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
-            # Drop entries with neither a server-arg nor an env override.
-            if not args and not envs:
+            controls: dict[str, Any] = {}
+            for key in ("remove_args", "unset_envs"):
+                raw = p.get(key)
+                if isinstance(raw, str):
+                    vals = [raw.strip()] if raw.strip() else []
+                elif isinstance(raw, (list, tuple, set)):
+                    vals = [str(v).strip() for v in raw if str(v).strip()]
+                else:
+                    vals = []
+                if vals:
+                    controls[key] = vals
+            mode = str(p.get("args_mode") or "append").strip().lower()
+            if mode == "replace":
+                controls["args_mode"] = "replace"
+            # Drop entries with neither a server-arg nor an env override —
+            # nothing for the restart to apply (e.g. research-only items)
+            # unless the entry removes inherited args/envs.
+            if not args and not envs and not controls:
                 continue
             name = str(p.get("name") or "").strip() or (f"{domain or 'specialist'}-{task.task_id[:8]}-{i}")
             grid.append(
@@ -1231,6 +1247,7 @@ class ExplorePhase(PhaseHandler):
                     "name": name,
                     "extra_args": args,
                     "extra_envs": envs,
+                    **controls,
                     "provenance": f"specialist:{domain}" if domain else "specialist",
                     "note": str(p.get("reason") or "")[:200],
                 }
@@ -1250,6 +1267,20 @@ class ExplorePhase(PhaseHandler):
             cb_args = str(cb.get("extra_server_args") or "")
             if cb_args:
                 params["base_extra_args"] = cb_args
+            _raw_remove = cb.get("remove_args")
+            _raw_unset = cb.get("unset_envs")
+            cb_remove = [_raw_remove] if isinstance(_raw_remove, str) and _raw_remove.strip() else [
+                str(v) for v in (_raw_remove or []) if str(v).strip()
+            ]
+            cb_unset = [_raw_unset] if isinstance(_raw_unset, str) and _raw_unset.strip() else [
+                str(v) for v in (_raw_unset or []) if str(v).strip()
+            ]
+            if cb_remove:
+                params["base_remove_args"] = cb_remove
+            if cb_unset:
+                params["base_unset_envs"] = cb_unset
+            if str(cb.get("args_mode") or "").strip().lower() == "replace":
+                params["base_args_mode"] = "replace"
         base_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
         if base_tput:
             params["base_tput"] = base_tput

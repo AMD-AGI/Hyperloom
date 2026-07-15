@@ -451,6 +451,15 @@ def _collect_forward_env() -> dict[str, str]:
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
+    unset_fwd = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
+    if unset_fwd:
+        try:
+            parsed_unset = json.loads(unset_fwd)
+            if isinstance(parsed_unset, list):
+                for key in parsed_unset:
+                    fwd.pop(str(key), None)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
     # Explicit per-variant env overrides come through HYPERLOOM_MN_EXTRA_FWD_ENV
     # as a JSON object; forwarded verbatim regardless of prefix and take
     # precedence over prefix-matched values for the same key.

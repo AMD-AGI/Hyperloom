@@ -18,17 +18,6 @@ models:
     model_prefix: qwen3.5
     verified_count: 178
 
-  # ── GLM 5 — DISABLED 2026-05-11 (paired with ci-config.yaml entry) ──
-  # Re-enable when InferenceX adds an MI300X baseline for GLM-5 (or when CI
-  # injects MI300X memory/topology adjustments before the prompt reaches the
-  # agent). Keeping the mapping commented so build_summary doesn't surface
-  # GLM-5 results against a wrong (MI355X) baseline.
-  # - display_name: GLM 5
-  #   api_name: GLM-5
-  #   hf_model: zai-org/GLM-5-FP8
-  #   model_prefix: glm5
-  #   verified_count: 58
-
   - display_name: Kimi K2.5 1T
     api_name: Kimi-K2.5
     hf_model: moonshotai/Kimi-K2.5
@@ -59,8 +48,8 @@ models:
 # Hyperloom 8h production-rerun pool:
 #   1. Families InferenceX already covers in its dedicated long-running
 #      job (so they are not double-spent on GPU here).
-#   2. Customer / roadmap exclusions where the product owner has said
-#      "do not run this in the production_1000 pool".
+#   2. Deployment-specific exclusions that should not enter this public
+#      example pool.
 # Substring matching also picks up third-party quant variants
 # (unsloth/QuantTrio/cyankiwi/AWQ etc.), which the exact `hf_model`
 # match in the `models:` block above cannot.
@@ -80,9 +69,7 @@ production_pool_exclusion_keywords:
   - minimax-m2.5
   - minimax-m25
 
-  # Customer / roadmap "do not run in production pool": GLM-5 (P2,
-  # paused for now); DeepSeek V4 series + GLM-5.1 (all P0 InferenceX
-  # long jobs).
+  # Deployment-specific long-job exclusions.
   - glm-5
   - glm5
   - deepseek-v4

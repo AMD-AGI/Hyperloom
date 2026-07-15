@@ -4848,9 +4848,26 @@ def _candidate_model_config_paths(model_name: str) -> list[Path]:
     if raw.suffix == ".json":
         candidates.append(raw)
     candidates.append(raw / "config.json")
-    models_root = Path(os.environ.get("HYPERLOOM_MODELS_ROOT", "/wekafs/models"))
-    candidates.append(models_root / text / "config.json")
-    candidates.append(models_root / raw.name / "config.json")
+    # Optional models-root override (env-only; no hardcoded default). Standalone
+    # kernel-agent tools cannot import hyperloom.common (the Ray/subprocess
+    # sys.path contract in hyperloom.common.__init__), so this mirrors the shared
+    # resolver's strategy (local path + HF hub cache) independently.
+    _root = os.environ.get("HYPERLOOM_MODELS_ROOT", "").strip()
+    if _root:
+        candidates.append(Path(_root) / text / "config.json")
+        candidates.append(Path(_root) / raw.name / "config.json")
+    # HF hub cache (what vLLM/SGLang populate when given a repo id): the snapshot
+    # commit-hash segment is not derivable by string, so let huggingface_hub
+    # locate it (honoring HF_HOME / HF_HUB_CACHE). Best-effort; skipped when the
+    # optional dep is absent or nothing is cached.
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        _hit = try_to_load_from_cache(repo_id=text, filename="config.json")
+        if isinstance(_hit, str):
+            candidates.append(Path(_hit))
+    except Exception:
+        pass
     out: list[Path] = []
     seen: set[str] = set()
     for path in candidates:
