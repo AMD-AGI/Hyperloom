@@ -6,7 +6,7 @@ Subcommands (``python3 -m hyperloom.inference_optimizer.multi_node <sub>``):
 ``create-rayjob`` (create via SaFE + wait for Running, checkpointing
 ``rayjob_id`` so retries don't leak a second workload), ``bootstrap``,
 ``verify``, ``restart-server`` (kill + relaunch nohup'd server,
-idempotent), ``kill-inference``, ``stop-rayjob``.
+idempotent), ``kill-inference``, ``stop-multi-job``.
 
 State lives in ``$MULTI_NODE_STATE_FILE`` (default:
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
@@ -142,7 +142,7 @@ def _state_file() -> Path:
     return resolve_state_file()
 
 
-def _dynamo_ssh_dir() -> Path:
+def _infera_ssh_dir() -> Path:
     """Session-scoped directory for the ephemeral multi-node SSH keypair.
 
     Returns:
@@ -264,8 +264,8 @@ def _ray_dashboard_client(state: dict[str, Any] | None = None) -> ray_dashboard.
     return ray_dashboard.RayDashboardClient(head, token=token)
 
 
-def _dynamo_known_hosts_path(state: dict[str, Any] | None = None) -> Path:
-    """Resolve the session known_hosts file for Dynamo SSH.
+def _infera_known_hosts_path(state: dict[str, Any] | None = None) -> Path:
+    """Resolve the session known_hosts file for Infera SSH.
 
     Args:
         state: Optional loaded multi-node state; when omitted, reads state.
@@ -277,35 +277,45 @@ def _dynamo_known_hosts_path(state: dict[str, Any] | None = None) -> Path:
     raw = str(st.get("ssh_known_hosts") or "").strip()
     if raw:
         return Path(raw)
-    return ssh_known_hosts.default_known_hosts_path(_dynamo_ssh_dir())
+    return ssh_known_hosts.default_known_hosts_path(_infera_ssh_dir())
 
 
-def _refresh_dynamo_known_hosts(
-    ips: list[str],
-    port: int,
+def _refresh_infera_known_hosts(
+    targets: list[tuple[str, int]],
     *,
     state: dict[str, Any] | None = None,
 ) -> Path:
-    """Run ssh-keyscan for Dynamo GPU pods and persist the path in state.
+    """Run ssh-keyscan for Infera GPU pods and persist the path in state.
 
     Args:
-        ips: Pod IP addresses to scan.
-        port: SSH port on each pod.
+        targets: ``(pod_ip, ssh_port)`` pairs to scan.
         state: Optional state dict to update with ``ssh_known_hosts``.
 
     Returns:
         Path: The refreshed known_hosts file.
     """
     kh = ssh_known_hosts.refresh_known_hosts(
-        [(ip, int(port)) for ip in ips if (ip or "").strip()],
-        _dynamo_known_hosts_path(state),
+        [(ip, int(port)) for ip, port in targets if (ip or "").strip()],
+        _infera_known_hosts_path(state),
     )
     if state is not None:
         state["ssh_known_hosts"] = str(kh)
     return kh
 
 
-def _dynamo_ssh_run_script(
+def _infera_default_ssh_port(state: dict[str, Any]) -> int:
+    """Return the session default SSH port from state.
+
+    Args:
+        state: The infera multi-node state.
+
+    Returns:
+        int: ``state['ssh_port']`` or the image default.
+    """
+    return int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
+
+
+def _infera_ssh_run_script(
     state: dict[str, Any],
     ip: str,
     script: str,
@@ -314,12 +324,13 @@ def _dynamo_ssh_run_script(
     *,
     timeout: int,
     env: dict[str, str] | None = None,
-    remote_path: str = "/tmp/mn_dynamo_launch",
+    remote_path: str = "/tmp/mn_infera_launch",
+    port: int | None = None,
 ):
-    """Run a script on a Dynamo pod over SSH with host-key retry.
+    """Run a script on an Infera pod over SSH with host-key retry.
 
     Args:
-        state: Dynamo multi-node state (ssh key / port / known_hosts).
+        state: Infera multi-node state (ssh key / port / known_hosts).
         ip: Target pod IP.
         script: Script body to ship.
         interpreter: Remote interpreter (e.g. ``python3``).
@@ -327,13 +338,14 @@ def _dynamo_ssh_run_script(
         timeout: SSH timeout in seconds.
         env: Optional env assignments prepended before the interpreter.
         remote_path: Remote path for the decoded script.
+        port: Per-pod sshd port; defaults to ``state['ssh_port']``.
 
     Returns:
         subprocess.CompletedProcess: The SSH subprocess result.
     """
     key_path = state["ssh_key_path"]
-    port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
-    known_hosts = _dynamo_known_hosts_path(state)
+    ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
+    known_hosts = _infera_known_hosts_path(state)
 
     def _run(kh: Path):
         return ssh_client.ssh_run_script(
@@ -343,7 +355,7 @@ def _dynamo_ssh_run_script(
             script_args,
             key_path=key_path,
             known_hosts=kh,
-            port=port,
+            port=ssh_port,
             timeout=timeout,
             env=env,
             remote_path=remote_path,
@@ -351,40 +363,42 @@ def _dynamo_ssh_run_script(
 
     cp = _run(known_hosts)
     if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"dynamo ssh {ip}: host key mismatch; refreshing known_hosts and retrying once")
+        warn(f"infera ssh {ip}:{ssh_port}: host key mismatch; refreshing known_hosts and retrying once")
         try:
-            known_hosts = _refresh_dynamo_known_hosts([ip], port, state=state)
+            known_hosts = _refresh_infera_known_hosts([(ip, ssh_port)], state=state)
         except RuntimeError as exc:
-            warn(f"dynamo ssh {ip}: known_hosts refresh failed: {exc}")
+            warn(f"infera ssh {ip}:{ssh_port}: known_hosts refresh failed: {exc}")
             return cp
         _save_state(state)
         cp = _run(known_hosts)
     return cp
 
 
-def _dynamo_ssh_bash_with_env(
+def _infera_ssh_bash_with_env(
     state: dict[str, Any],
     ip: str,
     script: str,
     env: dict[str, str] | None,
     *,
     timeout: int,
+    port: int | None = None,
 ):
-    """Run a bash script on a Dynamo pod via SSH stdin with host-key retry.
+    """Run a bash script on an Infera pod via SSH stdin with host-key retry.
 
     Args:
-        state: Dynamo multi-node state.
+        state: Infera multi-node state.
         ip: Target pod IP.
         script: Script body for ``bash -s``.
         env: Environment exports prepended to the script.
         timeout: SSH timeout in seconds.
+        port: Per-pod sshd port; defaults to ``state['ssh_port']``.
 
     Returns:
         subprocess.CompletedProcess: The SSH subprocess result.
     """
     key_path = state["ssh_key_path"]
-    port = int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
-    known_hosts = _dynamo_known_hosts_path(state)
+    ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
+    known_hosts = _infera_known_hosts_path(state)
 
     def _run(kh: Path):
         return ssh_client.ssh_run_bash_with_env(
@@ -393,17 +407,17 @@ def _dynamo_ssh_bash_with_env(
             env,
             key_path=key_path,
             known_hosts=kh,
-            port=port,
+            port=ssh_port,
             timeout=timeout,
         )
 
     cp = _run(known_hosts)
     if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"dynamo ssh {ip}: host key mismatch; refreshing known_hosts and retrying once")
+        warn(f"infera ssh {ip}:{ssh_port}: host key mismatch; refreshing known_hosts and retrying once")
         try:
-            known_hosts = _refresh_dynamo_known_hosts([ip], port, state=state)
+            known_hosts = _refresh_infera_known_hosts([(ip, ssh_port)], state=state)
         except RuntimeError as exc:
-            warn(f"dynamo ssh {ip}: known_hosts refresh failed: {exc}")
+            warn(f"infera ssh {ip}:{ssh_port}: known_hosts refresh failed: {exc}")
             return cp
         _save_state(state)
         cp = _run(known_hosts)
@@ -510,11 +524,11 @@ def _short_poll(
 
 
 # ---------------------------------------------------------------------------
-# Subcommand: create-dynamo (Dynamo idle-pod backend)
+# Subcommand: create-infera (Infera idle-pod backend)
 #
-# Mirrors create-rayjob but provisions a SaFE DynamoDeployment with idle
+# Mirrors create-rayjob but provisions a SaFE InferaDeployment with idle
 # worker pods (mn-idle.sh) and an SSH control plane instead of a RayJob with
-# the Ray Dashboard. The benchmark entry point is the Dynamo frontend
+# the Ray Dashboard. The benchmark entry point is the Infera frontend
 # (:8000), NOT sglang rank-0 :8888.
 
 
@@ -552,17 +566,17 @@ def _short_poll(
 
 
 def install_geak_on_pods_best_effort() -> int:
-    """Best-effort GEAK install on the Dynamo GPU pods (provisioner hook).
+    """Best-effort GEAK install on the Infera GPU pods (provisioner hook).
 
-    No-op (returns 0) for non-dynamo state. Failures are logged but do not
+    No-op (returns 0) for non-infera state. Failures are logged but do not
     abort provisioning — the kernel phase will surface a clear pod-side
     ``geak CLI not found`` error if install genuinely failed.
 
     Returns:
-        int: The install return code, or ``0`` for non-dynamo state / on a
+        int: The install return code, or ``0`` for non-infera state / on a
         swallowed error.
     """
-    if _load_state().get("backend") != "dynamo":
+    if _load_state().get("backend") != "infera":
         return 0
     ns = argparse.Namespace(
         geak_src=None,
@@ -735,7 +749,7 @@ def _read_bundled_pod_python_script(
 ) -> str:
     """Read a pod Python script with stdlib-only dependencies inlined.
 
-    Dynamo SSH ships a single decoded file per invocation, so dependency modules
+    Infera SSH ships a single decoded file per invocation, so dependency modules
     are prepended into one executable script body.
 
     Args:
@@ -1298,17 +1312,17 @@ def _submit_and_collect_pod_json(
 
 
 # Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only)
-# Cohesive rayjob/dynamo clusters live in commands/{rayjob,dynamo}.py. Bind
+# Cohesive rayjob/infera clusters live in commands/{rayjob,infera}.py. Bind
 # only the command hooks used below.
 from .commands.rayjob import cmd_create_rayjob as cmd_create_rayjob
-from .commands.dynamo import (
-    cmd_create_dynamo as cmd_create_dynamo,
-    _dynamo_restart_server as _dynamo_restart_server,
-    _dynamo_kill_inference as _dynamo_kill_inference,
-    _dynamo_apply_tracelens_patch as _dynamo_apply_tracelens_patch,
-    _dynamo_apply_patch as _dynamo_apply_patch,
-    _dynamo_revert_patch as _dynamo_revert_patch,
-    _dynamo_kernel_bench as _dynamo_kernel_bench,
+from .commands.infera import (
+    cmd_create_infera as cmd_create_infera,
+    _infera_restart_server as _infera_restart_server,
+    _infera_kill_inference as _infera_kill_inference,
+    _infera_apply_tracelens_patch as _infera_apply_tracelens_patch,
+    _infera_apply_patch as _infera_apply_patch,
+    _infera_revert_patch as _infera_revert_patch,
+    _infera_kernel_bench as _infera_kernel_bench,
     cmd_install_geak as cmd_install_geak,
 )
 
@@ -1338,8 +1352,8 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
         missing state / unreadable patch, ``EXIT_TRANSIENT`` when the JSON
         can't be parsed or the fan-out failed.
     """
-    if _load_state().get("backend") == "dynamo":
-        return _dynamo_apply_patch(args)
+    if _load_state().get("backend") == "infera":
+        return _infera_apply_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
@@ -1400,8 +1414,8 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
         int: ``EXIT_OK`` on success, ``EXIT_CONFIG_ERROR`` for missing state /
         invalid backup map, ``EXIT_TRANSIENT`` when the JSON can't be parsed.
     """
-    if _load_state().get("backend") == "dynamo":
-        return _dynamo_revert_patch(args)
+    if _load_state().get("backend") == "infera":
+        return _infera_revert_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
@@ -1456,8 +1470,8 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
         ``EXIT_CONFIG_ERROR`` for missing state / TraceLens root,
         ``EXIT_TRANSIENT`` otherwise.
     """
-    if _load_state().get("backend") == "dynamo":
-        return _dynamo_apply_tracelens_patch(args)
+    if _load_state().get("backend") == "infera":
+        return _infera_apply_tracelens_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
@@ -1521,8 +1535,8 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
         missing state / invalid files JSON, ``EXIT_TRANSIENT`` when the JSON
         can't be parsed.
     """
-    if _load_state().get("backend") == "dynamo":
-        return _dynamo_kernel_bench(args)
+    if _load_state().get("backend") == "infera":
+        return _infera_kernel_bench(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
@@ -1577,9 +1591,9 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
       --dist-init-addr per upstream multi-node docs. The agent runs ONE
       restart-server invocation; the driver inside the pod handles the rest.
 
-    Dynamo backend (state.backend == 'dynamo') routes to the SSH fan-out path
+    Infera backend (state.backend == 'infera') routes to the SSH fan-out path
     instead of the Ray Dashboard; the RayJob path below is byte-for-byte
-    unchanged for non-dynamo state.
+    unchanged for non-infera state.
 
     Args:
         args (argparse.Namespace): Parsed ``restart-server`` arguments
@@ -1590,8 +1604,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         int: ``EXIT_OK`` once the server is healthy, ``EXIT_CONFIG_ERROR`` for
         missing state, or a transient exit code on launch / poll failure.
     """
-    if _load_state().get("backend") == "dynamo":
-        return _dynamo_restart_server(args)
+    if _load_state().get("backend") == "infera":
+        return _infera_restart_server(args)
     try:
         validate_server_args(
             getattr(args, "extra_args", "") or "",
@@ -1890,8 +1904,8 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
         int: A process exit code (``EXIT_OK`` on success, otherwise a
             config error code).
     """
-    if _load_state().get("backend") == "dynamo":
-        return _dynamo_kill_inference(args)
+    if _load_state().get("backend") == "infera":
+        return _infera_kill_inference(args)
     state = _require_state("head_pod_ip")
     nnodes = int(state.get("nodes") or 1)
 
@@ -1937,8 +1951,8 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
         warn(f"kill-inference skipped: {type(exc).__name__}: {exc}")
 
 
-# Subcommand: stop-rayjob
-def cmd_stop_rayjob(args: argparse.Namespace) -> int:
+# Subcommand: stop-multi-job
+def cmd_stop_multi_job(args: argparse.Namespace) -> int:
     """Stop the RayJob via SaFE REST. Idempotent.
 
     Optionally deletes the workload and/or clears the local state file.
@@ -2003,7 +2017,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     Registers the ``create-rayjob`` / ``restart-server`` / ``kill-
     inference`` / ``apply-patch`` / ``revert-patch`` / ``apply-tracelens-
-    patch`` / ``kernel-bench`` / ``stop-rayjob`` subparsers and their
+    patch`` / ``kernel-bench`` / ``stop-multi-job`` subparsers and their
     flags.
 
     Returns:
@@ -2063,7 +2077,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="ownerId for SaFE cascading cleanup. Resolution: --owner-id > "
         "$WORKLOAD_ID (sandbox workload id). When set, SaFE GCs the "
         "RayJob when the owner workload stops (safety net for missed "
-        "`stop-rayjob`).",
+        "`stop-multi-job`).",
     )
     sp.add_argument("--extra-env", action="append", default=[], help="K=V (repeatable); merged AFTER credential fanout")
     sp.add_argument(
@@ -2083,22 +2097,27 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_create_rayjob)
 
-    # create-dynamo (Dynamo idle-pod backend)
+    # create-infera (Infera idle-pod backend)
     sp = sub.add_parser(
-        "create-dynamo",
-        help="create an idle multi-node DynamoDeployment (SSH control plane); "
-        "benchmark entry point is the Dynamo frontend :8000",
+        "create-infera",
+        help="create an idle multi-node InferaDeployment (SSH control plane); "
+        "benchmark entry point is the Infera frontend :8000",
     )
     sp.add_argument("--workspace", default=None, help="SaFE workspace id (--workspace > $SAFE_WORKSPACE)")
-    sp.add_argument("--image", required=True, help="dynamo image WITH the sshd layer (mn-idle.sh present)")
+    sp.add_argument("--image", required=True, help="infera image WITH the sshd layer (mn-idle.sh present)")
+    sp.add_argument(
+        "--model",
+        required=True,
+        help="model path/HF id (frontend --router-tokenizer-path)",
+    )
     sp.add_argument("--nodes", type=int, required=True, help="worker LWS node count (>=1); worker.replica == nodes")
     sp.add_argument("--gpus-per-node", type=int, default=8)
     sp.add_argument("--cpus-per-node", type=int, default=96)
     sp.add_argument("--mem-per-node", type=int, default=1024, help="GiB per worker pod")
     sp.add_argument("--ephemeral-per-node", type=int, default=400, help="GiB per worker pod")
     sp.add_argument("--shared-mem-per-node", type=int, default=200, help="GiB /dev/shm per worker pod (sharedMemory)")
-    sp.add_argument("--backend-framework", default="sglang", choices=("sglang", "vllm", "trtllm"))
-    sp.add_argument("--kv-transfer-backend", default="nixl", choices=("nixl", "mori", "mooncake"))
+    sp.add_argument("--backend-framework", default="sglang", choices=("sglang", "vllm"))
+    sp.add_argument("--kv-transfer-backend", default="mori", choices=("nixl", "mori", "mooncake"))
     sp.add_argument(
         "--ssh-port",
         type=int,
@@ -2127,7 +2146,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-wait", action="store_true")
     sp.add_argument("--recreate", action="store_true")
     _add_common_poll_flags(sp)
-    sp.set_defaults(func=cmd_create_dynamo)
+    sp.set_defaults(func=cmd_create_infera)
 
     # bootstrap
     sp = sub.add_parser(
@@ -2285,12 +2304,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_kill_inference)
 
-    # stop-rayjob
-    sp = sub.add_parser("stop-rayjob", help="stop the RayJob via SaFE REST")
+    # stop-multi-job
+    sp = sub.add_parser("stop-multi-job", help="stop the multi-node workload (rayjob or infera) via SaFE REST")
     sp.add_argument("--workload-id", default=None, help="override the workload id from state file")
     sp.add_argument("--delete", action="store_true", help="hard delete instead of soft stop (default: stop)")
     sp.add_argument("--clear-state", action="store_true", help="remove /tmp/multi_node_state.json on success")
-    sp.set_defaults(func=cmd_stop_rayjob)
+    sp.set_defaults(func=cmd_stop_multi_job)
 
     # apply-patch (multi-node only)
     sp = sub.add_parser(
@@ -2382,11 +2401,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_kernel_bench)
 
-    # install-geak (dynamo only)
+    # install-geak (infera only)
     sp = sub.add_parser(
         "install-geak",
-        help="install the GEAK CLI on every Dynamo GPU pod over SSH "
-        "(idempotent; pip-installs the shared-FS GEAK checkout); dynamo only",
+        help="install the GEAK CLI on every Infera GPU pod over SSH "
+        "(idempotent; pip-installs the shared-FS GEAK checkout); infera only",
     )
     sp.add_argument(
         "--geak-src",

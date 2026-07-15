@@ -1,7 +1,7 @@
-"""SSH control plane for the Dynamo multi-node backend.
+"""SSH control plane for the Infera multi-node backend.
 
-The Dynamo backend reuses the RayJob "long-lived pod + external server
-restart" pattern, but the pods are a SaFE DynamoDeployment (LeaderWorkerSet
+The Infera backend reuses the RayJob "long-lived pod + external server
+restart" pattern, but the pods are a SaFE InferaDeployment (LeaderWorkerSet
 worker) deployed IDLE (``mn-idle.sh`` starts sshd on ``$MN_SSH_PORT``), and the
 control plane is SSH instead of the Ray Dashboard REST API. ``restart-server``
 fans out by SSHing into each LWS worker pod and (re)launching sglang/vllm —
@@ -31,10 +31,14 @@ from pathlib import Path
 from .env_safety import assert_env_key_shapes, assert_forward_env_keys
 from .log import info, warn
 
-# Default sshd port baked into the image's mn-sshd-init.sh. Not 22: the SaFE
-# Dynamo pod template runs ClusterFirstWithHostNet and may be promoted to
-# hostNetwork, where :22 collides with the node's own sshd.
-DEFAULT_SSH_PORT = 2222
+# Default sshd port baked into the image's mn-sshd-init.sh. Not 22 and not 2222:
+# the SaFE Infera pod template runs ClusterFirstWithHostNet and may be promoted
+# to hostNetwork, where :22 collides with the node's own sshd. On this cluster
+# the control-plane nodes ALSO run an sshd on :2222, so a worker landing there
+# loses the IPv4 :2222 bind and the controller's SSH hits the node sshd (wrong
+# key -> Permission denied). Use a higher, unused base to avoid both.
+DEFAULT_SSH_PORT = 2233
+
 
 def _ssh_common_opts(known_hosts: Path) -> list[str]:
     """Build hardened non-interactive SSH options using a session known_hosts file.
@@ -71,7 +75,7 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     """Generate (or reuse) an ed25519 keypair under ``dest_dir``.
 
     Returns ``(private_key_path, public_key_str)``. Idempotent: if the key
-    already exists it is reused (so retries of ``create-dynamo`` keep the same
+    already exists it is reused (so retries of ``create-infera`` keep the same
     authorized key that the running pods already trust).
 
     Args:
@@ -97,7 +101,6 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
         try:
             p.unlink()
         except FileNotFoundError:
-            # File already absent; nothing to remove.
             pass
     proc = subprocess.run(
         [
@@ -108,7 +111,7 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
             "",
             "-q",
             "-C",
-            "hyperloom-mn-dynamo",
+            "hyperloom-mn-infera",
             "-f",
             str(priv),
         ],
@@ -178,7 +181,7 @@ def ssh_run_script(
     port: int = DEFAULT_SSH_PORT,
     user: str = "root",
     timeout: int = 600,
-    remote_path: str = "/tmp/mn_dynamo_launch",
+    remote_path: str = "/tmp/mn_infera_launch",
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Ship ``script_text`` to the pod (base64 over the command line) and run it.
@@ -245,8 +248,8 @@ def ssh_run_bash_with_env(
 
     The env (which may include credentials) is prepended as shell-quoted
     ``export`` lines and the whole script is piped over SSH **stdin** — so
-    secrets never appear in argv or on the pod's disk. Used by the pod-side
-    tool installs (credentials passed via env).
+    secrets never appear in argv or on the pod's disk. Used when forwarding
+    env to Infera GPU pods over SSH (e.g. install-geak).
 
     Args:
         host: The target host/IP.

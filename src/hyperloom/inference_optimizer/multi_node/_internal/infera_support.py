@@ -1,4 +1,4 @@
-"""Pure helpers for the Dynamo multi-node backend.
+"""Pure helpers for the Infera multi-node backend.
 
 No I/O / no env reads (mirrors ``workload_spec.py``): the CLI feeds in the
 SaFE GetWorkloadResponse / service info and these functions extract worker pod
@@ -11,17 +11,79 @@ from __future__ import annotations
 import shlex
 from typing import Any
 
-# Frontend HTTP port (SaFE common.DynamoFrontendPort). Benchmarks target this
+# Frontend HTTP port (SaFE common.InferaFrontendPort). Benchmarks target this
 # OpenAI-compatible endpoint, never sglang rank-0 :8888.
-DYNAMO_FRONTEND_PORT = 8000
+INFERA_FRONTEND_PORT = 8000
 
-# Substrings that mark a pod as the Dynamo worker (LWS) role vs the frontend.
+# SSH control plane: hostNetwork pods on the same node share one IP, so each
+# GPU role binds a distinct MN_SSH_PORT (decode offset by ROLE_STRIDE). Within
+# a role, LWS ordinals add to the role base via LWS_WORKER_INDEX pod-side.
+INFERA_SSH_PORT_ROLE_STRIDE = 10
+_INFERA_IDLE_SCRIPT = "/usr/local/bin/mn-idle.sh"
+
+# Substrings that mark a pod as the Infera worker (LWS) role vs the frontend.
 _WORKER_PODID_HINTS = ("worker", "-lws-", "lws-")
+_FRONTEND_PODID_HINTS = ("frontend",)
+
+
+def ssh_role_port_offset(role: str) -> int:
+    """Return the SSH port offset for a GPU service role.
+
+    Args:
+        role: Service role (``worker`` / ``prefill`` / ``decode``).
+
+    Returns:
+        int: ``0`` for worker/prefill; ``INFERA_SSH_PORT_ROLE_STRIDE`` for decode.
+    """
+    if (role or "").lower() == "decode":
+        return INFERA_SSH_PORT_ROLE_STRIDE
+    return 0
+
+
+def ssh_port_for_pod(
+    role: str,
+    lws_index: int | None,
+    *,
+    ssh_port_base: int = 2222,
+) -> int:
+    """Compute the sshd port a pod listens on.
+
+    Args:
+        role: Classified service role.
+        lws_index: LWS worker ordinal (leader = 0), or ``None``.
+        ssh_port_base: Base port (``MN_SSH_PORT`` default / CLI ``--ssh-port``).
+
+    Returns:
+        int: ``ssh_port_base + role_offset + lws_index``.
+    """
+    idx = lws_index if isinstance(lws_index, int) else 0
+    return int(ssh_port_base) + ssh_role_port_offset(role) + idx
+
+
+def idle_worker_entrypoint(*, role: str, ssh_port_base: int = 2222) -> str:
+    """Build the idle worker entryPoint with a role-scoped ``MN_SSH_PORT``.
+
+    The port is ``role_base + LWS_WORKER_INDEX`` so multi-node LWS groups on
+    different nodes can reuse the same role base while co-located roles (e.g.
+    prefill + decode on one node under hostNetwork) bind distinct ports.
+
+    Args:
+        role: GPU service role (``worker`` / ``prefill`` / ``decode``).
+        ssh_port_base: Base SSH port from the create-infera CLI.
+
+    Returns:
+        str: Shell command executed as the pod entryPoint (before base64).
+    """
+    role_base = int(ssh_port_base) + ssh_role_port_offset(role)
+    return (
+        f"export MN_SSH_PORT=$(( {role_base} + ${{LWS_WORKER_INDEX:-0}} )); "
+        f"exec {_INFERA_IDLE_SCRIPT}"
+    )
 
 
 def _service_roles_for(pd_mode: str) -> list[str]:
     """Positional serviceRoles list for the deployment topology (matches
-    ``build_dynamo_workload_body``): PD -> [frontend, prefill, decode];
+    ``build_infera_workload_body``): PD -> [frontend, prefill, decode];
     aggregated -> [frontend, worker].
 
     Args:
@@ -37,10 +99,10 @@ def _service_roles_for(pd_mode: str) -> list[str]:
 
 
 def _parse_role_index(pod_id: str) -> int | None:
-    """Parse the slot index from a DGD pod name ``<wid>-role<N>-<hash>``.
+    """Parse the slot index from a IDEP pod name ``<wid>-role<N>-<hash>``.
 
     Args:
-        pod_id: The DGD pod name.
+        pod_id: The IDEP pod name.
 
     Returns:
         The parsed role slot index, or ``None`` when the pattern is absent.
@@ -56,19 +118,19 @@ def _classify_pod_role(
     resource_id: Any,
     service_roles: list[str],
 ) -> str | None:
-    """Classify a DGD pod into frontend / prefill / decode / worker.
+    """Classify a IDEP pod into frontend / prefill / decode / worker.
 
     Priority:
       1. Explicit role substrings in podId (prefillworker / decodeworker /
          frontend) — present when SaFE renames the pods.
       2. Slot index -> ``service_roles[index]``. The index comes from
-         ``resourceId`` (SaFE sets it per DGD pod) or, as a fallback, the
+         ``resourceId`` (SaFE sets it per IDEP pod) or, as a fallback, the
          ``-role<N>-`` suffix in the pod name (SaFE keeps role0/role1/role2
          deployment names). This is the robust path for the observed
          ``<wid>-role<N>-<hash>`` naming.
 
     Args:
-        pod_id: The DGD pod name.
+        pod_id: The IDEP pod name.
         resource_id: SaFE-provided resource id (fallback slot index when an
             integer).
         service_roles: Positional service roles to map a slot index onto.
@@ -84,8 +146,8 @@ def _classify_pod_role(
         return "decode"
     if "frontend" in pl:
         return "frontend"
-    # The DGD pod NAME reliably encodes the slot (``<wid>-role<N>-<hash>``);
-    # prefer it over resourceId, which SaFE leaves 0 for DGD pods (no
+    # The IDEP pod NAME reliably encodes the slot (``<wid>-role<N>-<hash>``);
+    # prefer it over resourceId, which SaFE leaves 0 for IDEP pods (no
     # resource.id annotation) and would otherwise map every pod to role 0.
     idx = _parse_role_index(pod_id)
     if idx is None and isinstance(resource_id, int):
@@ -101,22 +163,25 @@ def discover_role_pods(
     workload: dict[str, Any],
     *,
     pd_mode: str = "aggregated",
+    ssh_port_base: int = 2222,
 ) -> dict[str, list[dict[str, Any]]]:
     """Group a SaFE GetWorkloadResponse's pods by role.
 
     ``pd_mode`` selects the positional serviceRoles used to map a pod's slot
     index (resourceId / ``-role<N>-``) to its role. Returns
     ``{"frontend": [...], "prefill": [...], "decode": [...], "worker": [...]}``;
-    each entry is ``{"podId", "podIP", "lwsIndex"}`` for pods with a non-empty
-    ``podIP``, sorted by LWS ordinal (leader = 0) for deterministic rank order.
+    each entry is ``{"podId", "podIP", "role", "lwsIndex", "sshPort"}`` for pods
+    with a non-empty ``podIP``, sorted by LWS ordinal (leader = 0) for
+    deterministic rank order.
 
     Args:
         workload: A SaFE GetWorkloadResponse mapping with a ``pods`` list.
         pd_mode: Deployment topology selecting the positional service roles.
+        ssh_port_base: Base SSH port matching the deployed ``--ssh-port``.
 
     Returns:
-        A mapping of role to its list of ``{"podId", "podIP", "lwsIndex"}``
-        entries, sorted by LWS ordinal then pod id.
+        A mapping of role to its list of pod SSH target dicts, sorted by LWS
+        ordinal then pod id.
     """
     service_roles = _service_roles_for(pd_mode)
     groups: dict[str, list[dict[str, Any]]] = {
@@ -131,7 +196,7 @@ def discover_role_pods(
         pod_ip = str(p.get("podIP") or "").strip()
         if not pod_ip:
             continue
-        # Skip terminal / dead pods. A DGD role pod that crashed during early
+        # Skip terminal / dead pods. A IDEP role pod that crashed during early
         # scheduling lingers in GetWorkload.pods with a stale podIP but no sshd
         # (phase=Failed/Succeeded). Including it makes restart-server SSH-fan-out
         # to a dead replica -> "Connection refused" rc=1 -> baseline_failed.
@@ -143,11 +208,14 @@ def discover_role_pods(
         role = _classify_pod_role(pod_id, p.get("resourceId"), service_roles)
         if role is None:
             continue
+        lws_idx = _parse_lws_ordinal(pod_id)
         groups[role].append(
             {
                 "podId": pod_id,
                 "podIP": pod_ip,
-                "lwsIndex": _parse_lws_ordinal(pod_id),
+                "role": role,
+                "lwsIndex": lws_idx,
+                "sshPort": ssh_port_for_pod(role, lws_idx, ssh_port_base=ssh_port_base),
             }
         )
     for role in groups:
@@ -158,6 +226,69 @@ def discover_role_pods(
             )
         )
     return groups
+
+
+def discover_worker_pods(workload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the aggregated worker pods — convenience wrapper over
+    :func:`discover_role_pods` for the non-PD path. Frontend pods are excluded.
+
+    Args:
+        workload: A SaFE GetWorkloadResponse mapping with a ``pods`` list.
+
+    Returns:
+        The aggregated worker pod entries.
+    """
+    return discover_role_pods(workload, pd_mode="aggregated")["worker"]
+
+
+def pod_targets_from_lists(
+    pods: list[dict[str, Any]] | None,
+    ips: list[str] | None,
+    *,
+    default_port: int,
+    default_role: str = "worker",
+) -> list[dict[str, Any]]:
+    """Build SSH targets from rich pod dicts or legacy IP-only state."""
+    if pods:
+        return [dict(p) for p in pods if isinstance(p, dict) and p.get("podIP")]
+    out: list[dict[str, Any]] = []
+    for ip in ips or []:
+        ip = str(ip or "").strip()
+        if not ip:
+            continue
+        out.append(
+            {
+                "podId": "",
+                "podIP": ip,
+                "role": default_role,
+                "lwsIndex": None,
+                "sshPort": int(default_port),
+            }
+        )
+    return out
+
+
+def gpu_ssh_targets_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolve every GPU pod SSH target from multi_node state."""
+    base = int(state.get("ssh_port") or 2222)
+    if (state.get("pd_mode") or "").lower() == "disaggregated":
+        return pod_targets_from_lists(
+            state.get("prefill_pods"),
+            state.get("prefill_pod_ips"),
+            default_port=base,
+            default_role="prefill",
+        ) + pod_targets_from_lists(
+            state.get("decode_pods"),
+            state.get("decode_pod_ips"),
+            default_port=base + INFERA_SSH_PORT_ROLE_STRIDE,
+            default_role="decode",
+        )
+    return pod_targets_from_lists(
+        state.get("worker_pods"),
+        state.get("worker_pod_ips"),
+        default_port=base,
+        default_role="worker",
+    )
 
 
 def _parse_lws_ordinal(pod_id: str) -> int | None:
@@ -181,15 +312,15 @@ def frontend_service_url(
     workspace: str,
     service_info: dict[str, Any] | None = None,
     *,
-    port: int = DYNAMO_FRONTEND_PORT,
+    port: int = INFERA_FRONTEND_PORT,
 ) -> str:
-    """Resolve the Dynamo frontend base URL for benchmarks.
+    """Resolve the Infera frontend base URL for benchmarks.
 
     Prefers the live SaFE service info (clusterIp / dns) when present; falls
     back to the conventional ``http://<wid>.<workspace>.svc.cluster.local:<port>``.
 
     Args:
-        workload_id: The Dynamo workload id.
+        workload_id: The Infera workload id.
         workspace: The Kubernetes namespace / workspace name.
         service_info: Optional live SaFE service info (internalDomain / dns /
             clusterIp / port).
@@ -220,15 +351,15 @@ def frontend_service_url(
     return f"http://{workload_id}.{workspace}.svc.cluster.local:{port}"
 
 
-# sglang PD bootstrap rendezvous port (SaFE common.DynamoBootstrapPort).
-DYNAMO_BOOTSTRAP_PORT = 30001
+# sglang PD bootstrap rendezvous port (SaFE common.InferaBootstrapPort).
+INFERA_BOOTSTRAP_PORT = 30001
 
 
-def disagg_flags(mode: str, kv_transfer_backend: str, *, bootstrap_port: int = DYNAMO_BOOTSTRAP_PORT) -> str:
+def disagg_flags(mode: str, kv_transfer_backend: str, *, bootstrap_port: int = INFERA_BOOTSTRAP_PORT) -> str:
     """sglang PD disaggregation flags for a prefill/decode group.
 
     Mirrors the SaFE dispatcher's ``sglangDisaggFlags`` so the SSH-launched
-    server matches the native deploy path. ``dynamo.sglang`` parses these via
+    server matches the native deploy path. ``infera.sglang`` parses these via
     argparse (it does NOT read SGLANG_DISAGGREGATION_* env), so they must be on
     the command line.
 
@@ -261,16 +392,16 @@ def build_node_launch_args(
     nnodes: int,
     ep: int = 1,
     dist_init_port: int = 5000,
-    pid_file: str = "/tmp/mn_dynamo_server.pid",
-    log_file: str = "/tmp/mn_dynamo_server.log",
+    pid_file: str = "/tmp/mn_infera_server.pid",
+    log_file: str = "/tmp/mn_infera_server.log",
     extra_args: str = "",
-    health_port: int = DYNAMO_FRONTEND_PORT,
+    health_port: int = INFERA_FRONTEND_PORT,
     health_wait_sec: int = 0,
     kill_only: bool = False,
     disagg_mode: str = "",
     kv_transfer_backend: str = "",
 ) -> str:
-    """Build the argv string for launch_dynamo_node.py (shipped over SSH).
+    """Build the argv string for launch_infera_node.py (shipped over SSH).
 
     The SAME string is sent to every pod IN A GROUP — each pod self-determines
     its node-rank from ``$LWS_WORKER_INDEX`` pod-side, so the controller does
@@ -294,7 +425,7 @@ def build_node_launch_args(
         kv_transfer_backend: KV transfer backend for PD disaggregation.
 
     Returns:
-        The shell-quoted argv string for ``launch_dynamo_node.py``.
+        The shell-quoted argv string for ``launch_infera_node.py``.
     """
     parts = ["--framework", framework]
     if kill_only:

@@ -129,8 +129,8 @@ def _session_gpu_ids() -> list[int] | None:
 def _is_multi_node_sandbox() -> bool:
     """True when running in multi-node mode (nodes >= 2).
 
-    In multi-node mode (both Dynamo and RayJob), the optimizer sandbox does
-    NOT own the inference server GPUs — those live in remote pods (Dynamo
+    In multi-node mode (both Infera and RayJob), the optimizer sandbox does
+    NOT own the inference server GPUs — those live in remote pods (Infera
     worker pods or RayJob head/worker pods). The sandbox may be scheduled on
     a GPU node and see local ``/dev/kfd`` + ``rocm-smi``, but:
       - The local GPUs run OTHER workloads (not ours).
@@ -139,7 +139,7 @@ def _is_multi_node_sandbox() -> bool:
       - The orchestration LLM then proposes ``recover`` every tick forever.
 
     In multi-node mode the local GPU probe is skipped entirely; remote GPU
-    health is handled by the Dynamo restart-server / kill-inference path
+    health is handled by the Infera restart-server / kill-inference path
     (SSH to the actual pods).
 
     Single-node (``is_multi_node() == False``) is unaffected — the sandbox
@@ -205,14 +205,14 @@ class RecoverExecutor:
             allow_reset,
         )
 
-        # Dynamo CPU-only sandbox: no local GPUs to reclaim (they live on remote
+        # Infera CPU-only sandbox: no local GPUs to reclaim (they live on remote
         # pods reached over SSH). Calling rocm-smi here deadlocks on the kfd
         # ioctl and makes recover loop. Short-circuit to success so the
         # orchestrator stops proposing recover; remote VRAM cleanup, when
-        # needed, is handled by the dynamo restart-server / kill-inference path.
+        # needed, is handled by the infera restart-server / kill-inference path.
         if _is_multi_node_sandbox():
             log.info(
-                "recover_executor: dynamo CPU-only sandbox detected; skipping "
+                "recover_executor: infera CPU-only sandbox detected; skipping "
                 "local rocm-smi probe + gpureset (GPUs are on remote pods)."
             )
             result = {
