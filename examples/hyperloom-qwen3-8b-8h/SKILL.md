@@ -68,7 +68,7 @@ Required optimize CLI flags:
 - `--conc 64`
 - `--isl 1024`
 - `--osl 1024`
-- `--precision fp8`
+- `--precision bf16`
 - `--target-gain 30`
 - `--max-hours 8`
 
