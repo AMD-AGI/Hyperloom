@@ -1215,7 +1215,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # owner; everything else is a real AttributeError.
         owner = Coordinator._DELEGATED.get(name)
         if owner is not None:
-            return getattr(getattr(self, owner), name)
+            target = getattr(self, owner)
+            try:
+                # Do not invoke the collaborator's fallback ``__getattr__`` here:
+                # a stale _DELEGATED entry would otherwise bounce back to this
+                # Coordinator and recurse until RecursionError.
+                return object.__getattribute__(target, name)
+            except AttributeError as exc:
+                raise AttributeError(
+                    f"{type(self).__name__!r} delegates {name!r} to {owner!r}, "
+                    f"but that collaborator does not define it"
+                ) from exc
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def _collaborator(self, attr: str, factory):
