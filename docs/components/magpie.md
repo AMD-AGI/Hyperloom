@@ -23,8 +23,11 @@ the input that [TraceLens](tracelens.md) then analyzes. Magpie relies on
 ## Role in Hyperloom
 
 The optimization loop drives Magpie's benchmark mode as a subprocess. The
-grid runner builds the command line and launches one run per variant in
-`src/hyperloom/orchestrator/actions/executors/_grid_runner.py`:
+command line is built by `build_benchmark_command()` /
+`MagpieBackend.build_command()` in
+`src/hyperloom/orchestrator/actions/executors/benchmark_backend.py`; callers
+such as `_grid_runner.py` and `baseline.py` invoke it to launch one run per
+variant:
 
 ```python
 cmd = [
@@ -38,7 +41,7 @@ cmd = [
 Each run produces a `benchmark_report.json` that Hyperloom parses to extract
 throughput/measurements and pick winners. To make concurrent benchmark runs
 robust, `src/hyperloom/orchestrator/actions/executors/_magpie_patcher.py`
-applies an idempotent, atomic-write patch to Magpie's cloned `benchmarker.py`
+applies an idempotent, atomic-write patch to Magpie's installed `benchmarker.py`
 (`_prepare_benchmark_scripts`) so a concurrent reader never sees a half-copied
 script. See [Hyperloom optimization loop](../conceptual/optimization-loop.md) for more information.
 

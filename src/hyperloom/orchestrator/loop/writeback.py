@@ -1742,11 +1742,16 @@ class WritebackCollaborator:
             )
 
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
-        """Persist scout output (hints, competitor target, gap seeds, dedup); all steps fail-soft.
+        """Persist scout output (hints, gap seeds, dedup); all steps fail-soft.
+
+        The scout is a text-hints-only collector. Any ``competitor_target``
+        numbers it emits are intentionally ignored here: measured competitor
+        baselines are sourced from InferenceX, not authored by the scout, so
+        LLM-written numbers must never be persisted as a consumable target.
 
         Args:
             done_payload: The completed research-scout task payload; its
-                ``research`` block carries hints, competitor target and PR ids.
+                ``research`` block carries hints and PR ids.
         """
         from ..knowledge import research_hints as _research_hints
 
@@ -1765,12 +1770,6 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: append_hints failed")
             added = 0
-        try:
-            _research_hints.write_competitor_target(
-                self.session_dir, block.get("competitor_target"),
-            )
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: competitor_target write failed")
         # Share inspected PR ids with the FRAMEWORK dedup set.
         pr_ids: list[Any] = []
         for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):

@@ -41,7 +41,7 @@ def test_setup_cli_forwards_flags_and_workspace_env(tmp_path: Path, monkeypatch)
     ]
     env = seen["env"]
     assert env["REPO_ROOT"] == str(tmp_path)
-    assert env["HYPERLOOM_ENV_FILE"] == str(tmp_path / ".env")
+    assert "HYPERLOOM_ENV_FILE" not in env
     assert env["HYPERLOOM_SKILL_PATH"] == str(tmp_path / "SKILL.md")
 
 
@@ -69,7 +69,6 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("REPO_ROOT", "/stale/root")
-    monkeypatch.setenv("HYPERLOOM_ENV_FILE", "/stale/.env")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-anthropic-key")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: stale")
@@ -89,7 +88,7 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
     assert rc == 7
     env = seen["env"]
     assert env["REPO_ROOT"] == str(tmp_path)
-    assert env["HYPERLOOM_ENV_FILE"] == str(tmp_path / ".env")
+    assert "HYPERLOOM_ENV_FILE" not in env
     assert env["HYPERLOOM_SKILL_PATH"] == str(tmp_path / "SKILL.md")
     assert env["HYPERLOOM_SETUP_ENV_AUTHORITATIVE"] == "1"
     for key in (
@@ -115,7 +114,7 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
     )
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("read_dotenv_var() {")
-    end = script_text.index("\nwrite_combined_env() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
     credential_functions = script_text[start:end]
     dotenv = tmp_path / ".env"
     dotenv.write_text(
@@ -201,9 +200,12 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
+    compose_start = script_text.index("_compose_pythonpath() {")
+    compose_end = script_text.index("\n# Keep REPO_ROOT on PYTHONPATH")
     env_start = script_text.index("write_env_file() {")
     env_end = script_text.index("\nensure_geak() {")
     dotenv_helpers = script_text[upsert_start:upsert_end]
+    compose_pythonpath = script_text[compose_start:compose_end]
     write_env_file = script_text[env_start:env_end]
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
@@ -263,6 +265,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
                 "log() { :; }",
                 "warn() { :; }",
                 dotenv_helpers,
+                compose_pythonpath,
                 write_env_file,
                 "write_env_file",
             ]
@@ -299,9 +302,12 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
+    compose_start = script_text.index("_compose_pythonpath() {")
+    compose_end = script_text.index("\n# Keep REPO_ROOT on PYTHONPATH")
     env_start = script_text.index("write_env_file() {")
     env_end = script_text.index("\nensure_geak() {")
     dotenv_helpers = script_text[upsert_start:upsert_end]
+    compose_pythonpath = script_text[compose_start:compose_end]
     write_env_file = script_text[env_start:env_end]
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
@@ -355,6 +361,7 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
                 "log() { :; }",
                 "warn() { :; }",
                 dotenv_helpers,
+                compose_pythonpath,
                 write_env_file,
                 "write_env_file",
             ]
@@ -397,9 +404,12 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
+    compose_start = script_text.index("_compose_pythonpath() {")
+    compose_end = script_text.index("\n# Keep REPO_ROOT on PYTHONPATH")
     env_start = script_text.index("write_env_file() {")
     env_end = script_text.index("\nensure_geak() {")
     dotenv_helpers = script_text[upsert_start:upsert_end]
+    compose_pythonpath = script_text[compose_start:compose_end]
     write_env_file = script_text[env_start:env_end]
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
@@ -446,6 +456,7 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
                 "log() { :; }",
                 "warn() { :; }",
                 dotenv_helpers,
+                compose_pythonpath,
                 write_env_file,
                 "write_env_file",
             ]

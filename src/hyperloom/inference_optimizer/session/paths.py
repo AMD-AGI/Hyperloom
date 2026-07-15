@@ -328,12 +328,14 @@ def open_source_root() -> Path:
 
 
 def magpie_dir() -> Path:
-    """``<open_source_root>/Magpie/`` — Magpie clone (pod-local; ``$MAGPIE_PATH``
-    overrides). Aligned with install.sh so script and runtime resolve the same
-    checkout.
+    """Magpie package root (``$MAGPIE_PATH`` override, else legacy default).
+
+    ``install.sh`` resolves ``MAGPIE_PATH`` from the pip-installed package.
+    This helper keeps the old default path for back-compat with callers that
+    ask before setup has exported the resolved value.
 
     Returns:
-        The Magpie checkout path.
+        The Magpie package/check-out root path.
     """
     override = os.environ.get("MAGPIE_PATH")
     if override:

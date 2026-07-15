@@ -364,7 +364,7 @@ def _extract_prepare_region(text: str) -> str:
 
 
 def _upstream_is_already_atomic(text: str) -> bool:
-    """True when the cloned Magpie already copies scripts atomically (#C1 patch
+    """True when installed Magpie already copies scripts atomically (#C1 patch
     redundant). Either signal suffices: ``_copy_benchmark_script_atomic``
     present, or an inline ``tempfile.mkstemp(`` + ``os.replace(`` in the
     ``_prepare_benchmark_scripts`` body.
@@ -373,7 +373,7 @@ def _upstream_is_already_atomic(text: str) -> bool:
         text: The full ``benchmarker.py`` source text to inspect.
 
     Returns:
-        True when the cloned Magpie already copies scripts atomically (making
+        True when installed Magpie already copies scripts atomically (making
         the #C1 patch redundant), False otherwise.
     """
     if _UPSTREAM_ATOMIC_HELPER in text:
@@ -698,7 +698,7 @@ def magpie_scripts_patch_status(
 def ensure_magpie_atomic_scripts_patch(
     magpie_dir: Path | str | None = None,
 ) -> bool:
-    """Ensure cloned Magpie's ``_prepare_benchmark_scripts`` copies each
+    """Ensure installed Magpie's ``_prepare_benchmark_scripts`` copies each
     script atomically (via ``os.replace``).
 
     Returns ``True`` when the race is closed (freshly-patched, already-patched,

@@ -81,15 +81,15 @@ def test_slugify_safe_paths() -> None:
     def _boom(_t: str) -> str:
         raise RuntimeError("translate failed")
 
-    out = slugify_safe("日本語のトピック", _boom, fallback_prefix="auto")
+    out = slugify_safe("Ελληνικά θέματα", _boom, fallback_prefix="auto")
     assert out.startswith("auto-")
 
     # No translate_fn for non-ascii -> hash fallback.
-    out2 = slugify_safe("日本語のトピック")
+    out2 = slugify_safe("Ελληνικά θέματα")
     assert out2.startswith("auto-")
 
     # translate_fn returning too-short text -> SlugifyError caught -> fallback.
-    out3 = slugify_safe("日本語", lambda _t: "x", fallback_prefix="p")
+    out3 = slugify_safe("Ελληνικά", lambda _t: "x", fallback_prefix="p")
     assert out3.startswith("p-")
 
 
