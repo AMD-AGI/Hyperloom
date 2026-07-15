@@ -661,6 +661,41 @@ def test_build_variant_yaml_propagates_benchmark_script(tmp_path):
     assert cfg["benchmark"]["runner_type"] == "mi300x"
 
 
+def test_build_variant_yaml_can_remove_base_args_and_unset_envs(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = (
+        "--enable-prefix-caching --max-num-seqs 512 --attention-backend aiter"
+    )
+    cfg["benchmark"]["envs"]["SGLANG_ENABLE_FOO"] = "1"
+    base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    out = _build_variant_yaml(
+        base,
+        base_extra_args="--enable-bar --block-size 128",
+        variant=GridVariant(
+            "without_user_foo",
+            "--max-num-seqs 256",
+            {"SGLANG_KEEP": "1"},
+            remove_args=["--enable-prefix-caching", "--attention-backend"],
+            unset_envs=["SGLANG_ENABLE_FOO"],
+        ),
+        output_subdir=tmp_path / "without_user_foo",
+    )
+
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    args = envs["EXTRA_SGLANG_ARGS"]
+    assert "--enable-prefix-caching" not in args
+    assert "--attention-backend" not in args
+    assert "aiter" not in args
+    assert "--enable-bar" in args
+    assert "--block-size 128" in args
+    assert "--max-num-seqs 256" in args
+    assert envs["SGLANG_KEEP"] == "1"
+    assert "SGLANG_ENABLE_FOO" not in envs
+
+
 def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     captured: dict = {}
@@ -804,6 +839,63 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
     for slot_path, result_dir in captured_envs:
         assert slot_path == result_dir
     assert len({rd for _, rd in captured_envs}) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, monkeypatch):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = "--bad-base 1 --keep-base 2"
+    cfg["benchmark"]["envs"]["SGLANG_REMOVE_ME"] = "1"
+    base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+    captured_restart: dict = {}
+
+    async def fake_restart_server_for_round(**kwargs):
+        captured_restart.update(kwargs)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._multi_node_server_lifecycle.restart_server_for_round",
+        fake_restart_server_for_round,
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        await run_grid(
+            base_yaml_path=base,
+            base_extra_args="--base-extra 3",
+            grid=[
+                GridVariant(
+                    "remove_inherited",
+                    "--variant 4",
+                    {"SGLANG_KEEP_ME": "1"},
+                    remove_args=["--bad-base"],
+                    unset_envs=["SGLANG_REMOVE_ME"],
+                )
+            ],
+            output_root=tmp_path / "out",
+            variant_timeout_sec=5,
+        )
+
+    args = captured_restart["extra_server_args"]
+    assert "--bad-base" not in args
+    assert "1" not in args.split()
+    assert "--keep-base 2" in args
+    assert "--base-extra 3" in args
+    assert "--variant 4" in args
+    assert captured_restart["unset_env"] == ["SGLANG_REMOVE_ME"]
+    assert captured_restart["extra_env"] == {"SGLANG_KEEP_ME": "1"}
 
 
 # Framework-aware help-text probe (atom + multi-framework cache)
