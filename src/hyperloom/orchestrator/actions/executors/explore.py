@@ -949,6 +949,8 @@ class ExploreExecutor:
                 identity_controls["remove_args"] = identity_remove_args
             if identity_unset_envs:
                 identity_controls["unset_envs"] = identity_unset_envs
+            if base_args_mode == "replace":
+                identity_controls["args_mode"] = "replace"
             fp = canonical_fingerprint(
                 gv.extra_server_args,
                 gv.extra_envs,
@@ -1027,6 +1029,7 @@ class ExploreExecutor:
         stack_extra_envs = dict(base_extra_envs)
         stack_remove_args = list(dict.fromkeys(base_remove_args))
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
+        stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
         # In-batch KEEP'd entries (for full vs incremental stack recompose).
         in_batch_keeps: list[dict[str, Any]] = []
@@ -1073,16 +1076,21 @@ class ExploreExecutor:
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
                 control_fields = _variant_control_fields(gv)
-                run_remove_args = list(
-                    dict.fromkeys(stack_remove_args + _coerce_str_list(getattr(gv, "remove_args", [])))
-                )
+                if stack_base_args_mode == "replace":
+                    run_remove_args = _coerce_str_list(getattr(gv, "remove_args", []))
+                else:
+                    run_remove_args = list(
+                        dict.fromkeys(stack_remove_args + _coerce_str_list(getattr(gv, "remove_args", [])))
+                    )
                 run_unset_envs = list(
                     dict.fromkeys(stack_unset_envs + _coerce_str_list(getattr(gv, "unset_envs", [])))
                 )
+                run_extra_envs = dict(stack_extra_envs)
+                run_extra_envs.update(gv.extra_envs)
                 run_gv = GridVariant(
                     name=gv.name,
                     extra_server_args=gv.extra_server_args,
-                    extra_envs=dict(gv.extra_envs),
+                    extra_envs=run_extra_envs,
                     note=gv.note,
                     remove_args=run_remove_args,
                     unset_envs=run_unset_envs,
@@ -1129,7 +1137,7 @@ class ExploreExecutor:
                             result_dir=override_result_dir,
                             soft_deadline_sec=None,
                             server_lifecycle=round1_lifecycle,
-                            base_args_mode=base_args_mode,
+                            base_args_mode=stack_base_args_mode,
                         )
                         w = warmup_results[0] if warmup_results else None
                         if w is None or getattr(w, "status", "") != "succeeded":
@@ -1211,7 +1219,7 @@ class ExploreExecutor:
                         result_dir=override_result_dir,
                         soft_deadline_sec=decision_deadline_sec,
                         server_lifecycle=round1_lifecycle,
-                        base_args_mode=base_args_mode,
+                        base_args_mode=stack_base_args_mode,
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
                     )
@@ -1415,13 +1423,13 @@ class ExploreExecutor:
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
                             remove_args=run_remove_args,
-                            args_mode=getattr(gv, "args_mode", "append"),
+                            args_mode="replace" if stack_base_args_mode == "replace" else getattr(gv, "args_mode", "append"),
                         )
                         next_stack_args = compose_server_args(
                             inherited_args="",
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
-                            remove_args=run_remove_args,
+                            remove_args=_coerce_str_list(getattr(gv, "remove_args", [])),
                             args_mode=getattr(gv, "args_mode", "append"),
                         )
                         next_envs = dict(stack_extra_envs)
@@ -1433,11 +1441,18 @@ class ExploreExecutor:
                             effective_control_fields["remove_args"] = list(run_remove_args)
                         if run_unset_envs:
                             effective_control_fields["unset_envs"] = list(run_unset_envs)
+                        persist_effective_args = bool(
+                            run_remove_args
+                            or str(getattr(gv, "args_mode", "append") or "append").strip().lower() == "replace"
+                            or stack_base_args_mode == "replace"
+                        )
+                        if persist_effective_args:
+                            effective_control_fields["args_mode"] = "replace"
                         keep_entry = {
                             "fingerprint": fp,
                             "name": gv.name,
                             "candidate_extra_server_args": gv.extra_server_args,
-                            "extra_server_args": next_stack_args,
+                            "extra_server_args": next_effective_args if persist_effective_args else next_stack_args,
                             "effective_extra_server_args": next_effective_args,
                             "extra_envs": dict(next_envs),
                             **effective_control_fields,
@@ -1497,7 +1512,7 @@ class ExploreExecutor:
                                 benchmark_script=override_script,
                                 result_dir=override_result_dir,
                                 server_lifecycle=round2_lifecycle,
-                                base_args_mode=base_args_mode,
+                                base_args_mode=stack_base_args_mode,
                                 preclean_before_run=not lifecycle_eligible,
                                 soft_deadline_sec=decision_deadline_sec,
                                 server_already_ready=lifecycle_eligible,
@@ -1556,10 +1571,11 @@ class ExploreExecutor:
                                 # recompute gain from it and fold the variant onto
                                 # the stack so the next variant benches against it.
                                 gain = _gain_pct(stack_rebench_tput, running_base_tput)
-                                stack_extra_args = next_stack_args
+                                stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
                                 stack_extra_envs = next_envs
                                 stack_remove_args = list(run_remove_args)
                                 stack_unset_envs = list(run_unset_envs)
+                                stack_base_args_mode = "replace" if persist_effective_args else "append"
                                 running_base_tput = stack_rebench_tput
                                 last_run_tput = stack_rebench_tput
                                 keep_entry["gain_pct"] = gain
@@ -1575,10 +1591,11 @@ class ExploreExecutor:
                         else:
                             # Round 2 disabled — KEEP on the cold round-1
                             # measurement, advance the running baseline naively.
-                            stack_extra_args = next_stack_args
+                            stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
                             stack_extra_envs = next_envs
                             stack_remove_args = list(run_remove_args)
                             stack_unset_envs = list(run_unset_envs)
+                            stack_base_args_mode = "replace" if persist_effective_args else "append"
                             running_base_tput = cold_tput or running_base_tput
                             last_run_tput = cold_tput
 

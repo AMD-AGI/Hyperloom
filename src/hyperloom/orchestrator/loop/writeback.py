@@ -796,6 +796,7 @@ class WritebackCollaborator:
                     "action": task_kind,
                     "variant_name": variant_name,
                     "candidate_extra_server_args": candidate_args,
+                    "extra_server_args": full_args,
                     "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
                     "tput": float(best_tput),
                     "workspace": (bv.get("workspace") if isinstance(bv, dict) else None),
@@ -875,6 +876,8 @@ class WritebackCollaborator:
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
             if bv.get("effective_extra_server_args"):
                 current_best["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+            if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
+                current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
         if self.shared_state.baseline_tput > 0:
             self.shared_state.cumulative_gain = (
