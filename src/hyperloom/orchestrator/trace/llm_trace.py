@@ -28,12 +28,12 @@ is a second guard that also covers rows rebuilt from raw dicts.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import append_jsonl
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 from ._row_utils import (
@@ -301,9 +301,7 @@ def append_llm_call(
     )
     dest = llm_calls_path(session_dir)
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with dest.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, sort_keys=True) + "\n")
+        append_jsonl(dest, row, make_parents=True, sort_keys=True)
     except OSError as exc:
         log.warning(
             "llm_trace: append failed for component=%s session_id=%s: %r",

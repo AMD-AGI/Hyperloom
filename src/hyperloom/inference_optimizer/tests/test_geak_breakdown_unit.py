@@ -24,7 +24,6 @@ from hyperloom.inference_optimizer.breakdown.collectors import collect_geak
 from hyperloom.orchestrator.actions.executors._geak_sweep import (
     _pareto_front,
     _parse_isl_osl,
-    _read_json,
     _serving_gpus,
     _write_benchmark_report,
     sweep_via_geak,
@@ -526,14 +525,6 @@ def test_parse_isl_osl() -> None:
     assert _parse_isl_osl("2048") == (2048, 1024)
     # Empty defaults both sides.
     assert _parse_isl_osl("") == (1024, 1024)
-
-
-def test_read_json_roundtrip_and_missing(tmp_path: Path) -> None:
-    good = tmp_path / "ok.json"
-    good.write_text(json.dumps({"a": 1}), encoding="utf-8")
-    assert _read_json(good) == {"a": 1}
-    # Missing / unparseable files degrade to an empty dict (never raise).
-    assert _read_json(tmp_path / "nope.json") == {}
 
 
 def test_schema_has_geak_contract() -> None:

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.agents.robustness.role.findings import FINDINGS_SUBDIR
 from hyperloom.common.timeutil import now_iso
 
 
@@ -218,9 +219,10 @@ def classify_proposal_action(action_name: str | None) -> str:
 # Severity rank for the "min_severity" filter: high > medium > low.
 _SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
 
-# Findings-sink JSONL subdir; kept in sync with
-# ``robustness_agent.findings.sink.FindingSinkConfig.subdir``.
-_ROBUSTNESS_FINDINGS_SUBDIR: str = "agents/robustness/findings"
+# Findings-sink JSONL subdir; imported from the robustness role layer
+# (``role.findings.FINDINGS_SUBDIR``, the on-disk source of truth) so this
+# cross-package path cannot silently drift from where the FindingSink writes.
+_ROBUSTNESS_FINDINGS_SUBDIR: str = FINDINGS_SUBDIR
 
 
 def _discover_robustness_findings_path(session_id: str) -> Path | None:

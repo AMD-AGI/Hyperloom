@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_text
+from hyperloom.common import io as _common_io
 
 from hyperloom.inference_optimizer.session import session_paths
 
@@ -145,11 +145,11 @@ def _persist(session_dir: Path, hints: list[dict[str, Any]]) -> None:
     sd = Path(session_dir)
     sd.mkdir(parents=True, exist_ok=True)
     try:
-        atomic_write_text(
+        _common_io.atomic_write_text(
             session_paths.research_hints_json(sd),
             json.dumps({"hints": hints}, indent=2) + "\n",
         )
-        atomic_write_text(session_paths.research_hints_md(sd), _render_md(hints))
+        _common_io.atomic_write_text(session_paths.research_hints_md(sd), _render_md(hints))
     except OSError as exc:
         log.warning("research_hints: persist failed (%s): %s", sd, exc)
 
@@ -236,7 +236,7 @@ def write_competitor_target(
         "notes": str(target.get("notes") or "").strip(),
     }
     try:
-        atomic_write_text(
+        _common_io.atomic_write_text(
             session_paths.competitor_target_json(session_dir),
             json.dumps(out, indent=2) + "\n",
         )

@@ -18,13 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom.common.timeutil import iso_z, now_iso
 
 from ._common import (
     _benchmark_report_candidates,
     _benchmark_report_metrics,
     _find_benchmark_report,
-    _iso_z,
     _latest_benchmark_report,
     _load_json_safe,
     _rel,
@@ -628,7 +627,7 @@ def collect_session(
         stop_reason = close_stop_reason
     ended_at_utc = ""
     if stop_reason:
-        ended_at_utc = _iso_z(close_ts) if close_ts else now_iso(timespec="seconds")
+        ended_at_utc = iso_z(close_ts) if close_ts else now_iso(timespec="seconds")
     elapsed_min: float | None = None
     if start_ts:
         try:

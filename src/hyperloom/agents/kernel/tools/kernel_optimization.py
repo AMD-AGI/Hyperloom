@@ -2446,17 +2446,6 @@ def _read_text_file(path: str | Path, *, errors: str | None = "replace") -> str 
         return None
 
 
-def _read_json_file(path: str | Path) -> Any | None:
-    """Read a JSON file, returning ``None`` when missing or unparseable."""
-    text = _read_text_file(path, errors=None)
-    if text is None:
-        return None
-    try:
-        return json.loads(text)
-    except Exception:
-        return None
-
-
 def _extract_speedup_from_report(report_path: str | Path) -> float | None:
     """Scan an external ``optimization_report.md`` for a speedup figure.
 

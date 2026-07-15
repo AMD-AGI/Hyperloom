@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.kernel import _kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -43,11 +44,11 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
     def test_truthy_env_value_true(self, value):
-        assert krh._truthy_env_value(value) is True
+        assert is_truthy(value) is True
 
     @pytest.mark.parametrize("value", ["", "0", "false", "off", None])
     def test_truthy_env_value_false(self, value):
-        assert krh._truthy_env_value(value) is False
+        assert is_truthy(value) is False
 
     def test_resolve_forge_server_log_priority(self, tmp_path):
         state = SharedState()

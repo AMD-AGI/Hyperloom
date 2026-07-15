@@ -252,10 +252,6 @@ class TestEnvHelpers:
         monkeypatch.setenv("TARGET_INT_TEST", "garbage")
         assert ta._env_int("TARGET_INT_TEST", default=3) == 3
 
-    def test_env_str_strips_whitespace(self, monkeypatch):
-        monkeypatch.setenv("TARGET_STR_TEST", "  value  ")
-        assert ta._env_str("TARGET_STR_TEST") == "value"
-
 
 # session_dir resolution
 

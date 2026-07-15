@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.io import append_jsonl
 from hyperloom.orchestrator.knowledge.cortex_t0 import run_t0_anchor
 from hyperloom.orchestrator.state.shared_state import SharedState
 from ..session.paths import workspace_root as _workspace_root_resolve
@@ -80,13 +81,11 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
             event (dict[str, Any]): The remote-read trace event to record.
         """
         try:
-            audit_path.parent.mkdir(parents=True, exist_ok=True)
             row = {
                 "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 **event,
             }
-            with audit_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(row, sort_keys=True) + "\n")
+            append_jsonl(audit_path, row, make_parents=True, sort_keys=True)
         except Exception:  # noqa: BLE001 — audit must never break a KB op
             log.debug("recipe_snapshot audit append failed", exc_info=True)
 
