@@ -75,9 +75,13 @@ def test_install_sh_gates_magpie_calls():
     # Backend-based gate present.
     assert "HYPERLOOM_BENCHMARK_BACKEND" in text
     assert 'if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then' in text
-    # Normalization must strip whitespace (mirrors Python's .strip().lower()) so
-    # " bypass"/"bypass " skip Magpie at install time too, matching runtime.
-    assert "tr -d '[:space:]'" in text
+    # Normalization must strip ONLY leading/trailing whitespace (mirrors
+    # Python's .strip().lower()) so " bypass"/"bypass " skip Magpie at install
+    # time too, while an internal-space value like "by pass" stays != "bypass"
+    # (matching runtime, which resolves unknown values back to magpie). A blanket
+    # ``tr -d '[:space:]'`` would collapse "by pass" -> "bypass" and diverge.
+    assert "sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'" in text
+    assert "tr -d '[:space:]'" not in text
     # Magpie stages are inside the else branch (only run for non-bypass).
     gate_idx = text.index('HYPERLOOM_BENCHMARK_BACKEND_LC=')
     else_idx = text.index("else", gate_idx)
