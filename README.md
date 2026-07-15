@@ -32,13 +32,8 @@ Hyperloom combines:
 
 | Goal | Guide |
 |------|-------|
-<<<<<<< HEAD
 | Run using a Docker container | [Docker quickstart](docs/install/local-mode.md) |
-| Run directly on a ROCm host | [Bare-metal quickstart](docs/install/bare-metal.md) |
-=======
-| Start through the hosted UI | [Hosted UI quickstart](docs/install/quickstart.md) |
 | Run directly on a ROCm host | [Bare-metal quickstart](docs/install/setup.md) |
->>>>>>> origin/main
 | Launch and monitor an optimization | [Run an optimization](docs/how-to/optimize.md) |
 | Understand the algorithm | [Optimization loop](docs/conceptual/optimization-loop.md) |
 
