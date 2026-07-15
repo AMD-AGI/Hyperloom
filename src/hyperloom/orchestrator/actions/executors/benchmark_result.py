@@ -12,7 +12,10 @@ wrapper status as diagnostics.
 from __future__ import annotations
 
 import logging
+import csv
+import json
 import os
+import time
 import re
 import shutil
 from pathlib import Path
@@ -310,7 +313,298 @@ def harvest_leaked_artifacts(
                     )
                     continue
                 harvested.append((match, destination_path))
+    # Multi-node: fold pod-side GPU sampler CSVs into this workspace and
+    # inject a flat gpu_monitor list into benchmark_report.json (no-op
+    # single-node). Never fail artifact harvest on metrics.
+    try:
+        harvest_mn_gpu_metrics(destination, subprocess_started_unix=subprocess_started_unix)
+    except Exception as exc:
+        log.warning("benchmark_result.harvest: MN GPU-metrics harvest failed: %s", exc)
     return harvested
+
+
+# Multi-node GPU metrics: the GPU pods run a rocm-smi sampler (see
+# launch_infera_node.py) streaming per-card samples to
+# ``$HYPERLOOM_MN_SERVER_LOG_DIR/gpu_metrics_<host>.csv`` on shared storage.
+# The benchmark client has no GPU, so we fold those pod CSVs into the task
+# workspace and inject a flat ``gpu_monitor`` list the breakdown aggregator
+# understands (parity with the single-node Magpie GPUMonitor field).
+_MN_GPU_SAMPLE_CAP: int = 5000
+_MN_GPU_WINDOW_SLACK_SEC: float = 2.0
+
+
+def _num_from_cell(cell: Any) -> float | None:
+    """Parse the first numeric token from a rocm-smi CSV cell (unit-tolerant).
+
+    Args:
+        cell (Any): A raw CSV cell value (e.g. ``"300.0"`` or ``"45.0(C)"``).
+
+    Returns:
+        float | None: The first numeric token, or ``None`` when absent.
+    """
+    if cell is None:
+        return None
+    m = re.search(r"-?\d+\.?\d*", str(cell))
+    return float(m.group(0)) if m else None
+
+
+def _row_to_gpu_sample(header: list[str], row: list[str]) -> dict[str, Any]:
+    """Map one rocm-smi ``--csv`` data row to a flat gpu_monitor sample.
+
+    Emits the keys ``breakdown._aggregate_gpu_monitor`` reads (``power_w``,
+    ``temperature_c``, ``clock_mhz``) plus ``gpu_util_pct`` / ``vram_pct`` for
+    richer reporting. rocm-smi column names vary across versions, so match by
+    case-insensitive substring with a small priority order.
+
+    Args:
+        header (list[str]): The rocm-smi CSV header row (ts-prefixed).
+        row (list[str]): One ts-prefixed rocm-smi data row.
+
+    Returns:
+        dict[str, Any]: The flat per-sample metrics (possibly empty).
+    """
+    n = min(len(header), len(row))
+    cols = [(header[i] or "").strip().lower() for i in range(n)]
+    vals = [_num_from_cell(row[i]) for i in range(n)]
+
+    def _pick(*preds: Any) -> float | None:
+        """Return the first numeric cell whose column matches a predicate.
+
+        Args:
+            *preds (Any): Column-name predicates, highest priority first.
+
+        Returns:
+            float | None: The matched value, or ``None`` when none match.
+        """
+        for pred in preds:
+            for i in range(n):
+                if vals[i] is not None and pred(cols[i]):
+                    return vals[i]
+        return None
+
+    sample: dict[str, Any] = {}
+    temp = _pick(
+        lambda c: "temp" in c and "junction" in c,
+        lambda c: "temp" in c and "edge" in c,
+        lambda c: "temp" in c and "mem" not in c,
+        lambda c: "temp" in c,
+    )
+    if temp is not None:
+        sample["temperature_c"] = temp
+    power = _pick(
+        lambda c: "average" in c and "power" in c,
+        lambda c: "socket" in c and "power" in c,
+        lambda c: "power" in c,
+    )
+    if power is not None:
+        sample["power_w"] = power
+    clock = _pick(lambda c: "sclk" in c)
+    if clock is not None:
+        sample["clock_mhz"] = clock
+    util = _pick(lambda c: "gpu use" in c or "gpu_use" in c or c == "gpu%")
+    if util is not None:
+        sample["gpu_util_pct"] = util
+    vram = _pick(lambda c: "vram" in c or ("memory" in c and "use" in c))
+    if vram is not None:
+        sample["vram_pct"] = vram
+    return sample
+
+
+def _aggregate_gpu_samples_by_role(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate flat GPU samples by ``role`` (prefill / decode).
+
+    Args:
+        samples (list[dict[str, Any]]): Flat per-sample metrics, each optionally
+            carrying a ``role`` key.
+
+    Returns:
+        dict[str, Any]: ``{role: {samples, avg/max power_w, temperature_c,
+        gpu_util_pct, vram_pct}}`` for each role present; ``{}`` when no sample
+        carries a role.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for s in samples:
+        role = str(s.get("role") or "").strip()
+        if role:
+            groups.setdefault(role, []).append(s)
+    if not groups:
+        return {}
+
+    def _stat(rows: list[dict[str, Any]], key: str, fn: Any) -> float:
+        """Reduce a numeric field across ``rows`` via ``fn`` (0.0 when empty).
+
+        Args:
+            rows (list[dict[str, Any]]): The per-role samples.
+            key (str): Sample field name.
+            fn (Any): Reducer over the present values (e.g. max / mean).
+
+        Returns:
+            float: The rounded reduced value, or 0.0 when none present.
+        """
+        vals = [to_float(r.get(key)) for r in rows]
+        vals = [v for v in vals if v is not None]
+        return round(fn(vals), 2) if vals else 0.0
+
+    out: dict[str, Any] = {}
+    for role, rows in groups.items():
+        out[role] = {
+            "samples": len(rows),
+            "avg_power_w": _stat(rows, "power_w", lambda v: sum(v) / len(v)),
+            "max_power_w": _stat(rows, "power_w", max),
+            "avg_temp_c": _stat(rows, "temperature_c", lambda v: sum(v) / len(v)),
+            "max_temp_c": _stat(rows, "temperature_c", max),
+            "avg_gpu_util_pct": _stat(rows, "gpu_util_pct", lambda v: sum(v) / len(v)),
+            "max_gpu_util_pct": _stat(rows, "gpu_util_pct", max),
+            "avg_vram_pct": _stat(rows, "vram_pct", lambda v: sum(v) / len(v)),
+            "max_vram_pct": _stat(rows, "vram_pct", max),
+        }
+    return out
+
+
+def harvest_mn_gpu_metrics(
+    destination: Path,
+    *,
+    subprocess_started_unix: float | None = None,
+) -> dict[str, Any]:
+    """Fold pod-side GPU sampler CSVs into ``destination`` (multi-node only).
+
+    Reads ``$HYPERLOOM_MN_SERVER_LOG_DIR/gpu_metrics_<host>.csv`` (written by
+    the on-pod rocm-smi sampler), slices rows to this round's benchmark window
+    ``[subprocess_started_unix, now]``, writes a consolidated host-tagged
+    ``gpu_metrics.csv`` into ``destination``, and injects a flat ``gpu_monitor``
+    sample list into ``destination/benchmark_report.json`` so the breakdown
+    telemetry aggregator can consume it. Best-effort; never raises. No-op when
+    no shared dir / no pod CSVs are present (single-node path).
+
+    Args:
+        destination (Path): The benchmark workspace to fold metrics into.
+        subprocess_started_unix (float | None): Benchmark-window start; rows
+            outside ``[start, now]`` (with slack) are dropped.
+
+    Returns:
+        dict[str, Any]: A small summary (csv path / row + sample counts), or
+        ``{}`` when nothing was harvested.
+    """
+    out: dict[str, Any] = {}
+    # Multi-node only: single-node uses Magpie's own client-side GPUMonitor,
+    # so never touch its result path. is_multi_node() is the authoritative
+    # gate (state nodes>=2 or $INFERENCE_OPTIMIZER_NODES>=2).
+    from ._multi_node_env import is_multi_node
+    if not is_multi_node():
+        return out
+    # Resolve the shared server-log dir exactly as cli.py forwards it to the
+    # pods (explicit env, else the $USER_DATA_PATH/server_logs default) so the
+    # client reads where the pod sampler wrote, without changing forwarding
+    # logic. Absolute-only; unresolved $VAR is treated as absent.
+    shared = os.path.expandvars(
+        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
+        or "$USER_DATA_PATH/server_logs"
+    )
+    if not shared.startswith("/") or "$" in shared:
+        return out
+    src_dir = Path(shared)
+    try:
+        if not src_dir.is_dir():
+            return out
+        pod_csvs = sorted(src_dir.glob("gpu_metrics_*.csv"))
+    except OSError:
+        return out
+    if not pod_csvs:
+        return out
+
+    # PD-disaggregation: map each pod IP -> prefill/decode role so metrics
+    # can be tagged and aggregated per role (empty unless disaggregated).
+    from ._multi_node_env import pd_topology_from_state
+    pd = pd_topology_from_state()
+    role_of: dict[str, str] = {}
+    for _ip in pd.get("prefill_pod_ips", []):
+        role_of[str(_ip)] = "prefill"
+    for _ip in pd.get("decode_pod_ips", []):
+        role_of[str(_ip)] = "decode"
+
+    lo = None
+    if subprocess_started_unix is not None:
+        lo = float(subprocess_started_unix) - _MN_GPU_WINDOW_SLACK_SEC
+    hi = time.time() + _MN_GPU_WINDOW_SLACK_SEC
+
+    header: list[str] | None = None
+    merged: list[list[str]] = []
+    samples: list[dict[str, Any]] = []
+    for pod_csv in pod_csvs:
+        host = pod_csv.stem[len("gpu_metrics_"):]
+        try:
+            with pod_csv.open(encoding="utf-8", errors="replace", newline="") as f:
+                rows = list(csv.reader(f))
+        except OSError:
+            continue
+        if len(rows) < 2:
+            continue
+        rocm_header = rows[0]
+        role = role_of.get(host, "")
+        if header is None:
+            header = (["host", "role"] if role_of else ["host"]) + rocm_header
+        for row in rows[1:]:
+            if not row:
+                continue
+            ts = _num_from_cell(row[0])
+            if ts is None:
+                continue
+            if lo is not None and (ts < lo or ts > hi):
+                continue
+            merged.append(([host, role] if role_of else [host]) + row)
+            s = _row_to_gpu_sample(rocm_header, row)
+            if s:
+                if role:
+                    s["role"] = role
+                samples.append(s)
+
+    if header and merged:
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            csv_path = destination / "gpu_metrics.csv"
+            with csv_path.open("w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(header)
+                w.writerows(merged)
+            out["gpu_metrics_csv"] = str(csv_path)
+            out["rows"] = len(merged)
+        except OSError as exc:
+            log.warning("benchmark_result: MN gpu_metrics.csv write failed: %s", exc)
+
+    if samples:
+        report_path = destination / "benchmark_report.json"
+        if report_path.is_file():
+            try:
+                with report_path.open(encoding="utf-8") as f:
+                    report = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                report = None
+            if isinstance(report, dict):
+                if len(samples) > _MN_GPU_SAMPLE_CAP:
+                    stride = max(1, len(samples) // _MN_GPU_SAMPLE_CAP)
+                    report["gpu_monitor"] = samples[::stride]
+                else:
+                    report["gpu_monitor"] = samples
+                # PD-disaggregation: surface topology + per-role GPU
+                # aggregate so downstream analysis / the specialist LLM can
+                # target prefill (compute/TTFT) vs decode (bandwidth/TPOT).
+                if pd:
+                    report["pd"] = pd
+                    by_role = _aggregate_gpu_samples_by_role(samples)
+                    if by_role:
+                        report["gpu_monitor_by_role"] = by_role
+                        out["gpu_monitor_by_role"] = {
+                            k: v.get("samples") for k, v in by_role.items()
+                        }
+                try:
+                    with report_path.open("w", encoding="utf-8") as f:
+                        json.dump(report, f, indent=2)
+                    out["gpu_monitor_samples"] = len(report["gpu_monitor"])
+                except (OSError, TypeError) as exc:
+                    log.warning("benchmark_result: gpu_monitor inject failed: %s", exc)
+    if out:
+        log.info("benchmark_result: harvested MN GPU metrics %s", out)
+    return out
 
 
 def _merge_raw_result(
@@ -750,6 +1044,7 @@ def estimate_killed_variant_throughput(
 
 
 __all__ = [
+    "harvest_mn_gpu_metrics",
     "estimate_killed_variant_throughput",
     "estimate_output_throughput_from_server_log",
     "extract_benchmark_measurement",
