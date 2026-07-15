@@ -275,3 +275,141 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
     assert result["decision"] == "KEEP"
     assert result["kept"] is True
     assert result["requires_e2e_validation"] is True
+
+
+def test_git_toplevel_success(monkeypatch, tmp_path):
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = "/repo/root\n"
+
+        return R()
+
+    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
+    assert forge_fusion._git_toplevel(str(tmp_path / "src/foo.py")) == "/repo/root"
+
+
+def test_git_toplevel_handles_subprocess_errors(monkeypatch):
+    def fake_run(*_args, **_kwargs):
+        raise OSError("git missing")
+
+    monkeypatch.setattr(forge_fusion.subprocess, "run", fake_run)
+    assert forge_fusion._git_toplevel("/any/path.py") == ""
+
+
+def test_main_invalid_json_returns_2(tmp_path, capsys):
+    bad = tmp_path / "bad.json"
+    bad.write_text("[]", encoding="utf-8")
+
+    rc = forge_fusion.main(["--input-json", str(bad)])
+
+    assert rc == 2
+    assert "failed" in capsys.readouterr().out
+
+
+def test_main_missing_required_field_returns_2(tmp_path, capsys):
+    input_json = tmp_path / "input.json"
+    input_json.write_text(
+        json.dumps({"model_path": "/m", "framework": "sglang", "output_dir": "/o"}),
+        encoding="utf-8",
+    )
+
+    rc = forge_fusion.main(["--input-json", str(input_json)])
+
+    assert rc == 2
+
+
+def test_build_cmd_optional_and_disabled_flags(tmp_path):
+    payload = _payload(tmp_path)
+    payload.update(
+        {
+            "decode_batch": 8,
+            "ab_isl": 64,
+            "ab_osl": 128,
+            "framework_root": "/fw",
+            "author": False,
+            "validate": False,
+            "verbose": True,
+            "fuse_all_confirmed": False,
+        }
+    )
+
+    cmd = forge_fusion._build_cmd(payload)
+
+    assert "--decode-batch" in cmd
+    assert "--ab-isl" in cmd
+    assert "--ab-osl" in cmd
+    assert "--framework-root" in cmd
+    assert "--no-author" in cmd
+    assert "--no-validate" in cmd
+    assert "--verbose" in cmd
+    assert "--fuse-all-confirmed" not in cmd
+
+
+def test_timeout_sec_prefers_timeout_sec_key():
+    assert forge_fusion._timeout_sec({"timeout_sec": 42}) == 42
+
+
+def test_terminate_process_tree_uses_process_group_on_posix(monkeypatch):
+    killed: list[tuple[int, int]] = []
+
+    class FakeProc:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(forge_fusion.os, "name", "posix")
+    monkeypatch.setattr(
+        forge_fusion.os,
+        "getpgid",
+        lambda pid: 9999 if pid == 1234 else 1111,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        forge_fusion.os,
+        "killpg",
+        lambda pgid, sig: killed.append((pgid, sig)),
+        raising=False,
+    )
+    monkeypatch.setattr(forge_fusion.signal, "SIGTERM", 15, raising=False)
+
+    forge_fusion._terminate_process_tree(FakeProc())
+
+    assert killed == [(9999, 15)]
+
+
+def test_terminate_process_tree_escalates_to_sigkill_on_posix(monkeypatch):
+    killed: list[tuple[int, int]] = []
+
+    class FakeProc:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            raise forge_fusion.subprocess.TimeoutExpired("cmd", 5)
+
+    monkeypatch.setattr(forge_fusion.os, "name", "posix")
+    monkeypatch.setattr(
+        forge_fusion.os,
+        "getpgid",
+        lambda pid: 9999 if pid == 1234 else 1111,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        forge_fusion.os,
+        "killpg",
+        lambda pgid, sig: killed.append((pgid, sig)),
+        raising=False,
+    )
+    monkeypatch.setattr(forge_fusion.signal, "SIGTERM", 15, raising=False)
+    monkeypatch.setattr(forge_fusion.signal, "SIGKILL", 9, raising=False)
+
+    forge_fusion._terminate_process_tree(FakeProc())
+
+    assert killed == [(9999, 15), (9999, 9)]
