@@ -41,13 +41,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import atomic_write_json
 from hyperloom.common.timeutil import now_iso
 
 log = logging.getLogger(__name__)
@@ -58,6 +58,26 @@ _CRASH_TIMESTAMP_CAP: int = 200
 
 # microseconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = now_iso
+
+
+# Cached lazy handle to ``..kernel.request_handlers``. A top-level import would
+# resurrect a circular import (request_handlers imports SharedState), so the
+# kernel forwarding shims below resolve the module through this getter and cache
+# it after the first call.
+_RH = None
+
+
+def _request_handlers():
+    """Return (and cache) the ``..kernel.request_handlers`` module.
+
+    Deferred to first use to avoid the circular import between
+    ``request_handlers`` and this module.
+    """
+    global _RH
+    if _RH is None:
+        from ..kernel import request_handlers as _m
+        _RH = _m
+    return _RH
 
 
 def _first_positive_tput(d: Any) -> float:
@@ -1225,19 +1245,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # and the recipe KB all carry the primary latency metric. Best-effort.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".json", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self.to_dict(), f, indent=2, sort_keys=True)
-            os.replace(tmp, path)
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                # Temp file already gone; re-raise the original error below.
-                pass
-            raise
+        atomic_write_json(path, self.to_dict(), indent=2, sort_keys=True)
         # Author-time breakdown capture: snapshot state-owned sections into the
         # recorder spool right after persisting. Best-effort; never blocks save.
         self._session_dir = Path(session_dir)
@@ -1901,6 +1909,39 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return None
         return text[-limit:] if len(text) > limit else text
 
+    def _common_result_fields(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Build the failure/diagnostic fields shared by the attempt + failure logs.
+
+        Single source of truth for the overlapping fields recorded by both
+        :meth:`record_action_attempt` and :meth:`record_action_failure`, so the
+        two writers can never drift.
+
+        ``stderr_tail`` is captured for EVERY failure carrying an ``error`` blob
+        (no ``error_class`` whitelist). The tail is the actionable end of a
+        server/subprocess crash — e.g. a vLLM ``server_init_dead`` whose root
+        cause (``ValueError: No common block size``) lives in the server.log
+        excerpt the executor already folded into ``error``. Both the breakdown
+        RCA exporter and the orchestration prompt consume it, so gating it by
+        error_class silently dropped the one field that explains the failure.
+
+        Args:
+            result (dict[str, Any]): The action result envelope.
+
+        Returns:
+            dict[str, Any]: The shared diagnostic fields (``error_class`` /
+                ``error_excerpt`` / ``stderr_tail`` / ``stderr_log_path`` /
+                ``workspace`` / ``raw_result_path`` / ``reported_success``).
+        """
+        return {
+            "error_class": (str(result.get("error_class")) if result.get("error_class") else None),
+            "error_excerpt": self._truncate_excerpt(result.get("error")),
+            "stderr_tail": self._stderr_tail(result.get("error")),
+            "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
+            "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
+            "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
+            "reported_success": result.get("reported_success"),
+        }
+
     def record_action_attempt(
         self,
         action: str,
@@ -1953,19 +1994,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "decision": str(decision or ""),
             "key_metric": key_metric,
             "key_metric_kind": metric_kind,
-            "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
-            "error_class": (str(result.get("error_class")) if result.get("error_class") else None),
-            "error_excerpt": self._truncate_excerpt(result.get("error")),
-            # stderr_tail mirrors record_action_failure: only for subprocess
-            # failures, so the breakdown exporter can surface the raw crash.
-            "stderr_tail": (
-                self._stderr_tail(result.get("error"))
-                if str(result.get("error_class") or "") in {"subprocess_nonzero", "timeout", "kv_cache_oom"}
-                else None
-            ),
-            "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
-            "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
-            "reported_success": result.get("reported_success"),
+            **self._common_result_fields(result),
             "extras": dict(extras or {}),
         }
         history: list[dict[str, Any]] = list(getattr(self, attempts_attr) or [])
@@ -2009,21 +2038,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             dict[str, Any]: The recorded failure entry.
         """
         result = result or {}
-        error_class = result.get("error_class")
-        error_class_str = str(error_class) if error_class else None
         entry: dict[str, Any] = {
             "ts": _now_iso(),
             "action": str(action or ""),
             "task_id": str(task_id or ""),
-            "error_class": error_class_str,
-            "error_excerpt": self._truncate_excerpt(result.get("error")),
-            "stderr_tail": (
-                self._stderr_tail(result.get("error")) if error_class_str in {"subprocess_nonzero", "timeout", "kv_cache_oom"} else None
-            ),
-            "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
-            "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
-            "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
-            "reported_success": result.get("reported_success"),
+            **self._common_result_fields(result),
         }
         history = list(self.last_action_failures or [])
         history.append(entry)

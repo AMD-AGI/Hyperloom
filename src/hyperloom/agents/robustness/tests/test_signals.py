@@ -541,9 +541,73 @@ def test_classifier_runs_all_default_rules():
         session_pods=[{"pod": {"namespace": "ns", "name": "p"}, "phase": "Failed"}],
         coordinator_events=[],
     )
-    classifier = Classifier(crash_config=CrashConfig(medium_threshold=2))
+    classifier = Classifier(configs={"crash": CrashConfig(medium_threshold=2)})
     out = classifier.classify(data, ctx)
     names = {s.name for s in out}
     assert "crash_count_rising" in names
     assert "repeated_policy_denied" in names
     assert "pod_not_running" in names
+
+
+# ---------------------------------------------------------------------------
+# Signal registry — order + config coverage invariants
+# ---------------------------------------------------------------------------
+
+
+def test_signal_registry_order_is_pinned():
+    """The registry order is part of the contract: ``classify`` appends in this
+    order and ``_dedup`` keeps the first-inserted symptom on an equal-severity
+    tie. Pin it so a reorder is a conscious, reviewed change."""
+    from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
+
+    assert [spec.name for spec in _SIGNAL_REGISTRY] == [
+        "stall",
+        "crash",
+        "event",
+        "health",
+        "local_health",
+        "gpu_leak",
+        "cluster_fault",
+        "budget",
+        "aiter_jit",
+        "progress",
+        "repeated_payload",
+        "decision_audit",
+        "model_gpu_fit",
+        "amdahl_ceiling",
+        "cold_start",
+        "critic_health",
+        "ray_pending",
+        "kernel_pipeline",
+        "state_integrity",
+        "external_deps",
+    ]
+
+
+def test_budget_is_the_only_configless_source_data_row():
+    """Only ``evaluate_budget_signals`` skips SourceData; encode that so the
+    ``needs_source_data`` flag can't silently flip for another row."""
+    from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
+
+    no_data = {spec.name for spec in _SIGNAL_REGISTRY if spec.evaluator is not None and not spec.needs_source_data}
+    assert no_data == {"budget"}
+
+
+def test_kernel_pipeline_config_slot_feeds_two_rows():
+    """One KernelPipelineConfig slot drives the stateful RayPendingDetector and
+    the stateless kernel-pipeline evaluator."""
+    from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
+
+    rows = [spec for spec in _SIGNAL_REGISTRY if spec.config_attr == "kernel_pipeline"]
+    assert {spec.name for spec in rows} == {"ray_pending", "kernel_pipeline"}
+    assert sum(1 for s in rows if s.detector_cls is not None) == 1
+    assert sum(1 for s in rows if s.evaluator is not None) == 1
+
+
+def test_classifier_config_map_covers_every_registry_slot():
+    from hyperloom.agents.robustness.signals.classifier import (
+        signal_registry_config_attrs,
+    )
+
+    classifier = Classifier()
+    assert set(classifier.signal_configs) == set(signal_registry_config_attrs())

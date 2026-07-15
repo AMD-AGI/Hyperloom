@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_text
+from hyperloom.common import io as _common_io
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
@@ -1213,7 +1213,7 @@ class ReportExecutor:
         # Atomic write: a kill mid-flush must never leave a non-empty but
         # invalid final.json on disk (issue #464 — downstream keys off it, and
         # the crash-safe fallback would otherwise see garbled JSON).
-        atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
+        _common_io.atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
         md_path.write_text(_format_md(summary), encoding="utf-8")
 
         log.info(

@@ -532,19 +532,6 @@ def _apply_patch_atomic_reason(src: Path) -> str:
     return _ATOMIC_REASON_APPLIED
 
 
-def _apply_patch_atomic(src: Path) -> bool:
-    """Bool wrapper over :func:`_apply_patch_atomic_reason`: True when the
-    atomic-copy race is closed (applied / already-patched / upstream-atomic).
-
-    Args:
-        src: The ``benchmarker.py`` file to patch in place.
-
-    Returns:
-        True when the atomic-copy race is closed, False on a genuine failure.
-    """
-    return _apply_patch_atomic_reason(src) not in _ATOMIC_REASONS_GENUINE_FAILURE
-
-
 def _is_remote_trust_patched(src: Path) -> bool:
     """Return whether SGLang compatibility sentinels are already present.
 
