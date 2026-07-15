@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-# All module loggers descend from this root so one configure call propagates.
+# All module loggers descend from this root.
 _ROOT_NAME = "framework_agent"
 _DEFAULT_FMT = "%(asctime)s %(levelname)-5s %(name)s :: %(message)s"
 _LEVEL_ENVS: tuple[str, ...] = (
@@ -152,8 +152,7 @@ def configure_logging(
         try:
             file_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            # A read-only mount / bad parent shouldn't abort logging setup;
-            # report and continue (FileHandler below raises if still unwritable).
+            # A read-only mount / bad parent shouldn't abort logging setup.
             print(
                 f"[framework-agent logging_setup] WARN: mkdir({file_path.parent}) "
                 f"failed: {exc!r}; FileHandler may also fail",

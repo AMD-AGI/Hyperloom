@@ -2,11 +2,9 @@
 
 """Multi-node bootstrap.sh env-forwarding coverage.
 
-The RayJob bootstrap renders ``/etc/profile.d/hyperloom-env.sh`` on remote
-nodes; every later REST job sources it to inherit credentials. Both custom-header
-env vars must be forwarded so the strict per-side header contract holds on
-remote workers (OpenAI/Codex reads OPENAI_CUSTOM_HEADERS, Claude reads
-ANTHROPIC_CUSTOM_HEADERS)."""
+Both custom-header env vars must be forwarded to remote workers
+(OpenAI/Codex reads OPENAI_CUSTOM_HEADERS, Claude reads ANTHROPIC_CUSTOM_HEADERS).
+"""
 
 from __future__ import annotations
 

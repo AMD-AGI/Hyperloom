@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Smoke tests for the kernel-agent payload-aliases compat shim (duplicated copy of hyperloom.inference_optimizer.compat; pins behaviour against drift)."""
+"""Smoke tests for the kernel-agent payload-aliases compat shim."""
 
 from __future__ import annotations
 
@@ -60,9 +60,8 @@ def test_shim_canonical_wins_over_legacy_when_both_present():
 def test_shim_has_no_hyperloom_import():
     """Static guard: the shim's source must not *import* ``hyperloom``.
 
-    A re-export (``from hyperloom.common... import ...``) would defeat the
-    standalone contract even though the module technically still exists on disk.
-    (Docstring/comment mentions of ``hyperloom`` explaining the rationale are fine.)
+    A re-export would defeat the standalone contract even though the module
+    technically still exists on disk.
     """
     source = (_TOOLS_DIR / "_payload_aliases.py").read_text(encoding="utf-8")
     assert "import hyperloom" not in source
@@ -71,8 +70,7 @@ def test_shim_has_no_hyperloom_import():
 def test_shim_importable_without_hyperloom_on_sys_path():
     """End-to-end contract check: run in a fresh subprocess with only
     ``tools/`` on ``sys.path`` and no ``hyperloom`` package importable,
-    mirroring a real standalone remote-node invocation
-    (``HYPERLOOM_KERNEL_AGENT_ROOT`` subprocesses / Ray workers)."""
+    mirroring a real standalone remote-node invocation."""
     code = (
         "import sys; "
         f"sys.path = [{str(_TOOLS_DIR)!r}] + [p for p in sys.path if p]; "

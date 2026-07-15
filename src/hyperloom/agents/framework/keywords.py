@@ -82,8 +82,7 @@ _TECHNICAL_TERMS = frozenset(
         "custom_ar",
         "radix",
         "scheduler",
-        # atom-specific surfaces: keeps search relevance on the atom axis
-        # (MTP / EP / aiter routing) instead of collapsing to generic "moe".
+        # atom-specific surfaces (MTP / EP / aiter routing).
         "mtp",
         "ep",
         "moe_ep",
@@ -91,9 +90,8 @@ _TECHNICAL_TERMS = frozenset(
         "dp",
         "kv_cache_dtype",
         "torch_profiler_dir",
-        # GPU hardware codenames (lowercase; gap is lowercased before lookup).
-        # Critical for relevance ranking so a gap on ``mi300x`` scopes to
-        # AMD-validated PRs instead of e.g. an SM90 (Hopper) MoE kernel.
+        # GPU hardware codenames (lowercase; gap is lowercased before lookup),
+        # used for relevance ranking so a gap scopes to matching-vendor PRs.
         # AMD CDNA accelerators (MI200/300/350 families + gfx IDs + uarch labels):
         "mi200",
         "mi210",
@@ -156,11 +154,9 @@ def extract_keywords(description: str) -> list[str]:
 
 
 # Anti-correlation table: when ``gap_keyword`` (key) is in the gap, any
-# anti-set token in a PR title is evidence the PR is on the wrong axis (model
-# family / GPU vendor / precision regime) and is demoted. Activation is gated
-# on the gap keyword's presence, so a gap without ``dense`` won't penalize a
-# generic ``moe`` PR. Bug-driven (session f219629b, Qwen3-32B dense/bf16/mi300x
-# picked an MoE/NVIDIA-H20 PR via positive-only overlap); axes below cover that.
+# anti-set token in a PR title marks the PR as on the wrong axis (model
+# family / GPU vendor / precision regime) and demotes it. Activation is gated
+# on the gap keyword's presence.
 _ANTI_KEYWORDS: dict[str, frozenset[str]] = {
     # Model architecture: dense Transformers vs Mixture-of-Experts.
     "dense": frozenset({"moe", "mega_moe", "deepseek", "mixtral", "expert", "ep"}),

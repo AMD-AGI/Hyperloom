@@ -20,7 +20,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
 
-# Test fixtures
 def _ctx(tmp_path: Path | None = None) -> RunnerContext:
     task = Task(
         task_id="t-roofline-1",
@@ -84,7 +83,6 @@ def _patch_subs(profile_result, ta_result):
     )
 
 
-# Happy path
 @pytest.mark.asyncio
 async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     state = _state()
@@ -146,7 +144,6 @@ async def test_happy_path_increments_snapshot_id_on_re_run(tmp_path):
     assert state.last_trace_analyze["roofline_baseline_gain_at_snapshot"] == 4.0
 
 
-# Failure paths — profile
 @pytest.mark.asyncio
 async def test_profile_failed_does_not_mutate_shared_state(tmp_path):
     state = _state()
@@ -210,10 +207,8 @@ async def test_profile_failed_with_trace_continues_to_trace_analyze(tmp_path):
 async def test_profile_failed_without_trace_never_calls_trace_analyze(tmp_path):
     """failed + no trace fields must stay profile_failed, never analyze a trace.
 
-    Contract guard for the recovered-trace path: ProfileExecutor mtime-gates
-    and scopes trace discovery to the current round, so a failed result carries
-    NO stale trace. Here we assert trace_analyze is never reached (it would
-    raise) and the canonical profile_failed shape is returned.
+    Asserts trace_analyze is never reached and the canonical profile_failed
+    shape is returned.
     """
     state = _state()
     state.last_profile_trace = "/old/trace.gz"
@@ -237,7 +232,6 @@ async def test_profile_failed_without_trace_never_calls_trace_analyze(tmp_path):
     assert result["error_class"] == "profile_failed"
     assert result["phase"] == "profile"
     assert "profile_recovered" not in result
-    # Failed-without-trace must not promote a (stale) trace into shared state.
     assert state.last_profile_trace == "/old/trace.gz"
 
 
@@ -286,7 +280,6 @@ async def test_profile_returns_non_dict(tmp_path):
     assert "non-dict" in result["error"]
 
 
-# Failure paths — trace_analyze
 @pytest.mark.asyncio
 async def test_trace_analyze_failed_keeps_profile_promote(tmp_path):
     """trace_analyze failure keeps last_profile_trace but leaves last_trace_analyze empty."""
@@ -335,7 +328,6 @@ async def test_trace_analyze_returns_non_dict(tmp_path):
     assert "non-dict" in result["error"]
 
 
-# Helpers + factory
 def test_extract_trace_path_prefers_main_trace_path():
     r = {
         "main_trace_path": "/main.gz",
@@ -386,7 +378,6 @@ def test_make_roofline_executor_factory_signature():
     assert exe.shared_state is state
 
 
-# Ctx wrap helper
 def test_wrap_profile_ctx_creates_child_task():
     state = SharedState()
     exe = RooflineExecutor(shared_state=state)
@@ -412,8 +403,7 @@ def test_resolve_session_dir_handles_missing_extra():
     assert exe._resolve_session_dir(ctx) == Path("/abc")
 
 
-# (formerly test_n10_roofline_promote_persistence.py) — N10: Coordinator persists
-# roofline executor SharedState mutations to state.json.
+# N10: Coordinator persists roofline executor SharedState mutations to state.json.
 import json
 
 from hyperloom.orchestrator.roles import (
@@ -624,7 +614,7 @@ async def test_promote_roofline_non_dict_result_short_circuits(session_dir):
     assert coord.shared_state.roofline_attempts == []
 
 
-# (formerly test_n11_strip_base64.py) — N11: strip base64 image data URLs from analysis.md.
+# N11: strip base64 image data URLs from analysis.md.
 def test_strip_passes_text_through_when_no_base64_url():
     md = "# Analysis\n\nNo images here, just text.\nSome markdown link: [foo](https://example.com/bar)\n"
     out = SharedState._strip_base64_data_urls(md)
@@ -752,7 +742,6 @@ def test_format_analysis_md_full_defaults_to_pointer_not_inline(monkeypatch):
         "analysis_md_path": "/p/analysis.md",
     }
     rendered = s._format_analysis_md_full()
-    # Default is now digest-only: a pointer, not the verbatim md body.
     assert "verbatim body text" not in rendered
     assert "show_analysis_md" in rendered
     assert "snapshot #7" in rendered
@@ -794,8 +783,8 @@ def test_strip_keeps_surrounding_markdown_intact():
     assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx" not in out
 
 
-# (formerly test_n26_steady_state_auto_retry.py) — N26: RooflineExecutor auto-retries
-# trace_analyze on steady_state_chunk_{empty,missing} with an alternate mode.
+# N26: RooflineExecutor auto-retries trace_analyze on
+# steady_state_chunk_{empty,missing} with an alternate mode.
 from hyperloom.orchestrator.actions.executors.roofline import (
     _extract_steady_state_retry_mode,
 )
@@ -1265,18 +1254,13 @@ async def test_retry_works_when_operator_started_with_non_mixed(tmp_path):
     assert calls["payloads"][1]["_n26_retry_from_mode"] == "prefilldecode"
 
 
-# ---------------------------------------------------------------------------
 # cuda-graph folding -> trace_analyze ok but 0 hot kernels
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
-    """trace_analyze succeeds (status=ok) but returns 0 hot kernels
-    because cuda-graph capture folded per-kernel activity (profile
-    trace_health flags per_kernel_attribution_degraded). The executor must
-    append a ``cuda_graph_attribution_degraded`` trace_health_warnings entry
-    — persisted into last_trace_analyze + rendered as ``warnings=[...]`` in
-    the orchestration prompt — so the LLM re-profiles eager instead of
-    reading top=[] as 'no optimizable kernels'."""
+    """trace_analyze succeeds but returns 0 hot kernels because cuda-graph
+    capture folded per-kernel activity; the executor appends a
+    ``cuda_graph_attribution_degraded`` trace_health_warnings entry so the LLM
+    re-profiles eager instead of reading top=[] as 'no optimizable kernels'."""
     state = _state()
     ctx = _ctx(tmp_path)
     md = tmp_path / "analysis.md"
@@ -1288,7 +1272,7 @@ async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
         "capture_traces_present": True,
         "issues": ["[3] main trace ... no execute_*/user_annotation ..."],
     }
-    ta = _trace_analyze_success()  # hot_kernels: []
+    ta = _trace_analyze_success()
     ta["trace_report_path"] = str(md)
 
     p1, p2 = _patch_subs(profile, ta)
@@ -1298,7 +1282,6 @@ async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
 
     assert result["status"] == "succeeded"
     assert result["kernel_attribution_degraded"] is True
-    # Persisted into the canonical last_trace_analyze warnings channel:
     warnings = state.last_trace_analyze.get("trace_health_warnings") or []
     codes = [w.get("code") for w in warnings if isinstance(w, dict)]
     assert "cuda_graph_attribution_degraded" in codes, warnings

@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for framework_agent.kb and the `fa kb <op>` CLI surface. Hermetic - redirects KB_ROOT via FRAMEWORK_AGENT_KB_DIR so no real workspace KB is touched."""
+"""Tests for framework_agent.kb and the `fa kb <op>` CLI surface. Hermetic - redirects KB_ROOT via FRAMEWORK_AGENT_KB_DIR."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ class TestListAndMatch:
         assert kb._match_domains("totally unrelated free-form text") == []
 
     def test_match_domains_atom_keyword_hit(self) -> None:
-        """``atom`` must hit the framework domain (pinned so a future trim of DOMAIN_KEYWORDS doesn't silently drop it)."""
+        """``atom`` must hit the framework domain."""
         domains = kb._match_domains("improve atom moe throughput on mi300x")
         assert "framework" in domains, f"atom must hit the framework domain; got {domains!r}"
 
@@ -233,7 +233,7 @@ class TestKbCli:
             ]
         )
         assert rc == 0
-        capsys.readouterr()  # discard contribute output
+        capsys.readouterr()
         rc = cli.main(["kb", "list"])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
@@ -335,14 +335,12 @@ class TestPathForFramework:
         assert path == kb_root / "framework_optimization" / framework
 
     def test_path_lowercases_and_strips(self, kb_root: Path) -> None:
-        # Casing/whitespace variants must resolve to the same partition.
         path_a = kb.path_for_framework("  Atom  ")
         path_b = kb.path_for_framework("ATOM")
         path_c = kb.path_for_framework("atom")
         assert path_a == path_b == path_c
 
     def test_empty_framework_returns_partition_root(self, kb_root: Path) -> None:
-        # Empty/whitespace framework resolves to the partition root (detect "not selected").
         assert kb.path_for_framework("") == kb_root / "framework_optimization"
         assert kb.path_for_framework("   ") == kb_root / "framework_optimization"
 

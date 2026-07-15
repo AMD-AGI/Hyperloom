@@ -4,13 +4,9 @@
 
 On ``baseline_failed`` the top-level ``final.json`` / report must headline the
 real terminal engine/worker fault from the last failed baseline attempt, not a
-benign upstream WARN (e.g. transformers' ``modeling_cohere2.py`` ENOENT).
-
-These exercise the real persistence path: a failed baseline result is recorded
-into ``SharedState`` via :meth:`SharedState.record_action_attempt` /
-:meth:`SharedState.record_action_failure` (exactly as the Coordinator does in
-``_handle_unpromotable_result``), and the report layer reads it back from state
-— there is no on-disk ``runs/baseline/<task_id>/result.json``.
+benign upstream WARN. The failed result is recorded into ``SharedState`` via
+:meth:`SharedState.record_action_attempt` / :meth:`SharedState.record_action_failure`
+and the report layer reads it back from state.
 """
 
 from __future__ import annotations
@@ -40,7 +36,7 @@ _SERVER_LOG_OOM = (
 )
 
 # A subprocess_nonzero stderr tail that mixes the benign WARN with the real
-# fault on separate lines (the #465 reproduction).
+# fault on separate lines.
 _MIXED_STDERR = (
     f"{_BENIGN_WARN}\n"
     "Loading safetensors checkpoint shards: 100% complete\n"
@@ -56,8 +52,7 @@ def _failed_state(
     task_id: str = "baseline-1",
     stop_reason: str = "baseline_failed",
 ) -> SharedState:
-    """Build a SharedState carrying one failed baseline attempt, like the
-    Coordinator's ``_handle_unpromotable_result`` does."""
+    """Build a SharedState carrying one failed baseline attempt."""
     state = SharedState()
     state.set_stop_reason(stop_reason)
     result = {
@@ -82,9 +77,6 @@ def _failed_state(
     return state
 
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 def test_is_benign_failure_text():
     assert _is_benign_failure_text(_BENIGN_WARN)
     assert not _is_benign_failure_text("HIP out of memory during ncclCommInitRank")
@@ -113,9 +105,6 @@ def test_classify_root_cause_type():
     assert _classify_root_cause_type("unknown", "") == "unknown"
 
 
-# ---------------------------------------------------------------------------
-# failure_summary sourced from SharedState
-# ---------------------------------------------------------------------------
 def test_failure_summary_from_server_init_dead_attempt():
     state = _failed_state(error_class="server_init_dead", error=_SERVER_LOG_OOM)
     fs = _build_failure_summary(state)
@@ -137,8 +126,7 @@ def test_failure_summary_mixed_error_keeps_real_root_cause():
 
 
 def test_failure_summary_pure_benign_falls_back_to_server_log(tmp_path):
-    """When the only recorded error is the benign WARN, fall back to the
-    attempt's server.log terminal marker."""
+    """When the only recorded error is the benign WARN, fall back to the attempt's server.log terminal marker."""
     workspace = tmp_path / "runs" / "baseline" / "baseline-1" / "benchmark_vllm_x"
     workspace.mkdir(parents=True)
     (workspace.parent / "server.log").write_text(_SERVER_LOG_OOM, encoding="utf-8")
@@ -153,7 +141,7 @@ def test_failure_summary_pure_benign_falls_back_to_server_log(tmp_path):
     assert "out of memory" in fs["root_cause"].lower()
     assert fs["suppressed_benign"]
     assert fs["server_log"].endswith("server.log")
-    # server.log path is rendered session-relative when session_dir is given.
+    # server.log path is session-relative when session_dir is given.
     assert not fs["server_log"].startswith(str(tmp_path))
 
 
@@ -179,6 +167,7 @@ def test_failure_summary_picks_latest_failed_attempt():
 
 def test_failure_summary_falls_back_to_last_action_failures():
     """When no baseline audit row exists, use the global failure log row."""
+
     state = SharedState()
     state.set_stop_reason("baseline_failed")
     state.record_action_failure(
@@ -210,9 +199,6 @@ def test_failure_summary_absent_when_no_failed_attempt():
     assert _build_failure_summary(state) is None
 
 
-# ---------------------------------------------------------------------------
-# wiring through _build_summary_dict / _format_md
-# ---------------------------------------------------------------------------
 def test_build_summary_dict_attaches_failure_summary():
     state = _failed_state(error_class="server_init_dead", error=_SERVER_LOG_OOM)
     summary = _build_summary_dict(state, ev_counts={}, highlights=[])
@@ -246,9 +232,8 @@ def test_classify_root_cause_type_kv_cache_oom():
 
 
 def test_classify_root_cause_ignores_mem_fraction_static_in_argv():
-    # --mem-fraction-static appears verbatim in normal server argv dumps; a
-    # generic failure whose text merely echoes the launch command must NOT be
-    # mislabeled kv_cache_oom (only the specific KV-cache OOM markers should).
+    # A generic failure whose text merely echoes --mem-fraction-static in the
+    # launch command must not be mislabeled kv_cache_oom.
     result = _classify_root_cause_type(
         "subprocess_nonzero",
         "server cmd: python -m sglang.launch_server "
@@ -258,9 +243,8 @@ def test_classify_root_cause_ignores_mem_fraction_static_in_argv():
 
 
 def test_classify_root_cause_kv_cache_oom_specific_phrase_still_matches():
-    # The actionable "Raise --mem-fraction-static above" remediation line is a
-    # genuine KV-cache OOM signal and must still classify as kv_cache_oom even
-    # when error_class is generic.
+    # The "Raise --mem-fraction-static above" remediation line is a genuine
+    # KV-cache OOM signal even when error_class is generic.
     assert (
         _classify_root_cause_type(
             "subprocess_nonzero",

@@ -3,9 +3,9 @@
 """Agent-stall detection.
 
 Computes each agent's last-activity timestamp from
-:attr:`SourceData.coordinator_events` (plus inbox tail, which may be more
-recent than the local SQLite probe) and alerts when idle past the
-threshold. Any event counts as activity, including heartbeats.
+:attr:`SourceData.coordinator_events` (plus inbox tail) and alerts when
+idle past the threshold. Any event counts as activity, including
+heartbeats.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def evaluate_stall_signals(
     for agent in _TRACKED_AGENTS:
         ts = last_seen.get(agent)
         if ts is None:
-            # No ground truth (e.g. first tick) — can't accuse of a stall.
+            # No ground truth yet — can't accuse of a stall.
             continue
         idle_s = max(0.0, ctx.now_unix - ts)
         if idle_s < cfg.stall_timeout_s:

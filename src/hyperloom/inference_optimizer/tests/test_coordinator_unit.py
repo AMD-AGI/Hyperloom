@@ -1,9 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Focused unit tests for ``coordinator`` module-level helpers and static utilities.
-
-Keeps imports light: no full ``Coordinator`` session construction unless necessary.
-"""
+"""Focused unit tests for ``coordinator`` module-level helpers and static utilities."""
 
 from __future__ import annotations
 
@@ -86,7 +83,6 @@ def test_format_inbox_delegated_result_non_dict_result():
         seq=1,
     )
     line = _format_inbox_event(m)
-    # Non-dict ``result`` omits outcome keys; only kind/state are surfaced.
     assert "kind='k'" in line and "state='s'" in line and "raw" not in line
 
 

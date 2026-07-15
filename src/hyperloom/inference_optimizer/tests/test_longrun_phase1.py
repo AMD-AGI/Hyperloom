@@ -2,15 +2,9 @@
 
 """Cyclic phase machine acceptance tests.
 
-Covers:
-* ``compute_next_phase`` SWEEP back-edge branches (reloop / converged / no
-  budget / short-run close).
-* per-cycle budget window.
-* Coordinator loopback application (macro_cycle bump, marker reset, streak).
-* PolicyGate re-entry after a loopback is not falsely denied.
-* 12h single-cycle regression: short-run behaviour stays single-pass.
-
-All deterministic + offline.
+Covers ``compute_next_phase`` SWEEP back-edge branches, the per-cycle budget
+window, Coordinator loopback application, PolicyGate re-entry after a loopback,
+and the short-run single-pass regression. All deterministic + offline.
 """
 
 from __future__ import annotations
@@ -49,9 +43,7 @@ def _sweep_state(
     return st
 
 
-# ==========================================================================
-# R1/R7 — compute_next_phase SWEEP back-edge
-# ==========================================================================
+# compute_next_phase SWEEP back-edge
 def test_sweep_reloops_to_explore_when_budget_and_leverage():
     st = _sweep_state(macro_cycle=0, cumulative_gain=5.0, gain_at_cycle_start=0.0)
     nxt = ps.compute_next_phase(st, max_hours=96.0)
@@ -75,7 +67,7 @@ def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available():
 
 
 def test_sweep_closes_when_globally_converged():
-    # No gain this cycle + streak already at 2 → effective 3 ≥ threshold.
+    # No gain this cycle + streak at 2 → effective 3 ≥ threshold.
     st = _sweep_state(
         macro_cycle=2,
         cumulative_gain=5.0,
@@ -90,7 +82,7 @@ def test_sweep_closes_when_globally_converged():
 
 
 def test_sweep_closes_when_insufficient_remaining():
-    # Long run (48h) but only ~10min remain → below the 30-min reloop floor.
+    # Long run (48h) but only ~10min remain → below the reloop floor.
     st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
     target, reason, evidence = ps.compute_next_phase(st, max_hours=48.0)
     assert target == ps.PHASE_CLOSE
@@ -99,8 +91,7 @@ def test_sweep_closes_when_insufficient_remaining():
 
 
 def test_short_bounded_run_never_reloops():
-    # 12h bounded run with plenty of budget + gain: legacy single-pass chain
-    # must wind down to CLOSE, never open a macro-cycle.
+    # 12h bounded run: single-pass chain winds down to CLOSE, no macro-cycle.
     st = _sweep_state(
         max_minutes=12 * 60,
         started_hours_ago=1.0,
@@ -131,7 +122,7 @@ def test_long_and_unbounded_runs_are_long():
     # >= 24h bounded → long.
     st_long = _sweep_state(max_minutes=24 * 60, started_hours_ago=1.0)
     assert ps.is_long_run(st_long) is True
-    # Unbounded (max_minutes == 0) → long (14-day ceiling).
+    # Unbounded (max_minutes == 0) → long.
     st_unbounded = _sweep_state(max_minutes=0, started_hours_ago=1.0)
     assert ps.is_long_run(st_unbounded) is True
 
@@ -143,9 +134,7 @@ def test_should_reloop_respects_max_cycles():
     assert ev["reloop_blocked"] == "max_cycles"
 
 
-# ==========================================================================
 # per-cycle budget window
-# ==========================================================================
 def test_per_cycle_budget_shrinks_phase_window():
     now = 1_000_000.0
     common = dict(
@@ -169,14 +158,14 @@ def test_per_cycle_budget_shrinks_phase_window():
         budget_pct=budget,
         now_unix=now,
     )
-    # whole-run: 96h*pct; per-cycle: 6h*pct → much smaller.
+    # whole-run: 96h*pct; per-cycle: 6h*pct.
     assert rem_run == pytest.approx(96 * 3600 * pct)
     assert rem_cycle == pytest.approx(6 * 3600 * pct)
     assert rem_cycle < rem_run
 
 
 def test_budget_minutes_falls_back_to_max_minutes_when_disabled():
-    # Long run (48h): cycle_minutes (when set) defines the per-cycle window.
+    # Long run (48h): cycle_minutes when set defines the per-cycle window.
     st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=48 * 60, cycle_minutes=0.0)
     assert ps._budget_minutes(st) == 48 * 60.0
     st.cycle_minutes = 120.0
@@ -184,16 +173,13 @@ def test_budget_minutes_falls_back_to_max_minutes_when_disabled():
 
 
 def test_budget_minutes_ignores_cycle_window_for_short_run():
-    # Short bounded run (10h < 24h): the per-cycle window must NOT apply, so
-    # phase budgets stay anchored on the whole session (legacy behaviour) even
-    # if cycle_minutes was pinned.
+    # Short bounded run (10h < 24h): the per-cycle window must NOT apply; phase
+    # budgets stay anchored on the whole session even if cycle_minutes was pinned.
     st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=600, cycle_minutes=360.0)
     assert ps._budget_minutes(st) == 600.0
 
 
-# ==========================================================================
 # Coordinator loopback application
-# ==========================================================================
 @pytest.fixture
 def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -236,8 +222,6 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     await c._advance_phase_if_needed()
 
     # Reloop targets the highest-leverage layer (FRAMEWORK enabled by default).
-    # The phase is re-opened on reloop (phase_done reset to False), so the entry
-    # pump runs a fresh discover; with no new PRs it fast-exits next tick.
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
     # Per-cycle sweep markers cleared so the new cycle's SWEEP runs fresh.
@@ -246,8 +230,7 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     # Gain anchored for the new cycle; gained this cycle → streak reset.
     assert st.gain_at_cycle_start == pytest.approx(7.0)
     assert st.no_gain_cycle_streak == 0
-    # The loopback transition row is stamped with the new cycle number
-    # (the entry pump may append later non-transition rows).
+    # The loopback transition row is stamped with the new cycle number.
     loopback_row = next(r for r in reversed(st.phase_history) if r.get("to_phase"))
     assert loopback_row["to_phase"] == "FRAMEWORK_AGENT"
     assert loopback_row["cycle"] == 1
@@ -264,7 +247,7 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
     st.macro_cycle = 3
     st.cumulative_gain_validated = 5.0
     st.gain_at_cycle_start = 5.0  # no gain this cycle
-    st.no_gain_cycle_streak = 2  # → effective 3 ≥ threshold
+    st.no_gain_cycle_streak = 2  # effective 3 ≥ threshold
     st.last_sweep = {"status": "succeeded"}
 
     await c._advance_phase_if_needed()
@@ -274,9 +257,7 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
     assert st.no_gain_cycle_streak == 3
 
 
-# ==========================================================================
 # PolicyGate re-entry after loopback is not falsely denied
-# ==========================================================================
 def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     from hyperloom.orchestrator.policy.gate import PolicyGate
@@ -309,9 +290,7 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
     )
 
 
-# ==========================================================================
 # Regression — short-run path unchanged (12h single-cycle behaviour)
-# ==========================================================================
 def test_regression_sweep_to_close_evidence_carries_no_loopback():
     st = _sweep_state(max_minutes=12 * 60)
     target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)

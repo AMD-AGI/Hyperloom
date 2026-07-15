@@ -3,9 +3,9 @@
 """Tests for proposer / operation_kind / per-variant attribution in the
 optimization timeline (phase_timeline + decision_trace).
 
-Verifies the augmentation that threads "who proposed", "what kind of change"
-(operation_kind), and "how it measured" (per-variant metrics + proposal scores)
-from the explore executor through the journal into the breakdown timeline.
+Verifies that "who proposed", "what kind of change" (operation_kind), and "how
+it measured" (per-variant metrics + proposal scores) thread from the explore
+executor through the journal into the breakdown timeline.
 """
 
 from __future__ import annotations
@@ -99,27 +99,26 @@ def test_decision_trace_resolves_proposer_kind_and_scores(tmp_path: Path) -> Non
     by_task = {r["decision"].get("task_id"): r["decision"] for r in rows}
 
     keep = by_task["t1"]
-    assert keep["component"] == "specialist:serving_specialist"  # resolved proposer
+    assert keep["component"] == "specialist:serving_specialist"
     assert keep["operation_kind"] == "backend"
     assert keep["provenance"] == "specialist:serving_specialist"
     assert keep["scope"] == "domain"
     assert keep["fingerprint"] == "fp1"
     assert keep["metrics"]["runtime_sec"] == 30.0
-    # Predicted gain surfaced for calibration (predicted 9.0 vs realized 4.2).
+    # Predicted gain surfaced for calibration.
     assert keep["predicted_gain_pct"] == 9.0
     # proposal_scorer signal joined by variant_name.
     raters = {s["rater"] for s in keep["proposal_scores"]}
     assert raters == {"modelA", "modelB"}
 
     revert = by_task["t2"]
-    assert revert["component"] == "grid"  # default_grid -> grid
+    assert revert["component"] == "grid"
     assert revert["operation_kind"] == "param"
 
 
 def test_decision_trace_routes_overhead_vs_unattributed(tmp_path: Path) -> None:
-    # A specialist + scorer call both keyed to t1 (attributed); an
-    # orchestration + critic call with no key (overhead); a stray keyless
-    # 'kernel_agent' call (genuinely unattributed).
+    # specialist + scorer keyed to t1 (attributed); orchestration + critic with
+    # no key (overhead); a keyless kernel_agent call (unattributed).
     trace = tmp_path / "reports" / "trace"
     trace.mkdir(parents=True, exist_ok=True)
     (tmp_path / "reports" / "optimization_journal.json").write_text(
@@ -152,14 +151,14 @@ def test_decision_trace_routes_overhead_vs_unattributed(tmp_path: Path) -> None:
     assert set(t1["tokens"]["by_component"]) == {"specialist", "proposal_scorer"}
     # orchestration + critic -> overhead; keyless kernel -> unattributed.
     assert out["overhead_tokens"]["calls"] == 2
-    assert out["overhead_tokens"]["total_in"] == 28      # 20 + 8
+    assert out["overhead_tokens"]["total_in"] == 28
     assert out["unattributed_tokens"]["calls"] == 1
     assert out["unattributed_tokens"]["total_in"] == 100
 
 
 def test_decision_trace_attributes_critic_review_to_decision(tmp_path: Path) -> None:
-    # A critic call that reviewed proposal msg "m1" should attribute to the
-    # decision whose task the proposal became (via proposal_task_map).
+    # A critic call reviewing proposal msg "m1" attributes to the decision whose
+    # task the proposal became (via proposal_task_map).
     trace = tmp_path / "reports" / "trace"
     trace.mkdir(parents=True, exist_ok=True)
     (tmp_path / "reports" / "optimization_journal.json").write_text(
@@ -177,8 +176,7 @@ def test_decision_trace_attributes_critic_review_to_decision(tmp_path: Path) -> 
     rows = [
         {"component": "critic", "reviewed_msg_ids": ["m1"], "input_tokens": 40,
          "output_tokens": 9, "ts": "2026-06-12T00:00:00Z"},
-        # A critic call reviewing two distinct materialized proposals stays in
-        # overhead (ambiguous attribution).
+        # Reviewing two distinct materialized proposals is ambiguous -> overhead.
         {"component": "critic", "reviewed_msg_ids": ["m1", "m2"],
          "input_tokens": 5, "output_tokens": 1, "ts": "2026-06-12T00:00:00Z"},
     ]
@@ -198,16 +196,15 @@ def test_decision_trace_attributes_critic_review_to_decision(tmp_path: Path) -> 
     assert dec["tokens"]["calls"] == 1
     assert "critic" in dec["tokens"]["by_component"]
     assert dec["tokens"]["by_component"]["critic"]["total_in"] == 40
-    # The ambiguous (m1+m2) critic call stays in overhead, not unattributed.
+    # The ambiguous (m1+m2) call stays in overhead.
     assert out["overhead_tokens"]["calls"] == 1
     assert out["overhead_tokens"]["total_in"] == 5
 
 
 def test_decision_trace_partial_mapping_critic_stays_overhead(tmp_path: Path) -> None:
-    # A batch critic review of three proposals where only ONE (m1) was later
-    # materialized (m2/m3 rejected -> absent from the map). The review served
-    # all three, so its token spend must NOT collapse onto task-A; it stays in
-    # overhead. A separate single-target review (m1 only) still attributes.
+    # A batch review of three proposals where only m1 was materialized must not
+    # collapse onto task-A; it stays in overhead. A separate single-target
+    # review (m1 only) still attributes.
     trace = tmp_path / "reports" / "trace"
     trace.mkdir(parents=True, exist_ok=True)
     (tmp_path / "reports" / "optimization_journal.json").write_text(
@@ -224,7 +221,7 @@ def test_decision_trace_partial_mapping_critic_stays_overhead(tmp_path: Path) ->
         encoding="utf-8",
     )
     rows = [
-        # Batch review of m1+m2+m3, partial mapping -> overhead (NOT task-A).
+        # Batch review of m1+m2+m3, partial mapping -> overhead.
         {"component": "critic", "reviewed_msg_ids": ["m1", "m2", "m3"],
          "input_tokens": 30, "output_tokens": 6, "ts": "2026-06-12T00:00:00Z"},
         # Single-target review of m1 -> attributes to task-A.
@@ -239,7 +236,7 @@ def test_decision_trace_partial_mapping_critic_stays_overhead(tmp_path: Path) ->
     # Only the single-target review folds into task-A's decision.
     assert dec["tokens"]["calls"] == 1
     assert dec["tokens"]["by_component"]["critic"]["total_in"] == 40
-    # The partial-mapping batch review stays in overhead, not unattributed.
+    # The partial-mapping batch review stays in overhead.
     assert out["overhead_tokens"]["calls"] == 1
     assert out["overhead_tokens"]["total_in"] == 30
 
@@ -249,11 +246,11 @@ def test_attribute_critic_calls_unit() -> None:
 
     msg_to_task = {"m1": "task-A", "m2": "task-B"}
     calls = [
-        # Single target, resolves to one task -> attributed.
+        # Single target -> attributed.
         {"component": "critic", "reviewed_msg_ids": ["m1"]},
-        # Batch review, partial mapping (only m1 known) -> left unkeyed.
+        # Partial mapping -> left unkeyed.
         {"component": "critic", "reviewed_msg_ids": ["m1", "x9"]},
-        # Batch review of two distinct tasks -> ambiguous, left unkeyed.
+        # Two distinct tasks -> ambiguous, left unkeyed.
         {"component": "critic", "reviewed_msg_ids": ["m1", "m2"]},
         # Already keyed -> respected.
         {"component": "critic", "task_id": "task-Z", "reviewed_msg_ids": ["m1"]},

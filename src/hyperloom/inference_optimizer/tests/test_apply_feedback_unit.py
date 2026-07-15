@@ -51,7 +51,6 @@ def test_format_for_mandate_minimal_only_header_and_channel():
     block = fb.format_for_mandate()
     assert "only.patch" in block
     assert "Channel: nogit" in block
-    # No optional sections present.
     assert "stderr" not in block
     assert "Rejected hunks" not in block
     assert "Source context" not in block
@@ -106,7 +105,6 @@ def test_read_context_deletion_uses_minus_side(tmp_path):
 
 
 def test_read_context_no_target_returns_empty(tmp_path):
-    # No ---/+++ header pair at all.
     ctx = read_patch_source_context("just some text\n", tmp_path)
     assert ctx == ""
 
@@ -198,13 +196,13 @@ def test_build_apply_feedback_with_root_adds_context(tmp_path):
 
 
 def test_build_apply_feedback_with_root_unreadable_patch(tmp_path):
-    # framework_root given but patch file does not exist → context stays empty.
+    # Missing patch file → context stays empty.
     fb = build_apply_feedback(tmp_path / "missing.patch", channel="git", framework_root=tmp_path)
     assert fb.source_context == ""
 
 
 # ---------------------------------------------------------------------------
-# Exception-guard branches (best-effort helpers must swallow and return "")
+# Exception-guard branches (helpers must swallow and return "")
 # ---------------------------------------------------------------------------
 
 def test_read_patch_source_context_swallows_exceptions(tmp_path, monkeypatch):

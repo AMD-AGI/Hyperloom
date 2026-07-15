@@ -28,7 +28,7 @@ from hyperloom.orchestrator.actions.executors.recover import (
 from hyperloom.orchestrator.state.task_registry import Task
 
 
-# RunnerContext stand-in (mirrors test_target_analysis_executor.py)
+# RunnerContext stand-in.
 @dataclass
 class _Ctx:
     task: Task
@@ -77,7 +77,6 @@ def _leaked_probe(num_gpus: int = 4, free_mb: float = 0.0) -> list[dict]:
     ]
 
 
-# No-op path — GPU already healthy
 @pytest.mark.asyncio
 async def test_no_stale_owners_returns_succeeded(tmp_path, monkeypatch):
     """Healthy GPUs + no stale owners -> state=succeeded, no kills."""
@@ -129,7 +128,6 @@ async def test_force_cleanup_false_skips_kill_stage(tmp_path, monkeypatch):
     assert out["killed_pids"] == []
 
 
-# Happy path — kills stale owners and GPUs recover
 @pytest.mark.asyncio
 async def test_kills_stale_owners_and_recovers(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
@@ -216,7 +214,7 @@ async def test_sigkill_fallthrough_when_pid_still_alive(tmp_path, monkeypatch):
     assert out["killed_pids"][0]["signal"] == "KILL"
 
 
-# gpureset env-gate (the "soft_then_hard_gated" choice)
+# gpureset env-gate
 @pytest.mark.asyncio
 async def test_env_gate_blocks_gpureset_when_disabled(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
@@ -331,8 +329,8 @@ async def test_gpureset_skipped_when_mid_probe_healthy(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gpureset_skipped_when_no_rocr_scope(tmp_path, monkeypatch):
-    """Env gate on + leaked VRAM but ROCR_VISIBLE_DEVICES unset -> refuse the
-    implicit full-node ``--gpu=all``; skip the hard reset and record why."""
+    """Env gate on + leaked VRAM but ROCR_VISIBLE_DEVICES unset -> skip the hard
+    reset (refuse implicit full-node ``--gpu=all``) and record why."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     monkeypatch.setenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", "1")
@@ -353,7 +351,6 @@ async def test_gpureset_skipped_when_no_rocr_scope(tmp_path, monkeypatch):
     assert out["error_class"] == "gpu_unhealthy_after_soft_cleanup"
 
 
-# CSV parser unit tests
 def test_parse_rocm_smi_vram_csv_basic():
     text = (
         "device,VRAM Total Memory (B),VRAM Total Used Memory (B)\n"
@@ -384,7 +381,6 @@ def test_parse_rocm_smi_vram_csv_handles_garbage_and_blank_blocks():
     assert "free_mb" in out[1]
 
 
-# Workspace handling
 @pytest.mark.asyncio
 async def test_result_json_omitted_when_no_workspace(monkeypatch):
     """Without a pre-made workspace the executor returns a complete dict but skips the on-disk audit."""
@@ -430,7 +426,6 @@ async def test_result_json_has_expected_keys(tmp_path, monkeypatch):
     assert expected_keys.issubset(persisted.keys())
 
 
-# Module-level callable
 def test_module_callable_exists():
     from hyperloom.orchestrator.actions.executors.recover import (
         RecoverExecutor as _Cls,
@@ -441,7 +436,7 @@ def test_module_callable_exists():
     assert recover_executor is _instance
 
 
-# gpureset subprocess error paths (real ``_try_rocm_smi_gpureset``)
+# gpureset subprocess error paths (real ``_try_rocm_smi_gpureset``).
 def test_try_rocm_smi_gpureset_handles_missing_binary(monkeypatch):
     exe = RecoverExecutor()
     monkeypatch.setattr(recmod.shutil, "which", lambda b: None)
@@ -489,7 +484,7 @@ def test_try_rocm_smi_gpureset_returns_stdout_stderr(monkeypatch):
 
 
 # ===========================================================================
-# Fine-grained helper-method unit tests (formerly test_recover_executor_units.py)
+# Fine-grained helper-method unit tests
 # ===========================================================================
 
 
@@ -517,14 +512,9 @@ class _ProcResult:
         self.stderr = stderr
 
 
-# ---------------------------------------------------------------------------
-# env gate
-# ---------------------------------------------------------------------------
-
-
 class TestEnvGate:
     def test_default_off(self, monkeypatch):
-        # Opt-in: hard GPU reset must NOT arm by default.
+        # Hard GPU reset must not arm by default.
         monkeypatch.delenv("HYPERLOOM_RECOVER_ALLOW_GPU_RESET", raising=False)
         assert _env_gate_allows_gpureset() is False
 
@@ -547,14 +537,9 @@ class TestSessionGpuIds:
         assert _session_gpu_ids() == [4, 5, 6, 7]
 
     def test_non_integer_token_returns_none(self, monkeypatch):
-        # A UUID token can't be safely mapped to a --gpu= index -> skip reset.
+        # A UUID token can't be mapped to a --gpu= index -> skip reset.
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-abc123")
         assert _session_gpu_ids() is None
-
-
-# ---------------------------------------------------------------------------
-# _parse_rocm_smi_vram_csv
-# ---------------------------------------------------------------------------
 
 
 class TestParseRocmSmiVramCsv:
@@ -587,11 +572,6 @@ class TestParseRocmSmiVramCsv:
         assert RecoverExecutor()._parse_rocm_smi_vram_csv("") == []
 
 
-# ---------------------------------------------------------------------------
-# _all_recovered
-# ---------------------------------------------------------------------------
-
-
 class TestAllRecovered:
     def test_empty_treated_as_unhealthy(self):
         assert RecoverExecutor()._all_recovered([]) is False
@@ -610,11 +590,6 @@ class TestAllRecovered:
         ex = RecoverExecutor()
         gpus = [{"gpu_id": 0}, {"gpu_id": 1, "free_mb": 9999.0}]
         assert ex._all_recovered(gpus) is False
-
-
-# ---------------------------------------------------------------------------
-# probe + signal helpers
-# ---------------------------------------------------------------------------
 
 
 class TestProbeGpuFreeMb:
@@ -720,11 +695,6 @@ class TestSendAndAlive:
         assert RecoverExecutor._pid_alive(1) is False
 
 
-# ---------------------------------------------------------------------------
-# _discover_stale_pids
-# ---------------------------------------------------------------------------
-
-
 class TestDiscoverStalePids:
     def test_no_pgrep_returns_empty(self, monkeypatch):
         monkeypatch.setattr(
@@ -775,11 +745,6 @@ class TestDiscoverStalePids:
         ex.OWNER_PATTERNS = ("sglang.launch_server",)
         out = ex._discover_stale_pids()
         assert [o["pid"] for o in out] == [12000]
-
-
-# ---------------------------------------------------------------------------
-# _try_rocm_smi_gpureset (unit-level coverage of subprocess branches)
-# ---------------------------------------------------------------------------
 
 
 class TestTryRocmSmiGpureset:
@@ -844,11 +809,6 @@ class TestTryRocmSmiGpureset:
         assert "launch_failed" in out["error"]
 
 
-# ---------------------------------------------------------------------------
-# _workspace_dir + _write_result_json
-# ---------------------------------------------------------------------------
-
-
 class TestWorkspaceHelpers:
     def test_workspace_dir_returns_none_when_missing(self):
         assert RecoverExecutor()._workspace_dir(SimpleNamespace(extra=None)) is None
@@ -886,7 +846,7 @@ from hyperloom.orchestrator.actions.executors import recover as recmod  # noqa: 
 
 class TestWriteResultJsonOSError:
     def test_oserror_on_write_text_is_swallowed(self, tmp_path, monkeypatch):
-        """mkdir succeeds but write_text raises OSError -> logged + swallowed (lines 347-348)."""
+        """mkdir succeeds but write_text raises OSError -> logged and swallowed."""
         target = tmp_path / "ws"
 
         real_write_text = Path.write_text
@@ -904,7 +864,7 @@ class TestWriteResultJsonOSError:
 
 class TestSessionGpuIdsEmptyTokens:
     def test_empty_and_whitespace_tokens_are_skipped(self, monkeypatch):
-        """Blank tokens between commas are skipped (line 121)."""
+        """Blank tokens between commas are skipped."""
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,,  ,1, 2 ")
         assert _session_gpu_ids() == [0, 1, 2]
 
@@ -928,7 +888,7 @@ class TestIsMultiNodeSandbox:
         assert recmod._is_multi_node_sandbox() is False
 
     def test_exception_defaults_to_single_node(self, monkeypatch):
-        """A failure in is_multi_node() is swallowed -> single-node (lines 156-158)."""
+        """A failure in is_multi_node() is swallowed -> single-node."""
         import hyperloom.orchestrator.actions.executors._multi_node_env as mne
 
         def _boom():
@@ -941,7 +901,7 @@ class TestIsMultiNodeSandbox:
 class TestMultiNodeShortCircuit:
     @pytest.mark.asyncio
     async def test_cpu_only_sandbox_short_circuits_to_success(self, tmp_path, monkeypatch):
-        """Multi-node sandbox skips local probes and returns cpu_only success (lines 214-236)."""
+        """Multi-node sandbox skips local probes and returns cpu_only success."""
         workspace = tmp_path / "ws"
         workspace.mkdir()
         monkeypatch.setattr(recmod, "_is_multi_node_sandbox", lambda: True)
@@ -995,7 +955,7 @@ class TestMultiNodeShortCircuit:
 
 class TestParseRocmSmiCsvEdgeCases:
     def test_blank_cells_line_is_skipped(self):
-        """A line that splits to all-empty cells doesn't crash (line 416 guard)."""
+        """A line that splits to all-empty cells doesn't crash."""
         text = (
             "device,VRAM Total Memory (B),VRAM Total Used Memory (B)\n"
             ",,\n"
@@ -1005,7 +965,7 @@ class TestParseRocmSmiCsvEdgeCases:
         assert [r["gpu_id"] for r in rows] == [0]
 
     def test_card_with_non_integer_index_is_skipped(self):
-        """``cardX`` where X is not an int is skipped (lines 424-425)."""
+        """``cardX`` where X is not an int is skipped."""
         text = (
             "device,VRAM Total Memory (B),VRAM Total Used Memory (B)\n"
             "cardX,206158430208,5242880\n"
@@ -1017,7 +977,7 @@ class TestParseRocmSmiCsvEdgeCases:
 
 class TestKillStaleOwnersNoneSignalled:
     def test_all_sigterm_fail_returns_empty(self, monkeypatch):
-        """If every SIGTERM fails to deliver, no wait/KILL and returns [] (line 484)."""
+        """If every SIGTERM fails to deliver, no wait/KILL and returns []."""
         exe = RecoverExecutor()
         monkeypatch.setattr(
             exe,
@@ -1042,7 +1002,7 @@ class TestKillStaleOwnersNoneSignalled:
 
 class TestDiscoverStalePidsBranches:
     def test_pgrep_timeout_is_skipped(self, monkeypatch):
-        """A pgrep TimeoutExpired for a pattern is logged + skipped (lines 515-517)."""
+        """A pgrep TimeoutExpired for a pattern is logged and skipped."""
         monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
 
         def _boom(cmd, *a, **k):
@@ -1054,7 +1014,7 @@ class TestDiscoverStalePidsBranches:
         assert ex._discover_stale_pids() == []
 
     def test_nonzero_nonone_returncode_is_skipped(self, monkeypatch):
-        """pgrep exit code not in (0, 1) is treated as an error and skipped (line 519)."""
+        """pgrep exit code not in (0, 1) is treated as an error and skipped."""
         monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
         monkeypatch.setattr(
             recmod.subprocess,
@@ -1066,7 +1026,7 @@ class TestDiscoverStalePidsBranches:
         assert ex._discover_stale_pids() == []
 
     def test_blank_and_single_token_lines_skipped(self, monkeypatch):
-        """Blank lines and single-token lines (no cmd) are skipped (lines 523, 526)."""
+        """Blank lines and single-token lines (no cmd) are skipped."""
         monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
         # Leading blank line, a single-token line (only pid), then a good match.
         out = "\n   \n12345\n5001 sglang.launch_server --port 8000\n"
@@ -1081,7 +1041,7 @@ class TestDiscoverStalePidsBranches:
         assert [o["pid"] for o in found] == [5001]
 
     def test_non_integer_pid_token_skipped(self, monkeypatch):
-        """A non-integer pid field is skipped (lines 529-530)."""
+        """A non-integer pid field is skipped."""
         monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
         out = "notapid sglang.launch_server foo\n7000 sglang.launch_server bar\n"
         monkeypatch.setattr(
@@ -1111,6 +1071,6 @@ class TestDiscoverStalePidsBranches:
 
 class TestPidAliveTrue:
     def test_pid_alive_returns_true_when_kill_succeeds(self, monkeypatch):
-        """os.kill(pid, 0) not raising -> process alive (line 578)."""
+        """os.kill(pid, 0) not raising -> process alive."""
         monkeypatch.setattr(recmod.os, "kill", lambda pid, sig: None)
         assert RecoverExecutor._pid_alive(1) is True

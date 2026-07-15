@@ -2,9 +2,9 @@
 
 """GEAK parameter resolution — TraceLens-first + profiling timeout.
 
-Pins three contracts (latent bugs on DeepSeek-R1 + AITER fmha_v3_varlen_fwd):
-TraceLens candidate wins for source_file, semantic benchmark reordering,
-and a ``timeout <N>`` prefix bounding each profiling subprocess.
+Pins three contracts: TraceLens candidate wins for source_file, semantic
+benchmark reordering, and a ``timeout <N>`` prefix bounding each profiling
+subprocess.
 """
 
 from __future__ import annotations

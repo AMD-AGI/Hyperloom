@@ -37,7 +37,7 @@ def _silent_coordinator(session_dir) -> Coordinator:
 
 @pytest.mark.asyncio
 async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch):
-    # Pin session dir + leak roots to tmp_path so the executor stays in the fixture tree.
+    # Pin session dir + leak roots to tmp_path.
     user_data = tmp_path / "user_data"
     user_data.mkdir()
     monkeypatch.setenv("USER_DATA_PATH", str(user_data))
@@ -62,8 +62,7 @@ async def test_profile_executor_fails_when_no_trace_files(tmp_path, monkeypatch)
         "hyperloom.orchestrator.actions.executors.profile.BaselineExecutor.__call__",
         fake_call,
     )
-    # ``profile`` is no longer registered; mirror RooflineExecutor by passing the
-    # workspace via ``ctx.extra`` so ``_resolve_workspace`` uses it.
+    # Pass the workspace via ``ctx.extra`` so ``_resolve_workspace`` uses it.
     task = Task(
         task_id="prof-empty",
         kind="profile",

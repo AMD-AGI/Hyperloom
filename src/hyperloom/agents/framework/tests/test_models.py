@@ -118,7 +118,7 @@ def test_explore_request_minimal() -> None:
     r = ExploreRequest.from_dict(_minimal_request_dict())
     assert r.framework == "sglang"
     assert r.work_dir == Path("/tmp/req")
-    assert r.search_modes == ("primus_cortex", "github")  # default
+    assert r.search_modes == ("primus_cortex", "github")
     assert r.search_perf_prs is False
     assert r.gap_description == ""
 

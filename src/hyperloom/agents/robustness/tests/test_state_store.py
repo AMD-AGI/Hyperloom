@@ -19,7 +19,6 @@ def test_empty_session_dir_starts_with_empty_state(tmp_path: Path) -> None:
     store = DetectorStateStore(session_dir=tmp_path)
     assert store.load_slot("gpu_leak") == {}
     assert store.snapshot() == {}
-    # Nothing written yet → no file.
     assert not store.file_path.exists()
 
 
@@ -54,7 +53,7 @@ def test_malformed_json_recovers_to_empty(tmp_path: Path) -> None:
     )
     store = DetectorStateStore(session_dir=tmp_path)
     assert store.snapshot() == {}
-    # Writing then flushing must overwrite the bad file with a valid one.
+    # Writing then flushing overwrites the bad file with a valid one.
     store.save_slot("gpu_leak", {"consecutive_hits": 1})
     store.flush_atomic()
     parsed = json.loads(store.file_path.read_text(encoding="utf-8"))
@@ -79,7 +78,7 @@ def test_non_dict_slot_values_are_dropped(tmp_path: Path) -> None:
         json.dumps(
             {
                 "gpu_leak": {"consecutive_hits": 1},
-                "ray_pending": ["bad"],  # not a dict
+                "ray_pending": ["bad"],
                 "progress": "also bad",
             }
         ),
@@ -99,8 +98,7 @@ def test_atomic_write_replaces_in_place(tmp_path: Path) -> None:
     store.save_slot("gpu_leak", {"consecutive_hits": 2})
     store.flush_atomic()
     inode2 = store.file_path.stat().st_ino
-    # os.replace produces a new inode (it's a rename), so this confirms
-    # we're not append-writing into the live file.
+    # os.replace renames, producing a new inode; confirms no append into the live file.
     assert inode1 != inode2
 
     again = DetectorStateStore(session_dir=tmp_path)
@@ -121,7 +119,7 @@ def test_view_load_save_roundtrip(tmp_path: Path) -> None:
 def test_in_memory_view_is_noop(tmp_path: Path) -> None:
     view = DetectorStateView(store=None, slot="gpu_leak")
     assert view.load() == {}
-    view.save({"consecutive_hits": 99})  # noop
+    view.save({"consecutive_hits": 99})
     assert view.load() == {}
 
 

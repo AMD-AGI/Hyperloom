@@ -2,10 +2,9 @@
 
 """sglang ``--watchdog-timeout`` injection tests.
 
-The first aiter request JIT-compiles a kernel that can exceed sglang's default
-300s watchdog and kill the server during warmup. Hyperloom injects a longer
-``--watchdog-timeout`` into ``EXTRA_SGLANG_ARGS`` unless the user pinned one.
-Exercised at both the pure-helper and ``materialize_config_with_envs`` layers.
+Hyperloom injects a longer ``--watchdog-timeout`` into ``EXTRA_SGLANG_ARGS``
+unless the user pinned one. Exercised at both the pure-helper and
+``materialize_config_with_envs`` layers.
 """
 
 from __future__ import annotations
@@ -88,7 +87,6 @@ def _materialize_envs(
     return cfg["benchmark"]["envs"]
 
 
-# resolve_sglang_watchdog_timeout
 def test_resolve_defaults_to_1800(monkeypatch):
     monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
     assert DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC == 1800
@@ -106,7 +104,6 @@ def test_resolve_bad_value_falls_back_to_default(monkeypatch, bad):
     assert resolve_sglang_watchdog_timeout() == 1800
 
 
-# inject_sglang_watchdog_timeout (pure helper)
 def test_inject_appends_default_for_sglang(monkeypatch):
     monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
     assert inject_sglang_watchdog_timeout("--foo bar", "sglang") == "--foo bar --watchdog-timeout 1800"
@@ -115,7 +112,6 @@ def test_inject_appends_default_for_sglang(monkeypatch):
 def test_inject_appends_when_args_empty(monkeypatch):
     monkeypatch.delenv("SGLANG_WATCHDOG_TIMEOUT", raising=False)
     assert inject_sglang_watchdog_timeout("", "sglang") == "--watchdog-timeout 1800"
-    # None coerces to empty and is treated identically.
     assert inject_sglang_watchdog_timeout(None, "sglang") == "--watchdog-timeout 1800"
 
 
@@ -156,7 +152,6 @@ def test_inject_noop_for_non_sglang(framework):
     )
 
 
-# materialize_config_with_envs (the production choke point)
 def test_materialize_sglang_injects_default_watchdog(tmp_path):
     envs = _materialize_envs(tmp_path, framework="sglang")
     assert "--watchdog-timeout 1800" in envs["EXTRA_SGLANG_ARGS"]
@@ -207,6 +202,5 @@ def test_materialize_sglang_preserves_existing_args(tmp_path):
 
 def test_materialize_vllm_does_not_inject_watchdog(tmp_path):
     envs = _materialize_envs(tmp_path, framework="vllm")
-    # A vllm run creates no sglang env and no watchdog flag.
     assert "EXTRA_SGLANG_ARGS" not in envs
     assert "--watchdog-timeout" not in envs.get("EXTRA_VLLM_ARGS", "")

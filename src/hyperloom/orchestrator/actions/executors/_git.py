@@ -4,7 +4,7 @@
 
 ``_run_git`` → ``(ok, stdout, stderr)``; ``_run_git_cp`` → the raw
 CompletedProcess (or None on spawn/timeout) for callers that must inspect
-returncode (e.g. the stash family's rc==128 "not a git repository" case).
+returncode.
 """
 
 from __future__ import annotations

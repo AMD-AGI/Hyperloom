@@ -19,14 +19,11 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-# Only the hottest kernels are scanned for a bottleneck keyword: the breakdown
-# is already time-sorted, so the dominant op is near the top and scanning the
-# long tail only risks matching a noise kernel.
+# Only the hottest kernels are scanned; the breakdown is time-sorted.
 _MAX_KERNELS_SCANNED = 5
 
 
-# Op-name substring → canonical bottleneck keyword fed to fa. Order matters:
-# first match wins so we emit exactly one keyword (not competing ones).
+# Op-name substring -> canonical bottleneck keyword; first match wins.
 _OP_TO_KEYWORD: tuple[tuple[str, str], ...] = (
     ("attention", "attention"),
     ("attn", "attention"),
@@ -110,8 +107,7 @@ def _extract_bottleneck_from_breakdown(breakdown_path: str | Path | None) -> str
 def _normalize_model_class(model_class: str) -> str:
     """Reduce moe_mla / moe-swa / Dense / "" to a canonical lowercase token.
 
-    Same canonicalisation rule (lowercase, -/+/space → _) every other
-    ``model_class`` consumer uses, keeping the gap token grep-friendly.
+    Lowercases and maps -/+/space to _.
 
     Args:
         model_class: Raw model-class label.
@@ -127,9 +123,6 @@ def _normalize_model_class(model_class: str) -> str:
 
 def _model_class_to_search_token(model_class: str) -> str:
     """Map the IO model_class taxonomy to one fa-friendly architectural token.
-
-    fa's anti-correlation table activates on ``dense`` / ``moe``, so the gap
-    must carry one of those rather than granular IO labels (``moe_mla`` ...).
 
     Args:
         model_class: Raw model-class label.
@@ -182,8 +175,7 @@ def compose_gap(
     prec = (precision or "").strip().lower()
     bottleneck = _extract_bottleneck_from_breakdown(profile_kernel_breakdown_path)
 
-    # Gap text mirrors the SKILL.md template
-    # ("improve {fw} {prec} {model_class} throughput on {gpu}").
+    # Gap text mirrors the SKILL.md template.
     parts: list[str] = ["improve"]
     if fw:
         parts.append(fw)
@@ -198,8 +190,7 @@ def compose_gap(
         parts.extend(["on", gpu])
     gap = " ".join(parts).strip()
 
-    # Keywords: dedup + sort, lowercase; passed as the ``keywords`` override
-    # so fa skips extract_keywords and uses them verbatim.
+    # Keywords: dedup + sort, lowercase; passed as the ``keywords`` override.
     kw_pool: list[str] = []
     for tok in (fw, gpu, arch, prec, bottleneck):
         if tok and tok not in kw_pool:

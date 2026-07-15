@@ -4,9 +4,8 @@
 
 Holds the declarative real-executor table, the specialist / dynamic-action
 executor factories, and ``_register_executors`` which wires everything onto
-a live :class:`Coordinator`. Extracted from ``cli.py`` so the entry module
-stays focused on parsing + the run flow. This module imports from the
-orchestrator packages only — it must not import ``cli`` (one-way dependency).
+a live :class:`Coordinator`. Imports from the orchestrator packages only — it
+must not import ``cli`` (one-way dependency).
 """
 
 from __future__ import annotations
@@ -53,32 +52,26 @@ async def _noop_prep(ctx) -> dict:
     return {"status": "succeeded", "kind": ctx.task.kind, "note": "noop-stub"}
 
 
-# Declarative action_kind -> ExecutorFn map so tests can introspect what's
-# wired; adding a real-executor action MUST update this (test_action_catalogue
-# enforces consistency with session_paths._runs_actions()).
+# Declarative action_kind -> ExecutorFn map (test_action_catalogue enforces
+# consistency with session_paths._runs_actions()).
 _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline": baseline_executor,
-    # replay_warm_recipe reuses BaselineExecutor (same Magpie subprocess,
-    # applies warm_start_recipe.best_config; Coordinator interprets it via
-    # _promote_replay_warm_recipe).
+    # replay_warm_recipe reuses BaselineExecutor, applying warm_start_recipe.best_config.
     "replay_warm_recipe": baseline_executor,
-    # profile: Coordinator-internal (--no-enable-roofline path); PolicyGate
-    # denies LLM-proposed delegate.
+    # profile: Coordinator-internal; PolicyGate denies LLM-proposed delegate.
     "profile": profile_executor,
     "explore": explore_executor,
     "sweep": sweep_executor,
-    # conc_sweep: Coordinator-internal post-sweep concurrency comparison
-    # (disable via --no-enable-conc-sweep); LLM-proposed conc_sweep denied.
+    # conc_sweep: Coordinator-internal post-sweep concurrency comparison.
     "conc_sweep": conc_sweep_executor,
     "report": report_executor,
     "session_breakdown": session_breakdown_executor,
-    # recover cleans up leaked VRAM owners (optional rocm-smi --gpureset
-    # behind HYPERLOOM_RECOVER_ALLOW_GPU_RESET=1).
+    # recover cleans up leaked VRAM owners.
     "recover": recover_executor,
 }
 
-# Kernel-owned kinds (dispatched via request{target_agent='kernel_agent'}); no-op
-# executors here so SubAgentRunner doesn't raise no_executor on a stale task.
+# Kernel-owned kinds; no-op executors here so SubAgentRunner doesn't raise
+# no_executor on a stale task.
 _NOOP_KINDS_KERNEL_ONLY: tuple[str, ...] = tuple(sorted(KERNEL_AGENT_OWNED_ACTIONS))
 
 
@@ -120,8 +113,7 @@ def _build_specialist_executor(
     per_turn_max_seconds = float(getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0)
     dispatch_mode = str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess").strip().lower()
 
-    # Root the specialist worktree at the same set the prompt + PolicyGate
-    # path-validator already trust.
+    # Root the specialist worktree at the set the prompt + PolicyGate trust.
     framework_source_roots = tuple(resolve_source_file_allowlist())
     claude_bin = shutil.which("claude") or ""
     use_subprocess = dispatch_mode != "inprocess" and bool(claude_bin)
@@ -132,9 +124,8 @@ def _build_specialist_executor(
         )
 
     if use_subprocess:
-        # Operator --specialist-mcp-config wins; else auto-generate one from
-        # the live KnowledgePlane so the subprocess has the PR Monitor MCP
-        # server wired (without it mcp__pr_monitor__* tools resolve to nothing).
+        # Operator --specialist-mcp-config wins; else auto-generate one from the
+        # live KnowledgePlane so the subprocess has the PR Monitor MCP wired.
         mcp_config_path: str | None = str(getattr(args, "specialist_mcp_config", "") or "") or None
         if mcp_config_path is None and knowledge_plane is not None:
             try:
@@ -180,7 +171,6 @@ def _build_specialist_executor(
             Returns:
                 A configured :class:`ClaudeBackend` instance.
             """
-            # in-process Claude path (fallback).
             return ClaudeBackend(
                 model=claude_model,
                 max_turns_default=max_turns,
@@ -259,8 +249,8 @@ def _register_executors(
     if specialist_executor is not None:
         coordinator.sub.register_executor("specialist", specialist_executor)
 
-    # IntegratePatchExecutor: applies specialist worktree patches via git
-    # apply, benches, decides KEEP/REVERT. Single integration point.
+    # IntegratePatchExecutor: applies specialist worktree patches, benches,
+    # decides KEEP/REVERT.
     coordinator.sub.register_executor(
         "integrate_patch",
         IntegratePatchExecutor(session_dir=session_dir),
@@ -273,7 +263,7 @@ def _register_executors(
     )
 
     # roofline (profile + trace_analyze): auto-enqueued at PRELUDE + each 10%
-    # watermark crossing (independent of --no-kernel), so always registered.
+    # watermark crossing, so always registered.
     coordinator.sub.register_executor(
         "roofline",
         make_roofline_executor(shared_state=coordinator.shared_state),

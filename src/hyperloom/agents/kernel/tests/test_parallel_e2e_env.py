@@ -24,7 +24,7 @@ def _write_env(tmp_path: Path, **vars: str) -> Path:
 
 
 def test_single_gateway_all_aliases_from_safe_key(tmp_path):
-    """Single gateway: every key alias is SAFE_API_KEY (no regression)."""
+    """Single gateway: every key alias is SAFE_API_KEY."""
     env = per.load_env_file(_write_env(tmp_path, SAFE_API_KEY="ak-safe", OPENAI_BASE_URL="https://gw/v1"))
     for alias in ("OPENAI_API_KEY", "GEAK_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         assert env[alias] == "ak-safe", alias
