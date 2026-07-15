@@ -232,7 +232,7 @@ you do not need to set any of the variables above by hand. The
 sandbox initializer binds your LLM Gateway key as `SAFE_API_KEY`,
 populates the path env from sandbox defaults, and runs install/preflight
 so downstream tools inherit the gateway URL and aliases. See
-[Setup and examples](../../examples/README.md).
+[Quickstart](../../examples/README.md).
 
 ---
 

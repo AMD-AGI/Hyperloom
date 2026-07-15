@@ -1,4 +1,4 @@
-# Hyperloom Setup and Examples
+# Hyperloom Quickstart
 
 This README is the main entry point for setting up Hyperloom and launching the
 model demo skills. The recommended customer path is a packaged install with

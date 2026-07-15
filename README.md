@@ -33,7 +33,7 @@ Hyperloom combines:
 
 | Goal | Guide |
 |------|-------|
-| Set up Hyperloom and run a demo | [Setup and examples](examples/README.md) |
+| Set up Hyperloom and run a demo | [Quickstart](examples/README.md) |
 | Launch and monitor an optimization | [Run an optimization](docs/how-to/optimize.md) |
 | Understand the algorithm | [Optimization loop](docs/conceptual/optimization-loop.md) |
 

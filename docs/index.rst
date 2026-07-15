@@ -46,7 +46,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
 
   .. grid-item-card:: Install
 
-    * `Setup and examples <../examples/README.md>`_
+    * `Quickstart <../examples/README.md>`_
     * :doc:`Slurm quickstart </install/slurm>`
 
   .. grid-item-card:: Components

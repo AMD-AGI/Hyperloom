@@ -8,7 +8,7 @@ myst:
 
 This topic assumes you have already completed installation. If you haven't:
 
-- **Setup and examples** — see [Setup and examples](../../examples/README.md),
+- **Quickstart** — see [Quickstart](../../examples/README.md),
   then return here to launch your first run.
 
 ## Launch from Cursor
