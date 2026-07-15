@@ -27,6 +27,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.session.paths import asset_root
 from ._grid_runner import (
     compact_json_server_args,
@@ -55,17 +56,6 @@ log = logging.getLogger(__name__)
 # gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
 _GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})
 
-
-def _coerce_str_list(value: Any) -> list[str]:
-    """Normalize optional string/list controls to non-empty strings."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, (list, tuple, set)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    text = str(value).strip()
-    return [text] if text else []
 
 _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
 
@@ -964,8 +954,8 @@ def materialize_config_with_envs(
         and _fp8_is_per_channel_per_token(_model_for_quant)
     ):
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
-    remove_list = _coerce_str_list(remove_args)
-    unset_list = _coerce_str_list(unset_envs)
+    remove_list = to_str_list(remove_args)
+    unset_list = to_str_list(unset_envs)
     if remove_list:
         envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
     for key in unset_list:
