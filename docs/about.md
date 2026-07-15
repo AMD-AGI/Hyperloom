@@ -25,7 +25,4 @@ These policies govern contributions and community behavior:
 These resources are available for Hyperloom users and contributors:
 
 - [Hyperloom repository](https://github.com/AMD-AGI/Hyperloom)
-- [Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX) — full
-  sweeps, patches, configs, and reproduction scripts for the key benchmark
-  results.
 - [LLM Gateway](https://llm.amd.com/) — obtain your API key.
