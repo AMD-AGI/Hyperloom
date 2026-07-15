@@ -98,8 +98,20 @@ def test_escape_flag_allows_empty_shape(tmp_path: Path):
     )
 
 
-def test_escape_env_allows_empty_shape(tmp_path: Path, monkeypatch):
+def test_escape_env_no_longer_allows_empty_shape(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "1")
+    payload = {"kernel_id": "k001", "candidate": _candidate(shapes=[])}
+    krh.set_allow_empty_kernel_shape(False)
+    result = krh._validate_kernel_shape_and_paths(
+        payload,
+        session_dir=tmp_path,
+    )
+    assert result is not None
+    assert result["error_class"] == "empty_kernel_shape"
+
+
+def test_escape_process_flag_allows_empty_shape(tmp_path: Path):
+    krh.set_allow_empty_kernel_shape(True)
     payload = {"kernel_id": "k001", "candidate": _candidate(shapes=[])}
     assert (
         krh._validate_kernel_shape_and_paths(
@@ -108,6 +120,7 @@ def test_escape_env_allows_empty_shape(tmp_path: Path, monkeypatch):
         )
         is None
     )
+    krh.set_allow_empty_kernel_shape(False)
 
 
 def test_dry_run_bypasses_validation(tmp_path: Path):

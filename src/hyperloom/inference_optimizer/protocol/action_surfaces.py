@@ -45,16 +45,6 @@ FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset(
 COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES | FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES
 
 
-# Coordinator-internal actions that intentionally do not appear in
-# phase_state.PHASE_ALLOWED_ACTIONS because they bypass LLM proposal /
-# delegate policy entirely.
-PHASE_ALLOWLIST_BYPASS_ACTIONS: frozenset[str] = frozenset(
-    {
-        "replay_warm_recipe",
-    }
-)
-
-
 # Robustness-only actions (driven via its action-ladder): in
 # PHASE_ALLOWED_ACTIONS but excluded from PHASE_LLM_PROPOSABLE_ACTIONS + the
 # prompt catalogue, so Orchestration must ALERT instead. ``recover`` walks
@@ -117,6 +107,5 @@ __all__ = [
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
-    "PHASE_ALLOWLIST_BYPASS_ACTIONS",
     "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]

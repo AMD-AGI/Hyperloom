@@ -19,7 +19,6 @@ __all__ = [
     "RendererFn",
     "REGISTRY",
     "register_renderer",
-    "renderer_names",
 ]
 
 
@@ -91,15 +90,6 @@ def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
         return fn
 
     return _wrap
-
-
-def renderer_names() -> list[str]:
-    """List the section ids of all registered renderers, in order.
-
-    Returns:
-        list[str]: Section identifiers in registry insertion order.
-    """
-    return [sid for sid, _ in REGISTRY]
 
 
 # Small markdown helpers — kept here so individual renderers stay terse.
@@ -189,21 +179,3 @@ def fmt_pct(v: Any, *, plus: bool = False) -> str:
         return "—"
     sign = "+" if (plus and x > 0) else ""
     return f"{sign}{x:.2f}%"
-
-
-def fmt_int(v: Any) -> str:
-    """Format a value as a thousands-separated integer string.
-
-    Args:
-        v (Any): The value to format.
-
-    Returns:
-        str: The integer with thousands separators (e.g. ``"1,234"``), the
-            raw ``str(v)`` when it is non-numeric, or ``"—"`` when ``None``.
-    """
-    if v is None:
-        return "—"
-    try:
-        return f"{int(v):,}"
-    except (TypeError, ValueError):
-        return str(v)

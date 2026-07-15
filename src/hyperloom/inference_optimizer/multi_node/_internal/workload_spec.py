@@ -275,67 +275,7 @@ def build_dynamo_workload_body(
     extra_env: dict[str, str] | None = None,
     extra_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Build a SaFE CreateWorkloadRequest body for an IDLE multi-node Dynamo
-    deployment (frontend + LeaderWorkerSet worker).
-
-    Topology: ``resources = [frontend, worker]`` with
-    ``dynamoOptions.serviceRoles = ["frontend", "worker"]``. When ``nodes >= 2``
-    the worker is listed in ``multinodeRoles`` and ``worker.replica = nodes`` so
-    the dispatcher sets ``multinode.numberOfNodes = nodes`` and the operator
-    materialises one LeaderWorkerSet group of ``nodes`` pods (a single
-    tensor-parallel model spanning nodes). ``worker.replica`` IS the node count
-    per the new API — NOT a Deployment replica count.
-
-    The worker entryPoint is the idle ``mn-idle.sh`` (sshd + block), so no
-    inference server starts at deploy time; the optimizer SSHes in to launch
-    sglang/vllm per round. ``ssh_authorized_key`` is injected as
-    ``MN_SSH_AUTHORIZED_KEY`` so ``mn-sshd-init.sh`` can authorise the
-    controller's key at container start.
-
-    ``entryPoints`` are base64-encoded per the SaFE contract (the apiserver
-    stores them verbatim; the dispatcher decodes/append/re-encodes the
-    launcher payload).
-
-    Args:
-        workspace: SaFE workspace id the workload belongs to.
-        display_name: Human-readable name for the workload.
-        image: Container image used for the frontend and worker roles.
-        nodes: Total node count for the aggregated worker role.
-        gpus_per_node: GPUs requested per GPU pod.
-        cpus_per_node: CPUs requested per GPU pod.
-        mem_gi_per_node: Memory in GiB requested per GPU pod.
-        ephemeral_gi_per_node: Ephemeral storage in GiB requested per GPU pod.
-        ssh_authorized_key: Public key injected as ``MN_SSH_AUTHORIZED_KEY``
-            for the idle-pod control plane.
-        backend_framework: Dynamo backend (``sglang`` / ``vllm`` / ``trtllm``).
-        kv_transfer_backend: KV transfer backend (``nixl`` / ``mori`` /
-            ``mooncake``).
-        ssh_port: SSH port exported as ``MN_SSH_PORT``.
-        shared_mem_gi: Shared memory in GiB requested per GPU pod.
-        rdma_resource: RDMA resource quantity for multinode / PD roles.
-        frontend_cpu: CPUs requested for the frontend pod.
-        frontend_mem_gi: Memory in GiB for the frontend pod.
-        frontend_port: Frontend HTTP port (benchmark target).
-        pd_mode: ``aggregated`` or ``disaggregated`` prefill/decode topology.
-        pd_prefill_nodes: Prefill group node count (disaggregated).
-        pd_decode_nodes: Decode group node count (disaggregated).
-        pd_prefill_tp: Prefill group tensor-parallel size (disaggregated).
-        pd_decode_tp: Decode group tensor-parallel size (disaggregated).
-        description: Optional workload description.
-        owner_id: Optional owner id to attach to the workload.
-        session_id: Optional session id injected as ``primus-claw/session-id``.
-        extra_env: Optional user environment variables (reserved keys stripped).
-        extra_labels: Optional user labels (Brain-managed prefixes stripped).
-
-    Returns:
-        A json.dumps-safe CreateWorkloadRequest body for the Dynamo deployment.
-
-    Raises:
-        ValueError: If ``nodes`` / ``gpus_per_node`` is below 1; if
-            ``workspace`` / ``display_name`` / ``image`` / ``ssh_authorized_key``
-            is empty; or if ``backend_framework`` / ``kv_transfer_backend`` is
-            not a supported enum value.
-    """
+    """Build a SaFE CreateWorkloadRequest for an idle multi-node Dynamo deployment."""
     if nodes < 1:
         raise ValueError(f"nodes must be >= 1, got {nodes}")
     if gpus_per_node < 1:

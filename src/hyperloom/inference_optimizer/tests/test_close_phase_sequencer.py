@@ -79,7 +79,7 @@ class _StubTaskRegistry:
         row = _StubTaskRow(
             task_id=tid,
             kind=kind,
-            state="succeeded",  # terminal so _wait_for_task_terminal returns immediately
+            state="succeeded",
             params=dict(params),
             idempotency_key=idempotency_key,
         )
@@ -219,46 +219,6 @@ async def test_record_close_step_no_op_when_history_empty(coord):
     await coord._record_close_step("report", status="done")
 
 
-# 2. _wait_for_task_terminal helper
-@pytest.mark.asyncio
-async def test_wait_for_task_terminal_returns_immediately_when_succeeded(
-    coord,
-):
-    await coord.tasks.create_or_return_existing(
-        kind="report",
-        params={},
-        idempotency_key="k1",
-        task_id="t-x",
-    )
-    state = await coord._wait_for_task_terminal("t-x", timeout_sec=1.0)
-    assert state == "succeeded"
-
-
-@pytest.mark.asyncio
-async def test_wait_for_task_terminal_returns_none_for_unknown(coord):
-    state = await coord._wait_for_task_terminal("missing", timeout_sec=1.0)
-    assert state is None
-
-
-@pytest.mark.asyncio
-async def test_wait_for_task_terminal_timeout(coord):
-    """Task never reaches terminal → returns None after timeout."""
-
-    class _StuckRegistry:
-        async def get(self, task_id):
-            return _StubTaskRow(
-                task_id=task_id,
-                kind="report",
-                state="running",
-                params={},
-                idempotency_key="",
-            )
-
-    coord.tasks = _StuckRegistry()
-    state = await coord._wait_for_task_terminal("t-stuck", timeout_sec=0.05)
-    assert state is None
-
-
 # Report task enqueue.
 @pytest.mark.asyncio
 async def test_enqueue_internal_report_task_fresh(coord):
@@ -368,6 +328,19 @@ async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
     await coord._on_enter_close(from_phase="SWEEP")
 
     assert coord.shared_state.stop_reason == "conc_sweep_done"
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_preserves_failed_conc_sweep_reason(coord):
+    """Failed conc_sweep closeout should stay distinguishable in final stop_reason."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "CLOSE", "reason": "conc_sweep_failed", "evidence": {"conc_sweep_status": "failed"}},
+    ]
+    assert coord.shared_state.stop_reason == ""
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    assert coord.shared_state.stop_reason == "conc_sweep_failed"
 
 
 @pytest.mark.asyncio

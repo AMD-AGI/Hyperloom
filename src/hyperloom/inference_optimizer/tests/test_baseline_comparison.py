@@ -19,25 +19,25 @@ import pytest
 
 # name_mapping
 def test_name_mapping_known_display_name_passthrough():
-    from hyperloom.inference_optimizer.baseline_comparison.name_mapping import to_inferencex_name
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
     assert to_inferencex_name("MiniMax-M2.5") == "MiniMax-M2.5"
 
 
 def test_name_mapping_strips_vendor_prefix_from_path():
-    from hyperloom.inference_optimizer.baseline_comparison.name_mapping import to_inferencex_name
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
     assert to_inferencex_name("/wekafs/models/MiniMaxAI-MiniMax-M2.5") == "MiniMax-M2.5"
 
 
 def test_name_mapping_case_insensitive():
-    from hyperloom.inference_optimizer.baseline_comparison.name_mapping import to_inferencex_name
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
     assert to_inferencex_name("/wekafs/x/minimaxai-minimax-m2.5") == "MiniMax-M2.5"
 
 
 def test_name_mapping_unknown_returns_none():
-    from hyperloom.inference_optimizer.baseline_comparison.name_mapping import to_inferencex_name
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
     assert to_inferencex_name("/wekafs/models/MyCorp-Custom-FT-7B") is None
     assert to_inferencex_name("") is None
@@ -45,7 +45,9 @@ def test_name_mapping_unknown_returns_none():
 
 
 def test_known_models_list_is_nonempty():
-    from hyperloom.inference_optimizer.baseline_comparison.name_mapping import KNOWN_INFERENCEX_MODELS
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
+        KNOWN_INFERENCEX_MODELS,
+    )
 
     assert "MiniMax-M2.5" in KNOWN_INFERENCEX_MODELS
     assert len(KNOWN_INFERENCEX_MODELS) >= 5

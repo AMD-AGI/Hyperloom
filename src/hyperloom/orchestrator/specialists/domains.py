@@ -38,10 +38,6 @@ class SpecialistDomain:
             (e.g. ``M5`` or ``M6``). Defaults to ``"M6"``.
         description (str): Free-form description of the domain's responsibilities.
             Defaults to an empty string.
-        sub_kinds (tuple[str, ...]): Optional per-domain sub_kind catalogue. When
-            empty, only ``params.sub_kind`` in {None, ""} is accepted; non-empty
-            values are denied with a structured PolicyGate error. Defaults to an
-            empty tuple.
     """
 
     key: str
@@ -49,8 +45,6 @@ class SpecialistDomain:
     kb_anchor: str
     available_in: str = "M6"
     description: str = ""
-    # Optional per-domain sub_kind catalogue; empty accepts only ``params.sub_kind`` ∈ {None, ""}.
-    sub_kinds: tuple[str, ...] = ()
 
 
 # Global allowlist of repos specialists may query via mcp__pr_monitor__*.

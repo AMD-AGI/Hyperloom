@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
+
+from hyperloom.common.coerce import to_float
 
 
 # Category vocabulary. Per-kernel outcome bucket; closed set (new categories
@@ -26,7 +29,7 @@ CATEGORY_IN_FLIGHT = "IN_FLIGHT"
 CATEGORY_UNATTEMPTED = "UNATTEMPTED"
 
 #: Terminal kernel-outcome bucket. Closed 4-value set the dashboard reads
-#: directly (one uniform field across forge / geak / oob backends) instead of
+#: directly (one uniform field across forge / geak / forge backends) instead of
 #: re-deriving from decision/status strings. ``IN_FLIGHT`` (no terminal
 #: decision) folds into ``fail`` -- a completed session should never leave a
 #: kernel mid-flight.
@@ -179,8 +182,8 @@ FIELD_GLOSSARY: dict[str, str] = {
     "bound_type": ("Whether the kernel is limited by memory bandwidth (memory-bound) or compute (compute-bound)."),
     "compile_passed": (
         "True only if at least one backend in the ladder produced a "
-        "usable patch. False means the whole geak->claude->codex "
-        "ladder failed to produce any compiled artifact."
+        "usable patch. False means the whole backend ladder "
+        "failed to produce any compiled artifact."
     ),
     "backend_ladder": (
         "Per-backend outcome of the kernel-agent dispatch. "
@@ -465,6 +468,99 @@ def _unattempted_reason(top_entry: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def _summary_integrated(
+    entry: dict[str, Any],
+    backend_ladder: list[dict[str, Any]],
+    artifact_error: str,
+) -> str:
+    """One-line summary for an ``INTEGRATED`` kernel."""
+    micro = entry.get("last_micro_speedup") or 0.0
+    return f"integrated into optimization_stack; micro_speedup={micro:.3f}x"
+
+
+def _summary_keep_pending(
+    entry: dict[str, Any],
+    backend_ladder: list[dict[str, Any]],
+    artifact_error: str,
+) -> str:
+    """One-line summary for a ``KEEP_PENDING`` kernel."""
+    micro = entry.get("last_micro_speedup") or 0.0
+    return f"KEEP awaiting integrate; micro_speedup={micro:.3f}x (pending integrate action)"
+
+
+def _summary_attempted_rejected(
+    entry: dict[str, Any],
+    backend_ladder: list[dict[str, Any]],
+    artifact_error: str,
+) -> str:
+    """One-line summary for an ``ATTEMPTED_REJECTED`` kernel."""
+    all_failed = bool(backend_ladder) and all(
+        row.get("status") == "failed" and not row.get("produced_artifact") for row in backend_ladder
+    )
+    if all_failed:
+        backends = "/".join(row.get("backend") or "?" for row in backend_ladder)
+        return (
+            f"kernel-agent ladder ({backends}) all "
+            f"{len(backend_ladder)} backends failed to produce a "
+            f"usable patch; verification: {artifact_error or 'no usable artifact'}"
+        )
+    decision = str(entry.get("last_decision") or "").upper() or "rejected"
+    return f"{decision}; rejected_reason={entry.get('rejected_reason') or 'n/a'}"
+
+
+def _summary_in_flight(
+    entry: dict[str, Any],
+    backend_ladder: list[dict[str, Any]],
+    artifact_error: str,
+) -> str:
+    """One-line summary for an ``IN_FLIGHT`` kernel."""
+    attempts = int(entry.get("attempts") or 0)
+    return f"in-flight; {attempts} attempt(s) recorded, no terminal decision yet"
+
+
+class _CategoryHandling(NamedTuple):
+    """One row of :data:`CATEGORY_DISPATCH`.
+
+    Attributes:
+        count_key: The ``totals`` counter this category increments.
+        summary: Deterministic ``(entry, backend_ladder, artifact_error) ->
+            str`` one-line summary builder for this category.
+    """
+
+    count_key: str
+    summary: Callable[[dict[str, Any], list[dict[str, Any]], str], str]
+
+
+#: Single source of truth for the per-category handling that was previously
+#: inlined (and duplicated) at three sites: the summary builder in
+#: ``_summary_one_line`` and the ``totals`` counter increment at both count
+#: sites in ``build_kernel_optimization_summary``. A category absent from this
+#: table falls back to the ``IN_FLIGHT`` counter / an empty summary, preserving
+#: the original ``else`` / trailing-``return ""`` behavior.
+CATEGORY_DISPATCH: dict[str, _CategoryHandling] = {
+    CATEGORY_INTEGRATED: _CategoryHandling("integrated", _summary_integrated),
+    CATEGORY_KEEP_PENDING: _CategoryHandling("keep_pending", _summary_keep_pending),
+    CATEGORY_ATTEMPTED_REJECTED: _CategoryHandling("rejected", _summary_attempted_rejected),
+    CATEGORY_IN_FLIGHT: _CategoryHandling("in_flight", _summary_in_flight),
+}
+
+
+def _category_count_key(category: str) -> str:
+    """Resolve the ``totals`` counter for ``category`` via :data:`CATEGORY_DISPATCH`.
+
+    Unknown categories fall back to ``in_flight`` so a novel/blank category
+    increments the same counter the original ``else`` branch did.
+
+    Args:
+        category: The kernel outcome category constant.
+
+    Returns:
+        The ``totals`` dict key to increment for this category.
+    """
+    handling = CATEGORY_DISPATCH.get(category)
+    return handling.count_key if handling is not None else "in_flight"
+
+
 def _summary_one_line(
     *,
     category: str,
@@ -483,29 +579,10 @@ def _summary_one_line(
     Returns:
         A one-line summary string (``""`` for unknown categories).
     """
-    if category == CATEGORY_INTEGRATED:
-        micro = entry.get("last_micro_speedup") or 0.0
-        return f"integrated into optimization_stack; micro_speedup={micro:.3f}x"
-    if category == CATEGORY_KEEP_PENDING:
-        micro = entry.get("last_micro_speedup") or 0.0
-        return f"KEEP awaiting integrate; micro_speedup={micro:.3f}x (pending integrate action)"
-    if category == CATEGORY_ATTEMPTED_REJECTED:
-        all_failed = bool(backend_ladder) and all(
-            row.get("status") == "failed" and not row.get("produced_artifact") for row in backend_ladder
-        )
-        if all_failed:
-            backends = "/".join(row.get("backend") or "?" for row in backend_ladder)
-            return (
-                f"kernel-agent ladder ({backends}) all "
-                f"{len(backend_ladder)} backends failed to produce a "
-                f"usable patch; verification: {artifact_error or 'no usable artifact'}"
-            )
-        decision = str(entry.get("last_decision") or "").upper() or "rejected"
-        return f"{decision}; rejected_reason={entry.get('rejected_reason') or 'n/a'}"
-    if category == CATEGORY_IN_FLIGHT:
-        attempts = int(entry.get("attempts") or 0)
-        return f"in-flight; {attempts} attempt(s) recorded, no terminal decision yet"
-    return ""
+    handling = CATEGORY_DISPATCH.get(category)
+    if handling is None:
+        return ""
+    return handling.summary(entry, backend_ladder, artifact_error)
 
 
 # Top-level builder
@@ -597,12 +674,8 @@ def build_kernel_optimization_summary(
             rejected_ids=rejected_ids,
             kernel_id=kid,
         )
-        if category == CATEGORY_INTEGRATED:
-            counts["integrated"] += 1
-        elif category == CATEGORY_KEEP_PENDING:
-            counts["keep_pending"] += 1
-        elif category == CATEGORY_ATTEMPTED_REJECTED:
-            counts["rejected"] += 1
+        counts[_category_count_key(category)] += 1
+        if category == CATEGORY_ATTEMPTED_REJECTED:
             rej_reason = str(attempt.get("rejected_reason") or "").strip()
             bucket = rej_reason if rej_reason in KNOWN_REJECTION_REASONS else None
             if bucket is None:
@@ -615,8 +688,6 @@ def build_kernel_optimization_summary(
                 else:
                     bucket = "other"
             rejection_breakdown[bucket] = rejection_breakdown.get(bucket, 0) + 1
-        else:
-            counts["in_flight"] += 1
         by_kernel.append(
             _render_attempted_row(
                 top_entry,
@@ -640,14 +711,7 @@ def build_kernel_optimization_summary(
             rejected_ids=rejected_ids,
             kernel_id=kid,
         )
-        if category == CATEGORY_INTEGRATED:
-            counts["integrated"] += 1
-        elif category == CATEGORY_KEEP_PENDING:
-            counts["keep_pending"] += 1
-        elif category == CATEGORY_ATTEMPTED_REJECTED:
-            counts["rejected"] += 1
-        else:
-            counts["in_flight"] += 1
+        counts[_category_count_key(category)] += 1
         by_kernel.append(
             _render_attempted_row(
                 {"kernel_id": kid},
@@ -948,7 +1012,7 @@ def _build_top_takeaways(
     if ladder_all >= 1:
         out.append(
             f"Dominant failure mode: kernel-agent backend ladder "
-            f"(geak/claude/codex) failed completely for {ladder_all} "
+            f"(geak/forge) failed completely for {ladder_all} "
             "kernel(s) — no backend produced a usable patch. Inspect "
             "kernel-agent toolchain (build env, backend availability)."
         )
@@ -1011,18 +1075,17 @@ def _find_highest_impact_missed(
 def _to_float(v: Any) -> float | None:
     """Coerce a value to a 4-decimal float, or ``None`` on failure.
 
+    Wraps :func:`hyperloom.common.coerce.to_float` (rejects bool/None/dirty
+    input) and rounds the result to 4 decimals for the forensic report.
+
     Args:
         v: Arbitrary value to convert.
 
     Returns:
         The rounded float, or ``None`` if it cannot be parsed.
     """
-    if v is None:
-        return None
-    try:
-        return round(float(v), 4)
-    except (TypeError, ValueError):
-        return None
+    parsed = to_float(v)
+    return round(parsed, 4) if parsed is not None else None
 
 
 __all__ = [

@@ -31,7 +31,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.payload_aliases import read_extra_server_args
+from hyperloom.common.io import safe_mtime
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
@@ -530,21 +530,6 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
     ]
 
 
-def _safe_mtime(p: Path) -> float:
-    """Return st_mtime, or 0 on stat() failure (e.g. NFS stale handle).
-
-    Args:
-        p (Path): Path to stat.
-
-    Returns:
-        float: The modification time, or ``0.0`` if ``stat()`` fails.
-    """
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
 def _default_profile_config() -> Path:
     """Resolve default profile YAML from $FRAMEWORK (atom / vllm / sglang;
     unknown falls back to ``profile_sglang.yaml``).
@@ -784,7 +769,7 @@ class ProfileExecutor(BaselineExecutor):
         base_args = _sanitize_profile_server_args(
             str(params.get("base_extra_args") or "").strip(),
         )
-        caller_args = _sanitize_profile_server_args(read_extra_server_args(params))
+        caller_args = _sanitize_profile_server_args(str(params.get("extra_server_args") or ""))
         from ._grid_runner import merge_server_args
 
         merged_args = merge_server_args(base_args, caller_args)
@@ -960,7 +945,7 @@ class ProfileExecutor(BaselineExecutor):
             trace_dir = Path(round_trace_root)
             if trace_dir.is_dir():
                 all_files = sorted(trace_dir.glob("*.trace.json.gz"))
-                trace_files = [p for p in all_files if _safe_mtime(p) >= task_started_unix]
+                trace_files = [p for p in all_files if safe_mtime(p) >= task_started_unix]
                 result["trace_dir"] = str(trace_dir)
                 result["trace_files"] = [str(p) for p in trace_files]
                 if trace_files:

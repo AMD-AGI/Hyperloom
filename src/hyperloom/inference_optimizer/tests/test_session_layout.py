@@ -28,7 +28,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.inference_optimizer.session.session_paths import (
     agent_prompt_snapshot,
-    kernel_workspace,
     manifest_path,
     patches_dir,
     runs_dir,
@@ -208,9 +207,6 @@ def test_find_latest_per_session_dir_ignores_non_ts_dirs(
 def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
     """N17: runtime/ lives under workspace_root, not the per-session subdir."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
-    assert paths.runtime_dir(sd) == tmp_path / "runtime"
-    # Also true when caller passes the historical no-arg form (back-compat)
     assert paths.runtime_dir() == tmp_path / "runtime"
 
 
@@ -401,8 +397,7 @@ def test_runs_dir_rejects_unknown_action(tmp_path):
         runs_dir(tmp_path, "this_is_not_an_action", "x")
 
 
-def test_kernel_workspace_and_patches(tmp_path):
-    assert kernel_workspace(tmp_path, "k001") == tmp_path / "kernel-agent-workspace" / "k001"
+def test_patches_path(tmp_path):
     assert patches_dir(tmp_path, "k001") == tmp_path / "patches" / "k001"
 
 

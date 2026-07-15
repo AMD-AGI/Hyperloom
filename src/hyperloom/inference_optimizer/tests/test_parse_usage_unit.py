@@ -9,14 +9,14 @@ import json
 from hyperloom.orchestrator.trace import parse_usage as pu
 
 
-# ---- _coerce_optional_int ----
+# ---- coerce_optional_int ----
 
 
 def test_coerce_optional_int():
-    assert pu._coerce_optional_int(None) is None
-    assert pu._coerce_optional_int("5") == 5
-    assert pu._coerce_optional_int(7) == 7
-    assert pu._coerce_optional_int("x") is None
+    assert pu.coerce_optional_int(None) is None
+    assert pu.coerce_optional_int("5") == 5
+    assert pu.coerce_optional_int(7) == 7
+    assert pu.coerce_optional_int("x") is None
 
 
 # ---- normalize_usage ----
@@ -240,29 +240,6 @@ def test_parse_claude_response_no_text(tmp_path):
     log = tmp_path / "p.log"
     log.write_text('{"type": "system"}\n', encoding="utf-8")
     assert pu.parse_claude_stream_json_response(log) is None
-
-
-# ---- parse_oob_json_usage ----
-
-
-def test_parse_oob_empty():
-    assert pu.parse_oob_json_usage("") is None
-    assert pu.parse_oob_json_usage("   ") is None
-
-
-def test_parse_oob_whole_doc():
-    out = pu.parse_oob_json_usage(json.dumps({"usage": {"input_tokens": 3}}))
-    assert out["input_tokens"] == 3
-
-
-def test_parse_oob_jsonl_fallback():
-    stdout = "log noise\n" + json.dumps({"result": {"usage": {"output_tokens": 8}}})
-    out = pu.parse_oob_json_usage(stdout)
-    assert out["output_tokens"] == 8
-
-
-def test_parse_oob_nothing():
-    assert pu.parse_oob_json_usage("no json here") is None
 
 
 # ---- parse_geak_usage ----

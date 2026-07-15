@@ -28,11 +28,6 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
     REVIEW_VERDICTS,
 )
-from hyperloom.orchestrator.prompts.critic_prompt_builder import (
-    build_critic_prompt,
-)
-
-
 # 1. intent_parser — envelope schema accepts verdict OR verdict_map
 def _envelope(**payload: Any) -> dict[str, Any]:
     return {
@@ -481,33 +476,6 @@ async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
     assert "advice=" not in line
 
 
-# 4. Critic prompt — OUTPUT PROTOCOL documents the single-verdict shape
-def _critic_prompt_text() -> str:
-    from hyperloom.orchestrator.actions.registry import ActionRegistry
-
-    registry = ActionRegistry()
-    registry.load()
-    return build_critic_prompt(
-        action_registry=registry,
-        enabled_actions=("baseline", "explore", "report"),
-        framework="sglang",
-        kernel_enabled=False,
-        max_minutes=60,
-    )
-
-
-def test_critic_prompt_documents_single_verdict_shape():
-    text = _critic_prompt_text()
-    assert "single-proposal" in text.lower()
-    assert "verdict:" in text.lower() or "'verdict'" in text.lower()
-
-
-def test_critic_prompt_does_not_advertise_per_variant_verdict_map():
-    """Explore grids bench directly, so the Critic no longer emits a per-variant ``verdict_map``."""
-    text = _critic_prompt_text()
-    assert "verdict_map" not in text
-
-
 # 5. _materialize_approved_proposal — filter semantics (unit)
 @pytest.mark.asyncio
 async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
@@ -736,126 +704,6 @@ def test_specialist_prompt_renders_default_top_12_target():
     assert "AT MOST **12** entries" in text
     assert "top-12" in text
     assert "AT MOST **5** entries" not in text
-
-
-# critic prompt builder (formerly test_critic_prompt_builder.py)
-class TestCriticPromptBuilder:
-    """Tests for :mod:`critic_prompt_builder`."""
-
-    @pytest.fixture
-    def registry(self):
-        from hyperloom.orchestrator.actions.registry import ActionRegistry
-
-        return ActionRegistry().load()
-
-    @staticmethod
-    def _rules_path():
-        from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
-
-        return asset_system_prompts_dir() / "critic.md"
-
-    def test_section_headers_present(self, registry):
-        from hyperloom.orchestrator.prompts.critic_prompt_builder import (
-            build_critic_prompt,
-        )
-        from hyperloom.orchestrator.prompts.prompt_builder import (
-            default_enabled_actions,
-        )
-
-        text = build_critic_prompt(
-            action_registry=registry,
-            enabled_actions=default_enabled_actions(no_kernel=False),
-            framework="sglang",
-            kernel_enabled=True,
-            max_minutes=120,
-            rules_fragment_path=self._rules_path(),
-        )
-        for header in (
-            "## 1. MISSION",
-            "## 2. RUN CONTEXT",
-            "## 3. KNOWN ACTIONS",
-            "## 4. DEFAULT VERDICT",
-            "## 5. PHASE REVIEW CONTRACT (v0.8 §3.3)",
-            "## 5b. KERNEL_AGENT-OWNED CARVE-OUT",
-            "## 6. RULES",
-            "## 7. OUTPUT PROTOCOL",
-        ):
-            assert header in text, f"missing {header}"
-
-    def test_deterministic(self, registry):
-        from hyperloom.orchestrator.prompts.critic_prompt_builder import (
-            build_critic_prompt,
-        )
-        from hyperloom.orchestrator.prompts.prompt_builder import (
-            default_enabled_actions,
-        )
-
-        kwargs = dict(
-            action_registry=registry,
-            enabled_actions=default_enabled_actions(no_kernel=False),
-            framework="vllm",
-            kernel_enabled=True,
-            max_minutes=60,
-            rules_fragment_path=self._rules_path(),
-        )
-        assert build_critic_prompt(**kwargs) == build_critic_prompt(**kwargs)
-
-    def test_full_prompt_contains_all_registered_actions(self, registry):
-        """Regression guard: every action in _meta must appear in the known-actions section."""
-        from hyperloom.orchestrator.prompts.critic_prompt_builder import (
-            build_critic_prompt,
-        )
-
-        text = build_critic_prompt(
-            action_registry=registry,
-            enabled_actions=registry.names(),
-            framework="sglang",
-            kernel_enabled=True,
-            max_minutes=60,
-            rules_fragment_path=self._rules_path(),
-        )
-        for name in registry.names():
-            assert f"**{name}**" in text, f"action {name!r} missing from KNOWN ACTIONS"
-
-    def test_validate_stack_in_both_modes(self, registry):
-        from hyperloom.orchestrator.prompts.critic_prompt_builder import (
-            build_critic_prompt,
-        )
-        from hyperloom.orchestrator.prompts.prompt_builder import (
-            default_enabled_actions,
-        )
-
-        for no_kernel in (False, True):
-            enabled = default_enabled_actions(no_kernel=no_kernel)
-            text = build_critic_prompt(
-                action_registry=registry,
-                enabled_actions=enabled,
-                framework="sglang",
-                kernel_enabled=not no_kernel,
-                max_minutes=60,
-                rules_fragment_path=self._rules_path(),
-            )
-            assert "validate_stack" in text, f"validate_stack missing (no_kernel={no_kernel})"
-
-    def test_no_kernel_mode_drops_kernel_owned(self, registry):
-        from hyperloom.orchestrator.prompts.critic_prompt_builder import (
-            build_critic_prompt,
-        )
-        from hyperloom.orchestrator.prompts.prompt_builder import (
-            default_enabled_actions,
-        )
-
-        text = build_critic_prompt(
-            action_registry=registry,
-            enabled_actions=default_enabled_actions(no_kernel=True),
-            framework="sglang",
-            kernel_enabled=False,
-            max_minutes=60,
-            rules_fragment_path=self._rules_path(),
-        )
-        assert "## 5. KERNEL_AGENT-OWNED CARVE-OUT" not in text
-        for name in ("kernel_opt", "integrate", "deep_kernel_analysis"):
-            assert f"**{name}**" not in text, f"{name} should not appear in no-kernel catalogue"
 
 
 # critic_robustness breakdown renderer (formerly test_critic_robustness_renderer_units.py)

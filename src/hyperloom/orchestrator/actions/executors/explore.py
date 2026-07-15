@@ -473,23 +473,6 @@ def _default_grid_for_framework(
     return []
 
 
-def _gain_pct(tput: float | None, base_tput: float) -> float | None:
-    """Compute the percentage throughput gain over a baseline.
-
-    Thin alias for :func:`gain_math.gain_pct` (the canonical None-on-non-positive
-    contract), kept as a module-private name so existing call sites are unchanged.
-
-    Args:
-        tput (float | None): The variant's throughput.
-        base_tput (float): The baseline throughput to compare against.
-
-    Returns:
-        float | None: The gain as a percentage, or ``None`` when either
-        input is non-positive or ``tput`` is not numeric.
-    """
-    return gain_pct(tput, base_tput)
-
-
 # Auto-derived per-variant hard timeout: rather than a universal constant
 # (the legacy 2400s smoke floor times out slow workloads like Qwen3-32B TP=1
 # ~70 min baselines), derive the cap from the Coordinator-injected measured
@@ -1333,7 +1316,7 @@ class ExploreExecutor:
                     # already clear keep_threshold (and the accuracy gate) earn
                     # a warm stack-rebench round. With warm-decision active this
                     # measurement is already warm (the cold warmup was discarded).
-                    gain = _gain_pct(r.output_throughput, running_base_tput)
+                    gain = gain_pct(r.output_throughput, running_base_tput)
                     outcome = "FAILED"
                     reason: str = ""
                     if r.status != "succeeded" or gain is None:

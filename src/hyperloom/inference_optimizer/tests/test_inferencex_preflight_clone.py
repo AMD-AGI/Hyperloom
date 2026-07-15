@@ -19,7 +19,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 
 
@@ -42,8 +41,8 @@ def test_clone_inferencex_sha_ref_uses_shallow_fetch(tmp_path, monkeypatch):
             (dest / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
         return subprocess.CompletedProcess(cmd, 0)
 
-    with patch("hyperloom.inference_optimizer.cli.subprocess.run", side_effect=fake_run):
-        out = cli._clone_inferencex(dest)
+    with patch("hyperloom.inference_optimizer.cli.preflight.subprocess.run", side_effect=fake_run):
+        out = cli_preflight._clone_inferencex(dest)
 
     assert out == str(dest)
     # init + fetch + checkout (not a --branch clone)
@@ -65,8 +64,8 @@ def test_clone_inferencex_branch_ref_uses_clone(tmp_path, monkeypatch):
             (dest / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
         return subprocess.CompletedProcess(cmd, 0)
 
-    with patch("hyperloom.inference_optimizer.cli.subprocess.run", side_effect=fake_run):
-        out = cli._clone_inferencex(dest)
+    with patch("hyperloom.inference_optimizer.cli.preflight.subprocess.run", side_effect=fake_run):
+        out = cli_preflight._clone_inferencex(dest)
 
     assert out == str(dest)
     assert any("clone" in c and "--branch" in c for c in calls)
@@ -80,8 +79,8 @@ def test_clone_inferencex_failure_returns_none(tmp_path, monkeypatch):
     def boom(cmd, *a, **kw):
         raise subprocess.CalledProcessError(128, cmd)
 
-    with patch("hyperloom.inference_optimizer.cli.subprocess.run", side_effect=boom):
-        out = cli._clone_inferencex(dest)
+    with patch("hyperloom.inference_optimizer.cli.preflight.subprocess.run", side_effect=boom):
+        out = cli_preflight._clone_inferencex(dest)
 
     assert out is None
 
@@ -100,8 +99,8 @@ def test_clone_inferencex_removes_partial_dir_on_failure(tmp_path, monkeypatch):
             return subprocess.CompletedProcess(cmd, 0)
         raise subprocess.CalledProcessError(128, cmd)  # fetch fails
 
-    with patch("hyperloom.inference_optimizer.cli.subprocess.run", side_effect=init_then_fail):
-        out = cli._clone_inferencex(dest)
+    with patch("hyperloom.inference_optimizer.cli.preflight.subprocess.run", side_effect=init_then_fail):
+        out = cli_preflight._clone_inferencex(dest)
 
     assert out is None
     assert not dest.exists()
@@ -117,8 +116,8 @@ def test_clone_inferencex_rejects_checkout_without_marker(tmp_path, monkeypatch)
         dest.mkdir(parents=True, exist_ok=True)  # empty, no marker
         return subprocess.CompletedProcess(cmd, 0)
 
-    with patch("hyperloom.inference_optimizer.cli.subprocess.run", side_effect=fake_run):
-        out = cli._clone_inferencex(dest)
+    with patch("hyperloom.inference_optimizer.cli.preflight.subprocess.run", side_effect=fake_run):
+        out = cli_preflight._clone_inferencex(dest)
 
     assert out is None
     assert not dest.exists()
@@ -128,12 +127,12 @@ def test_inferencex_checkout_ok_requires_benchmark_lib(tmp_path):
     """The validity check rejects a bare dir and accepts a real checkout."""
     stub = tmp_path / "stub"
     stub.mkdir()
-    assert cli._inferencex_checkout_ok(stub) is False
+    assert cli_preflight._inferencex_checkout_ok(stub) is False
 
     good = tmp_path / "good"
     (good / "benchmarks").mkdir(parents=True)
     (good / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
-    assert cli._inferencex_checkout_ok(good) is True
+    assert cli_preflight._inferencex_checkout_ok(good) is True
 
 
 def test_preflight_detects_checkout_via_validity_not_isdir():

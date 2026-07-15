@@ -15,7 +15,7 @@ Mapping (trace -> phase span -> agent span -> generation)::
     Trace                 = one session
       phase span          = PRELUDE / EXPLORE / KERNEL_AGENT / SWEEP / ...
         agent span        = component (orchestration / kernel / specialist /
-                            critic / geak / oob / proposal_scorer / ...)
+                            critic / geak / forge / proposal_scorer / ...)
           Generation      = one LLM call (llm_calls.jsonl; prompt/response
                             paired from conversations.jsonl when available)
       Score               = one decision (decision_trace.jsonl), attached to
@@ -71,6 +71,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.jsonio import read_json, read_jsonl
 from hyperloom.orchestrator.trace import langfuse_mapping as lfmap
 from hyperloom.orchestrator.trace.langfuse_emitter import (
     _end_obs,
@@ -91,54 +92,6 @@ UNPHASED = lfmap.UNPHASED
 
 
 # ---------------------------------------------------------------------------
-# IO helpers
-# ---------------------------------------------------------------------------
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Load a JSONL file into a list of dict records.
-
-    Args:
-        path: Path to the ``.jsonl`` file.
-
-    Returns:
-        The dict records; a missing file yields ``[]`` and malformed lines are
-        skipped.
-    """
-    out: list[dict[str, Any]] = []
-    if not path.exists():
-        return out
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            out.append(obj)
-    return out
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    """Load a JSON object file.
-
-    Args:
-        path: Path to the JSON file.
-
-    Returns:
-        The parsed object, or ``{}`` when the file is missing, unreadable, or
-        not a JSON object.
-    """
-    if not path.exists():
-        return {}
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        return obj if isinstance(obj, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-# ---------------------------------------------------------------------------
 # Plan building (pure -- no SDK, dry-run friendly)
 # ---------------------------------------------------------------------------
 def build_plan(session_dir: Path) -> dict[str, Any]:
@@ -152,11 +105,11 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
         hierarchy.
     """
     tdir = session_dir / TRACE_SUBDIR
-    llm = _load_jsonl(tdir / LLM_CALLS)
-    conv = _load_jsonl(tdir / CONVERSATIONS)
-    decisions = _load_jsonl(tdir / DECISION_TRACE)
-    recipe_audit = _load_jsonl(recipe_snapshot_audit_jsonl(session_dir))
-    manifest = _load_json(session_dir / MANIFEST)
+    llm = read_jsonl(tdir / LLM_CALLS, require_dict=True, skip_malformed=True)
+    conv = read_jsonl(tdir / CONVERSATIONS, require_dict=True, skip_malformed=True)
+    decisions = read_jsonl(tdir / DECISION_TRACE, require_dict=True, skip_malformed=True)
+    recipe_audit = read_jsonl(recipe_snapshot_audit_jsonl(session_dir), require_dict=True, skip_malformed=True)
+    manifest = read_json(session_dir / MANIFEST, default={}, require_dict=True)
 
     conv_by_key: dict[tuple, dict[str, Any]] = {}
     for c in conv:

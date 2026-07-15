@@ -1,12 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""LLM gateway environment resolution shared by OpenAI-compatible callers."""
+"""LLM gateway environment resolution shared by LLM SDK callers."""
 
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass
+from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -30,6 +31,24 @@ class OpenAIClientConfig:
         if self.default_headers:
             kwargs["default_headers"] = dict(self.default_headers)
         return kwargs
+
+
+CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_CUSTOM_HEADERS",
+    "SAFE_API_KEY",
+    "LLM_GATEWAY_KEY",
+)
+
+DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
 
 
 def parse_custom_headers(raw: str | None) -> dict[str, str]:
@@ -122,11 +141,10 @@ def resolve_openai_client_config(
     )
     base_url = base_url or None
 
-    headers = parse_custom_headers(source.get("OPENAI_CUSTOM_HEADERS")) or parse_custom_headers(
-        source.get("ANTHROPIC_CUSTOM_HEADERS")
-    )
-    if base_url and _should_add_amd_subscription_header(base_url, headers):
-        headers = {**headers, "Ocp-Apim-Subscription-Key": api_key}
+    # OpenAI/Codex side reads only OPENAI_CUSTOM_HEADERS. Gateway-specific
+    # headers (e.g. an AMD ``Ocp-Apim-Subscription-Key``) are operator-supplied
+    # via that env var — no host-specific auto-injection.
+    headers = parse_custom_headers(source.get("OPENAI_CUSTOM_HEADERS"))
     return OpenAIClientConfig(api_key=api_key, base_url=base_url, default_headers=headers)
 
 
@@ -140,17 +158,80 @@ def openai_client_kwargs(
     return resolve_openai_client_config(api_key_env=api_key_env, base_url_env=base_url_env, env=env).as_kwargs()
 
 
-def _should_add_amd_subscription_header(base_url: str, headers: dict[str, str]) -> bool:
-    if any(name.lower() == "ocp-apim-subscription-key" for name in headers):
-        return False
-    parts = urlsplit(base_url)
-    host = parts.hostname or ""
-    return host == "llm-api.amd.com" or parts.path.rstrip("/").endswith("/Unified/v1")
+def claude_sdk_env_options(
+    *,
+    model: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Return Claude SDK options that isolate a run from global Claude config.
+
+    Claude Code and ``claude_agent_sdk`` can read ``~/.claude/settings.json``.
+    Hyperloom runs, however, may intentionally point at a per-run provider or
+    gateway. When any LLM-provider signal is present in the current environment,
+    pass an explicit child environment and disable settings sources so global
+    developer-machine configuration cannot override the run contract.
+    """
+    source = dict(env if env is not None else os.environ)
+    if not any((source.get(key) or "").strip() for key in CLAUDE_GATEWAY_SIGNAL_KEYS):
+        return {}
+
+    if "ANTHROPIC_BASE_URL" not in source and source.get("DEEPSEEK_API_KEY"):
+        source["ANTHROPIC_BASE_URL"] = source.get("DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL
+
+    fallback_key = (
+        source.get("ANTHROPIC_AUTH_TOKEN")
+        or source.get("ANTHROPIC_API_KEY")
+        or source.get("DEEPSEEK_API_KEY")
+        or source.get("OPENAI_API_KEY")
+        or source.get("SAFE_API_KEY")
+        or source.get("LLM_GATEWAY_KEY")
+        or ""
+    )
+    if fallback_key:
+        source.setdefault("ANTHROPIC_API_KEY", fallback_key)
+        source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
+    # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS (already carried
+    # in ``source``); gateway-specific headers (e.g. an AMD subscription key)
+    # are operator-supplied via that env var — no host-specific auto-injection
+    # and no cross-copy from OPENAI_CUSTOM_HEADERS.
+    # Claude Code >= 2.1.x injects ``anthropic-beta: advisor-tool-*``, which
+    # strict gateways reject with HTTP 400 — stalling orchestration (is_error
+    # every tick, 0 intents). Disable it by default; an operator can re-enable
+    # by presetting CLAUDE_CODE_DISABLE_ADVISOR_TOOL in the environment.
+    source.setdefault("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
+    if model:
+        source.setdefault("ANTHROPIC_MODEL", model)
+        source.setdefault("ANTHROPIC_SMALL_FAST_MODEL", model)
+    return {"env": source, "setting_sources": []}
+
+
+def apply_reasoning_effort(
+    params: dict[str, object],
+    *,
+    env: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Inject ``reasoning_effort`` into chat.completions params, env-gated.
+
+    Sets ``params["reasoning_effort"]`` only when ``HYPERLOOM_REASONING_EFFORT``
+    (or ``OPENAI_REASONING_EFFORT``) is a recognized value. No-op otherwise, so
+    non-reasoning models and gateways that reject the field are unaffected.
+    Mutates and returns ``params``.
+    """
+    source = env if env is not None else os.environ
+    val = (source.get("HYPERLOOM_REASONING_EFFORT") or source.get("OPENAI_REASONING_EFFORT") or "").strip().lower()
+    if val in {"minimal", "low", "medium", "high"}:
+        params["reasoning_effort"] = val
+    return params
 
 
 __all__ = [
+    "CLAUDE_GATEWAY_SIGNAL_KEYS",
+    "DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL",
+    "DEFAULT_DEEPSEEK_MODEL",
     "LLMConfigError",
     "OpenAIClientConfig",
+    "apply_reasoning_effort",
+    "claude_sdk_env_options",
     "derive_openai_base_url",
     "openai_client_kwargs",
     "parse_custom_headers",

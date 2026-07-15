@@ -15,9 +15,9 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
-    _is_truthy,
 )
 
 
@@ -25,9 +25,6 @@ from hyperloom.orchestrator.actions.executors.baseline import (
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-    # Keep these executor tests single-round so the materialized config is the
-    # one Magpie sees (no warmup/measure split).
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_DOUBLE_RUN", "0")
 
 
 def _write_yaml(path: Path) -> None:
@@ -86,7 +83,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-# --- _is_truthy ------------------------------------------------------------
+# --- is_truthy (baseline's disable_run_eval param interpretation) ----------
 @pytest.mark.parametrize(
     "value,expected",
     [
@@ -104,7 +101,7 @@ def _run(coro):
     ],
 )
 def test_is_truthy(value, expected):
-    assert _is_truthy(value) is expected
+    assert is_truthy(value) is expected
 
 
 # --- _is_eval_rooted_failure ----------------------------------------------
@@ -231,8 +228,9 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
     ):
         result = _run(executor(ctx))
 
-    # First attempt eval=true (failed), fallback retried eval=false (succeeded).
-    assert [c["run_eval"] for c in calls] == ["true", "false"]
+    # Warmup first tries eval=true, falls back to eval=false, then the hot
+    # measured baseline reuses the eval-disabled materialized config.
+    assert [c["run_eval"] for c in calls] == ["true", "false", "false"]
     assert result["status"] == "succeeded"
     assert result.get("accuracy_source") == "eval_unavailable"
     assert "eval_failed_fallback_no_accuracy" in result.get("nonfatal_warnings", [])

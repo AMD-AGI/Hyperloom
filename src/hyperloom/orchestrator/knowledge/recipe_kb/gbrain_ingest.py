@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Bulk-ingest local recipe snapshots into gbrain (the read-side cache).
+"""Mirror local recipe snapshots into gbrain (the read-side cache).
 
 main's ``recipe_kb`` writes recipes LOCAL-only; the gbrain read remote
 (:class:`recipe_kb.gbrain_remote_client.GbrainRemoteRecipeClient`) serves
@@ -26,19 +26,12 @@ best_config_args / best_config_envs / best_throughput).
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import os
 import re
-import sys
 from typing import Any, Mapping
 
-from hyperloom.common.payload_aliases import (
-    CANONICAL_KEY,
-    LEGACY_KEY,
-    read_extra_server_args,
-)
 from .gbrain_remote_client import _GbrainMcp
 
 log = logging.getLogger(__name__)
@@ -67,6 +60,7 @@ _YAML_KEYWORDS = frozenset(
 _TAG_CLEAN = str.maketrans({" ": "-", "\t": "-", "/": "-"})
 _DEFAULT_RECIPE_SLUG_PREFIX = "hyperloom-recipe-kb"
 _RECIPE_SLUG_PREFIX_ENV = "GBRAIN_RECIPE_SLUG_PREFIX"
+_EXTRA_SERVER_ARGS_KEY = "extra_server_args"
 
 
 def _tag_value(value: Any) -> str:
@@ -153,13 +147,12 @@ def _emit_yaml(obj: Mapping[str, Any], indent: int = 0) -> str:
     return "\n".join(lines)
 
 
-# best_config keys that are NOT environment variables (launch args under
-# the canonical/legacy name + the nested env containers + current_best
-# passthrough metadata copied by ``coordinator._build_recipe_payload``).
+# best_config keys that are NOT environment variables (launch args under the
+# canonical name + the nested env containers + current_best passthrough metadata
+# copied by ``coordinator._build_recipe_payload``).
 _NON_ENV_BEST_CONFIG_KEYS = frozenset(
     {
-        CANONICAL_KEY,
-        LEGACY_KEY,
+        _EXTRA_SERVER_ARGS_KEY,
         "extra_envs",
         "envs",
         "args",
@@ -170,6 +163,17 @@ _NON_ENV_BEST_CONFIG_KEYS = frozenset(
 )
 
 
+def _coerce_server_args(value: Any) -> str:
+    """Return canonical ``extra_server_args`` as a launch-arg string."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value)
+
+
 def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
     """Split a ``best_config`` dict into (launch_args, envs).
 
@@ -178,17 +182,16 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
 
     * NESTED (authoritative local shape from
       ``coordinator._build_recipe_payload``): launch args under the
-      canonical (or read-only legacy-alias) key and the env map nested
-      under ``extra_envs`` / ``envs``. The nested dict MUST be unwrapped —
+      canonical key and the env map nested under ``extra_envs`` / ``envs``.
+      The nested dict MUST be unwrapped —
       treating ``extra_envs`` as a scalar env and ``str()``-ing it would
       serialize a Python ``dict`` repr into a single bogus env value and
       drop the real envs.
-    * FLAT (legacy / direct-dict shape): launch args under the
-      canonical/legacy key and each env as a sibling scalar key.
+    * FLAT (direct-dict shape): launch args under the canonical key and each
+      env as a sibling scalar key.
 
-    Reads the args via the compat helper (canonical with read-only legacy
-    fallback). For envs, a nested map wins; otherwise the remaining scalar
-    sibling keys (minus non-env metadata) are taken as flat envs.
+    For envs, a nested map wins; otherwise the remaining scalar sibling keys
+    (minus non-env metadata) are taken as flat envs.
 
     Args:
         best_config: The champion config dict in either nested or flat shape.
@@ -196,7 +199,7 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
     Returns:
         A tuple of the launch-args string and the env-var dict.
     """
-    args = read_extra_server_args(dict(best_config)).strip()
+    args = _coerce_server_args(best_config.get(_EXTRA_SERVER_ARGS_KEY)).strip()
     nested = best_config.get("extra_envs")
     if not isinstance(nested, Mapping):
         nested = best_config.get("envs")
@@ -263,9 +266,8 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     args, envs = _best_config_split(best_config)
     model = str(recipe.get("model") or "")
     hardware = str(recipe.get("hardware") or "")
-    # Back-compat: the batch ingest reads raw on-disk recipe.json via
-    # ``list_all_live_recipes`` (no Recipe.from_dict normalization), so rows
-    # persisted before the framework_name rename still carry the legacy key.
+    # Back-compat: mirroring reads the raw recipe payload, so rows persisted
+    # before the framework_name rename still carry the legacy key.
     framework_name = str(recipe.get("framework_name") or recipe.get("framework") or "")
     attrs: dict[str, Any] = {
         "model": model,
@@ -338,52 +340,6 @@ def recipe_to_page(recipe: Mapping[str, Any]) -> tuple[str, str] | None:
     ]
     content = "---\n" + _emit_yaml(frontmatter) + "\n---\n\n" + "\n".join(body_lines) + "\n"
     return slug, content
-
-
-def ingest_local_to_gbrain(
-    *,
-    recipes: list[dict[str, Any]],
-    mcp: _GbrainMcp | None,
-    dry_run: bool,
-) -> dict[str, int]:
-    """Ingest a list of v2 recipe dicts into gbrain. Returns counters.
-
-    Args:
-        recipes: The v2 recipe dicts to ingest.
-        mcp: The gbrain MCP client, or ``None`` to skip the actual writes.
-        dry_run: When ``True``, count rows as ingested without writing.
-
-    Returns:
-        A counters dict with ``total`` / ``ingested`` / ``skipped_*`` /
-        ``errors`` tallies.
-    """
-    stats = {
-        "total": len(recipes),
-        "ingested": 0,
-        # Accurate name for newly skipped rows (currently: missing canonical_id,
-        # or strict-gate seed-only skeletons). Keep the legacy key below as an
-        # alias for callers that still read it.
-        "skipped_unmirrorable": 0,
-        "skipped_no_config": 0,
-        "errors": 0,
-    }
-    for recipe in recipes:
-        page = recipe_to_page(recipe)
-        if page is None:
-            stats["skipped_unmirrorable"] += 1
-            stats["skipped_no_config"] += 1
-            continue
-        slug, content = page
-        if dry_run or mcp is None:
-            stats["ingested"] += 1
-            continue
-        try:
-            mcp.call("put_page", {"slug": slug, "content": content})
-            stats["ingested"] += 1
-        except Exception as exc:  # noqa: BLE001 - count, keep going
-            stats["errors"] += 1
-            log.warning("gbrain ingest put_page failed for %s: %r", slug, exc)
-    return stats
 
 
 def mirror_recipe(recipe: Mapping[str, Any], mcp: _GbrainMcp | None) -> bool:
@@ -487,63 +443,9 @@ class GbrainMirroringRecipeKB:
         return getattr(self._inner, name)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point to bulk-ingest local recipes into gbrain.
-
-    Args:
-        argv: Optional argument vector; defaults to ``sys.argv`` when
-            ``None``.
-
-    Returns:
-        Process exit code (``0`` on success, non-zero on usage errors).
-    """
-    ap = argparse.ArgumentParser(description="Bulk-ingest local recipe snapshots into gbrain.")
-    ap.add_argument(
-        "--local-kb-root",
-        default=os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", ""),
-        help="LocalRecipeStore root (default: $HYPERLOOM_LOCAL_KB_ROOT)",
-    )
-    ap.add_argument("--gbrain-url", default=os.environ.get("GBRAIN_BASE_URL", ""))
-    ap.add_argument("--token", default=os.environ.get("GBRAIN_TOKEN", ""))
-    ap.add_argument("--limit", type=int, default=0, help="max recipes to scan (0=all)")
-    ap.add_argument("--write", action="store_true", help="actually put pages (default dry-run)")
-    args = ap.parse_args(argv)
-
-    if not args.local_kb_root:
-        print("requires --local-kb-root (or $HYPERLOOM_LOCAL_KB_ROOT)")
-        return 2
-    from pathlib import Path
-
-    from .local_store import LocalRecipeStore
-
-    store = LocalRecipeStore(root=Path(args.local_kb_root))
-    recipes = store.list_all_live_recipes()
-    dry = not args.write
-    mcp = None
-    if not dry:
-        if not args.gbrain_url or not args.token:
-            print("--write requires GBRAIN_BASE_URL + GBRAIN_TOKEN")
-            return 2
-        from hyperloom.inference_optimizer import recipe_snapshot_constants as C
-
-        mcp = _GbrainMcp(args.gbrain_url, args.token, C.DEFAULT_HTTP_TIMEOUT_SEC)
-
-    stats = ingest_local_to_gbrain(recipes=recipes, mcp=mcp, dry_run=dry)
-    print(f"=== gbrain recipe ingest ({'DRY-RUN' if dry else 'WRITE'}) ===")
-    for key, val in stats.items():
-        print(f"  {key:18}: {val}")
-    return 0 if stats["errors"] == 0 else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-
-
 __all__ = [
     "recipe_to_page",
-    "ingest_local_to_gbrain",
     "mirror_recipe",
     "build_mirror_mcp_from_env",
     "GbrainMirroringRecipeKB",
-    "main",
 ]

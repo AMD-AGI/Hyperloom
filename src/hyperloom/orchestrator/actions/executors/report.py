@@ -31,21 +31,6 @@ from hyperloom.inference_optimizer.session.paths import db_path_for
 log = logging.getLogger(__name__)
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically (tempfile in the same dir + os.replace).
-
-    Guarantees a reader never observes a half-written file: either the old
-    contents or the complete new contents, never a truncated/partial one.
-
-    Delegates to :func:`hyperloom.common.io.atomic_write_text`.
-
-    Args:
-        path: Destination file path.
-        text: Full file contents to write.
-    """
-    _common_io.atomic_write_text(path, text)
-
-
 def _safe_call(state: Any, method: str, default: Any) -> Any:
     """Call a zero-arg SharedState helper, returning ``default`` when absent
     or raising.
@@ -377,6 +362,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
     "sweep_done": "SWEEP finished the configured concurrency / shape grid.",
     "conc_sweep_done": "Post-sweep concurrency sweep finished.",
+    "conc_sweep_failed": "Post-sweep concurrency sweep reached a failed terminal result.",
     "explore_force_exit_low_budget": "EXPLORE force-exited: the remaining wall-clock budget was too low to start new work.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
@@ -1227,7 +1213,7 @@ class ReportExecutor:
         # Atomic write: a kill mid-flush must never leave a non-empty but
         # invalid final.json on disk (issue #464 — downstream keys off it, and
         # the crash-safe fallback would otherwise see garbled JSON).
-        _atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
+        _common_io.atomic_write_text(json_path, json.dumps(summary, indent=2, sort_keys=True))
         md_path.write_text(_format_md(summary), encoding="utf-8")
 
         log.info(

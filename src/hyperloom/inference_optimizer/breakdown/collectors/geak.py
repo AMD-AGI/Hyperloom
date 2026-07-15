@@ -10,11 +10,11 @@ recorded in ``warnings`` and the section returns a best-effort partial.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.jsonio import read_json
 
 from ._common import (
     _rel,
@@ -54,13 +54,13 @@ def _geak_accepted_kernels_from_journey(
             kj_path = str(Path(eval_dir) / "kernel_journey.json")
     if not kj_path:
         return []
-    try:
-        if not Path(kj_path).is_file():
-            return []
-        journey = json.loads(Path(kj_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        warnings.append(f"geak: kernel_journey read failed for backfill: {exc}")
+    if not Path(kj_path).is_file():
         return []
+    journey = read_json(
+        Path(kj_path),
+        default=None,
+        on_error=lambda exc: warnings.append(f"geak: kernel_journey read failed for backfill: {exc}"),
+    )
     if not isinstance(journey, dict):
         return []
 
@@ -89,7 +89,7 @@ def _geak_accepted_kernels_from_journey(
         # The e2e optimizer's own kernel backend is the canonical ``geak`` (this
         # whole-pipeline optimizer, formerly labelled ``geak_v4`` / perfskills).
         # kernel_journey.json already labels it ``geak``, so it is kept verbatim;
-        # the legacy per-kernel backend is now the distinct ``geak_v3`` token.
+        # kernel_journey.json already labels it ``geak``, so it is kept verbatim.
         accepted.append(
             {
                 "kernel_id": kid,
@@ -145,15 +145,16 @@ def _geak_reconstruct_from_disk(
         return None
 
     def _load_json(p: Path) -> dict[str, Any]:
-        try:
-            if p.is_file():
-                obj = json.loads(p.read_text(encoding="utf-8"))
-                return obj if isinstance(obj, dict) else {}
-        except (OSError, ValueError) as exc:
-            warnings.append(
+        if not p.is_file():
+            return {}
+        obj = read_json(
+            p,
+            default={},
+            on_error=lambda exc: warnings.append(
                 f"geak: reconstruct read failed for {p.name}: {exc}"
-            )
-        return {}
+            ),
+        )
+        return obj if isinstance(obj, dict) else {}
 
     stages: list[str] = []
     recon: dict[str, Any] = {}
