@@ -152,10 +152,13 @@ clone_or_update() {
     return 0
   fi
   mkdir -p "$(dirname "$dest")"
-  run git clone "$repo" "$dest"
+  if ! run git clone "$repo" "$dest"; then
+    return 1
+  fi
   if [ -n "$ref" ]; then
     run git -C "$dest" checkout "$ref"
   fi
+  return 0
 }
 
 resolve_forge() {
@@ -167,12 +170,21 @@ resolve_forge() {
     return 0
   fi
 
+  # KernelForge is a separate repo cloned only for the opt-in forge kernel
+  # backend. Treat the clone as best-effort: when it is unavailable (no access
+  # or not yet public), warn and continue so the rest of local setup still
+  # succeeds. The default backend order is geak, which does not require
+  # KernelForge; forge is opt-in via KERNEL_OPT_BACKEND_ORDER=forge.
   local root="${_open_source_root}/KernelForge"
-  clone_or_update "KernelForge" "$KERNEL_FORGE_REPO" "$root" ""
-  FORGE_PATH="${FORGE_PATH:-$root}"
-  KERNEL_FORGE_ROOT="${KERNEL_FORGE_ROOT:-$FORGE_PATH}"
-  export FORGE_PATH KERNEL_FORGE_ROOT
-  log "FORGE_PATH: ${FORGE_PATH}"
+  if clone_or_update "KernelForge" "$KERNEL_FORGE_REPO" "$root" ""; then
+    FORGE_PATH="${FORGE_PATH:-$root}"
+    KERNEL_FORGE_ROOT="${KERNEL_FORGE_ROOT:-$FORGE_PATH}"
+    export FORGE_PATH KERNEL_FORGE_ROOT
+    log "FORGE_PATH: ${FORGE_PATH}"
+  else
+    warn "KernelForge checkout unavailable (${KERNEL_FORGE_REPO}); skipping forge backend setup."
+    warn "The forge kernel backend (KERNEL_OPT_BACKEND_ORDER=forge) will be unavailable; the default 'geak' backend does not require KernelForge."
+  fi
 }
 
 write_local_env() {
