@@ -40,13 +40,13 @@ To choose an explicit local path:
 ```bash
 export HYPERLOOM_LOCAL_KB_ROOT=/path/to/hyperloom-kb
 # or pass:
-inference_optimizer optimize --local-kb-root /path/to/hyperloom-kb ...
+python3 -m hyperloom.inference_optimizer.cli optimize --local-kb-root /path/to/hyperloom-kb ...
 ```
 
 To force a run without KB hooks:
 
 ```bash
-inference_optimizer optimize --degraded-kb ...
+python3 -m hyperloom.inference_optimizer.cli optimize --degraded-kb ...
 ```
 
 ---
@@ -97,7 +97,7 @@ never for recipe reads or writes. It is enabled only when you explicitly pass a
 URL:
 
 ```bash
-inference_optimizer optimize --cortex-kb-url https://your-cortex-kb ...
+python3 -m hyperloom.inference_optimizer.cli optimize --cortex-kb-url https://your-cortex-kb ...
 ```
 
 or export:

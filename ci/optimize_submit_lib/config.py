@@ -162,7 +162,7 @@ def _multinode_prompt_suffix(nodes: int, rayjob_image: str) -> str:
         f"\n\nMulti-node run ({nodes} nodes): this model does NOT fit on a single "
         f"8-GPU sandbox node. You CANNOT benchmark it directly in the sandbox -- "
         f"launch it as a SaFE RayJob (Claw fan-out) and export NODES={nodes} "
-        f"before starting `inference_optimizer optimize` so the Coordinator sizes "
+        f"before starting `python -m hyperloom.inference_optimizer.cli optimize` so the Coordinator sizes "
         f"the cluster for {nodes}x8 GPUs (TP spans all nodes).\n"
         f"Task submission ({nodes}-node):\n"
         f"RayJob image: {rayjob_image}\n"

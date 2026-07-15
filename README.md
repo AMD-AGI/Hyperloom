@@ -17,7 +17,7 @@ generates a report with all proposed changes and expected performance improvemen
 automation enables developers to achieve significant performance improvements while maintaining code
 quality and reducing the manual effort traditionally required for GPU optimization.
 
-<p align="center"><img width="600" alt="Hyperloom Architecture" src="docs/images/Hyperloom_architecture.png" /></p>
+<p align="center"><img width="600" alt="Hyperloom optimization loop" src="docs/images/optimization-loop.svg" /></p>
 
 Hyperloom combines:
 
@@ -33,8 +33,7 @@ Hyperloom combines:
 
 | Goal | Guide |
 |------|-------|
-| Run using a Docker container | [Docker quickstart](docs/install/local-mode.md) |
-| Run directly on a ROCm host | [Bare-metal quickstart](docs/install/setup.md) |
+| Set up Hyperloom and run a demo | [Quickstart](examples/README.md) |
 | Launch and monitor an optimization | [Run an optimization](docs/how-to/optimize.md) |
 | Understand the algorithm | [Optimization loop](docs/conceptual/optimization-loop.md) |
 
@@ -56,7 +55,7 @@ Hyperloom combines:
 
 - Runtime package: `src/hyperloom/`
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md)
-- CLI entry point: `inference_optimizer optimize`
+- CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
 - Documentation source: `docs/`
 

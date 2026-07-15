@@ -130,16 +130,16 @@ where = ["src"]
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
 # Demo run skills chained from /hyperloom-setup; installed under every agent's
-# discovery dir so /hyperloom-qwen3-8b-{3h,8h,24h} are visible after install.
+# discovery dir so the local demo skills are visible after install.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".cursor/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
-".agents/skills/hyperloom-qwen3-8b-8h" = ["examples/hyperloom-qwen3-8b-8h/SKILL.md"]
-".claude/skills/hyperloom-qwen3-8b-8h" = ["examples/hyperloom-qwen3-8b-8h/SKILL.md"]
-".cursor/skills/hyperloom-qwen3-8b-8h" = ["examples/hyperloom-qwen3-8b-8h/SKILL.md"]
-".agents/skills/hyperloom-qwen3-8b-24h" = ["examples/hyperloom-qwen3-8b-24h/SKILL.md"]
-".claude/skills/hyperloom-qwen3-8b-24h" = ["examples/hyperloom-qwen3-8b-24h/SKILL.md"]
-".cursor/skills/hyperloom-qwen3-8b-24h" = ["examples/hyperloom-qwen3-8b-24h/SKILL.md"]
+".agents/skills/hyperloom-qwen3-30b-a3b-8h" = ["examples/hyperloom-qwen3-30b-a3b-8h/SKILL.md"]
+".claude/skills/hyperloom-qwen3-30b-a3b-8h" = ["examples/hyperloom-qwen3-30b-a3b-8h/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-30b-a3b-8h" = ["examples/hyperloom-qwen3-30b-a3b-8h/SKILL.md"]
+".agents/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
+".claude/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
+".cursor/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
 
 [tool.setuptools.package-data]
 # tree-reform.MD P2.3: orchestrator/prompts/*.md moved with the

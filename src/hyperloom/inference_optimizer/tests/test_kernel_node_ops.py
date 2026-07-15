@@ -2,7 +2,7 @@
 
 """Unit tests for ``multi_node/scripts/kernel_node_ops.py``.
 
-The Ray-free, pod-side kernel ops runner for the Dynamo backend. Stdlib-only,
+The Ray-free, pod-side kernel ops runner for the Infera backend. Stdlib-only,
 imported via importlib. These guard the safety-critical behaviours: py_compile
 auto-revert on a bad patch, the bench staging path-traversal guard, and the
 status -> returncode contract the sandbox-side callers depend on.

@@ -21,12 +21,12 @@ Then choose one request style:
 
 ```bash
 # Free-text power-user path. Failure hard-stops the run with exit code 3.
-inference_optimizer optimize \
+python3 -m hyperloom.inference_optimizer.cli optimize \
   --model /models/source \
   --quantize "fp8 global scheme, fp8 kv_cache, exclude lm_head"
 
 # Structured path. `none` or omit means no quantization.
-inference_optimizer optimize \
+python3 -m hyperloom.inference_optimizer.cli optimize \
   --model /models/source \
   --quantize-scheme fp8
 ```
@@ -50,13 +50,13 @@ also published on PyPI (`pip install amd-quark`). The
 the `release/0.12` branch (and later), so clone that branch when you need the
 agent-driven prelude.
 
-When you run `inference_optimizer optimize`, the quantization prelude resolves
+When you run `python -m hyperloom.inference_optimizer.cli optimize`, the quantization prelude resolves
 the Quark root in this order:
 
 1. `QUARK_ROOT`
 2. The canonical default `/primus/hyperloom/Quark`
 
-`inference_optimizer optimize` has no `--quark-root` flag; that argument only
+`python -m hyperloom.inference_optimizer.cli optimize` has no `--quark-root` flag; that argument only
 exists on the standalone `quantization-agent` CLI. For the `optimize` path,
 set `QUARK_ROOT` explicitly wherever the canonical default is not mounted. The
 path must contain

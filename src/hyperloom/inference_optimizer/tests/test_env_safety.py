@@ -1,6 +1,14 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for multi-node SSH env key validation."""
+"""Unit tests for multi-node SSH env key validation.
+
+``env_safety`` is the last-mile gate on keys that already entered a forward
+dict: it blocks shell/loader injection vectors (``_DENY_KEYS``) and invalid
+key shapes. Credential exclusion (``*_API_KEY``, ``SAFE_API_KEY``, ``*_BASE_URL``)
+happens upstream in ``infera._collect_forward_env`` (prefix whitelist) and
+``create-infera`` (operator ``--extra-env`` only); those keys are never placed
+into the forward dict, so they are not SSH-forwarded to inference pods.
+"""
 
 from __future__ import annotations
 
@@ -21,10 +29,18 @@ def test_invalid_key_shape_rejected():
     assert not env_safety.is_forward_env_key_allowed("bad-key")
 
 
-def test_sensitive_and_deny_keys_rejected():
+def test_denylist_keys_rejected():
+    """Only exact _DENY_KEYS entries are blocked (loader/python/PATH/shell vectors)."""
     assert not env_safety.is_forward_env_key_allowed("LD_PRELOAD")
     assert not env_safety.is_forward_env_key_allowed("PYTHONPATH")
-    assert not env_safety.is_forward_env_key_allowed("OPENAI_API_KEY")
+    assert not env_safety.is_forward_env_key_allowed("PATH")
+    assert not env_safety.is_forward_env_key_allowed("IFS")
+
+
+def test_non_denylist_tuning_keys_pass_shape_gate():
+    """Keys outside _DENY_KEYS pass the low-level forward gate when present."""
+    assert env_safety.is_forward_env_key_allowed("NCCL_IB_HCA")
+    assert env_safety.is_forward_env_key_allowed("SGLANG_USE_AITER")
 
 
 def test_filter_forward_env_drops_bad_keys():

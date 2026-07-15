@@ -208,7 +208,7 @@ hard-allowlisted:
 
 | Use | Environment variable | Allowed values | Notes |
 |---|---|---|---|
-| Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | `claude-opus-4-7` (preferred) or `claude-opus-4-6` | Enforced by the optimizer's model gate; other names are rejected. |
+| Orchestration | `CLAUDE_MODEL` / `CURSOR_DEFAULT_MODEL` / `LLM_MODEL` | `claude-opus-4-8` (preferred), or `claude-opus-4-7` / `claude-opus-4-6` | Enforced by the optimizer's model gate; other names are rejected. |
 | Kernel agent (GEAKv4 Claude Code workflow) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-4-8` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different Claude Code model. |
 | Codex / external | `CODEX_MODEL` | for example `gpt-5.4` | Use a gpt/codex-family model. |
 
@@ -247,7 +247,7 @@ The following items address common Slurm job and cluster configuration problems.
 - `CERTIFICATE_VERIFY_FAILED: unable to get local issuer` (huggingface/github): the CA bundle has only the internal cert. Use a combined CA bundle.
 - `ModuleNotFoundError: No module named '...cli'`: the source snapshot is incomplete or an old layout. Stage a complete src-layout checkout (`src/hyperloom/...`).
 - `--gpu-type: invalid choice: 'MI355X'`: the CLI is case-sensitive. Use lowercase (for example `mi355x`; `submit-vultr.sh` already does).
-- `--claude-model=... is not allowed`: the orchestration model is not in the allowlist. Use `claude-opus-4-7` for orchestration.
+- `--claude-model=... is not allowed`: the orchestration model is not in the allowlist. Use `claude-opus-4-8` for orchestration.
 - `Invalid model name` / `401 missing subscription key`: the model name is not in the key catalog (often a suffixed variant). Use a name from `curl $OPENAI_BASE_URL/models`.
 - Server fails to start / OOM in shm: `/dev/shm` is too small. Raise `HL_SHM_SIZE` (default `64g`).
 - DNS failure / connection timeout to the gateway: the host alias was not applied. The docker path uses `--add-host`; confirm the node can reach the jump host on `:443`.
@@ -266,7 +266,7 @@ The following are known limitations of the Slurm integration.
 - The docker path exposes all node GPUs to the container, so TP=8 occupies a
   whole node. Running multiple jobs per node requires isolating devices with
   `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (the scripts do not do this).
-- The installer clones Magpie / InferenceX / GEAK / TraceLens from GitHub, so
+- The installer pip-installs Magpie and clones InferenceX / GEAK / TraceLens from GitHub, so
   nodes need GitHub egress. A fully offline setup must bake these into the image
   and pre-stage model weights on the shared mount.
 - If the gateway's upstream lacks subscription credentials, real completions might

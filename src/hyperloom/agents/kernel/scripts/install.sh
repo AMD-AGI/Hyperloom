@@ -98,7 +98,32 @@ _resolve_magpie_python() {
   printf '%s' "${candidate:-/opt/venv/bin/python}"
 }
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
-PYTHONPATH="${MAGPIE_PATH}:${PYTHONPATH:-}"
+# Join PYTHONPATH-style entries in order, dropping empties and duplicates so
+# repeated composition stays idempotent. Earlier arguments win their position.
+_compose_pythonpath() {
+  local out="" entry part
+  for entry in "$@"; do
+    [ -n "$entry" ] || continue
+    # Split each argument on ':' so a passed-in PYTHONPATH is de-duplicated too.
+    local _ifs="$IFS"
+    IFS=':'
+    for part in $entry; do
+      [ -n "$part" ] || continue
+      case ":${out}:" in
+        *":${part}:"*) ;;
+        *) out="${out:+${out}:}${part}" ;;
+      esac
+    done
+    IFS="$_ifs"
+  done
+  printf '%s' "$out"
+}
+# Keep REPO_ROOT on PYTHONPATH so subprocesses can ``import hyperloom`` under a
+# ``pip install --target $REPO_ROOT`` layout (the target dir is not on the
+# default sys.path). Put REPO_ROOT first, then MAGPIE_PATH, then any pre-existing
+# PYTHONPATH; write_env_file recomposes this the same way just before persisting
+# it, so a stale .env sourced later cannot drop REPO_ROOT.
+PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "${MAGPIE_PATH:-}" "${PYTHONPATH:-}")"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
@@ -143,7 +168,7 @@ TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-int
 # Credentials fallback: env always wins. If any supported LLM credential is
 # missing from env, source $REPO_ROOT/.env but protect already-set values.
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-DOTENV="${HYPERLOOM_ENV_FILE:-${REPO_ROOT}/.env}"
+DOTENV="${REPO_ROOT}/.env"
 if [ -z "${SAFE_API_KEY:-}" ] || [ -z "${OPENAI_BASE_URL:-}" ] \
    || [ -z "${OPENAI_API_KEY:-}" ] || [ -z "${ANTHROPIC_BASE_URL:-}" ] \
    || [ -z "${ANTHROPIC_API_KEY:-}" ] || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
@@ -865,6 +890,15 @@ write_env_file() {
   if [ -z "${_openai_url:-}" ] && [ -z "${_anthropic_url:-}" ]; then
     warn "LLM gateway URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL/OPENAI_BASE_URL"
   fi
+  # Recompute PYTHONPATH just before persisting it. Sourcing an existing
+  # $REPO_ROOT/.env (credentials fallback above) can re-import a stale
+  # PYTHONPATH that lacks REPO_ROOT, silently overwriting the value composed at
+  # the top of this script. Under a ``pip install --target $REPO_ROOT`` layout
+  # that dir holds the hyperloom package and is not on the default sys.path, so
+  # subprocesses would fail to ``import hyperloom`` on re-install. Rebuild here
+  # (REPO_ROOT first, then MAGPIE_PATH, then any remaining entries) and drop
+  # duplicates so repeated installs stay idempotent.
+  PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "${MAGPIE_PATH:-}" "${PYTHONPATH:-}")"
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
   {
@@ -889,7 +923,7 @@ write_env_file() {
     [ -n "${_openai_key}" ] && echo "export OPENAI_API_KEY='${_openai_key}'"
     # Pin TRACELENS_ROOT and TRACELENS_INTERNAL_ROOT to the (possibly
     # mirrored) values resolved by ensure_tracelens(). This is what lets
-    # setsid nohup inference_optimizer optimize →
+    # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →
     # src/hyperloom/agents/kernel/tools/tracelens_analysis.py inherit the writable
     # mirrors instead of falling back to the read-only /wekafs defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
@@ -986,10 +1020,8 @@ write_env_file() {
   log "updated ${DOTENV} with kernel-agent runtime env"
 }
 
-# Clone the e2e optimizer ("geak"; GEAK@GEAK_v4, formerly PerfSkills): SHA pins
-# use a shallow fetch-checkout; tags/branches use git clone --branch. Not
-# pip-installed (it's a JS workflow dir); after the checkout we run GEAK's
-# setup.sh (Claude Code CLI + py deps) plus claude_agent_sdk.
+# Clone the e2e optimizer ("geak", formerly PerfSkills) for its
+# interface/run_e2e.py runner, then pip-install the GEAK package + claude_agent_sdk.
 ensure_geak() {
   log "ensuring e2e optimizer geak (GEAK@${GEAK_REF}, formerly PerfSkills)"
   if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
@@ -1015,19 +1047,18 @@ ensure_geak() {
     fi
   fi
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    # GEAK's own installer: upgrades the Claude Code CLI to the dynamic Workflow
-    # floor (>= 2.1.177) and installs its py deps. Idempotent.
-    # `env -u REPO_ROOT`: we export REPO_ROOT (Hyperloom's checkout) for our own
-    # steps, but GEAK's setup.sh keys its requirements.txt path off REPO_ROOT too
-    # (${REPO_ROOT:-...}), so leaking ours makes it look for requirements.txt in
-    # the Hyperloom tree and die. Strip it so setup.sh derives its own repo root.
-    if [ -x "${GEAK_ROOT}/setup.sh" ]; then
-      run env -u REPO_ROOT bash "${GEAK_ROOT}/setup.sh" || warn "GEAK setup.sh failed; Claude Code may be < 2.1.177"
-    else
-      warn "GEAK setup.sh missing at ${GEAK_ROOT}/setup.sh; using the npm claude from ensure_forge_claude_cli"
-    fi
-    # setup.sh installs the CLI, not the SDK; run_e2e.py prefers the SDK.
     _PIP_FLAGS="-q --no-cache-dir --break-system-packages"
+    # GEAK is a pip package now: install from the checkout above so the package
+    # matches the interface/run_e2e.py we run and honours any GEAK_REPO/GEAK_REF
+    # override (local mirror, fork, SSH URL). Its bootstrap installs deps + the
+    # Claude Code CLI (>= 2.1.177); GEAK_HOME reuses our checkout so bootstrap
+    # skips a second clone.
+    if [ -f "${GEAK_ROOT}/pyproject.toml" ] || [ -f "${GEAK_ROOT}/setup.py" ]; then
+      run env GEAK_HOME="${GEAK_ROOT}" python3 -m pip install ${_PIP_FLAGS} "${GEAK_ROOT}" || \
+        warn "GEAK pip install failed; Claude Code may be < 2.1.177"
+    else
+      warn "GEAK package metadata missing at ${GEAK_ROOT}; skipping pip install (Claude Code may be < 2.1.177)"
+    fi
     run python3 -m pip install ${_PIP_FLAGS} claude-agent-sdk anyio || \
       warn "claude-agent-sdk install failed; run_e2e.py will fall back to the claude CLI"
     if [ ! -f "${GEAK_E2E_RUNNER}" ]; then
