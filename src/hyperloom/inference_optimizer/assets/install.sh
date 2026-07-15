@@ -1029,8 +1029,23 @@ ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
 # InferenceX clones + the chained kernel-agent GEAK/TraceLens clones).
 acquire_install_lock
-ensure_magpie
-ensure_magpie_atomic_scripts_patch
+# Magpie is only needed when the Magpie benchmark backend is active. The
+# bypass backend drives InferenceX directly (see benchmark_backend.py), so
+# skip the Magpie clone/install and its script-patch when bypass is selected.
+# Default (unset/blank) stays magpie, preserving existing behavior.
+# Mirror Python's resolve_backend_name() normalization (strip THEN lower):
+# sed trims ONLY leading/trailing whitespace (like str.strip()), so " bypass" /
+# "bypass " skip Magpie here to match runtime, while an internal-space value
+# such as "by pass" stays != "bypass" and correctly falls through to Magpie
+# (runtime resolves such unknown values back to magpie). A blanket delete of
+# ALL whitespace would wrongly collapse "by pass" -> "bypass" and diverge.
+HYPERLOOM_BENCHMARK_BACKEND_LC="$(printf '%s' "${HYPERLOOM_BENCHMARK_BACKEND:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then
+  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_atomic_scripts_patch"
+else
+  ensure_magpie
+  ensure_magpie_atomic_scripts_patch
+fi
 ensure_inferencex
 ensure_bench_serving_deps
 ensure_xdit_quality_deps
