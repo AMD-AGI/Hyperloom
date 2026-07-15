@@ -72,7 +72,7 @@ git clone https://github.com/AMD-AGI/Hyperloom.git && cd Hyperloom
 
 Start a coding agent from the repo root (i.e. run `claude` here or open this folder in Cursor) and install Hyperloom using the following prompt:
 
-> Follow the tutorial `examples/hyperloom-local-demo.md` and run the hyperloom demo.
+> Follow the tutorial `examples/README.md` and run the hyperloom demo.
 
 #### 3.2 Install from source
 

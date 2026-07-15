@@ -107,7 +107,36 @@ value.
    - If the user is unsure and is already inside a framework image or shell with
      a working framework, recommend `baremetal`; otherwise recommend `docker`.
 
-7. Only when the user chose `baremetal`, ask whether to install a serving
+7. Only when the user chose `docker`, resolve the Docker target host
+   (`HYPERLOOM_DOCKER_TARGET_HOST`). This is where the example skill will run
+   `docker run` / `docker exec` later.
+
+   First inspect the current machine and any Slurm allocation:
+
+   ```bash
+   echo "current host: $(hostname)"
+   if command -v squeue >/dev/null 2>&1; then
+     echo "SLURM detected — current allocations:"
+     squeue -u "$USER" 2>/dev/null || squeue 2>/dev/null
+     echo "allocated nodes: $(squeue -u "$USER" -h -t RUNNING -o '%N' 2>/dev/null | paste -sd, -)"
+   else
+     echo "no SLURM (squeue not found) — use the current host"
+   fi
+   ```
+
+   - If `squeue` is not available, set `HYPERLOOM_DOCKER_TARGET_HOST` to the
+     current host (`$(hostname)`) without asking another question.
+   - If Slurm is detected but there are no allocated nodes, set
+     `HYPERLOOM_DOCKER_TARGET_HOST` to the current host and explain that no
+     Slurm allocation was available to choose.
+   - If Slurm is detected and the user has allocated nodes, ask which host should
+     run the Docker container. Offer the current host, each allocated node, and a
+     custom host option.
+   - If the chosen host is not the current host, tell the user that the demo
+     skill will first SSH to that host and run all Docker commands there. Do not
+     start or restart any Slurm job from setup.
+
+8. Only when the user chose `baremetal`, ask whether to install a serving
    framework (used as the `--install-framework` value in Step 4):
    - `none`: use an already-installed SGLang/vLLM framework stack on the host.
    - `sglang`: install SGLang ROCm framework components (shared with the host torch).
@@ -122,9 +151,10 @@ value.
 Create or update `.env` in the current directory.
 
 - For every value the user chose in this run (LLM mode, base URL, model, run
-  mode, `USER_DATA_PATH`), write exactly what the user selected. This wins over
-  any pre-existing value in `.env` or the shell environment — e.g. if the user
-  picked the Anthropic official URL, write `ANTHROPIC_BASE_URL=https://api.anthropic.com`
+  mode, `USER_DATA_PATH`, Docker target host), write exactly what the user
+  selected. This wins over any pre-existing value in `.env` or the shell
+  environment — e.g. if the user picked the Anthropic official URL, write
+  `ANTHROPIC_BASE_URL=https://api.anthropic.com`
   even when a different `ANTHROPIC_BASE_URL` already exists.
 - Preserve existing keys unrelated to this setup.
 - Never print secret values back to the user.
@@ -141,6 +171,8 @@ Common keys (all modes):
 
 - `USER_DATA_PATH`
 - `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`, the resolved run mode for this session)
+- `HYPERLOOM_DOCKER_TARGET_HOST` (only when `HYPERLOOM_RUN_MODE=docker`; the host
+  where the demo skill should run Docker)
 
 ### AMD APIM subscription header
 
@@ -239,6 +271,7 @@ mode, skip this until the demo skill runs setup inside the container. Read
 Report:
 - The `.env` path.
 - The run mode (`baremetal` or `docker`).
+- The Docker target host when `HYPERLOOM_RUN_MODE=docker`.
 - The setup command that was run (or that host setup was skipped in `docker` mode).
 - Whether setup completed or failed (in `docker` mode, report that host setup was skipped).
 - The detected `FRAMEWORK` value (or that it is unset).

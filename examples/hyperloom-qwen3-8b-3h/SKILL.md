@@ -16,6 +16,9 @@ Resolve the run mode before launching Hyperloom:
 
 In docker mode:
 - If `hyperloom-setup` already ran, do **not** re-run setup on the host.
+- Read `HYPERLOOM_DOCKER_TARGET_HOST` from `.env` when present. If it names a
+  host different from `$(hostname)`, first SSH to that host and continue this
+  Docker setup there; do not start Docker on the login/current host.
 - Always run setup **inside the container** after `docker run`.
 - Pass `--install-framework none --yes` in the container (ROCm/framework comes from
   the image). Do **not** use `--skip-base-check` — let Phase 1 preflight validate
@@ -28,7 +31,8 @@ Suggested Docker images:
 - `sglang` MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
 - `sglang` MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
 
-In Docker mode, start a long-running container from the host before running setup or optimize:
+In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
+(or the current host when it is unset) before running setup or optimize:
 
 ```bash
 docker run -d \

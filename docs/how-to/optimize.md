@@ -10,8 +10,8 @@ This topic assumes you have already completed installation. If you haven't:
 
 - **Docker Container** — see [Docker quickstart](../install/local-mode.md) to 
   get Hyperloom running in a Docker container.
-- **Bare-metal** — see [Bare-metal quickstart](../install/setup.md), then
-  return here to launch your first run.
+- **Setup and examples** — see [Setup and examples](../../examples/README.md),
+  then return here to launch your first run.
 
 ## Launch from Cursor
 
