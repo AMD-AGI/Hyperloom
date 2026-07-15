@@ -6,7 +6,7 @@ Before optimizing, run this shell prelude exactly:
   mkdir -p "$(dirname "$HYPERLOOM_SOURCE_DIR")"
   rm -rf "$HYPERLOOM_SOURCE_DIR"
   if ! git clone --depth 1 --branch main "$HYPERLOOM_SOURCE_REPO" "$HYPERLOOM_SOURCE_DIR"; then
-    echo "[FATAL] git clone of Hyperloom failed — refusing to fall back to /wekafs/HyperloomV2" >&2
+    echo "[FATAL] git clone of Hyperloom failed — refusing to fall back to any shared checkout" >&2
     exit 1
   fi
   cd "$HYPERLOOM_SOURCE_DIR"
@@ -19,7 +19,7 @@ Before optimizing, run this shell prelude exactly:
   fi
 
 SAFETY:
-- NEVER `find /` or `find /wekafs` without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
+- NEVER run broad filesystem scans without `-maxdepth 4`. Prefer which/ls/$PATH lookups.
 - NEVER run `kill -9 $(ps aux | grep ...)` — this kills the sandbox executor itself.
 - Per-bash timeouts must be <= 120s; use short polling loops rather than one long blocking call.
 - Modification of USER_DATA_PATH environment variable is not allowed.

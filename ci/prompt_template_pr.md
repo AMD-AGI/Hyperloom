@@ -1,6 +1,6 @@
 You are running on a SaFE CI sandbox to validate **PR-head commit `{git_ref}`** for `{model_hf}` on AMD MI300X.
 
-The deployed inference_optimizer at `/wekafs/HyperloomV2` is the **production / scheduled-CI** baseline; for THIS run we want the *unmerged PR head* — so do NOT cd into `/wekafs/HyperloomV2`. Clone PR head into the sandbox first, install from there, then drive the inference_optimizer skill from the cloned repo.
+For THIS run we want the *unmerged PR head*. Clone PR head into the sandbox first, install from there, then drive the inference_optimizer skill from the cloned repo.
 
 ## Step 0 — Prepare PR-head workspace (do this FIRST)
 
@@ -18,11 +18,11 @@ test "$(git rev-parse HEAD)" = "{git_ref}" || {{ echo "[pr-ci] ERROR: HEAD != {g
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 ```
 
-If step 0 fails (network, token, install.sh broken on PR head, …) **stop and exit non-zero** — do NOT silently fall back to `/wekafs/HyperloomV2`, the comparison would be meaningless.
+If step 0 fails (network, token, install.sh broken on PR head, …) **stop and exit non-zero** — do NOT silently fall back to any shared or pre-deployed checkout, the comparison would be meaningless.
 
 ## Step 1 — Run inference_optimizer skill from the cloned PR-head repo
 
-Use the skill at `$REPO_ROOT/src/hyperloom/inference_optimizer/SKILL.md` (NOT the wekafs copy). Read SKILL.md, then follow Step 2 ("Launch a New Optimization") with these CLI flags:
+Use the skill at `$REPO_ROOT/src/hyperloom/inference_optimizer/SKILL.md` (not any shared copy). Read SKILL.md, then follow Step 2 ("Launch a New Optimization") with these CLI flags:
 
   --model {model_path}
   --framework {framework}
