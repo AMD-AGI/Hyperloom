@@ -48,7 +48,21 @@ def test_derive_openai_base_url_from_amd_anthropic_endpoint():
     )
 
 
-def test_openai_kwargs_from_anthropic_only_gateway_env():
+def test_openai_kwargs_reads_openai_custom_headers():
+    """The OpenAI/Codex client applies OPENAI_CUSTOM_HEADERS verbatim."""
+    kwargs = openai_client_kwargs(
+        env={
+            "_".join(("OPENAI", "API", "KEY")): "openai-token",
+            "OPENAI_BASE_URL": "https://llm-api.amd.com/Unified/v1",
+            "OPENAI_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ak-header",
+        }
+    )
+    assert kwargs["default_headers"] == {"Ocp-Apim-Subscription-Key": "ak-header"}
+
+
+def test_openai_kwargs_ignores_anthropic_custom_headers_and_host():
+    """The OpenAI/Codex client reads only OPENAI_CUSTOM_HEADERS and does no
+    host-based auto-injection. Base URL is still derived."""
     kwargs = openai_client_kwargs(
         env={
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
@@ -58,17 +72,8 @@ def test_openai_kwargs_from_anthropic_only_gateway_env():
     )
     assert kwargs["api_key"] == "ak-anthropic"
     assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
-    assert kwargs["default_headers"] == {"Ocp-Apim-Subscription-Key": "ak-header"}
-
-
-def test_openai_kwargs_auto_adds_amd_subscription_header_when_missing():
-    kwargs = openai_client_kwargs(
-        env={
-            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
-            "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic",
-        }
-    )
-    assert kwargs["default_headers"] == {"Ocp-Apim-Subscription-Key": "ak-anthropic"}
+    # Empty headers are omitted from kwargs entirely.
+    assert "default_headers" not in kwargs
 
 
 def test_openai_kwargs_preserves_explicit_openai_config():
@@ -114,3 +119,59 @@ def test_claude_sdk_env_options_keeps_explicit_deepseek_base_url():
     )
     child_env = opts["env"]
     assert child_env["ANTHROPIC_BASE_URL"] == "https://deepseek.example/anthropic"
+
+
+def test_claude_sdk_env_options_forwards_anthropic_custom_headers():
+    """The Claude subprocess forwards ANTHROPIC_CUSTOM_HEADERS verbatim."""
+    opts = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic",
+            "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: operator-key",
+        }
+    )
+    headers = parse_custom_headers(opts["env"]["ANTHROPIC_CUSTOM_HEADERS"])
+    assert headers["Ocp-Apim-Subscription-Key"] == "operator-key"
+
+
+def test_claude_sdk_env_options_no_header_auto_injection():
+    """A gateway without an explicit ANTHROPIC_CUSTOM_HEADERS gets NO
+    auto-injected subscription header."""
+    opts = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic",
+        }
+    )
+    headers = parse_custom_headers(opts["env"].get("ANTHROPIC_CUSTOM_HEADERS"))
+    assert "Ocp-Apim-Subscription-Key" not in headers
+
+
+def test_claude_sdk_env_options_does_not_copy_openai_custom_headers():
+    """OPENAI_CUSTOM_HEADERS is NOT copied onto the Claude (Anthropic) side; the
+    claude path reads only ANTHROPIC_CUSTOM_HEADERS."""
+    opts = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic",
+            "OPENAI_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: openai-key",
+        }
+    )
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in opts["env"]
+
+
+def test_claude_sdk_env_options_disables_advisor_tool_by_default():
+    """Claude Code's advisor-tool beta header (rejected by strict gateways) is
+    disabled by default; an operator preset is preserved."""
+    opts = claude_sdk_env_options(
+        env={"_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic"}
+    )
+    assert opts["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
+
+    preset = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "0",
+        }
+    )
+    assert preset["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "0"

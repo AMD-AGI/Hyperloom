@@ -20,9 +20,10 @@ lives in `orchestrator/system_prompts/orchestration.md`. In brief:
   isolated worktree; `integrate_patch` does the actual `git apply` +
   throughput/accuracy gate after Critic review. GPU specialists are on by
   default at whole-machine capacity (WS2); launch with
-  `--gpu-specialist-capacity 0` (or
-  `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=0`) to disable them. When
-  enabled, Orchestration may dispatch
+  `--gpu-specialist-capacity 0` to disable them, or pass an explicit positive
+  capacity to clamp the pool. The legacy
+  `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY` env is ignored by the CLI
+  default resolver. When enabled, Orchestration may dispatch
   `delegate{action_name='specialist', params={needs_gpu: true, gpu_count: ...}}`.
   GPU specialists serialize against serving through `gpu_research_lane` and
   exclusively own their leased cards: they may start/stop their own servers
@@ -52,7 +53,7 @@ candidate is Critic-gated, then `git apply`d against the live
 framework_source_roots and benchmarked; KEEP commits to the live tree (next
 candidate stacks on top), REVERT does `git reset --hard`. Exits on low budget
 (<0.6 × max_hours), plateau (3 consecutive benchmarked candidate tests with no
-KEEP; env `INFERENCE_OPTIMIZER_FRAMEWORK_PLATEAU_STREAK`), or an empty
+KEEP), or an empty
 discovery batch. Resume skips completed candidates by idempotency key. The
 launcher only chooses whether the phase runs (`--no-framework-agent`).
 

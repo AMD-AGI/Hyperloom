@@ -16,33 +16,6 @@ def _write_json(path: Path, data: dict) -> Path:
     return path
 
 
-# ---- _load_json -----------------------------------------------------------
-def test_load_json(tmp_path):
-    good = _write_json(tmp_path / "g.json", {"a": 1})
-    assert br._load_json(good) == {"a": 1}
-    bad = tmp_path / "b.json"
-    bad.write_text("{not json", encoding="utf-8")
-    assert br._load_json(bad) is None
-    arr = tmp_path / "arr.json"
-    arr.write_text("[1, 2]", encoding="utf-8")
-    assert br._load_json(arr) is None  # not a dict
-    assert br._load_json(tmp_path / "missing.json") is None
-
-
-# ---- coercion helpers -----------------------------------------------------
-def test_to_float_int_first():
-    assert br._to_float(True) is None
-    assert br._to_float(None) is None
-    assert br._to_float(object()) is None
-    assert br._to_float("1.5") == 1.5
-    assert br._to_int(True) is None
-    assert br._to_int(object()) is None
-    assert br._to_int("3") == 3
-    assert br._first_float(None, "bad", object()) is None
-    assert br._first_float("bad", 2.0) == 2.0
-    assert br._first_int(None, "bad", 4) == 4
-
-
 # ---- _candidate_raw_jsons ordering ----------------------------------------
 def test_candidate_raw_jsons_ordering(tmp_path):
     (tmp_path / "profile_x.json").write_text("{}", encoding="utf-8")
@@ -51,7 +24,6 @@ def test_candidate_raw_jsons_ordering(tmp_path):
     out = br._candidate_raw_jsons(tmp_path)
     names = [p.name for p in out]
     assert "benchmark_report.json" not in names
-    # baseline (non-profile) sorts before profile
     assert names.index("baseline.json") < names.index("profile_x.json")
 
 
@@ -134,7 +106,6 @@ def test_materialize_rescue_inside_workspace(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
     src = _write_json(ws / "inferencex_result.json", {"x": 1})
-    # source already inside workspace -> None
     assert br._materialize_rescue_into_workspace(src, ws) is None
 
 
@@ -149,7 +120,6 @@ def test_materialize_rescue_copy_error(tmp_path, monkeypatch):
 # ---- _rescue_candidate_paths ----------------------------------------------
 def test_rescue_candidate_paths_default(tmp_path, monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", raising=False)
-    # default /workspace path doesn't exist -> not a file -> dropped
     assert br._rescue_candidate_paths(tmp_path) == []
 
 
@@ -176,7 +146,6 @@ def test_rescue_candidate_paths_mtime_gate(tmp_path, monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
     ws = tmp_path / "ws"
     ws.mkdir()
-    # subprocess started way after the leak's mtime -> stale -> dropped
     cands = br._rescue_candidate_paths(ws, subprocess_started_unix=leak.stat().st_mtime + 10000)
     assert cands == []
 
@@ -185,7 +154,7 @@ def test_rescue_candidate_paths_dedup_and_in_ws(tmp_path, monkeypatch):
     ws = tmp_path / "ws"
     ws.mkdir()
     inside = _write_json(ws / "inferencex_result.json", {"x": 1})
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", f"{inside}:{inside}")  # duplicate + inside ws
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", f"{inside}:{inside}")
     assert br._rescue_candidate_paths(ws) == []
 
 
@@ -206,7 +175,6 @@ def test_harvest_leaked_artifacts(tmp_path):
 def test_harvest_skips_non_file(tmp_path):
     leak_root = tmp_path / "workspace"
     leak_root.mkdir()
-    # a directory matching the glob is not a file -> skipped
     (leak_root / "server.log").mkdir()
     dest = tmp_path / "dest"
     out = br.harvest_leaked_artifacts(dest, leak_root=leak_root)
@@ -239,7 +207,6 @@ def test_harvest_missing_root(tmp_path):
 
 
 def test_harvest_skips_already_under_dest(tmp_path):
-    # leak file lives directly under the destination -> nothing to harvest
     dest = tmp_path / "dest"
     dest.mkdir()
     (dest / "server.log").write_text("log", encoding="utf-8")
@@ -294,7 +261,7 @@ def test_extract_with_workspace_raw(tmp_path):
 def test_extract_skips_raw_without_throughput(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
-    _write_json(ws / "result.json", {"completed_requests": 5})  # no tput
+    _write_json(ws / "result.json", {"completed_requests": 5})
     m = br.extract_benchmark_measurement({"throughput": {}}, workspace=ws)
     assert m["valid_measurement"] is False
 
@@ -328,7 +295,6 @@ def test_extract_rescue_copy_failed_warning(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
-    # copy into workspace fails -> recorded path falls back to the leak path
     monkeypatch.setattr(br, "_materialize_rescue_into_workspace", lambda *a, **k: None)
     m = br.extract_benchmark_measurement(
         {"throughput": {}}, workspace=ws, subprocess_started_unix=leak.stat().st_mtime - 100
@@ -340,7 +306,7 @@ def test_extract_rescue_copy_failed_warning(tmp_path, monkeypatch):
 def test_extract_rescue_skips_no_throughput(tmp_path, monkeypatch):
     ws = tmp_path / "ws"
     ws.mkdir()
-    leak = _write_json(tmp_path / "inferencex_result.json", {"completed_requests": 5})  # no output_throughput
+    leak = _write_json(tmp_path / "inferencex_result.json", {"completed_requests": 5})
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
     m = br.extract_benchmark_measurement(
         {"throughput": {}}, workspace=ws, subprocess_started_unix=leak.stat().st_mtime - 100

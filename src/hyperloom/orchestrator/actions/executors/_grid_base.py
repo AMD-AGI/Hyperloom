@@ -19,16 +19,51 @@ from ._canonical_fingerprint import canonical_fingerprint
 
 log = logging.getLogger(__name__)
 
+# Content-based variant fingerprint (cross-action dedup ledger key). Delegates
+# to :func:`canonical_fingerprint` (the single source of truth); both produce
+# the identical 16-char content hash.
+def variant_fingerprint(
+    extra_server_args: str | None,
+    extra_envs: dict[str, Any] | None,
+    *,
+    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
+    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
+    args_mode: str = "append",
+) -> str:
+    """Stable content fingerprint for a (extra_server_args, extra_envs) pair.
+
+    Name and note are NOT inputs — variants with identical content but
+    different names collapse to the same fingerprint. Delegates to
+    :func:`canonical_fingerprint` so the two never drift.
+
+    Args:
+        extra_server_args (str | None): Backend server args for the variant.
+        extra_envs (dict[str, Any] | None): Per-variant environment overrides.
+        remove_args: Base/server args to remove before appending this variant.
+        unset_envs: Inherited env names to unset before applying this variant.
+        args_mode: ``"append"`` or ``"replace"``.
+
+    Returns:
+        str: The 16-char content fingerprint of the pair.
+    """
+    return canonical_fingerprint(
+        extra_server_args,
+        extra_envs,
+        remove_args=remove_args,
+        unset_envs=unset_envs,
+        args_mode=args_mode,
+    )
+
 _MAGPIE_CWD_DEFAULT = "/tmp"
 
-_VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC for Qwen3-32B TP=1 CONC=64 ISL/OSL=1024 NUM_PROMPTS=320 workload
+_VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
 
-@dataclass(init=False)
+@dataclass
 class GridVariant:
     """One row of the grid we're going to test.
 
-    Describes a single server-config candidate: the flags/env overrides to
-    apply on top of the base Magpie config for one benchmark run.
+    A single server-config candidate: the flags/env overrides to apply on top
+    of the base Magpie config for one benchmark run.
 
     Attributes:
         name (str): Human-readable label for the variant.
@@ -36,14 +71,22 @@ class GridVariant:
             ``EXTRA_{SGLANG,VLLM,ATOM}_ARGS``. Defaults to ``""``.
         extra_envs (dict[str, str]): Per-variant environment overrides.
             Defaults to an empty dict.
+        remove_args (list[str]): Base/server flags to remove before appending
+            this variant's args. Defaults to ``[]``.
+        unset_envs (list[str]): Inherited environment keys to remove before
+            applying ``extra_envs``. Defaults to ``[]``.
+        args_mode (str): ``"append"`` (default) or ``"replace"``.
         note (str): Optional reason/category tag (e.g. ``multi_node_only_*``).
             Defaults to ``""``.
     """
 
-    name: str  # human-readable label
-    extra_server_args: str = ""  # appended via EXTRA_{SGLANG,VLLM,ATOM}_ARGS env
+    name: str
+    extra_server_args: str = ""
     extra_envs: dict[str, str] = field(default_factory=dict)
-    note: str = ""  # optional reason / category
+    remove_args: list[str] = field(default_factory=list)
+    unset_envs: list[str] = field(default_factory=list)
+    args_mode: str = "append"
+    note: str = ""
 
     def __init__(
         self,
@@ -52,7 +95,9 @@ class GridVariant:
         extra_envs: dict[str, str] | None = None,
         note: str = "",
         *,
-        extra_sglang_args: str | None = None,
+        remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
+        unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
+        args_mode: str = "append",
     ) -> None:
         """Initialize a grid variant descriptor.
 
@@ -61,27 +106,32 @@ class GridVariant:
             extra_server_args: Extra server CLI args for this variant.
             extra_envs: Extra environment variables for this variant.
             note: Optional reason/category note.
-            extra_sglang_args: Deprecated alias for ``extra_server_args``;
-                routed into the canonical attribute with a warning.
+            remove_args: Base/server args to remove before appending this
+                variant's args.
+            unset_envs: Inherited env names to remove before applying
+                ``extra_envs``.
+            args_mode: ``"append"`` or ``"replace"``.
         """
-        # Back-compat alias for the historical ``extra_sglang_args`` kwarg;
-        # routed into the canonical attribute with a DeprecationWarning.
-        if extra_sglang_args is not None:
-            import warnings as _warnings
-
-            _warnings.warn(
-                "GridVariant(extra_sglang_args=...) is a deprecation "
-                "alias for GridVariant(extra_server_args=...) and will "
-                "be removed in the next Hyperloom release.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if not extra_server_args:
-                extra_server_args = extra_sglang_args
         self.name = name
         self.extra_server_args = extra_server_args
         self.extra_envs = dict(extra_envs) if extra_envs is not None else {}
+        self.remove_args = self._coerce_str_list(remove_args)
+        self.unset_envs = self._coerce_str_list(unset_envs)
+        mode = str(args_mode or "append").strip().lower()
+        self.args_mode = mode if mode in {"append", "replace"} else "append"
         self.note = note
+
+    @staticmethod
+    def _coerce_str_list(value: Any) -> list[str]:
+        """Normalize optional string/list controls to non-empty strings."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if isinstance(value, (list, tuple, set)):
+            return [str(v).strip() for v in value if str(v).strip()]
+        text = str(value).strip()
+        return [text] if text else []
 
     @property
     def fingerprint(self) -> str:
@@ -91,7 +141,13 @@ class GridVariant:
             str: :func:`canonical_fingerprint` of this variant's
             ``extra_server_args`` and ``extra_envs``.
         """
-        return canonical_fingerprint(self.extra_server_args, self.extra_envs)
+        return variant_fingerprint(
+            self.extra_server_args,
+            self.extra_envs,
+            remove_args=self.remove_args,
+            unset_envs=self.unset_envs,
+            args_mode=self.args_mode,
+        )
 
 def coerce_extra_envs(value: Any) -> dict[str, str]:
     """Normalize Orchestration-supplied ``extra_envs`` to ``dict[str,str]``.
@@ -150,8 +206,8 @@ def coerce_extra_envs(value: Any) -> dict[str, str]:
 class VariantResult:
     """One bench run's parsed result.
 
-    Captures the parsed outcome of a single variant's Magpie run: identity,
-    status, the headline throughput/latency metrics, artifact paths, and
+    The parsed outcome of a single variant's Magpie run: identity, status,
+    headline throughput/latency metrics, artifact paths, and
     failure-classification metadata.
 
     Attributes:
@@ -205,21 +261,15 @@ class VariantResult:
     returncode: int | None = None
     nonfatal_warnings: list[str] = field(default_factory=list)
     error: str | None = None
-    # Short failure-classification tag matching ``_write_variant_abort_marker``
-    # (e.g. ``magpie_timeout``, ``yaml_build_error``); empty for successes.
-    # Surfaced in the LLM critic prompt as ``failed_variants[*].error_class``.
+    # Short failure-classification tag; empty for successes.
     error_class: str = ""
     note: str = ""
-    # Wall-clock seconds the Magpie subprocess consumed; populated on
-    # success AND on the ``killed_overtime`` path.
+    # Wall-clock seconds the Magpie subprocess consumed.
     runtime_sec: float | None = None
-    # True iff reaped by the overtime soft deadline; caller demotes to
-    # the synthetic ``KILLED_OVERTIME`` outcome (no tput / fingerprint).
+    # True iff reaped by the overtime soft deadline.
     killed_overtime: bool = False
-    # Rough output tok/s salvaged from the engine's periodic ``server.log``
-    # throughput logs on the killed_overtime path. Informational only: the
-    # variant stays ``failed``/``killed_overtime`` and this never feeds winner
-    # selection (which keys off ``output_throughput``).
+    # Rough output tok/s salvaged from server.log on the killed_overtime path;
+    # informational only, never feeds winner selection.
     estimated_output_throughput: float | None = None
 
     @property

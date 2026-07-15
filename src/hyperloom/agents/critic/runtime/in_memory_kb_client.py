@@ -1,13 +1,13 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""In-memory KBClient for tests + dry-run mode (contract §7.3 faithful mock).
+"""In-memory KBClient for tests + dry-run mode.
 
 Honours: ``(scope, kind, slug)`` UNIQUE with upsert idempotency, partial
-merge (G-1) and importance protection (G-2); ``contradicts`` auto-mirroring
-(G-8); ``scope_filter`` containment with ``trim().lowercase()`` (G-3);
-``metadata_filter`` nested + array-contains (G-7). :meth:`simulate_failure`
-injects faults for dead-letter tests. ``updated_at`` uses an injectable
-``time_fn`` so tests can pin time.
+merge and importance protection; ``contradicts`` auto-mirroring;
+``scope_filter`` containment with ``trim().lowercase()``; ``metadata_filter``
+nested + array-contains. :meth:`simulate_failure` injects faults for
+dead-letter tests. ``updated_at`` uses an injectable ``time_fn`` so tests can
+pin time.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ def _scope_contains(row_scope: dict[str, str], scope_filter: dict[str, Any]) -> 
 
 
 def _matches_metadata(metadata: dict[str, Any], filter_obj: dict[str, Any]) -> bool:
-    """Recursive nested + array-contains matcher (G-7).
+    """Recursive nested + array-contains matcher.
 
     Nested dict filters recurse into nested metadata; list filters require
     every expected item to be present in the metadata's list (array-contains);
@@ -92,7 +92,7 @@ def _matches_metadata(metadata: dict[str, Any], filter_obj: dict[str, Any]) -> b
         if isinstance(expected, list):
             haystack = metadata.get(key)
             if isinstance(haystack, list):
-                # array contains: every item in expected must be in haystack
+                # array contains: every expected item must be in haystack
                 for item in expected:
                     if item not in haystack:
                         return False
@@ -279,9 +279,9 @@ class InMemoryKBClient:
         """Insert or merge a row keyed by ``(scope, kind, slug)``.
 
         New keys insert a fresh row; existing keys merge summary/metadata/edges
-        (partial merge, G-1) and only raise importance, never lower it
-        (importance protection, G-2). Scope normalisation that alters a value
-        surfaces a ``scope_value_normalized`` warning (G-3).
+        (partial merge) and only raise importance, never lower it (importance
+        protection). Scope normalisation that alters a value surfaces a
+        ``scope_value_normalized`` warning.
 
         Args:
             payload (dict[str, Any]): Must contain ``scope``, ``kind``,
@@ -309,8 +309,7 @@ class InMemoryKBClient:
         edges_in = payload.get("edges") or {}
 
         warnings: list[str] = []
-        # Scope value normalisation: warn when an incoming value differs
-        # from its normalised form.
+        # Warn when an incoming scope value differs from its normalised form.
         for k, v in payload["scope"].items():
             if str(v).strip().lower() != _normalise_value(v) or _normalise_value(v) != _normalise_value(
                 payload["scope"][k]
@@ -405,7 +404,7 @@ class InMemoryKBClient:
     # add_edges
     # ------------------------------------------------------------------
     def add_edges(self, edges: list[dict[str, Any]]) -> dict[str, Any]:
-        """Add directed edges, auto-mirroring ``contradicts`` edges (G-8).
+        """Add directed edges, auto-mirroring ``contradicts`` edges.
 
         Edges whose source row is missing are skipped; ``contradicts`` edges
         are mirrored back onto the destination row, with a skip recorded when

@@ -3,11 +3,9 @@
 """RobustnessAgentBackend — bridges the ``hyperloom.agents.robustness``
 runtime into the Coordinator as a real Robustness Backend.
 
-Mirrors :class:`CriticAgentBackend`'s subprocess transport, simplified
-because the robustness reactor is deterministic (no LLM, KB, or two-phase
-handshake). Each tick is one ``runtime.cli tick`` invocation whose
-``emit.json`` carries an ``intent_envelope`` like critic-agent's. Test seam:
-``runtime_caller_factory`` bypasses the subprocess.
+Each tick is one ``runtime.cli tick`` invocation whose ``emit.json`` carries
+an ``intent_envelope``. Test seam: ``runtime_caller_factory`` bypasses the
+subprocess.
 """
 
 from __future__ import annotations
@@ -68,10 +66,8 @@ class RobustnessAgentBackend:
     robustness_agent_root:
         Directory containing ``runtime/cli.py``
         (``src/hyperloom/agents/robustness/``). The CLI is invoked as the
-        package-qualified ``python -m hyperloom.agents.robustness.runtime.cli``,
-        resolved via the normal installed ``hyperloom`` namespace;
-        ``cwd=robustness_agent_root`` is still set for parity with the other
-        sibling-agent backends.
+        package-qualified ``python -m hyperloom.agents.robustness.runtime.cli``
+        with ``cwd=robustness_agent_root``.
     session_dir:
         Coordinator session directory; scopes per-turn workdirs and is
         forwarded into ``request.options.session_dir``.
@@ -241,8 +237,7 @@ class RobustnessAgentBackend:
             }
         )
 
-        # Record the robustness signal before stale workdirs are pruned
-        # (folded into the critic_robustness breakdown).
+        # Record the robustness signal before stale workdirs are pruned.
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -259,10 +254,7 @@ class RobustnessAgentBackend:
             "tick_index": runtime_tick_index,
             "parse_warnings": parse_warnings,
         }
-        # Fold any RCA-LLM token spend the runtime reported into the metadata
-        # under the canonical counter keys, so the Coordinator's reactor trace
-        # records a ``component=robustness`` ledger row instead of silently
-        # dropping it. Absent on the common no-LLM (Noop) path.
+        # Fold any RCA-LLM token spend into canonical metadata counters.
         self._merge_llm_usage(metadata, emit.get("llm_usage"))
 
         return BackendTurnResult(
@@ -295,9 +287,8 @@ class RobustnessAgentBackend:
     def _build_runtime_env(self) -> dict[str, str]:
         """Build the subprocess environment for ``runtime.cli`` invocations.
 
-        The module now resolves via the normal installed ``hyperloom``
-        namespace, so no ``PYTHONPATH`` prepending is needed (robustness-agent
-        lives in ``hyperloom.agents.robustness``).
+        The module resolves via the installed ``hyperloom`` namespace, so no
+        ``PYTHONPATH`` prepending is needed.
 
         Returns:
             A copy of the current environment with the robustness

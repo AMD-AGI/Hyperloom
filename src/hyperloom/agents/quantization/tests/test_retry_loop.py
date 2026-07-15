@@ -32,7 +32,6 @@ class _StubRunner:
     """Records calls + lets each attempt mutate workspace before returning."""
 
     def __init__(self, side_effects: list[Callable[[Path, int], str | None]]):
-        # Each entry mutates the workspace and returns an sdk_error (or None).
         self.side_effects = side_effects
         self.calls: list[dict[str, Any]] = []
 
@@ -71,10 +70,7 @@ def quark_root(tmp_path: Path) -> Path:
 
 @pytest.mark.asyncio
 async def test_quark_root_missing_fast_path(tmp_path, monkeypatch):
-    # With QUARK_ROOT unset the resolver falls back to DEFAULT_QUARK_ROOT;
-    # point that at a nonexistent path so the bootstrap still fails with
-    # quark_root_missing (hermetic — doesn't depend on the host's real
-    # /primus/hyperloom/Quark checkout).
+    # QUARK_ROOT unset -> resolver falls back to a nonexistent DEFAULT_QUARK_ROOT so bootstrap fails.
     monkeypatch.delenv("QUARK_ROOT", raising=False)
     monkeypatch.setattr(
         "hyperloom.agents.quantization.driver.retry.DEFAULT_QUARK_ROOT",
@@ -119,7 +115,6 @@ async def test_single_clean_attempt_returns_success(tmp_path, quark_root, build_
     ws = tmp_path / "ws"
 
     def populate(workspace: Path, attempt: int) -> str | None:
-        # Reuse build_workspace by pointing it at the same dir.
         build_workspace(workspace=workspace)
         return None
 
@@ -151,7 +146,6 @@ async def test_no_retry_without_fix_hypothesis(tmp_path, quark_root, build_works
     ws = tmp_path / "ws"
 
     def populate(workspace: Path, attempt: int) -> str | None:
-        # Set up workspace with a quantized dir missing weights → must_have_weights_missing.
         build_workspace(
             workspace=workspace,
             include_weights=False,
@@ -185,7 +179,6 @@ async def test_retry_with_hypothesis_then_recover(tmp_path, quark_root, build_wo
             include_weights=False,
             include_validation_report=False,
         )
-        # SKILL.md drops a hypothesis for the next attempt.
         (workspace / "fix_hypothesis_attempt_2.md").write_text(
             "## Fix\nRerun export with disk space cleared.\n", encoding="utf-8"
         )
@@ -225,7 +218,7 @@ async def test_counter_persists_and_caps_retries(tmp_path, quark_root, build_wor
 
     ws = tmp_path / "ws"
     ws.mkdir()
-    # Pre-seed the counter at the max so the first attempt is already at the cap.
+    # Pre-seed the counter at the max.
     (ws / "requantize_attempts.txt").write_text("1", encoding="utf-8")
 
     def fail(workspace: Path, attempt: int) -> str | None:
@@ -289,7 +282,7 @@ async def test_auto_fail_stops_immediately(tmp_path, quark_root, build_workspace
 
     def md5_fail(workspace: Path, attempt: int) -> str | None:
         build_workspace(workspace=workspace, validation_tag="md5_fail")
-        # Even if SKILL.md drops a hypothesis, AUTO_FAIL stops the loop.
+        # AUTO_FAIL stops the loop even with a hypothesis present.
         (workspace / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
         return None
 
@@ -333,7 +326,7 @@ async def test_eval_gap_exceeded_accepted_by_operator_promotes_to_accepted(
         )
         return None
 
-    # Stub the interactive yes/no — answer "y".
+    # Stub the operator prompt to answer "y".
     from hyperloom.agents.quantization.driver import retry as retry_mod
     monkeypatch.setattr(retry_mod, "_ask_operator", lambda msg: True)
 

@@ -14,7 +14,8 @@ import logging
 import os
 import re
 import subprocess
-from typing import Any
+
+from hyperloom.common.env import is_truthy
 
 from ._grid_base import (
     GridVariant,
@@ -75,22 +76,12 @@ def _parse_skip_spec(spec: str) -> list[str]:
 # the integer value.
 _RE_CUDA_GRAPH_MAX_BS = re.compile(r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)")
 
-# ---------------------------------------------------------------------------
-# Multi-node grid prioritisation + invalid-variant filtering
-# ---------------------------------------------------------------------------
-#
-# In multi-node mode a ``--max-hours`` cut may stop the explore loop before the
-# whole grid is benched, so we (a) drop variants that are known regressions on
-# multi-node fabrics and (b) reorder the survivors so the strongest candidates
-# run first. Both are STRICT no-ops outside multi-node mode (single-node grid
-# order is a hard "never alter" invariant).
-#
-# ``priority_tags`` is an ordered list of category tags; a variant's priority is
-# the index of the first tag that appears (as a substring) in its ``note`` (or,
-# when ``note`` is empty, its ``name``). Lower index == higher priority; an
-# untagged variant sinks to the end. ``_MN_PARAMS_PRIORITY`` is concatenated
-# ahead of ``_MN_BACKENDS_PRIORITY`` by callers, so param-tuning variants
-# (cheap, high-yield) are surfaced before heavier comm/backend variants.
+# Multi-node grid prioritisation + invalid-variant filtering. In multi-node
+# mode a ``--max-hours`` cut may stop the loop before the whole grid is benched,
+# so we drop known regressions and reorder survivors so strong candidates run
+# first. Both are STRICT no-ops outside multi-node mode. ``priority_tags`` ranks
+# variants by the first tag matching their ``note``/``name`` (lower = higher);
+# params priority is concatenated ahead of backends priority by callers.
 _MN_PARAMS_PRIORITY: tuple[str, ...] = (
     "cuda_graph_max_bs",
     "max_running_requests",
@@ -160,7 +151,7 @@ def reorder_grid_for_multi_node(
 
     if not is_multi_node():
         return grid
-    # ``sorted`` is stable, so ties (same priority index) keep input order.
+    # ``sorted`` is stable, so ties keep input order.
     return sorted(grid, key=lambda v: _mn_priority_index(v, priority_tags))
 
 def apply_multi_node_invalid_variants(
@@ -212,22 +203,18 @@ def apply_multi_node_invalid_variants(
         kept.append(v)
     return kept, dropped
 
-# Framework / hardware compatibility filter: drops variants whose flag literals
-# are unsupported by the live framework + model class (real incompatibility,
-# not a strategy gate). Each entry maps an ``extra_server_args`` substring to a
-# required model class.
+# Framework / hardware compatibility filter: each entry maps an
+# ``extra_server_args`` substring to a required model class.
 _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
     ("--enable-flashinfer-mla", "mla"),
     ("--enable-deepep-moe", "moe"),
     ("--enable-ep-moe", "moe"),
 )
 
-# xDiT (diffusion) do-not-set blacklist — env knobs proven to crash or regress
-# on FLUX.2-class DiT models with Ulysses SP (source: arbor empirical KB /
-# flux2-dev recipe). Each entry maps an env key to the set of forbidden values
-# (``"*"`` = any truthy value) and a short reason. Precision keys are locked
-# OFF (a precision change is a different model). Enforced for the ``xdit``
-# framework only, in :func:`apply_compatibility_filter`.
+# xDiT (diffusion) do-not-set blacklist — env knobs that crash or regress on
+# FLUX.2-class DiT models with Ulysses SP. Each entry maps an env key to the
+# set of forbidden values (``"*"`` = any truthy value) and a short reason.
+# Enforced for the ``xdit`` framework only, in :func:`apply_compatibility_filter`.
 _XDIT_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
     "XDIT_ATTENTION_BACKEND": (
         frozenset({"aiter_fp8", "aiter_sage", "aiter_sage_v2"}),
@@ -250,17 +237,6 @@ _XDIT_ENV_COMBO_BLACKLIST: tuple[tuple[tuple[str, ...], str], ...] = (
     ),
 )
 
-def _is_truthy_env(value: Any) -> bool:
-    """Return whether an env-string value is truthy (set and not 0/false/off).
-
-    Args:
-        value (Any): Candidate env value.
-
-    Returns:
-        bool: ``True`` when the value is set to a non-falsey token.
-    """
-    return str(value).strip().lower() not in ("", "0", "false", "off", "no")
-
 def xdit_blacklist_reason(
     extra_envs: dict[str, str] | None,
 ) -> str | None:
@@ -278,12 +254,12 @@ def xdit_blacklist_reason(
             continue
         val = envs[key]
         if "*" in bad_values:
-            if _is_truthy_env(val):
+            if is_truthy(val, default=True):
                 return f"{key}={val}: {reason}"
         elif val.strip().lower() in {b.lower() for b in bad_values}:
             return f"{key}={val}: {reason}"
     for keys, reason in _XDIT_ENV_COMBO_BLACKLIST:
-        if all(k in envs and _is_truthy_env(envs[k]) for k in keys):
+        if all(k in envs and is_truthy(envs[k], default=True) for k in keys):
             return reason
     return None
 
@@ -304,8 +280,7 @@ _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
         "-c",
         "from vllm.entrypoints.openai.api_server import make_arg_parser; make_arg_parser(None).print_help()",
     ),
-    # atom exposes EngineArgs.add_cli_args on ``atom.model_engine.arg_utils``
-    # (mirrors vLLM); populate a throwaway parser and print its help.
+    # atom exposes EngineArgs.add_cli_args (mirrors vLLM).
     "atom": (
         "python3",
         "-c",
@@ -320,9 +295,7 @@ def _probe_server_help_text(framework: str) -> str:
 
     Supported: ``sglang``, ``vllm``, ``atom``; unknown values return ``""``.
     Returns ``""`` on ANY failure — callers MUST treat empty as "unknown" and
-    fall through to NOT filtering. Empty results are NOT cached. The broad
-    ``except`` is deliberate: this probe is a perf optimisation only and must
-    never crash the optimizer.
+    fall through to NOT filtering. Empty results are NOT cached.
 
     Args:
         framework (str): Framework name; matched case-insensitively.

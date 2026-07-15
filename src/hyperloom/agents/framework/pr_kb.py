@@ -7,18 +7,16 @@ Reads the markdown pages the ``Primus-Claw/pr-kb`` worker writes to gbrain
 framework-agent already consumes:
 
 * :func:`fetch_pr_kb_diff` — files page -> unified diff text (P1, for audit).
-* :func:`parse_meta_frontmatter` / :func:`parse_index_prs` — candidate
-  discovery inputs (P2).
+* :func:`parse_index_prs` — candidate discovery inputs (P2).
 
 All helpers are defensive: missing keys / unparseable blocks yield empty
-results so callers fall back to Cortex / GitHub (design §7 degradation).
+results so callers fall back to Cortex / GitHub.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from .gbrain_page_client import GbrainPageClient, GbrainPageError
@@ -30,11 +28,8 @@ log = logging.getLogger(__name__)
 def _page_markdown(page: dict[str, Any]) -> str:
     """Extract page body markdown across known gbrain key spellings.
 
-    ``compiled_truth`` is the actual field ``get_page`` returns on this
-    gbrain deployment (confirmed against PR-KB-worker-written pages) — checked
-    first since every other key in this list has never been observed in
-    practice; kept as a defensive fallback in case a future/older gbrain build
-    differs.
+    ``compiled_truth`` is the field ``get_page`` returns on this gbrain
+    deployment; the rest are defensive fallbacks.
     """
     for key in ("compiled_truth", "markdown", "content", "body", "text", "page_content"):
         val = page.get(key)
@@ -168,25 +163,12 @@ def fetch_pr_kb_diff(
     if not page:
         return "", ""
     parsed = parse_files_page(page)
-    # Never feed a partial diff downstream (design R3): bail so the caller
-    # degrades to the full diff_url.
+    # Never feed a partial diff downstream; degrade to the full diff_url.
     if parsed["files_truncated"] or parsed["patch_omitted_any"]:
         log.info("pr_kb: files page %s truncated/omitted; degrading to diff_url", files_page_slug)
         return "", ""
     diff = synthesize_unified_diff(parsed["patches"])
     return (diff, "gbrain_pr_kb") if diff.strip() else ("", "")
-
-
-def parse_meta_frontmatter(page: dict[str, Any]) -> dict[str, Any]:
-    """Return the meta page frontmatter dict (empty on miss)."""
-    return _parse_frontmatter(_page_markdown(page))
-
-
-def parse_meta_title(page: dict[str, Any]) -> str:
-    """Extract the PR title from a meta page H1 (``# PR #n: <title>``)."""
-    md = _page_markdown(page)
-    m = re.search(r"^#\s+PR\s+#\d+:\s*(.+)$", md, flags=re.MULTILINE)
-    return m.group(1).strip() if m else ""
 
 
 def parse_index_prs(page: dict[str, Any]) -> list[dict[str, Any]]:
@@ -199,8 +181,6 @@ __all__ = [
     "synthesize_unified_diff",
     "parse_files_page",
     "fetch_pr_kb_diff",
-    "parse_meta_frontmatter",
-    "parse_meta_title",
     "parse_index_prs",
     "index_slug",
 ]

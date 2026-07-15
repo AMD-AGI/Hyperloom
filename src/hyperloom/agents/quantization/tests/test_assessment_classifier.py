@@ -1,9 +1,7 @@
 """classify_attempt — one fixture per outcome row (where artifact-driven).
 
-A few outcomes (e.g. quark_skill_unavailable, validator_self_test_failed) are
-only visible to the runner via sdk_error or the LLM's blocked.md; the
-classifier covers them via the sdk_error pattern path or the
-blocked.md outcome-id parser.
+Some outcomes are only visible via sdk_error or blocked.md; the classifier
+covers them via the sdk_error pattern path or the blocked.md outcome-id parser.
 """
 
 from __future__ import annotations
@@ -56,8 +54,7 @@ def test_sdk_runtime_error_rate_limit(build_workspace):
 
 
 def test_blocked_md_outcome_marker_wins(build_workspace):
-    # Even with a fully-successful artifact set, an explicit blocked.md
-    # marker overrides — SKILL.md knows something disk evidence doesn't.
+    # An explicit blocked.md marker overrides successful artifacts.
     ws = build_workspace(blocked_md="outcome_id: upstream_change_required\nreason: needs quark patch")
     assert classify_attempt(ws) == OutcomeId.upstream_change_required
 
@@ -247,11 +244,8 @@ def test_exec_oom_via_sdk_error_under_exec_phase(build_workspace):
         include_eval_report=False,
         last_phase="exec",
     )
-    # Need to add manifest so we get past the phase-gap check; instead pass
-    # last_phase via sdk path. With no manifest under exec phase, the
-    # phase-aware check fires first and returns manifest_artifact_*.
-    # So test phase-tagged sdk_error path with manifest present but quantized
-    # dir absent + sdk error.
+    # Test the phase-tagged sdk_error path with manifest present but quantized
+    # dir absent.
     ws2 = build_workspace(
         include_quantized_dir=False,
         include_validation_report=False,

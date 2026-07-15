@@ -11,9 +11,6 @@ import pytest
 from hyperloom.orchestrator.actions.registry import ActionRegistry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.prompts.critic_prompt_builder import (
-    build_critic_prompt,
-)
 from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
@@ -69,11 +66,9 @@ def test_orchestration_prompt_no_explore_trims_catalogue_and_marks_skipped(regis
         explore_enabled=False,
         max_minutes=120,
     )
-    # PHASE CONTRACT annotates EXPLORE as skipped + SESSION CONTEXT state line.
     assert "(DISABLED: --no-explore — phase skipped)" in text
     assert "explore_enabled  : false" in text
-    # ACTION CATALOGUE no longer advertises the `explore` action body. The
-    # catalogue lists actions as `- **<name>** —`; assert that bullet is gone.
+    # The `explore` action bullet must be gone from the catalogue.
     assert "- **explore** —" not in text
     # specialist/integrate_patch stay visible (KERNEL still uses them).
     assert "- **specialist** —" in text
@@ -106,19 +101,6 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
     assert "explore_enabled  : true" in text
     assert "framework_agent_phase_enabled : true" in text
     assert "(DISABLED:" not in text
-
-
-def test_critic_prompt_includes_phase_review_contract(registry):
-    text = build_critic_prompt(
-        action_registry=registry,
-        enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        max_minutes=120,
-    )
-    assert "PHASE REVIEW CONTRACT" in text
-    # Explore grids run directly, so the Critic uses single-action verdicts (no verdict_map).
-    assert "verdict_map" not in text.lower()
-    assert "single-proposal" in text.lower()
 
 
 def test_role_md_files_carry_phase_awareness():
@@ -201,7 +183,6 @@ def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
 
 
 def test_shared_state_phase_budget_telemetry_includes_framework():
-    # Regression: the renderer must iterate PHASE_NAMES so FRAMEWORK isn't swallowed.
     s = SharedState(max_minutes=60)
     s.record_phase_transition(
         to_phase="PRELUDE",
@@ -267,7 +248,6 @@ def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockKernelBackend,
         MockRobustnessBackend,
         ScriptedPlan,
     )
@@ -276,7 +256,7 @@ def coordinator_with_mocks(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }

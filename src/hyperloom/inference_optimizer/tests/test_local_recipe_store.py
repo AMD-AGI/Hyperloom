@@ -23,14 +23,12 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb.local_store import _matches_labels
+from hyperloom.orchestrator.knowledge.recipe_kb.local_store import _list_jsonl, _matches_labels
 
 
 def test_from_dict_reads_legacy_framework_key() -> None:
-    """Recipes persisted before the framework->framework_name rename store the
-    serving framework under the legacy ``framework`` key. ``from_dict`` must
-    still hydrate ``framework_name`` from it and must not leak the legacy key
-    into ``extras``."""
+    """``from_dict`` must hydrate ``framework_name`` from the legacy ``framework``
+    key and must not leak the legacy key into ``extras``."""
     legacy = {
         "canonical_id": "inference:m:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8",
         "model": "m",
@@ -52,14 +50,12 @@ def test_from_dict_prefers_new_framework_name_over_legacy() -> None:
 
 def test_matches_labels_matches_legacy_framework_payload() -> None:
     """A search filtered by ``framework_name`` must still match recipe rows
-    persisted on disk with the legacy ``framework`` key (search reads raw JSON
-    without normalizing through ``Recipe.from_dict``)."""
+    persisted with the legacy ``framework`` key."""
     legacy_payload = {"model": "m", "hardware": "mi300x", "framework": "sglang"}
     assert _matches_labels(legacy_payload, {"framework_name": "sglang"}) is True
     assert _matches_labels(legacy_payload, {"framework_name": "vllm"}) is False
 
 
-# canonical_id <-> path components
 def _cid(
     *,
     model: str = "deepseek-r1",
@@ -77,6 +73,10 @@ def _cid(
     )
 
 
+def _list_attempt_rows(store: LocalRecipeStore, canonical_id: str) -> list[dict[str, Any]]:
+    return _list_jsonl(store._attempts_path(canonical_id))
+
+
 def test_cid_to_path_components_roundtrip() -> None:
     cid = _cid(model="qwen3-30b-a3b", precision="bf16")
     parts = cid_to_path_components(cid)
@@ -84,7 +84,7 @@ def test_cid_to_path_components_roundtrip() -> None:
 
 
 def test_cid_to_path_components_rejects_legacy_4_segment_id() -> None:
-    """Pre-Commit-1 4-segment ids like ``inference:m:fw:hw`` must NOT be accepted (would shadow real recipes)."""
+    """4-segment ids like ``inference:m:fw:hw`` must NOT be accepted."""
     with pytest.raises(InvalidCanonicalIdError):
         cid_to_path_components("inference:m:fw:hw")
 
@@ -135,7 +135,6 @@ def test_canonical_id_for_path_rejects_unexpected_depth(tmp_path: Path) -> None:
     assert "expected" in ei.value.reason
 
 
-# put_recipe — happy path + history archival
 def test_put_recipe_first_call_creates_live_at_version_1(
     tmp_path: Path,
 ) -> None:
@@ -156,14 +155,12 @@ def test_put_recipe_first_call_creates_live_at_version_1(
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     assert live["version"] == 1
-    # Top-level arbor identity fields stamped from put_recipe args.
     assert live["model"] == "deepseek-r1"
     assert live["hardware"] == "mi300x"
-    # arbor-style payload fields at the top level.
     assert live["best_config"] == {"tp": "8"}
     assert live["best_throughput"] == 24300.5
     assert live["created_at"] == live["updated_at"]
-    # Live row sits at the documented 7-level depth.
+    # Live row sits at the 7-level depth.
     rel = (
         tmp_path
         / "deepseek-r1"
@@ -194,17 +191,10 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
         provenance={"source": "second", "generator": "ut"},
     )
     assert second == {"canonical_id": cid, "version": 2, "created": False}
-    history = store.get_history(canonical_id=cid)
-    assert len(history) == 1
-    archive = history[0]
-    assert archive["version"] == 1
-    assert archive["snapshot"]["best_throughput"] == 1000.0
-    # ``replaced_by`` carries the triggering write's provenance for audit.
-    assert archive["replaced_by"] == {
-        "source": "second",
-        "generator": "ut",
-    }
-    # Live row carries the new throughput and the bumped version.
+    archived = store.get_recipe(canonical_id=cid, version=1)
+    assert archived is not None
+    assert archived["version"] == 1
+    assert archived["best_throughput"] == 1000.0
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     assert live["version"] == 2
@@ -221,7 +211,7 @@ def test_put_recipe_preserves_created_at_across_updates(
     first_live = store.get_recipe(canonical_id=cid)
     assert first_live is not None
     created_first = first_live["created_at"]
-    # Force at least one microsecond gap so the timestamps differ.
+    # Force a gap so the timestamps differ.
     import time
 
     time.sleep(0.001)
@@ -244,7 +234,6 @@ def test_put_recipe_rejects_malformed_canonical_id(tmp_path: Path) -> None:
         store.put_recipe(canonical_id="inference:bogus")
 
 
-# get_recipe — live + ?version=N
 def test_get_recipe_returns_none_for_unknown_cid(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     assert store.get_recipe(canonical_id=_cid(model="never-seen")) is None
@@ -284,55 +273,8 @@ def test_get_recipe_with_unknown_version_returns_none(tmp_path: Path) -> None:
     assert store.get_recipe(canonical_id=cid, version=99) is None
 
 
-# get_history
-def test_get_history_excludes_live(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.put_recipe(canonical_id=cid)
-    store.put_recipe(canonical_id=cid)
-    store.put_recipe(canonical_id=cid)
-    rows = store.get_history(canonical_id=cid)
-    assert [r["version"] for r in rows] == [1, 2]
-
-
-def test_get_history_empty_for_unknown_cid(tmp_path: Path) -> None:
-    """Mirrors the server contract: ``GET /history`` returns an empty array, never 404."""
-    store = LocalRecipeStore(root=tmp_path)
-    assert store.get_history(canonical_id=_cid(model="absent")) == []
-
-
-def test_get_history_respects_limit(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    for _ in range(5):
-        store.put_recipe(canonical_id=cid)
-    rows = store.get_history(canonical_id=cid, limit=2)
-    assert len(rows) == 2
-    assert [r["version"] for r in rows] == [1, 2]
-
-
-# delete_recipe
-def test_delete_recipe_removes_live_preserves_history(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.put_recipe(canonical_id=cid, best_throughput=1000.0)
-    store.put_recipe(canonical_id=cid, best_throughput=2000.0)
-    assert store.delete_recipe(canonical_id=cid) is True
-    assert store.get_recipe(canonical_id=cid) is None
-    # History survives — caller can still recover v1.
-    history = store.get_history(canonical_id=cid)
-    assert len(history) == 1
-    assert history[0]["snapshot"]["best_throughput"] == 1000.0
-
-
-def test_delete_recipe_returns_false_for_unknown_cid(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    assert store.delete_recipe(canonical_id=_cid(model="absent")) is False
-
-
-# list_recent / search
 def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
-    """Create three recipes spanning different identity/metrics, keyed by short alias."""
+    """Create three recipes spanning different identity/metrics, keyed by alias."""
     cid_a = recipe_canonical_id(
         model="m-a",
         hardware="mi300x",
@@ -391,12 +333,12 @@ def _seed_diverse_recipes(store: LocalRecipeStore) -> dict[str, str]:
     return {"a": cid_a, "b": cid_b, "c": cid_c}
 
 
-def test_list_recent_returns_all_ordered_by_updated_desc(
+def test_search_default_order_is_updated_desc(
     tmp_path: Path,
 ) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cids = _seed_diverse_recipes(store)
-    rows = store.list_recent(limit=10)
+    rows = store.search(limit=10)
     assert [r["canonical_id"] for r in rows] == [cids["c"], cids["b"], cids["a"]]
 
 
@@ -445,7 +387,7 @@ def test_search_excludes_rows_missing_the_metric_key(tmp_path: Path) -> None:
     """A row without the metric key cannot satisfy the filter and is excluded."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid(model="no-tput")
-    # ``best_throughput`` defaults to 0.0; a high min trips the "missing key" path.
+    # ``best_throughput`` defaults to 0.0; a high min trips the missing-key path.
     store.put_recipe(canonical_id=cid, extras={"mfu": 0.5})
     rows = store.search(metric_filters={"throughput": {"min": 100}})
     assert rows == []
@@ -506,7 +448,6 @@ def test_search_limit_is_clamped_to_1_to_1000(tmp_path: Path) -> None:
     assert len(rows) == 2
 
 
-# attempts
 def test_append_attempt_creates_attempts_file(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
@@ -519,7 +460,7 @@ def test_append_attempt_creates_attempts_file(tmp_path: Path) -> None:
     )
     assert out["id"] == 1
     assert out["recipe_canonical_id"] == cid
-    rows = store.list_attempts(canonical_id=cid)
+    rows = _list_attempt_rows(store, cid)
     assert len(rows) == 1
     assert rows[0]["outcome"] == "kept"
     assert rows[0]["fitness"] == 0.83
@@ -535,7 +476,6 @@ def test_append_attempt_does_not_require_parent_recipe(tmp_path: Path) -> None:
         outcome="kept",
     )
     assert out["id"] == 1
-    # No recipe.json was created — attempts dir is independent.
     assert store.get_recipe(canonical_id=cid) is None
 
 
@@ -553,47 +493,6 @@ def test_append_attempt_id_is_monotonic_per_cid(tmp_path: Path) -> None:
     assert ids == [1, 2, 3]
 
 
-def test_list_attempts_returns_newest_first(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    for outcome in ("kept", "reverted", "failed"):
-        store.append_attempt(
-            canonical_id=cid,
-            session_id="s",
-            outcome=outcome,
-        )
-    rows = store.list_attempts(canonical_id=cid)
-    assert [r["outcome"] for r in rows] == ["failed", "reverted", "kept"]
-
-
-def test_list_attempts_respects_limit(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    for _ in range(5):
-        store.append_attempt(
-            canonical_id=cid,
-            session_id="s",
-            outcome="kept",
-        )
-    rows = store.list_attempts(canonical_id=cid, limit=2)
-    assert len(rows) == 2
-
-
-def test_list_session_attempts_aggregates_across_recipes(
-    tmp_path: Path,
-) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid_a = _cid(model="m-a")
-    cid_b = _cid(model="m-b")
-    store.append_attempt(canonical_id=cid_a, session_id="s1", outcome="kept")
-    store.append_attempt(canonical_id=cid_b, session_id="s1", outcome="reverted")
-    store.append_attempt(canonical_id=cid_a, session_id="s2", outcome="kept")
-    rows = store.list_session_attempts(session_id="s1")
-    assert len(rows) == 2
-    assert {r["recipe_canonical_id"] for r in rows} == {cid_a, cid_b}
-
-
-# Concurrency
 def test_put_recipe_concurrent_writers_keep_versions_monotonic(
     tmp_path: Path,
 ) -> None:
@@ -616,8 +515,7 @@ def test_put_recipe_concurrent_writers_keep_versions_monotonic(
     live = store.get_recipe(canonical_id=cid)
     assert live is not None
     assert live["version"] == n
-    history = store.get_history(canonical_id=cid)
-    assert [r["version"] for r in history] == list(range(1, n))
+    assert [store.get_recipe(canonical_id=cid, version=i)["version"] for i in range(1, n)] == list(range(1, n))
 
 
 def test_append_attempt_concurrent_keeps_ids_unique(tmp_path: Path) -> None:
@@ -638,7 +536,6 @@ def test_append_attempt_concurrent_keeps_ids_unique(tmp_path: Path) -> None:
     assert sorted(ids) == list(range(1, n + 1))
 
 
-# Defensive: malformed on-disk content
 def test_search_skips_directories_with_corrupt_recipe_json(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -678,53 +575,36 @@ def test_list_attempts_skips_malformed_lines(tmp_path: Path) -> None:
             )
             + "\n"
         )
-    rows = store.list_attempts(canonical_id=cid)
+    rows = _list_attempt_rows(store, cid)
     outcomes = [r["outcome"] for r in rows]
     assert "kept" in outcomes
     assert "reverted" in outcomes
 
 
 def test_walk_skips_non_5level_directories(tmp_path: Path) -> None:
-    """A stray directory at the wrong depth must NOT be picked up by list_recent."""
+    """A stray directory at the wrong depth must NOT be picked up by search."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid)
-    # Inject a recipe.json at depth 3 (intentionally wrong).
+    # Inject a recipe.json at depth 3 (wrong depth).
     stray = tmp_path / "model" / "hw" / "fw" / RECIPE_FILENAME
     stray.parent.mkdir(parents=True)
     stray.write_text(json.dumps({"canonical_id": "stray", "version": 1}))
-    rows = store.list_recent()
+    rows = store.search()
     cids_found = {r["canonical_id"] for r in rows}
     assert cid in cids_found
     assert "stray" not in cids_found
 
 
-# Maintenance
-def test_purge_recipe_removes_everything(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.put_recipe(canonical_id=cid)
-    store.put_recipe(canonical_id=cid)
-    store.append_attempt(canonical_id=cid, session_id="s", outcome="kept")
-    store.purge_recipe(canonical_id=cid)
-    assert store.get_recipe(canonical_id=cid) is None
-    assert store.get_history(canonical_id=cid) == []
-    assert store.list_attempts(canonical_id=cid) == []
-    # Tree above the cid is left intact (other cids may share prefix).
-    recipe_dir = tmp_path.joinpath(*cid_to_path_components(cid))
-    assert not recipe_dir.is_dir()
-
-
 def test_construction_does_not_create_root(tmp_path: Path) -> None:
-    """Construction is cheap: a degraded run that never touches the KB
-    must not create any directory on disk."""
+    """A run that never touches the KB must not create any directory on disk."""
     root = tmp_path / "kb-never-used"
     LocalRecipeStore(root=root)
     assert not root.exists()
 
 
 def test_str_root_accepted(tmp_path: Path) -> None:
-    """``LocalRecipeStore(root=str(...))`` still works (defensive coercion in __post_init__)."""
+    """``LocalRecipeStore(root=str(...))`` still works via coercion in __post_init__."""
     store = LocalRecipeStore(root=str(tmp_path))
     cid = _cid(model="m-x")
     store.put_recipe(canonical_id=cid)
@@ -743,8 +623,8 @@ def test_recipe_payload_carries_canonical_id_and_version(tmp_path: Path) -> None
 
 
 def test_history_dir_lives_at_six_levels_below_root(tmp_path: Path) -> None:
-    """``history/`` is the only directory that may sit below the
-    7-level recipe dir; the walker MUST NOT recurse into it."""
+    """``history/`` is the only directory that may sit below the 7-level recipe
+    dir; the walker MUST NOT recurse into it."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid)

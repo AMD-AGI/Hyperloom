@@ -2,9 +2,8 @@
 
 """Focused unit coverage for small pure-logic helpers.
 
-These modules are import-level libraries whose error / edge branches were
-previously only exercised indirectly. Each test here pins one concrete
-branch so the contract stays covered without standing up the full runtime.
+Each test pins one concrete branch so the contract stays covered without
+standing up the full runtime.
 """
 
 from __future__ import annotations
@@ -27,11 +26,11 @@ def test_gain_math_branches() -> None:
     assert gain_math.gain_pct(120.0, 0.0) is None
     assert gain_math.gain_pct(110.0, 100.0) == pytest.approx(10.0)
 
-    # gain_pct_or_zero: base <= 0 -> 0.0 (line 16).
+    # gain_pct_or_zero: base <= 0 -> 0.0.
     assert gain_math.gain_pct_or_zero(120.0, 0.0) == 0.0
     assert gain_math.gain_pct_or_zero(90.0, 100.0) == pytest.approx(-10.0)
 
-    # incremental_gain_pct: ref <= 0 -> None (line 23).
+    # incremental_gain_pct: ref <= 0 -> None.
     assert gain_math.incremental_gain_pct(120.0, 0.0) is None
     assert gain_math.incremental_gain_pct(110.0, 100.0) == pytest.approx(10.0)
 
@@ -45,6 +44,15 @@ def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
     root = kb_writeback._default_kb_root()
     assert root == tmp_path / "framework_optimization"
+
+
+def test_kb_writeback_default_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
+    from hyperloom.orchestrator.knowledge import kb_writeback
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+
+    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "kb" / "framework_optimization"
 
 
 async def test_kb_writeback_rejects_unknown_outcome() -> None:
@@ -82,26 +90,13 @@ async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
 # baseline_comparison.name_mapping                                            #
 # --------------------------------------------------------------------------- #
 def test_name_mapping_paths() -> None:
-    from hyperloom.inference_optimizer.baseline_comparison import name_mapping as nm
+    from hyperloom.inference_optimizer.baseline_comparison import target_analyzer as nm
 
     assert nm.to_inferencex_name("") is None
-    # Whitespace-only collapses to empty after strip (line 76).
+    # Whitespace-only collapses to empty after strip.
     assert nm.to_inferencex_name("   ") is None
     assert nm.to_inferencex_name("/wekafs/models/MiniMaxAI-MiniMax-M2.5") == "MiniMax-M2.5"
     assert nm.to_inferencex_name("totally-unknown-model") is None
-
-
-# --------------------------------------------------------------------------- #
-# baseline_comparison.types                                                   #
-# --------------------------------------------------------------------------- #
-def test_baseline_summary_from_dict_partial() -> None:
-    from hyperloom.inference_optimizer.baseline_comparison.types import BaselineSummary
-
-    summary = BaselineSummary.from_dict({"query": {"model": "m"}, "best": None})
-    assert summary.query.model == "m"
-    assert summary.best is None
-    # Round-trips back to a dict.
-    assert summary.to_dict()["query"]["model"] == "m"
 
 
 # --------------------------------------------------------------------------- #
@@ -113,18 +108,15 @@ def test_framework_registry_surface() -> None:
     assert "sglang" in fr.names()
     assert fr.is_supported("SGLang") is True
     assert fr.is_supported("nope") is False
-    spec = fr.get("sglang")  # lines 134-135
+    spec = fr.FRAMEWORKS["sglang"]
     assert spec.name == "sglang"
-    assert fr.kind("xdit") == fr.SCRIPTABLE
+    assert fr.FRAMEWORKS["xdit"].kind == fr.SCRIPTABLE
     assert fr.is_scriptable("xdit") is True
     assert fr.is_scriptable("sglang") is False
     assert fr.extra_args_env("vllm") == "EXTRA_VLLM_ARGS"
     assert fr.throughput_unit("xdit") == "img/s"
-    assert fr.supports_server_reuse("atom") is False
-    assert fr.repo_url("vllm")
-    assert fr.repo_url("does-not-exist") is None
     # Unknown name falls back to the default spec.
-    assert fr.kind("unknown") == fr.get(fr.DEFAULT_FRAMEWORK).kind
+    assert fr.is_scriptable("unknown") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -133,12 +125,12 @@ def test_framework_registry_surface() -> None:
 def test_quantization_join_and_prompt() -> None:
     from hyperloom.orchestrator.phases import quantization_schemes as qs
 
-    assert qs._join_clauses([]) == ""  # line 131
+    assert qs._join_clauses([]) == ""
     assert qs._join_clauses(["a"]) == "a"
     assert qs._join_clauses(["a", "b", "c"]) == "a, b and c"
 
     cfg = qs.QuantizationConfig(global_scheme="fp8")
-    # model_path without skill_path -> "Quantize ..." intro (line 232).
+    # model_path without skill_path -> "Quantize ..." intro.
     prompt = qs.build_quantization_prompt(cfg, model_path="/m", gpu_type="mi300x")
     assert "Quantize /m on an MI300X target." in prompt
     assert "Quantization strategy" in prompt
@@ -152,7 +144,7 @@ def test_tput_objective_progress_zero() -> None:
 
     obj = TargetTputObjective(target_tput_per_gpu=100.0)
     state = SimpleNamespace(current_best={}, baseline_tput=0.0)
-    assert obj.progress(state) == 0.0  # line 226
+    assert obj.progress(state) == 0.0
     assert obj.reached(state) is False
     assert obj.describe() == "target_tput_per_gpu=100.0"
 
@@ -164,7 +156,7 @@ def test_baseline_objective_progress_zero_ref(tmp_path) -> None:
     report.write_text(json.dumps({"throughput": {"output_throughput": 50.0}}), encoding="utf-8")
     obj = TargetBaselineObjective(baseline_dir=str(tmp_path))
     assert obj.kind() == "baseline"
-    # Force the degenerate ref to exercise the guard (line 339).
+    # Force the degenerate ref to exercise the guard.
     obj._ref_tput = 0.0
     state = SimpleNamespace(current_best={"tput": 10.0}, baseline_tput=0.0)
     assert obj.progress(state) == 0.0
@@ -184,7 +176,7 @@ def test_canonical_id_roundtrip_and_errors() -> None:
     from hyperloom.orchestrator.knowledge.recipe_kb import canonical_id as cid
 
     with pytest.raises(cid.InvalidCanonicalIdError):
-        cid.cid_to_path_components("")  # line 110
+        cid.cid_to_path_components("")
     with pytest.raises(cid.InvalidCanonicalIdError):
         cid.cid_to_path_components("inference:only:three")
     with pytest.raises(cid.InvalidCanonicalIdError):
@@ -200,11 +192,11 @@ def test_canonical_id_roundtrip_and_errors() -> None:
 def test_canonical_id_for_path_errors(tmp_path) -> None:
     from hyperloom.orchestrator.knowledge.recipe_kb import canonical_id as cid
 
-    # recipe_dir not under root (lines 187-188).
+    # recipe_dir not under root.
     with pytest.raises(cid.InvalidCanonicalIdError):
         cid.canonical_id_for_path(root=tmp_path / "root", recipe_dir=tmp_path / "elsewhere")
 
-    # Wrong depth under root (line 194).
+    # Wrong depth under root.
     root = tmp_path / "root"
     shallow = root / "only_one_level"
     with pytest.raises(cid.InvalidCanonicalIdError):
@@ -242,7 +234,7 @@ def test_file_lock_no_fcntl(monkeypatch, tmp_path) -> None:
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    # Falls through without exclusion (lines 19-21); body still runs.
+    # Falls through without exclusion; body still runs.
     with _file_lock.best_effort_file_lock(str(tmp_path / "lock")):
         ran = True
     assert ran
@@ -261,12 +253,12 @@ def test_file_lock_acquires(tmp_path) -> None:
 def test_framework_gap_bottleneck(tmp_path) -> None:
     from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
 
-    # top_kernels as list of strings (lines 91-92).
+    # top_kernels as list of strings.
     bp = tmp_path / "bd.json"
     bp.write_text(json.dumps({"top_kernels": ["fused_moe_gemm_kernel"]}), encoding="utf-8")
     assert gc._extract_bottleneck_from_breakdown(str(bp)) == "moe"
 
-    # No candidates -> "" (line 102).
+    # No candidates -> "".
     empty = tmp_path / "empty.json"
     empty.write_text(json.dumps({"top_kernels": []}), encoding="utf-8")
     assert gc._extract_bottleneck_from_breakdown(str(empty)) == ""
@@ -291,7 +283,7 @@ def test_gpu_specialist_capacity_coercions() -> None:
     from hyperloom.inference_optimizer.session import manifest
 
     assert manifest._gpu_specialist_capacity_from_args(argparse.Namespace(gpu_specialist_capacity=4)) == 4
-    # Non-int coerces through the except branch (lines 370-371) then detects.
+    # Non-int coerces through the except branch then detects.
     val = manifest._gpu_specialist_capacity_from_args(argparse.Namespace(gpu_specialist_capacity="nope"))
     assert isinstance(val, int) and val >= 0
 
@@ -303,17 +295,17 @@ def test_validate_envelope_structural_errors() -> None:
     from hyperloom.inference_optimizer.protocol.intent import IntentValidationError, validate_envelope
 
     with pytest.raises(IntentValidationError):
-        validate_envelope("not a dict")  # type: ignore[arg-type]  # line 194
+        validate_envelope("not a dict")  # type: ignore[arg-type]
     with pytest.raises(IntentValidationError):
-        validate_envelope({})  # missing intents -> line 196
+        validate_envelope({})  # missing intents
     with pytest.raises(IntentValidationError):
-        validate_envelope({"intents": "x"})  # line 199
+        validate_envelope({"intents": "x"})
     with pytest.raises(IntentValidationError):
-        validate_envelope({"intents": ["x"]})  # item not dict -> line 204
+        validate_envelope({"intents": ["x"]})  # item not dict
     with pytest.raises(IntentValidationError):
-        validate_envelope({"intents": [{"intent_type": "alert"}]})  # missing payload -> 206
+        validate_envelope({"intents": [{"intent_type": "alert"}]})  # missing payload
     with pytest.raises(IntentValidationError):
-        validate_envelope({"intents": [{"intent_type": "alert", "payload": "x"}]})  # 213
+        validate_envelope({"intents": [{"intent_type": "alert", "payload": "x"}]})
     with pytest.raises(IntentValidationError):
         validate_envelope({"intents": [{"intent_type": "bad_type", "payload": {}}]})
 
@@ -321,7 +313,7 @@ def test_validate_envelope_structural_errors() -> None:
 def test_validate_envelope_review_verdict_map_keys() -> None:
     from hyperloom.inference_optimizer.protocol.intent import IntentValidationError, validate_envelope
 
-    # verdict_map with a non-string key (line 263).
+    # verdict_map with a non-string key.
     bad = {
         "intents": [
             {
@@ -349,23 +341,16 @@ def test_validate_envelope_happy_path() -> None:
 def test_paths_helpers(monkeypatch, tmp_path) -> None:
     from hyperloom.inference_optimizer.session import paths
 
-    # _sanitize_model_basename empty -> "session" (line 139).
+    # _sanitize_model_basename empty -> "session".
     assert paths._sanitize_model_basename("   ") == "session"
     assert paths._sanitize_model_basename("/a/b/Model:X") == "Model_X"
 
-    # asset_root override that exists (line 267).
+    # asset_root override that exists.
     monkeypatch.setenv(paths.ENV_OVERRIDE_ASSET_ROOT, str(tmp_path))
     assert paths.asset_root() == tmp_path
-    # Derived asset dirs (lines 277, 304).
-    assert paths.asset_scripts_dir() == tmp_path / "assets"
-    assert paths.asset_kernel_opt_dir() == tmp_path / "kernel_opt"
-
-    # find_latest returns None when workspace root is not a dir (line 179).
+    # find_latest returns None when workspace root is not a dir.
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "does_not_exist"))
     assert paths.find_latest_per_session_dir() is None
-
-    sd = tmp_path / "sd"
-    assert paths.kernel_agent_root(sd) == sd / "kernel-agent"  # line 383
 
 
 def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:

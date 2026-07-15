@@ -19,17 +19,17 @@ import inferenceX_parser as ix  # noqa: E402
 
 
 def test_unmangle_msys_path():
-    mangled = r"C:/Program Files/Git/wekafs/models/x"
-    assert ix._unmangle_msys_path(mangled) == "/wekafs/models/x"
+    mangled = r"C:/Program Files/Git/mnt/shared/models/x"
+    assert ix._unmangle_msys_path(mangled) == "/mnt/shared/models/x"
 
 
 def test_unmangle_msys_path_noop():
-    assert ix._unmangle_msys_path("/wekafs/models/x") == "/wekafs/models/x"
+    assert ix._unmangle_msys_path("/mnt/shared/models/x") == "/mnt/shared/models/x"
 
 
 def test_get_nfs_root_default(monkeypatch):
     monkeypatch.delenv("NFS_ROOT", raising=False)
-    assert ix.get_nfs_root() == "/wekafs"
+    assert ix.get_nfs_root() == "/mnt/shared"
 
 
 def test_get_nfs_root_env(monkeypatch):
@@ -226,7 +226,6 @@ def test_get_latest_commit_empty(monkeypatch):
 
 def test_fetch_amd_master_yaml(monkeypatch, tmp_path: Path):
     def fake_run(cmd, **kw):
-        # cmd: ["git","clone","--depth=1","--branch=main", url, tmpdir]
         tmpdir = Path(cmd[-1])
         cfgp = tmpdir / ".github" / "configs" / "amd-master.yaml"
         cfgp.parent.mkdir(parents=True, exist_ok=True)

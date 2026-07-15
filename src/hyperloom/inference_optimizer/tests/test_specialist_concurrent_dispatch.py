@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 
-# Helpers
 async def _build_coord_with_capacity(
     tmp_path: Path,
     *,
@@ -29,12 +28,7 @@ async def _build_coord_with_capacity(
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
-    # Hermetic GPU-pool resolution: the Coordinator bakes the specialist GPU pool
-    # at construction from gpu_specialist_capacity carved by the serving TP and
-    # the visible-device masks. A stray ``TP`` / ROCR/HIP/CUDA env (e.g. an
-    # optimization shell that exported the workload) would otherwise carve the
-    # tiny test pool to empty and starve the dispatch. Clear them so these tests
-    # resolve a deterministic ``[0..capacity-1]`` pool regardless of the host env.
+    # Clear GPU-pool env so tests resolve a deterministic [0..capacity-1] pool.
     if monkeypatch is not None:
         for _var in (
             "TP",
@@ -69,7 +63,6 @@ async def _build_coord_with_capacity(
     return coord
 
 
-# Stub specialist executor: records concurrency timing
 class _ConcurrencyProbe:
     """Captures per-task entry/exit times to detect actual parallelism."""
 
@@ -128,7 +121,6 @@ def _max_concurrent(entries: list[tuple[str, float]], exits: list[tuple[str, flo
     return peak
 
 
-# Tests
 @pytest.mark.asyncio
 async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
     """capacity=4 with 4 queued specialists runs all 4 in one pump (peak concurrency 4)."""
@@ -272,13 +264,9 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
     tmp_path: Path,
     monkeypatch,
 ):
-    # WS2: the GPU lease TTL is re-sourced to the WS1 wall budget × (1 + grace)
-    # (the old ``max_turns × per_turn`` ceiling became ~1000×600 once the turn
-    # cap was lifted). The iron law is kill ≤ gpu_lease TTL ≤ gpu_research_lane
-    # TTL — neither max_turns nor per_turn drives the lease any more.
+    # GPU lease TTL is the wall budget × (1 + grace); kill ≤ lease TTL ≤ lane TTL.
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_PER_TURN_MAX_SECONDS", "10")
     coord = await _build_coord_with_capacity(
         tmp_path,
         capacity=1,
@@ -313,45 +301,33 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
 
     await coord._pump_dispatcher_once()
 
-    budget = coord._specialist_wall_budget_sec(needs_gpu=True)  # 3600 (gpu base)
+    budget = coord._specialist_wall_budget_sec(needs_gpu=True)
     expected_ttl = max(5, int(budget * (1.0 + GPU_LEASE_TTL_GRACE)))
     assert captured_ttls == [expected_ttl]
-    assert expected_ttl >= int(budget)  # kill ≤ lease TTL
+    assert expected_ttl >= int(budget)
     assert probe.gpu_ids_by_task
 
 
-# CLI surface check — the default capacity is the research-lane ceiling.
 def test_cli_default_research_lane_capacity_is_ceiling(monkeypatch):
     """The default ``--research-lane-capacity`` is the GPU-derived ceiling (2 × visible GPU)."""
     from hyperloom.inference_optimizer import cli as cli_mod
     from hyperloom.orchestrator.policy import gate as policy_mod
 
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY", raising=False)
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)
     parser = cli_mod._build_parser()
     args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
     assert args.research_lane_capacity == policy_mod.research_lane_ceiling()
     assert args.research_lane_capacity == 8
-    # WS2: GPU specialists default on at whole-machine capacity (detected GPU
-    # count), not 0. Env=0 (or --gpu-specialist-capacity 0) still disables.
+    # GPU specialists default on at whole-machine capacity; env=0 disables.
     assert args.gpu_specialist_capacity == 4
-
-
-def test_cli_research_lane_capacity_env_override(monkeypatch):
-    """An explicit env value still wins over the GPU-derived default."""
-    from hyperloom.inference_optimizer import cli as cli_mod
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESEARCH_LANE_CAPACITY", "3")
-    parser = cli_mod._build_parser()
-    args = parser.parse_args(["optimize", "--model", "/tmp/dummy"])
-    assert args.research_lane_capacity == 3
 
 
 def test_cli_clamps_research_lane_capacity_above_ceiling(tmp_path, monkeypatch):
     """An operator value above the GPU-derived ceiling is clamped down in SharedState."""
     import argparse
 
-    from hyperloom.inference_optimizer.cli import _seed_shared_state
+    from hyperloom.inference_optimizer.cli.bootstrap import _seed_shared_state
     from hyperloom.orchestrator.policy import gate as policy_mod
 
     monkeypatch.setattr(policy_mod, "detect_gpu_count", lambda: 4)

@@ -66,7 +66,6 @@ def test_replay_keeps_failed_rows(tmp_path):
     assert summary.succeeded == 1
     assert summary.failed == 1
     files = dlq.files()
-    # Surviving file should still hold one record.
     assert len(files) == 1
     survivors = [json.loads(line) for line in files[0].read_text("utf-8").splitlines() if line.strip()]
     assert len(survivors) == 1

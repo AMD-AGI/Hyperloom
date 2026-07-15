@@ -31,7 +31,7 @@ def test_roofline_and_profile_registered_in_both_modes(
     no_kernel: bool,
 ) -> None:
     """Both ``roofline`` and ``profile`` must register in every boot configuration."""
-    from hyperloom.inference_optimizer.cli import _register_executors
+    from hyperloom.inference_optimizer.cli.executors import _register_executors
 
     coord = _StubCoord()
     _register_executors(

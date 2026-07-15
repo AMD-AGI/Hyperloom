@@ -123,7 +123,6 @@ class TaskNotFound(RuntimeError):
     pass
 
 
-# ---------------------------------------------------------------------------
 class TaskRegistry:
     """State machine + persistence layer for delegated tasks.
 
@@ -441,18 +440,10 @@ class TaskRegistry:
     ) -> list[str]:
         """Fail running tasks whose lease-holder process is provably dead.
 
-        The TTL-based :meth:`reclaim_expired_running` only fires once a task's
-        ``lease_ttl_sec`` (hours, for serving lanes) elapses. When a worker
-        crashes outright (segfault / OOM-kill / aborted build / killed
-        subprocess) its lease-holder PID is gone immediately, yet the row stays
-        ``running`` — stranding its lanes and making the explore-dedup deny every
-        new delegate as a duplicate of a zombie task.
-
-        This joins ``running`` tasks to the ``leases`` table on ``task_id`` and
+        Joins ``running`` tasks to the ``leases`` table on ``task_id`` and
         transitions ``running -> failed`` for any whose recorded ``pid`` is no
         longer alive (and not the current process). Tasks with no lease row or a
-        null/non-positive pid are left untouched (cannot prove dead). Returns the
-        reclaimed task_ids. Idempotent.
+        null/non-positive pid are left untouched (cannot prove dead). Idempotent.
 
         Args:
             reason: Reason label recorded in the transition history evidence.

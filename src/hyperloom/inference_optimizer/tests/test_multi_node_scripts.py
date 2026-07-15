@@ -158,13 +158,10 @@ def test_kill_remote_sigterms_then_process_exits(tmp_path, monkeypatch):
 
 
 def test_pd_decode_dist_init_port_derives_from_prefill():
-    """PD-disaggregated decode rendezvous port = prefill port + 1, so an operator override shifts both in lock-step (regression guard for the hard-coded `_PD_DECODE_DIST_INIT_PORT`)."""
+    """PD-disaggregated decode rendezvous port = prefill port + 1, so an operator override shifts both in lock-step."""
     lm = _load_script_module("lm_test_pd_decode_port", "launch_multinode.py")
-    # Default: 29500 → 29501
     assert lm._pd_decode_dist_init_port(lm._DEFAULT_DIST_INIT_PORT) == 29501
-    # Operator override (the exact override example the source-comment cites)
     assert lm._pd_decode_dist_init_port(29501) == 29502
-    # Arbitrary value: still + 1
     assert lm._pd_decode_dist_init_port(40000) == 40001
     # Hard-coded constant must NOT come back (regression guard).
     assert not hasattr(lm, "_PD_DECODE_DIST_INIT_PORT"), (
@@ -417,7 +414,7 @@ def test_wait_health_false_on_timeout(monkeypatch):
 
 def test_find_head_pod_ip_prefers_kuberay_head_suffix():
     """SaFE may list submitter as resourceId 0; real Ray head podId contains '-head-'."""
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     wl = {
         "pods": [
@@ -433,18 +430,18 @@ def test_find_head_pod_ip_prefers_kuberay_head_suffix():
             },
         ],
     }
-    assert mn_cli._find_head_pod_ip(wl) == "10.245.131.77"
+    assert mn_rayjob._find_head_pod_ip(wl) == "10.245.131.77"
 
 
 def test_find_head_pod_ip_fallback_resource_id_zero():
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     wl = {
         "pods": [
             {"podId": "legacy-pod", "resourceId": 0, "podIP": "10.0.0.1"},
         ],
     }
-    assert mn_cli._find_head_pod_ip(wl) == "10.0.0.1"
+    assert mn_rayjob._find_head_pod_ip(wl) == "10.0.0.1"
 
 
 def test_build_rayjob_entrypoints_empty_submitter_tail():
@@ -467,8 +464,6 @@ def test_build_rayjob_entrypoints_empty_submitter_tail():
     assert dec == "tail -f /dev/null"
 
 
-# (formerly test_multi_node_env_ray.py)
-
 # Common kwargs for builder tests; keeps each test focused on the one field under test.
 _BUILDER_MIN_KWARGS = dict(
     workspace="ws-a",
@@ -483,7 +478,7 @@ _BUILDER_MIN_KWARGS = dict(
 
 
 def test_extra_env_rayjob_long_lived_passthrough():
-    # RAYJOB_LONG_LIVED is no longer stripped; user-supplied values reach body.env unchanged.
+    # User-supplied RAYJOB_LONG_LIVED reaches body.env unchanged.
     from hyperloom.inference_optimizer.multi_node._internal import workload_spec
 
     b = workload_spec.build_rayjob_workload_body(
@@ -576,9 +571,7 @@ _DYNAMO_MIN_KWARGS = dict(
 
 
 def test_dynamo_body_multinode_idle_shape():
-    # Multi-node Dynamo body: DynamoDeployment kind, [frontend, worker]
-    # resources, worker.replica == node count, multinodeRoles=["worker"],
-    # idle worker entryPoint, frontend on :8000.
+    # Multi-node Dynamo body shape: DynamoDeployment kind, frontend+worker resources.
     import base64
 
     from hyperloom.inference_optimizer.multi_node._internal import workload_spec
@@ -626,8 +619,7 @@ def test_dynamo_body_single_node_omits_multinode_and_rdma():
 
 
 def test_dynamo_body_requires_ssh_key():
-    # The idle-pod control plane is unreachable without an authorized key,
-    # so the builder fails fast rather than producing a dead deployment.
+    # Builder fails fast without an authorized key rather than producing a dead deployment.
     import pytest as _pytest
 
     from hyperloom.inference_optimizer.multi_node._internal import workload_spec
@@ -654,10 +646,8 @@ def test_dynamo_body_rejects_bad_enums():
 
 
 def test_dynamo_body_pd_independent_instances_no_multinode():
-    # PD with TP that fits one pod (tp <= gpus_per_node): prefill/decode are
-    # independent single-node instances -> NO multinodeRoles, but PD still
-    # carries rdmaResource for the cross-pod KV transfer plane.
-    # Matches the canonical PD body (replica=2, TP=8).
+    # PD with TP that fits one pod: independent single-node instances (no
+    # multinodeRoles), but PD still carries rdmaResource for cross-pod KV transfer.
     from hyperloom.inference_optimizer.multi_node._internal import workload_spec
 
     b = workload_spec.build_dynamo_workload_body(
@@ -675,15 +665,13 @@ def test_dynamo_body_pd_independent_instances_no_multinode():
     assert "multinodeRoles" not in b["dynamoOptions"]
     assert len(b["resources"]) == 3 and len(b["images"]) == 3
     assert b["resources"][1]["replica"] == 2 and b["resources"][2]["replica"] == 2
-    # PD always carries rdmaResource ("1k") for the cross-pod KV transfer
-    # plane, even when each role is single-node (TP <= gpus_per_node).
+    # PD always carries rdmaResource ("1k") for cross-pod KV transfer.
     assert b["resources"][1]["rdmaResource"] == "1k"
     assert b["resources"][2]["rdmaResource"] == "1k"
 
 
 def test_dynamo_body_pd_multinode_when_tp_exceeds_node():
-    # PD with TP that exceeds one pod's GPUs: prefill/decode span nodes (LWS)
-    # -> multinodeRoles + rdmaResource.
+    # PD with TP exceeding one pod's GPUs: prefill/decode span nodes -> multinodeRoles + rdmaResource.
     from hyperloom.inference_optimizer.multi_node._internal import workload_spec
 
     b = workload_spec.build_dynamo_workload_body(
@@ -759,7 +747,7 @@ def test_dynamo_body_vllm_backend_and_session_label():
 # dynamo_support pure-helper tests (Dynamo backend SSH fan-out).
 
 
-def test_dynamo_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
+def test_dynamo_discover_role_pods_aggregated_excludes_frontend_sorts_by_ordinal():
     from hyperloom.inference_optimizer.multi_node._internal import dynamo_support
 
     wl = {
@@ -770,7 +758,7 @@ def test_dynamo_discover_worker_pods_excludes_frontend_sorts_by_ordinal():
             {"podId": "dyn-worker-pending", "resourceId": 1, "podIP": ""},
         ]
     }
-    w = dynamo_support.discover_worker_pods(wl)
+    w = dynamo_support.discover_role_pods(wl, pd_mode="aggregated")["worker"]
     assert [p["podIP"] for p in w] == ["10.0.0.1", "10.0.0.2"]
     assert [p["lwsIndex"] for p in w] == [0, 1]
 
@@ -841,18 +829,18 @@ def test_dynamo_build_node_launch_args_sglang_and_kill_only():
 
 
 def test_resolve_geak_src_resolution_order(monkeypatch):
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import dynamo as mn_dynamo
 
     monkeypatch.delenv("HYPERLOOM_GEAK_SRC", raising=False)
     monkeypatch.delenv("HYPERLOOM_ROOT", raising=False)
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
-    assert mn_cli._resolve_geak_src("/x/geak") == "/x/geak"  # explicit wins
+    assert mn_dynamo._resolve_geak_src("/x/geak") == "/x/geak"  # explicit wins
     monkeypatch.setenv("USER_DATA_PATH", "/data")
-    assert mn_cli._resolve_geak_src(None) == "/data/runtime/geak"
+    assert mn_dynamo._resolve_geak_src(None) == "/data/runtime/geak"
     monkeypatch.setenv("HYPERLOOM_ROOT", "/r")
-    assert mn_cli._resolve_geak_src(None) == "/r/geak"
+    assert mn_dynamo._resolve_geak_src(None) == "/r/geak"
     monkeypatch.setenv("HYPERLOOM_GEAK_SRC", "/explicit/geak")
-    assert mn_cli._resolve_geak_src(None) == "/explicit/geak"
+    assert mn_dynamo._resolve_geak_src(None) == "/explicit/geak"
 
 
 def test_apply_patch_routes_to_dynamo_only_when_backend_dynamo(tmp_path, monkeypatch):
@@ -932,17 +920,6 @@ def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
     sp.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
     assert mn_cli.install_geak_on_pods_best_effort() == 0
-
-
-def test_install_kernel_tools_noop_for_rayjob(tmp_path, monkeypatch):
-    # kernel-tools install is Dynamo-only (GEAK); RayJob is a no-op.
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    sp = tmp_path / "s.json"
-    sp.write_text('{"backend":"rayjob","nodes":2,"head_pod_ip":"10.1.2.3"}', encoding="utf-8")
-    sp.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
-    assert mn_cli.install_kernel_tools_on_pods_best_effort() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1058,11 +1035,11 @@ def test_write_rayjob_meta_writes_expected_payload(tmp_path, monkeypatch):
     # Meta lands at <profile_traces>/<wid>/<session_id> with all fields populated and JSON-decodable.
     import json as _json
 
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
 
-    mn_cli._write_rayjob_meta(**_write_meta_kwargs())
+    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs())
 
     meta_path = tmp_path / "profile-traces" / "wid-abc" / "sess-1"
     assert meta_path.is_file()
@@ -1081,12 +1058,12 @@ def test_write_rayjob_meta_writes_expected_payload(tmp_path, monkeypatch):
 
 def test_write_rayjob_meta_skipped_when_session_id_missing(tmp_path, monkeypatch):
     # Empty/None session_id → the helper short-circuits and creates nothing under profile-traces/.
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
 
-    mn_cli._write_rayjob_meta(**_write_meta_kwargs(session_id=None))
-    mn_cli._write_rayjob_meta(**_write_meta_kwargs(session_id=""))
+    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs(session_id=None))
+    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs(session_id=""))
 
     profile_traces = tmp_path / "profile-traces"
     # The directory may not even exist; if it does, it must be empty.
@@ -1098,11 +1075,11 @@ def test_write_rayjob_meta_allows_null_owner_id(tmp_path, monkeypatch):
     # owner_id is optional; the meta must still serialize cleanly with owner_id=None.
     import json as _json
 
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
 
-    mn_cli._write_rayjob_meta(**_write_meta_kwargs(owner_id=None))
+    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs(owner_id=None))
 
     meta_path = tmp_path / "profile-traces" / "wid-abc" / "sess-1"
     payload = _json.loads(meta_path.read_text(encoding="utf-8"))
@@ -1111,7 +1088,7 @@ def test_write_rayjob_meta_allows_null_owner_id(tmp_path, monkeypatch):
 
 def test_write_rayjob_meta_best_effort_on_oserror(tmp_path, monkeypatch):
     # A filesystem failure must NOT propagate (meta is audit data); force Path.mkdir to raise OSError.
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.inference_optimizer.multi_node.commands import rayjob as mn_rayjob
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
 
@@ -1121,7 +1098,7 @@ def test_write_rayjob_meta_best_effort_on_oserror(tmp_path, monkeypatch):
     monkeypatch.setattr("pathlib.Path.mkdir", _boom)
 
     # If the helper re-raised, this call would fail the test.
-    mn_cli._write_rayjob_meta(**_write_meta_kwargs())
+    mn_rayjob._write_rayjob_meta(**_write_meta_kwargs())
 
     # And no file should have been created.
     meta_path = tmp_path / "profile-traces" / "wid-abc" / "sess-1"
@@ -1163,8 +1140,7 @@ def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
 
 def test_multinode_entrypoint_shlex_quotes_malicious_value():
-    """A shell-metacharacter kernel_id must be shlex-quoted into the Ray
-    Dashboard entrypoint, not spliced in as bare shell (no command injection)."""
+    """A shell-metacharacter kernel_id must be shlex-quoted into the Ray Dashboard entrypoint (no command injection)."""
     import shlex
 
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
@@ -1202,11 +1178,10 @@ def test_create_dynamo_env_omits_credentials(monkeypatch):
     """create-dynamo must NOT bake *_API_KEY / SAFE_API_KEY / *_BASE_URL into the
     new inference pod's container env; only operator --extra-env is forwarded."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-    # cmd_create_dynamo and its ssh_client/workload_spec usage live in the
-    # ``commands.dynamo`` sibling; patch it there.
+    # cmd_create_dynamo uses ssh_client/workload_spec via commands.dynamo; patch it there.
     from hyperloom.inference_optimizer.multi_node.commands import dynamo as mn_dynamo
 
-    # Credentials present in the controller env (would previously fan out).
+    # Credentials present in the controller env.
     for k in ("SAFE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_API_KEY"):
         monkeypatch.setenv(k, f"secret-{k}")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example/v1")

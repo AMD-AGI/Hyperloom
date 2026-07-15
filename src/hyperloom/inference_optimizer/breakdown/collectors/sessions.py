@@ -18,13 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom.common.timeutil import iso_z, now_iso
 
 from ._common import (
     _benchmark_report_candidates,
     _benchmark_report_metrics,
     _find_benchmark_report,
-    _iso_z,
     _latest_benchmark_report,
     _load_json_safe,
     _rel,
@@ -70,8 +69,7 @@ _ENV_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 )
 
 
-# Defense-in-depth: strip credential-shaped keys even under allowlisted
-# prefixes (case-insensitive substring match catches ``HF_API_TOKEN`` etc).
+# Strip credential-shaped keys even under allowlisted prefixes.
 _ENV_DENY_PATTERN = re.compile(
     r"(KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL|COOKIE|API_KEY)",
     re.IGNORECASE,
@@ -79,7 +77,7 @@ _ENV_DENY_PATTERN = re.compile(
 
 
 def _filter_envs(envs: dict[str, Any] | None) -> dict[str, str]:
-    """Apply the allowlist + secret denylist; returns a fresh ``dict[str, str]`` (values stringified).
+    """Apply the allowlist + secret denylist; returns a fresh ``dict[str, str]`` with stringified values.
 
     Args:
         envs (dict[str, Any] | None): Raw environment mapping to filter, or
@@ -161,7 +159,7 @@ _SERVER_LOG_MAX_BYTES = 256 * 1024
 
 
 def _strip_log_prefix(line: str) -> str:
-    """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix (incl. the process tag) from a log line.
+    """Strip a leading ``[ts] LEVEL [src.py:NN]`` style prefix from a log line.
 
     Args:
         line (str): A single raw log line.
@@ -208,15 +206,11 @@ def _load_yaml_dict_safe(config_yaml: Path) -> dict | None:
         config_yaml (Path): The YAML file to parse.
 
     Returns:
-        dict | None: The decoded top-level mapping, or ``None`` when PyYAML is
-        unavailable, the file fails to read/parse, or the document is not a
-        dict.
+        dict | None: The decoded top-level mapping, or ``None`` when the file
+        fails to read/parse, or the document is not a dict.
     """
-    try:
-        import yaml  # type: ignore[import-not-found]
-    except ImportError:
-        log.debug("PyYAML unavailable; skipping yaml framework_args fallback")
-        return None
+    import yaml
+
     try:
         text = config_yaml.read_text(encoding="utf-8", errors="replace")
         data = yaml.safe_load(text)
@@ -329,7 +323,7 @@ def _extract_framework_args(
     lines = chunk.splitlines() if chunk else []
 
     # Pass 0: ``non-default args: {...}`` echo, parsed via ast.literal_eval;
-    # a failed eval is treated as a miss (anti-hallucination invariant).
+    # a failed eval is treated as a miss.
     for line in lines:
         m = _FRAMEWORK_ARGS_NON_DEFAULT_RE.search(line)
         if not m:
@@ -399,7 +393,7 @@ def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
 
     Returns:
         dict[str, str]: The allowlisted, secret-stripped env subset. Empty when
-        the path is missing, PyYAML is unavailable, or parsing fails.
+        the path is missing or parsing fails.
     """
     if config_path is None:
         return {}
@@ -408,11 +402,8 @@ def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
             return {}
     except OSError:
         return {}
-    try:
-        import yaml
-    except ImportError:
-        log.debug("PyYAML unavailable; skipping invocation env extraction")
-        return {}
+    import yaml
+
     try:
         text = config_path.read_text(encoding="utf-8", errors="replace")
         data = yaml.safe_load(text)
@@ -431,12 +422,9 @@ def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
 def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
     """Resolve the container image for ``collect_session``.
 
-    Prefers the manifest field (written once at session start, captures
-    the spawn-time image even if the env later changes). Falls back to
-    the same env / mount-point chain the manifest helper uses, so V1
-    manifests (no ``image`` field) still surface a value when one of
-    the envs is set. Mirrors :func:`manifest._detect_image` but kept as
-    a separate function to avoid an import cycle.
+    Prefers the manifest field (the spawn-time image), then falls back to the
+    env / mount-point chain the manifest helper uses. Kept separate from
+    :func:`manifest._detect_image` to avoid an import cycle.
 
     Resolution order: manifest ``image`` field → ``HYPERLOOM_IMAGE`` /
     ``CONTAINER_IMAGE`` / ``IMAGE`` env vars → known image marker files →
@@ -475,10 +463,7 @@ def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
                 if m:
                     return f"unknown@{m.group(1)[:12]}"
     except OSError as exc:
-        # /proc/1/cgroup may be unreadable in restricted sandboxes,
-        # non-Linux hosts, or stripped-down containers. Best-effort
-        # source — fall through to None so consumers see an honest
-        # "image not detected" rather than a fabricated value.
+        # /proc/1/cgroup may be unreadable; fall through to None.
         log.debug("cgroup-based image detection failed: %r", exc)
     return None
 
@@ -530,14 +515,10 @@ def _should_use_close_stop_reason(stop_reason: str, close_stop_reason: str) -> b
 def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     """Project SharedState's crash / interruption / resume signals.
 
-    SharedState already tracks whether a run crashed, was continued by the
-    steward, entered degraded mode, or has an accepted stack awaiting
-    post-resume revalidation — but none of it reaches the breakdown, so a
-    resumed run reads as if it proceeded monotonically. This folds those
-    signals into the ``session.recovery`` block so a reader can see the run
-    was interrupted and continued (the context behind gaps like an empty
-    ``geak_result`` lost to a kill before the tick-boundary save). Pure /
-    best-effort: unparseable fields are skipped, never raised.
+    Folds crash / steward-continuation / degraded-mode / pending-revalidation
+    signals into the ``session.recovery`` block so a resumed run is not read as
+    a clean monotonic one. Pure / best-effort: unparseable fields are skipped,
+    never raised.
 
     Args:
         state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
@@ -560,7 +541,7 @@ def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     last_exc: dict[str, Any] | None = None
     lte = state.get("last_tick_exception")
     if isinstance(lte, dict) and lte:
-        # Drop the (large) traceback; keep the compact postmortem header.
+        # Drop the large traceback; keep the compact postmortem header.
         last_exc = {
             "tick": lte.get("tick"),
             "ts": lte.get("ts"),
@@ -635,14 +616,13 @@ def collect_session(
         stop_reason = close_stop_reason
     ended_at_utc = ""
     if stop_reason:
-        ended_at_utc = _iso_z(close_ts) if close_ts else now_iso(timespec="seconds")
+        ended_at_utc = iso_z(close_ts) if close_ts else now_iso(timespec="seconds")
     elapsed_min: float | None = None
     if start_ts:
         try:
             start = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
             elapsed_min = (datetime.now(timezone.utc) - start).total_seconds() / 60.0
         except (ValueError, TypeError):
-            # Malformed timestamp; skip elapsed-time computation.
             pass
     image = _detect_image_for_session(manifest)
     if image is None:
@@ -661,9 +641,8 @@ def collect_session(
         "code_revision": str(manifest.get("code_revision") or ""),
         "pid": int(manifest.get("pid") or 0),
         "session_dir": str(session_dir),
-        # USER_DATA_PATH root (the operator-chosen workspace base; session_dir
-        # nests under it in per_model_ts layout). Snapshotted in the manifest at
-        # session start; env is the in-process fallback for older manifests.
+        # USER_DATA_PATH root (the operator-chosen workspace base). Manifest is
+        # snapshotted at session start; env is the in-process fallback.
         "user_data_path": str(
             manifest.get("user_data_path")
             or state.get("user_data_path")
@@ -671,8 +650,7 @@ def collect_session(
             or ""
         ),
         "tick_count": int(state.get("tick") or 0),
-        # Crash / interruption / resume history so a resumed run is not read as
-        # a clean monotonic one (context behind e.g. an empty geak_result).
+        # Crash / interruption / resume history.
         "recovery": _collect_recovery(state),
     }
 
@@ -685,12 +663,8 @@ def collect_session_meta(
 ) -> dict[str, Any]:
     """Collect the ``session_meta`` enrichment block.
 
-    Historically this block was injected post-export by ``ci/optimize_submit.py``
-    (``_backfill_ci_metrics_file``), so any session that never went through that
-    CI path landed in pulse without a ``session_meta``. The exporter now always
-    emits it straight from the manifest + resolved ``session`` section, so the
-    block no longer depends on CI; the CI step degrades to a gap-filler for the
-    fields the sandbox could not know (e.g. ``category``).
+    Emitted straight from the manifest + resolved ``session`` section; the CI
+    step only gap-fills fields the sandbox could not know (e.g. ``category``).
 
     Args:
         manifest (dict[str, Any]): Parsed ``manifest.json``.
@@ -699,9 +673,7 @@ def collect_session_meta(
 
     Returns:
         dict[str, Any]: ``{code_revision, image, image_id,
-        session_duration_seconds}``. Mirrors the field contract the CI backfill
-        used so downstream readers (pulse ``sbd_store`` / ``normalize``) resolve
-        the same values whether they came from the exporter or CI.
+        session_duration_seconds}``.
     """
     image = session_section.get("image")
     image_str = image if isinstance(image, str) and image.strip() else ""
@@ -814,7 +786,7 @@ def collect_baseline(
     """
     last_b = state.get("last_baseline") or {}
     workspace_str = last_b.get("workspace") or ""
-    # Re-root container-style paths under the on-disk session_dir (see ``_resolve_under_session``).
+    # Re-root container-style paths under the on-disk session_dir.
     workspace = _resolve_under_session(session_dir, workspace_str)
     if workspace_str and workspace is None:
         warnings.append(
@@ -826,8 +798,8 @@ def collect_baseline(
 
     _, ttft, _tpot, e2el = _benchmark_report_metrics(report if isinstance(report, dict) else None)
 
-    # Symmetric to A2: when the state workspace doesn't resolve, fall back to
-    # the most recent ``runs/baseline/<hash>/.../benchmark_report.json`` on disk.
+    # When the state workspace doesn't resolve, fall back to the most recent
+    # ``runs/baseline/<hash>/.../benchmark_report.json`` on disk.
     ttft_source: str | None = "state_workspace" if ttft is not None else None
     if ttft is None:
         baseline_root = session_dir / "runs" / "baseline"
@@ -946,10 +918,7 @@ def collect_baseline(
 
     return {
         "throughput_tok_s_per_gpu": _to_float(state.get("baseline_tput")) or 0.0,
-        # Throughput unit is framework-dependent: serving frameworks report
-        # tok/s, scriptable xDiT diffusion reports img/s. The numeric field name
-        # is kept for backwards compatibility; this records the true unit so the
-        # value is not silently read as tokens/s.
+        # Framework-dependent unit (serving = tok/s, scriptable xDiT = img/s).
         "throughput_unit": framework_registry.throughput_unit(state.get("framework")),
         "accuracy": _to_float(state.get("baseline_accuracy")) or 0.0,
         "ttft_mean_ms": ttft,
@@ -959,12 +928,10 @@ def collect_baseline(
         "benchmark_report_path": _rel(report_path, session_dir) if report_path else None,
         "attempts_history": history,
         "failure_streak": int(state.get("baseline_failure_streak") or 0),
-        # Combined backstop: ALL baseline failures regardless of error_class;
-        # surfaces the fast-fail trigger that per-class streaks alone can hide.
+        # ALL baseline failures regardless of error_class.
         "total_failures": int(state.get("baseline_total_failures") or 0),
         "invocation": invocation,
-        # Standalone baseline-arm roofline ceiling backup (state.json#baseline_roofline_ceiling);
-        # frontend ceiling fallback when the roofline step failed. {} when absent.
+        # Baseline-arm roofline ceiling backup; frontend fallback. {} when absent.
         "roofline_ceiling": state.get("baseline_roofline_ceiling") or {},
     }
 
@@ -1086,12 +1053,10 @@ def collect_final(
     e2el = _to_float(cb.get("e2el_mean_ms"))
     ttft_e2el_source = "current_best" if (ttft is not None or e2el is not None) else "unavailable"
 
-    # Disk-walk reconstruction when ``current_best.ttft_mean_ms`` is unset:
-    # validate_stack first (authoritative), then current_best, then stack top.
+    # Disk-walk reconstruction when a latency metric is unset: validate_stack
+    # first (authoritative), then current_best, then stack top. Gate on EITHER
+    # metric so xDiT diffusion (ttft meaningless, e2el meaningful) is covered.
     reconstructed_report: Path | None = None
-    # Reconstruct from disk when EITHER latency metric is missing. For scriptable
-    # xDiT diffusion ttft is a meaningless 0.0/None and e2el is the meaningful
-    # signal, so gating only on ttft dropped e2el from the final section.
     if ttft is None or e2el is None:
         reconstructed_report = _find_latest_validate_stack_report(session_dir)
         if reconstructed_report is not None:
@@ -1128,25 +1093,19 @@ def collect_final(
 
     return {
         "throughput_tok_s_per_gpu": _to_float(cb.get("tput")),
-        # See collect_baseline: records the true throughput unit (tok/s vs img/s
-        # for scriptable xDiT) alongside the compat-named numeric field.
+        # True throughput unit (tok/s vs img/s for scriptable xDiT).
         "throughput_unit": framework_registry.throughput_unit(state.get("framework")),
-        # Which field holds the primary result: e2el_mean_ms (scriptable/xDiT)
-        # vs throughput_tok_s_per_gpu (serving). Lets consumers pick per model.
+        # Which field holds the primary result (e2el_mean_ms vs throughput).
         "primary_metric": framework_registry.primary_metric_name(state.get("framework")),
         "cumulative_gain_pct_validated": _to_float(state.get("cumulative_gain_validated")) or 0.0,
         "cumulative_gain_pct_per_round_sum": _to_float(state.get("cumulative_gain")) or 0.0,
-        # Provenance/basis of the recorded gain so the renderer can tell a
-        # same-harness-validated number from a cross-harness PROVISIONAL one
-        # (e.g. a geak e2e win pending its same-harness rebench). Empty on
-        # native/legacy sessions (renders as validated, unchanged).
+        # Provenance/basis of the recorded gain (same-harness validated vs
+        # cross-harness PROVISIONAL). Empty on native/legacy sessions.
         "cumulative_gain_provenance": str(state.get("cumulative_gain_provenance") or ""),
         "revalidation_pending": bool(state.get("resume_pending_revalidation") or False),
-        # A GEAK(GEAK) e2e candidate whose self-reported win has NOT yet
-        # been confirmed by a main-flow rebench. Present => the renderer surfaces
-        # it as an audit-only note and EXCLUDES it from the headline gain (the
-        # candidate is intentionally absent from current_best / action_path until
-        # a measured rebench validates it). Empty on native/validated sessions.
+        # A GEAK e2e candidate whose self-reported win is not yet confirmed by a
+        # main-flow rebench; surfaced as an audit-only note and EXCLUDED from the
+        # headline gain. Empty on native/validated sessions.
         "geak_pending": (
             dict(state.get("geak_pending") or {})
             if isinstance(state.get("geak_pending"), dict)

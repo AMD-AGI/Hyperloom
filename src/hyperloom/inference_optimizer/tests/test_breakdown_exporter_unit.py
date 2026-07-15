@@ -12,37 +12,37 @@ import pytest
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 
 
-# ---- _load_state / _load_manifest ----
+# ---- _load_session_json ----
 
 
 def test_load_state_missing(tmp_path):
     warnings = []
-    assert ex._load_state(tmp_path, warnings) == {}
+    assert ex._load_session_json(tmp_path / "state.json", "state.json", warnings) == {}
     assert any("state.json missing" in w for w in warnings)
 
 
 def test_load_state_valid(tmp_path):
     (tmp_path / "state.json").write_text('{"session_id": "s"}', encoding="utf-8")
-    assert ex._load_state(tmp_path, [])["session_id"] == "s"
+    assert ex._load_session_json(tmp_path / "state.json", "state.json", [])["session_id"] == "s"
 
 
 def test_load_state_parse_error(tmp_path):
     (tmp_path / "state.json").write_text("{bad", encoding="utf-8")
     warnings = []
-    assert ex._load_state(tmp_path, warnings) == {}
+    assert ex._load_session_json(tmp_path / "state.json", "state.json", warnings) == {}
     assert any("failed to parse state.json" in w for w in warnings)
 
 
 def test_load_manifest_missing(tmp_path):
     warnings = []
-    assert ex._load_manifest(tmp_path, warnings) == {}
+    assert ex._load_session_json(tmp_path / "manifest.json", "manifest.json", warnings) == {}
     assert any("manifest.json missing" in w for w in warnings)
 
 
 def test_load_manifest_parse_error(tmp_path):
     (tmp_path / "manifest.json").write_text("{bad", encoding="utf-8")
     warnings = []
-    assert ex._load_manifest(tmp_path, warnings) == {}
+    assert ex._load_session_json(tmp_path / "manifest.json", "manifest.json", warnings) == {}
     assert any("failed to parse manifest.json" in w for w in warnings)
 
 
@@ -91,14 +91,16 @@ def test_build_empty_session(tmp_path):
     assert out["exporter_version"] == ex.EXPORTER_VERSION
     assert "warnings" in out
     assert "session" in out
-    # Missing state/manifest produce warnings.
     assert any("missing" in w for w in out["warnings"])
 
 
-def test_build_include_transcripts_via_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS", "1")
-    out = ex.build(tmp_path)
-    assert out["schema_version"] is not None
+def test_build_include_transcripts_process_default(tmp_path):
+    ex.set_default_include_transcripts(True)
+    try:
+        out = ex.build(tmp_path)
+        assert out["schema_version"] is not None
+    finally:
+        ex.set_default_include_transcripts(False)
 
 
 # ---- write_breakdown_json ----
@@ -123,7 +125,6 @@ def test_write_breakdown_json_custom_output(tmp_path):
 
 
 def test_patch_breakdown_langfuse_no_breakdown(tmp_path):
-    # No receipt and no breakdown file -> False.
     assert ex.patch_breakdown_langfuse(tmp_path) is False
 
 
@@ -146,7 +147,6 @@ def test_write_minimal_final_report_idempotent(tmp_path):
 
 
 def test_write_minimal_final_report_with_attempts(tmp_path):
-    # Populate SharedState so the last_* attempt + sweep branches render.
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(tmp_path)
@@ -168,19 +168,16 @@ def test_write_minimal_final_json_creates(tmp_path):
     assert target.name == "final.json"
     assert target.is_file()
     data = json.loads(target.read_text(encoding="utf-8"))
-    # Crash-safe fallback marker so consumers can tell this apart from the
-    # full ReportExecutor output.
+    # Crash-safe fallback marker distinguishing this from full ReportExecutor output.
     assert data["safety_net"] is True
     assert data["report_complete"] is False
-    # Headline fields the downstream stats pipeline keys off must be present
-    # (even when null on an empty session).
+    # Headline fields the downstream stats pipeline keys off must be present.
     for key in ("session_id", "model_name", "stop_reason", "baseline_tput"):
         assert key in data
 
 
 def test_write_minimal_final_json_idempotent(tmp_path):
-    # A pre-existing (e.g. full ReportExecutor) final.json must never be
-    # clobbered by the minimal fallback.
+    # A pre-existing final.json must never be clobbered by the minimal fallback.
     reports = tmp_path / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     (reports / "final.json").write_text('{"full_report": true}', encoding="utf-8")
@@ -189,8 +186,8 @@ def test_write_minimal_final_json_idempotent(tmp_path):
 
 
 def test_write_minimal_final_json_refreshes_stale_fallback(tmp_path):
-    # A prior crash-safe fallback (safety_net=true) is stale after --resume and
-    # must be overwritten with the current state, NOT preserved.
+    # A prior crash-safe fallback is stale after --resume and must be
+    # overwritten with the current state, NOT preserved.
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     reports = tmp_path / "reports"
@@ -212,15 +209,14 @@ def test_write_minimal_final_json_refreshes_stale_fallback(tmp_path):
 
 
 def test_write_minimal_final_json_recovers_corrupt(tmp_path):
-    # A non-empty but invalid final.json (e.g. a full-report write killed
-    # mid-flush) must be backed up and replaced with a consumable fallback,
-    # not left in place as garbled JSON downstream can't read.
+    # A non-empty but invalid final.json must be backed up and replaced with a
+    # consumable fallback, not left as garbled JSON downstream can't read.
     reports = tmp_path / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     (reports / "final.json").write_text('{"baseline_tput": 35.83, "trunc', encoding="utf-8")
 
     target = ex.write_minimal_final_json(tmp_path)
-    data = json.loads(target.read_text(encoding="utf-8"))  # must now parse
+    data = json.loads(target.read_text(encoding="utf-8"))
     assert data["safety_net"] is True
     # Original (corrupt) bytes preserved for forensics.
     corrupt = reports / "final.json.corrupt"
@@ -251,7 +247,6 @@ def test_write_minimal_final_json_fields(tmp_path):
 def test_patch_breakdown_langfuse_success(tmp_path):
     from hyperloom.orchestrator.trace.langfuse_emitter import _receipt_path
 
-    # Write a breakdown first, then a post-flush receipt to splice in.
     ex.write_breakdown_json(tmp_path)
     receipt_path = _receipt_path(tmp_path)
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,5 +255,4 @@ def test_patch_breakdown_langfuse_success(tmp_path):
     assert ex.patch_breakdown_langfuse(tmp_path) is True
     bd = json.loads((tmp_path / ex.BREAKDOWN_FILENAME).read_text())
     assert bd["langfuse"]["enabled"] is True
-    # Second call is a no-op (already current).
     assert ex.patch_breakdown_langfuse(tmp_path) is False

@@ -33,7 +33,7 @@ DEFAULT_EVENTS_KEEP_RECENT: int = 5000
 DEFAULT_TASKS_KEEP_DONE: int = 2000
 
 # Only these task states are safe to prune: truly done, never retried, and not
-# pending manual attention. (``failed`` can transition back to ``running``.)
+# pending manual attention.
 _PRUNABLE_TASK_STATES: tuple[str, ...] = ("succeeded", "cancelled")
 
 
@@ -71,18 +71,12 @@ async def _min_processed_seq(cursors: CursorStore) -> int | None:
     return min(int(s.last_processed_seq) for s in states.values())
 
 
-# A ``proposal`` event is *semantically pending* until a ``review_verdict``
-# targets its ``msg_id``. ``Coordinator.replay_for_resume`` reconstructs pending
-# proposals by exactly this join — a proposal is decided iff some verdict has a
-# non-empty ``target_proposal_msg_id`` equal to it (empty / missing targets are
-# skipped). Pruning a pending proposal's row would lose the only durable record,
-# so a late critic verdict arriving after resume would dangle. This
-# helper is the single SQL source of truth for that set; keep it in lockstep
-# with ``replay_for_resume`` (a cross-check test guards against drift).
-#
-# NOTE on the ``NOT IN`` NULL trap: the inner SELECT must exclude NULL/empty
-# targets, else ``msg_id NOT IN (.., NULL)`` evaluates to NULL (never TRUE) and
-# every proposal would (wrongly) look decided.
+# A ``proposal`` event is semantically pending until a ``review_verdict`` targets
+# its ``msg_id``; pruning a pending proposal's row would lose the only durable
+# record a post-resume late verdict can attach to. Single SQL source of truth for
+# that set; keep in lockstep with ``replay_for_resume``.
+# The inner SELECT must exclude NULL/empty targets, else ``msg_id NOT IN (..,
+# NULL)`` evaluates to NULL and every proposal would wrongly look decided.
 _PENDING_PROPOSAL_SEQS_SQL = """
     SELECT seq FROM events
     WHERE topic = 'proposal'
@@ -94,22 +88,6 @@ _PENDING_PROPOSAL_SEQS_SQL = """
           AND json_extract(payload, '$.target_proposal_msg_id') != ''
       )
 """
-
-
-async def pending_proposal_seqs(db: SqliteConnection) -> set[int]:
-    """Return seqs of ``proposal`` events with no matching ``review_verdict``.
-
-    These rows are protected from pruning (see :data:`_PENDING_PROPOSAL_SEQS_SQL`
-    and ``Coordinator.replay_for_resume``).
-    """
-    rows = await db.fetchall(_PENDING_PROPOSAL_SEQS_SQL)
-    out: set[int] = set()
-    for r in rows or []:
-        try:
-            out.add(int(r["seq"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return out
 
 
 async def prune_events(
@@ -142,10 +120,8 @@ async def prune_events(
     delete_below = min(min_cursor, max_seq - max(0, int(keep_recent)))
     if delete_below <= 0:
         return 0
-    # Content guard: never prune a ``proposal`` row that is still
-    # semantically pending (no ``review_verdict`` targets it yet), even if every
-    # cursor advanced past it — its row is the only durable record a post-resume
-    # late verdict can attach to. The anti-join mirrors ``replay_for_resume``.
+    # Never prune a ``proposal`` row still semantically pending; the anti-join
+    # mirrors ``replay_for_resume``.
     async with db.transaction() as cur:
         cur.execute(
             f"""

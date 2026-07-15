@@ -3,24 +3,18 @@
 
 """ci/optimize_submit.py — Hyperloom CI variant of SaFE optimize_submit.
 
-Submits SaFE inference optimization tasks. Reuses the same SaFE bearer token
-as the rest of Hyperloom CI (CLAW_API_KEY).
+Submits SaFE inference optimization tasks, reusing the SaFE bearer token
+(CLAW_API_KEY).
 
-Tracks the SaFE script's API contract (Primus-SaFE/scripts/optimize_submit.py
-as of 2026-05-06):
+SaFE API contract:
   POST /api/v1/playground/models   body = {source, workspace, target.volume}
   GET  /api/v1/playground/models/{id}
   POST /api/v1/optimization/tasks  body = {modelId, mode=local, framework, ...}
 
 Notes on tools / mode:
-  - SaFE backend hard-codes Claw Tools=[16,18] for optimization tasks
-    (apiserver/.../optimization/handler.go), so the client never sends a
-    tools field. This is independent of the [67] used by Hyperloom's existing
-    Claw-direct CI (ci-config.yaml) — different code path.
-  - mode=local (default): prompt tells the agent "SandboxImage: ..." and the
-    agent runs benchmarks directly in the sandbox.
-  - mode=claw: prompt warns the agent it cannot reach /shared_nfs directly
-    and must go through Claw (RayJob fan-out).
+  - SaFE backend hard-codes Claw Tools=[16,18], so the client never sends tools.
+  - mode=local (default): the agent runs benchmarks directly in the sandbox.
+  - mode=claw: the agent goes through Claw (RayJob fan-out).
 
 Usage:
   # Auto mode — single model
@@ -37,15 +31,13 @@ Usage:
 
 Env vars (all optional, CLI flags take precedence):
   CLAW_API_KEY | SAFE_API_KEY        bearer token (ak-xxx)
-  SAFE_BASE_URL | SAFE_API_URL       base URL (default: https://core42.primus-safe.amd.com)
+  SAFE_BASE_URL | SAFE_API_URL       base URL for a compatible SaFE deployment
   HF_TOKEN                           HuggingFace token (gated models)
-  SAFE_OPTIMIZE_WORKSPACE            override default 'core42-hyperloom'
-  SAFE_OPTIMIZE_VOLUME               override default '/wekafs'
+  SAFE_OPTIMIZE_WORKSPACE            shorthand for register + submit workspace
+  SAFE_OPTIMIZE_VOLUME               shared storage volume mounted by the backend
 
-Implementation note:
-  This file is intentionally kept as the stable CLI/import facade. The
-  implementation lives under ci/optimize_submit_lib/ so individual modules stay
-  reviewable while workflows keep running python3 optimize_submit.py.
+This file is the stable CLI/import facade; the implementation lives under
+ci/optimize_submit_lib/.
 """
 
 from __future__ import annotations
@@ -58,8 +50,7 @@ import sys
 import time
 from pathlib import Path
 
-# Keep local sibling imports (model_compat, optimize_submit_lib) available when
-# the script is executed directly from ci/ or imported by tests.
+# Keep local sibling imports available when run from ci/ or imported by tests.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from optimize_submit_lib import artifacts as _artifacts
@@ -220,8 +211,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--submit-workspaces",
         default="",
         help="Comma-separated list of submit workspaces for "
-        "round-robin task distribution (e.g. "
-        "'core42-sandbox,core42-hyperloom'). When set, "
+        "round-robin task distribution. When set, "
         "overrides --submit-workspace and spreads the "
         "batch evenly across the listed workspaces. "
         "Each must independently accept the same model "
@@ -244,8 +234,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help=f"GPU type tag for the prompt (defaults to "
         f"$SAFE_OPTIMIZE_GPU_TYPE then '{DEFAULT_GPU_TYPE}'). "
-        f"Known profiles: {', '.join(GPU_PROFILES)}. "
-        f"SaFE backend default is MI355X — must override on core42.",
+        f"Known profiles: {', '.join(GPU_PROFILES)}.",
     )
     parser.add_argument(
         "--inferencex-path",
@@ -324,17 +313,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Secondary HuggingFace token to alternate with on 429 (or set $HF_TOKEN_2)",
     )
 
-    # Production-pool audit metadata: copied into submission_manifest.json (does
-    # not affect submission) to trace which pool entry a task reran.
+    # Production-pool audit metadata: copied into submission_manifest.json.
     parser.add_argument("--pool-id", default=os.environ.get("HYPERLOOM_POOL_ID", ""))
     parser.add_argument("--pool-index", default=os.environ.get("HYPERLOOM_POOL_INDEX", ""))
     parser.add_argument("--pool-batch-index", default=os.environ.get("HYPERLOOM_POOL_BATCH_INDEX", ""))
     parser.add_argument("--pool-batch-size", default=os.environ.get("HYPERLOOM_POOL_BATCH_SIZE", ""))
     parser.add_argument("--pool-source-task-id", default=os.environ.get("HYPERLOOM_POOL_SOURCE_TASK_ID", ""))
-    # HF download count for this model (carried from the candidates pool via the
-    # matrix). When it parses as an int < 100, the submit pins the orchestration
-    # model to claude-opus-4-6 via session env (CLAUDE_MODEL). Missing / non-int
-    # leaves the model unset (no-op).
+    # HF download count for this model. When it parses as an int < 100, the
+    # submit pins the orchestration model to claude-opus-4-6 via CLAUDE_MODEL.
     parser.add_argument("--downloads", default=os.environ.get("HYPERLOOM_DOWNLOADS", ""))
 
     parser.add_argument(
@@ -441,8 +427,7 @@ def main() -> int:
 
     base_url = args.api_url or os.environ.get("SAFE_BASE_URL") or os.environ.get("SAFE_API_URL") or DEFAULT_API_URL
     api_key = args.api_key or os.environ.get("CLAW_API_KEY") or os.environ.get("SAFE_API_KEY") or ""
-    # --workspace shorthand sets both to the same value (back-compat); explicit
-    # --register-workspace / --submit-workspace override it.
+    # --workspace shorthand sets both; explicit register/submit flags override.
     shared_ws = args.workspace or os.environ.get("SAFE_OPTIMIZE_WORKSPACE") or ""
     register_workspace = (
         args.register_workspace
@@ -456,16 +441,15 @@ def main() -> int:
         or shared_ws
         or DEFAULT_SUBMIT_WORKSPACE
     )
-    # Round-robin pool: --submit-workspaces overrides single submit_workspace;
-    # empty -> single-workspace mode.
+    # Round-robin pool: --submit-workspaces overrides single submit_workspace.
     submit_workspaces_raw = args.submit_workspaces or os.environ.get("SAFE_OPTIMIZE_SUBMIT_WORKSPACES") or ""
     submit_workspaces_pool = [w.strip() for w in submit_workspaces_raw.split(",") if w and w.strip()]
     volume = args.volume or os.environ.get("SAFE_OPTIMIZE_VOLUME") or DEFAULT_VOLUME
     gpu_type_input = args.gpu_type or os.environ.get("SAFE_OPTIMIZE_GPU_TYPE") or DEFAULT_GPU_TYPE
     gpu_type = canonical_gpu_type(gpu_type_input)
     gpu_profile = normalize_gpu_profile(gpu_type, warn=False) or DEFAULT_GPU_PROFILE
-    # Unset by default (install.sh clones a writable per-session copy); only an
-    # explicit path pins one. Empty -> inferencexPath="" suppresses SaFE's default.
+    # Unset by default (install.sh clones a per-session copy); empty suppresses
+    # SaFE's default inferencexPath.
     inferencex_path = args.inferencex_path or os.environ.get("SAFE_OPTIMIZE_INFERENCEX_PATH") or ""
     oob_path = args.oob_path or os.environ.get("SAFE_OPTIMIZE_OOB_PATH") or ""
     tracelens_root = args.tracelens_root or os.environ.get("SAFE_OPTIMIZE_TRACELENS_ROOT", "")
@@ -475,9 +459,21 @@ def main() -> int:
         log.error("%s", e)
         return 2
 
-    if not api_key and not args.dry_run:
-        log.error("no API key set (CLAW_API_KEY / SAFE_API_KEY / --api-key)")
-        return 2
+    if not args.dry_run:
+        missing_live_settings = []
+        if not base_url:
+            missing_live_settings.append("SAFE_BASE_URL / SAFE_API_URL / --api-url")
+        if not api_key:
+            missing_live_settings.append("CLAW_API_KEY / SAFE_API_KEY / --api-key")
+        if not register_workspace:
+            missing_live_settings.append("SAFE_OPTIMIZE_REGISTER_WORKSPACE / --register-workspace")
+        if not submit_workspace and not submit_workspaces_pool:
+            missing_live_settings.append("SAFE_OPTIMIZE_SUBMIT_WORKSPACE / --submit-workspace")
+        if not volume:
+            missing_live_settings.append("SAFE_OPTIMIZE_VOLUME / --volume")
+        if missing_live_settings:
+            log.error("live submit requires explicit configuration: %s", ", ".join(missing_live_settings))
+            return 2
 
     log.info(
         "SaFE base_url=%s register_workspace=%s submit_workspace=%s volume=%s",
@@ -556,15 +552,12 @@ def main() -> int:
         "source_task_id": args.pool_source_task_id,
     }
 
-    # ── Multi-node resolution ──────────────────────────────────────────────
-    # --nodes>1 spans an N-node RayJob. The SaFE task body has no node count, so
-    # force mode=claw and append the RayJob topology to the prompt suffix
-    # (mirrors the Claw-direct CI). --nodes is global but effectively per-model.
+    # Multi-node: --nodes>1 spans an N-node RayJob (force mode=claw, append
+    # RayJob topology to the prompt suffix).
     effective_mode = args.mode
     effective_prompt_suffix = args.prompt_suffix or None
     _nodes = args.nodes or 1
-    # tp must fit nodes*8 GPUs (enforced for single-node too) so a stray --tp 16
-    # is rejected at submit time, not at runtime on an 8-GPU sandbox.
+    # tp must fit nodes*8 GPUs, so a stray --tp is rejected at submit time.
     if args.tp and args.tp > _nodes * 8:
         log.error(
             "--tp %d exceeds --nodes %d * 8 GPUs = %d; lower --tp or raise --nodes (tp>8 requires multi-node).",
@@ -594,12 +587,8 @@ def main() -> int:
             rayjob_image or "(agent-chosen)",
         )
 
-    # Pre-submit jitter. When a large matrix fans out, every job otherwise hits
-    # register/submit (and Claw-session creation) in the same instant — the
-    # backend then sheds load with HTTP 500 "failed to create Claw session" /
-    # 504. A per-process random(0..N) sleep here spreads the herd across an
-    # N-second window so the backend sees a trickle rather than a spike. The
-    # submit_task retry loop still backstops any residual collision.
+    # Pre-submit jitter: a per-process random(0..N) sleep spreads a fanned-out
+    # matrix across an N-second window so the backend sees a trickle.
     jitter = max(0, args.submit_jitter_sec)
     if jitter > 0 and not args.dry_run:
         d = random.uniform(0, jitter)
@@ -610,8 +599,7 @@ def main() -> int:
         )
         time.sleep(d)
 
-    # Parse --session-env KEY=VALUE pairs once, up front, so a malformed pair
-    # fails fast before any task is submitted (rather than silently dropped).
+    # Parse --session-env KEY=VALUE pairs up front so malformed pairs fail fast.
     cli_session_env: dict[str, str] = {}
     for pair in args.session_env or []:
         if "=" not in pair:
@@ -631,16 +619,14 @@ def main() -> int:
         log.info("=" * 60)
         log.info("Model: %s", repo)
         # Low-download models (HF downloads < 100) pin the orchestration model
-        # to claude-opus-4-6 via session env. A missing or non-integer downloads
-        # value is a no-op (env stays None).
+        # to claude-opus-4-6 via session env.
         submit_env: dict | None = None
         try:
             if int(str(args.downloads).strip()) < 100:
                 submit_env = {"CLAUDE_MODEL": "claude-opus-4-6"}
         except (TypeError, ValueError):
             submit_env = None
-        # Merge explicit --session-env KEY=VALUE pairs (reliable session_env
-        # channel). These win over the CLAUDE_MODEL default on key collision.
+        # Merge explicit --session-env pairs; these win on key collision.
         if cli_session_env:
             submit_env = {**(submit_env or {}), **cli_session_env}
         rec = process_model(
@@ -706,7 +692,7 @@ def main() -> int:
     else:
         non_success = []
 
-    # Manifest written after wait/collect so it captures final_status etc.
+    # Manifest written after wait/collect so it captures final_status.
     if args.output_dir:
         write_manifest(Path(args.output_dir), records, base_url, register_workspace, submit_workspace, volume)
 

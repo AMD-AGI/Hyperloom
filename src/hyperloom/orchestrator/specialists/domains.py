@@ -38,10 +38,6 @@ class SpecialistDomain:
             (e.g. ``M5`` or ``M6``). Defaults to ``"M6"``.
         description (str): Free-form description of the domain's responsibilities.
             Defaults to an empty string.
-        sub_kinds (tuple[str, ...]): Optional per-domain sub_kind catalogue. When
-            empty, only ``params.sub_kind`` in {None, ""} is accepted; non-empty
-            values are denied with a structured PolicyGate error. Defaults to an
-            empty tuple.
     """
 
     key: str
@@ -49,14 +45,11 @@ class SpecialistDomain:
     kb_anchor: str
     available_in: str = "M6"
     description: str = ""
-    # Optional per-domain sub_kind catalogue; empty accepts only ``params.sub_kind`` ∈ {None, ""}.
-    sub_kinds: tuple[str, ...] = ()
 
 
 # Global allowlist of repos specialists may query via mcp__pr_monitor__*.
-# Shared by all domains; each specialist self-selects which repos to query
-# within this set. ROCm/aiter and triton-lang/triton are intentionally
-# excluded (those are source-editing targets, not PR-query targets).
+# ROCm/aiter and triton-lang/triton are excluded (source-editing targets, not
+# PR-query targets).
 PR_QUERY_REPOS: tuple[str, ...] = (
     "sgl-project/sglang",
     "ROCm/vllm",
@@ -198,9 +191,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
 SPECIALIST_DOMAIN_KEYS: frozenset[str] = frozenset(d.key for d in SPECIALIST_DOMAINS)
 
 
-# Controlled knowledge-domain tag vocabulary derived from distinct
-# ``kb_anchor`` values so tags and KB anchors never drift. Append here for
-# anchors with no backing SpecialistDomain yet.
+# Extra knowledge-domain tags for anchors with no backing SpecialistDomain yet.
 EXTRA_KNOWLEDGE_DOMAIN_TAGS: tuple[str, ...] = ()
 
 
@@ -230,7 +221,6 @@ KNOWLEDGE_DOMAIN_TAG_SET: frozenset[str] = frozenset(KNOWLEDGE_DOMAIN_TAGS)
 
 
 # Map each knowledge-domain tag back to a representative catalogue entry.
-# The first catalogue entry that owns the anchor wins.
 def _anchor_to_domain_map() -> dict[str, "SpecialistDomain"]:
     """Build a map from KB anchor to its representative domain entry.
 
@@ -278,9 +268,7 @@ def _tag_to_kb_anchor(tag: str) -> str:
     validates against (``framework`` …). A tag naming a domain **key** is
     translated to that domain's anchor; a tag that is already a valid anchor is
     kept as-is; anything else is returned verbatim so a genuinely unknown tag
-    still surfaces as ``specialist_unknown_domain`` (the safety net is
-    preserved). This is the fix for keys leaking through ``params.tags``
-    untranslated and being mis-rejected against the anchor whitelist.
+    still surfaces as ``specialist_unknown_domain``.
 
     Args:
         tag: A single (already-stripped, non-empty) dispatch tag.
@@ -340,8 +328,8 @@ def get_domain(key: str) -> SpecialistDomain | None:
     return None
 
 
-# Synthetic domain for ``scope='freeform'`` dispatches. It is intentionally
-# NOT part of SPECIALIST_DOMAINS / the knowledge-domain vocabulary — it exists only to
+# Synthetic domain for ``scope='freeform'`` dispatches. NOT part of
+# SPECIALIST_DOMAINS / the knowledge-domain vocabulary — it exists only to
 # satisfy the runner's Domain contract. The real mandate is carried by
 # ``params.task_description`` and rendered by the free-form prompt block.
 FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
@@ -356,19 +344,12 @@ FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
 )
 
 
-# Default number of LLM turns a specialist may run.
-#
-# The turn count is not the stop signal — a specialist runs until it
-# reaches a deliverable conclusion, bounded by the explicit wall-clock budget
-# (see ``Coordinator`` dispatch + ``SpecialistSubprocessDispatcher._reap_loop``)
-# rather than by turns. This is set to a practically-unbounded value so the
-# ``max_seconds = max_turns × per_turn`` ceiling is decoupled from turns;
-# ``per_turn_max_seconds`` survives only as a single-stuck-turn backstop (and in
-# practice the 300s stale-heartbeat check does that work).
+# Default number of LLM turns a specialist may run. Practically unbounded so the
+# ``max_seconds = max_turns × per_turn`` ceiling is decoupled from turns; the
+# real stop is the wall-clock budget.
 DEFAULT_SPECIALIST_MAX_TURNS: int = 1000
 
 # Hard cap (PolicyGate R2 ``specialist_max_turns_excess`` enforces this).
-# Effectively unbounded; the real stop is the wall-clock budget.
 SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
 
 

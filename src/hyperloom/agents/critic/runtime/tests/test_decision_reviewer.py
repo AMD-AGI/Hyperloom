@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from hyperloom.agents.critic.runtime.decision_reviewer import DecisionReviewer
@@ -62,10 +64,7 @@ def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
     assert bundle.merged_context["model"] == "Qwen3-14B"
     assert bundle.merged_context["framework"] == "sglang"
     assert bundle.kb_read_skipped_reason is None
-    # _PROMPT_WITH_TWO_PROPOSALS carries baseline (framework_op) +
-    # kernel_opt (evidence_producer); the strictest class wins, so the
-    # bundle-level checklist mirrors evidence_producer (NOT the legacy
-    # patch_landing checklist that demanded before/after benchmarks).
+    # Mixed batch: strictest class wins at bundle level (evidence_producer).
     constraints = bundle.review_constraints
     assert constraints["bundle_action_class"] == "evidence_producer"
     assert "comparable_before_after_benchmark" not in constraints["approve_requires"]
@@ -74,7 +73,6 @@ def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
         "aaa1": "framework_op",
         "bbb2": "evidence_producer",
     }
-    # All three class checklists are surfaced for SKILL prompt use.
     by_cls = constraints["approve_requires_by_class"]
     assert "patch_landing" in by_cls
     assert "evidence_producer" in by_cls
@@ -105,9 +103,7 @@ def test_prepare_review_omits_known_actions_when_absent(reviewer):
     assert "known_actions" not in bundle.review_constraints
 
 
-# -----------------------------------------------------------------
 # Per-action review_constraints (action-class taxonomy)
-# -----------------------------------------------------------------
 def _explore_only_prompt() -> str:
     return (
         "=== Shared session state ===\n"
@@ -151,10 +147,8 @@ def test_prepare_review_evidence_producer_relaxes_approve_requires(reviewer):
     bundle = rev.prepare_review(_coordinator_request(_explore_only_prompt(), "sess_evp"))
     constraints = bundle.review_constraints
     assert constraints["bundle_action_class"] == "evidence_producer"
-    # No legacy strict checklist items leak through for an explore-only batch.
     assert "comparable_before_after_benchmark" not in constraints["approve_requires"]
     assert "accuracy_gate_or_waiver" not in constraints["approve_requires"]
-    # Structural checks instead.
     assert "specialist_or_default_grid_provenance" in constraints["approve_requires"]
     assert "in_phase_allowed_action" in constraints["approve_requires"]
     assert "no_contradicting_kb_prior" in constraints["approve_requires"]
@@ -169,9 +163,7 @@ def test_prepare_review_patch_landing_uses_strict_approve_requires(reviewer):
     bundle = rev.prepare_review(_coordinator_request(_patch_landing_prompt(), "sess_pl"))
     constraints = bundle.review_constraints
     assert constraints["bundle_action_class"] == "patch_landing"
-    # The original 4-item strict checklist is preserved verbatim for
-    # patch landing — Critic stays the last gate before
-    # optimization_stack / framework_source_roots mutate.
+    # The 4-item strict checklist is preserved verbatim for patch landing.
     assert constraints["approve_requires"] == [
         "comparable_before_after_benchmark",
         "accuracy_gate_or_waiver",
@@ -191,7 +183,7 @@ def test_prepare_review_framework_op_emits_empty_approve_requires(reviewer):
 
 
 def test_classify_framework_agent_is_framework_op():
-    """FRAMEWORK pre-screen candidates classify as framework_op (no extra approve_requires)."""
+    """FRAMEWORK pre-screen candidates classify as framework_op."""
     from hyperloom.agents.critic.runtime.decision_reviewer import (
         _APPROVE_REQUIRES_BY_CLASS,
         ACTION_CLASS_FRAMEWORK_OP,
@@ -206,13 +198,10 @@ def test_prepare_review_mixed_batch_uses_strictest_class(reviewer):
     rev, _, _ = reviewer
     bundle = rev.prepare_review(_coordinator_request(_mixed_prompt(), "sess_mix"))
     constraints = bundle.review_constraints
-    # patch_landing wins over evidence_producer at the bundle level — a
-    # caller that ignores proposal_action_classes still gets the most
-    # conservative behaviour.
+    # patch_landing wins over evidence_producer at the bundle level.
     assert constraints["bundle_action_class"] == "patch_landing"
     assert "comparable_before_after_benchmark" in constraints["approve_requires"]
-    # But the per-proposal map still classifies each correctly so
-    # SKILL-aware callers can apply the right per-proposal bar.
+    # Per-proposal map still classifies each correctly.
     assert constraints["proposal_action_classes"] == {
         "expA": "evidence_producer",
         "intB": "patch_landing",
@@ -234,7 +223,7 @@ def test_prepare_review_unknown_action_falls_back_to_evidence_producer(reviewer)
 
 
 def test_prepare_review_no_proposals_uses_strict_default(reviewer):
-    """``critic_decision_request`` has no inbox proposals, so the legacy strict checklist stays the safe default."""
+    """No inbox proposals: the strict checklist stays the safe default."""
     rev, _, _ = reviewer
     bundle = rev.prepare_review(
         {
@@ -252,7 +241,6 @@ def test_prepare_review_no_proposals_uses_strict_default(reviewer):
         "active_path_proof_when_relevant",
         "rollback_plan",
     ]
-    # Decision requests don't classify per-proposal.
     assert "proposal_action_classes" not in constraints
     assert "bundle_action_class" not in constraints
 
@@ -343,8 +331,8 @@ def test_commit_review_for_coordinator_inbox_emits_intent_envelope(reviewer):
     verdicts = [i["payload"]["verdict"] for i in intents]
     assert types == ["review_verdict", "review_verdict"]
     assert sorted(verdicts) == ["approve", "reject"]
-    assert sm.is_msg_already_reviewed("sess_c", "aaa1")
-    assert sm.is_msg_already_reviewed("sess_c", "bbb2")
+    reviewed = json.loads((sm.session_dir("sess_c") / "reviewed_msg_ids.json").read_text("utf-8"))
+    assert {"aaa1", "bbb2"} <= set(reviewed)
 
 
 def _verdict_intent_for(intents: list[dict], target: str) -> dict:
@@ -379,7 +367,6 @@ def test_commit_review_backfills_advice_text_from_advice_entry(reviewer):
     intents = outcome.intent_envelope["intents"]
     verdict_intent = _verdict_intent_for(intents, "aaa1")
     assert verdict_intent["payload"]["advice_text"] == "Re-run the sweep at higher concurrency before promotion."
-    # The standalone advice broadcast is preserved alongside the backfill.
     advice_intents = [
         i for i in intents if i["intent_type"] == "send_message" and i["payload"].get("topic") == "advice"
     ]
@@ -575,7 +562,7 @@ def test_decision_request_commit_emits_decision_review(reviewer):
     outcome = rev.commit_review(request, review)
     assert outcome.decision_review is not None
     assert outcome.decision_review["verdict"] == "adopt"
-    assert outcome.kb_writes  # review_verdict-equivalent triggered
+    assert outcome.kb_writes
 
 
 def test_init_session_records_event(reviewer):
@@ -589,7 +576,11 @@ def test_init_session_records_event(reviewer):
         }
     )
     assert out["session_id"] == "sess_init"
-    events = sm.list_events("sess_init")
+    events = [
+        json.loads(line)
+        for line in (sm.session_dir("sess_init") / "events.jsonl").read_text("utf-8").splitlines()
+        if line.strip()
+    ]
     assert events and events[0]["kind"] == "init_session"
 
 
@@ -669,9 +660,7 @@ def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):
     assert bundle.kb_priors_by_proposal["aaa"]
 
 
-# -----------------------------------------------------------------
 # Optional substrate KB /v2/reasoning/assess enrichment
-# -----------------------------------------------------------------
 class _FakeAssess:
     """Records assess() calls and returns a canned verdict."""
 
@@ -708,7 +697,7 @@ def test_kb_assess_skipped_when_unconfigured(tmp_path, monkeypatch):
     kb = InMemoryKBClient()
     writer = KBWriter(kb, session_memory=sm)
     rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
- # no CORTEX_KB_URL → no assess client built from env
+ # no CORTEX_KB_URL -> no assess client
     assert rev.kb_assess_client is None
     bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_noassess"))
     assert bundle.kb_assess_by_proposal == {}
@@ -725,11 +714,9 @@ def test_kb_assess_injected_when_client_configured(tmp_path):
 
     assert "lev1" in bundle.kb_assess_by_proposal
     assert bundle.kb_assess_by_proposal["lev1"]["reasonable"] == "supported"
-    # focus mapped from merged context
     call = fake.calls[0]
     assert call["focus"]["model"] == "Qwen3-14B"
     assert call["focus"]["framework"] == "sglang"
-    # levers split out of payload params
     assert call["params"] == {"kv_cache_dtype": "fp8"}
     assert call["envs"] == {"VLLM_USE_AITER": "1"}
     assert call["args"] == "--quantization fp8"
@@ -742,15 +729,13 @@ def test_kb_assess_skips_proposal_without_levers(tmp_path):
     fake = _FakeAssess()
     rev = DecisionReviewer(session_memory=sm, kb_writer=writer, kb_assess_client=fake)
 
-    # baseline proposal carries no params/envs/args → no assess call
+    # baseline proposal carries no levers -> no assess call
     bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_nolevers"))
     assert bundle.kb_assess_by_proposal == {}
     assert fake.calls == []
 
 
-# -----------------------------------------------------------------
 # KB trace audit fields (kb_assess_trace / kb_priors_trace)
-# -----------------------------------------------------------------
 def test_kb_assess_trace_not_configured(tmp_path, monkeypatch):
     monkeypatch.delenv("CORTEX_KB_URL", raising=False)
     sm = SessionMemory(root=tmp_path / "sm")

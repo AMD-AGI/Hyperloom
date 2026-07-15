@@ -38,12 +38,10 @@ def _nfs_fallback_collect(
     current_session_hints: set[str] | None = None,
 ) -> int:
     """Scan NFS result directories for files matching this model, used when the
-    SaFE artifact API returns nothing (V2 writes under /wekafs/users/<uid>/...).
+    SaFE artifact API returns nothing.
 
     Two stages: A. legacy canonical CI dirs, matched by dir name; B. per-user
-    session dirs, matched by each ci_metrics.json's `model` field (more accurate
-    than dir-name fuzzy match). Mirrors ci/orchestrator.py's fallback.
-    Returns count of files copied.
+    session dirs, matched by each ci_metrics.json's `model` field.
 
     Args:
         rec (SubmissionRecord): Record used to match sessions and record
@@ -57,7 +55,7 @@ def _nfs_fallback_collect(
         int: Number of files copied.
     """
     current_session_hints = set(current_session_hints or set())
-    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    nfs_root = os.environ.get("NFS_ROOT", "/mnt/shared")
     model_basename = (rec.model or "").split("/")[-1]
     model_short = model_basename.lower().replace("-", "").replace("_", "").replace(".", "")
     if not model_short or not rec.task_id:
@@ -77,7 +75,7 @@ def _nfs_fallback_collect(
         )
         return copied
 
-    # ── Stage A: legacy canonical dirs (matched by current timestamp) ───────
+    # Stage A: legacy canonical dirs, matched by current timestamp.
     legacy_scan_dirs = [
         f"{nfs_root}/hyperloom-results",
         f"{nfs_root}/results/ci",
@@ -132,13 +130,12 @@ def _nfs_fallback_collect(
     if copied:
         return copied
 
-    # ── Stage B: /wekafs/users/<uid>/<session>/...  matched by timestamp ────
+    # Stage B: <shared-root>/users/<uid>/<session>/... matched by timestamp.
     users_root = f"{nfs_root}/users"
     if not os.path.isdir(users_root):
         return copied
 
-    # Primary match: JSON model fields when present. Secondary: conservative
-    # session-dir match (needed for runs that persist JSON without a `model` field).
+    # Primary match: JSON model fields when present; secondary: session-dir match.
     target = _norm_token(model_basename)
     if not target:
         return copied
@@ -165,8 +162,7 @@ def _nfs_fallback_collect(
         """Score a candidate result file and append it to ``candidates``.
 
         Validates the file's model/session/claw fields against the record and,
-        when it matches, records a ``(score, mtime, path, session_dir)`` tuple
-        for later best-match selection.
+        when it matches, records a ``(score, mtime, path, session_dir)`` tuple.
 
         Args:
             path (str): Path to a candidate result JSON file.
@@ -217,7 +213,7 @@ def _nfs_fallback_collect(
             return
         candidates.append((score, mtime, path, session_dir))
 
-    candidates: list[tuple[int, float, str, str]] = []  # (score, mtime, marker_path, session_dir)
+    candidates: list[tuple[int, float, str, str]] = []
     uid_dirs = [rec.safe_user_id] if rec.safe_user_id else os.listdir(users_root)
     for uid_dir in uid_dirs:
         if not uid_dir:
@@ -239,9 +235,8 @@ def _nfs_fallback_collect(
                 )
                 _consider_result_file(ci_path, sess_path, 0)
 
-        # Current layout: /wekafs/users/<uid>/<model-basename>/<YYYYmmddTHHMMSSZ>/.
-        # With no artifact-derived hint, accept timestamp dirs only under this
-        # exact user id + model dir and inside the task's startedAt/finishedAt window.
+        # <shared-root>/users/<uid>/<model-basename>/<ts>/: with no artifact hint,
+        # accept timestamp dirs under this user+model dir within the task window.
         if rec.safe_user_id and uid_dir == rec.safe_user_id:
             for model_dir_name in _candidate_model_dir_names(rec):
                 model_dir = os.path.join(uid_path, model_dir_name)
@@ -279,7 +274,7 @@ def _nfs_fallback_collect(
 
     if not candidates:
         log.info(
-            "[task %s] no /wekafs/users candidate matched model=%s (user_id=%s, hints=%s, task_window=%s)",
+            "[task %s] no shared users candidate matched model=%s (user_id=%s, hints=%s, task_window=%s)",
             rec.task_id,
             model_basename,
             rec.safe_user_id or "?",
@@ -288,7 +283,7 @@ def _nfs_fallback_collect(
         )
         return copied
 
-    # Highest-confidence, then freshest (same model may be re-run).
+    # Highest-confidence, then freshest.
     candidates.sort(reverse=True)
     _score, _mtime, best_ci, best_sess = candidates[0]
     log.info(
@@ -299,8 +294,7 @@ def _nfs_fallback_collect(
         best_sess,
     )
 
-    # Copy ci_metrics + any optimization_report.md flat under task_dir/ (the
-    # shape build_summary.py expects).
+    # Copy ci_metrics + any optimization_report.md flat under task_dir/.
     targets = [best_ci]
     for cand in [
         os.path.join(best_sess, "optimization_report.md"),
@@ -310,7 +304,7 @@ def _nfs_fallback_collect(
         if os.path.isfile(cand):
             targets.append(cand)
             break
-    # Optional audit artifact, when the agent emitted it.
+    # Optional audit artifact.
     for cand in [
         os.path.join(best_sess, "session_breakdown.json"),
         os.path.join(best_sess, "phase10_report", "session_breakdown.json"),

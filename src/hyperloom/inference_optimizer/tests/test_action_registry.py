@@ -70,7 +70,7 @@ def test_metadata_expected_gain_pct_must_be_pair():
 
 
 def test_metadata_no_allowed_modes_field():
-    """allowed_modes is no longer accepted because full mode is the only supported mode."""
+    """allowed_modes is not accepted because full mode is the only supported mode."""
     payload = _good_payload()
     payload["allowed_modes"] = ["quick"]  # extra fields silently ignored
     meta = ActionMetadata.from_yaml_dict(payload, expected_name="baseline")
@@ -98,7 +98,7 @@ def registry() -> ActionRegistry:
 
 
 def test_registry_loads_p1_1_actions(registry):
-    names = set(registry.names())
+    names = {meta.name for meta in registry.all()}
     expected = {"baseline", "target_analysis", "explore", "report"}
     assert expected.issubset(names)
 
@@ -112,22 +112,6 @@ def test_registry_baseline_metadata(registry):
     assert "Bash" in baseline.allowed_tools
     assert baseline.accuracy_risk == 0.0
     assert baseline.lease_ttl_sec == 4200
-
-
-def test_registry_by_family(registry):
-    """report belongs to family=shallow, not prep."""
-    prep = {a.name for a in registry.by_family("prep")}
-    assert {"baseline", "target_analysis"}.issubset(prep)
-    analysis = {a.name for a in registry.by_family("analysis")}
-    assert "roofline" in analysis
-    shallow = {a.name for a in registry.by_family("shallow")}
-    assert "report" in shallow
-    assert "explore" in shallow
-
-
-def test_registry_unknown_family_rejected(registry):
-    with pytest.raises(ActionRegistryError, match="family="):
-        registry.by_family("not_a_family")
 
 
 def test_registry_get_unknown_returns_none(registry):
@@ -149,7 +133,7 @@ def test_registry_validates_filename_matches_yaml_name(tmp_path):
     bad_path.write_text(
         yaml.safe_dump(
             {
-                "name": "wrong_name",  # doesn't match filename
+                "name": "wrong_name",
                 "family": "prep",
                 "cost_minutes_p50": 1.0,
                 "cost_minutes_p75": 2.0,
@@ -230,21 +214,6 @@ def test_gate_propose_action_kernel_owned_rejected(gate_with_registry):
             ),
         )
     assert exc.value.rule == "kernel_owned_by_kernel_agent"
-
-
-def test_gate_allowed_tools_for_action_uses_metadata(gate_with_registry):
-    tools = gate_with_registry.allowed_tools_for_action("baseline")
-    assert tools == ["emit_intent", "Read", "Bash"]
-
-
-def test_gate_allowed_tools_for_unknown_action_falls_back(gate_with_registry):
-    tools = gate_with_registry.allowed_tools_for_action("never_registered")
-    assert tools == ["emit_intent"]
-
-
-def test_gate_allowed_tools_for_action_no_registry_falls_back():
-    g = PolicyGate(role_registry=default_role_registry(), action_registry=None)
-    assert g.allowed_tools_for_action("baseline") == ["emit_intent"]
 
 
 def test_gate_delegate_unknown_action_no_registry_passes():

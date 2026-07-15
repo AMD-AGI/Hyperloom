@@ -3,15 +3,11 @@
 """CK block-scale patch wiring tests at the env-materialization choke point.
 
 The ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M`` env only yields a speedup on a
-KernelForge-patched sglang ``fp8_utils.py`` (M-aware CK routing). Hyperloom is
-responsible for ensuring that patch is applied whenever it injects the env, by
-calling ``ensure_sglang_patched_for_ck_blockscale`` from
-``materialize_config_with_envs``. A prior incident showed this wiring can
-silently drift across deploys (the env was injected but the patcher was never
-invoked, so the env no-op'd on an unpatched tree). These tests pin the wiring:
-the patcher must be invoked exactly when (sglang framework + env present +
-``HYPERLOOM_ENABLE_PATCH`` on), and never otherwise, and a fail-soft patch
-result must not break materialization.
+KernelForge-patched sglang ``fp8_utils.py`` (M-aware CK routing), so
+``materialize_config_with_envs`` must call ``ensure_sglang_patched_for_ck_blockscale``
+whenever it injects the env. These tests pin the wiring: the patcher is invoked
+exactly when (sglang framework + env present + ``HYPERLOOM_ENABLE_PATCH`` on),
+never otherwise, and a fail-soft patch result must not break materialization.
 """
 
 from __future__ import annotations
@@ -98,7 +94,7 @@ def _materialize(
 def test_patcher_invoked_when_ck_env_present_on_sglang(tmp_path, patcher_calls):
     envs = _materialize(tmp_path, extra_envs={_CK_ENV: "256"})
     assert patcher_calls == [True]
-    # The env survives materialization so the (now patched) tree honours it.
+    # The env survives materialization so the patched tree honours it.
     assert envs.get(_CK_ENV) == "256"
 
 

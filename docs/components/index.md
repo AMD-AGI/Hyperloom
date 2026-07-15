@@ -10,11 +10,10 @@ Hyperloom orchestrates several specialized tools. Each has its own
 documentation page; the overarching optimization flow that ties them together
 is described in [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
-| Component | Role | Source |
-|-----------|------|--------|
-| [IntelliKit](intellikit.md) | Low-level GPU profiling primitives | [AMDResearch/intellikit](https://github.com/AMDResearch/intellikit) |
-| [Magpie](magpie.md) | Benchmark engine with trace-collection support | [AMD-AGI/Magpie](https://github.com/AMD-AGI/Magpie) |
-| [TraceLens](tracelens.md) | Agentic trace analysis and roofline targets | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) |
-| KernelForge | Deterministic forge backend | AMD-AGI/KernelForge *(to be open-sourced separately)* |
-| [GEAK](geak.md) | GPU kernel generation and optimization (Triton / HIP / FlyDSL) | [AMD-AGI/GEAK](https://github.com/AMD-AGI/GEAK) |
-| [AgentKernelArena](agentkernelarena.md) | Optional standardized evaluation arena for agent benchmarking | [AMD-AGI/AgentKernelArena](https://github.com/AMD-AGI/AgentKernelArena) |
+| Component | Role | Source | Documentation|
+|-----------|------|--------|--------------|
+| [IntelliKit](intellikit.md) | Low-level GPU profiling primitives | [AMDResearch/intellikit](https://github.com/AMDResearch/intellikit) | [IntelliKit Docs](https://rocm.docs.amd.com/projects/intellikit/en/latest/) |
+| [Magpie](magpie.md) | Benchmark engine with trace-collection support | [AMD-AGI/Magpie](https://github.com/AMD-AGI/Magpie) | [Magpie Docs](https://rocm.docs.amd.com/projects/magpie/en/latest/) |
+| [TraceLens](tracelens.md) | Agentic trace analysis and roofline targets | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) | [TraceLens Docs](https://rocm.docs.amd.com/projects/tracelens/en/latest/) |
+| [GEAK](geak.md) | GPU kernel generation and optimization (Triton / HIP / FlyDSL) | [AMD-AGI/GEAK](https://github.com/AMD-AGI/GEAK) | [GEAK Docs](https://rocm.docs.amd.com/projects/geak/en/latest/) |
+| [AgentKernelArena](agentkernelarena.md) | Optional standardized evaluation arena for agent benchmarking | [AMD-AGI/AgentKernelArena](https://github.com/AMD-AGI/AgentKernelArena) | [AgentKernelArena Docs](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/) |

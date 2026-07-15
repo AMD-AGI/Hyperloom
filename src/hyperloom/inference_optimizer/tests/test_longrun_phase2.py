@@ -2,16 +2,11 @@
 
 """Long-run exploration-depth bottleneck re-direction acceptance tests.
 
-Covers:
-* cyclic EXPLORE plateau is *actionable* (winds the cycle down via
-  ``explore_no_more_leverage`` + ``switch_bottleneck``); advisory-only when cyclic off.
-* ``compute_next_phase`` routes a plateaued EXPLORE → KERNEL_AGENT (switch lever).
-* Coordinator stamps the bottleneck-switch handoff onto SharedState.
-* The redirect advisory renders in the next cycle's EXPLORE and names a
-  suggested specialist domain; it clears once the live bottleneck drifts.
-* Rejected/tested fingerprints are bucketed per macro-cycle and stay de-duped.
-
-All deterministic + offline.
+Covers that a cyclic EXPLORE plateau is actionable, that ``compute_next_phase``
+routes a plateaued EXPLORE → KERNEL_AGENT, that the Coordinator stamps the
+bottleneck-switch handoff and renders the redirect advisory, and that
+rejected/tested fingerprints are bucketed per macro-cycle. All deterministic +
+offline.
 """
 
 from __future__ import annotations
@@ -24,9 +19,6 @@ from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-CYCLIC_ENV = "INFERENCE_OPTIMIZER_CYCLIC_PHASES"
-
-
 def _plateaued_explore_state(
     *,
     macro_cycle: int = 1,
@@ -34,8 +26,8 @@ def _plateaued_explore_state(
     started_hours_ago: float = 0.5,
     top_bottleneck: str = "MoE_fused",
 ) -> SharedState:
-    """EXPLORE state that satisfies compute_plateau_explore (no winners + 3
-    trailing empty specialist rounds) with budget remaining."""
+    """EXPLORE state satisfying compute_plateau_explore (no winners + 3 trailing
+    empty specialist rounds) with budget remaining."""
     now = datetime.now(timezone.utc)
     st = SharedState(
         session_id="t",
@@ -54,11 +46,8 @@ def _plateaued_explore_state(
     return st
 
 
-# ==========================================================================
 # plateau → actionable
-# ==========================================================================
-def test_explore_plateau_is_actionable_in_cyclic(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_explore_plateau_is_actionable_in_cyclic():
     st = _plateaued_explore_state()
     out = ps.exit_normal_explore(st)
     assert out is not None
@@ -68,36 +57,24 @@ def test_explore_plateau_is_actionable_in_cyclic(monkeypatch):
     assert evidence.get("plateau") is True
 
 
-def test_explore_plateau_is_advisory_only_when_cyclic_off(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "0")
-    st = _plateaued_explore_state()
-    # Budget remains + no escalate hint + cyclic off → plateau does NOT force exit.
-    assert ps.exit_normal_explore(st) is None
-
-
-def test_compute_next_phase_plateau_routes_explore_to_kernel(monkeypatch):
-    monkeypatch.setenv(CYCLIC_ENV, "1")
+def test_compute_next_phase_plateau_routes_explore_to_kernel():
     st = _plateaued_explore_state()
     target, reason, evidence = ps.compute_next_phase(st, max_hours=96.0)
-    # Exhausted explore leverage switches lever to KERNEL (non-terminal).
+    # Exhausted explore leverage switches lever to KERNEL.
     assert target == ps.PHASE_KERNEL_AGENT
     assert reason == "explore_no_more_leverage"
     assert evidence.get("switch_bottleneck") is True
 
 
-# ==========================================================================
 # Coordinator stamps the bottleneck-switch handoff
-# ==========================================================================
 @pytest.fixture
 def cyclic_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv(CYCLIC_ENV, "1")
     from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockKernelBackend,
         MockRobustnessBackend,
         ScriptedPlan,
     )
@@ -107,7 +84,7 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(ScriptedPlan(turns=[]), name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -132,22 +109,20 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
 
     await c._advance_phase_if_needed()
 
-    # Exhausted explore leverage switches lever to KERNEL (non-terminal).
+    # Exhausted explore leverage switches lever to KERNEL.
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.pending_bottleneck_switch is True
     assert st.last_cycle_bottleneck == "MoE_fused"
 
 
-# ==========================================================================
 # redirect advisory block
-# ==========================================================================
 def test_redirect_advisory_renders_with_suggested_domain(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
     st.phase = ps.PHASE_EXPLORE
     st.macro_cycle = 2
     st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
-    # A fresh roofline whose dominant direction is comm.
+    # A roofline whose dominant direction is comm.
     st.roofline_snapshots = [
         {
             "snapshot_id": 2,
@@ -201,15 +176,6 @@ def test_cycle_strategy_planner_avoids_saturated_focus(cyclic_coordinator):
     assert f"focus={row['focus']}" in block
 
 
-def test_redirect_advisory_empty_when_cyclic_off(cyclic_coordinator, monkeypatch):
-    c = cyclic_coordinator
-    monkeypatch.setenv(CYCLIC_ENV, "0")
-    st = c.shared_state
-    st.phase = ps.PHASE_EXPLORE
-    st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
-    assert c._bottleneck_redirect_advisory_block() == ""
-
-
 def test_redirect_advisory_empty_outside_explore(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
@@ -232,31 +198,19 @@ def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
     }
     block = c._acceptance_threshold_advisory_block()
     assert "KEEP>=0.40%" in block
-    assert "v_hi" in block  # 0.6% >= 0.40% → re-testable
-    assert "v_lo" in block  # 0.2% < 0.40% → reference only
+    assert "v_hi" in block  # >= bar → re-testable
+    assert "v_lo" in block  # < bar → reference only
     assert "v_keep" not in block  # KEEP'd → never surfaced for re-test
 
 
 def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
-    st.macro_cycle = 0  # first cycle: bar == legacy default, nothing decayed
+    st.macro_cycle = 0  # first cycle: bar == default, nothing decayed
     assert c._acceptance_threshold_advisory_block() == ""
 
 
-def test_acceptance_threshold_advisory_empty_when_cyclic_off(
-    cyclic_coordinator,
-    monkeypatch,
-):
-    c = cyclic_coordinator
-    monkeypatch.setenv(CYCLIC_ENV, "0")
-    c.shared_state.macro_cycle = 3
-    assert c._acceptance_threshold_advisory_block() == ""
-
-
-# ==========================================================================
 # drift clears the pending switch
-# ==========================================================================
 def test_switch_clears_on_bottleneck_drift():
     st = SharedState(session_id="t")
     st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
@@ -277,9 +231,7 @@ def test_mark_switch_falls_back_to_live_top_bottleneck():
     assert st.last_cycle_bottleneck == "attn_decode"
 
 
-# ==========================================================================
 # rejected/tested fingerprints bucketed per cycle (no re-explore)
-# ==========================================================================
 def test_tested_and_rejected_stamped_with_macro_cycle():
     st = SharedState(session_id="t", macro_cycle=0)
     st.apply_explore_search_update(
@@ -293,7 +245,7 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     assert st.explore_search["rejected"][0]["cycle"] == 0
 
     # Next cycle: a new rejection is bucketed under cycle 1; the old one keeps
-    # its cycle-0 attribution (never re-explored, just re-attributed-safe).
+    # its cycle-0 attribution.
     st.macro_cycle = 1
     st.apply_explore_search_update(
         {
@@ -329,8 +281,7 @@ def test_veto_fingerprints_bucketed_by_bottleneck():
     assert st.explore_search["tested"]["fp_a"]["bottleneck"] == "MoE_fused"
     assert st.explore_search["rejected"][0]["bottleneck"] == "MoE_fused"
 
-    # cycle 1 drifted to a comm bottleneck; new rejection carries the new bucket
-    # while the old one keeps its MoE attribution.
+    # cycle 1 drifted to a comm bottleneck; new rejection carries the new bucket.
     st.macro_cycle = 1
     st.roofline_snapshots = [{"snapshot_id": 2, "top_bottleneck": "all_reduce"}]
     st.apply_explore_search_update(

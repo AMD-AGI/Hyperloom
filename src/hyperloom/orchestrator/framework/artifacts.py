@@ -31,8 +31,8 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 log = logging.getLogger(__name__)
 
 
-# Per-candidate terminal statuses that mean the candidate actually reached the
-# apply/bench stage (as opposed to being filtered before any source change).
+# Per-candidate terminal statuses that mean the candidate reached the apply/bench
+# stage (as opposed to being filtered before any source change).
 _TESTED_STATUSES: frozenset[str] = frozenset(
     {"kept", "reverted", "applied_no_bench", "apply_failed", "bench_reverted"}
 )
@@ -47,9 +47,9 @@ def candidate_key(row: dict[str, Any] | None) -> str:
     carries only a ``pr_url`` (no ``candidate_id``) can never dedup against a
     progress row keyed on its ``candidate_id`` (and vice-versa).
 
-    Precedence mirrors the historical inline ``candidate_id or pr_url or ref``
-    fallback. Progress rows persist this value in their ``candidate_id`` field,
-    so passing a progress row back through here is idempotent.
+    Precedence is ``candidate_id or pr_url or ref``. Progress rows persist this
+    value in their ``candidate_id`` field, so passing a progress row back
+    through here is idempotent.
 
     Args:
         row: A candidate dict or ``framework_agent_phase_progress`` row (or

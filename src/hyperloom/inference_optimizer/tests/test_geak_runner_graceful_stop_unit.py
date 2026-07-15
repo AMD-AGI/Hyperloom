@@ -1,13 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 """Behavioral tests for geak_runner's graceful-stop / flush contract.
 
-Regression guard for the bug where the runner's inner soft deadline
-(GEAK_E2E_TIMEOUT_S, consumed by run_e2e's anyio.fail_after) and the outer
-hard subprocess kill used the SAME value, so result.json was SIGKILLed mid-flush
--> "no_result_json" and the measured win was lost.
-
-These drive the REAL call_geak() against a fake runner script so the
-process-group signalling + soft/hard split are exercised end to end.
+Drive the real call_geak() against a fake runner script so the process-group
+signalling and soft/hard timeout split are exercised end to end.
 """
 from __future__ import annotations
 
@@ -77,7 +72,7 @@ def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
     out = psr.call_geak(_handoff(), tmp_path / "out", timeout_s=600)
 
     assert out["status"] == "ok"
-    assert out["inner_budget"] == "420"  # 600 - 180
+    assert out["inner_budget"] == "420"
     assert out["returncode"] == 0
 
 
@@ -99,7 +94,6 @@ def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):
     monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
     monkeypatch.setenv("GEAK_FLUSH_GRACE_S", "5")
 
-    # timeout_s small so the outer communicate() times out quickly and SIGTERMs.
     out = psr.call_geak(_handoff(), tmp_path / "out", timeout_s=2)
 
     assert out["status"] == "ok"

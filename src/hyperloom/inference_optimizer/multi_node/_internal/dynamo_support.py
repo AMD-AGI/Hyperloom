@@ -1,9 +1,9 @@
 """Pure helpers for the Dynamo multi-node backend.
 
-No I/O / no env reads (mirrors ``workload_spec.py``): the CLI feeds in the
-SaFE GetWorkloadResponse / service info and these functions extract worker pod
-IPs, the frontend service URL, and the pod-side launcher argv. Kept pure so the
-SSH fan-out logic stays unit-testable without a live cluster.
+No I/O / no env reads: the CLI feeds in the SaFE GetWorkloadResponse / service
+info and these functions extract worker pod IPs, the frontend service URL, and
+the pod-side launcher argv. Kept pure so the SSH fan-out logic stays
+unit-testable without a live cluster.
 """
 
 from __future__ import annotations
@@ -11,8 +11,7 @@ from __future__ import annotations
 import shlex
 from typing import Any
 
-# Frontend HTTP port (SaFE common.DynamoFrontendPort). Benchmarks target this
-# OpenAI-compatible endpoint, never sglang rank-0 :8888.
+# Frontend HTTP port; benchmarks target this OpenAI-compatible endpoint.
 DYNAMO_FRONTEND_PORT = 8000
 
 # Substrings that mark a pod as the Dynamo worker (LWS) role vs the frontend.
@@ -20,9 +19,8 @@ _WORKER_PODID_HINTS = ("worker", "-lws-", "lws-")
 
 
 def _service_roles_for(pd_mode: str) -> list[str]:
-    """Positional serviceRoles list for the deployment topology (matches
-    ``build_dynamo_workload_body``): PD -> [frontend, prefill, decode];
-    aggregated -> [frontend, worker].
+    """Positional serviceRoles list for the deployment topology: PD ->
+    [frontend, prefill, decode]; aggregated -> [frontend, worker].
 
     Args:
         pd_mode: Deployment topology mode (``"disaggregated"`` or
@@ -60,12 +58,9 @@ def _classify_pod_role(
 
     Priority:
       1. Explicit role substrings in podId (prefillworker / decodeworker /
-         frontend) — present when SaFE renames the pods.
-      2. Slot index -> ``service_roles[index]``. The index comes from
-         ``resourceId`` (SaFE sets it per DGD pod) or, as a fallback, the
-         ``-role<N>-`` suffix in the pod name (SaFE keeps role0/role1/role2
-         deployment names). This is the robust path for the observed
-         ``<wid>-role<N>-<hash>`` naming.
+         frontend).
+      2. Slot index -> ``service_roles[index]``, from ``resourceId`` or the
+         ``-role<N>-`` suffix in the pod name.
 
     Args:
         pod_id: The DGD pod name.
@@ -84,9 +79,7 @@ def _classify_pod_role(
         return "decode"
     if "frontend" in pl:
         return "frontend"
-    # The DGD pod NAME reliably encodes the slot (``<wid>-role<N>-<hash>``);
-    # prefer it over resourceId, which SaFE leaves 0 for DGD pods (no
-    # resource.id annotation) and would otherwise map every pod to role 0.
+    # Prefer the slot encoded in the pod name over resourceId.
     idx = _parse_role_index(pod_id)
     if idx is None and isinstance(resource_id, int):
         idx = resource_id
@@ -131,11 +124,7 @@ def discover_role_pods(
         pod_ip = str(p.get("podIP") or "").strip()
         if not pod_ip:
             continue
-        # Skip terminal / dead pods. A DGD role pod that crashed during early
-        # scheduling lingers in GetWorkload.pods with a stale podIP but no sshd
-        # (phase=Failed/Succeeded). Including it makes restart-server SSH-fan-out
-        # to a dead replica -> "Connection refused" rc=1 -> baseline_failed.
-        # The live replacement replica (same role index) is the one we want.
+        # Skip terminal / dead pods (stale podIP with no live sshd).
         pod_phase = str(p.get("phase") or "").strip().lower()
         if pod_phase in ("failed", "succeeded", "terminating"):
             continue
@@ -158,19 +147,6 @@ def discover_role_pods(
             )
         )
     return groups
-
-
-def discover_worker_pods(workload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the aggregated worker pods — convenience wrapper over
-    :func:`discover_role_pods` for the non-PD path. Frontend pods are excluded.
-
-    Args:
-        workload: A SaFE GetWorkloadResponse mapping with a ``pods`` list.
-
-    Returns:
-        The aggregated worker pod entries.
-    """
-    return discover_role_pods(workload, pd_mode="aggregated")["worker"]
 
 
 def _parse_lws_ordinal(pod_id: str) -> int | None:
@@ -212,13 +188,12 @@ def frontend_service_url(
         The resolved frontend base URL.
     """
     if service_info:
-        # Prefer the ready-made internalDomain ("<wid>.<ns>.svc.cluster.local:8000").
+        # Prefer the ready-made internalDomain.
         internal = str(service_info.get("internalDomain") or "").strip()
         if internal:
             internal = internal.split("://", 1)[-1].rstrip("/")
             return f"http://{internal}"
-        # SaFE returns ``port`` as a nested object {protocol, port, targetPort};
-        # extract the integer (older shapes may return a bare int).
+        # ``port`` may be a nested object {protocol, port, targetPort} or a bare int.
         raw_port = service_info.get("port")
         if isinstance(raw_port, dict):
             svc_port = raw_port.get("port") or raw_port.get("targetPort") or port
@@ -233,17 +208,15 @@ def frontend_service_url(
     return f"http://{workload_id}.{workspace}.svc.cluster.local:{port}"
 
 
-# sglang PD bootstrap rendezvous port (SaFE common.DynamoBootstrapPort).
+# sglang PD bootstrap rendezvous port.
 DYNAMO_BOOTSTRAP_PORT = 30001
 
 
 def disagg_flags(mode: str, kv_transfer_backend: str, *, bootstrap_port: int = DYNAMO_BOOTSTRAP_PORT) -> str:
     """sglang PD disaggregation flags for a prefill/decode group.
 
-    Mirrors the SaFE dispatcher's ``sglangDisaggFlags`` so the SSH-launched
-    server matches the native deploy path. ``dynamo.sglang`` parses these via
-    argparse (it does NOT read SGLANG_DISAGGREGATION_* env), so they must be on
-    the command line.
+    ``dynamo.sglang`` parses these via argparse, so they must be on the command
+    line.
 
     Args:
         mode: Disaggregation mode (``"prefill"`` or ``"decode"``); any other
@@ -285,10 +258,9 @@ def build_node_launch_args(
 ) -> str:
     """Build the argv string for launch_dynamo_node.py (shipped over SSH).
 
-    The SAME string is sent to every pod IN A GROUP — each pod self-determines
-    its node-rank from ``$LWS_WORKER_INDEX`` pod-side, so the controller does
-    not encode the rank here. ``disagg_mode`` (prefill/decode) folds the sglang
-    PD flags into the launched command for that group.
+    The same string is sent to every pod in a group; each pod self-determines
+    its node-rank from ``$LWS_WORKER_INDEX`` pod-side. ``disagg_mode``
+    (prefill/decode) folds the sglang PD flags into the launched command.
 
     Args:
         framework: Framework name (``"sglang"`` or ``"vllm"``).
@@ -312,8 +284,7 @@ def build_node_launch_args(
     parts = ["--framework", framework]
     if kill_only:
         parts.append("--kill-only")
-        # kill-only still needs framework (vllm tears down its ray node) and
-        # the pid-file path so it kills the right server.
+        # kill-only still needs framework and the pid-file path.
         parts.extend(["--pid-file", pid_file])
         return " ".join(shlex.quote(x) for x in parts)
     parts.extend(
@@ -339,8 +310,7 @@ def build_node_launch_args(
     if ep and int(ep) > 1:
         parts.extend(["--ep", str(ep)])
     quoted = " ".join(shlex.quote(x) for x in parts)
-    # Fold the PD disaggregation flags into extra_args (the pod-side script
-    # re-splits --extra-args with shlex and appends them to the sglang cmd).
+    # Fold the PD disaggregation flags into extra_args.
     merged_extra = (extra_args or "").strip()
     df = disagg_flags(disagg_mode, kv_transfer_backend)
     if df:

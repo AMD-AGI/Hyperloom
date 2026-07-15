@@ -57,16 +57,13 @@ def _fake_self(**state_kw):
         gpu_type=state_kw.get("gpu_type", "mi300x"),
     )
     fake = types.SimpleNamespace(shared_state=state)
-    # Bind the real discovery method so the builder path is exercised; tests
-    # that don't want the network stub the low-level enumerate_candidates.
+    # Bind the real discovery method so the builder path is exercised.
     fake._discover_enablement_candidate_refs = types.MethodType(Coordinator._discover_enablement_candidate_refs, fake)
-    # Source-context read is best-effort grounding; stub to empty so the builder
-    # path stays pure (no filesystem dependency in these unit tests).
+    # Stub source-context read to empty so the builder path stays pure.
     fake._read_enablement_source_context = lambda _sig: ""
-    # Checkpoint weight-facts derivation is best-effort auto-feedback; stub to
-    # empty so the builder path stays pure (no checkpoint filesystem dependency).
+    # Stub weight-facts derivation to empty so the builder path stays pure.
     fake._derive_checkpoint_weight_facts = lambda _log: ""
-    # The fake has no GPU pool, so dispatch degrades to the research-lane-only path.
+    # No GPU pool, so dispatch degrades to the research-lane-only path.
     fake._framework_gpu_params = lambda: {}
     return fake
 
@@ -93,9 +90,7 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     assert params["framework_agent_authoring"] is True
     assert params["enablement"] is True
     assert params["enablement_failure_kind"] == "missing_model_arch"
-    # The pre-patch signature is serialized for the runnable-gate replay.
     assert params["enablement_before_signature"]["kind"] == "missing_model_arch"
-    # The notes body is the single-source mandate rendered by build_mandate.
     assert "RUNNABILITY" in params["notes"]
     assert "git apply --check" in params["notes"]
     assert "GLM-5" in params["notes"]
@@ -179,7 +174,7 @@ def _enqueue_self(**state_kw):
         stop_reason=state_kw.get("stop_reason", ""),
         save=lambda *a, **k: None,
     )
-    # Minimal set_stop_reason shim (real one validates against STOP_REASON_VOCAB).
+    # Minimal set_stop_reason shim.
     state.set_stop_reason = lambda v, **k: setattr(state, "stop_reason", str(v or ""))
 
     async def _warm(_params):
@@ -204,7 +199,7 @@ def _enqueue_self(**state_kw):
     fake._discover_enablement_candidate_refs = types.MethodType(Coordinator._discover_enablement_candidate_refs, fake)
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
-    # The fake has no GPU pool → no needs_gpu, so dispatch stays on research_lane only.
+    # No GPU pool, so dispatch stays on research_lane only.
     fake._framework_gpu_params = lambda: {}
     fake._framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (
         ["research_lane"],
@@ -493,13 +488,7 @@ def test_build_params_threads_base_patches_when_stacked(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enqueue_dispatches_for_unknown_nonblank_log(monkeypatch):
-    """Q1: a non-blank UNKNOWN failure DISPATCHES (never wedges in human_review).
-
-    A brand-new gap the rule table has never seen must still get a repair
-    attempt — the LLM specialist reads the raw log regardless of ``kind`` — so
-    the run never gets stuck waiting on a human just because a failure did not
-    match an enumerated classifier rule.
-    """
+    """Q1: a non-blank UNKNOWN failure DISPATCHES (never wedges in human_review)."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -705,7 +694,7 @@ def test_read_source_context_empty_on_blank_file(tmp_path):
 
 def _make_coord_with_phase(session_dir) -> "Coordinator":
     """Build a minimal Coordinator for authored-lane tests."""
-    from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
+    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
     plan = ScriptedPlan(
@@ -736,8 +725,6 @@ def test_rearm_authored_lane_delegates_enablement(session_dir):
 
 def test_rearm_authored_lane_perf_framework_increments_counter(session_dir):
     """apply_failed on perf_framework lane increments apply_fail_reauthor_attempts."""
-    from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
-
     coord = _make_coord_with_phase(session_dir)
     cand_id = "https://github.com/example/repo/pull/99"
     res = {

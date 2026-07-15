@@ -46,7 +46,6 @@ def _validate_stack_event(
                 "optimization_stack": stack or [{"action": "backends", "variant_name": "fp8"}],
                 "config_path": "/tmp/baseline_config.yaml",
             },
-            # Different idempotency_key each attempt — the smoking gun.
             "idempotency_key": f"validate-stack-tick-{task_id}",
         },
     }
@@ -89,7 +88,7 @@ def test_three_identical_payloads_fires_high():
 
 
 def test_different_idempotency_key_does_not_break_dedup():
-    """The 2026-05-18 GPU-leak failure mode: distinct keys, same payload."""
+    """Distinct idempotency keys, same payload, still dedups."""
     events = [_validate_stack_event(task_id=str(i)) for i in range(5)]
     data = SourceData(coordinator_events=events)
     out = evaluate_repeated_payload_signals(_ctx(), data)
@@ -109,7 +108,6 @@ def test_payload_change_resets_streak():
         data,
         config=RepeatedPayloadConfig(streak_threshold=3),
     )
-    # After the t3 payload change the streak resets to length 1.
     assert all(s.name != "same_payload_loop" for s in out)
 
 
@@ -210,8 +208,7 @@ def test_inbox_and_coordinator_events_combined():
         inbox=inbox,
         now_unix=1.0,
     )
-    # config_path differs so inbox + coord won't merge into one hash;
-    # match them up:
+    # Match config_path so inbox + coord merge into one hash.
     inbox[0].payload["params"]["config_path"] = coord_events[0]["payload"]["params"]["config_path"]
     data = SourceData(coordinator_events=coord_events)
     out = evaluate_repeated_payload_signals(
@@ -221,77 +218,3 @@ def test_inbox_and_coordinator_events_combined():
     )
     sym = next(s for s in out if s.name == "same_payload_loop")
     assert sym.evidence["count"] == 3
-
-
-# ---------------------------------------------------------------------------
-# Legacy ``extra_sglang_args`` envelopes still fingerprint to the same
-# hash as canonical envelopes.
-# ---------------------------------------------------------------------------
-def _integrate_event(*, task_id: str, args_value: str, legacy: bool) -> dict:
-    """Build an ``integrate`` envelope using legacy ``extra_sglang_args`` (legacy=True) or canonical ``extra_server_args``; otherwise identical so both fingerprint to the same hash."""
-    key = "extra_sglang_args" if legacy else "extra_server_args"
-    return {
-        "topic": "delegated_result",
-        "agent": "coordinator",
-        "payload": {
-            "kind": "integrate",
-            "family": "integrate",
-            "state": "failed",
-            "task_id": task_id,
-            "error_class": "ApplyFailed",
-            "params": {
-                "kernel_id": "k1",
-                "patch_path": "/tmp/p1.patch",
-                key: args_value,
-                "extra_envs": {"CONC": "8"},
-            },
-            "idempotency_key": f"integrate-{task_id}",
-        },
-    }
-
-
-def test_legacy_extra_sglang_args_envelope_hashes_identically(recwarn):
-    """G3 regression: legacy and canonical key envelopes must fingerprint identically so same_payload_loop fires across a mixed-key burst."""
-    events = [
-        _integrate_event(task_id="t1", args_value="--tp 4", legacy=True),
-        _integrate_event(task_id="t2", args_value="--tp 4", legacy=False),
-        _integrate_event(task_id="t3", args_value="--tp 4", legacy=True),
-    ]
-    data = SourceData(coordinator_events=events)
-    out = evaluate_repeated_payload_signals(
-        _ctx(),
-        data,
-        config=RepeatedPayloadConfig(streak_threshold=3),
-    )
-    sym = next(s for s in out if s.name == "same_payload_loop")
-    assert sym.evidence["family"] == "integrate"
-    assert sym.evidence["count"] == 3, "legacy + canonical envelopes did not collapse to the same hash"
-    # At least one DeprecationWarning must fire for the audit channel.
-    legacy_warnings = [
-        w for w in recwarn.list if issubclass(w.category, DeprecationWarning) and "extra_sglang_args" in str(w.message)
-    ]
-    assert legacy_warnings, "no DeprecationWarning fired on legacy envelope"
-
-
-def test_legacy_envelope_alone_still_fingerprints(recwarn):
-    """An all-legacy-key streak must still fire — the shim normalises before projection, not just on mixed-key bursts."""
-    events = [
-        _integrate_event(task_id="t1", args_value="--tp 4", legacy=True),
-        _integrate_event(task_id="t2", args_value="--tp 4", legacy=True),
-        _integrate_event(task_id="t3", args_value="--tp 4", legacy=True),
-    ]
-    data = SourceData(coordinator_events=events)
-    out = evaluate_repeated_payload_signals(
-        _ctx(),
-        data,
-        config=RepeatedPayloadConfig(streak_threshold=3),
-    )
-    sym = next(s for s in out if s.name == "same_payload_loop")
-    assert sym.evidence["count"] == 3
-    # The legacy-alias DeprecationWarning is part of the audit channel; capture
-    # it via recwarn (like the mixed-key sibling) so it does not leak to the
-    # pytest warnings summary.
-    legacy_warnings = [
-        w for w in recwarn.list if issubclass(w.category, DeprecationWarning) and "extra_sglang_args" in str(w.message)
-    ]
-    assert legacy_warnings, "no DeprecationWarning fired on legacy envelope"

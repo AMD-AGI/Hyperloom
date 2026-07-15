@@ -1,9 +1,9 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Aiter JIT-cache regression detector (A7).
+"""Aiter JIT-cache regression detector.
 
 Cross-tick view of aiter's ``jit/`` ``.so`` cache, warning before the next
-cold-start hits the 3600s ``hipcc`` timeout. Catches cache-regressed-mid-session
+cold-start hits the ``hipcc`` timeout. Catches cache-regressed-mid-session
 and build-dir-stuck; tracks prior ``so_count`` itself since LocalProbe is stateless.
 """
 
@@ -25,9 +25,9 @@ class AiterJitConfig:
 
     # Below this count the cache is "cold".
     cold_so_count: int = 20
-    # current/previous ``so_count`` ratio below which (when also cold) → regressed, fire HIGH.
+    # current/previous ``so_count`` ratio below which (when also cold) → regressed.
     regression_ratio: float = 0.8
-    # Build-dir stale: count > stale_build_threshold AND unchanged for stale_build_persist_ticks ticks.
+    # Build-dir stale: count > threshold AND unchanged for persist_ticks ticks.
     stale_build_threshold: int = 1
     stale_build_persist_ticks: int = 5
 
@@ -52,7 +52,7 @@ class AiterJitDetector:
         """
         self._config = config or AiterJitConfig()
         self._state_view = state_view
-        # Disk-backed cross-tick state; required for the regression check under subprocess-per-tick transport.
+        # Disk-backed cross-tick state for the regression check.
         loaded = state_view.load() if state_view is not None else {}
         last_so = loaded.get("last_so_count")
         self._last_so_count: int | None = int(last_so) if isinstance(last_so, (int, float)) else None
@@ -98,7 +98,7 @@ class AiterJitDetector:
         """
         info = data.local_aiter_jit
         if not isinstance(info, dict) or not info:
-            # No JIT data this tick — keep counters; don't accuse on missing telemetry.
+            # No JIT data this tick — keep counters.
             return []
         so_count = info.get("so_count")
         build_count = info.get("build_count") or 0
@@ -118,7 +118,7 @@ class AiterJitDetector:
         if self._stale_build_streak >= self._config.stale_build_persist_ticks:
             symptoms.append(self._build_stuck_symptom(info))
 
-        # Cache regression: needs a prior baseline AND the new value crossing both relative-drop and absolute-cold thresholds.
+        # Cache regression: needs a prior baseline AND the new value crossing both thresholds.
         prev = self._last_so_count
         if (
             prev is not None
@@ -203,27 +203,7 @@ class AiterJitDetector:
             suggestion=("observe; if it persists, suggest cleaning <jit_dir>/build/ manually between runs"),
         )
 
-
-def evaluate_aiter_jit_signals(
-    detector: AiterJitDetector,
-    ctx: ReactorContext,
-    data: SourceData,
-) -> list[Symptom]:
-    """Module-level helper mirroring the other signal rule entry points.
-
-    Args:
-        detector (AiterJitDetector): The stateful detector owned by the caller.
-        ctx (ReactorContext): Reactor context for the current tick.
-        data (SourceData): Collected source data.
-
-    Returns:
-        list[Symptom]: The detector's symptoms for this tick, possibly empty.
-    """
-    return detector.evaluate(ctx, data)
-
-
 __all__ = [
     "AiterJitConfig",
     "AiterJitDetector",
-    "evaluate_aiter_jit_signals",
 ]

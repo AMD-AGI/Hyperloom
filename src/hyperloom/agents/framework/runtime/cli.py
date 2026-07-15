@@ -33,27 +33,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
-from hyperloom.common.subprocess_bridge import emit_json as _common_emit_json
+from hyperloom.common.subprocess_bridge import emit_json
+
+from ..pr_kb_slug import normalise_repo as _normalise_pr_kb_repo
 
 if TYPE_CHECKING:
     from ..models import ExploreRequest
-
-
-# Framework's emit uses ``make_parents=True`` because its CLI is invoked with
-# ``--out`` paths under a fresh work dir that may not exist yet (Critic /
-# Robustness never create the parent). This thin wrapper keeps all call sites
-# using the bare ``_emit_json(obj, out)`` signature.
-def _emit_json(obj: Any, out: str | None) -> None:
-    """Serialize obj as JSON to stdout or a file path, creating parent dirs.
-
-    Delegates to :func:`hyperloom.common.subprocess_bridge.emit_json` with
-    ``make_parents=True``.
-
-    Args:
-        obj (Any): JSON-serialisable object to emit.
-        out (str | None): Destination path, or ``None``/``"-"`` for stdout only.
-    """
-    _common_emit_json(obj, out, make_parents=True)
 
 
 def _load_request(path: str) -> "ExploreRequest":
@@ -90,7 +75,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (unused).
     """
     del args
-    _emit_json(
+    emit_json(
         {
             "required": ["framework", "repo_url", "baseline"],
             "subcommands_available": [
@@ -134,6 +119,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
             },
         },
         "-",
+        make_parents=True,
     )
 
 
@@ -148,7 +134,7 @@ def _cmd_explore(args: argparse.Namespace) -> None:
 
     request = _load_request(args.request)
     summary = explore(request, execute=bool(args.execute))
-    _emit_json(summary, args.out)
+    emit_json(summary, args.out, make_parents=True)
 
 
 def _cmd_candidates(args: argparse.Namespace) -> None:
@@ -170,7 +156,7 @@ def _cmd_candidates(args: argparse.Namespace) -> None:
         "count": len(candidates),
         "candidates": [asdict(c) for c in candidates],
     }
-    _emit_json(payload, args.out)
+    emit_json(payload, args.out, make_parents=True)
 
 
 def _read_json_request(path: str) -> dict[str, Any]:
@@ -248,10 +234,8 @@ def _candidate_excluded_by_memory(
 ) -> bool:
     """True when a discovered candidate matches the session's exclusion memory.
 
-    Hard-dedup (Step B): drops a candidate whose ``pr_url`` / ``ref`` is an
-    excluded id, or whose PR number matches an excluded / already-failed PR
-    (same-PR de-prioritisation collapses to a drop). Genuinely new candidates
-    pass through.
+    Drops a candidate whose ``pr_url`` / ``ref`` is an excluded id, or whose PR
+    number matches an excluded / already-failed PR.
 
     Args:
         pr_url: The candidate's PR URL.
@@ -311,7 +295,6 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     framework = str(request.get("framework") or "sglang").strip().lower()
     repo_url = str(request.get("repo_url") or "").strip()
     if not repo_url:
-        # Standalone repo_map; no reverse-import of hyperloom.inference_optimizer.
         from ..repo_map import repo_url_for_framework
 
         repo_url = repo_url_for_framework(framework)
@@ -324,17 +307,9 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     if not isinstance(gaps, list) or not gaps:
         gaps = [{"gap_canonical_id": "", "gap_description": ""}]
 
-    # #5-P2 forced cross-framework candidates. Operators (or the Coordinator)
-    # can pin exact upstream PRs so they surface as ``source='explicit'``
-    # candidates (always emitted first by ``enumerate_candidates``) instead of
-    # relying on keyword search ranking. Refs are scoped to the repo whose slug
-    # matches ``repo_scope`` (default: apply to any repo). This keeps the forced
-    # refs attributed to their OWN repo so the Coordinator's cross-discover tag
-    # (FRAMEWORK_AGENT_CROSS_DISCOVER_TAG) can stamp them src->dst correctly.
-    #   request field:  "forced_candidate_refs": ["PR:27364", ...]
-    #                   "forced_candidate_repo_scope": "sgl-project/sglang"
-    #   env fallback:   FRAMEWORK_AGENT_FORCE_PR_REFS="PR:27364,PR:27965,PR:25098"
-    #                   FRAMEWORK_AGENT_FORCE_PR_REPO="sgl-project/sglang"
+    # Forced cross-framework candidates: pinned upstream PRs surfaced as
+    # source='explicit'. Scoped to repo_scope; supports request fields and
+    # FRAMEWORK_AGENT_FORCE_PR_REFS / FRAMEWORK_AGENT_FORCE_PR_REPO env fallback.
     forced_refs_raw = request.get("forced_candidate_refs")
     if not forced_refs_raw:
         env_refs = (os.environ.get("FRAMEWORK_AGENT_FORCE_PR_REFS") or "").strip()
@@ -362,7 +337,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
 
     forced_refs: list[str] = []
     if forced_repo_scope and forced_repo_scope not in repo_url.strip().lower():
-        # This queried repo is out of scope for the forced refs; skip.
+        # Queried repo out of scope for the forced refs; skip.
         forced_refs = []
     else:
         seen_fr: set[str] = set()
@@ -372,9 +347,8 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 seen_fr.add(nr)
                 forced_refs.append(nr)
 
-    # Step B hard-dedup: candidates the caller (Hyperloom) has already
-    # discovered or reached a terminal verdict on. Also collapse "same PR
-    # number as a failed candidate" into a drop (deterministic de-prioritise).
+    # Hard-dedup: drop candidates already discovered/finalised, and collapse
+    # "same PR number as a failed candidate" into a drop.
     excluded_ids: set[str] = {
         str(x).strip() for x in (request.get("excluded_candidate_ids") or []) if str(x).strip()
     }
@@ -388,10 +362,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                     excluded_pr_numbers.add(n)
     excluded_count = 0
 
-    # Resolve the primus_cortex base URL (the PR-Monitor service). Only enable
-    # the primus_cortex search mode when a URL is available, else enumerate
-    # raises SourceConfigError before it can fall through to GitHub — which
-    # would make discovery empty whenever primus isn't wired. GitHub
+    # Enable the primus_cortex mode only when a URL is available; GitHub
     # (anonymous, best-effort) is always kept so discovery degrades gracefully.
     primus_url = str(request.get("primus_cortex_url") or os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
     if primus_url:
@@ -402,8 +373,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
         primus_block = {}
 
     # gbrain PR KB is the primary discovery backend when enabled + configured;
-    # prepend it so it ranks ahead of primus_cortex/github, which stay as
-    # fallbacks (design D6 degradation chain).
+    # prepend it so it ranks ahead of primus_cortex/github fallbacks.
     pr_kb_enabled = (os.environ.get("PR_KB_ENABLE", "1") or "1").strip() != "0"
     pr_kb_configured = bool(
         (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
@@ -437,18 +407,14 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 "model_class": str(request.get("model_class") or request.get("model") or ""),
                 "gpu_type": str(request.get("gpu_type") or ""),
                 "precision": str(request.get("precision") or ""),
-                # search_perf_prs MUST be True here: enumerate_candidates
-                # short-circuits to explicit-refs-only (empty for phase-discover)
-                # when it is False, so omitting it made FRAMEWORK discovery
-                # always return 0 candidates (never querying primus_cortex/github).
+                # Must be True: else enumerate_candidates short-circuits to
+                # explicit-refs-only and returns 0 candidates here.
                 "search_perf_prs": True,
                 "search_modes": search_modes,
                 "pr_states": request.get("pr_states") or ["open"],
                 "max_search_candidates": max_candidates,
                 "keywords": gap_keywords,
-                # #5-P2: explicit forced refs are always emitted first by
-                # enumerate_candidates (source='explicit'); empty by default so
-                # same-framework / unforced discovery is byte-for-byte unchanged.
+                # Forced refs are emitted first (source='explicit'); empty by default.
                 "candidate_refs": tuple(forced_refs),
                 **primus_block,
             }
@@ -464,25 +430,16 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
         for cand in cands:
             entry = _asdict(cand)
             repo = str(entry.get("repo") or "")
-            # #5-P2: explicit forced candidates carry repo=repo_url (the queried
-            # repo_url, typically a .git URL). Derive the owner/name slug for
-            # pr_url/diff_url building, but KEEP the ``repo`` field as the
-            # canonical .git URL so the Coordinator's cross-discover origin
-            # helper (exact-match against repo_map .git URLs) can re-tag the
-            # candidate's origin framework (sglang) and route it through the
-            # cross-framework PORT instead of a same-framework raw apply.
+            # Explicit forced candidates carry repo=repo_url (a .git URL).
+            # Derive the owner/name slug for pr_url/diff_url but KEEP the repo
+            # field as the canonical .git URL for cross-discover origin re-tagging.
             repo_slug = repo
             if str(entry.get("source") or "") == "explicit" and (
                 repo.startswith("http") or repo.endswith(".git")
             ):
-                try:
-                    from framework_agent.pr_kb_slug import normalise_repo as _norm_repo
-
-                    slug = _norm_repo(repo)
-                    if slug:
-                        repo_slug = slug  # used only for pr_url/diff_url below
-                except Exception:  # noqa: BLE001 — best-effort
-                    repo_slug = repo
+                slug = _normalise_pr_kb_repo(repo)
+                if slug:
+                    repo_slug = slug  # used only for pr_url/diff_url
             ref = str(entry.get("ref") or "")
             key = (repo, ref)
             if not ref or key in seen_refs:
@@ -501,8 +458,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 else (f"https://github.com/{repo_slug}/pull/{pr_number}.diff" if repo_slug and isinstance(pr_number, int) else "")
             )
             pr_url = html_url or _pr_url_for(repo_slug, pr_number)
-            # Step B: drop candidates already seen / finalised / equivalent to a
-            # failed PR this session, so discovery stops re-surfacing them.
+            # Drop candidates already seen/finalised or equivalent to a failed PR.
             if _candidate_excluded_by_memory(
                 pr_url=pr_url,
                 ref=ref,
@@ -555,7 +511,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     for rank, candidate in enumerate(out_cands, start=1):
         candidate["prior_rank"] = rank
 
-    _emit_json(
+    emit_json(
         {
             "batch_id": batch_id,
             "framework": framework,
@@ -572,6 +528,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             "candidates": out_cands,
         },
         args.out,
+        make_parents=True,
     )
 
 
@@ -597,7 +554,7 @@ def _cmd_phase_audit(args: argparse.Namespace) -> None:
 
     request = _read_json_request(args.request)
     result = run_phase_audit(request)
-    _emit_json(result, args.out)
+    emit_json(result, args.out, make_parents=True)
 
 
 def _cmd_kb(args: argparse.Namespace) -> None:
@@ -616,29 +573,31 @@ def _cmd_kb(args: argparse.Namespace) -> None:
 
     op = args.kb_op
     if op == "list":
-        _emit_json(
+        emit_json(
             {
                 "kb_root": str(kb_mod._resolve_kb_root()),
                 "domains": kb_mod.list_domains(),
             },
             args.out,
+            make_parents=True,
         )
         return
     if op == "show":
         files = kb_mod.get_domain_files(args.domain)
         if not files:
             raise RuntimeAdapterError(f"domain {args.domain!r} not found under {kb_mod._resolve_kb_root()}")
-        _emit_json(
+        emit_json(
             {
                 "domain": args.domain,
                 "files": [{"path": str(p), "size_bytes": p.stat().st_size} for p in files if p.is_file()],
             },
             args.out,
+            make_parents=True,
         )
         return
     if op == "search":
         hits = kb_mod.search_kb(args.query, domains=args.domain or None)
-        _emit_json(
+        emit_json(
             {
                 "query": args.query,
                 "domain_filter": list(args.domain) if args.domain else None,
@@ -646,6 +605,7 @@ def _cmd_kb(args: argparse.Namespace) -> None:
                 "hits": [{"domain": h.domain, "path": str(h.path)} for h in hits],
             },
             args.out,
+            make_parents=True,
         )
         return
     if op == "contribute":
@@ -658,7 +618,7 @@ def _cmd_kb(args: argparse.Namespace) -> None:
             source=args.source,
             session_id=args.session_id,
         )
-        _emit_json({"status": "appended", "path": str(path)}, args.out)
+        emit_json({"status": "appended", "path": str(path)}, args.out, make_parents=True)
         return
     if op == "synthesize":
         findings: list[Finding] = []
@@ -712,8 +672,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="framework-agent",
         description="Explore serving frameworks/refs in isolated worktrees.",
     )
-    # Global logging flags on the top-level parser so every subcommand picks
-    # them up uniformly (wired into logging_setup.configure_logging).
+    # Global logging flags on the top-level parser so every subcommand picks them up.
     parser.add_argument(
         "--log-level",
         default=None,

@@ -39,7 +39,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# Hyperloom roofline formula (single source of truth for ceiling).
 from hyperloom.orchestrator.kernel.roofline_ceiling import (
     HW_SPECS,
     compute_theoretical_peak_output_tok_per_sec,
@@ -47,9 +46,6 @@ from hyperloom.orchestrator.kernel.roofline_ceiling import (
 )
 
 
-# ---------------------------------------------------------------------------
-# State / template extraction
-# ---------------------------------------------------------------------------
 @dataclass
 class LaunchTemplate:
     """sglang launch parameter bundle (one per config: baseline / optimized)."""
@@ -81,9 +77,7 @@ def extract_templates(state: dict[str, Any]) -> tuple[LaunchTemplate, LaunchTemp
     """Build the (baseline, optimized) launch templates from state.json.
 
     Baseline = vanilla sglang (no extra flags / envs). Optimized =
-    state.current_best.extra_server_args + extra_envs. The optimized
-    template is the hard KPI of this sweep — when empty, the caller
-    should refuse to run.
+    state.current_best.extra_server_args + extra_envs.
 
     Args:
         state: The parsed session ``state.json`` mapping.
@@ -110,9 +104,6 @@ def extract_templates(state: dict[str, Any]) -> tuple[LaunchTemplate, LaunchTemp
     )
 
 
-# ---------------------------------------------------------------------------
-# sglang server lifecycle
-# ---------------------------------------------------------------------------
 class SglangServer:
     """Spawn ``python -m sglang.launch_server`` in a process group; kill on exit."""
 
@@ -174,15 +165,11 @@ class SglangServer:
             cmd.extend(self.extra_args.strip().split())
 
         env = os.environ.copy()
-        # ROCm GPU pinning: set ONLY ROCR_VISIBLE_DEVICES. Do NOT also set
-        # CUDA/HIP_VISIBLE_DEVICES — ROCR filters to expose the target GPU as
-        # logical index 0, so a stacked CUDA_VISIBLE_DEVICES=<gpu_id> would
-        # then select a non-existent index and torch reports "No accelerator".
-        # Pop the others so only ROCR is in effect.
+        # ROCm GPU pinning: set ONLY ROCR_VISIBLE_DEVICES; pop the others so
+        # only ROCR is in effect.
         env["ROCR_VISIBLE_DEVICES"] = str(self.gpu_id)
         env.pop("CUDA_VISIBLE_DEVICES", None)
         env.pop("HIP_VISIBLE_DEVICES", None)
-        # MI355X defaults the orchestrator's baseline_executor also injects.
         env.setdefault("SGLANG_USE_AITER", "1")
         env.setdefault("SGLANG_AITER_MLA_PERSIST", "1")
         env.setdefault("HSA_NO_SCRATCH_RECLAIM", "1")
@@ -221,7 +208,6 @@ class SglangServer:
                         print(f"[server] ready on port {self.port}", flush=True)
                         return
             except Exception:
-                # Server not ready yet; retry after the sleep below.
                 pass
             time.sleep(5)
         raise RuntimeError(f"sglang server did not become ready in {self.ready_timeout_sec}s")
@@ -242,7 +228,6 @@ class SglangServer:
                 os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
                 self.proc.wait(timeout=10)
         except ProcessLookupError:
-            # Process already exited; nothing to signal.
             pass
         print(f"[server] stopped (port {self.port})", flush=True)
 
@@ -256,9 +241,6 @@ class SglangServer:
         return f"http://127.0.0.1:{self.port}"
 
 
-# ---------------------------------------------------------------------------
-# bench_serving
-# ---------------------------------------------------------------------------
 def run_bench(
     *,
     base_url: str,
@@ -337,9 +319,6 @@ def run_bench(
         return {}
 
 
-# ---------------------------------------------------------------------------
-# Ceiling per concurrency
-# ---------------------------------------------------------------------------
 def compute_ceiling(
     *,
     model_meta: Any,
@@ -383,9 +362,6 @@ def compute_ceiling(
     )
 
 
-# ---------------------------------------------------------------------------
-# Sweep one template across all concurrencies (single server reuse)
-# ---------------------------------------------------------------------------
 def sweep_one_template(
     *,
     tmpl: LaunchTemplate,
@@ -489,9 +465,6 @@ def sweep_one_template(
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Output: csv + svg
-# ---------------------------------------------------------------------------
 def write_csv(rows: list[dict[str, Any]], csv_path: Path) -> None:
     """Write sweep result rows to a CSV file.
 
@@ -560,8 +533,7 @@ def plot_svg(
     target = [c * target_ratio if c is not None else None for c in ceiling]
     base_mbu = _series("baseline", "mbu_pct")
     opt_mbu = _series("optimized", "mbu_pct")
-    # Baseline-only sweep (no accepted optimization) -> hide the optimized
-    # series entirely so the chart reads as Measured vs Roofline vs target.
+    # Baseline-only sweep hides the optimized series.
     has_opt = any(v is not None for v in opt_meas)
 
     fig, (ax1, ax2) = plt.subplots(
@@ -642,9 +614,6 @@ def plot_svg(
     print(f"[out] svg -> {svg_path}", flush=True)
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for the roofline concurrency sweep.
 

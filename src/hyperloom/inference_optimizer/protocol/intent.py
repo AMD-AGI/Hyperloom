@@ -1,11 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Structured-intent transport schema (protocol layer).
+"""Structured-intent transport validation (protocol layer).
 
 Claude (``emit_intent`` MCP tool_call) and Codex (``validated_json_output``)
-transports share one envelope schema, validated via :func:`validate_envelope`.
-Bottom-layer definition: must never import ``orchestrator`` / ``shared_state``
-(import cycle).
+transports share one envelope shape, validated via :func:`validate_envelope`.
+Must never import ``orchestrator`` / ``shared_state`` (import cycle).
 """
 
 from __future__ import annotations
@@ -29,8 +28,7 @@ class IntentType(str, Enum):
     PROPOSE_ACTION = "propose_action"
     UPDATE_STATE = "update_state"
     ALERT = "alert"
-    # Bidirectional agent-to-agent RPC; PolicyGate restricts (source,
-    # target_agent) pairs and `kind` per pair.
+    # Bidirectional agent-to-agent RPC.
     REQUEST = "request"
     RESPONSE = "response"
     REVIEW_VERDICT = "review_verdict"  # Critic-only
@@ -41,44 +39,12 @@ class IntentType(str, Enum):
     # specialist exit: one per task.
     SPECIALIST_DONE = "specialist_done"
 
-
-_ALL_INTENT_VALUES: tuple[str, ...] = tuple(t.value for t in IntentType)
-
-
 @dataclass
 class Intent:
     """One validated intent from any transport."""
 
     type: IntentType
     payload: dict[str, Any] = field(default_factory=dict)
-
-
-# Envelope schema — inlined to avoid a jsonschema dependency.
-INTENT_ENVELOPE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "intents": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "intent_type": {
-                        "type": "string",
-                        "enum": list(_ALL_INTENT_VALUES),
-                    },
-                    "payload": {
-                        "type": "object",
-                        "description": "Schema depends on intent_type.",
-                    },
-                },
-                "required": ["intent_type", "payload"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["intents"],
-    "additionalProperties": False,
-}
 
 
 # Per-intent payload required-field map
@@ -90,63 +56,14 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
     IntentType.RESPONSE: ("in_reply_to", "kind"),
-    # verdict/verdict_map mutual exclusion enforced by
-    # _validate_review_verdict_payload; only the structural field required here.
+    # verdict/verdict_map mutual exclusion enforced by _validate_review_verdict_payload.
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.KILL_TASK: ("task_id", "reason"),
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
-    # specialist exit envelope; per-variant schema enforced by PolicyGate R3
-    # (policy._validate_specialist_done).
+    # specialist exit envelope; per-variant schema enforced by PolicyGate R3.
     IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "empty", "summary"),
 }
-
-
-# Tool schema for the Claude SDK.
-EMIT_INTENT_TOOL_SCHEMA: dict[str, Any] = {
-    "name": "emit_intent",
-    "description": (
-        "The ONLY way to communicate decisions, messages, or actions to "
-        "the system. Free-text responses are ignored. Call this tool one "
-        "or more times per turn; each call carries exactly one intent."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "intent_type": {
-                "type": "string",
-                "enum": list(_ALL_INTENT_VALUES),
-            },
-            "payload": {
-                "type": "object",
-                "description": (
-                    "Per-intent payload. send_message: {topic, body_md, to?}; "
-                    "propose_action: {action_name, predicted_gain_pct, "
-                    "reason?}; delegate: {action_name, params?, "
-                    "idempotency_key?}; alert: {severity, summary, detail?}; "
-                    "update_state: {changes}; "
-                    "request: {target_agent, kind, params?, "
-                    "reason?}; response: {in_reply_to, kind, status?, "
-                    "result?}; review_verdict: {target_proposal_msg_id, "
-                    "verdict ∈ approve/reject/redirect/advise/needs_review, "
-                    "reasoning, kb_evidence?} for single-proposal review, "
-                    "OR {target_proposal_msg_id, verdict_map: "
-                    "{variant_name: {verdict, rationale?}}} for batch "
-                    "explore review (v0.8 KB_gaps/Gap-11); the two "
-                    "shapes are mutually exclusive — Critic-only; "
-                    "kill_task / prune_branch / "
-                    "escalate_strategy_change — Robustness-only (PolicyGate); "
-                    "specialist_done: {gap_canonical_id, domain, "
-                    "proposal_set: [variant...], empty, summary, "
-                    "confidence?, new_findings?, residual_questions?} — "
-                    "specialist-only, exactly one per task."
-                ),
-            },
-        },
-        "required": ["intent_type", "payload"],
-    },
-}
-
 
 class NoIntentEmitted(RuntimeError):
     """Backend produced no parseable envelope and no tool_use blocks."""
@@ -221,9 +138,6 @@ def _validate_review_verdict_payload(
     """Enforce REVIEW_VERDICT structural shape: exactly one of ``verdict``
     (single) or ``verdict_map`` (per-variant batch) must be present.
 
-    PolicyGate handles content validation (verdict vocab, variant_name vs
-    grid); this only guarantees at-most-one-present for downstream callers.
-
     Args:
         payload: The REVIEW_VERDICT intent payload to validate.
         index: Position of the intent in the envelope (for error messages).
@@ -268,8 +182,6 @@ def _validate_review_verdict_payload(
 
 
 __all__ = [
-    "EMIT_INTENT_TOOL_SCHEMA",
-    "INTENT_ENVELOPE_SCHEMA",
     "Intent",
     "IntentType",
     "IntentValidationError",

@@ -113,9 +113,7 @@ def process_model(
         rec.detected = asdict(detected)
         rec.category = _category_from_arch(rec.detected.get("arch", ""))
         # Absolute small-context floor: skip models whose config.json
-        # max_position_embeddings is present and <= MIN_MAX_POSITION_EMBEDDINGS,
-        # regardless of the requested isl/osl. (A missing config.json already
-        # fails auto_detect above and is skipped there.)
+        # max_position_embeddings is present and <= MIN_MAX_POSITION_EMBEDDINGS.
         mpe = int(rec.detected.get("max_position_embeddings") or 0)
         if mpe and mpe <= MIN_MAX_POSITION_EMBEDDINGS:
             rec.status = "skipped"
@@ -137,15 +135,13 @@ def process_model(
             log.warning("[%s] skipping: %s", repo_id, rec.error)
             return rec
 
-        # Shared structural compatibility pre-flight (multimodal, Gemma2,
-        # Phi3 longrope, dual-chunk attention, ModelOpt FP8, FlashInfer,
-        # missing tokenizer). Uses the real downloaded config + local model dir
-        # so doomed models are skipped before a Claw session is created.
+        # Shared structural compatibility pre-flight, using the downloaded config
+        # + local model dir so doomed models are skipped before a Claw session.
         compat = model_compat.unrunnable_reason(
             detected.raw_config,
             repo=repo_id,
             model_dir=os.path.join(
-                os.environ.get("CI_MODELS_DIR", "/wekafs/models"),
+                os.environ.get("CI_MODELS_DIR", "/mnt/shared/models"),
                 repo_id.replace("/", "-")),
             whitelist=model_compat.load_whitelist(),
             gpu_type=gpu_type,
@@ -169,11 +165,9 @@ def process_model(
             )
             return rec
 
-        # Online fallback for missing_tokenizer: the local rule above only fires
-        # once the model dir is populated with weights. Not-yet-cached repos that
-        # ship weights but omit tokenizer.* files would otherwise slip through and
-        # fail to serve. Probe the HF file listing directly (HF_TOKEN/HF_TOKEN_2)
-        # so they are skipped before a Claw session is created.
+        # Online fallback for missing_tokenizer: probe the HF file listing so
+        # not-yet-cached repos lacking tokenizer.* files are skipped before a
+        # Claw session is created.
         hf_tokens = [t for t in (os.environ.get("HF_TOKEN", ""),
                                   os.environ.get("HF_TOKEN_2", "")) if t]
         tok_reason = model_compat.hf_missing_tokenizer(repo_id, hf_tokens)
@@ -218,16 +212,15 @@ def process_model(
         rec.status = "dry-run"
         return rec
 
-    # If prewarm already populated /wekafs/models/<slug>/, use local_path mode so
-    # SaFE sets phase=Ready immediately without re-downloading over our files.
-    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    # If prewarm already populated the shared model cache, use local_path mode so
+    # SaFE sets phase=Ready immediately without re-downloading.
+    nfs_root = os.environ.get("NFS_ROOT", "/mnt/shared")
     target_slug = repo_id.replace("/", "-")
     target_dir = f"{nfs_root}/models/{target_slug}"
     use_local_path = False
     try:
         if os.path.isdir(target_dir):
-            # Heuristic floor: any real HF repo has >=5 files (config + tokenizer
-            # + weight shard).
+            # Heuristic floor: any real HF repo has >=5 files.
             n_files = sum(1 for _ in os.scandir(target_dir))
             if n_files >= 5:
                 use_local_path = True
@@ -248,10 +241,8 @@ def process_model(
     except OSError as e:
         log.warning("[%s] could not probe %s: %s — falling back to SaFE download", repo_id, target_dir, e)
 
-    # Find existing SaFE record OR register fresh. Stale phase=Failed records
-    # (aborted prior download) would make wait_ready return False forever, so we
-    # re-register: SaFE issues a new model_id or resets to Pending, and the
-    # Download Job now sees prewarmed files and finishes in seconds.
+    # Find existing SaFE record OR register fresh. Stale phase=Failed records are
+    # re-registered so the Download Job re-runs against prewarmed files.
     safe_model = safe.find_model(repo_id)
     if safe_model and safe_model.get("phase") != "Failed":
         model_id = safe_model["id"]
@@ -264,7 +255,7 @@ def process_model(
     else:
         if safe_model:
             log.info(
-                "[%s] existing model %s is %s — re-registering (prewarm should have populated /wekafs/models/ already)",
+                "[%s] existing model %s is %s — re-registering (prewarm should have populated the shared model cache already)",
                 repo_id,
                 safe_model.get("id"),
                 safe_model.get("phase"),

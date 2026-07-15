@@ -2,14 +2,9 @@
 
 """Long-run infrastructure acceptance tests.
 
-Covers the "live long safely" reworks that must hold before the cyclic phase
-machine is introduced:
-
-* bounded SharedState ledgers + events/tasks DB retention (resume-safe).
-* active GPU-lease reaper + coordinator maintenance tick.
-* bounded transient-failure retry/backoff for LLM backend calls.
-
-All deterministic + offline (no GPU, no network, fake clock).
+Covers bounded SharedState ledgers + events/tasks DB retention, the GPU-lease
+reaper + coordinator maintenance tick, and transient-failure retry/backoff for
+LLM backend calls. All deterministic + offline.
 """
 
 from __future__ import annotations
@@ -32,9 +27,6 @@ from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
 
-# --------------------------------------------------------------------------
-# Fixtures
-# --------------------------------------------------------------------------
 @pytest.fixture
 def conn(tmp_path):
     db = SqliteConnection(tmp_path / "coordinator.db")
@@ -47,18 +39,16 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat(timespec="microseconds")
 
 
-# ==========================================================================
 # SharedState ledger caps
-# ==========================================================================
 def test_intervention_mix_capped():
     st = SharedState()
     cap = ss_mod._INTERVENTION_MIX_CAP
     for i in range(cap + 250):
         st.record_intervention(change_type="config", action="explore", task_id=str(i))
     assert len(st.intervention_mix) == cap
-    # Most-recent retained (tail-trim), oldest evicted.
+    # Most-recent retained, oldest evicted.
     assert st.intervention_mix[-1]["task_id"] == str(cap + 250 - 1)
-    # Authoritative control counter is NOT trimmed.
+    # Control counter is NOT trimmed.
     assert st.consecutive_config_only_rounds == cap + 250
 
 
@@ -76,8 +66,8 @@ def test_seen_pr_ids_capped():
     cap = ss_mod._SEEN_PR_IDS_CAP
     st.register_seen_pr_ids([f"pr{i}" for i in range(cap + 500)])
     assert len(st.research_scout_seen_pr_ids) == cap
-    # Newest kept (FIFO eviction of oldest).
-    assert st.has_seen_pr_id(f"pr{cap + 500 - 1}")
+    # Newest kept, oldest evicted.
+    assert f"pr{cap + 500 - 1}" in st.research_scout_seen_pr_ids
 
 
 def test_winners_history_capped_via_explore_update():
@@ -93,7 +83,7 @@ def test_tested_ledger_cap_helper():
     tested = {f"fp{i}": {"i": i} for i in range(cap + 300)}
     out = _cap_tested_ledger(tested)
     assert len(out) == cap
-    # Oldest insertion-order keys evicted; newest retained.
+    # Oldest keys evicted; newest retained.
     assert f"fp{cap + 300 - 1}" in out
     assert "fp0" not in out
 
@@ -106,9 +96,7 @@ def test_tested_ledger_cap_applied_on_merge():
     assert len(st.explore_search["tested"]) == cap
 
 
-# ==========================================================================
 # DB retention (events + tasks), resume-safe
-# ==========================================================================
 @pytest.mark.asyncio
 async def test_prune_events_respects_min_cursor_and_recent_window(conn):
     bus = MessageBus(conn)
@@ -118,10 +106,10 @@ async def test_prune_events_respects_min_cursor_and_recent_window(conn):
     # No cursor yet => nothing is safe to prune.
     assert await dbm.prune_events(conn, cursors, keep_recent=0) == 0
 
-    # Advance the (single) min cursor to seq=60; keep_recent=10 protects the tail.
+    # Advance the min cursor to seq=60; keep_recent=10 protects the tail.
     await cursors.advance("orchestration", seq=60, msg_id="x")
     deleted = await dbm.prune_events(conn, cursors, keep_recent=10)
-    # delete_below = min(60, 100-10=90) = 60 => seq 1..60 removed.
+    # delete_below = min(60, 90) = 60 => seq 1..60 removed.
     assert deleted == 60
     remaining = await conn.fetchall("SELECT seq FROM events ORDER BY seq")
     assert [r["seq"] for r in remaining] == list(range(61, 101))
@@ -139,29 +127,25 @@ async def test_prune_events_never_crosses_resume_anchor(conn):
     await cursors.advance("kernel_agent", seq=20, msg_id="b")
     await dbm.prune_events(conn, cursors, keep_recent=0)
     rows = await conn.fetchall("SELECT MIN(seq) AS m FROM events")
-    # Nothing at/below the laggard's unprocessed frontier (seq>20) is removed.
+    # Nothing at/below the laggard's unprocessed frontier is removed.
     assert int(rows[0]["m"]) == 21
-    # Resume replay for the laggard still sees all its unprocessed events.
     replay = await bus.replay_for("kernel_agent", after_seq=20)
     assert len(replay) == 30
 
 
-# --------------------------------------------------------------------------
-# Issue 3 — pruning must not delete a still-pending proposal
-# --------------------------------------------------------------------------
+# pruning must not delete a still-pending proposal
 @pytest.mark.asyncio
 async def test_prune_events_protects_pending_proposal(conn):
     """A processed-but-undecided proposal survives pruning; once a verdict
     targets it, it becomes prunable."""
     bus = MessageBus(conn)
     cursors = CursorStore(conn)
-    # A proposal with no verdict yet (semantically pending).
+    # A proposal with no verdict yet.
     prop = Message.new("orchestration", "*", "proposal", {"action_name": "x"})
     await bus.append_and_seq(prop)
     # Filler so the proposal is well below the recent window.
     for i in range(50):
         await bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
-    # Advance all cursors past everything; small keep_recent.
     await cursors.advance("orchestration", seq=100, msg_id="z")
 
     # Pending proposal must survive even though it's processed + old.
@@ -205,7 +189,8 @@ async def test_pending_proposal_seqs_matches_reconstruct_logic(conn):
         {"target_proposal_msg_id": "", "verdict": "approve"},
     ))
 
-    pending = await dbm.pending_proposal_seqs(conn)
+    rows = await conn.fetchall(dbm._PENDING_PROPOSAL_SEQS_SQL)
+    pending = {int(r["seq"]) for r in rows or []}
 
     # Cross-check against the same join replay_for_resume uses.
     proposals = await bus.tail(topic="proposal", n=1000)
@@ -230,7 +215,6 @@ async def test_prune_tasks_keeps_recent_done_and_spares_inflight(conn):
     q = await reg.create(kind="explore", params={}, idempotency_key="q1")
     r = await reg.create(kind="explore", params={}, idempotency_key="r1")
     await reg.transition(r.task_id, "running")
-    # Many done (succeeded) tasks.
     done_ids = []
     for i in range(30):
         t = await reg.create(kind="explore", params={}, idempotency_key=f"d{i}")
@@ -242,7 +226,6 @@ async def test_prune_tasks_keeps_recent_done_and_spares_inflight(conn):
     # Queued + running survive.
     assert (await reg.get(q.task_id)).state == "queued"
     assert (await reg.get(r.task_id)).state == "running"
-    # Exactly keep_done most-recent succeeded remain.
     rows = await conn.fetchall("SELECT COUNT(*) AS c FROM tasks WHERE state='succeeded'")
     assert int(rows[0]["c"]) == 10
 
@@ -259,9 +242,7 @@ async def test_run_db_retention_aggregates(conn):
     assert res.total == res.events_deleted + res.tasks_deleted
 
 
-# ==========================================================================
 # GPU lease reaper
-# ==========================================================================
 @pytest.mark.asyncio
 async def test_gpu_pool_reap_expired(conn):
     pool = SpecialistGpuPool(conn, gpu_ids=[0, 1, 2, 3])
@@ -284,9 +265,7 @@ async def test_gpu_pool_reap_expired(conn):
     assert [r["gpu_id"] for r in remaining] == [0]
 
 
-# ==========================================================================
-# R6a — retry/backoff
-# ==========================================================================
+# retry/backoff
 @pytest.mark.asyncio
 async def test_retry_with_backoff_recovers_then_succeeds():
     from hyperloom.orchestrator.roles.base import (
@@ -347,9 +326,7 @@ def test_retry_policy_from_env(monkeypatch):
     assert pol.max_attempts == 1  # disables retry
 
 
-# ==========================================================================
 # coordinator maintenance tick (cadence + wiring)
-# ==========================================================================
 @pytest.mark.asyncio
 async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -359,9 +336,9 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockKernelBackend,
         MockRobustnessBackend,
         ScriptedPlan,
+        auto_respond_kernel,
     )
     from .conftest import seed_target_analysis_marker
 
@@ -369,7 +346,7 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": auto_respond_kernel(),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
@@ -389,9 +366,7 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
 
         # Off-cadence ticks are a no-op.
         assert await c._maybe_run_maintenance_tick(tick=7) is None
-        # On-cadence tick reaps leases + runs DB retention (events under the
-        # 5000-event keep-recent default are intentionally retained; the prune
-        # threshold itself is unit-tested in test_prune_events_* above).
+        # On-cadence tick reaps leases + runs DB retention.
         summary = await c._maybe_run_maintenance_tick(tick=10)
         assert summary is not None
         assert summary["gpu_leases_reaped"] == 1
@@ -402,9 +377,7 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
         await c.stop()
 
 
-# --------------------------------------------------------------------------
-# R6a — ClaudeBackend retries a transient SDK failure end-to-end
-# --------------------------------------------------------------------------
+# ClaudeBackend retries a transient SDK failure end-to-end
 class ToolUseBlock:  # class name must be exactly "ToolUseBlock" (backend checks type name)
     def __init__(self, name: str, inp: dict[str, Any]):
         self.name = name
@@ -455,7 +428,7 @@ async def test_claude_backend_retries_transient_then_succeeds():
         enable_mcp_emit_intent=False,
         retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),
     )
-    # Force a fast timeout so the first attempt's wait_for path is exercised.
+    # Fast timeout so the first attempt's wait_for path is exercised.
     backend.call_timeout_s = 5.0
     backend.mcp_tool_name = EMIT_INTENT_TOOL_QUALIFIED
 

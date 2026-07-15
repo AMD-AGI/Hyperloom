@@ -3,11 +3,9 @@
 """Single source of truth for inference-framework capabilities.
 
 A *framework* is one serving/execution backend a session optimizes
-(``sglang`` / ``vllm`` / ``atom`` / ``xdit``). Historically the allowed set
-and per-framework behavior (extra-args env name, repo URL, server-reuse
-eligibility) were hardcoded across ``cli.py`` / ``_grid_runner.py`` /
-``_server_lifecycle.py`` / ``framework-agent``. This module centralizes them
-so adding a framework is a single-table edit.
+(``sglang`` / ``vllm`` / ``atom`` / ``xdit``). This module centralizes the
+allowed set and per-framework behavior (extra-args env name, repo URL,
+server-reuse eligibility) so adding a framework is a single-table edit.
 
 It also introduces ``kind`` to split the two execution models the loop must
 support:
@@ -58,8 +56,8 @@ SERVING = "serving"
 SCRIPTABLE = "scriptable"
 
 
-# The single registry. Adding a framework = one entry here (+ a Magpie script
-# and a benchmark YAML). Order is the canonical order surfaced in CLI help.
+# The single registry (one entry per framework). Order is the canonical order
+# surfaced in CLI help.
 FRAMEWORKS: dict[str, FrameworkSpec] = {
     "sglang": FrameworkSpec(
         name="sglang",
@@ -93,23 +91,13 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         supports_server_reuse=False,
         throughput_unit="img/s",
     ),
-    # HunyuanImage-3.0: an 80B unified autoregressive multimodal MoE text-to-
-    # image model. Unlike the xfuser/diffusers pipelines that back ``xdit``, it
-    # is a transformers ``AutoModelForCausalLM`` (trust_remote_code) driven via
-    # its own ``generate_image`` method, so it does NOT use the xfuser
-    # sequence-parallel runner registry. It is still a SCRIPTABLE image workload
-    # (server-less single command; throughput img/s; LPIPS/SSIM/MSE quality
-    # gate), so it reuses the scriptable env plumbing in _workload_envs
-    # (XDIT_QUALITY_* injection) and the img/s -> e2el_mean_ms metric mapping.
+    # HunyuanImage-3.0: an 80B multimodal MoE text-to-image model run as a
+    # transformers AutoModelForCausalLM. Treated as a SCRIPTABLE image workload.
     "hunyuan_image3": FrameworkSpec(
         name="hunyuan_image3",
         kind=SCRIPTABLE,
         extra_args_env="EXTRA_HUNYUAN_IMAGE3_ARGS",
-        # No framework-agent source repo: HunyuanImage-3.0 is a model we run
-        # as-is, not a framework whose source the perf-PR agent scouts/patches
-        # (unlike xdit). Kept out of framework_agent's _FRAMEWORK_TO_REPO_URL,
-        # so repo_url stays None to satisfy the registry<->repo_map consistency
-        # guard (test_registry_urls_match_repo_map skips None entries).
+        # No framework-agent source repo; repo_url stays None.
         repo_url=None,
         supports_server_reuse=False,
         throughput_unit="img/s",
@@ -140,22 +128,6 @@ def is_supported(framework: str | None) -> bool:
     return str(framework or "").strip().lower() in FRAMEWORKS
 
 
-def get(framework: str | None) -> FrameworkSpec:
-    """Return the :class:`FrameworkSpec` for ``framework``.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        FrameworkSpec: The matching spec.
-
-    Raises:
-        KeyError: When the name is not registered.
-    """
-    key = str(framework or "").strip().lower()
-    return FRAMEWORKS[key]
-
-
 def _spec_or_default(framework: str | None) -> FrameworkSpec:
     """Return the spec for ``framework`` or the default's spec when unknown.
 
@@ -167,19 +139,6 @@ def _spec_or_default(framework: str | None) -> FrameworkSpec:
     """
     key = str(framework or "").strip().lower()
     return FRAMEWORKS.get(key, FRAMEWORKS[DEFAULT_FRAMEWORK])
-
-
-def kind(framework: str | None) -> str:
-    """Return the execution ``kind`` for ``framework``.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        str: ``"serving"`` or ``"scriptable"`` (default framework's kind for
-        unknown names).
-    """
-    return _spec_or_default(framework).kind
 
 
 def is_scriptable(framework: str | None) -> bool:
@@ -308,28 +267,3 @@ def format_primary_metric(
     if value is None:
         return f"n/a {unit}"
     return f"{value:.{precision}f} {unit}"
-
-
-def supports_server_reuse(framework: str | None) -> bool:
-    """Return whether ``framework`` supports the server_lifecycle reuse path.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        bool: ``True`` only for serving frameworks that ship a reusable server.
-    """
-    return _spec_or_default(framework).supports_server_reuse
-
-
-def repo_url(framework: str | None) -> str | None:
-    """Return the canonical upstream repo URL for ``framework``.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        str | None: The repo URL, or ``None`` when not registered / unset.
-    """
-    spec = FRAMEWORKS.get(str(framework or "").strip().lower())
-    return spec.repo_url if spec is not None else None

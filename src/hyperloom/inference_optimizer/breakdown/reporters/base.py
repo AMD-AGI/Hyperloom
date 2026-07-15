@@ -3,8 +3,8 @@
 """Shared data structures + registry for ``session_breakdown`` section renderers.
 
 A renderer is a deterministic function turning one breakdown section into
-a :class:`RenderedSection`. Numbers stay deterministic (the LLM has
-historically hallucinated them); the LLM only narrates ``key_facts``.
+a :class:`RenderedSection`. Numbers stay deterministic; the LLM only
+narrates ``key_facts``.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ __all__ = [
     "RendererFn",
     "REGISTRY",
     "register_renderer",
-    "renderer_names",
 ]
 
 
@@ -58,8 +57,7 @@ class RenderedSection:
 RendererFn = Callable[[dict[str, Any]], RenderedSection]
 
 
-# Renderers self-register at import time; compose.py walks this in
-# insertion order so section ordering is stable.
+# Renderers self-register at import time; walked in insertion order.
 REGISTRY: list[tuple[str, RendererFn]] = []
 
 
@@ -93,16 +91,7 @@ def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
     return _wrap
 
 
-def renderer_names() -> list[str]:
-    """List the section ids of all registered renderers, in order.
-
-    Returns:
-        list[str]: Section identifiers in registry insertion order.
-    """
-    return [sid for sid, _ in REGISTRY]
-
-
-# Small markdown helpers — kept here so individual renderers stay terse.
+# Small markdown helpers.
 def md_table(headers: list[str], rows: Iterable[list[Any]]) -> str:
     """Render a GitHub-flavored markdown table; empty rows yield ``""``.
 
@@ -189,21 +178,3 @@ def fmt_pct(v: Any, *, plus: bool = False) -> str:
         return "—"
     sign = "+" if (plus and x > 0) else ""
     return f"{sign}{x:.2f}%"
-
-
-def fmt_int(v: Any) -> str:
-    """Format a value as a thousands-separated integer string.
-
-    Args:
-        v (Any): The value to format.
-
-    Returns:
-        str: The integer with thousands separators (e.g. ``"1,234"``), the
-            raw ``str(v)`` when it is non-numeric, or ``"—"`` when ``None``.
-    """
-    if v is None:
-        return "—"
-    try:
-        return f"{int(v):,}"
-    except (TypeError, ValueError):
-        return str(v)

@@ -21,15 +21,13 @@ from .storage.connection import SqliteConnection
 
 DEFAULT_GPU_LEASE_TTL_SEC = 1800
 
-# GPU-lease / gpu_research_lane TTL grace over the agent wall budget. The
-# iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — the lease must
-# outlive the agent's wall-budget kill so the cards are never reclaimed while
-# the agent is still computing (which would let serving grab them and pollute
-# the result). TTL = wall_budget × (1 + grace).
+# GPU-lease / gpu_research_lane TTL grace over the agent wall budget. Iron law:
+# ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — the lease must outlive the
+# agent's wall-budget kill so cards are not reclaimed mid-compute. TTL =
+# wall_budget × (1 + grace).
 GPU_LEASE_TTL_GRACE = 0.1
 
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = now_iso
 
 
@@ -162,7 +160,7 @@ def resolve_whole_machine_devices() -> list[int]:
     mask_ids, mask_present = _visible_device_mask()
     if mask_present:
         return mask_ids
-    # No mask: fall back to the detected machine GPU count. Imported lazily.
+    # No mask: fall back to the detected machine GPU count.
     from ..policy.gate import detect_gpu_count
 
     return list(range(max(0, int(detect_gpu_count() or 0))))

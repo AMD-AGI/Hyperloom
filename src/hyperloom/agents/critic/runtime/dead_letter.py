@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Append-only KB dead-letter queue (contract §6 / G-5).
+"""Append-only KB dead-letter queue.
 
 Failed KB writes go into ``KB_DEAD_LETTER_DIR/<endpoint>.jsonl`` (one JSON
 record per line: ``endpoint``, ``payload``, ``attempts``, ``last_error``,
@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from hyperloom.common.io import append_jsonl
 from hyperloom.common.timeutil import now_iso
 
 from .errors import RuntimeAdapterError
@@ -120,8 +121,7 @@ class DeadLetter:
             "last_error": last_error,
             "context": context or {},
         }
-        with path.open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+        append_jsonl(path, record, ensure_ascii=False)
         get_registry().counter(CRITIC_KB_DEAD_LETTER_COUNT).inc({"endpoint": endpoint})
         return path
 

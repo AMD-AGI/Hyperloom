@@ -33,7 +33,6 @@ def tl_module():
 
 @pytest.fixture(autouse=True)
 def _clear_gateway_env(monkeypatch):
-    # Isolate from the runner's own env so each test sets its own gateway.
     for k in ("ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "SAFE_API_KEY"):
         monkeypatch.delenv(k, raising=False)
 
@@ -43,7 +42,6 @@ def _use_safe_gateway(monkeypatch):
 
 
 def test_dot_form_opus_normalized_on_safe(tl_module, monkeypatch):
-    # The exact in-loop failure: image default dot form rejected by core42.
     _use_safe_gateway(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
@@ -62,14 +60,12 @@ def test_already_dash_is_unchanged_on_safe(tl_module, monkeypatch):
 
 
 def test_non_safe_gateway_leaves_dot_form_untouched(tl_module, monkeypatch):
-    # Direct Anthropic / other backends must not have their model id mangled.
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "Claude-Opus-4.7"
 
 
 def test_empty_env_yields_empty(tl_module, monkeypatch):
-    # Empty env must keep the prior behavior (runner/SDK default applies).
     _use_safe_gateway(monkeypatch)
     assert tl_module._resolve_tracelens_model() == ""
 
@@ -81,22 +77,18 @@ def test_whitespace_only_yields_empty(tl_module, monkeypatch):
 
 
 def test_plain_openai_base_url_not_normalized(tl_module, monkeypatch):
-    # A non-gateway OpenAI-compatible base URL must NOT mangle the model id.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "Claude-Opus-4.7"
 
 
 def test_no_gateway_env_leaves_dot_form_untouched(tl_module, monkeypatch):
-    # No base URL / key at all: the SDK default applies, id stays raw.
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "Claude-Opus-4.7"
 
 
 def test_self_hosted_litellm_base_url_is_treated_as_gateway(tl_module, monkeypatch):
-    # Documented behavior: any 'litellm' host is treated as the strict gateway
-    # and normalized. A non-SAFE self-hosted LiteLLM deployment is included by
-    # the 'litellm' marker; change the marker set if that is undesired.
+    # Any 'litellm' host is treated as the strict gateway and normalized.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://litellm.internal.example.com/v1")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"

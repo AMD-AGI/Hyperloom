@@ -85,8 +85,7 @@ def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
     Explicit ``OPENAI_BASE_URL`` always wins in callers. This fallback handles
     AMD's split gateway convention, where Anthropic traffic uses
     ``/anthropic`` and OpenAI-compatible chat completions use ``/Unified/v1``.
-    Unknown Anthropic URLs fall back to their original value to preserve the
-    previous single-gateway behavior.
+    Unknown Anthropic URLs fall back to their original value.
     """
     if not anthropic_base_url:
         return None
@@ -141,11 +140,8 @@ def resolve_openai_client_config(
     )
     base_url = base_url or None
 
-    headers = parse_custom_headers(source.get("OPENAI_CUSTOM_HEADERS")) or parse_custom_headers(
-        source.get("ANTHROPIC_CUSTOM_HEADERS")
-    )
-    if base_url and _should_add_amd_subscription_header(base_url, headers):
-        headers = {**headers, "Ocp-Apim-Subscription-Key": api_key}
+    # OpenAI/Codex side reads only OPENAI_CUSTOM_HEADERS; gateway headers are operator-supplied.
+    headers = parse_custom_headers(source.get("OPENAI_CUSTOM_HEADERS"))
     return OpenAIClientConfig(api_key=api_key, base_url=base_url, default_headers=headers)
 
 
@@ -191,8 +187,9 @@ def claude_sdk_env_options(
     if fallback_key:
         source.setdefault("ANTHROPIC_API_KEY", fallback_key)
         source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
-    if "ANTHROPIC_CUSTOM_HEADERS" not in source and source.get("OPENAI_CUSTOM_HEADERS"):
-        source["ANTHROPIC_CUSTOM_HEADERS"] = source["OPENAI_CUSTOM_HEADERS"]
+    # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS; gateway headers are operator-supplied.
+    # Disable the advisor-tool beta header by default since strict gateways reject it.
+    source.setdefault("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
     if model:
         source.setdefault("ANTHROPIC_MODEL", model)
         source.setdefault("ANTHROPIC_SMALL_FAST_MODEL", model)
@@ -216,14 +213,6 @@ def apply_reasoning_effort(
     if val in {"minimal", "low", "medium", "high"}:
         params["reasoning_effort"] = val
     return params
-
-
-def _should_add_amd_subscription_header(base_url: str, headers: dict[str, str]) -> bool:
-    if any(name.lower() == "ocp-apim-subscription-key" for name in headers):
-        return False
-    parts = urlsplit(base_url)
-    host = parts.hostname or ""
-    return host == "llm-api.amd.com" or parts.path.rstrip("/").endswith("/Unified/v1")
 
 
 __all__ = [

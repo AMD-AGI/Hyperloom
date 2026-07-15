@@ -17,19 +17,18 @@ from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import (
     _page_to_recipe,
     build_gbrain_remote_from_env,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb.remote_client import RemoteRecipeClientError
+from hyperloom.orchestrator.knowledge.recipe_kb import RemoteRecipeClientError
 
 
 def test_page_to_recipe_reads_legacy_framework_attr() -> None:
-    """gbrain pages authored before the framework->framework_name rename carry
-    the serving framework under the legacy ``framework`` attr. The reader must
-    fall back to it so the 5-tuple identity (and canonical id) stays correct
-    instead of degrading to the ``unknown_framework`` default slug."""
+    """The reader falls back to the legacy ``framework`` attr so the 5-tuple
+    identity (and canonical id) stays correct instead of degrading to the
+    ``unknown_framework`` default slug."""
     frontmatter = {
         "attrs": {
             "model": "deepseek-r1",
             "hardware": "mi300x",
-            "framework": "sglang",  # legacy key (pre-rename pages)
+            "framework": "sglang",
             "framework_version": "0.4.5",
             "precision": "fp8",
         },
@@ -51,8 +50,7 @@ class _FakeMcp:
     """Stand-in for the gbrain MCP: serves canned list_pages / get_page."""
 
     def __init__(self, pages: dict[str, dict[str, Any]]) -> None:
-        # pages: slug -> frontmatter dict
-        self.pages = pages
+        self.pages = pages  # slug -> frontmatter dict
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def call(self, tool: str, args: dict[str, Any]) -> Any:
@@ -108,15 +106,13 @@ def test_page_to_recipe_maps_identity_and_config() -> None:
     fm = _recipe_page("Qwen/Qwen3-32B", "mi300x", "sglang", "fp8", args="--cuda-graph-max-bs 256", gain=12.5)
     r = _page_to_recipe(fm)
     assert r is not None
-    # Unified nested KB-interface envelope: identity under ``labels``,
-    # champion under ``body.best_config``, throughput under ``metrics``.
+    # Nested KB-interface envelope: labels / body.best_config / metrics.
     assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:unknown_version:fp8"
     assert r["labels"]["model"] == "qwen3-32b"
     assert r["labels"]["hardware"] == "mi300x"
     best_config = r["body"]["best_config"]
     assert best_config["extra_server_args"] == "--cuda-graph-max-bs 256"
-    # Envs are nested under ``extra_envs`` (canonical warm-replay shape),
-    # not flattened as sibling keys.
+    # Envs nested under ``extra_envs``, not flattened as sibling keys.
     assert best_config["extra_envs"] == {"FOO": "1"}
     assert "FOO" not in best_config
     assert r["metrics"]["validated_gain_pct"] == 12.5
@@ -180,7 +176,7 @@ def test_get_recipe_uses_direct_slug_fast_path() -> None:
     r = c.get_recipe(canonical_id=cid)
 
     assert r is not None and r["canonical_id"] == cid
-    # Exact gbrain slugs should avoid the expensive broad list_pages scan.
+    # Exact gbrain slugs avoid the broad list_pages scan.
     assert [tool for tool, _ in c._mcp.calls] == ["get_page"]  # type: ignore[union-attr]
 
 
@@ -237,8 +233,7 @@ def test_search_filters_by_label_match() -> None:
             _session_slug("legacy"): _recipe_page("Qwen3-32B", "mi300x", "sglang"),
         }
     )
-    # model-only filter → both Qwen rows. The gbrain adapter returns the
-    # nested KB-interface shape, so identity lives under ``labels``.
+    # model-only filter → both Qwen rows; identity lives under ``labels``.
     rows = c.search(label_match={"model": "Qwen3-32B"})
     assert {_hw(r) for r in rows} == {"mi300x", "mi355x"}
     # model + hardware → exactly one
@@ -277,8 +272,7 @@ def test_search_reuses_scan_cache() -> None:
     assert any(tool == "list_pages" for tool, _ in c._mcp.calls)  # type: ignore[union-attr]
 
     assert len(c.search(label_match={"framework_name": "vllm"})) == 1
-    # Second search should reuse the process-local scan cache; no extra MCP
-    # calls are needed.
+    # Second search reuses the scan cache; no extra MCP calls.
     assert len(c._mcp.calls) == first_call_count  # type: ignore[union-attr]
 
 
@@ -287,16 +281,6 @@ def test_disabled_client_returns_empty() -> None:
     assert c.enabled is False
     assert c.get_recipe(canonical_id="inference:m:h:f:v:p") is None
     assert c.search(label_match={"model": "x"}) == []
-    assert c.list_recent() == []
-    assert c.health() is False
-
-
-def test_get_history_and_attempts_are_empty() -> None:
-    c = _client({_default_slug("r1"): _recipe_page("m", "mi300x")})
-    assert c.get_history(canonical_id="inference:m:mi300x:sglang:v:p") == []
-    assert c.list_attempts(canonical_id="inference:m:mi300x:sglang:v:p") == []
-    assert c.list_session_attempts(session_id="s") == []
-    assert c.session_summary(session_id="s") is None
 
 
 def test_build_from_env(monkeypatch) -> None:
@@ -310,9 +294,7 @@ def test_build_from_env(monkeypatch) -> None:
 
 
 def test_client_returns_unified_nested_shape() -> None:
-    # The unified KB interface: gbrain no longer advertises a flat-arbor
-    # capability flag; every read returns the nested envelope the cortex
-    # kb-service also emits, so the dispatcher runs ONE translation.
+    # Every read returns the nested envelope so the dispatcher runs one translation.
     c = GbrainRemoteRecipeClient(base_url="http://gbrain.test", token="tok", enabled=True)
     assert not hasattr(c, "returns_arbor_shape")
     fm = _recipe_page("Qwen3-32B", "mi300x", "sglang", "fp8", args="--x 1")
@@ -323,8 +305,7 @@ def test_client_returns_unified_nested_shape() -> None:
 
 
 def test_gbrain_error_is_remote_recipe_client_error() -> None:
-    # The dispatcher's ``except RemoteRecipeClientError`` fall-through only
-    # catches gbrain failures if GbrainRemoteError subclasses it.
+    # GbrainRemoteError must subclass RemoteRecipeClientError for the dispatcher fall-through.
     assert issubclass(GbrainRemoteError, RemoteRecipeClientError)
     err = GbrainRemoteError("boom")
     assert isinstance(err, RemoteRecipeClientError)
@@ -381,16 +362,3 @@ def test_mcp_call_raises_on_tool_iserror(monkeypatch) -> None:
     mcp = grc._GbrainMcp("http://gbrain.test", "tok", 2.0)
     with pytest.raises(GbrainRemoteError):
         mcp.call("list_pages", {"type": "recipe"})
-
-
-def test_health_false_on_rpc_error(monkeypatch) -> None:
-    _patch_urlopen(
-        monkeypatch,
-        {
-            "jsonrpc": "2.0",
-            "id": "1",
-            "error": {"code": -32000, "message": "boom"},
-        },
-    )
-    c = GbrainRemoteRecipeClient(base_url="http://gbrain.test", token="tok", enabled=True)
-    assert c.health() is False

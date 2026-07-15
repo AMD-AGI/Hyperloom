@@ -18,72 +18,7 @@ from hyperloom.orchestrator.actions.executors.benchmark_result import (
 )
 
 
-# Unit helpers (formerly test_benchmark_result_units.py)
-
-
-# scalar coercion helpers
-class TestScalarHelpers:
-    @pytest.mark.parametrize(
-        "value, expected",
-        [
-            ("3.14", 3.14),
-            (42, 42.0),
-            (None, None),
-            (True, None),  # booleans are skipped intentionally
-            ("nope", None),
-            ([], None),
-        ],
-    )
-    def test_to_float(self, value, expected):
-        out = br._to_float(value)
-        if expected is None:
-            assert out is None
-        else:
-            assert out == pytest.approx(expected)
-
-    @pytest.mark.parametrize(
-        "value, expected",
-        [
-            ("7", 7),
-            (3.9, 3),
-            (None, None),
-            (True, None),
-            ("oops", None),
-        ],
-    )
-    def test_to_int(self, value, expected):
-        assert br._to_int(value) == expected
-
-    def test_first_float_returns_first_valid(self):
-        assert br._first_float(None, "x", "1.5", 9.0) == 1.5
-
-    def test_first_int_returns_first_valid(self):
-        assert br._first_int(None, "bad", "3", 5) == 3
-
-    def test_first_helpers_return_none_when_all_invalid(self):
-        assert br._first_float(None, "x") is None
-        assert br._first_int(True, None) is None
-
-
-# _load_json
-class TestLoadJson:
-    def test_returns_dict_on_valid_json(self, tmp_path):
-        path = tmp_path / "x.json"
-        path.write_text(json.dumps({"a": 1}))
-        assert br._load_json(path) == {"a": 1}
-
-    def test_returns_none_on_missing_file(self, tmp_path):
-        assert br._load_json(tmp_path / "ghost.json") is None
-
-    def test_returns_none_on_malformed_json(self, tmp_path):
-        path = tmp_path / "bad.json"
-        path.write_text("{nope")
-        assert br._load_json(path) is None
-
-    def test_returns_none_when_not_dict(self, tmp_path):
-        path = tmp_path / "lst.json"
-        path.write_text(json.dumps([1, 2, 3]))
-        assert br._load_json(path) is None
+# Unit helpers
 
 
 # _candidate_raw_jsons ordering
@@ -96,7 +31,6 @@ class TestCandidateRawJsons:
         (ws / "benchmark_report.json").write_text("{}")
         out = br._candidate_raw_jsons(ws)
         names = [p.name for p in out]
-        # benchmark_report.json filtered out, non-profile sorted first.
         assert names[0] == "inferencex_result.json"
         assert names[1] == "profile_result.json"
         assert "benchmark_report.json" not in names
@@ -158,7 +92,6 @@ class TestRescueCandidatePaths:
         leak = tmp_path / "old" / "inferencex_result.json"
         leak.parent.mkdir()
         leak.write_text("{}")
-        # Force leak mtime way in the past.
         old = leak.stat().st_mtime - 3600.0
         os.utime(leak, (old, old))
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
@@ -172,7 +105,7 @@ class TestRescueCandidatePaths:
         assert out == []
 
 
-# Rescue end-to-end (formerly test_benchmark_result_rescue.py): salvage adopts mtime-gated leaked results into the workspace.
+# Rescue end-to-end: salvage adopts mtime-gated leaked results into the workspace.
 
 
 def _write_inferencex(path: Path, tput: float = 1761.6, completed: int = 640) -> None:
@@ -199,12 +132,11 @@ def test_rescue_from_env_path_adopted_after_subprocess_start(
     leak_dir = tmp_path / "leak"
     leak_path = leak_dir / "inferencex_result.json"
     _write_inferencex(leak_path)
-    # mtime cutoff strictly before the file's mtime
     cutoff = leak_path.stat().st_mtime - 5.0
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak_dir))
 
     measurement = extract_benchmark_measurement(
-        report={"success": False},  # wrapper reported failure
+        report={"success": False},
         workspace=workspace,
         subprocess_started_unix=cutoff,
     )
@@ -225,7 +157,6 @@ def test_rescue_rejects_stale_leak_with_older_mtime(tmp_path, monkeypatch):
     workspace.mkdir()
     leak_path = tmp_path / "leak" / "inferencex_result.json"
     _write_inferencex(leak_path)
-    # subprocess "started" well *after* the leak file's mtime → stale
     cutoff = leak_path.stat().st_mtime + 10.0
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak_path))
 
@@ -252,7 +183,6 @@ def test_rescue_skips_when_in_workspace_salvage_succeeded(tmp_path, monkeypatch)
         workspace=workspace,
         subprocess_started_unix=leak_path.stat().st_mtime - 5.0,
     )
-    # in-workspace value wins; rescue path should not have been used.
     assert measurement["valid_measurement"] is True
     assert measurement["output_throughput"] == pytest.approx(2000.0)
     assert not any(w.startswith("rescued_from_leaked_path:") for w in measurement["nonfatal_warnings"])
@@ -261,8 +191,6 @@ def test_rescue_skips_when_in_workspace_salvage_succeeded(tmp_path, monkeypatch)
 def test_rescue_no_candidates_keeps_invalid_measurement(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    # explicit empty env to avoid the default /workspace/ path from picking up
-    # something under the test sandbox.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(tmp_path / "nope"))
 
     measurement = extract_benchmark_measurement(
@@ -282,7 +210,6 @@ def test_rescue_directory_scanned_for_inferencex_result_glob(
     workspace.mkdir()
     leak_dir = tmp_path / "leak"
     leak_dir.mkdir()
-    # Two leaked files; the helper sorts via Path.glob() then mtime-gates.
     a = leak_dir / "inferencex_result_eval.json"
     b = leak_dir / "inferencex_result.json"
     _write_inferencex(a, tput=100.0)
@@ -342,7 +269,6 @@ def test_rescue_copies_leaked_file_into_workspace(tmp_path, monkeypatch):
     assert body["completed_requests"] == 500
     assert measurement["raw_result_path"] == str(copied)
     assert any(w == f"rescued_from_leaked_path:{leak_path}" for w in measurement["nonfatal_warnings"])
-    # The leak file itself is not touched (we copy, never move/delete).
     assert leak_path.exists()
 
 
@@ -357,7 +283,6 @@ def test_rescue_copy_failure_falls_back_to_leak_path(
     _write_inferencex(leak_path, tput=999.9, completed=42)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak_path))
 
-    # Force the copy helper to fail so we exercise the fallback branch.
     monkeypatch.setattr(
         br,
         "_materialize_rescue_into_workspace",
@@ -377,7 +302,7 @@ def test_rescue_copy_failure_falls_back_to_leak_path(
     assert any(w.startswith("rescued_copy_into_workspace_failed:") for w in warnings)
 
 
-# Harvest pass (formerly test_harvest_leaked_artifacts.py): copy diagnostics leaked under /workspace/ into the per-task workspace.
+# Harvest pass: copy diagnostics leaked under /workspace/ into the per-task workspace.
 
 
 def _touch(path: Path, content: str = "x", *, mtime: float | None = None) -> Path:
@@ -407,7 +332,7 @@ def test_harvest_copies_every_default_glob(tmp_path):
 
     harvested = harvest_leaked_artifacts(
         destination,
-        subprocess_started_unix=None,  # gate disabled
+        subprocess_started_unix=None,
         leak_root=leak_root,
     )
 
@@ -435,9 +360,7 @@ def test_harvest_mtime_gating_skips_stale_leaks(tmp_path):
         "fresh post-launch csv",
     )
 
-    # Cutoff sits well beyond the mtime-gate slack from the stale file
-    # (which is ~1h old) while remaining at-or-before the fresh file's
-    # mtime, so the stale leak is rejected and the fresh one is adopted.
+    # Cutoff rejects the ~1h-old stale leak while adopting the fresh file.
     cutoff = stale.stat().st_mtime + 60.0
     harvested = harvest_leaked_artifacts(
         destination,
@@ -603,9 +526,7 @@ def test_harvest_creates_destination_if_missing(tmp_path):
     assert harvested
 
 
-# ---------------------------------------------------------------------------
 # Approximate throughput for killed-overtime variants (server.log parsing)
-# ---------------------------------------------------------------------------
 _SGLANG_LOG = """\
 [2026-06-12 10:00:00] INFO: server started
 Decode batch. #running-req: 64, #token: 1000, token usage: 0.10, gen throughput (token/s): 100.0, #queue-req: 0
@@ -630,8 +551,7 @@ def test_estimate_from_sglang_server_log(tmp_path):
     log_path.write_text(_SGLANG_LOG)
     est = br.estimate_output_throughput_from_server_log(log_path)
     assert est is not None
-    # 5 positive samples; warmup_skip=int(5*0.25)=1 drops the 100.0 ramp.
-    # mean(900,1000,1100,1200) = 1050.0
+    # warmup_skip=1 drops the 100.0 ramp; mean(900,1000,1100,1200) = 1050.0.
     assert est["output_throughput"] == pytest.approx(1050.0)
     assert est["num_samples"] == 5
     assert est["source_path"] == str(log_path)
@@ -643,8 +563,7 @@ def test_estimate_from_vllm_server_log_filters_zero(tmp_path):
     log_path.write_text(_VLLM_LOG)
     est = br.estimate_output_throughput_from_server_log(log_path)
     assert est is not None
-    # 3 positive samples (the 0.0 prefill window is filtered);
-    # warmup_skip=int(3*0.25)=0 keeps all -> mean(800,1000,1200)=1000.0
+    # 3 positive samples (0.0 prefill filtered); mean(800,1000,1200)=1000.0.
     assert est["output_throughput"] == pytest.approx(1000.0)
     assert est["num_samples"] == 3
 
@@ -666,7 +585,7 @@ def test_estimate_killed_variant_prefers_richest_log(tmp_path):
     uses the largest server.log (the engine's full decode trace)."""
     slot = tmp_path / "variant_00_vA"
     (slot / "benchmark_sglang_x").mkdir(parents=True)
-    # A tiny harvested stub plus the full in-slot log; the larger one wins.
+    # A tiny stub plus the full in-slot log; the larger one wins.
     (slot / "server.log").write_text(_SGLANG_LOG)
     (slot / "benchmark_sglang_x" / "server.log").write_text(
         "Decode batch. gen throughput (token/s): 5.0, #queue-req: 0\n"

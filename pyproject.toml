@@ -9,20 +9,13 @@ description = "Inference Optimizer — single-mode 4-agent (Orchestration/Kernel
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = [
-    "claude-agent-sdk>=0.2.110",
-    "openai>=1.50",
-    "httpx>=0.27",
-    "PyYAML>=6.0",
-    # Optional critic-agent web tools (web_search / web_fetch). Kept in the
-    # base dependency set because the critic backend imports them at module
-    # load time even when CRITIC_WEB_TOOLS_ENABLED=false.
-    "markdownify>=0.11",
-    "cachetools>=5.3",
-    # tree-reform.MD P2.5: framework-agent's own base dependency, merged in
-    # verbatim after its promotion into hyperloom.agents.framework.
-    "jsonschema>=4.0",
-]
+# Intentionally empty: the bare wheel carries no third-party runtime deps so a
+# ``pip install --target`` workspace stays clean. Runtime deps are installed by
+# the packaged install.sh (see the ``runtime`` extra below and the packaged
+# branch of inference_optimizer/assets/install.sh); ``setup.py`` starts with
+# stdlib-only imports so ``python -m hyperloom.inference_optimizer.setup`` runs
+# before any dep is installed.
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/AMD-AGI/Hyperloom"
@@ -32,7 +25,31 @@ Changelog = "https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md"
 Security = "https://github.com/AMD-AGI/Hyperloom/security/policy"
 
 [project.optional-dependencies]
+# LLM backend SDKs — lazy-imported by the Claude/Codex/critic/scorer roles and
+# backfilled at runtime by preflight ``_ensure_python_sdks``. httpx also has a
+# few top-level imports in robustness/multi_node internals (not on the CLI
+# startup path).
+llm = [
+    "claude-agent-sdk>=0.2.110",
+    "openai>=1.50",
+    "httpx>=0.27",
+]
+# Critic-agent web tools (web_search / web_fetch). ``web_tools`` imports these
+# at module load time even when CRITIC_WEB_TOOLS_ENABLED=false, but that module
+# is only imported lazily by the critic backend, so they stay out of base.
+web = [
+    "markdownify>=0.11",
+    "cachetools>=5.3",
+]
+# Full runtime dependency set installed by the packaged install.sh. PyYAML is
+# a hard import-time dep of the CLI startup path (executors/baseline.py); the
+# rest come from the llm/web extras above.
+runtime = [
+    "PyYAML>=6.0",
+    "hyperloom-inference_optimizer[llm,web]",
+]
 test = [
+    "hyperloom-inference_optimizer[runtime]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     "respx>=0.21",
@@ -75,7 +92,7 @@ claude = [
 
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
-hyperloom = "hyperloom.inference_optimizer.cli.setup:main"
+hyperloom = "hyperloom.inference_optimizer.setup:main"
 # tree-reform.MD P2.5: framework-agent's own ``[project.scripts]`` entries
 # (``framework-agent`` / ``fa``), preserved verbatim so the console scripts
 # keep resolving after promotion into the single ``hyperloom`` distribution.
@@ -101,9 +118,28 @@ quantization-agent = "hyperloom.agents.quantization.cli:main"
 where = ["src"]
 
 [tool.setuptools.data-files]
+# Install the setup skill under every agent's discovery dir so /hyperloom-setup
+# is visible in Claude Code (.claude), Cursor (.cursor/.agents) and Codex.
 ".agents/skills/hyperloom-setup" = [
-    "src/hyperloom/inference_optimizer/agent_skills/hyperloom-setup/SKILL.md",
+    "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
+".claude/skills/hyperloom-setup" = [
+    "src/hyperloom/skills/hyperloom-setup/SKILL.md",
+]
+".cursor/skills/hyperloom-setup" = [
+    "src/hyperloom/skills/hyperloom-setup/SKILL.md",
+]
+# Demo run skills chained from /hyperloom-setup; installed under every agent's
+# discovery dir so /hyperloom-qwen3-8b-{3h,8h,24h} are visible after install.
+".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
+".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
+".agents/skills/hyperloom-qwen3-8b-8h" = ["examples/hyperloom-qwen3-8b-8h/SKILL.md"]
+".claude/skills/hyperloom-qwen3-8b-8h" = ["examples/hyperloom-qwen3-8b-8h/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-8b-8h" = ["examples/hyperloom-qwen3-8b-8h/SKILL.md"]
+".agents/skills/hyperloom-qwen3-8b-24h" = ["examples/hyperloom-qwen3-8b-24h/SKILL.md"]
+".claude/skills/hyperloom-qwen3-8b-24h" = ["examples/hyperloom-qwen3-8b-24h/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-8b-24h" = ["examples/hyperloom-qwen3-8b-24h/SKILL.md"]
 
 [tool.setuptools.package-data]
 # tree-reform.MD P2.3: orchestrator/prompts/*.md moved with the
@@ -127,7 +163,6 @@ hyperloom = [
     "assets/*.sh",
     "assets/*.example",
     "assets/configs/*.yaml",
-    "agent_skills/*/SKILL.md",
     # Slurm submission bundle (batch-scheduler counterpart to the k8s layout;
     # see docs/install/slurm.md). Shipped so wheel installs get the scripts.
     "assets/slurm/*.sh",
@@ -136,8 +171,6 @@ hyperloom = [
     "assets/slurm/*.template",
     "references/*.md",
     "tools/*.sh.example",
-    "data/framework/*.md",
-    "data/recipes/*.json",
 ]
 # tree-reform.MD P2.5: critic-agent's LLM skill assets (mounted by the A2A /
 # Codex chat server host, not imported as Python) promoted alongside its
@@ -239,16 +272,6 @@ pythonpath = ["src", ".", "ci"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
-    "expects_legacy_alias_warning: tests that intentionally exercise the ``extra_sglang_args`` -> ``extra_server_args`` deprecation alias and assert on the resulting DeprecationWarning. Listed by the static guard in test_no_legacy_writer_sites.py so the allowlist stays narrow.",
-]
-filterwarnings = [
-    # The DeprecationWarning for the extra_sglang_args -> extra_server_args
-    # rename is raised from this canonical module (tree-reform.MD P2.4
-    # flattened compat/payload_aliases.py into compat.py, which re-exported
-    # -- not re-wrapped -- hyperloom.common.payload_aliases; P2.7 then
-    # removed that transition shim entirely once every call site was updated
-    # to import hyperloom.common.payload_aliases directly).
-    "ignore::DeprecationWarning:hyperloom.common.payload_aliases",
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
@@ -317,7 +340,6 @@ omit = [
     # apply_kernel_patch / parallel_e2e_runner tools above. Their pure helpers
     # (e.g. _diff_unsupported_ops, _spread) ARE covered by test_apply_and_bench.py.
     "src/hyperloom/agents/kernel/tools/apply_and_bench.py",
-    "src/hyperloom/agents/kernel/tools/geak_vs_forge_driver.py",
     # Backends within kernel-agent tools (subprocess submit).
     "src/hyperloom/agents/kernel/tools/backends/*",
     "src/hyperloom/agents/kernel/tools/_collective_names.py",
@@ -393,7 +415,6 @@ omit = [
     "ci/optimize_submit.py",
     "ci/optimize_submit_lib/*.py",
     "ci/orchestrator.py",
-    "ci/import_session_breakdown.py",
     "ci/claw_client.py",
     "ci/prewarm_models.py",
     "ci/send_webhook.py",

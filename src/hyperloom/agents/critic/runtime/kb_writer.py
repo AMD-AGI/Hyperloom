@@ -4,10 +4,9 @@
 
 Never raises for transport / 4xx errors — catches, dead-letters, and
 returns a typed :class:`WriteResult` so the pipeline never blocks on KB
-issues (contract §6, "writes must not block review_verdict"). Triggers:
-:meth:`write_verdict` (A, upsert; defer/inconclusive/advise skipped),
-:meth:`write_kb_drafts` (B, batch insert ``on_conflict=upsert``),
-:meth:`add_contradiction` (C, contradicts edge). Plus :meth:`list_priors`
+issues. Triggers: :meth:`write_verdict` (upsert; defer/inconclusive/advise
+skipped), :meth:`write_kb_drafts` (batch insert ``on_conflict=upsert``),
+:meth:`add_contradiction` (contradicts edge). Plus :meth:`list_priors`
 (read, TTL'd cache backed by :class:`SessionMemory`).
 """
 
@@ -48,8 +47,8 @@ from .session_memory import SessionMemory
 from .slugify import slugify, slugify_safe
 
 
-# Verdicts that should produce a KB write (per contract §5.1 — defer /
-# inconclusive / advise are pure dispatch decisions, no reusable lesson).
+# Verdicts that should produce a KB write (defer/inconclusive/advise are pure
+# dispatch decisions with no reusable lesson).
 _KB_RELEVANT_VERDICTS: frozenset[str] = frozenset(
     {
         "approve",
@@ -61,8 +60,7 @@ _KB_RELEVANT_VERDICTS: frozenset[str] = frozenset(
 
 
 # Circuit-breaker defaults: after ``threshold`` consecutive transport
-# failures, reads/writes short-circuit for ``cooldown`` seconds. Defaults
-# favour "skip KB rather than wait" — one failure opens it, short cooldown.
+# failures, reads/writes short-circuit for ``cooldown`` seconds.
 _DEFAULT_BREAKER_THRESHOLD = 1
 _DEFAULT_BREAKER_COOLDOWN_SECONDS = 60.0
 
@@ -143,9 +141,7 @@ class KBWriter:
         self._consecutive_failures = 0
         self._unreachable_until = 0.0
 
-    # ------------------------------------------------------------------
     # Circuit-breaker helpers
-    # ------------------------------------------------------------------
     def is_kb_unreachable(self) -> bool:
         """Return True iff the breaker is currently open.
 
@@ -169,17 +165,6 @@ class KBWriter:
             "threshold": self._breaker_threshold,
             "cooldown_seconds": self._breaker_cooldown,
         }
-
-    def force_kb_unreachable(self, *, cooldown: float | None = None) -> None:
-        """Open the breaker manually (used by tests + admin tooling).
-
-        Args:
-            cooldown (float | None): Seconds to keep the breaker open; falls
-                back to the configured cooldown when ``None``.
-        """
-        self._consecutive_failures = self._breaker_threshold
-        self._unreachable_until = self._time_fn() + (cooldown if cooldown is not None else self._breaker_cooldown)
-        get_registry().counter(CRITIC_KB_BREAKER_OPEN_TOTAL).inc({"reason": "manual"})
 
     def _record_kb_failure(self, endpoint: str, exc: Exception) -> None:
         """Account a transport error and possibly open the breaker.
@@ -209,9 +194,7 @@ class KBWriter:
         self._consecutive_failures = 0
         self._unreachable_until = 0.0
 
-    # ------------------------------------------------------------------
-    # list_priors (Trigger D — read; not gated by KB_WRITE_ENABLED)
-    # ------------------------------------------------------------------
+    # list_priors (read; not gated by KB_WRITE_ENABLED)
     def list_priors(
         self,
         *,
@@ -249,15 +232,14 @@ class KBWriter:
 
         cache_key = scope_cache_key(scope, topic=topic)
 
-        # Cache wins regardless of breaker state — we may still have valid
-        # priors from before the outage.
+        # Cache wins regardless of breaker state.
         if ctx is not None:
             cached = self.session_memory.get_cached_priors(ctx.session_id, cache_key)
             if cached is not None:
                 get_registry().counter(CRITIC_KB_PRIOR_CACHE_HIT).inc()
                 return {"priors": list(cached), "cache": "hit", "cache_key": cache_key}
 
-        # Breaker open → short-circuit before paying another timeout.
+        # Breaker open → short-circuit.
         if self.is_kb_unreachable():
             get_registry().counter(CRITIC_KB_UNREACHABLE_TOTAL).inc({"endpoint": "list"})
             return {
@@ -285,9 +267,8 @@ class KBWriter:
                 "breaker": self.kb_breaker_state(),
             }
         except KBError as exc:
-            # 4xx / validation errors — KB is up, the request was bad. Don't
-            # trip the breaker; surface the error for inspection but keep
-            # priors empty so the LLM doesn't act on garbage.
+            # 4xx / validation errors — KB is up, request was bad. Don't trip
+            # the breaker; keep priors empty and surface the error.
             return {
                 "priors": [],
                 "cache": "miss",
@@ -301,9 +282,7 @@ class KBWriter:
             self.session_memory.put_cached_priors(ctx.session_id, cache_key, priors)
         return {"priors": priors, "cache": "miss", "cache_key": cache_key}
 
-    # ------------------------------------------------------------------
-    # write_verdict (Trigger A)
-    # ------------------------------------------------------------------
+    # write_verdict
     def write_verdict(
         self,
         *,
@@ -312,7 +291,7 @@ class KBWriter:
         session_context: dict[str, Any] | None = None,
         ctx: WriteContext,
     ) -> WriteResult:
-        """Write a single verdict lesson to KB (Trigger A).
+        """Write a single verdict lesson to KB.
 
         Skips non-reusable verdicts, builds a scope/slug/importance, and
         upserts with dead-letter fallback. Never raises for transport/4xx
@@ -395,9 +374,7 @@ class KBWriter:
         }
         return self._upsert_with_dead_letter(payload, ctx)
 
-    # ------------------------------------------------------------------
-    # write_kb_drafts (Trigger B)
-    # ------------------------------------------------------------------
+    # write_kb_drafts
     def write_kb_drafts(
         self,
         *,
@@ -406,7 +383,7 @@ class KBWriter:
         session_context: dict[str, Any] | None = None,
         ctx: WriteContext,
     ) -> WriteResult:
-        """Batch-write session-close KB drafts (Trigger B).
+        """Batch-write session-close KB drafts.
 
         Each draft is mapped to a kind/slug/importance and upserted via
         ``batch_insert`` with ``on_conflict=upsert``. Individual drafts that
@@ -531,9 +508,7 @@ class KBWriter:
                 {"reason": "transport_error", "error": str(exc), "rejected": rejected},
             )
 
-    # ------------------------------------------------------------------
-    # add_contradiction (Trigger C)
-    # ------------------------------------------------------------------
+    # add_contradiction
     def add_contradiction(
         self,
         *,
@@ -541,7 +516,7 @@ class KBWriter:
         old_ids: list[str],
         ctx: WriteContext,
     ) -> WriteResult:
-        """Add ``contradicts`` edges from a new row to older rows (Trigger C).
+        """Add ``contradicts`` edges from a new row to older rows.
 
         Edge writes are supplemental and best-effort: failures return a
         ``skipped`` result rather than dead-lettering.
@@ -575,12 +550,10 @@ class KBWriter:
             self._record_kb_failure("edges/add", exc)
             return WriteResult("skipped", {"reason": "edge_write_failed", "error": str(exc)})
         except KBError as exc:
-            # Edge writes are supplemental — best-effort. Don't dead-letter.
+            # Supplemental — don't dead-letter.
             return WriteResult("skipped", {"reason": "edge_write_failed", "error": str(exc)})
 
-    # ------------------------------------------------------------------
     # internals
-    # ------------------------------------------------------------------
     def _upsert_with_dead_letter(
         self,
         payload: dict[str, Any],
@@ -636,9 +609,7 @@ class KBWriter:
             return WriteResult("dead_lettered", {"reason": "transport_error", "error": str(exc)})
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 def _topic_from_reasoning(verdict: dict[str, Any]) -> str | None:
     """Derive a slug-safe topic from verdict.reasoning when not provided.
 
@@ -654,7 +625,6 @@ def _topic_from_reasoning(verdict: dict[str, Any]) -> str | None:
     reasoning = (verdict.get("reasoning") or "").strip()
     if not reasoning:
         return None
-    # Take the first 8 ASCII words to keep within slugify length bounds.
     words = [w for w in reasoning.split() if w.isascii()][:8]
     if not words:
         return None
@@ -662,7 +632,7 @@ def _topic_from_reasoning(verdict: dict[str, Any]) -> str | None:
 
 
 def slug_for_kind(kind: str, topic: str, draft: dict[str, Any] | None = None) -> str:
-    """Build a slug for ``(kind, topic, draft)`` per contract §2.2 templates.
+    """Build a slug for ``(kind, topic, draft)``.
 
     Args:
         kind (str): The KB row kind (e.g. ``params_catalog``, ``model_profile``,
@@ -676,7 +646,6 @@ def slug_for_kind(kind: str, topic: str, draft: dict[str, Any] | None = None) ->
     """
     draft = draft or {}
     if kind == "params_catalog":
-        # Param entries should slugify the param name itself.
         param_name = draft.get("action") or topic
         return slugify(param_name)
     if kind == "model_profile":

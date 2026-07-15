@@ -2,10 +2,9 @@
 
 """Specialist_done bookkeeping tests.
 
-Root cause: ``_handle_intent`` lacked a SPECIALIST_DONE branch, so the
-intent degraded to an observation and dropped its bookkeeping. Exercises
-``_record_specialist_result``, the intent-routing path, the dispatcher exit
-hook, streak semantics, round_id idempotence, and unknown-task defense.
+Exercises ``_record_specialist_result``, the intent-routing path, the
+dispatcher exit hook, streak semantics, round_id idempotence, and
+unknown-task defense.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 
 
-# Helpers — minimal stand-ins
 @dataclass
 class _StubTask:
     """Task-shaped stub (only ``task_id`` and ``params`` are inspected)."""
@@ -44,7 +42,7 @@ class _StubSharedState:
         self.saved: int = 0
 
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
-        # Mirror the real SharedState's idempotence-on-round_id behaviour.
+        # Mirror SharedState's idempotence-on-round_id behaviour.
         round_id = str(entry.get("round_id") or "").strip()
         if round_id:
             for i, prev in enumerate(self.specialist_rounds):
@@ -411,7 +409,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     tmp_path: Path,
 ):
     """End-to-end via the dispatcher exit hook: one specialist task lands the four bookkeeping mutations."""
-    from hyperloom.inference_optimizer.cli import _build_specialist_executor
+    from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
     from hyperloom.orchestrator.roles.mock_backend import (
         MockBackend,
         MockTurn,
@@ -562,7 +560,7 @@ async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
     assert params["gap_canonical_id"] == "gap.framework.scheduler.s1"
     assert params["scope"] == "domain"
     assert "forced-stalled-framework" in intent.payload["idempotency_key"]
-    # Cycle 0 → no cycle suffix (legacy monotonic key is byte-for-byte unchanged).
+    # Cycle 0 → no cycle suffix.
     assert not intent.payload["idempotency_key"].endswith("-c0")
     # Counter is zeroed up-front so it can't re-fire next tick.
     assert state.rounds_since_last_specialist["framework"] == 0
@@ -570,8 +568,8 @@ async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
 
 @pytest.mark.asyncio
 async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
-    # In a later macro-cycle the forced-specialist key must carry the cycle
-    # suffix so it does not dedup-match the prior cycle's task.
+    # In a later macro-cycle the forced-specialist key carries the cycle suffix
+    # so it does not dedup-match the prior cycle's task.
     state = force_coord.shared_state
     state.macro_cycle = 2
     for _ in range(10):
@@ -617,18 +615,13 @@ async def test_force_stalled_domain_noop_outside_explore(force_coord):
     force_coord._handle_intent.assert_not_awaited()
 
 
-# 6. Intent routing branch wired into _handle_intent
+# 6. Intent routing branch wired into the dispatch table
 def test_handle_intent_dispatch_table_has_specialist_done_branch():
     """The dispatch table routes SPECIALIST_DONE to ``_handle_specialist_done``."""
-    import inspect
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+    from hyperloom.orchestrator.loop.intent_router import _INTENT_DISPATCH
 
-    from hyperloom.orchestrator.loop.intent_router import IntentRouter
-
-    src = inspect.getsource(IntentRouter._handle_intent)
-    assert "IntentType.SPECIALIST_DONE" in src, (
-        "_handle_intent must dispatch SPECIALIST_DONE (KB_gaps/Gap-03)"
-    )
-    assert "_handle_specialist_done" in src, (
-        "_handle_intent must route SPECIALIST_DONE to "
-        "_handle_specialist_done"
+    assert _INTENT_DISPATCH.get(IntentType.SPECIALIST_DONE) == "_handle_specialist_done", (
+        "_INTENT_DISPATCH must route SPECIALIST_DONE to "
+        "_handle_specialist_done (KB_gaps/Gap-03)"
     )

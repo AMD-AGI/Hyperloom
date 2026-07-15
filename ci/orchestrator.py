@@ -45,13 +45,10 @@ CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
 PROMPT_TEMPLATE_PR = (CI_DIR / "prompt_template_pr.md").read_text()
 
-# prompt_template.md (default schedule/workflow_dispatch): validates the
-# /wekafs/HyperloomV2 deployed snapshot (may lag main). prompt_template_pr.md
-# (PR-approve): agent git-clones the PR head into /tmp/Hyperloom-pr so numbers
-# reflect proposed code; GH token is formatted into the prompt (Claw API has no
-# env-injection field), uses per-run ${{ github.token }} because AMD-AGI bans
-# Classic PATs. Both share plugin 4 (tools 3 + 85); the skill runtime IS the
-# inference_optimizer package. ci-mix300 (tool 74) is NOT bundled in plugin 4.
+# prompt_template.md targets the configured Hyperloom checkout/skill path.
+# prompt_template_pr.md has the agent git-clone the PR head into a temporary
+# sandbox checkout so numbers reflect proposed code; the GH token is formatted
+# into the prompt since the Claw API has no env-injection field.
 
 
 def load_config(config_path: str | None = None) -> dict:
@@ -76,9 +73,9 @@ def render_prompt(
 
     Args:
         merged: Merged model/run config (workload dims, benchmarks, image).
-        pr_mode: When False, use ``prompt_template.md`` against
-            ``/wekafs/HyperloomV2``; when True, use ``prompt_template_pr.md``
-            so the agent git-clones the PR head.
+        pr_mode: When False, use ``prompt_template.md`` against the configured
+            checkout; when True, use ``prompt_template_pr.md`` so the agent
+            git-clones the PR head.
         git_ref: PR head SHA; required when ``pr_mode`` is True.
         gh_token: GitHub token used to clone AMD-AGI/Hyperloom in PR mode.
 
@@ -98,21 +95,23 @@ def render_prompt(
     )
 
     # Do NOT inject SAFE_API_KEY / SAFE_BASE_URL into the prompt body: the agent
-    # already has them in its sandbox env, and rendering them leaked the key into
-    # Claw history, Actions logs, and artifacts.
+    # already has them in its sandbox env, and rendering them leaks the key.
 
     # Multi-node entries (nodes > 1) need a "Task submission" block with RayJob
     # image / per-node resources / RDMA env; single-node gets an empty section.
     nodes = int(merged.get("nodes", 1) or 1)
     if nodes > 1:
         rayjob_image = merged.get("rayjob_image", "") or merged.get("sandbox_image", "")
+        bnxt_tar = os.environ.get("SAFE_OPTIMIZE_BNXT_TAR", "").strip()
+        env_lines = f"- NODES={nodes}\n"
+        if bnxt_tar:
+            env_lines += f"- PATH_TO_BNXT_TAR_PACKAGE={bnxt_tar}\n"
         multinode_section = (
             f"\nTask submission ({nodes}-node):\n"
             f"RayJob image: {rayjob_image}\n"
             f"RayJob resource per node: CPU=96, GPU=8, memory=1024Gi, ephemeralStorage=400Gi\n"
             f"RayJob node count: {nodes}\n"
-            f"env:\n"
-            f"- PATH_TO_BNXT_TAR_PACKAGE=/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz\n"
+            f"env:\n{env_lines}"
         )
     else:
         multinode_section = ""
@@ -165,9 +164,9 @@ def render_prompt(
 
 _STREAM_TRUNCATION_MIN_TOOL_CALLS = 3  # fewer tool calls in <10min = likely truncation
 _STREAM_TRUNCATION_MAX_ELAPSED_S = 600  # completed under this → suspect truncation
-_MAX_RETRY_ATTEMPTS = 4  # 1 initial + up to 3 retries (transient Vertex overloads)
+_MAX_RETRY_ATTEMPTS = 4  # 1 initial + up to 3 retries
 _OVERLOADED_BACKOFF_S = (180, 360, 720)  # exponential backoff for Vertex overloads
-_TRUNCATION_BACKOFF_S = 60  # fast retry; truncations are usually transient
+_TRUNCATION_BACKOFF_S = 60  # fast retry
 
 
 def _is_stream_truncated(status: str, sse_events: list[dict], elapsed_s: float) -> bool:
@@ -214,8 +213,8 @@ def _detect_vertex_overloaded(sse_events: list[dict]) -> bool:
             err_msg = (err.get("message") or "").lower() if isinstance(err, dict) else ""
             if "overloaded" in err_type or "overloaded" in err_msg:
                 return True
-        # Narrow match keyed on req_vrtx_ to avoid false-positives on the literal
-        # word "overloaded" embedded in chatDelta/statusUpdate chat content.
+        # Narrow match keyed on req_vrtx_ to avoid false-positives on the word
+        # "overloaded" embedded in chat content.
         blob = json.dumps(evt, default=str)
         if "overloaded_error" in blob and "req_vrtx_" in blob:
             return True
@@ -287,7 +286,7 @@ def run_model(
             time.sleep(wait_s)
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
 
-        # Create session — sandbox_image selects the GPU sandbox.
+        # sandbox_image selects the GPU sandbox.
         session_name = f"ci-{model_name}-{timestamp}"
         if attempt > 1:
             session_name = f"ci-{model_name}-{timestamp}-retry{attempt - 1}"
@@ -336,8 +335,7 @@ def run_model(
         time.sleep(1)
 
         try:
-            # Per-entry plugin_id override (defaults to 4; null opts the entry
-            # out of the Hyperloom plugin — send_message omits pluginId then).
+            # Per-entry plugin_id override (defaults to 4; null omits pluginId).
             entry_plugin_id = merged.get("claw_plugin_id", 4)
             claw.send_message(session_id, prompt, plugin_id=entry_plugin_id)
             log.info(
@@ -367,9 +365,8 @@ def run_model(
             sum(1 for e in sse_events if e.get("type") == "toolUsed"),
         )
 
-        # Recoverable failures: overloaded_error (Vertex blip, exponential
-        # backoff) or stream truncation (short retry). Check overloaded first —
-        # it's broader and may catch status="failed" sessions too.
+        # Recoverable failures: overloaded_error (exponential backoff) or stream
+        # truncation (short retry). Check overloaded first — it's broader.
         if _detect_vertex_overloaded(sse_events):
             last_failure_reason = "overloaded"
             log.warning(
@@ -404,9 +401,8 @@ def run_model(
     # Download the optimization report from Claw, with NFS fallback.
     report_content = None
     os.makedirs(result_dir, exist_ok=True)
-    # Canonical Required Artifacts contract; MUST stay in sync with
+    # Canonical Required Artifacts contract; must stay in sync with
     # optimize_submit.py's DEFAULT_ARTIFACT_PATTERNS / _KEY_RESULT_SUFFIXES.
-    # claw-stats-service prefers session_breakdown.json over ci_metrics.json.
     download_suffixes = (
         "optimization_report.md",
         "ci_metrics.json",
@@ -534,8 +530,8 @@ def main():
         help="PR-CI mode: render prompt_template_pr.md so the agent "
         "first git-clones --git-ref into /tmp/Hyperloom-pr inside "
         "the sandbox, then installs + drives the skill from PR head "
-        "(NOT from /wekafs/HyperloomV2). Required so reviewer-visible "
-        "numbers reflect the proposed code, not the wekafs snapshot.",
+        "(not from a pre-deployed shared checkout). Required so reviewer-visible "
+        "numbers reflect the proposed code, not a shared snapshot.",
     )
     parser.add_argument(
         "--git-ref",
@@ -621,8 +617,8 @@ def main():
         )
         yaml_path = Path(_tmpdir) / ifx_cfg["config_path"]
 
-        # Read-only image version report (no --update): CI baselines stay pinned
-        # to the InferenceX image tag so tok/s comparisons stay comparable.
+        # Read-only image version report: CI baselines stay pinned to the
+        # InferenceX image tag so tok/s comparisons stay comparable.
         check_script = CI_DIR.parent / "inference_optimization" / "InferenceX" / "utils" / "check_image_versions.py"
         if check_script.exists():
             cmd = [sys.executable, str(check_script), "--config-files", str(yaml_path)]
@@ -647,7 +643,7 @@ def main():
         for model_cfg in model_list:
             ifx_key = model_cfg.get("inferenceX_key", "")
             if not ifx_key:
-                # Self-contained entry (no upstream InferenceX baseline).
+                # Self-contained entry, no upstream InferenceX baseline.
                 continue
             script = find_benchmark_script(_tmpdir, ifx_key, scripts_path)
             ifx_scripts[ifx_key] = script
@@ -668,7 +664,7 @@ def main():
             ifx_entry = amd_master[ifx_key]
         elif model_cfg.get("model_hf") and model_cfg.get("image"):
             # Self-contained entry: synthesize an amd-master-style entry from
-            # ci-config so the rest of the merge flow works unchanged.
+            # ci-config so the merge flow works unchanged.
             ifx_entry = synthesize_entry_from_ci_config(model_cfg)
             log.info(
                 "Model %s: using self-contained ci-config entry (no amd-master.yaml lookup)",
@@ -704,8 +700,7 @@ def main():
         log.error("No valid models to process")
         sys.exit(1)
 
-    # PR-mode: resolve + validate token / git-ref upfront so we fail fast
-    # before spinning up any sandbox.
+    # PR-mode: resolve + validate token / git-ref upfront so we fail fast.
     pr_mode = bool(args.pr_mode)
     git_ref: str | None = None
     gh_token: str | None = None
@@ -768,7 +763,7 @@ def main():
         )
 
     # Wrap report generation in try/except so a reporting bug never discards
-    # expensive LLM results that already completed.
+    # LLM results that already completed.
     ci_run_id = f"ci-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}"
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

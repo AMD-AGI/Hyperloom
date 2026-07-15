@@ -18,10 +18,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import first_float as _first_float
-from hyperloom.common.coerce import first_int as _first_int
-from hyperloom.common.coerce import to_float as _to_float
-from hyperloom.common.coerce import to_int as _to_int
+from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
 
 log = logging.getLogger(__name__)
@@ -32,10 +29,8 @@ log = logging.getLogger(__name__)
 _DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (Path("/workspace/inferencex_result.json"),)
 
 
-# Wrapper-side diagnostic files hardcoded under ``/workspace/`` (server
-# log, GPU monitor CSV, profile relay trace). Unlike
-# ``inferencex_result.json`` they don't feed measurement recovery, but
-# they live outside the per-task workspace so the NFS clone misses them;
+# Wrapper-side diagnostic files hardcoded under ``/workspace/``. They live
+# outside the per-task workspace so the NFS clone misses them;
 # :func:`harvest_leaked_artifacts` copies fresh matches in.
 _DEFAULT_LEAK_ARTIFACT_GLOBS: tuple[str, ...] = (
     "server.log",
@@ -47,22 +42,8 @@ _DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 
 # Slack subtracted from ``subprocess_started_unix`` before comparing a leak's
 # ``st_mtime``, to reject stale prior-run leaks without false-dropping fresh
-# ones. 1s absorbs clock-vs-mtime / FS-granularity skew (NFS ~1s) while
-# staying below the multi-second gap that separates genuinely stale leaks.
+# ones. 1s absorbs clock-vs-mtime / FS-granularity skew.
 _MTIME_GATE_SLACK_SEC: float = 1.0
-
-
-def _load_json(path: Path) -> dict[str, Any] | None:
-    """Load a JSON object from ``path``, tolerating read/parse errors.
-
-    Args:
-        path (Path): The JSON file to read.
-
-    Returns:
-        dict[str, Any] | None: The parsed mapping, or ``None`` on IO /
-        decode error or when the top-level JSON is not an object.
-    """
-    return read_json(path, default=None, require_dict=True)
 
 
 def _candidate_raw_jsons(workspace: Path) -> list[Path]:
@@ -305,11 +286,9 @@ def harvest_leaked_artifacts(
                 seen.add(resolved)
                 try:
                     resolved.relative_to(ws_resolved)
-                    # Already under the workspace — nothing to harvest.
-                    continue
+                    continue  # Already under the workspace — nothing to harvest.
                 except ValueError:
-                    # Path is outside the workspace; fall through to harvest it below.
-                    pass
+                    pass  # Outside the workspace; fall through to harvest below.
                 if not match.is_file():
                     continue
                 if subprocess_started_unix is not None:
@@ -356,34 +335,34 @@ def _merge_raw_result(
         None: ``measurement`` is mutated in place.
     """
     if measurement.get("output_throughput") is None:
-        measurement["output_throughput"] = _to_float(raw.get("output_throughput"))
+        measurement["output_throughput"] = to_float(raw.get("output_throughput"))
     if measurement.get("request_throughput") is None:
-        measurement["request_throughput"] = _to_float(raw.get("request_throughput"))
+        measurement["request_throughput"] = to_float(raw.get("request_throughput"))
     if measurement.get("total_token_throughput") is None:
-        measurement["total_token_throughput"] = _to_float(raw.get("total_token_throughput"))
+        measurement["total_token_throughput"] = to_float(raw.get("total_token_throughput"))
     if measurement.get("completed_requests") is None:
-        measurement["completed_requests"] = _first_int(
+        measurement["completed_requests"] = first_int(
             raw.get("completed_requests"),
             raw.get("completed"),
         )
     if measurement.get("duration_seconds") is None:
-        measurement["duration_seconds"] = _first_float(
+        measurement["duration_seconds"] = first_float(
             raw.get("duration_seconds"),
             raw.get("duration"),
         )
     if measurement.get("ttft_mean_ms") is None:
-        measurement["ttft_mean_ms"] = _to_float(raw.get("mean_ttft_ms"))
+        measurement["ttft_mean_ms"] = to_float(raw.get("mean_ttft_ms"))
     if measurement.get("ttft_p99_ms") is None:
-        measurement["ttft_p99_ms"] = _to_float(raw.get("p99_ttft_ms"))
+        measurement["ttft_p99_ms"] = to_float(raw.get("p99_ttft_ms"))
     if measurement.get("tpot_mean_ms") is None:
-        measurement["tpot_mean_ms"] = _to_float(raw.get("mean_tpot_ms"))
+        measurement["tpot_mean_ms"] = to_float(raw.get("mean_tpot_ms"))
     if measurement.get("e2el_mean_ms") is None:
-        measurement["e2el_mean_ms"] = _first_float(
+        measurement["e2el_mean_ms"] = first_float(
             raw.get("mean_e2el_ms"),
             raw.get("mean_latency_ms"),
         )
     if measurement.get("e2el_p99_ms") is None:
-        measurement["e2el_p99_ms"] = _first_float(
+        measurement["e2el_p99_ms"] = first_float(
             raw.get("p99_e2el_ms"),
             raw.get("p99_latency_ms"),
         )
@@ -425,38 +404,37 @@ def extract_benchmark_measurement(
         "reported_success": report.get("success") if report else None,
         "framework": report.get("framework"),
         "model": report.get("model"),
-        # Scriptable (server-less) workloads — e.g. xDiT diffusion — tag the
-        # report with workload_kind/unit and ship a quality_gate block instead
-        # of a GSM8K eval. Carried through so downstream gates/reporters can
-        # branch without re-reading the YAML.
+        # Scriptable (server-less) workloads tag the report with
+        # workload_kind/unit and ship a quality_gate block instead of a GSM8K
+        # eval; carried through so downstream gates/reporters can branch.
         "workload_kind": report.get("workload_kind"),
         "throughput_unit": report.get("throughput_unit") or throughput.get("unit"),
         "quality_gate": report.get("quality_gate"),
-        "latency_s": _first_float(report.get("latency_s"), throughput.get("latency_s")),
-        "request_throughput": _to_float(throughput.get("request_throughput")),
-        "output_throughput": _to_float(throughput.get("output_throughput")),
-        "total_token_throughput": _to_float(throughput.get("total_token_throughput")),
-        "completed_requests": _first_int(
+        "latency_s": first_float(report.get("latency_s"), throughput.get("latency_s")),
+        "request_throughput": to_float(throughput.get("request_throughput")),
+        "output_throughput": to_float(throughput.get("output_throughput")),
+        "total_token_throughput": to_float(throughput.get("total_token_throughput")),
+        "completed_requests": first_int(
             throughput.get("completed_requests"),
             throughput.get("completed"),
             # Diffusion scripts report images produced under either key.
             throughput.get("images_generated"),
             throughput.get("num_images"),
         ),
-        "duration_seconds": _to_float(throughput.get("duration_seconds")),
-        "ttft_mean_ms": _to_float(ttft.get("mean_ms")),
-        "ttft_p99_ms": _to_float(ttft.get("p99_ms")),
-        "tpot_mean_ms": _to_float(tpot.get("mean_ms")),
-        "e2el_mean_ms": _to_float(e2el.get("mean_ms")),
-        "e2el_p99_ms": _to_float(e2el.get("p99_ms")),
+        "duration_seconds": to_float(throughput.get("duration_seconds")),
+        "ttft_mean_ms": to_float(ttft.get("mean_ms")),
+        "ttft_p99_ms": to_float(ttft.get("p99_ms")),
+        "tpot_mean_ms": to_float(tpot.get("mean_ms")),
+        "e2el_mean_ms": to_float(e2el.get("mean_ms")),
+        "e2el_p99_ms": to_float(e2el.get("p99_ms")),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }
 
     if workspace is not None:
         for raw_path in _candidate_raw_jsons(workspace):
-            raw = _load_json(raw_path)
-            if not raw or _to_float(raw.get("output_throughput")) is None:
+            raw = read_json(raw_path, default=None, require_dict=True)
+            if not raw or to_float(raw.get("output_throughput")) is None:
                 continue
             _merge_raw_result(measurement, raw, source_path=raw_path)
             if is_valid_measurement(measurement):
@@ -478,13 +456,11 @@ def extract_benchmark_measurement(
             workspace,
             subprocess_started_unix=subprocess_started_unix,
         ):
-            raw = _load_json(rescue_path)
-            if not raw or _to_float(raw.get("output_throughput")) is None:
+            raw = read_json(rescue_path, default=None, require_dict=True)
+            if not raw or to_float(raw.get("output_throughput")) is None:
                 continue
-            # Copy the leak into the workspace BEFORE merging so
-            # ``raw_result_path`` advertises the in-workspace copy and the
-            # NFS clone stays self-contained. Best-effort: on copy failure
-            # we fall back to the leak path rather than drop the measurement.
+            # Copy the leak into the workspace BEFORE merging so the NFS clone
+            # stays self-contained. On copy failure fall back to the leak path.
             materialized = _materialize_rescue_into_workspace(
                 rescue_path,
                 workspace,
@@ -518,8 +494,8 @@ def _derive_tpot_if_missing(
     """
     if measurement.get("tpot_mean_ms") is not None:
         return
-    e2el = _to_float(measurement.get("e2el_mean_ms"))
-    ttft = _to_float(measurement.get("ttft_mean_ms"))
+    e2el = to_float(measurement.get("e2el_mean_ms"))
+    ttft = to_float(measurement.get("ttft_mean_ms"))
     if e2el is None or ttft is None or e2el <= ttft:
         return
     osl = _resolve_osl(report)
@@ -545,7 +521,7 @@ def _resolve_osl(report: dict[str, Any] | None) -> int | None:
         if isinstance(section, dict):
             candidates.extend(section.get(k) for k in ("osl", "output_len", "max_tokens"))
     for value in candidates:
-        n = _to_int(value)
+        n = to_int(value)
         if n is not None and n > 0:
             return n
     return None
@@ -588,38 +564,30 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     """
     if not isinstance(result, dict):
         return False
-    output_tput = _to_float(result.get("output_throughput"))
+    output_tput = to_float(result.get("output_throughput"))
     if output_tput is None or output_tput <= 0:
         return False
     if _is_scriptable_measurement(result):
-        # A scriptable run whose image-quality gate failed is not a selectable
-        # result, regardless of throughput. Reuse quality_gate_passed as the
-        # single source of truth so a gate that fails on thresholds (lpips/ssim/
-        # mse) — not just an explicit passed=False — is also rejected. require=
-        # False keeps a missing/empty gate non-blocking here (parity with the
-        # prior behavior); the gate is enforced as required upstream (Magpie
-        # result.py + parse_eval_results) for the accuracy contract.
+        # A scriptable run whose image-quality gate failed is not selectable,
+        # regardless of throughput. ``require=False`` keeps a missing/empty gate
+        # non-blocking here; the gate is enforced as required upstream.
         from ._accuracy_gate import quality_gate_passed
 
         qg = result.get("quality_gate")
         if not quality_gate_passed(qg, require=False):
             return False
         return True
-    completed = _to_int(result.get("completed_requests"))
+    completed = to_int(result.get("completed_requests"))
     return completed is not None and completed > 0
 
 
 # ── Approximate throughput for killed-overtime variants ──
 #
-# A variant reaped at the soft overtime deadline never writes a
-# ``benchmark_report.json`` / ``inferencex_result.json``, so the normal
-# measurement path yields nothing. The inference engine, however, prints its
-# instantaneous decode throughput to ``server.log`` every few hundred steps:
-#   sglang: ``... gen throughput (token/s): 1234.56, #queue-req: 0``
-#   vllm:   ``... Avg generation throughput: 1234.5 tokens/s, Running: 64 ...``
-# Averaging the steady-state samples gives a rough (intentionally imprecise)
-# output-throughput estimate so the run is still legible post-mortem. This is
-# informational only — callers keep the variant marked killed/failed.
+# A variant reaped at the soft overtime deadline never writes a result file, but
+# the engine prints its instantaneous decode throughput to ``server.log``.
+# Averaging the steady-state samples gives a rough output-throughput estimate so
+# the run is still legible post-mortem. Informational only — callers keep the
+# variant marked killed/failed.
 _SGLANG_GEN_TPUT_RE = re.compile(
     r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)",
     re.IGNORECASE,
@@ -629,8 +597,8 @@ _VLLM_GEN_TPUT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Fraction of the leading (warmup/ramp-up) samples dropped before averaging so
-# the estimate reflects sustained decode rather than the cold-start climb.
+# Fraction of the leading warmup samples dropped before averaging so the
+# estimate reflects sustained decode rather than the cold-start climb.
 _DEFAULT_WARMUP_SKIP_FRAC: float = 0.25
 
 
@@ -655,7 +623,7 @@ def _parse_server_log_gen_throughput(log_path: Path) -> list[float]:
                 match = _SGLANG_GEN_TPUT_RE.search(line) or _VLLM_GEN_TPUT_RE.search(line)
                 if match is None:
                     continue
-                value = _to_float(match.group(1))
+                value = to_float(match.group(1))
                 if value is not None:
                     samples.append(value)
     except OSError:

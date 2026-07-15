@@ -17,7 +17,7 @@ or framework builds might work but are not regularly tested.
 
 ## GPU support
 
-These AMD Instinct GPUs are validated with Hyperloom:
+The following AMD Instinct GPUs are validated with Hyperloom:
 
 | GPU | Architecture | Status |
 |-----|--------------|--------|
@@ -35,7 +35,7 @@ image is supplied.
 
 ## Inference frameworks
 
-These inference frameworks are supported:
+The following inference frameworks are supported:
 
 | Framework | ROCm version | Status | Notes |
 |-----------|--------------|--------|-------|
@@ -62,7 +62,7 @@ Browse all available SGLang tags at
 
 ## Component dependencies
 
-These are the Hyperloom components:
+Hyperloom is dependent on the following components:
 
 | Component | Source |
 |-----------|--------|

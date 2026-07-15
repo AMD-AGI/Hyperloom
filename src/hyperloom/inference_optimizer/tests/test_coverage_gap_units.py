@@ -64,11 +64,6 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HL_FLOAT", "")
     assert env.env_float("HL_FLOAT", default=1.25) == pytest.approx(1.25)
 
-    monkeypatch.delenv("HL_STR", raising=False)
-    assert env.env_str("HL_STR", default="fallback") == "fallback"
-    monkeypatch.setenv("HL_STR", " value ")
-    assert env.env_str("HL_STR") == "value"
-
 
 def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.common import io
@@ -76,10 +71,6 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
     text_path = tmp_path / "nested" / "value.txt"
     io.atomic_write_text(text_path, "hello", make_parents=True)
     assert text_path.read_text(encoding="utf-8") == "hello"
-
-    bytes_path = tmp_path / "payload.bin"
-    io.atomic_write_bytes(bytes_path, b"\x00\x01")
-    assert bytes_path.read_bytes() == b"\x00\x01"
 
     json_path = tmp_path / "data.json"
     io.atomic_write_json(json_path, {"b": 2, "a": 1}, indent=None, trailing_newline=True)
@@ -372,11 +363,16 @@ def test_dynamo_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MORI_FOO", "1")
     monkeypatch.setenv("SGLANG_MORI_BAR", "2")
     monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "/shared/traces")
-    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", json.dumps({"SGLANG_USE_AITER": "1", "MORI_FOO": "override"}))
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_EXTRA_FWD_ENV",
+        json.dumps({"SGLANG_USE_AITER": "1", "MORI_FOO": "override", "SGLANG_MORI_BAR": "explicit"}),
+    )
+    monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["SGLANG_MORI_BAR"]))
     fwd = dyn._collect_forward_env()
     assert fwd["MORI_FOO"] == "override"
     assert fwd["SGLANG_TORCH_PROFILER_DIR"] == "/shared/traces"
     assert fwd["SGLANG_USE_AITER"] == "1"
+    assert fwd["SGLANG_MORI_BAR"] == "explicit"
 
     monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "{bad")
     assert dyn._collect_forward_env()["MORI_FOO"] == "1"
@@ -749,8 +745,7 @@ def test_framework_audit_common_patch_sources(tmp_path: Path, monkeypatch: pytes
         "-def gone(): pass\n"
     )
     changes = common.parse_unified_diff(diff)
-    # Deleted-file sections end at /dev/null and are filtered as placeholder
-    # sections by the current parser contract; the branch is still exercised.
+    # Deleted-file sections are filtered as placeholder sections.
     assert [c.path for c in changes] == ["pkg/a.py"]
     assert changes[0].is_new is True
     assert common._symbols(changes[0].added) == ["Added", "run"]
@@ -1261,7 +1256,7 @@ def test_dynamo_create_reuse_and_restart_error_branches(tmp_path: Path, monkeypa
         dyn._dynamo_restart_server(_restart_args())
 
     monkeypatch.setattr(dyn, "_dynamo_require_state", lambda: {"backend": "dynamo", "worker_pod_ips": ["10.0.1.0"], "ssh_key_path": "/tmp/k", "framework": "sglang"})
-    monkeypatch.setattr(dyn, "_validate_extra_server_args", lambda *a, **kw: (_ for _ in ()).throw(dyn.ServerArgsRejected("denied")))
+    monkeypatch.setattr(dyn, "validate_server_args", lambda *a, **kw: (_ for _ in ()).throw(dyn.ServerArgsRejected("denied")))
     assert dyn._dynamo_restart_server(_restart_args(extra_args="--bad")) == dyn.EXIT_CONFIG_ERROR
 
     monkeypatch.setattr(dyn, "_dynamo_require_state", lambda: {"backend": "dynamo", "worker_pod_ips": [], "ssh_key_path": "/tmp/k"})

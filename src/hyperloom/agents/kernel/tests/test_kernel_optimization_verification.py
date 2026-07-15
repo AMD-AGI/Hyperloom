@@ -82,7 +82,7 @@ def test_structured_shape_cases_prefer_input_shapes():
         "input_shapes": [
             {"call_num": 7, "shape": "(1,2,3) bf16<BR/>(4,) int"},
         ],
-        # Legacy prose field disagrees; it must not win over input_shapes.
+        # Prose field must not win over input_shapes.
         "shapes": [{"call_num": 99, "shape": "(999,) fp32"}],
     }
 
@@ -231,7 +231,7 @@ def test_benchmark_available_alone_does_not_pass_correctness(tmp_path):
 
 
 def test_report_correctness_passes_when_explicit(tmp_path):
-    """Report-scan correctness lights up on its own (no `accuracy_passed`, which would mask the report scanner via accuracy_override)."""
+    """Report-scan correctness lights up on its own (no `accuracy_passed`)."""
     report = tmp_path / "optimization_report.md"
     report.write_text(
         "Correctness passed\nSpeedup: 1.32x\n",
@@ -321,7 +321,7 @@ def test_complete_kernel_artifact_can_integrate_without_e2e_yet(tmp_path):
 
 
 def test_report_correctness_failure_blocks_keep(tmp_path):
-    """Explicit "Correctness failed" in the report must block KEEP (no `accuracy_passed`, which would mask it via accuracy_override)."""
+    """Explicit "Correctness failed" in the report must block KEEP (no `accuracy_passed`)."""
     report = tmp_path / "optimization_report.md"
     report.write_text(
         "Correctness failed: assert_close failed\nSpeedup: 2.0x\n",
@@ -350,7 +350,7 @@ def test_cli_correctness_override(tmp_path):
 
 
 def test_speedup_just_above_gate_keeps(tmp_path):
-    """A 1.07x speedup clears the 1.05x KEEP gate and is not rejected by the old higher gate."""
+    """A 1.07x speedup clears the 1.05x KEEP gate."""
     artifact = tmp_path / "optimized.hip"
     verification = ko.build_verification(
         _args(correctness_passed=True, micro_speedup=1.07, e2e_gain_pct=0.5, accuracy_passed=True),
@@ -373,7 +373,7 @@ def test_speedup_below_gate_needs_review(tmp_path):
     assert any("below KEEP" in r for r in proposal["reasons"])
 
 
-# GEAK prompt yaml patcher: rewrites a misleading task_runner.py example to placeholders; pin idempotency + fail-soft.
+# GEAK prompt yaml patcher: rewrites a misleading example to placeholders.
 
 
 def _seed_yaml(tmp_path):
@@ -431,7 +431,7 @@ def test_geak_prompt_patcher_idempotent(tmp_path, monkeypatch):
 
 
 def test_geak_prompt_patcher_fails_soft_when_yaml_missing(tmp_path, monkeypatch):
-    """Missing YAML → ``ensure_geak_prompt_patched`` returns ``(False, …)`` (UX hardening, not a correctness gate)."""
+    """Missing YAML → ``ensure_geak_prompt_patched`` returns ``(False, …)``."""
     import geak_prompt_patcher as gpp
 
     monkeypatch.setenv(
@@ -463,8 +463,8 @@ def test_geak_prompt_patcher_refuses_to_guess_on_drift(tmp_path, monkeypatch):
 
 
 def test_geak_prompt_patcher_recognises_upstream_already_fixed(tmp_path, monkeypatch):
-    """When upstream YAML already uses generic <your-test-command> placeholders
-    (GEAK ec61bdb+), the patcher should return ok without modifying the file."""
+    """When upstream YAML already uses generic <your-test-command> placeholders,
+    the patcher returns ok without modifying the file."""
     import geak_prompt_patcher as gpp
 
     yaml = tmp_path / "config" / "mini_kernel_strategy_list.yaml"
@@ -497,16 +497,17 @@ def test_benchmark_files_list_counts_as_benchmark(tmp_path):
     assert ko.has_benchmark(args, {"benchmark_files": [str(bench)]}) is True
 
 
-# Regression: backend stdout must never be promoted to `source_file` artifact (Qwen3-8B k007 2026-05-20); stdout now goes to `_stdout.log` and only the fenced-block extraction path may surface it.
+# Backend stdout must never be promoted to a `source_file` artifact; only the
+# fenced-block extraction path may surface it.
 
 
 def test_geak_stdout_log_must_not_false_positive_as_source_file(tmp_path):
-    """Stdout-log-only artifact (no patch, no .cu, no code fence) → artifact_source == "missing" (Qwen3-8B k007 2026-05-20)."""
+    """Stdout-log-only artifact (no patch, no .cu, no code fence) → artifact_source == "missing"."""
     log_path = tmp_path / "geak-deadbeef_stdout.log"
     log_path.write_text(
         "minisweagent.agents.parallel_agent: INFO: [running 12.0min] Sub-agents working\n"
         "2 total patches (task_0: 2)\n"
-        # Embeds void/int/float markers the pre-fix heuristic accepted as CUDA source.
+        # Embeds void/int/float markers that must not be accepted as CUDA source.
         "Trajectory note: convert the int loop, drop the void wrapper, use float.\n"
         "Best patch: patch_1 (agent 0)\n",
         encoding="utf-8",
@@ -569,7 +570,7 @@ def test_geak_stdout_log_with_fenced_cuda_block_is_extracted(tmp_path):
 
 
 def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
-    """Patch wins over stdout log; with no readable original to apply against, a bare diff yields `missing` rather than promoting the marker-noise log (`_candidate_artifact_paths` precedence)."""
+    """Patch wins over stdout log; with no readable original, a bare diff yields `missing` rather than promoting the marker-noise log."""
     patch_path = tmp_path / "patch_1.patch"
     patch_path.write_text(
         "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -1,1 +1,1 @@\n-old\n+new\n",
@@ -596,7 +597,7 @@ def test_geak_patch_is_preferred_over_stdout_log(tmp_path):
         run_dir=tmp_path,
     )
 
-    # Crucial: the marker-noise log is NOT silently promoted to source_file (the pre-fix bug).
+    # The marker-noise log is NOT silently promoted to source_file.
     assert source == "missing"
     assert artifact_path == ""
 
@@ -605,19 +606,13 @@ def test_patch_only_winner_reconstructs_full_source(tmp_path):
     """A backend whose best artifact is a unified diff (no full-source .py, no
     fenced block) must reconstruct the complete optimized source by applying the
     patch to the original kernel — not defer with artifact_source='missing'.
-
-    Reproduces the DeepSeek-R1 fp8-MoE case: GEAK's winning ``asm-kernel-rewrite``
-    emitted only ``patch_0.patch`` under a ``<task-label>/`` dir (so the
-    ``parallel_<M>`` worktree mapping missed it) and a diff has no fenced block to
-    scrape, leaving the verified +8.4% kernel unverifiable. The patch + original
-    reconstruct the optimized file deterministically.
     """
     original = tmp_path / "fused_moe.py"
     original.write_text(
         "import triton\n\n\ndef helper():\n    return 1\n\n\ndef kernel():\n    return helper()\n",
         encoding="utf-8",
     )
-    # Unified diff that adds a cache helper (mirrors the asm-rewrite shape).
+    # Unified diff that adds a cache helper.
     patch_path = tmp_path / "asm-kernel-rewrite" / "patch_0.patch"
     patch_path.parent.mkdir(parents=True)
     patch_path.write_text(
@@ -654,7 +649,7 @@ def test_patch_only_winner_reconstructs_full_source(tmp_path):
     assert "_CACHE = {}" in text
     assert "def kernel():" in text  # untouched original content preserved
     assert "@@" not in text  # not a diff
-    # Security: nothing was written outside run_dir (no traversal escape).
+    # Nothing was written outside run_dir.
     assert Path(artifact_path).resolve().is_relative_to(tmp_path.resolve())
 
 
@@ -877,10 +872,8 @@ def test_reconstruct_no_matching_target(tmp_path):
 
 def test_reconstruct_double_slash_header_cannot_escape_sandbox(tmp_path):
     """A ``b//abs/path`` header must not write outside the sandbox: the empty
-    component from ``//`` previously survived the count-based strip and produced
-    an absolute write path (``tmp / "/abs"`` resets to the absolute path). The
-    empty component is now dropped and a containment guard backstops it, so the
-    apply stays inside the temp dir and never creates the outside victim path."""
+    ``//`` component is dropped and a containment guard keeps the apply inside the
+    temp dir, never creating the outside victim path."""
     victim_dir = tmp_path / "OUTSIDE"
     work = tmp_path / "work"
     work.mkdir()
@@ -895,7 +888,7 @@ def test_reconstruct_double_slash_header_cannot_escape_sandbox(tmp_path):
         encoding="utf-8",
     )
     ko._reconstruct_source_from_patch(patch_path, str(original), work / "out.py")
-    # The only security property that matters: nothing written outside the dir.
+    # Nothing written outside the dir.
     assert not victim_dir.exists()
 
 
@@ -946,11 +939,12 @@ def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):
     assert res is None
 
 
-# Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must keep matching both legacy `_optimized.<suffix>` and new `_stdout.log` names.
+# Downstream-consumer contract: breakdown collector's `glob("{attempt_id}*")` must
+# match both the `_optimized.<suffix>` and `_stdout.log` names.
 
 
 def test_optimized_dir_glob_picks_up_both_legacy_and_new_attempt_files(tmp_path):
-    """Lock the `glob("{attempt_id}*")` contract: both names surface for the same attempt id across old + new sessions."""
+    """Lock the `glob("{attempt_id}*")` contract: both names surface for the same attempt id."""
     opt_dir = tmp_path / "optimized"
     opt_dir.mkdir()
 
@@ -1317,7 +1311,7 @@ def test_build_hypothesis_block_renders_reasoning_and_resolution():
     assert "## TraceLens Hypothesis [validate before acting]" in block
     assert "Memory-bound kernel saturating HBM bandwidth." in block
     assert "Fuse RMSNorm with the following GEMM" in block
-    # Hypothesis framing always present so GEAK doesn't treat the guess as ground truth.
+    # Hypothesis framing always present.
     assert "verify the reasoning" in block
     assert "(hypothesis)" in block
     assert "Estimated impact range" not in block
@@ -1340,7 +1334,7 @@ def test_build_hypothesis_block_renders_impact_range_when_set():
     assert "3.20% E2E" in block
     assert "40.00 ms" in block
     assert "10.40% E2E" in block
-    # Numbers are TraceLens roofline estimates, framed as such so GEAK doesn't treat them as measured.
+    # Numbers are framed as TraceLens roofline estimates.
     assert "roofline" in block
     assert "Reasoning for slowdown" not in block
     assert "Recommended direction" not in block
@@ -1362,7 +1356,7 @@ def test_build_hypothesis_block_renders_identification_when_present():
     assert "Identification (TraceLens context):" in block
     assert "Four `aiter::rmsnorm_quant`" in block
     assert "rmsnorm_metrics.json" in block
-    # Identification appears before Reasoning (what before why).
+    # Identification appears before Reasoning.
     id_pos = block.index("Identification (TraceLens context):")
     reason_pos = block.index("Reasoning for slowdown (hypothesis):")
     assert id_pos < reason_pos
@@ -1384,7 +1378,7 @@ def test_build_hypothesis_block_renders_all_pitem_prose_when_function_spans_pite
     """Multi-entry ``task_group.all_pitem_prose`` renders every P-item with a ``### P{rank}`` header, rank-sorted."""
     candidate = {
         "name": "aiter::rms_norm",
-        # Primary's flat prose intentionally divergent so the test confirms the renderer reads from all_pitem_prose.
+        # Flat prose diverges to confirm the renderer reads from all_pitem_prose.
         "identification": "<should not appear in multi-pitem render>",
         "reasoning_for_slowdown": "<should not appear>",
         "task_group": {
@@ -1422,13 +1416,13 @@ def test_build_hypothesis_block_renders_all_pitem_prose_when_function_spans_pite
     assert "Prefill rows: 95% of compute peak" in block
     assert "Increase batch upstream" in block
     assert "Tile-size tuning" in block
-    # P2 before P5 (rank-ascending).
+    # P2 before P5.
     p2_pos = block.index("### P2")
     p5_pos = block.index("### P5")
     assert p2_pos < p5_pos
     assert "5.00 ms" in block and "10.00 ms" in block
     assert "1.00 ms" in block and "3.00 ms" in block
-    # Candidate's flat prose must not leak into the multi-pitem render.
+    # Flat prose must not leak into the multi-pitem render.
     assert "<should not appear>" not in block
 
 
@@ -1672,9 +1666,10 @@ def test_build_prompt_omits_priority_block_for_legacy_candidates():
     assert "## Optimization priorities" not in prompt
 
 
-# Defect 1 regression: make_proposal must surface ``artifact_error`` (not "compile failed") when zero backend attempts produced a usable result (geak_dispatch_audit.md Defect 1).
+# make_proposal must surface ``artifact_error`` (not "compile failed") when zero
+# backend attempts produced a usable result.
 def test_make_proposal_surfaces_backend_dispatch_failure():
-    """All dispatch failed (``best`` None) → REVERT reason names the real cause (no usable backend attempt), not compile."""
+    """All dispatch failed (``best`` None) → REVERT reason names the real cause, not compile."""
     verification = {
         "compile_passed": False,
         "correctness_passed": False,
@@ -1691,12 +1686,12 @@ def test_make_proposal_surfaces_backend_dispatch_failure():
     assert len(proposal["reasons"]) == 1
     assert "backend dispatch failed" in proposal["reasons"][0]
     assert "no usable backend attempt" in proposal["reasons"][0]
-    # The misleading legacy string must NOT appear when we know the real cause.
+    # The generic string must NOT appear when we know the real cause.
     assert "compile failed" not in proposal["reasons"][0]
 
 
 def test_make_proposal_keeps_legacy_compile_failed_when_artifact_lookup_failed():
-    """Compile-side regression: attempt produced output but artifact resolution failed → REVERT with legacy 'compile failed'."""
+    """Attempt produced output but artifact resolution failed → REVERT with 'compile failed'."""
     verification = {
         "compile_passed": False,
         "correctness_passed": False,
@@ -1714,7 +1709,7 @@ def test_make_proposal_keeps_legacy_compile_failed_when_artifact_lookup_failed()
 
 
 def test_make_proposal_empty_artifact_error_falls_back_to_compile_failed():
-    """Belt-and-braces: compile_passed=False with empty artifact_error must not crash and keeps the legacy reason."""
+    """compile_passed=False with empty artifact_error must not crash and keeps the fallback reason."""
     verification = {
         "compile_passed": False,
         "correctness_passed": False,

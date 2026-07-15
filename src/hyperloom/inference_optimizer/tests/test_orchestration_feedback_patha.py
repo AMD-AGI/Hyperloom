@@ -67,7 +67,7 @@ def test_format_delegated_result_with_error_is_truncated():
     )
     assert "state='failed'" in line
     assert "error=" in line
-    assert len(line) < 600  # 200-char cap on the error string
+    assert len(line) < 600
 
 
 def test_format_review_verdict_and_denial():
@@ -168,8 +168,7 @@ async def test_recent_outcomes_reader_projects_delegated_results(session_dir):
         assert "Recent action outcomes" in out
         assert "kind='explore'" in out
         assert "gain=4.0" in out
-        # Non-outcome topics are excluded (only delegated_result /
-        # review_verdict are projected).
+        # Non-outcome topics are excluded.
         assert "ignored_obs" not in out
     finally:
         await c.stop()
@@ -193,8 +192,7 @@ async def test_inline_whitelist_picks_lane_light_registered_actions(session_dir)
         async def _stub(ctx: RunnerContext) -> dict:
             return {"status": "ok"}
 
-        # target_analysis is lane-light in the registry; register an
-        # executor so it qualifies for the whitelist.
+        # Register an executor so target_analysis qualifies for the whitelist.
         c.sub.register_executor("target_analysis", _stub)
         wl = c._inline_action_whitelist()
         assert "target_analysis" in wl
@@ -223,7 +221,6 @@ async def test_run_action_now_sync_disabled_by_flag(session_dir, monkeypatch):
 async def test_run_action_now_sync_rejects_non_whitelisted(session_dir):
     c = _silent_coordinator(session_dir)
     try:
-        # explore holds lanes -> never inline-eligible.
         out = c._run_action_now_sync("explore", {})
         assert "not inline-eligible" in out
     finally:
@@ -244,16 +241,15 @@ async def test_run_action_now_happy_path_emits_delegated_result(
             return {"status": "ok", "gain_pct": 1.5}
 
         c.sub.register_executor("inline_probe", _stub)
-        # Focus this test on the inline mechanics: stub the whitelist +
-        # PolicyGate (both independently covered elsewhere).
+        # Stub the whitelist + PolicyGate to focus on inline mechanics.
         monkeypatch.setattr(
-            c.inline_actions,
+            c.dispatcher,
             "_inline_action_whitelist",
             lambda: frozenset({"inline_probe"}),
         )
         monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
         monkeypatch.setattr(
-            c.gating,
+            c.dispatcher,
             "_sequence_denial_for_action",
             lambda *a, **k: None,
         )
@@ -264,7 +260,6 @@ async def test_run_action_now_happy_path_emits_delegated_result(
         assert "state='succeeded'" in out
         assert "gain=1.5" in out
 
-        # A delegated_result audit event was published with inline=True.
         events = await c.bus.tail(topic="delegated_result")
         assert events
         last = events[-1]
@@ -280,10 +275,8 @@ async def test_run_action_now_calls_sequence_denial_with_single_arg(
     session_dir,
     monkeypatch,
 ):
-    """Regression: ``_run_action_now`` must call ``_sequence_denial_for_action``
-    with only ``action_name``. A stray second positional (``params``) raised
-    ``TypeError`` at runtime; it stayed hidden because other tests stub the
-    method with ``lambda *a, **k``. This drives the real 1-arg signature."""
+    """``_run_action_now`` must call ``_sequence_denial_for_action`` with only
+    ``action_name``; this drives the real 1-arg signature."""
     c = _silent_coordinator(session_dir)
     try:
 
@@ -292,13 +285,12 @@ async def test_run_action_now_calls_sequence_denial_with_single_arg(
 
         c.sub.register_executor("inline_probe", _stub)
         monkeypatch.setattr(
-            c.inline_actions,
+            c.dispatcher,
             "_inline_action_whitelist",
             lambda: frozenset({"inline_probe"}),
         )
         monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
-        # Deliberately NOT stubbing _sequence_denial_for_action so the real
-        # 1-arg signature is exercised through the call site.
+        # Leave _sequence_denial_for_action unstubbed to exercise its real signature.
         c.shared_state.baseline_tput = 100.0
 
         out = await c._run_action_now("inline_probe", {"p": 1})
@@ -322,21 +314,20 @@ async def test_run_action_now_sync_bridges_to_coordinator_loop(
 
         c.sub.register_executor("inline_probe", _stub)
         monkeypatch.setattr(
-            c.inline_actions,
+            c.dispatcher,
             "_inline_action_whitelist",
             lambda: frozenset({"inline_probe"}),
         )
         monkeypatch.setattr(c.policy, "validate_intent", lambda *a, **k: None)
         monkeypatch.setattr(
-            c.gating,
+            c.dispatcher,
             "_sequence_denial_for_action",
             lambda *a, **k: None,
         )
         # Capture the running loop the way Coordinator.run() does.
         c._coordinator_loop = asyncio.get_running_loop()
 
-        # Run the blocking sync bridge in a worker thread so it can wait
-        # on the coordinator loop (this loop) via run_coroutine_threadsafe.
+        # Run the blocking sync bridge in a worker thread so it can wait on this loop.
         out = await asyncio.to_thread(
             c._run_action_now_sync,
             "inline_probe",

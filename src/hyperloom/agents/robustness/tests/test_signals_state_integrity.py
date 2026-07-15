@@ -25,11 +25,6 @@ def _ctx(*, now_unix: float = 2_000_000.0) -> ReactorContext:
     )
 
 
-# ---------------------------------------------------------------------------
-# state_json_corrupt
-# ---------------------------------------------------------------------------
-
-
 def test_i1_state_json_invalid_fires_high():
     data = SourceData(
         local_state_integrity={
@@ -58,8 +53,7 @@ def test_i1_silent_when_state_json_valid():
 
 
 def test_i1_silent_on_missing_state_json():
-    """``error='missing'`` is normal on tick 0 (Coordinator hasn't
-    persisted yet). We only fire on corruption, not absence."""
+    """``error='missing'`` is normal on tick 0; we fire on corruption, not absence."""
     data = SourceData(
         local_state_integrity={
             "state_json": {"valid": False, "error": "missing", "path": "/p/state.json"},
@@ -78,11 +72,6 @@ def test_i1_fires_on_read_failed():
     )
     out = evaluate_state_integrity_signals(_ctx(), data)
     assert any(s.name == "state_json_corrupt" for s in out)
-
-
-# ---------------------------------------------------------------------------
-# coordinator_wal_bloat
-# ---------------------------------------------------------------------------
 
 
 def test_i2_wal_bloat_medium_at_warn():
@@ -123,11 +112,6 @@ def test_i2_silent_below_warn():
     )
     out = evaluate_state_integrity_signals(_ctx(), data)
     assert all(s.name != "coordinator_wal_bloat" for s in out)
-
-
-# ---------------------------------------------------------------------------
-# stale_lease
-# ---------------------------------------------------------------------------
 
 
 def test_i3_stale_lease_fires_when_holder_dead():
@@ -174,12 +158,10 @@ def test_i3_silent_when_lease_too_young():
         }
     )
     out = evaluate_state_integrity_signals(_ctx(now_unix=2_000_000.0), data)
-    # acquired 10s ago; default stale_lease_min_age_s=60.0 → silent.
     assert all(s.name != "stale_lease" for s in out)
 
 
 def test_i3_handles_iso_timestamp_in_acquired_at():
-    # Ancient ISO timestamp + ``now`` in 2026 → age_s >> threshold.
     now_2026 = 1_780_000_000.0  # ~2026-05
     data = SourceData(
         local_state_integrity={
@@ -197,11 +179,6 @@ def test_i3_handles_iso_timestamp_in_acquired_at():
     out = evaluate_state_integrity_signals(_ctx(now_unix=now_2026), data)
     sym = next(s for s in out if s.name == "stale_lease")
     assert sym.evidence["task_id"] == "tsk-10"
-
-
-# ---------------------------------------------------------------------------
-# inbox_bloat
-# ---------------------------------------------------------------------------
 
 
 def test_i4_inbox_bloat_low_at_warn():
@@ -281,11 +258,6 @@ def test_i4_separate_symptom_per_role_and_kind():
     }
 
 
-# ---------------------------------------------------------------------------
-# coordinator_zombie
-# ---------------------------------------------------------------------------
-
-
 def test_i5_coordinator_zombie_fires():
     """PID dead + state.json valid + empty stop_reason → HIGH."""
     data = SourceData(
@@ -344,11 +316,6 @@ def test_i5_silent_when_no_pid_recorded():
     )
     out = evaluate_state_integrity_signals(_ctx(), data)
     assert all(s.name != "coordinator_zombie" for s in out)
-
-
-# ---------------------------------------------------------------------------
-# Custom config
-# ---------------------------------------------------------------------------
 
 
 def test_custom_thresholds_apply():

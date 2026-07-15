@@ -60,16 +60,13 @@ def test_classify_attempt_failure_priority():
 
 
 def test_backend_results_dir_lookup(tmp_path: Path):
-    # No runs root at all.
     assert kas._backend_results_dir(tmp_path, "sid") is None
 
-    # Exact key match.
     sd = tmp_path / "sess"
     results = sd / "kernel-agent" / "runs" / "sess" / "results"
     results.mkdir(parents=True)
     assert kas._backend_results_dir(sd, "") == results
 
-    # Single-subdir recovery when neither key matches.
     sd2 = tmp_path / "sess2"
     other = sd2 / "kernel-agent" / "runs" / "migrated-key" / "results"
     other.mkdir(parents=True)
@@ -197,7 +194,6 @@ def test_unattempted_reason_order():
 
 
 def test_load_backend_ladder_skipped_flag(tmp_path: Path):
-    # A forge self-skip attempt carries skipped=True; it must ride into the row.
     payload = {
         "attempts": [
             {
@@ -215,61 +211,131 @@ def test_load_backend_ladder_skipped_flag(tmp_path: Path):
     ladder, reason = kas._load_backend_ladder(tmp_path, "k")
     assert reason == "" and len(ladder) == 2
     assert ladder[0]["skipped"] is True
-    # Non-skip rows must not gain a skipped key.
     assert "skipped" not in ladder[1]
 
 
 def test_kernel_outcome_class_mapping():
-    # success: kept / integrated.
     assert kas._kernel_outcome_class(kas.CATEGORY_INTEGRATED, []) == kas.OUTCOME_SUCCESS
     assert kas._kernel_outcome_class(kas.CATEGORY_KEEP_PENDING, []) == kas.OUTCOME_SUCCESS
 
-    # skip: never dispatched.
     assert kas._kernel_outcome_class(kas.CATEGORY_UNATTEMPTED, []) == kas.OUTCOME_SKIP
 
-    # skip: every recorded attempt self-skipped.
     all_skipped = [{"skipped": True, "error_class": kas.ERROR_CLASS_AGENT_ERROR}]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, all_skipped) == kas.OUTCOME_SKIP
 
-    # mixed ladder (one skipped, one really failed) is NOT a skip -> fail.
     mixed = [
         {"skipped": True},
         {"error_class": kas.ERROR_CLASS_COMPILE_FAILED},
     ]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, mixed) == kas.OUTCOME_FAIL
 
-    # timeout: any attempt timed out (and not all-skipped).
     to = [{"error_class": kas.ERROR_CLASS_TIMEOUT}]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, to) == kas.OUTCOME_TIMEOUT
 
-    # fail: attempted, real error, no skip/timeout.
     fail = [{"error_class": kas.ERROR_CLASS_AGENT_ERROR}]
     assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, fail) == kas.OUTCOME_FAIL
 
-    # IN_FLIGHT folds into fail.
     assert kas._kernel_outcome_class(kas.CATEGORY_IN_FLIGHT, []) == kas.OUTCOME_FAIL
+
+
+# CATEGORY_DISPATCH — single source of truth consumed by the summary builder
+# and both count sites; pin the count-key mapping + per-category summary output
+# so the three formerly-duplicated dispatch sites can never drift apart.
+def test_category_dispatch_count_keys():
+    # The table covers exactly the four terminal categories.
+    assert set(kas.CATEGORY_DISPATCH) == {
+        kas.CATEGORY_INTEGRATED,
+        kas.CATEGORY_KEEP_PENDING,
+        kas.CATEGORY_ATTEMPTED_REJECTED,
+        kas.CATEGORY_IN_FLIGHT,
+    }
+    # Each category maps to the ``totals`` counter the old if/elif ladder used.
+    assert kas._category_count_key(kas.CATEGORY_INTEGRATED) == "integrated"
+    assert kas._category_count_key(kas.CATEGORY_KEEP_PENDING) == "keep_pending"
+    assert kas._category_count_key(kas.CATEGORY_ATTEMPTED_REJECTED) == "rejected"
+    assert kas._category_count_key(kas.CATEGORY_IN_FLIGHT) == "in_flight"
+    # Unknown/blank category falls back to the ``in_flight`` counter (the old
+    # ``else`` branch), never a KeyError.
+    assert kas._category_count_key("NOT_A_CATEGORY") == "in_flight"
+    assert kas._category_count_key("") == "in_flight"
+
+
+def test_summary_one_line_per_category():
+    integrated = kas._summary_one_line(
+        category=kas.CATEGORY_INTEGRATED,
+        entry={"last_micro_speedup": 1.25},
+        backend_ladder=[],
+        artifact_error="",
+    )
+    assert integrated == "integrated into optimization_stack; micro_speedup=1.250x"
+
+    keep = kas._summary_one_line(
+        category=kas.CATEGORY_KEEP_PENDING,
+        entry={"last_micro_speedup": 1.2},
+        backend_ladder=[],
+        artifact_error="",
+    )
+    assert keep == "KEEP awaiting integrate; micro_speedup=1.200x (pending integrate action)"
+
+    in_flight = kas._summary_one_line(
+        category=kas.CATEGORY_IN_FLIGHT,
+        entry={"attempts": 3},
+        backend_ladder=[],
+        artifact_error="",
+    )
+    assert in_flight == "in-flight; 3 attempt(s) recorded, no terminal decision yet"
+
+    # ATTEMPTED_REJECTED: all-failed ladder branch wins over the decision fallback.
+    all_failed = kas._summary_one_line(
+        category=kas.CATEGORY_ATTEMPTED_REJECTED,
+        entry={"last_decision": "REVERT", "rejected_reason": "revert_decision"},
+        backend_ladder=[
+            {"backend": "geak_v3", "status": "failed", "produced_artifact": False},
+            {"backend": "claude", "status": "failed", "produced_artifact": False},
+        ],
+        artifact_error="no usable artifact",
+    )
+    assert all_failed == (
+        "kernel-agent ladder (geak_v3/claude) all 2 backends failed to produce a "
+        "usable patch; verification: no usable artifact"
+    )
+
+    # ATTEMPTED_REJECTED: decision/reason fallback when not all-failed.
+    rejected = kas._summary_one_line(
+        category=kas.CATEGORY_ATTEMPTED_REJECTED,
+        entry={"last_decision": "revert", "rejected_reason": "max_failures_without_keep"},
+        backend_ladder=[],
+        artifact_error="",
+    )
+    assert rejected == "REVERT; rejected_reason=max_failures_without_keep"
+
+    # Unknown category -> empty string (the old trailing ``return ""``).
+    assert (
+        kas._summary_one_line(
+            category="NOT_A_CATEGORY",
+            entry={},
+            backend_ladder=[],
+            artifact_error="",
+        )
+        == ""
+    )
 
 
 def test_session_kernel_opt_outcome_rollup():
     out = kas._session_kernel_opt_outcome
-    # No kernels -> skip.
     assert out([]) == kas.OUTCOME_SKIP
-    # Any success wins.
     assert out([
         {"outcome_class": kas.OUTCOME_FAIL},
         {"outcome_class": kas.OUTCOME_SUCCESS},
     ]) == kas.OUTCOME_SUCCESS
-    # All skip -> skip.
     assert out([
         {"outcome_class": kas.OUTCOME_SKIP},
         {"outcome_class": kas.OUTCOME_SKIP},
     ]) == kas.OUTCOME_SKIP
-    # timeout only when present and no real fail.
     assert out([
         {"outcome_class": kas.OUTCOME_SKIP},
         {"outcome_class": kas.OUTCOME_TIMEOUT},
     ]) == kas.OUTCOME_TIMEOUT
-    # fail dominates a co-occurring timeout.
     assert out([
         {"outcome_class": kas.OUTCOME_TIMEOUT},
         {"outcome_class": kas.OUTCOME_FAIL},

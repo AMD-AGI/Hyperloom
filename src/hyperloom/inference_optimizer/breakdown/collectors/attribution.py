@@ -10,6 +10,7 @@ recorded in ``warnings`` and the section returns a best-effort partial.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 
@@ -36,11 +37,41 @@ def _normalize_specialist_key(provenance: str) -> str:
     if not s:
         return "unknown"
     if s.startswith("specialist:"):
-        # Trust the orchestrator's domain string verbatim (no parallel update needed for new domains).
         return s[len("specialist:") :] or "unknown"
     if s.startswith("legacy:"):
         return f"legacy_{s[len('legacy:') :]}"
     return s
+
+
+# Ordered ``(predicate, family)`` table for :func:`_action_family`. Matched
+# top-to-bottom on the lowercased action label; the FIRST hit wins, so the
+# order is load-bearing (e.g. the ``kernel_opt`` prefix must precede the exact
+# ``==`` checks below it). Falls through to ``"other"`` when nothing matches.
+_ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
+    (lambda s: s.startswith("kernel_opt") or s == "integrate", "kernel_agent"),
+    # Legacy stack-entry action labels from archived sessions.
+    (lambda s: s == "backends", "backends"),
+    (lambda s: s == "params", "params"),
+    (lambda s: s == "validate_stack", "validate"),
+    (lambda s: s == "sweep", "sweep"),
+    # merged explore family subsuming the legacy backends + params buckets.
+    (lambda s: s == "explore", "explore"),
+    # REPLAY_WARM_RECIPE: warm-recipe / cortex best_config replay (a prep action).
+    # Its own headline row so its gain reconciles against validated_total_pct
+    # instead of vanishing into the non-emitted ``other`` family. The label may
+    # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
+    (lambda s: s.split(":", 1)[0] == "replay_warm_recipe", "replay_warm_recipe"),
+    # FRAMEWORK: own headline row so per-source totals reconcile against
+    # validated_total_pct (else these KEEPs fell into ``other`` and vanished).
+    (lambda s: s == "framework", "framework"),
+    # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
+    # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
+    (lambda s: s == "gemm_tuning", "gemm_tuning"),
+    # GEAK e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart
+    # from generic ``kernel`` so its gain gets a dedicated row instead of vanishing into
+    # ``other`` or being mis-credited to a backend.
+    (lambda s: s == "geak_e2e", "geak"),
+)
 
 
 def _action_family(action: str) -> str:
@@ -55,39 +86,9 @@ def _action_family(action: str) -> str:
         ``gemm_tuning``, or ``"other"`` when unrecognized.
     """
     s = (action or "").lower()
-    if s.startswith("kernel_opt") or s == "integrate":
-        return "kernel_agent"
-    # Legacy stack-entry action labels from archived sessions.
-    if s == "backends":
-        return "backends"
-    if s == "params":
-        return "params"
-    if s == "validate_stack":
-        return "validate"
-    if s == "sweep":
-        return "sweep"
-    # merged explore family subsuming the legacy backends + params buckets.
-    if s == "explore":
-        return "explore"
-    # REPLAY_WARM_RECIPE: warm-recipe / cortex best_config replay (a prep action).
-    # Its own headline row so its gain reconciles against validated_total_pct
-    # instead of vanishing into the non-emitted ``other`` family. The label may
-    # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
-    if s.split(":", 1)[0] == "replay_warm_recipe":
-        return "replay_warm_recipe"
-    # FRAMEWORK: own headline row so per-source totals reconcile against
-    # validated_total_pct (else these KEEPs fell into ``other`` and vanished).
-    if s == "framework":
-        return "framework"
-    # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
-    # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
-    if s == "gemm_tuning":
-        return "gemm_tuning"
-    # GEAK e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart
-    # from generic ``kernel`` so its gain gets a dedicated row instead of vanishing into
-    # ``other`` or being mis-credited to a backend.
-    if s == "geak_e2e":
-        return "geak"
+    for predicate, family in _ACTION_FAMILY_TABLE:
+        if predicate(s):
+            return family
     return "other"
 
 
@@ -131,9 +132,7 @@ def _promote_legacy_gain_entries(
             "delta_pct": delta,
             "extra_server_args": str(se.get("extra_server_args") or se.get("candidate_extra_server_args") or ""),
         }
-        # Carry the explore join key / source forward when the Coordinator
-        # stamped them, so phase_breakdown.explore.by_domain can attribute
-        # the gain to its specialist provenance instead of ``default_grid``.
+        # Carry the explore join key / source forward for provenance attribution.
         fp = str(se.get("fingerprint") or se.get("variant_fingerprint") or "")
         if fp:
             promoted["fingerprint"] = fp
@@ -169,12 +168,12 @@ def collect_attribution(
         An attribution dict mapping stack entries to their measured gains.
     """
     forge_invocations = forge_invocations or []
-    # Prefer the authoritative ``gain_per_stack_entry`` ledger; else reconstruct from optimization_stack.
+    # Prefer the authoritative ledger; else reconstruct from optimization_stack.
     state_entries = state.get("gain_per_stack_entry")
     state_provided = isinstance(state_entries, list) and len(state_entries) > 0
     promoted_from_legacy = False
     if state_provided and any(not isinstance(e, dict) for e in state_entries):
-        # Older state: bare numeric ledger; promote into the V1 schema.
+        # Bare numeric ledger; promote into the V1 schema.
         entries = _promote_legacy_gain_entries(state_entries, state)
         promoted_from_legacy = True
     elif state_provided:
@@ -188,13 +187,11 @@ def collect_attribution(
     method: str
     if state_provided:
         if promoted_from_legacy:
-            # Lifted post-hoc, not a per-event capture.
             method = "reconstructed"
         else:
             all_deltas_set = all(isinstance(e, dict) and e.get("delta_pct") is not None for e in state_entries)
             method = "validated" if all_deltas_set else "reconstructed"
     elif stack_len == 1:
-        # Single-entry stack: one unambiguous source of gain.
         method = "single_source"
     elif stack_len > 1:
         method = "reconstructed"
@@ -211,16 +208,10 @@ def collect_attribution(
         "backends": 0.0,
         "params": 0.0,
         "validate": 0.0,
-        # unified explore family (subsumes backends + params).
         "explore": 0.0,
-        # FRAMEWORK family, kept apart from ``other`` for a dedicated row.
         "framework": 0.0,
-        # REPLAY_WARM_RECIPE family: warm-recipe replay, kept apart from ``other``
-        # so its gain gets a dedicated headline row.
         "replay_warm_recipe": 0.0,
-        # GEMM_TUNING family, kept apart from ``kernel`` (deterministic tuner vs rewrite).
         "gemm_tuning": 0.0,
-        # GEAK e2e family: whole-pipeline KERNEL-phase optimizer.
         "geak": 0.0,
     }
     for e in entries:
@@ -232,7 +223,7 @@ def collect_attribution(
         fam = _action_family(str(e.get("action") or ""))
         family_totals[fam] = family_totals.get(fam, 0.0) + max(delta, 0.0)
 
-    # Split "kernel_agent" between active per-kernel backends based on adopted KEEP entries.
+    # Split "kernel_agent" between backends based on adopted KEEP entries.
     forge_kept_kids = {inv.get("kernel_id") for inv in forge_invocations if inv.get("decision") == "KEEP"}
     kernel_total = family_totals.get("kernel_agent", 0.0)
     forge_total = 0.0
@@ -258,7 +249,7 @@ def collect_attribution(
             "cum_gain_after)."
         )
 
-    # per-phase gain breakdown (buckets each KEEP by its phase_history-active phase).
+    # Per-phase gain breakdown (buckets each KEEP by its active phase).
     phase_breakdown = _collect_phase_breakdown(state, entries, warnings)
 
     return {
@@ -266,21 +257,14 @@ def collect_attribution(
         "method": method,
         "source_breakdown": {
             "forge_pct_of_total": round(forge_total, 2),
-            # primary row.
             "explore_pct_of_total": round(family_totals.get("explore", 0.0), 2),
-            # REPLAY_WARM_RECIPE row; always emitted (0.0 when no warm-recipe
-            # replay was reproduced/adopted this session).
             "replay_warm_recipe_pct_of_total": round(
                 family_totals.get("replay_warm_recipe", 0.0), 2
             ),
-            # FRAMEWORK row; always emitted (0.0 when disabled/empty).
             "framework_pct_of_total": round(family_totals.get("framework", 0.0), 2),
-            # GEMM_TUNING row; always emitted (0.0 when non-FP8/skipped/no KEEP).
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
-            # GEAK e2e row (whole-pipeline optimizer, now the canonical ``geak``);
-            # always emitted (0.0 when native/no e2e win).
             "geak_pct_of_total": round(family_totals.get("geak", 0.0), 2),
-            # Legacy rows, kept so archived-session reports reconcile (0.0 on current sessions).
+            # Legacy rows, kept so archived-session reports reconcile.
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
             "params_pct_of_total": round(family_totals.get("params", 0.0), 2),
             "sweep_pct_of_total": round(family_totals.get("sweep", 0.0), 2),
@@ -296,7 +280,7 @@ def _collect_phase_breakdown(
     entries: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """KB_design §3.12 §4.6 + §3.13 M7 §6 — per-phase gain attribution.
+    """Per-phase gain attribution.
 
     Assigns each KEEP entry to the phase active at its acceptance
     timestamp (explore further splits by domain, kernel by kernel_id).
@@ -314,7 +298,7 @@ def _collect_phase_breakdown(
         ``unattributed``), each with a ``total_gain_pct`` and phase-specific
         sub-breakdowns.
     """
-    # phase timeline lookup: for an entry ts, pick the latest row with ts_unix ≤ ts.
+    # Phase timeline: for an entry ts, pick the latest row with ts_unix <= ts.
     history = state.get("phase_history") or []
     if not isinstance(history, list):
         history = []
@@ -351,9 +335,8 @@ def _collect_phase_breakdown(
                 break
         return current
 
-    # explore provenance: map fingerprint → provenance from winners_history.
-    # ``scope_by_fp`` carries the orthogonal specialist dial (domain / domains
-    # / freeform) as an additive analytics tag; absent on legacy sessions.
+    # Explore provenance: map fingerprint -> provenance from winners_history.
+    # ``scope_by_fp`` carries the specialist dial as an additive analytics tag.
     explore_search = state.get("explore_search") or {}
     provenance_by_fp: dict[str, str] = {}
     scope_by_fp: dict[str, str] = {}
@@ -371,11 +354,11 @@ def _collect_phase_breakdown(
 
     phase_buckets: dict[str, dict[str, Any]] = {
         "prelude": {"total_gain_pct": 0.0},
-        # FRAMEWORK: upstream-PR bake-in phase; by_pr keyed per adopted PR.
+        # by_pr keyed per adopted PR.
         "framework": {"total_gain_pct": 0.0, "by_pr": {}},
         "explore": {"total_gain_pct": 0.0, "by_domain": {}},
         "kernel_agent": {"total_gain_pct": 0.0, "by_kernel_id": {}},
-        # GEMM_TUNING: KERNEL-entry tuner, bucketed apart; by_tuned_file keyed on the produced CSV.
+        # by_tuned_file keyed on the produced CSV.
         "gemm_tuning": {"total_gain_pct": 0.0, "by_tuned_file": {}},
         "sweep": {"total_gain_pct": 0.0},
         "close": {"total_gain_pct": 0.0},
@@ -405,8 +388,7 @@ def _collect_phase_breakdown(
         phase = _phase_for(ts_f).lower()
         action = str(e.get("action") or "").lower()
         fam = _action_family(action)
-        # gemm_tuning runs inside KERNEL but is bucketed separately, so
-        # override the coarser phase_history KERNEL label by family.
+        # gemm_tuning runs inside KERNEL but is bucketed separately.
         if fam == "gemm_tuning":
             phase = "gemm_tuning"
         # Fall back to action family when phase_history isn't usable.
@@ -430,15 +412,12 @@ def _collect_phase_breakdown(
             by_domain = bucket.setdefault("by_domain", {})
             fp = str(e.get("fingerprint") or e.get("variant_fingerprint") or "")
             raw_prov = provenance_by_fp.get(fp) or str(e.get("provenance") or "") or "default_grid"
-            # Normalize to a bare specialist key (see ``_normalize_specialist_key``).
             domain = _normalize_specialist_key(raw_prov)
             by_domain[domain] = round(
                 float(by_domain.get(domain, 0.0)) + float(delta),
                 2,
             )
-            # Additive scope split (specialist dial); legacy sessions with no
-            # ``scope`` recorded collapse into the ``unspecified`` bucket so
-            # the totals still reconcile against ``total_gain_pct``.
+            # Additive scope split; missing ``scope`` collapses into ``unspecified``.
             by_scope = bucket.setdefault("by_scope", {})
             scope_key = scope_by_fp.get(fp) or str(e.get("scope") or "") or "unspecified"
             by_scope[scope_key] = round(
@@ -483,7 +462,7 @@ def _reconstruct_gain_ledger(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Approximate per-stack contribution (each entry's ``gain_pct`` as its delta) when Coordinator didn't record it; best-effort, see ``attribution.notes``.
+    """Approximate per-stack contribution (each entry's ``gain_pct`` as its delta) when Coordinator didn't record it.
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
@@ -516,8 +495,7 @@ def _reconstruct_gain_ledger(
             "delta_pct": delta,
             "extra_server_args": str(entry.get("extra_server_args") or ""),
         }
-        # Preserve the explore join key / source so attribution can resolve the
-        # specialist provenance (else by_domain collapses into ``default_grid``).
+        # Preserve the explore join key / source for provenance resolution.
         fp = str(entry.get("fingerprint") or entry.get("variant_fingerprint") or "")
         if fp:
             row["fingerprint"] = fp

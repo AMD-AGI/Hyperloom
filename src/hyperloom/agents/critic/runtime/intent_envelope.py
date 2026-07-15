@@ -9,11 +9,10 @@ The Coordinator accepts intent envelopes of the form
 ```
 
 The Critic normally produces two intent types: ``review_verdict``
-(per proposal) and ``send_message`` (heartbeat / ``advice``).
-Schema and verdict vocabulary are mirrored from
-``src/hyperloom/inference_optimizer/protocol/intent.py`` and ``.../policy.py`` rather than
-imported, so the skill stays a standalone package. Bump
-``ENVELOPE_SCHEMA_VERSION`` if the Coordinator extends the envelope schema.
+(per proposal) and ``send_message`` (heartbeat / ``advice``). Raw
+envelope validation delegates to the inference-optimizer protocol
+validator so the Coordinator and standalone critic runtime share one
+payload schema.
 """
 
 from __future__ import annotations
@@ -21,24 +20,31 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from hyperloom.inference_optimizer.protocol.intent import (
+    IntentType,
+    IntentValidationError,
+)
+from hyperloom.inference_optimizer.protocol.intent import (
+    validate_envelope as _validate_protocol_envelope,
+)
+
 from .errors import IntentEnvelopeValidationError
 
 
 ENVELOPE_SCHEMA_VERSION = "v0.6"
 
 
-# Intent types the Critic role is allowed to emit ( +
-# ``_CRITIC_INTENTS`` in agent_role.py).
+# Intent types the Critic role is allowed to emit.
 ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset(
     {
-        "review_verdict",
-        "send_message",
-        "alert",
+        IntentType.REVIEW_VERDICT.value,
+        IntentType.SEND_MESSAGE.value,
+        IntentType.ALERT.value,
     }
 )
 
 
-# Verdict vocabulary from policy.REVIEW_VERDICTS.
+# Verdict vocabulary.
 ALLOWED_VERDICTS: frozenset[str] = frozenset(
     {
         "approve",
@@ -50,7 +56,7 @@ ALLOWED_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-# Verdict source vocabulary from references/verdict_schema.md.
+# Verdict source vocabulary.
 ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset(
     {
         "critic",
@@ -61,17 +67,7 @@ ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset(
 )
 
 
-# Required payload fields per intent type — same set the Coordinator's
-# PolicyGate enforces. See ``_PAYLOAD_REQUIRED`` in protocol/intent.py.
-_PAYLOAD_REQUIRED: dict[str, tuple[str, ...]] = {
-    "send_message": ("topic",),
-    "alert": ("severity", "summary"),
-    "review_verdict": ("target_proposal_msg_id", "verdict"),
-}
-
-
-# Default content for the heartbeat fallback. Matches MockCriticBackend
-# behaviour so callers can unit-test parity.
+# Default content for the heartbeat fallback.
 DEFAULT_HEARTBEAT_TOPIC = "heartbeat"
 DEFAULT_HEARTBEAT_BODY = "ok (critic)"
 DEFAULT_ADVICE_TOPIC = "advice"
@@ -119,51 +115,8 @@ class IntentEnvelope:
         self.intents.append(intent)
 
 
-# ---------------------------------------------------------------------------
-def _validate_payload(intent_type: str, payload: dict[str, Any]) -> None:
-    """Validate a single intent payload against the per-type requirements.
-
-    Enforces required keys for each intent type and, for ``review_verdict``,
-    the allowed verdict / source vocabulary and a non-empty target msg id.
-
-    Args:
-        intent_type (str): The intent type whose rules apply.
-        payload (dict[str, Any]): The payload to validate.
-
-    Raises:
-        IntentEnvelopeValidationError: If the payload is not a dict, is
-            missing a required key, or violates the ``review_verdict`` rules.
-    """
-    if not isinstance(payload, dict):
-        raise IntentEnvelopeValidationError(
-            f"intent {intent_type!r}: payload must be an object, got {type(payload).__name__}"
-        )
-    required = _PAYLOAD_REQUIRED.get(intent_type, ())
-    for key in required:
-        if key not in payload:
-            raise IntentEnvelopeValidationError(f"intent {intent_type!r}: missing required payload key {key!r}")
-    if intent_type == "review_verdict":
-        verdict = payload.get("verdict")
-        if verdict not in ALLOWED_VERDICTS:
-            raise IntentEnvelopeValidationError(
-                f"review_verdict.verdict {verdict!r} not in {sorted(ALLOWED_VERDICTS)!r}"
-            )
-        target = payload.get("target_proposal_msg_id")
-        if not isinstance(target, str) or not target:
-            raise IntentEnvelopeValidationError("review_verdict.target_proposal_msg_id must be a non-empty string")
-        source = payload.get("source")
-        if source is not None and source not in ALLOWED_VERDICT_SOURCES:
-            raise IntentEnvelopeValidationError(
-                f"review_verdict.source {source!r} not in {sorted(ALLOWED_VERDICT_SOURCES)!r}"
-            )
-
-
 def validate_envelope(envelope: dict[str, Any]) -> IntentEnvelope:
     """Validate the dict form and return a typed :class:`IntentEnvelope`.
-
-    The function is the inverse of :meth:`IntentEnvelope.to_dict` — it's the
-    only place we accept envelopes constructed by hand (e.g. when reading
-    a Skill-produced ``review.json``).
 
     Args:
         envelope (dict[str, Any]): The raw envelope dict to validate.
@@ -176,35 +129,26 @@ def validate_envelope(envelope: dict[str, Any]) -> IntentEnvelope:
             intent type is not Critic-permitted, or a payload fails
             validation.
     """
-    if not isinstance(envelope, dict):
-        raise IntentEnvelopeValidationError(f"envelope must be an object, got {type(envelope).__name__}")
-    if "intents" not in envelope:
-        raise IntentEnvelopeValidationError("envelope missing 'intents' key")
-    items = envelope["intents"]
-    if not isinstance(items, list) or not items:
+    if isinstance(envelope, dict) and envelope.get("intents") == []:
         raise IntentEnvelopeValidationError("envelope.intents must be a non-empty list")
+    try:
+        validated = _validate_protocol_envelope(envelope)
+    except IntentValidationError as exc:
+        raise IntentEnvelopeValidationError(str(exc)) from exc
     out = IntentEnvelope()
-    for i, item in enumerate(items):
-        if not isinstance(item, dict):
-            raise IntentEnvelopeValidationError(f"envelope.intents[{i}] must be an object")
-        if "intent_type" not in item or "payload" not in item:
-            raise IntentEnvelopeValidationError(f"envelope.intents[{i}] missing intent_type or payload")
-        intent_type = item["intent_type"]
+    for i, item in enumerate(validated):
+        intent_type = item.type.value
         if intent_type not in ALLOWED_CRITIC_INTENTS:
             raise IntentEnvelopeValidationError(
                 f"envelope.intents[{i}].intent_type {intent_type!r} is not "
                 f"a Critic-permitted intent (allowed: "
                 f"{sorted(ALLOWED_CRITIC_INTENTS)!r})"
             )
-        payload = item["payload"]
-        _validate_payload(intent_type, payload)
-        out.append(Intent(intent_type=intent_type, payload=dict(payload)))
+        out.append(Intent(intent_type=intent_type, payload=dict(item.payload)))
     return out
 
 
-# ---------------------------------------------------------------------------
 # Builders — convenience constructors used by decision_reviewer.
-# ---------------------------------------------------------------------------
 def build_review_verdict_intent(
     *,
     target_proposal_msg_id: str,
@@ -326,7 +270,7 @@ def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
     env = IntentEnvelope()
     for intent in materialised:
         env.append(intent)
-    # Self-check at build time rather than after the LLM responds.
+    # Self-check at build time.
     validate_envelope(env.to_dict())
     return env
 

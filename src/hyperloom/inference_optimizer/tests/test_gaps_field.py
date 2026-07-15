@@ -2,9 +2,9 @@
 
 """structured gaps[] ledger tests.
 
-Covers PR 5.1-5.6: the SharedState ``gaps`` field + write helpers,
-the PolicyGate lock, Coordinator ``_refresh_gaps`` extraction, the
-``to_gaps_summary`` rendering, and specialist-param warmup.
+Covers the SharedState ``gaps`` field + write helpers, the PolicyGate lock,
+Coordinator ``_refresh_gaps`` extraction, the ``to_gaps_summary`` rendering,
+and specialist-param warmup.
 """
 
 from __future__ import annotations
@@ -166,26 +166,6 @@ def test_upsert_gap_enforces_global_entries_cap():
     assert len(s.gaps) == _GAPS_MAX_ENTRIES
     # Most recently upserted MUST be retained.
     assert s.find_gap(f"issue.cap.{_GAPS_MAX_ENTRIES + 4}") is not None
-
-
-def test_replace_gaps_dedups_and_caps_attempts():
-    s = SharedState()
-    s.replace_gaps(
-        [
-            {
-                "canonical_id": "issue.a",
-                "symptom": "first",
-                "attempts": [{"action": "a", "outcome": "REVERT"}] * (_GAPS_ATTEMPTS_HISTORY + 3),
-            },
-            # Duplicate canonical_id — the second wins (last-write wins).
-            {"canonical_id": "issue.a", "symptom": "second"},
-            {"canonical_id": "issue.b", "symptom": "b"},
-        ]
-    )
-    assert len(s.gaps) == 2
-    assert s.find_gap("issue.a")["symptom"] == "second"
-    assert len(s.find_gap("issue.a")["attempts"]) == 0  # second had none
-    assert s.find_gap("issue.b") is not None
 
 
 # 4. Prompt rendering (to_gaps_summary)
@@ -389,7 +369,7 @@ async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
     assert any(a["variant_name"] == "v1" for a in gap["attempts"])
 
 
-# 6. specialist warmup (PR 5.6) — gap fields flow into task.params
+# 6. specialist warmup — gap fields flow into task.params
 @pytest.mark.asyncio
 async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
     s = coord.shared_state

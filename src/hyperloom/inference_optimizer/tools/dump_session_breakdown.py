@@ -92,8 +92,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Inline specialist transcript bodies under "
-            "specialist_runs[i].transcripts[j].body. Mirrors "
-            "INFERENCE_OPTIMIZER_BREAKDOWN_INCLUDE_TRANSCRIPTS=1."
+            "specialist_runs[i].transcripts[j].body."
         ),
     )
     parser.add_argument(

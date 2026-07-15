@@ -47,13 +47,7 @@ def test_every_domain_has_focus_template():
 def test_specialist_domain_keys_covers_all_active_domains():
     """The active set covers the full catalogue (ten entries: seven legacy
     domains + static_recon_specialist + enablement_specialist +
-    cross_framework_rewrite_specialist).
-
-    ``SPECIALIST_DOMAINS_M5`` was a misleading alias that had become
-    byte-for-byte identical to ``SPECIALIST_DOMAIN_KEYS`` (the catalogue had
-    grown to fully cover the once-narrower active set), so it was removed and
-    every reference switched to the canonical constant.
-    """
+    cross_framework_rewrite_specialist)."""
     assert len(SPECIALIST_DOMAIN_KEYS) == 10
 
 
@@ -74,11 +68,11 @@ def test_serving_specialist_has_source_patch_playbook():
     """The serving focus must guide authoring source patches and carry the framework safety priors (ALWAYS_ON / NEVER_TOUCH)."""
     text = _build("serving_specialist")
     for marker in (
-        "Source-patch playbook",  # the code-authoring section
-        "block_manager",  # kv-cache module mapping
-        "add_seq_group",  # upstream call-order contract to preserve
-        "NEVER_TOUCH",  # safety classification from Arbor KB
-        "VLLM_ROCM_USE_AITER",  # ALWAYS_ON umbrella flag
+        "Source-patch playbook",
+        "block_manager",
+        "add_seq_group",
+        "NEVER_TOUCH",
+        "VLLM_ROCM_USE_AITER",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
@@ -237,7 +231,6 @@ def test_static_recon_shared_expert_advisory_present():
     )
     system, user = build_specialist_prompts(inp)
     text = system + "\n" + user
-    # Advisory must mention fusion and EP caveat
     assert "grouped-gemm" in text.lower() or "grouped gemm" in text.lower()
     assert "expert parallelism" in text.lower() or "EP" in text
 
@@ -339,8 +332,6 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
         )
 
 
-# Merged from test_v08_m5_specialist.py
-
 """Specialist sub-agent framework tests."""
 
 
@@ -388,7 +379,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     build_specialist_prompts,
-    build_specialist_prompts_for_domain,
 )
 
 
@@ -570,8 +560,7 @@ def test_R2_max_turns_excess_denied(gate):
 
 
 def test_R2_max_turns_zero_allowed_unbounded(gate):
-    # WS1: max_turns=0 is accepted as "unbounded" (depth bounded by the
-    # wall-clock budget); it must no longer be denied.
+    # max_turns=0 is accepted as "unbounded" (depth bounded by wall-clock budget).
     gate.validate_intent(
         "orchestration",
         Intent(
@@ -763,10 +752,17 @@ def test_research_lane_has_no_conflicts():
 
 
 # 6. specialist_prompt_builder — 9-section assembly
+def _build_serving_prompt(**kwargs: Any) -> tuple[str, str]:
+    domain = get_domain("serving_specialist")
+    assert domain is not None
+    return build_specialist_prompts(
+        SpecialistPromptInputs(domain=domain, **kwargs)
+    )
+
+
 def test_prompt_builder_emits_nine_sections():
-    sys_p, usr_p = build_specialist_prompts_for_domain(
+    sys_p, usr_p = _build_serving_prompt(
         task_id="task-001",
-        domain_key="serving_specialist",
         gap_canonical_id="gap.scheduler.long_isl",
         gpu_type="MI300X",
         tp=8,
@@ -785,29 +781,19 @@ def test_prompt_builder_emits_nine_sections():
 
 
 def test_prompt_builder_uses_none_placeholder_for_empty_sections():
-    sys_p, usr_p = build_specialist_prompts_for_domain(
+    sys_p, usr_p = _build_serving_prompt(
         task_id="task-002",
-        domain_key="serving_specialist",
     )
     # Several user-side sections will be empty → "(none)" placeholder.
     assert "(none)" in usr_p
 
 
 def test_prompt_builder_pr_monitor_unavailable_renders_explanatory_line():
-    sys_p, usr_p = build_specialist_prompts_for_domain(
+    sys_p, usr_p = _build_serving_prompt(
         task_id="task-003",
-        domain_key="serving_specialist",
         pr_monitor_available=False,
     )
     assert "unavailable" in usr_p
-
-
-def test_prompt_builder_unknown_domain_raises():
-    with pytest.raises(ValueError, match="unknown specialist domain"):
-        build_specialist_prompts_for_domain(
-            task_id="t",
-            domain_key="nope_specialist",
-        )
 
 
 # 7. SpecialistRunner — happy path + failure synth
@@ -1071,7 +1057,7 @@ def test_record_specialist_round_dedup_by_round_id():
         {
             "round_id": "explore-001",
             "domains": ["serving_specialist"],
-            "proposals_total": 5,  # updated count
+            "proposals_total": 5,
         }
     )
     s.record_specialist_round(

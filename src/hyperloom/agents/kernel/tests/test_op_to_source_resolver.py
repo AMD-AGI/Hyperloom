@@ -27,8 +27,7 @@ import pytest
 
 _TLA_PATH = Path(__file__).resolve().parent.parent / "tools" / "tracelens_analysis.py"
 
-# An editable native source must end in .cu/.cuh/.hip/.h and resolve to an
-# absolute path; a non-editable one is e.g. an empty/unshipped csrc path.
+# An editable native source ends in .cu/.cuh/.hip/.h and is an absolute path.
 _EDITABLE_CU = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/foo.cu"
 _EDITABLE_CU_2 = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/bar.cu"
 _EDITABLE_H = "/sgl-workspace/aiter/csrc/kernels/rope/rope_common.h"
@@ -70,9 +69,7 @@ def _entry(kind: str, *, vllm: dict | None = None, sglang: dict | None = None) -
     }
 
 
-# --------------------------------------------------------------------------- #
 # single
-# --------------------------------------------------------------------------- #
 def test_single_multiple_editable_sources_fans_out_one_leaf_per_cu(tla) -> None:
     """A routable ``single`` with two editable .cu yields two leaves, one per file."""
     mapping = {
@@ -130,9 +127,7 @@ def test_phase_suffix_is_stripped_before_lookup(tla) -> None:
     assert res.op_name == "aiter::foo"
 
 
-# --------------------------------------------------------------------------- #
 # dispatch
-# --------------------------------------------------------------------------- #
 def test_dispatch_matches_editable_route(tla) -> None:
     """A trace device_kernel_name matching an editable+patchable route resolves to it."""
     mapping = {
@@ -186,9 +181,7 @@ def test_dispatch_without_device_kernel_name_is_unresolved(tla) -> None:
     assert res.sources == []
 
 
-# --------------------------------------------------------------------------- #
 # composite
-# --------------------------------------------------------------------------- #
 def test_composite_mixed_keeps_only_editable_leaves(tla) -> None:
     """A composite with one editable + one non-editable kernel keeps only the editable leaf."""
     mapping = {
@@ -231,11 +224,6 @@ def test_composite_all_non_editable_is_non_rewritable(tla) -> None:
 def test_composite_device_name_narrows_to_matching_kernel(tla) -> None:
     """A composite given the trace device kernel name narrows to that ONE editable
     source (the hot kernel) instead of fanning out to every co-firing kernel.
-
-    Regression: the Triton fused-MoE label aggregates the MoE GEMM plus co-firing
-    quant/align helpers; without device-name narrowing the resolver fanned out to
-    all three sources (quant.cu, the triton .py, int8.py) and GEAK chased the wrong
-    file. With the trace's device symbol it must resolve to just the GEMM source.
     """
     mapping = {
         "moe::fused": _entry(
@@ -298,9 +286,7 @@ def test_composite_device_name_no_match_falls_back_to_fanout(tla) -> None:
     assert {lf.primary_source for lf in leaves} == {_EDITABLE_CU, _EDITABLE_CU_2}
 
 
-# --------------------------------------------------------------------------- #
 # _select_source_meta
-# --------------------------------------------------------------------------- #
 def test_select_sources_framework_hint_picks_matching_container(tla) -> None:
     """With both containers editable and neither on disk, the framework hint decides."""
     entry = _entry(
@@ -327,9 +313,7 @@ def test_select_sources_on_disk_tie_break_beats_framework_hint(tla, tmp_path: Pa
     assert [m[0] for m in resolver._select_source_meta(entry, "sglang")] == [str(on_disk)]
 
 
-# --------------------------------------------------------------------------- #
 # _expand_op_fanout
-# --------------------------------------------------------------------------- #
 def test_expand_op_fanout_splits_duration_across_leaves(tla, monkeypatch) -> None:
     """A 2-source routable op splits its duration evenly across two fanned-out candidates."""
     mapping = {
@@ -363,12 +347,7 @@ def test_expand_op_fanout_single_leaf_does_not_split(tla, monkeypatch) -> None:
 
 
 def test_expand_op_fanout_explicit_framework_selects_matching_source(tla, monkeypatch) -> None:
-    """An explicit ``framework`` routes to that container's source.
-
-    The same op carries both ``vllm`` and ``sglang`` editable sources at distinct
-    ``.cu`` paths and neither is on disk, so only the explicit framework decides.
-    ``HYPERLOOM_FRAMEWORK`` is cleared to prove the value comes from the arg, not env.
-    """
+    """An explicit ``framework`` routes to that container's source."""
     mapping = {
         "aiter::foo": _entry(
             "single",
@@ -423,9 +402,7 @@ def test_expand_op_fanout_dict_miss_passes_through(tla, monkeypatch) -> None:
     assert out[0]["_op_resolution"] is None
 
 
-# --------------------------------------------------------------------------- #
 # classify_patchability op_to_source short-circuit
-# --------------------------------------------------------------------------- #
 def test_classify_shortcircuit_patchable_true_is_routable(tla) -> None:
     """An op_to_source verdict of patchable=True with a source file routes (True, '')."""
     candidate = {
@@ -469,9 +446,7 @@ def test_classify_shortcircuit_none_falls_through_to_legacy(tla) -> None:
     assert "PyTorch native op" in reason
 
 
-# --------------------------------------------------------------------------- #
 # _finalize_candidates legacy fallback wiring
-# --------------------------------------------------------------------------- #
 def test_finalize_dict_miss_fires_legacy_grep_pybind_fallback(tla, monkeypatch) -> None:
     """A dictionary miss with no source_file runs the legacy grep/pybind chain."""
     monkeypatch.setattr(tla, "load_mapping", lambda: {})
@@ -522,9 +497,7 @@ def test_finalize_in_dict_non_rewritable_does_not_grep(tla, monkeypatch) -> None
     assert out["source_file"] == "launcher.py"
 
 
-# --------------------------------------------------------------------------- #
 # load_op_dominant_kernel_map (data-driven composite disambiguation)
-# --------------------------------------------------------------------------- #
 def test_dominant_kernel_map_picks_max_duration(tla, tmp_path) -> None:
     """The dominant device kernel = max aggregated duration, parsed from the CSV."""
     import csv as _csv

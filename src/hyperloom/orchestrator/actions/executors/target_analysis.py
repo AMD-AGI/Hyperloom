@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import env_str
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 from ...loop.sub_agent_runner import RunnerContext
 
@@ -49,18 +50,6 @@ def _env_int(name: str, default: int = 0) -> int:
             default,
         )
         return default
-
-
-def _env_str(name: str) -> str:
-    """Read a stripped string environment variable.
-
-    Args:
-        name (str): The environment variable name.
-
-    Returns:
-        str: The stripped value, or ``""`` when unset.
-    """
-    return os.environ.get(name, "").strip()
 
 
 class TargetAnalysisExecutor:
@@ -160,7 +149,7 @@ class TargetAnalysisExecutor:
             try:
                 summary = analyze(
                     session_dir=session_dir,
-                    model_path=str(params.get("model_path") or _env_str("MODEL_PATH")),
+                    model_path=str(params.get("model_path") or env_str("MODEL_PATH")),
                     compare_against_gpu="",
                 )
             except Exception as exc:  # noqa: BLE001
@@ -174,9 +163,9 @@ class TargetAnalysisExecutor:
                 }
             return self._format_result(ctx, summary, session_dir)
 
-        model_path = str(params.get("model_path") or _env_str("MODEL_PATH"))
-        framework = str(params.get("framework") or _env_str("FRAMEWORK"))
-        precision = str(params.get("precision") or _env_str("PRECISION"))
+        model_path = str(params.get("model_path") or env_str("MODEL_PATH"))
+        framework = str(params.get("framework") or env_str("FRAMEWORK"))
+        precision = str(params.get("precision") or env_str("PRECISION"))
         isl = int(params.get("isl") or _env_int("ISL", 0))
         osl = int(params.get("osl") or _env_int("OSL", 0))
 

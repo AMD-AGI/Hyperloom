@@ -24,15 +24,14 @@ from .cluster_decoder import decode_gpu_snapshot, merge_gpu_snapshots
 
 @dataclass
 class _MetricsWindow:
-    """Explicit ``start`` / ``end`` Unix-second window for ``/metrics``
-    and ``/summary``. M1 defaults to the last 5 minutes."""
+    """Explicit ``start`` / ``end`` Unix-second window for ``/metrics`` and ``/summary``."""
 
     start_unix: int
     end_unix: int
 
 
 class RobustnessServerClient:
-    """HTTP client for the subset of robustness-server we use in M1."""
+    """HTTP client for the subset of robustness-server we use."""
 
     def __init__(
         self,
@@ -122,47 +121,6 @@ class RobustnessServerClient:
             raise SourceUnavailable(f"GET {path}: invalid json") from exc
 
     # -- public methods --------------------------------------------------
-
-    async def health(self) -> bool:
-        """Probe ``GET /healthz`` for server liveness.
-
-        Returns:
-            bool: ``True`` when the server responds 200; ``False`` on a
-            non-200 status or any transport error.
-        """
-        try:
-            resp = await self._client.get("/healthz")
-        except httpx.RequestError:
-            return False
-        return resp.status_code == 200
-
-    async def list_sessions(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """List known sessions via ``GET /api/v1/sessions``.
-
-        Args:
-            limit (int): Maximum number of sessions to request.
-
-        Returns:
-            list[dict[str, Any]]: The session rows, or ``[]`` when the
-            response is not a list.
-        """
-        body = await self._get_json("/api/v1/sessions", params={"limit": limit})
-        if isinstance(body, list):
-            return body
-        return []
-
-    async def get_session(self, session_id: str) -> dict[str, Any] | None:
-        """Fetch one session via ``GET /api/v1/sessions/{id}``.
-
-        Args:
-            session_id (str): Identifier of the session to fetch.
-
-        Returns:
-            dict[str, Any] | None: The session object, or ``None`` when
-            absent / not a dict.
-        """
-        body = await self._get_json(f"/api/v1/sessions/{session_id}")
-        return body if isinstance(body, dict) else None
 
     async def list_session_pods(
         self,
@@ -256,42 +214,6 @@ class RobustnessServerClient:
         )
         return body if isinstance(body, dict) else {}
 
-    async def get_session_metrics(
-        self,
-        session_id: str,
-        window: _MetricsWindow,
-        *,
-        categories: list[str] | None = None,
-        step: str | None = None,
-    ) -> dict[str, Any]:
-        """Fetch session metrics via ``GET .../{id}/metrics``.
-
-        Args:
-            session_id (str): Identifier of the session.
-            window (_MetricsWindow): Explicit ``start`` / ``end`` Unix
-                second bounds for the query.
-            categories (list[str] | None): Optional metric categories;
-                joined comma-separated into the ``categories`` query.
-            step (str | None): Optional sampling step passed through.
-
-        Returns:
-            dict[str, Any]: The metrics object, or ``{}`` when the
-            response is not a dict.
-        """
-        params: dict[str, Any] = {
-            "start": str(window.start_unix),
-            "end": str(window.end_unix),
-        }
-        if categories:
-            params["categories"] = ",".join(categories)
-        if step:
-            params["step"] = step
-        body = await self._get_json(
-            f"/api/v1/sessions/{session_id}/metrics",
-            params=params,
-        )
-        return body if isinstance(body, dict) else {}
-
     # -- cluster-physical proxies ---------------------------------------
 
     async def get_cluster_pod_metrics(
@@ -335,46 +257,6 @@ class RobustnessServerClient:
             params=params,
         )
         return body if isinstance(body, dict) else {}
-
-    async def list_cluster_pod_metric_categories(
-        self,
-        namespace: str,
-        name: str,
-        window: _MetricsWindow,
-        *,
-        categories: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        """GET ``/api/v1/cluster/pods/{ns}/{name}/metrics/list``.
-
-        Args:
-            namespace (str): Kubernetes namespace of the pod.
-            name (str): Pod name.
-            window (_MetricsWindow): Explicit ``start`` / ``end`` Unix
-                second bounds for the query.
-            categories (list[str] | None): Optional metric categories;
-                joined comma-separated into the ``categories`` query.
-
-        Returns:
-            list[dict[str, Any]]: The ``available`` array verbatim so
-            callers can pick which categories to query, or ``[]`` when
-            absent.
-        """
-
-        params: dict[str, Any] = {
-            "start": str(window.start_unix),
-            "end": str(window.end_unix),
-        }
-        if categories:
-            params["categories"] = ",".join(categories)
-        body = await self._get_json(
-            f"/api/v1/cluster/pods/{namespace}/{name}/metrics/list",
-            params=params,
-        )
-        if isinstance(body, dict):
-            available = body.get("available")
-            if isinstance(available, list):
-                return available
-        return []
 
     async def get_cluster_workload_hierarchy(
         self,
@@ -517,15 +399,12 @@ class RobustnessServerSource:
         self._faults_lookback_s = max(0, int(faults_lookback_s))
         self._faults_page_size = max(1, min(500, int(faults_page_size)))
         self._enable_cluster_faults = bool(enable_cluster_faults)
-        # Off by default: fans out one HTTP call per pod per tick. Enabling
-        # makes signals/local_health.py prefer server-decoded GPU data over
-        # LocalProbe rocm-smi.
+        # Off by default: fans out one HTTP call per pod per tick.
         self._enable_cluster_pod_metrics = bool(enable_cluster_pod_metrics)
         self._pod_metrics_categories = tuple(pod_metrics_categories)
         self._max_pods_per_tick = max(1, int(max_pods_per_tick))
-        # ``workload_uid`` opts into hierarchy-based pod discovery so
-        # multi-node RayJobs reconcile the full pod set (head + workers).
-        # Empty string keeps the legacy ``list_session_pods`` path.
+        # ``workload_uid`` opts into hierarchy-based pod discovery; empty keeps
+        # the ``list_session_pods`` path.
         self._workload_uid = (workload_uid or "").strip()
 
     async def fetch(self, ctx: Any) -> SourceData:
@@ -573,9 +452,7 @@ class RobustnessServerSource:
         if window.start_unix and window.end_unix:
             summary = await self._client.get_session_summary(session_id, window)
 
-        # When workload_uid is configured, merge cluster-hierarchy pods with
-        # the session view so the fan-out covers Ray workers the session has
-        # not yet seen (consistent multi-node view for downstream signals).
+        # When workload_uid is set, merge cluster-hierarchy pods with the session view.
         hierarchy_pods: list[dict[str, Any]] = []
         if self._workload_uid:
             try:
@@ -596,8 +473,7 @@ class RobustnessServerSource:
                     page_size=self._faults_page_size,
                 )
             except SourceUnavailable:
-                # Transport-level failure (timeouts / 5xx wrapped by
-                # _get_json): re-raise so DegradeRouter counts it.
+                # Transport-level failure: re-raise so DegradeRouter counts it.
                 raise
 
         local_gpu: dict[str, Any] = {}

@@ -18,11 +18,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Leading-underscore module "constants" below are read only from *other*
-# modules (e.g. ``phases/kernel.py``, ``loop/writeback.py`` import them
-# directly) rather than from within this file. Static analysis that only
-# tracks in-module reads (e.g. CodeQL's unused-global-variable check) can't
-# see that cross-module usage on its own, so list them here to mark them as
+# Constants below are read from other modules; listed here to mark them as
 # intentionally exported.
 __all__ = [
     "_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT",
@@ -63,7 +59,15 @@ def _infer_model_class_from_config(model_path: str) -> str:
     raw_path = (model_path or "").strip()
     payload: dict[str, Any] = {}
     if raw_path:
-        cfg = Path(raw_path) / "config.json"
+        # ``model_path`` may be an HF repo id; resolve to the local weights dir so
+        # the config-based classification works (the raw string still feeds the
+        # keyword fallback below). Lazy import: stdlib-only leaf, no import cycle.
+        from hyperloom.inference_optimizer.model_config_utils import (
+            resolve_local_model_dir,
+        )
+
+        _resolved = resolve_local_model_dir(raw_path)
+        cfg = (_resolved / "config.json") if _resolved is not None else Path(raw_path) / "config.json"
         try:
             if cfg.is_file():
                 data = json.loads(cfg.read_text(encoding="utf-8"))
@@ -152,8 +156,7 @@ def _infer_model_class_from_config(model_path: str) -> str:
     return "dense"
 
 
-# task.params fields fingerprinted by the self-loop guard to detect a
-# proposal repeating the same params after the same failure mode.
+# task.params fields fingerprinted by the self-loop guard.
 _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "benchmark_script",
     "result_dir",
@@ -174,7 +177,6 @@ _MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset(
 )
 
 _DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
-_ROOFLINE_WATERMARK_RATIO_ENV: str = "HYPERLOOM_ROOFLINE_WATERMARK_RATIO"
 
 
 def effective_closing_grace_sec(
@@ -322,25 +324,15 @@ def _baseline_params_fingerprint(params: dict[str, Any] | None) -> dict[str, Any
 
 
 def _resolve_roofline_watermark_ratio() -> float:
-    """Resolve the roofline watermark ratio from ``$HYPERLOOM_ROOFLINE_WATERMARK_RATIO`` (fallback 1.10).
+    """Resolve the roofline watermark ratio.
 
     Returns:
-        The watermark ratio (> 1.0), falling back to ``1.10`` when unset,
-        unparseable, or not greater than 1.0.
+        The fixed watermark ratio (> 1.0).
     """
-    raw = (os.environ.get(_ROOFLINE_WATERMARK_RATIO_ENV) or "").strip()
-    if not raw:
-        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
-    if val <= 1.0:
-        return _DEFAULT_ROOFLINE_WATERMARK_RATIO
-    return val
+    return _DEFAULT_ROOFLINE_WATERMARK_RATIO
 
 
-def _merge_cumulative_extra_sglang_args(
+def _merge_cumulative_extra_server_args(
     base_args: str,
     candidate_args: str,
     full_args: str,
@@ -492,27 +484,13 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-# Minimum over-baseline gain a same-harness revalidation must show for the
-# optimization to count as "engaged" (i.e. the tuned config actually took
-# effect). Only used to detect a collapse back to ~baseline (an un-optimized
-# relaunch), never to gate a specific optimization — kept general across all
-# winner kinds. Overridable via env for tuning.
-try:
-    _MIN_KERNEL_ENGAGED_GAIN_PCT: float = float(
-        os.environ.get("INFERENCE_OPTIMIZER_MIN_ENGAGED_GAIN_PCT", "").strip() or "2.0"
-    )
-except (TypeError, ValueError):
-    _MIN_KERNEL_ENGAGED_GAIN_PCT = 2.0
+# Minimum over-baseline gain a same-harness revalidation must show to count as
+# "engaged"; detects a collapse back to ~baseline.
+_MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
 
-# |measurement_divergence_pct| above this (GEAK vs orchestrator on the SAME
-# config) is logged as a measurement-mismatch warning at geak promote.
-# Reporting only — never gates scheduling. Overridable via env.
-try:
-    _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = float(
-        os.environ.get("INFERENCE_OPTIMIZER_MEASUREMENT_DIVERGENCE_WARN_PCT", "").strip() or "3.0"
-    )
-except (TypeError, ValueError):
-    _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT = 3.0
+# |measurement_divergence_pct| above this (GEAK vs orchestrator, same config) is
+# logged as a measurement-mismatch warning at geak promote.
+_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 
 
 def _split_env_and_flags(env_str: str) -> tuple[dict[str, str], str]:
@@ -521,9 +499,8 @@ def _split_env_and_flags(env_str: str) -> tuple[dict[str, str], str]:
     ``accepted_config.env`` (and any ``KEY=VAL KEY=VAL`` / ``--flag val`` blob)
     is parsed so that every ``KEY=VAL`` token becomes a real environment
     variable and every ``--flag`` (or ``--flag=val``) token is folded back into
-    a server-args string. Single source of truth for this parse so the promote
-    path, the resume-materialize path, and the revalidation path all agree.
-    General: no key/optimization is special-cased.
+    a server-args string. Single source of truth for this parse. No
+    key/optimization is special-cased.
 
     Args:
         env_str: The raw config blob (may mix ``KEY=VAL`` and ``--flag`` tokens).
@@ -708,12 +685,9 @@ def _resolve_serving_fidelity(
 
 
 #: Launch flags that are RUN-/TOPOLOGY-specific (host, device set, model path,
-#: parallelism, ports, seeds) — the consuming harness sets these itself per
-#: launch, so they are stripped from the forwarded ``server_launch_flags``.
-#: Everything NOT listed here (engine knobs: mem-fraction, radix cache,
-#: chunked-prefill, cuda-graph, attention backend, quant, kv-cache dtype, …) is
-#: kept, so the sync is COMPLETE by construction (allow-nothing blacklist rather
-#: than a hand-picked whitelist that silently drops un-enumerated knobs).
+#: parallelism, ports, seeds); stripped from the forwarded
+#: ``server_launch_flags`` since the consuming harness sets them per launch.
+#: Everything not listed (engine knobs) is kept.
 _RUN_SPECIFIC_LAUNCH_FLAGS: frozenset[str] = frozenset(
     {
         "--model-path",
@@ -754,8 +728,7 @@ _PROFILING_LAUNCH_FLAGS: frozenset[str] = frozenset(
 )
 
 #: Per-backend token that marks the START of the launch argv on a captured
-#: command line (``server.log`` header / ``set -x`` stderr echo). A new backend
-#: is one map entry; an unknown backend disables the scrape (no guess).
+#: command line; an unknown backend disables the scrape.
 _LAUNCH_ARGV_MARKERS: dict[str, str] = {
     "sglang": "launch_server",
     "vllm": "vllm",
@@ -822,20 +795,12 @@ def _scrape_resolved_launch_flags(
 ) -> str:
     """Recover the orchestrator's FULL resolved server-launch flags from logs.
 
-    The recipe YAML only carries the recipe-level ``EXTRA_*_ARGS`` delta; the
-    harness launch script (e.g. InferenceX ``sglang_mi300x.sh``) bakes in the
-    rest (``--mem-fraction-static``, ``--disable-radix-cache``,
-    ``--chunked-prefill-size`` …). The ONLY complete, authoritative record of
-    what the engine actually ran with is the launched argv, echoed into each
-    benchmark's ``server.log`` / ``benchmark_stderr.log``.
-
-    Selection is by THROUGHPUT, not recency: we find the benchmark whose measured
-    ``output_throughput`` equals ``target_tput`` (``current_best``'s number) and
-    scrape ITS sibling server log — i.e. replay the exact launch that produced
-    the throughput we are asking GEAK to reproduce. This is deterministic
-    and never mistakes a profiling/roofline or losing-candidate launch for the
-    baseline. Falls back to the most recent clean launch when no throughput
-    match exists (or ``target_tput<=0``).
+    The complete record of what the engine ran with is the launched argv,
+    echoed into each benchmark's ``server.log`` / ``benchmark_stderr.log``.
+    Selection is by throughput, not recency: find the benchmark whose measured
+    ``output_throughput`` equals ``target_tput`` and scrape its sibling server
+    log. Falls back to the most recent clean launch when no throughput match
+    exists (or ``target_tput<=0``).
 
     Args:
         session_dir: The run's session directory (root of ``runs/``).
@@ -853,9 +818,9 @@ def _scrape_resolved_launch_flags(
         import glob as _glob
 
         runs_root = Path(session_dir) / "runs"
-        # 1) Throughput-matched selection: find the benchmark dir whose
-        #    inferencex_result.json output_throughput == target_tput, scrape its
-        #    sibling server log. Deterministic reproduction of THE best launch.
+        # Throughput-matched selection: find the benchmark whose
+        # inferencex_result.json output_throughput == target_tput, scrape its
+        # sibling server log.
         if target_tput and target_tput > 0:
             best_path, best_err = "", 1e9
             for rp in _glob.glob(
@@ -883,7 +848,7 @@ def _scrape_resolved_launch_flags(
                     flags = _launch_argv_from_log(str(bench_dir / name), marker)
                     if flags:
                         return flags
-        # 2) Fallback: most recent clean (non-profiling) launch across the run.
+        # Fallback: most recent clean (non-profiling) launch across the run.
         candidates: list[tuple[float, str]] = []
         for name in ("server.log", "benchmark_stderr.log"):
             for p in _glob.glob(str(runs_root / "**" / name), recursive=True):
