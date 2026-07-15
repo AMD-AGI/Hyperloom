@@ -48,7 +48,8 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json
-from hyperloom.common.timeutil import now_iso
+
+from . import kernel_decision_settings as _kernel_decision_settings
 
 log = logging.getLogger(__name__)
 
@@ -56,8 +57,15 @@ log = logging.getLogger(__name__)
 # recent tail; older entries age out of any sane emergency window anyway).
 _CRASH_TIMESTAMP_CAP: int = 200
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
-_now_iso = now_iso
+# Compatibility aliases kept on shared_state for existing callers/tests.
+_DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
+_DEFAULT_HOT_KERNEL_GATE_TOP_N = _kernel_decision_settings._DEFAULT_HOT_KERNEL_GATE_TOP_N
+_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
+_DEFAULT_KERNEL_OPT_MAX_FAILURES = _kernel_decision_settings._DEFAULT_KERNEL_OPT_MAX_FAILURES
+_DEFAULT_KERNEL_OPT_MAX_PARTIAL = _kernel_decision_settings._DEFAULT_KERNEL_OPT_MAX_PARTIAL
+_MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
+_now_iso = _kernel_decision_settings._now_iso
+resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 
 # Cached lazy handle to ``..kernel.request_handlers``. A top-level import would
@@ -139,30 +147,6 @@ def render_model_arch_compact(arch: dict | None) -> str:
     return "; ".join(parts)
 
 
-# Default partial-attempt cap for run_optimization; override via env in ``record_kernel_opt`` (1 disables second chance).
-_DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
-# Backend ladder infra failures can be transient; require two failed ladders
-# before retiring the kernel. Override via
-# ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` (>=1).
-_DEFAULT_KERNEL_OPT_MAX_FAILURES = 2
-
-
-def resolve_kernel_opt_max_failures() -> int:
-    """Resolve the infra-failure retry budget (>=1).
-
-    Shared by ``record_kernel_opt``, ``kernel_work_pending``, and batch
-    dispatch so ``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`` stays
-    consistent across layers.
-    """
-    env_f = os.environ.get("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES")
-    if env_f:
-        try:
-            return max(1, int(env_f))
-        except (TypeError, ValueError):
-            pass
-    return _DEFAULT_KERNEL_OPT_MAX_FAILURES
-
-
 # Integration faults (environment / apply / bench crashes) are distinct from a
 # genuine gate REVERT (measured gain below threshold / accuracy regression). A
 # fault means the patch was never fairly measured, so it must not burn the
@@ -192,25 +176,10 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
         "subprocess_timeout",
     }
 )
-# Independent bounded budget for integration-fault *attempts* (separate from the
-# REVERT ``max_attempts`` quota). NOTE: this counts total fault attempts, not
-# retries-after-the-first — a value of 2 means "one initial fault plus one
-# retry, then reject". Total attempts are still capped globally by the
-# crash-rate emergency stop in the coordinator.
-_MAX_INTEGRATE_FAULT_ATTEMPTS = 2
-
-# Hot-kernel report gate: reusable hot kernels >= this GPU share need a kernel_opt attempt/rejection before ``report``.
-_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 3.0
-# Only the top-N reusable hot kernels are enforced.
-_DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
-
 # How many hot / skipped kernels ``record_trace_analyze`` keeps in the trace
 # summary (the ``hot_kernels_top15`` / ``kernel_roofline_top15`` field names
 # reflect this value).
 _TRACE_HOT_KERNEL_TOP_N = 15
-
-# Per-action audit history cap (``<action>_attempts`` lists keep most recent N).
-_DEFAULT_ATTEMPTS_HISTORY = 20
 
 # Global ``last_action_failures`` rolling-log cap.
 _DEFAULT_LAST_FAILURES = 10
@@ -269,32 +238,6 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 
 #: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
 LATEST_STATE_SCHEMA_VERSION: int = 2
-
-
-# Legacy key renames applied once on load: ``extra_sglang_args`` -> ``extra_server_args``.
-_PHASE4_LEGACY_KEY_RENAMES: dict[str, str] = {
-    "extra_sglang_args": "extra_server_args",
-    "candidate_extra_sglang_args": "candidate_extra_server_args",
-}
-
-
-def _migrate_legacy_extra_sglang_args_keys(obj: Any) -> int:
-    """Rewrite legacy launch-arg field names in-place; canonical keys win."""
-    migrated = 0
-    if isinstance(obj, dict):
-        for legacy_key, canonical_key in _PHASE4_LEGACY_KEY_RENAMES.items():
-            if legacy_key in obj:
-                if canonical_key not in obj:
-                    obj[canonical_key] = obj.pop(legacy_key)
-                else:
-                    del obj[legacy_key]
-                migrated += 1
-        for value in obj.values():
-            migrated += _migrate_legacy_extra_sglang_args_keys(value)
-    elif isinstance(obj, list):
-        for item in obj:
-            migrated += _migrate_legacy_extra_sglang_args_keys(item)
-    return migrated
 
 
 def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
@@ -998,16 +941,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         needs_migration = incoming_version < LATEST_STATE_SCHEMA_VERSION
         migration_events: list[str] = []
 
-        legacy_migrations = _migrate_legacy_extra_sglang_args_keys(raw)
-        if legacy_migrations:
-            migration_events.append(
-                f"extra_server_args rename: migrated {legacy_migrations} legacy "
-                "extra_sglang_args / candidate_extra_sglang_args key(s)"
-            )
-
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f for f in cls.__dataclass_fields__}
         filtered = {k: v for k, v in raw.items() if k in known}
+        if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
+            filtered["specialist_patch_verdicts"] = {}
         # Legacy scoreboard fields; already dropped by the filter, listed only to count/log in ``warn`` mode.
         _legacy_drop_fields = (
             "action_scores",
@@ -1991,8 +1929,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return None
         attempts_attr = f"{action}_attempts"
         last_attr = f"last_{action}"
-        if not hasattr(self, attempts_attr) or not hasattr(self, last_attr):
-            return None
         result = result or {}
         metric_key, metric_kind = _KEY_METRIC_MAP.get(
             action,
