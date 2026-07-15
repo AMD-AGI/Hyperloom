@@ -785,7 +785,7 @@ class BaselineExecutor:
             default_timeout_sec (int): Default (warm-start) subprocess timeout.
             cwd (Path | str): Working directory for the Magpie subprocess.
         """
-        from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
+        from ._grid_runner import _resolve_session_dir
 
         # Backend-aware interpreter: bypass uses a plain python3, magpie
         # uses the Magpie-importable venv.
