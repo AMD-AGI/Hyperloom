@@ -59,7 +59,15 @@ def _infer_model_class_from_config(model_path: str) -> str:
     raw_path = (model_path or "").strip()
     payload: dict[str, Any] = {}
     if raw_path:
-        cfg = Path(raw_path) / "config.json"
+        # ``model_path`` may be an HF repo id; resolve to the local weights dir so
+        # the config-based classification works (the raw string still feeds the
+        # keyword fallback below). Lazy import: stdlib-only leaf, no import cycle.
+        from hyperloom.inference_optimizer.model_config_utils import (
+            resolve_local_model_dir,
+        )
+
+        _resolved = resolve_local_model_dir(raw_path)
+        cfg = (_resolved / "config.json") if _resolved is not None else Path(raw_path) / "config.json"
         try:
             if cfg.is_file():
                 data = json.loads(cfg.read_text(encoding="utf-8"))
