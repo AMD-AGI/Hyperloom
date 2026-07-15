@@ -758,6 +758,164 @@ def test_infera_process_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     ) == 1
 
 
+def test_rayjob_create_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hyperloom.inference_optimizer.multi_node.commands.rayjob as rayjob
+
+    # Missing workspace bails fast.
+    monkeypatch.delenv("SAFE_WORKSPACE", raising=False)
+    monkeypatch.setattr(rayjob.safe_client, "from_env", lambda: _FakeSafe())
+    monkeypatch.setattr(rayjob._mn_cli(), "_load_state", lambda: {})
+    monkeypatch.setattr(rayjob._mn_cli(), "_save_state", lambda payload: None)
+    missing_ws = argparse.Namespace(
+        extra_env=[], extra_label=[], owner_id=None, workspace=None,
+        display_name="rj", image="ray:tag", nodes=2, gpus_per_node=8,
+    )
+    with pytest.raises(RuntimeError, match="workspace is required"):
+        rayjob.cmd_create_rayjob(missing_ws)
+
+    # Reuse a prior non-terminal workload (skip create) and honor --no-wait.
+    saved: list[dict] = []
+    monkeypatch.setenv("SAFE_WORKSPACE", "ws")
+    monkeypatch.setenv("WORKLOAD_ID", "owner-1")
+    monkeypatch.setattr(rayjob._mn_cli(), "_load_state", lambda: (saved[-1] if saved else {"rayjob_id": "wid-prior"}))
+    monkeypatch.setattr(rayjob._mn_cli(), "_save_state", lambda payload: saved.append(dict(payload)))
+    monkeypatch.setattr(rayjob, "_write_rayjob_meta", lambda **kw: None)
+
+    class _ReuseSafe(_FakeSafe):
+        def create_workload(self, body: dict) -> str:  # pragma: no cover - must not be called
+            raise AssertionError("create_workload should not run when reusing")
+
+    reuse_safe = _ReuseSafe(workload={"phase": "Running", "pods": []})
+    monkeypatch.setattr(rayjob.safe_client, "from_env", lambda: reuse_safe)
+    args = argparse.Namespace(
+        extra_env=[], extra_label=[], owner_id=None, workspace=None,
+        display_name="rj", image="ray:tag", nodes=2, gpus_per_node=8,
+        cpus_per_node=96, mem_per_node=1024, ephemeral_per_node=400,
+        description=None, no_wait=True, recreate=False, poll_interval=1, poll_timeout=2,
+    )
+    assert rayjob.cmd_create_rayjob(args) == 0
+    # No head pod IP resolvable -> empty ray_address, still succeeds.
+    assert saved[-1]["head_pod_ip"] == ""
+    assert saved[-1]["ray_address"] == ""
+
+    # _find_head_pod_ip fallbacks and empty-pod path.
+    assert rayjob._find_head_pod_ip({"pods": []}) == ""
+    assert rayjob._find_head_pod_ip({"pods": [{"podId": "x-head-1", "podIP": "1.1.1.1"}]}) == "1.1.1.1"
+    assert rayjob._find_head_pod_ip({"pods": [{"podIP": "2.2.2.2"}]}) == "2.2.2.2"
+    assert rayjob.ray_gcs_address("3.3.3.3") == "3.3.3.3:6379"
+
+    # _summarize_workload_failure: pending queue + no failed pods branch.
+    diag, snap = rayjob._summarize_workload_failure(
+        {"phase": "Pending", "queuePosition": 4, "pods": [{"podId": "p", "phase": "Pending", "podIP": "9.9.9.9"}]}
+    )
+    assert "queuePosition=4" in diag
+    assert "pods=1" in diag
+    assert snap["phase"] == "Pending"
+
+
+def test_infera_restart_config_and_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    # No prior launch recorded -> never a match.
+    assert inf._infera_restart_config_matches({}, argparse.Namespace(), "sglang", "aggregated") is False
+
+    agg_state = {
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "aggregated",
+        "last_restart_extra_args": "--foo 1",
+    }
+    agg_args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
+    assert inf._infera_restart_config_matches(agg_state, agg_args, "sglang", "aggregated") is True
+    # A changed served flag breaks the match.
+    assert inf._infera_restart_config_matches(
+        agg_state, argparse.Namespace(model="/m", tp=4, ep=8, extra_args="--foo 1"), "sglang", "aggregated"
+    ) is False
+
+    # Disaggregated PD topology match (node counts inferred from pod lists).
+    pd_state = {
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "disaggregated",
+        "last_restart_extra_args": "",
+        "last_restart_pd_prefill_nodes": 1,
+        "last_restart_pd_decode_nodes": 1,
+        "prefill_pod_ips": ["10.0.0.1"],
+        "decode_pod_ips": ["10.0.0.2"],
+    }
+    pd_args = argparse.Namespace(
+        model="/m", tp=8, ep=8, extra_args="",
+        pd_prefill_nodes=1, pd_decode_nodes=1,
+        pd_prefill_tp=0, pd_decode_tp=0, pd_prefill_ep=0, pd_decode_ep=0,
+        pd_prefill_extra_args="", pd_decode_extra_args="",
+    )
+    assert inf._infera_restart_config_matches(pd_state, pd_args, "sglang", "disaggregated") is True
+
+    # _infera_servers_alive: empty targets -> False.
+    assert inf._infera_servers_alive({}, [], timeout=5) is False
+
+    state = {"ssh_key_path": "/tmp/k"}
+    targets = [{"podIP": "10.0.0.1", "sshPort": 2222}]
+    monkeypatch.setattr(inf._mn_cli, "_infera_default_ssh_port", lambda st: 2222)
+    monkeypatch.setattr(
+        inf._mn_cli, "_infera_ssh_bash_with_env",
+        lambda *a, **kw: _Completed(returncode=0, stdout="MN_ALIVE\n"),
+    )
+    assert inf._infera_servers_alive(state, targets, timeout=5) is True
+
+    # Dead pod (no MN_ALIVE marker) -> False.
+    monkeypatch.setattr(
+        inf._mn_cli, "_infera_ssh_bash_with_env",
+        lambda *a, **kw: _Completed(returncode=0, stdout="dead"),
+    )
+    assert inf._infera_servers_alive(state, targets, timeout=5) is False
+
+    # SSH timeout -> False.
+    monkeypatch.setattr(
+        inf._mn_cli, "_infera_ssh_bash_with_env",
+        lambda *a, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["ssh"], timeout=1)),
+    )
+    assert inf._infera_servers_alive(state, targets, timeout=5) is False
+
+    # A target missing podIP -> False.
+    assert inf._infera_servers_alive(state, [{"podIP": ""}], timeout=5) is False
+
+
+def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    import hyperloom.inference_optimizer.multi_node.commands.infera as inf
+
+    state = {
+        "backend": "infera",
+        "pd_mode": "aggregated",
+        "worker_pod_ips": ["10.0.1.0"],
+        "ssh_key_path": "/tmp/k",
+        "last_restart_framework": "sglang",
+        "last_restart_model": "/m",
+        "last_restart_tp": 8,
+        "last_restart_ep": 8,
+        "last_restart_pd_mode": "aggregated",
+        "last_restart_extra_args": "",
+    }
+    monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
+    monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 20)
+    monkeypatch.setattr(inf, "_infera_all_gpu_targets", lambda st: [{"podIP": "10.0.1.0", "sshPort": 2222}])
+    monkeypatch.setattr(inf, "_infera_servers_alive", lambda st, targets, timeout: True)
+    monkeypatch.setenv("MULTI_NODE_RESTART_RESUME_RUNNING", "1")
+
+    args = argparse.Namespace(
+        framework="sglang", model="/m", tp=8, ep=8, extra_args="",
+        pd_mode="", pd_transfer_backend="", print_logs=False,
+        pd_prefill_extra_args="", pd_decode_extra_args="",
+    )
+    assert inf._infera_restart_server(args) == 0
+    out = capsys.readouterr().out
+    assert '"resumed": true' in out
+
+
 def test_framework_audit_common_patch_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.agents.framework import _audit_common as common
 
