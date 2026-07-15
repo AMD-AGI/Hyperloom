@@ -35,6 +35,7 @@ from ._internal import ssh_client, ssh_known_hosts
 from ._internal.log import info, warn, err
 from ._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .state_paths import resolve_state_file, state_file_safe_to_read
+from ._internal.external_state import load_multi_node_state
 
 # Default poll budget sized under the sandbox 120s ceiling.
 _DEFAULT_POLL_INTERVAL_S = 6
@@ -155,17 +156,7 @@ def _load_state() -> dict[str, Any]:
         dict[str, Any]: The parsed state, or an empty dict if the file is
         missing, unreadable, or fails the ownership/permission check.
     """
-    path = _state_file()
-    if not path.is_file():
-        return {}
-    if not state_file_safe_to_read(path):
-        warn(f"state file {path} failed ownership/permission check; ignoring")
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        warn(f"state file {path} unreadable: {exc}")
-        return {}
+    return load_multi_node_state()
 
 
 def _save_state(state: dict[str, Any]) -> None:

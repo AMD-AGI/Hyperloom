@@ -15,13 +15,16 @@ skips its own server launch and points ``benchmark_serving`` at the head pod.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.multi_node.state_paths import legacy_state_file, resolve_state_file, state_file_safe_to_read
+from hyperloom.inference_optimizer.multi_node._internal.external_state import (
+    external_service_url,
+    load_multi_node_state,
+)
+from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_file
 
 log = logging.getLogger(__name__)
 
@@ -36,24 +39,12 @@ def _state_path() -> Path:
 
 
 def _read_state() -> dict[str, Any]:
-    """Best-effort read of the state file. Returns {} on any failure.
+    """Best-effort read of multi-node state (file, else external env synthesis).
 
     Returns:
-        dict[str, Any]: The parsed state dict, or ``{}`` if the file is
-            missing, unreadable, or not a JSON object.
+        dict[str, Any]: The effective state dict for this process.
     """
-    p = _state_path()
-    if not p.is_file():
-        return {}
-    if not state_file_safe_to_read(p):
-        log.warning("multi_node state file %s failed ownership/permission check", p)
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("multi_node state file %s unreadable: %s", p, exc)
-        return {}
-    return data if isinstance(data, dict) else {}
+    return load_multi_node_state()
 
 
 def mn_bench_warmup_enabled() -> bool:
@@ -307,178 +298,6 @@ def export_ray_address_to_os() -> None:
         os.environ["RAY_ADDRESS"] = addr
 
 
-def safe_available() -> bool:
-    """True when SaFE is reachable (both SAFE_API_URL + SAFE_API_KEY set).
-
-    SaFE presence is signaled by these env vars (see safe_client). When SaFE
-    is available the optimizer uses the normal SaFE create flow; the
-    ``HYPERLOOM_MN_EXT_*`` external bypass only engages when SaFE is absent.
-
-    Returns:
-        bool: Whether SaFE API credentials are both present.
-    """
-    return bool(os.environ.get("SAFE_API_URL", "").strip()) and bool(
-        os.environ.get("SAFE_API_KEY", "").strip()
-    )
-
-
-def external_service_url() -> str:
-    """Explicit external benchmark endpoint that bypasses SaFE provisioning.
-
-    When ``$HYPERLOOM_MN_EXT_SERVICE_URL`` is a http(s) URL, the optimizer skips
-    the SaFE rayjob/infera create flow entirely and drives benchmarks (and,
-    when SSH is supplied, server restarts + GPU sampling) against an
-    already-provisioned cluster described purely by env vars. Empty otherwise.
-
-    Returns:
-        str: The external service URL, or ``""`` when not in external mode.
-    """
-    if safe_available():
-        return ""
-    u = os.environ.get("HYPERLOOM_MN_EXT_SERVICE_URL", "").strip()
-    return u if u.startswith(("http://", "https://")) else ""
-
-
-def build_external_state_from_env() -> dict[str, Any]:
-    """Synthesize the multi-node state.json purely from ``HYPERLOOM_MN_EXT_*``.
-
-    Lets the optimizer run with SaFE assumed absent: every field SaFE would
-    normally write (service_url, prefill/decode/worker pods, ssh key/port) is
-    read from env instead, so all downstream code (restart, worker-ready gate,
-    #3 GPU sampling, magpie_remote_env, pd_topology) works unchanged.
-
-    Env vars:
-        HYPERLOOM_MN_EXT_SERVICE_URL   frontend/benchmark URL (required)
-        HYPERLOOM_MN_EXT_PREFILL_IPS   comma-separated prefill pod IPs
-        HYPERLOOM_MN_EXT_DECODE_IPS    comma-separated decode pod IPs
-        HYPERLOOM_MN_EXT_WORKER_IPS    comma-separated worker pod IPs (aggregated)
-        HYPERLOOM_MN_EXT_SSH_KEY       SSH private key path (enables restart/sampling)
-        HYPERLOOM_MN_EXT_SSH_PORT      SSH base port (default 2233; decode role-offset)
-        HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS  known_hosts path (optional)
-    Reuses INFERENCE_OPTIMIZER_NODES / INFERENCE_OPTIMIZER_GPUS_PER_NODE / PD_MODE.
-
-    Returns:
-        dict[str, Any]: A synthetic state dict, or ``{}`` when not in external
-        mode (no ``HYPERLOOM_MN_EXT_SERVICE_URL``).
-    """
-    url = external_service_url()
-    if not url:
-        return {}
-
-    def _ips(name: str) -> list[str]:
-        return [x.strip() for x in os.environ.get(name, "").split(",") if x.strip()]
-
-    def _int_env(name: str, default: int) -> int:
-        try:
-            return int(os.environ.get(name, "") or default)
-        except ValueError:
-            return default
-
-    ssh_key = os.environ.get("HYPERLOOM_MN_EXT_SSH_KEY", "").strip()
-    ssh_port = _int_env("HYPERLOOM_MN_EXT_SSH_PORT", 2233)
-    known_hosts = os.environ.get("HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS", "").strip()
-    nodes = _int_env("INFERENCE_OPTIMIZER_NODES", 1)
-    gpn = _int_env("INFERENCE_OPTIMIZER_GPUS_PER_NODE", 8)
-    pd_mode = (os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
-    if pd_mode in ("colocated", "mixed"):
-        pd_mode = "aggregated"
-
-    # Per-role SSH port mirrors the infera backend (decode offset by role stride)
-    # so restart-server's SSH fan-out targets the right port per pod.
-    try:
-        from hyperloom.inference_optimizer.multi_node._internal.infera_support import ssh_role_port_offset
-    except Exception:  # noqa: BLE001
-        def ssh_role_port_offset(role: str) -> int:  # fallback: decode +10
-            return 10 if (role or "").lower() == "decode" else 0
-
-    def _pods(ips: list[str], role: str) -> list[dict[str, Any]]:
-        base = ssh_port + ssh_role_port_offset(role)
-        return [
-            {"podIP": ip, "podId": f"external-{role}-{i}", "role": role, "sshPort": base}
-            for i, ip in enumerate(ips)
-        ]
-
-    prefill, decode, worker = (
-        _ips("HYPERLOOM_MN_EXT_PREFILL_IPS"),
-        _ips("HYPERLOOM_MN_EXT_DECODE_IPS"),
-        _ips("HYPERLOOM_MN_EXT_WORKER_IPS"),
-    )
-    backend = (os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "") or "infera").strip().lower()
-    # rayjob control plane: head IP is the single required field; the Ray GCS
-    # address (head:6379) and Ray Dashboard (head:8265) both derive from it.
-    head_ip = os.environ.get("HYPERLOOM_MN_EXT_HEAD_IP", "").strip()
-    ray_address = f"{head_ip}:6379" if head_ip else ""
-    ray_dash_token = os.environ.get("HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN", "").strip()
-    # rayjob_id / workspace are SaFE constructs (no SaFE workload in external
-    # mode). No dedicated env var; carry the standard SAFE_WORKSPACE (k8s
-    # namespace) through when present, purely as a k8s-scope passthrough.
-    workspace = os.environ.get("SAFE_WORKSPACE", "").strip()
-    state: dict[str, Any] = {
-        "backend": backend if backend in ("infera", "rayjob") else "infera",
-        "external": True,
-        "service_url": url,
-        "nodes": nodes,
-        "gpus_per_node": gpn,
-        "pd_mode": pd_mode,
-        "ssh_port": ssh_port,
-        "prefill_pod_ips": prefill,
-        "prefill_pods": _pods(prefill, "prefill"),
-        "decode_pod_ips": decode,
-        "decode_pods": _pods(decode, "decode"),
-        "worker_pod_ips": worker,
-        "worker_pods": _pods(worker, "worker"),
-    }
-    if ssh_key:
-        state["ssh_key_path"] = ssh_key
-    if known_hosts:
-        state["ssh_known_hosts"] = known_hosts
-    if head_ip:
-        state["head_pod_ip"] = head_ip
-        state["ray_address"] = ray_address
-    if ray_dash_token:
-        state["ray_dashboard_token"] = ray_dash_token
-    if workspace:
-        state["workspace"] = workspace
-    return state
-
-
-def external_has_ssh_control() -> bool:
-    """True when external mode can SSH-manage servers (restart + GPU sampling).
-
-    Requires ``HYPERLOOM_MN_EXT_SSH_KEY`` plus at least one prefill/decode/worker
-    pod IP. When False (benchmark-only external), restart is a no-op and the
-    optimizer just benchmarks the already-running server.
-
-    Returns:
-        bool: Whether external SSH server control is available.
-    """
-    if not external_service_url():
-        return False
-    if not os.environ.get("HYPERLOOM_MN_EXT_SSH_KEY", "").strip():
-        return False
-    return any(
-        os.environ.get(k, "").strip()
-        for k in ("HYPERLOOM_MN_EXT_PREFILL_IPS", "HYPERLOOM_MN_EXT_DECODE_IPS", "HYPERLOOM_MN_EXT_WORKER_IPS")
-    )
-
-
-def external_has_server_control() -> bool:
-    """True when external mode can restart the server (backend-aware).
-
-    infera: needs SSH (see :func:`external_has_ssh_control`). rayjob: needs
-    a Ray address (via ``HYPERLOOM_MN_EXT_HEAD_IP``). When False, restart is
-    a no-op and the optimizer benchmarks the already-running server as-is.
-
-    Returns:
-        bool: Whether external server restart control is available.
-    """
-    if not external_service_url():
-        return False
-    if external_has_ssh_control():
-        return True
-    return bool(os.environ.get("HYPERLOOM_MN_EXT_HEAD_IP", "").strip())
-
-
 def magpie_remote_env() -> dict[str, str]:
     """Return env vars to inject into a Magpie ``benchmark`` subprocess.
 
@@ -492,10 +311,9 @@ def magpie_remote_env() -> dict[str, str]:
         Env vars to inject into the Magpie subprocess, or ``{}`` for the
         single-node path or when no service URL is available.
     """
-    # External mode: point benchmarks straight at the env-provided endpoint
-    # (SaFE bypassed); works regardless of state / node count.
+    # External mode: point benchmarks at the env-provided endpoint when multi-node.
     ext = external_service_url()
-    if ext:
+    if ext and is_multi_node():
         return {"MAGPIE_RUN_PHASE": "client", "BENCHMARK_BASE_URL": ext}
     if not is_multi_node():
         return {}
