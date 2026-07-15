@@ -60,6 +60,7 @@ from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
 )
+from .benchmark_backend import build_benchmark_command
 
 
 log = logging.getLogger(__name__)
@@ -763,7 +764,11 @@ class BaselineExecutor:
         """
         from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
 
-        self.magpie_python = magpie_python or _resolve_magpie_python()
+        # Backend-aware interpreter: bypass uses a plain python3, magpie
+        # uses the Magpie-importable venv.
+        from .benchmark_backend import resolve_benchmark_interpreter
+
+        self.magpie_python = magpie_python or resolve_benchmark_interpreter()
         # None = resolve from $FRAMEWORK at call time; explicit fixture path wins.
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
@@ -1624,19 +1629,11 @@ class BaselineExecutor:
             success, or ``status="failed"`` with an ``error_class`` on
             failure.
         """
-        cmd = [
-            self.magpie_python,
-            "-m",
-            "Magpie",
-            "-v",
-            "benchmark",
-            "--benchmark-config",
-            str(config_path),
-            "--output-dir",
-            str(output_dir),
-            "--run-mode",
-            "local",
-        ]
+        cmd = build_benchmark_command(
+            python_exe=self.magpie_python,
+            config_path=config_path,
+            output_dir=output_dir,
+        )
         env = os.environ.copy()
         # Put the venv first in PATH so the benchmark script's `python3`
         # resolves to one with torch+rocm (defense in depth vs Magpie YAML).

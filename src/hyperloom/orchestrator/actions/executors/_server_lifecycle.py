@@ -85,8 +85,18 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     except (TypeError, ValueError):
         info["port"] = REUSE_PORT_DEFAULT
 
-    # Server-less (scriptable) frameworks never boot a persistent server, so the
-    # reuse protocol does not apply; bail before the built-in-script check.
+    # Backend delegation: a non-Magpie backend (e.g. bypass) decides its
+    # own server_lifecycle eligibility. Magpie returns None here so the
+    # historical script-name-based path below runs unchanged.
+    from .benchmark_backend import resolve_backend
+
+    backend_verdict = resolve_backend().lifecycle_eligibility(bench)
+    if backend_verdict is not None:
+        return backend_verdict
+
+    # Server-less (scriptable) frameworks — e.g. xDiT diffusion — never boot a
+    # persistent server, so the reuse protocol does not apply. Bail out before
+    # the Magpie built-in-script check (whose script names are serving-only).
     from hyperloom.inference_optimizer import framework_registry
 
     if (
