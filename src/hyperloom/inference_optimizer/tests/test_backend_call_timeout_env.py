@@ -63,7 +63,7 @@ class TestParseCallTimeoutEnv:
 
     @pytest.mark.parametrize("raw", ["inf", "-inf", "infinity"])
     def test_infinity_returns_default(self, monkeypatch, caplog, raw):
-        """``math.isfinite`` rejects both ``+inf`` and ``-inf`` (CodeQL fix)."""
+        """``math.isfinite`` rejects both ``+inf`` and ``-inf``."""
         monkeypatch.setenv(PROBE_ENV, raw)
         with caplog.at_level("WARNING"):
             result = parse_call_timeout_env(PROBE_ENV, default=120.0)

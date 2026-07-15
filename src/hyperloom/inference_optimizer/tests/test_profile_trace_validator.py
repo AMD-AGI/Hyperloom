@@ -22,8 +22,7 @@ def _write_minimal_sglang_trace(
     with_execute_star: bool = True,
 ) -> None:
     """Write a tiny gzipped JSON trace blob; each flag toggles one validator signal."""
-    # Real torch/kineto traces tag op events with ``"cat": "cpu_op"``; check [7]
-    # (zero_ops) keys on that category, so the healthy fixture must carry it.
+    # Op events carry ``"cat": "cpu_op"`` so check [7] (zero_ops) keys on it.
     events: list[dict] = [
         {"name": "cpu_op", "cat": "cpu_op", "ph": "X", "ts": 0, "dur": 1, "args": {"Input Dims": [[1, 2, 3]]}},
     ]
@@ -334,10 +333,7 @@ def test_validator_never_raises_even_on_unreadable_trace(tmp_path, caplog):
     _validate_trace_structure(trace_dir, "sglang")
 
 
-# ---------------------------------------------------------------------------
-# Structured trace_health return (basis for the eager-mode
-# re-profile fallback when CUDA-graph folding zeroes out hot kernels)
-# ---------------------------------------------------------------------------
+# Structured trace_health return.
 def test_trace_health_healthy_layout(tmp_path):
     """Healthy layout: per-kernel attribution intact, capture traces
     present, no issues — so the kernel pipeline keeps the cuda-graph
@@ -403,9 +399,7 @@ def test_trace_health_flags_degraded_attribution_cuda_graph(tmp_path):
     )
     health = _validate_trace_structure(trace_dir, "sglang")
     assert health["per_kernel_attribution_degraded"] is True
- # capture_traces/ is still intact — a capture-fold fallback (#431
-    # proper fix) would have data to mine even though the live trace lost
-    # per-kernel attribution.
+ # capture_traces/ is still intact so a capture-fold fallback has data to mine.
     assert health["capture_traces_present"] is True
     assert any("execute_* / user_annotation" in m for m in health["issues"]), health["issues"]
 

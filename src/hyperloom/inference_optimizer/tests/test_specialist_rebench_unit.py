@@ -2,11 +2,10 @@
 
 """Unit coverage for the optional GPU-specialist rebench helper.
 
-``run_grid`` / Magpie are mocked, so these exercise the pure logic — port
+``run_grid`` / Magpie are mocked, so these exercise the pure logic: port
 resolution + 8888 refusal, leased-card reporting, env-pair parsing, the
 success / failed-status / no-result / exception result shapes, and the CLI
-``main`` (success, failure rc, and the explicit-8888 reject path) — without a
-GPU or a real server.
+``main``.
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ def test_current_leased_cards_precedence(monkeypatch) -> None:
     assert sr._current_leased_cards() == ""
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "4,5")
     assert sr._current_leased_cards() == "4,5"
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "6,7")  # ROCR wins over HIP
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "6,7")
     assert sr._current_leased_cards() == "6,7"
 
 

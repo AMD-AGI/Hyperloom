@@ -8,17 +8,8 @@ FRAMEWORK replicates EXPLORE's config search by, within its phase:
 3. benchmarking it via the ExploreExecutor (KEEP/REVERT/rebench/ledger),
 4. iterating over rounds until no new candidates or the round cap.
 
-Coverage:
-* ``_build_framework_config_grid`` / ``_framework_config_explore_params`` /
-  ``_run_framework_config_exploration`` — grid + explore-task plumbing.
-* ``_framework_config_new_variants`` — tested-ledger de-dup.
-* ``_framework_config_grid_from_proposals`` / ``_ingest_framework_config_generation``
-  — proposal_set -> grid harvest.
-* ``_maybe_hold_for_framework_config_lane`` — the default-OFF subphase state
-  machine ('' -> generating -> running -> done).
-
-Methods are invoked unbound on a light fake ``self`` (mirroring
-``test_mn_auto_materialize``); real helpers are bound with ``types.MethodType``.
+Methods are invoked unbound on a light fake ``self``; real helpers are bound
+with ``types.MethodType``.
 """
 
 from __future__ import annotations
@@ -92,7 +83,7 @@ def _fake_self(**state_overrides):
         _inject_explore_runtime_params=lambda params: None,
         _cycle_idem_suffix=lambda: "",
         _dominant_roofline_direction=lambda: ("", 0.0),
-        # Safe async defaults; individual tests override to exercise branches.
+        # Safe async defaults; tests override to exercise branches.
         _framework_config_generation_inflight=_async_return(False),
         _framework_config_exploration_inflight=_async_return(False),
         _dispatch_framework_config_generation_specialist=_async_return("gen-default"),
@@ -374,8 +365,7 @@ def test_start_generation_falls_back_to_default_grid_when_dispatch_fails():
 
 
 def test_run_idempotency_key_is_round_unique():
-    # Regression: a shared key would collapse rounds 2..N onto round 1's task
-    # (create_or_return_existing dedups by idempotency_key regardless of state).
+    # A shared key would collapse rounds 2..N onto round 1's task.
     s1 = _fake_self()
     asyncio.run(
         Coordinator._run_framework_config_exploration(
@@ -418,8 +408,8 @@ def test_lane_should_engage_only_when_enabled_and_leaving_framework():
 
 
 def test_mn_explore_skips_framework_config_generation_specialist(monkeypatch):
-    # The mn-explore bridge must skip config-generation specialists so their
-    # proposal_set is not double-consumed (owned by the config subphase).
+    # The mn-explore bridge skips config-generation specialists so their
+    # proposal_set is not double-consumed.
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
@@ -842,8 +832,8 @@ def test_context_lines_uses_unknown_key_when_framework_blank():
 # Regression: bugbot findings (empty-harvest seed fallback + budget deadlock)
 # --------------------------------------------------------------------------
 def test_hold_generating_empty_harvest_finishes_not_seeds(monkeypatch):
-    # BUG1: an EMPTY harvested proposal_set (pending=[]) must finish the lane as
-    # generation_empty, NOT silently fall back to the default seed grid.
+    # An empty harvested proposal_set (pending=[]) finishes the lane as
+    # generation_empty rather than falling back to the default seed grid.
     from hyperloom.orchestrator.actions.executors import explore as _exp
 
     gv = SimpleNamespace(
@@ -869,9 +859,8 @@ def test_hold_generating_empty_harvest_finishes_not_seeds(monkeypatch):
 
 
 def test_hold_running_finishes_when_phase_budget_exhausted():
-    # BUG2: when the FRAMEWORK phase budget is spent the dispatcher stops
-    # spawning the queued explore round while the inflight check counts queued
-    # tasks, so the lane must yield instead of holding forever.
+    # When the FRAMEWORK phase budget is spent the lane yields instead of
+    # holding forever.
     s = _fake_self(
         framework_config_exploration_enabled=True,
         framework_config_lane_state="running",
@@ -884,7 +873,7 @@ def test_hold_running_finishes_when_phase_budget_exhausted():
 
 
 def test_hold_start_yields_when_phase_budget_exhausted():
-    # BUG2: do not even start a lane whose phase budget is already spent.
+    # Do not start a lane whose phase budget is already spent.
     s = _fake_self(framework_config_exploration_enabled=True)
     s._dispatch_paused_for_phase_budget = lambda: True
     s._dispatch_framework_config_generation_specialist = _async_return("must-not-run")

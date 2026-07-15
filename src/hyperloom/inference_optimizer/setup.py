@@ -68,9 +68,8 @@ def _setup_dotenv_is_authoritative(env_file: Path) -> bool:
 def _scrub_ambient_llm_env(env: dict[str, str], env_file: Path) -> None:
     """Keep the setup skill's freshly-written .env authoritative.
 
-    Interactive setup collects the user's provider choice, writes .env, and then
-    invokes this backend. Ambient shell variables left behind by local Claude /
-    LiteLLM setup must not override that file and get persisted back into it by
+    Ambient shell variables left behind by local Claude / LiteLLM setup must not
+    override the setup-written .env and get persisted back into it by
     install_baremetal.sh. Only scrub when the .env already exists so standalone
     non-interactive installer use can still rely on process env.
     """

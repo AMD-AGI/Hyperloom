@@ -13,7 +13,6 @@ import pytest
 from hyperloom.orchestrator.actions.executors import session_breakdown as sb
 
 
-# Helpers
 def _ctx(*, params: dict | None = None, extra: dict | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         task=SimpleNamespace(task_id="sb-t1", params=params or {}),
@@ -27,7 +26,6 @@ def session_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-# _resolve_session_dir
 class TestResolveSessionDir:
     def test_extra_session_dir_wins(self, tmp_path):
         ctx = _ctx(extra={"session_dir": str(tmp_path)})
@@ -62,7 +60,6 @@ class TestResolveSessionDir:
         assert sb.SessionBreakdownExecutor._resolve_session_dir(ctx) is None
 
 
-# Execution branches
 class TestExecutor:
     @pytest.mark.asyncio
     async def test_failed_when_no_session_dir(self, monkeypatch, tmp_path):

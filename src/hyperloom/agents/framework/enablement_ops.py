@@ -191,14 +191,9 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "than authoring from scratch.",
 )
 
-# Environment-setup authorization. Some enablement gaps are NOT source bugs but
-# missing/stale dependencies or tools: e.g. a brand-new model arch needs a newer
-# ``transformers``; PR discovery needs the ``gh`` CLI; a kernel needs a build
-# toolchain. The specialist has ``Bash`` and MAY run these installs during its
-# own validation. To make them DURABLE (reproduced when the Coordinator
-# re-benches, and across pod restarts) the specialist must ALSO record each such
-# command verbatim in ``specialist_done.setup_commands`` — integrate_patch
-# re-runs those (allowlisted, non-interactive) before applying patches + booting.
+# Environment-setup authorization: the specialist MAY run dependency/tool
+# installs during validation, and must record each verbatim in
+# ``specialist_done.setup_commands`` so integrate_patch can replay them.
 ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
     "You MAY install missing/stale packages or CLI tools when that is what the "
     "model needs to build or run — e.g. `pip install -U transformers`, "

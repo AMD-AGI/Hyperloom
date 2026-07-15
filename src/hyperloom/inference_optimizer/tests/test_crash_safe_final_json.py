@@ -2,18 +2,11 @@
 
 """End-to-end proof that a non-graceful exit still yields final.json.
 
-Unlike the unit tests in ``test_breakdown_exporter_unit.py`` (which exercise
-``write_minimal_final_json`` in isolation), these tests launch a *real*
-subprocess that mirrors how ``cli.py`` runs the optimizer:
-
-* it installs an asyncio SIGINT/SIGTERM handler that lets the event loop
-  unwind (exactly like ``Coordinator.run``), and
-* it calls ``write_minimal_final_json`` from a ``finally`` block (exactly like
-  ``cli.py``'s end-of-session safety net).
-
-We then send a real signal and assert on the on-disk result. This reproduces
-the original bug (no ``final.json`` on a killed run) and pins down precisely
-which kill modes the fix covers.
+Launches a real subprocess that mirrors how ``cli.py`` runs the optimizer: it
+installs an asyncio SIGINT/SIGTERM handler that lets the event loop unwind, and
+calls ``write_minimal_final_json`` from a ``finally`` block. A real signal is
+sent and the on-disk result asserted, pinning down which kill modes the fix
+covers.
 """
 
 from __future__ import annotations
@@ -25,12 +18,11 @@ import sys
 import time
 from pathlib import Path
 
-# Worktree/repo root (…/src/hyperloom/inference_optimizer/tests/<this> -> parents[4]).
+# Worktree/repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
-# A faithful miniature of the cli.py run+finally lifecycle. Seeds a state.json,
-# installs the same SIGTERM handler Coordinator.run uses, blocks until signalled,
-# and flushes the crash-safe final.json from a finally block on the way out.
+# Miniature of the cli.py run+finally lifecycle: seed state.json, install the
+# SIGTERM handler, block until signalled, flush the crash-safe final.json.
 _HARNESS = """
 import asyncio, signal, sys
 from pathlib import Path
@@ -64,8 +56,7 @@ asyncio.run(main())
 
 def _spawn(session_dir: Path, install_handler: bool) -> subprocess.Popen:
     env = dict(os.environ)
-    # Make the worktree's package importable in the child regardless of any
-    # editable install pointing elsewhere.
+    # Make the worktree's package importable in the child.
     env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     env["USER_DATA_PATH"] = str(session_dir)
     proc = subprocess.Popen(
@@ -90,11 +81,7 @@ def _spawn(session_dir: Path, install_handler: bool) -> subprocess.Popen:
 
 
 def test_sigterm_runs_finally_and_writes_final_json(tmp_path):
-    """SIGTERM (the normal external-kill path) -> finally runs -> final.json exists.
-
-    This is the bug reproduction: without the fix there is no
-    ``write_minimal_final_json`` call on this path, so ``final.json`` is absent.
-    """
+    """SIGTERM (the normal external-kill path) -> finally runs -> final.json exists."""
     proc = _spawn(tmp_path, install_handler=True)
     proc.send_signal(signal.SIGTERM)
     proc.wait(timeout=30)
@@ -114,10 +101,8 @@ def test_sigterm_runs_finally_and_writes_final_json(tmp_path):
 def test_sigkill_cannot_write_final_json(tmp_path):
     """SIGKILL (hard kill / Slurm reclaim) -> finally CANNOT run -> no final.json.
 
-    Documents the honest boundary of the in-process fix: a -9 kill bypasses
-    Python's finally entirely, so only an offline rebuild (Layer 3) can recover
-    here. If this ever starts passing it means the kill mode changed, not that
-    the in-process safety net grew new powers.
+    Documents the boundary of the in-process fix: a -9 kill bypasses Python's
+    finally entirely, so only an offline rebuild can recover here.
     """
     proc = _spawn(tmp_path, install_handler=True)
     proc.send_signal(signal.SIGKILL)

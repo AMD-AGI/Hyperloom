@@ -294,7 +294,7 @@ def test_merge_combines_multiple_pod_snapshots_in_stable_order():
     merged = merge_gpu_snapshots([snap1, snap2])
     assert merged["tool"] == "robust-api"
     keys = [(g["pod_namespace"], g["pod_name"], g["gpu_id"]) for g in merged["gpus"]]
-    # ns1 / podA should sort before ns2 / podZ even though it was decoded second.
+    # Merged output is sorted by (namespace, pod, gpu_id) regardless of decode order.
     assert keys == [("ns1", "podA", 0), ("ns2", "podZ", 0)]
 
 

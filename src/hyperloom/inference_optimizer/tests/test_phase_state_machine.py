@@ -20,14 +20,12 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
-# fixtures
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     return make_session_dir()
 
 
-# phase_state pure function tests
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
         "PRELUDE",
@@ -80,8 +78,7 @@ def test_llm_proposable_set_drops_coordinator_internal_actions():
         proposable = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS[phase]
         assert proposable == (allowed - COORDINATOR_INTERNAL_ACTIONS - ROBUSTNESS_DELEGATE_ONLY_ACTIONS)
         assert proposable.isdisjoint(COORDINATOR_INTERNAL_ACTIONS)
-        # recover stays phase-allowed (robustness delegate) but is
-        # never LLM-proposable by Orchestration.
+        # recover stays phase-allowed but is never LLM-proposable.
         assert "recover" in allowed
         assert "recover" not in proposable
     # The advertised analysis / framework names are never proposable.
@@ -227,7 +224,6 @@ def test_phase_exit_reasons_includes_required_vocab():
 
 def test_stop_reason_vocab_includes_v06_and_v08():
     for reason in (
-        # v0.6 sentinels
         "target_reached",
         "time_exhausted",
         "max_ticks",
@@ -235,13 +231,11 @@ def test_stop_reason_vocab_includes_v06_and_v08():
         "baseline_failed",
         "emergency",
         "coordinator_exception",
-        # schema additions
         "crash_threshold_exceeded",
         "user_stop_requested",
         "cortex_drain_failed",
         "plateau_explore",
         "conc_sweep_failed",
- # fast baseline arg-error stop reason
         "baseline_arg_error",
     ):
         assert phase_state.is_valid_stop_reason(reason), reason
@@ -299,7 +293,7 @@ def test_exit_terminal_prelude_after_three_baseline_failures():
 
 
 def test_exit_normal_explore_uses_budget_exhaustion():
-    # Past phase_started_unix so elapsed exceeds budget; IR-6 force-exit disabled to isolate budget path.
+    # Elapsed exceeds budget; IR-6 force-exit disabled to isolate the budget path.
     state = SimpleNamespace(
         phase="EXPLORE",
         phase_started_unix=1.0,
@@ -354,7 +348,6 @@ def test_compute_next_phase_terminal_overrides_phase():
     assert out[2].get("terminal") is True
 
 
-# SharedState writer
 def test_shared_state_phase_fields_default_to_empty():
     s = SharedState()
     assert s.phase == ""
@@ -378,7 +371,7 @@ def test_record_phase_transition_writes_row_and_updates_phase():
     assert s.phase_started_unix == 1747600000.0
     assert s.phase_history == [row]
     assert row["from_phase"] == "" and row["to_phase"] == "PRELUDE"
-    # Second transition keeps history append-only.
+    # History is append-only.
     row2 = s.record_phase_transition(
         to_phase="EXPLORE",
         reason="prelude_done",
@@ -392,7 +385,6 @@ def test_record_phase_transition_writes_row_and_updates_phase():
     assert row2["from_phase"] == "PRELUDE"
 
 
-# CORE_STATE_FIELDS includes phase fields (Inv-1 single writer)
 def test_core_state_fields_includes_phase_fields():
     for f in (
         "phase",
@@ -404,7 +396,6 @@ def test_core_state_fields_includes_phase_fields():
         assert f in CORE_STATE_FIELDS, f
 
 
-# PolicyGate R1 phase_incompatible
 def _make_role_registry():
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
@@ -426,8 +417,7 @@ def test_policy_gate_phase_strict_denies_kernel_in_prelude():
         strict_phase=True,
     )
     # ``explore`` is an EXPLORE-phase action; proposing it in PRELUDE is
-    # phase-incompatible. (Kernel-owned names are now denied by the ownership
-    # guard before the phase check, so they no longer exercise this path.)
+    # phase-incompatible.
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "explore", "predicted_gain_pct": 1.0},
@@ -456,7 +446,7 @@ def test_policy_gate_phase_warn_mode_does_not_raise():
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "explore", "predicted_gain_pct": 1.0},
     )
-    # Should NOT raise — warn-mode just bumps the audit counter.
+    # warn-mode just bumps the audit counter, no raise.
     gate.validate_intent("orchestration", intent)
     assert state.policy_denial_streak.get("explore:phase_incompatible", 0) >= 1
 
@@ -496,12 +486,8 @@ def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
         shared_state=state,
         strict_phase=True,
     )
-    # ``profile`` / ``roofline`` are Coordinator-managed and denied by
-    # R1 ``phase_incompatible`` regardless of phase, and ``params`` is
-    # denied with ``action_deprecated``. We pick ``sweep`` instead — a
-    # non-deprecated, non-internal action that is proposable only in the
-    # SWEEP phase, so the propose lands on R1 phase_incompatible via the
-    # per-phase set while in PRELUDE.
+    # ``sweep`` is proposable only in SWEEP, so proposing it in PRELUDE
+    # lands on R1 phase_incompatible.
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "sweep", "predicted_gain_pct": 1.0},
@@ -606,9 +592,7 @@ def test_policy_gate_sweep_rejects_explore_lever():
         shared_state=state,
         strict_phase=True,
     )
-    # ``explore`` is not widened into SWEEP by interleave (which only touches
-    # EXPLORE/KERNEL), so R1 still rejects it. (kernel_opt would now be denied
-    # earlier by the kernel-ownership guard, so it no longer probes this path.)
+    # ``explore`` is not widened into SWEEP by interleave, so R1 rejects it.
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "explore", "predicted_gain_pct": 1.0},
@@ -618,7 +602,6 @@ def test_policy_gate_sweep_rejects_explore_lever():
     assert excinfo.value.rule == "phase_incompatible"
 
 
-# Coordinator initialises phase on fresh sessions
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (
@@ -652,8 +635,7 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     row = c.shared_state.phase_history[0]
     assert row["to_phase"] == "PRELUDE"
     assert row["reason"] == "phase_entered"
-    # Budget rebalance: FRAMEWORK now carries 0.15 (0.075 each from EXPLORE
-    # 0.375 and KERNEL 0.305); PRELUDE 3%, SWEEP 12%, CLOSE 2%; sum stays 1.0.
+    # FRAMEWORK 0.15, EXPLORE 0.375, PRELUDE 0.03; budgets sum to 1.0.
     assert c.shared_state.phase_budget_pct["FRAMEWORK_AGENT"] == 0.15
     assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.375
     assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.03
@@ -666,14 +648,14 @@ async def test_coordinator_advances_to_explore_when_baseline_present(
 ):
     c = coordinator_with_mocks
     try:
-        # Skip FRAMEWORK so this exercises the legacy PRELUDE→EXPLORE contract.
+        # Skip FRAMEWORK to exercise the PRELUDE→EXPLORE contract.
         c.shared_state.framework_agent_phase_enabled = False
-        # Simulate baseline KEEP: write the event that triggers prelude_done.
+        # Simulate baseline KEEP to trigger prelude_done.
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
         assert c.shared_state.phase == "EXPLORE"
-        # 2 rows: PRELUDE entry + PRELUDE→EXPLORE (FRAMEWORK skipped).
+        # 2 rows: PRELUDE entry + PRELUDE→EXPLORE.
         assert len(c.shared_state.phase_history) == 2
         last = c.shared_state.phase_history[-1]
         assert last["from_phase"] == "PRELUDE"
@@ -695,14 +677,13 @@ async def test_coordinator_phase_idempotent_within_same_tick(
         c.shared_state.save(session_dir)
         await c.tick(1)
         first_history = list(c.shared_state.phase_history)
-        # Another tick without state change → no new transition.
+        # No state change → no new transition.
         await c.tick(1)
         assert c.shared_state.phase_history == first_history
     finally:
         await c.stop()
 
 
-# breakdown collect_phase_segments
 def test_collect_phase_segments_groups_actions_by_window():
     from hyperloom.inference_optimizer.breakdown.collectors import collect_phase_segments
 

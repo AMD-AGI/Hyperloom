@@ -17,18 +17,14 @@ from __future__ import annotations
 
 import sqlite3
 
-# v3 added gpu_leases; v2 widened the leases PK + added lane_capacity.
 # ensure_schema migrates v1 DBs in place under BEGIN IMMEDIATE.
 SCHEMA_VERSION = 3
 
 
 # Default lane capacities; ``--research-lane-capacity`` overrides research_lane
-# at boot. A fresh DB runs with research_lane=1 (single specialist).
-# ``gpu_research_lane`` carries GPU specialists and is mutually exclusive with
-# the serving lanes (LANE_CONFLICTS). Capacity-1 / strictly serial: the
-# co-acquisition lock model can't express a multi-holder lane that also mutexes
-# the cap-1 serving lanes, so a single GPU specialist holds the machine at a
-# time (the GPU pool partitions cards within that one lease).
+# at boot. ``gpu_research_lane`` carries GPU specialists and is mutually
+# exclusive with the serving lanes (LANE_CONFLICTS); it is capacity-1 so a
+# single GPU specialist holds the machine at a time.
 DEFAULT_LANE_CAPACITIES: dict[str, int] = {
     "server_lifecycle": 1,
     "workspace_mutation": 1,
@@ -40,9 +36,7 @@ DEFAULT_LANE_CAPACITIES: dict[str, int] = {
 
 
 _DDL = [
-    # leases — Resource Lock Manager. Composite PK
-    # (lane, holder_id); per-lane cap in lane_capacity (acquire_many
-    # rolls back when count >= capacity).
+    # leases — Resource Lock Manager. Composite PK (lane, holder_id).
     """
     CREATE TABLE IF NOT EXISTS leases (
         lane          TEXT    NOT NULL,
@@ -147,9 +141,8 @@ _MANAGED_TABLES = (
 
 def _migrate_leases_v1_to_v2(cur: sqlite3.Cursor) -> bool:
     """In-place widen of the legacy ``leases`` PK (``lane`` -> composite
-    ``(lane, holder_id)``). Returns True when a migration ran, False when
-    already migrated / unknown shape. Snapshots rows, recreates the table,
-    re-inserts; runs inside the caller's BEGIN IMMEDIATE.
+    ``(lane, holder_id)``). Snapshots rows, recreates the table, re-inserts;
+    runs inside the caller's BEGIN IMMEDIATE.
 
     Args:
         cur: Open SQLite cursor within the caller's transaction.

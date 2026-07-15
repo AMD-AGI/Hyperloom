@@ -2,10 +2,9 @@
 
 """SQLite connection wrapper.
 
-Stdlib ``sqlite3``, WAL + ``synchronous=FULL`` (crash-safe across checkpoints,
-issue #242). Async surface wraps sync ops in ``asyncio.to_thread``.
-``transaction()`` uses ``BEGIN IMMEDIATE`` for cross-table atomicity (ADR-42:
-events + cursors + tasks + leases) without deferred-txn deadlocks.
+Stdlib ``sqlite3``, WAL + ``synchronous=FULL``. Async surface wraps sync ops in
+``asyncio.to_thread``. ``transaction()`` uses ``BEGIN IMMEDIATE`` for cross-table
+atomicity (events + cursors + tasks + leases).
 """
 
 from __future__ import annotations
@@ -22,13 +21,9 @@ from typing import Any
 from .schema import ensure_schema
 
 
-# Journal mode is env-overridable. WAL is the default (crash-safe across
-# checkpoints on local disk, issue #242), but WAL relies on a shared-memory
-# ``-shm`` mapping that networked filesystems (WekaFS / NFS) do not implement
-# correctly, which can corrupt ``coordinator.db`` ("file is not a database").
-# On such mounts set ``INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE=DELETE`` (a plain
-# rollback journal, still durable with synchronous=FULL) to avoid the WAL/shm
-# corruption path.
+# Journal mode is env-overridable; WAL default. On networked filesystems
+# (WekaFS / NFS) WAL's ``-shm`` mapping can corrupt the DB, so set
+# ``INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE=DELETE`` on such mounts.
 _JOURNAL_MODE = (
     os.environ.get("INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE", "WAL").strip() or "WAL"
 )
@@ -93,8 +88,7 @@ class SqliteConnection:
     """Async-friendly wrapper over a single SQLite connection.
 
     Single underlying connection; concurrent callers serialize through
-    ``self._async_lock`` (WAL is single-writer anyway, so a pool would only
-    add contention).
+    ``self._async_lock``.
     """
 
     def __init__(self, db_path: str | Path):
@@ -109,7 +103,6 @@ class SqliteConnection:
         self._async_lock = asyncio.Lock()
         self._sync_lock = threading.RLock()
 
-    # sync helpers (tests / boot / migrations)
     @property
     def raw(self) -> sqlite3.Connection:
         """Return the underlying ``sqlite3.Connection``.
@@ -187,7 +180,6 @@ class SqliteConnection:
             finally:
                 cur.close()
 
-    # async surface
     async def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         """Execute a write statement asynchronously and commit.
 

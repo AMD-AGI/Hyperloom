@@ -68,8 +68,7 @@ def canonical_fingerprint(
     try:
         args_tokens = sorted(shlex.split(args_text))
     except ValueError:
-        # Shell-parse failure: fall back to whitespace split so we still
-        # produce a fingerprint (identical bad strings still collide).
+        # Shell-parse failure: fall back to whitespace split.
         args_tokens = sorted(args_text.split())
     env_pairs = sorted((str(k), str(v)) for k, v in (extra_envs or {}).items())
     mode = str(args_mode or "append").strip().lower()

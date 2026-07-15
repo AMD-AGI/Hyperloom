@@ -83,7 +83,6 @@ def _stub_bench(result: dict, gate: dict):
     return _b
 
 
-# ---- missing param ----
 @pytest.mark.asyncio
 async def test_missing_specialist_task_id(tmp_path):
     ex = IntegratePatchExecutor(session_dir=tmp_path)
@@ -92,7 +91,6 @@ async def test_missing_specialist_task_id(tmp_path):
     assert res["error_class"] == "missing_param"
 
 
-# ---- no framework root ----
 @pytest.mark.asyncio
 async def test_no_framework_agent_root(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -108,7 +106,6 @@ async def test_no_framework_agent_root(tmp_path, monkeypatch):
     assert res["error_class"] == "no_framework_agent_root"
 
 
-# ---- rejected by critic ----
 @pytest.mark.asyncio
 async def test_rejected_by_critic(tmp_path):
     session = tmp_path / "s"
@@ -130,11 +127,9 @@ async def test_rejected_by_critic(tmp_path):
         )
     )
     assert res["status"] == "rejected_by_critic"
-    # patch was reverted -> tree restored
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# ---- KEEP path ----
 @pytest.mark.asyncio
 async def test_keep_path(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -171,7 +166,6 @@ def _stub_confirm(result: dict):
     return _c
 
 
-# ---- KEEP confirmed by stack rebench ----
 @pytest.mark.asyncio
 async def test_keep_confirmed_by_rebench(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -199,12 +193,10 @@ async def test_keep_confirmed_by_rebench(tmp_path, monkeypatch):
         )
     )
     assert res["status"] == "kept"
-    # headline tput becomes the confirmed rebench value
     assert res["output_throughput"] == 190.0
     assert res["delta_pct"] == 90.0
 
 
-# ---- REVERT when rebench misses the stability floor ----
 @pytest.mark.asyncio
 async def test_revert_when_rebench_unstable(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -236,7 +228,6 @@ async def test_revert_when_rebench_unstable(tmp_path, monkeypatch):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# ---- REVERT when rebench shows an accuracy regression ----
 @pytest.mark.asyncio
 async def test_revert_when_rebench_accuracy_fails(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -267,13 +258,11 @@ async def test_revert_when_rebench_accuracy_fails(tmp_path, monkeypatch):
     assert "accuracy regression on rebench" in res["reason"]
 
 
-# ---- REVERT when a framework-authored rebench loses its accuracy verdict ----
 @pytest.mark.asyncio
 async def test_revert_when_rebench_accuracy_missing_with_baseline(tmp_path, monkeypatch):
     """First bench passes accuracy, but the stable rebench produces NO accuracy
     verdict. For a framework-authored patch with a baseline accuracy, the gate
-    must reject (mirrors the first-bench accuracy_keep_block) rather than KEEP on
-    the stale first-bench pass."""
+    must reject rather than KEEP on the stale first-bench pass."""
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -341,7 +330,6 @@ async def test_keep_when_rebench_accuracy_missing_but_not_required(tmp_path, mon
     assert res["status"] == "kept"
 
 
-# ---- REVERT path (low throughput) ----
 @pytest.mark.asyncio
 async def test_revert_low_throughput(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -369,7 +357,6 @@ async def test_revert_low_throughput(tmp_path, monkeypatch):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# ---- REVERT path (accuracy fail) ----
 @pytest.mark.asyncio
 async def test_revert_accuracy_fail(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -397,7 +384,6 @@ async def test_revert_accuracy_fail(tmp_path, monkeypatch):
     assert "accuracy regression" in res["reason"]
 
 
-# ---- bench raises generic exception ----
 @pytest.mark.asyncio
 async def test_bench_exception_reverts(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -424,7 +410,6 @@ async def test_bench_exception_reverts(tmp_path, monkeypatch):
     assert res["error_class"] == "bench_exception"
 
 
-# ---- bench raises FrameworkScriptMismatchError ----
 @pytest.mark.asyncio
 async def test_bench_script_mismatch_reverts(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -451,7 +436,6 @@ async def test_bench_script_mismatch_reverts(tmp_path, monkeypatch):
     assert res["error_class"] == "framework_script_mismatch"
 
 
-# ---- framework KB writeback on KEEP ----
 @pytest.mark.asyncio
 async def test_framework_kb_writeback(tmp_path, monkeypatch):
     session = tmp_path / "s"
@@ -503,14 +487,12 @@ async def test_framework_kb_writeback_config_lever_untagged_proposal(tmp_path, m
     """A same-framework config-lever deliverable has no ``specialist:serving:
     framework`` provenance on its own (only the cross-framework prompt path
     emits that tag) — the FRAMEWORK dispatch context must stamp it so the KB
-    write still fires. Regression test for the leaderboard's real-run gap
-    where config-lever KEEPs never reached ``lessons.jsonl``.
+    write still fires.
     """
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
     _init_git_repo(repo)
-    # No provenance / fa_pr_url on the proposal — mirrors real specialist output.
     proposal = {"name": "cfg", "extra_envs": {"SGLANG_USE_AITER": "1"}}
     _write_workspace(session, "spec", proposal_set=[proposal])
 
@@ -613,12 +595,10 @@ def test_stamp_framework_kb_provenance_noop_when_done_payload_none():
     )  # must not raise
 
 
-# ---- _maybe_write helpers directly ----
 @pytest.mark.asyncio
 async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     payload = {"proposal_set": [{"provenance": "specialist:serving:framework"}]}
-    # No fa_pr_url / fa_pr_sha -> early return, no exception.
     await ex._maybe_write_framework_kb_record(
         done_payload=payload,
         outcome="integrated",
@@ -637,7 +617,6 @@ def test_find_frameworkoposal():
     assert found["id"] == 1
 
 
-# ---- pure helpers ----
 def test_git_checkout_clean(tmp_path):
     repo = tmp_path / "repo"
     _init_git_repo(repo)
@@ -667,7 +646,6 @@ def test_read_done_payload_bad_json(tmp_path):
     assert _read_done_payload(tmp_path) is None
 
 
-# ---- _bench_patch ----
 class _FakeVR:
     """Minimal VariantResult stand-in for _bench_patch."""
 
@@ -677,8 +655,7 @@ class _FakeVR:
         self.output_throughput = kw.get("output_throughput", 123.0)
         self.ttft_ms = kw.get("ttft_ms", 10.0)
         self.itl_ms = kw.get("itl_ms", 5.0)
-        # Mirror the real VariantResult attribute name (``workspace``); the
-        # bench code reads ``r.workspace`` for the accuracy-gate eval dir.
+        # Mirror the real VariantResult ``workspace`` attribute (the accuracy-gate eval dir).
         self.workspace = kw.get("workspace", "/tmp/rd")
         self.error = kw.get("error", "")
         self.nonfatal_warnings = kw.get("nonfatal_warnings", [])
@@ -736,7 +713,6 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
 
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
-    # A large accuracy drop must fail the gate (exercises real key + arg order).
     monkeypatch.setattr(ip, "parse_eval_results", lambda rd, framework=None: {"accuracy": 0.50})
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     _, gate = await ex._bench_patch(

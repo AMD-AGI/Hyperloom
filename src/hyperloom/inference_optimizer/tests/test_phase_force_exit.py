@@ -60,8 +60,7 @@ def _make_explore_state(
     if phase_budget_pct is None:
         phase_budget_pct = dict(phase_state.DEFAULT_PHASE_BUDGET_PCT)
     state.phase_budget_pct = phase_budget_pct
-    # Seed plateau signals so any later plateau judgment paths don't
-    # interfere; we focus the test on the force-exit gate.
+    # Seed plateau signals so plateau judgment paths don't interfere.
     state.explore_search = {
         "schema_version": 1,
         "tested": {},
@@ -92,9 +91,8 @@ def test_force_exit_total_remaining_below_threshold():
 
 def test_force_exit_phase_pct_below_threshold():
     """Phase elapsed close to its slice; session_remaining still OK."""
-    # 10h budget, EXPLORE pct=0.60 -> 6h slice. Elapsed 5.7h in EXPLORE ->
-    # remaining=0.3h=5% of slice <= 20%. start_ts is 6h ago so session
-    # remaining is 4h > 3h threshold.
+    # EXPLORE slice nearly exhausted (~5% left <= 20%) while session
+    # remaining (4h) stays above the 3h threshold.
     state = _make_explore_state(
         max_minutes=600,
         started_hours_ago=6.0,
@@ -125,8 +123,7 @@ def test_force_exit_neither_trigger_fires():
     )
     assert fired is False
     assert evidence["fired_reasons"] == []
-    # Evidence still populated for diagnostics so the prompt can show
-    # the buffer.
+    # Evidence still populated for diagnostics.
     assert evidence["session_remaining_seconds"] > 3 * 3600
     assert evidence["phase_remaining_pct"] > 0.20
 
@@ -159,8 +156,7 @@ def test_force_exit_unlimited_run_never_fires():
     )
     fired, evidence = phase_state.should_force_exit_explore(state)
     assert fired is False
-    # Without max_minutes neither phase_remaining nor session_remaining
-    # are computable.
+    # Without max_minutes nothing is computable.
     assert "session_remaining_seconds" not in evidence
 
 
@@ -171,8 +167,7 @@ def test_exit_normal_explore_force_exit_takes_priority_over_plateau():
         started_hours_ago=7.6,
         phase_started_hours_ago=4.0,
     )
-    # Seed enough plateau-shaped data that a plateau judgment would
-    # otherwise fire (3 empty rounds + low cumulative gain).
+    # Seed plateau-shaped data that would otherwise fire.
     state.specialist_rounds = [{"round_id": i, "empty_streak": i + 1, "proposal_count": 0} for i in range(3)]
     result = phase_state.exit_normal_explore(state)
     assert result is not None
@@ -206,8 +201,8 @@ def test_compute_next_phase_routes_to_sweep_when_kernel_disabled():
     assert nxt is not None
     target, reason, evidence = nxt
     assert target == phase_state.PHASE_SWEEP
-    # When kernel is disabled we route through ``no_kernel_skipped`` and
-    # pass the original reason through evidence.
+    # Kernel disabled: route through ``no_kernel_skipped``, original reason
+    # passed through evidence.
     assert reason == "no_kernel_skipped"
     assert evidence.get("passed_through_reason") == "explore_force_exit_low_budget"
 
@@ -228,8 +223,7 @@ def test_force_exit_thresholds_routed_through_overrides():
         "force_exit_hours_remaining": 9.0,
         "force_exit_budget_pct": 0.95,
     }
-    # With absurd thresholds (9h remaining required, 95% pct floor),
-    # ANY in-progress session triggers.
+    # With absurd thresholds, any in-progress session triggers.
     nxt = phase_state.compute_next_phase(state, kernel_enabled=True)
     assert nxt is not None
     target, reason, _ = nxt
@@ -237,13 +231,10 @@ def test_force_exit_thresholds_routed_through_overrides():
     assert reason == "explore_force_exit_low_budget"
 
 
-# ---------------------------------------------------------------------------
-# Fix B: interleave-aware IR-6 narrowing
-# ---------------------------------------------------------------------------
 def test_interleave_env_no_longer_narrows_force_exit_hours(monkeypatch):
     """The retired interleave env no longer narrows the strict 3h gate."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
-    # 7.5h elapsed of 10h -> 2.5h remaining; strict mode fires.
+    # 2.5h remaining; strict mode fires.
     state = _make_explore_state(
         max_minutes=600,
         started_hours_ago=7.5,
@@ -259,7 +250,7 @@ def test_interleave_env_no_longer_narrows_force_exit_hours(monkeypatch):
 def test_interleave_still_fires_inside_close_buffer(monkeypatch):
     """The retired interleave env does not disable the strict close buffer."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
-    # 9.5h elapsed of 10h -> 0.5h remaining, so strict mode fires.
+    # 0.5h remaining, so strict mode fires.
     state = _make_explore_state(
         max_minutes=600,
         started_hours_ago=9.5,

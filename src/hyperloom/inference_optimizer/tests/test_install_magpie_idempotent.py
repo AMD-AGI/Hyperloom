@@ -2,14 +2,8 @@
 
 """Behavioural + static guards for ensure_magpie()'s idempotent reinstall.
 
-Magpie is editable-installed into the pod-level ``/opt/venv`` that
-concurrent sessions on the same Claw pod share. The old ``ensure_magpie``
-reran ``pip install -e`` unconditionally on every install, briefly tearing
-the egg-link down/up; a sibling session mid-``python -m Magpie`` benchmark
-hit that gap and died with "No module named Magpie" (intermittent, could
-follow an earlier successful run). The fix skips the editable reinstall
-when the checkout exists under ``$MAGPIE_PATH`` AND ``import Magpie``
-already resolves into it.
+ensure_magpie skips the editable reinstall when the checkout exists under
+``$MAGPIE_PATH`` AND ``import Magpie`` already resolves into it.
 
 Behaviour contract (asserted below):
 
@@ -19,9 +13,8 @@ Behaviour contract (asserted below):
 * no checkout present                        -> reinstall
 
 The behavioural test extracts the real ``ensure_magpie`` body from
-``install.sh`` (so it cannot silently drift from the shipped script) and
-runs it with stubbed ``log``/``warn``/``git_fetch_pinned`` and a fake
-``$PYTHON`` whose import-probe outcome is scripted per scenario.
+``install.sh`` and runs it with stubbed ``log``/``warn``/``git_fetch_pinned``
+and a fake ``$PYTHON`` whose import-probe outcome is scripted per scenario.
 """
 
 from __future__ import annotations
@@ -181,10 +174,7 @@ def test_reinstall_when_no_checkout(tmp_path: Path) -> None:
     assert pip_called, f"reinstall should have run with no checkout present:\n{out}"
 
 
-# ---------------------------------------------------------------------------
-# Static guard: the idempotent skip must stay wired in (no regression to the
-# old unconditional ``pip install -e`` on every install).
-# ---------------------------------------------------------------------------
+# Static guard: the idempotent skip must stay wired in.
 def test_io_install_magpie_reinstall_is_idempotent_guarded() -> None:
     body = _extract_ensure_magpie()
     assert "skipping editable reinstall" in body, "ensure_magpie must keep the idempotent skip branch"

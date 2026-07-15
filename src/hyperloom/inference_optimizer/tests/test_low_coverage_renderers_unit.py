@@ -1,7 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
 """Unit tests for the data-provenance, sweep, and kernel-lifecycle breakdown
-renderers (previously near-uncovered)."""
+renderers."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def test_data_provenance_full_table():
                     "missing_required": [],
                 },
                 {"section": "kernels", "status": "ok", "populated": True, "sources": []},
-                "not-a-dict",  # skipped by the dict guard
+                "not-a-dict",
             ]
         }
     )
@@ -91,7 +91,6 @@ def test_sweep_non_dict_variant_coerced():
 
 def test_sweep_ot_handles_bad_value():
     assert sw.render  # ensure module import
-    # exercise the inner sort key indirectly via a non-numeric throughput
     out = sw.render(
         {
             "sweep": {
@@ -140,7 +139,7 @@ def test_kernel_lifecycle_full_with_adopted_and_residual():
         },
         {"kernel_id": "k2", "name": "attn", "final_decision": "reverted", "geak": {"attempts": 1}},
         {"kernel_id": "k3", "final_decision": "rejected"},
-        # residual long-tail kernel (not selected / touched / decided)
+        # residual long-tail kernel
         {
             "kernel_id": "k4",
             "name": "elementwise",
@@ -149,7 +148,7 @@ def test_kernel_lifecycle_full_with_adopted_and_residual():
             "final_decision": "not_optimized",
         },
         "anon-string-id",  # coerced into {"kernel_id": ...}
-        {"name": "no-id-dropped"},  # filtered out (no kernel_id)
+        {"name": "no-id-dropped"},  # filtered out
     ]
     out = kl.render({"kernel_lifecycle": {"detected": detected}})
     assert out.skipped is False

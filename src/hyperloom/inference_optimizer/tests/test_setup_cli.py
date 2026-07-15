@@ -286,10 +286,9 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
 
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
-    """Regression: writing kernel-agent env must NOT wipe the Anthropic creds
-    the operator put in .env. A prior version unconditionally removed every
-    provider var from .env, so an Anthropic-only setup lost ANTHROPIC_API_KEY /
-    ANTHROPIC_BASE_URL right after install."""
+    """Writing kernel-agent env must NOT wipe the Anthropic creds the operator
+    put in .env (an Anthropic-only setup must keep ANTHROPIC_API_KEY /
+    ANTHROPIC_BASE_URL after install)."""
     install_script = (
         Path(setup.__file__).resolve().parents[1]
         / "agents"

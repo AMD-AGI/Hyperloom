@@ -29,10 +29,8 @@ log = logging.getLogger(__name__)
 _DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (Path("/workspace/inferencex_result.json"),)
 
 
-# Wrapper-side diagnostic files hardcoded under ``/workspace/`` (server
-# log, GPU monitor CSV, profile relay trace). Unlike
-# ``inferencex_result.json`` they don't feed measurement recovery, but
-# they live outside the per-task workspace so the NFS clone misses them;
+# Wrapper-side diagnostic files hardcoded under ``/workspace/``. They live
+# outside the per-task workspace so the NFS clone misses them;
 # :func:`harvest_leaked_artifacts` copies fresh matches in.
 _DEFAULT_LEAK_ARTIFACT_GLOBS: tuple[str, ...] = (
     "server.log",
@@ -44,8 +42,7 @@ _DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 
 # Slack subtracted from ``subprocess_started_unix`` before comparing a leak's
 # ``st_mtime``, to reject stale prior-run leaks without false-dropping fresh
-# ones. 1s absorbs clock-vs-mtime / FS-granularity skew (NFS ~1s) while
-# staying below the multi-second gap that separates genuinely stale leaks.
+# ones. 1s absorbs clock-vs-mtime / FS-granularity skew.
 _MTIME_GATE_SLACK_SEC: float = 1.0
 
 
@@ -289,11 +286,9 @@ def harvest_leaked_artifacts(
                 seen.add(resolved)
                 try:
                     resolved.relative_to(ws_resolved)
-                    # Already under the workspace — nothing to harvest.
-                    continue
+                    continue  # Already under the workspace — nothing to harvest.
                 except ValueError:
-                    # Path is outside the workspace; fall through to harvest it below.
-                    pass
+                    pass  # Outside the workspace; fall through to harvest below.
                 if not match.is_file():
                     continue
                 if subprocess_started_unix is not None:
@@ -409,10 +404,9 @@ def extract_benchmark_measurement(
         "reported_success": report.get("success") if report else None,
         "framework": report.get("framework"),
         "model": report.get("model"),
-        # Scriptable (server-less) workloads — e.g. xDiT diffusion — tag the
-        # report with workload_kind/unit and ship a quality_gate block instead
-        # of a GSM8K eval. Carried through so downstream gates/reporters can
-        # branch without re-reading the YAML.
+        # Scriptable (server-less) workloads tag the report with
+        # workload_kind/unit and ship a quality_gate block instead of a GSM8K
+        # eval; carried through so downstream gates/reporters can branch.
         "workload_kind": report.get("workload_kind"),
         "throughput_unit": report.get("throughput_unit") or throughput.get("unit"),
         "quality_gate": report.get("quality_gate"),
@@ -465,10 +459,8 @@ def extract_benchmark_measurement(
             raw = read_json(rescue_path, default=None, require_dict=True)
             if not raw or to_float(raw.get("output_throughput")) is None:
                 continue
-            # Copy the leak into the workspace BEFORE merging so
-            # ``raw_result_path`` advertises the in-workspace copy and the
-            # NFS clone stays self-contained. Best-effort: on copy failure
-            # we fall back to the leak path rather than drop the measurement.
+            # Copy the leak into the workspace BEFORE merging so the NFS clone
+            # stays self-contained. On copy failure fall back to the leak path.
             materialized = _materialize_rescue_into_workspace(
                 rescue_path,
                 workspace,
@@ -576,13 +568,9 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     if output_tput is None or output_tput <= 0:
         return False
     if _is_scriptable_measurement(result):
-        # A scriptable run whose image-quality gate failed is not a selectable
-        # result, regardless of throughput. Reuse quality_gate_passed as the
-        # single source of truth so a gate that fails on thresholds (lpips/ssim/
-        # mse) — not just an explicit passed=False — is also rejected. require=
-        # False keeps a missing/empty gate non-blocking here (parity with the
-        # prior behavior); the gate is enforced as required upstream (Magpie
-        # result.py + parse_eval_results) for the accuracy contract.
+        # A scriptable run whose image-quality gate failed is not selectable,
+        # regardless of throughput. ``require=False`` keeps a missing/empty gate
+        # non-blocking here; the gate is enforced as required upstream.
         from ._accuracy_gate import quality_gate_passed
 
         qg = result.get("quality_gate")
@@ -595,15 +583,11 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
 
 # ── Approximate throughput for killed-overtime variants ──
 #
-# A variant reaped at the soft overtime deadline never writes a
-# ``benchmark_report.json`` / ``inferencex_result.json``, so the normal
-# measurement path yields nothing. The inference engine, however, prints its
-# instantaneous decode throughput to ``server.log`` every few hundred steps:
-#   sglang: ``... gen throughput (token/s): 1234.56, #queue-req: 0``
-#   vllm:   ``... Avg generation throughput: 1234.5 tokens/s, Running: 64 ...``
-# Averaging the steady-state samples gives a rough (intentionally imprecise)
-# output-throughput estimate so the run is still legible post-mortem. This is
-# informational only — callers keep the variant marked killed/failed.
+# A variant reaped at the soft overtime deadline never writes a result file, but
+# the engine prints its instantaneous decode throughput to ``server.log``.
+# Averaging the steady-state samples gives a rough output-throughput estimate so
+# the run is still legible post-mortem. Informational only — callers keep the
+# variant marked killed/failed.
 _SGLANG_GEN_TPUT_RE = re.compile(
     r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)",
     re.IGNORECASE,
@@ -613,8 +597,8 @@ _VLLM_GEN_TPUT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Fraction of the leading (warmup/ramp-up) samples dropped before averaging so
-# the estimate reflects sustained decode rather than the cold-start climb.
+# Fraction of the leading warmup samples dropped before averaging so the
+# estimate reflects sustained decode rather than the cold-start climb.
 _DEFAULT_WARMUP_SKIP_FRAC: float = 0.25
 
 

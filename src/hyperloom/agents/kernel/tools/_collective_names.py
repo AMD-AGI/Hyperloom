@@ -2,8 +2,8 @@
 
 """Collective-kernel name detection.
 
-Name-pattern fallback for multi-GPU collectives TraceLens missed (r24
-``custom_allreduce`` regression); false positives are cheap so we bias toward them.
+Name-pattern fallback for multi-GPU collectives TraceLens missed; false
+positives are cheap so we bias toward them.
 """
 
 from __future__ import annotations

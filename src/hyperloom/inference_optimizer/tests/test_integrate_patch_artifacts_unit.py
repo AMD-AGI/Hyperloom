@@ -21,7 +21,7 @@ def _make_workspace(tmp_path: Path) -> Path:
     return ws
 
 
-# ---- _resolve_artifact_specs: sandbox validation --------------------------
+# ---- _resolve_artifact_specs: sandbox validation ----
 def test_resolve_artifact_specs_valid(tmp_path, monkeypatch):
     ws = _make_workspace(tmp_path)
     src = ws / "worktree" / "tuned.json"
@@ -200,10 +200,8 @@ def test_apply_keeps_artifact_when_not_reverted(tmp_path):
 
 # ---- _resolve_artifact_target: absolute-within-allowlist (Option A) --------
 def test_resolve_artifact_target_absolute_within_allowlist(tmp_path, monkeypatch):
-    """A specialist may author an ABSOLUTE target that points inside an
-    allowlisted framework root (e.g. the installed aiter package dir). It must
-    resolve (regression: absolute targets were rejected, dropping the tuned
-    artifact even after it was routed to integrate_patch)."""
+    """An ABSOLUTE target pointing inside an allowlisted framework root (e.g.
+    the installed aiter package dir) must resolve."""
     fw = tmp_path / "aiter"
     (fw / "configs" / "model_configs").mkdir(parents=True)
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
@@ -245,12 +243,10 @@ def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeyp
 
 
 def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_path, monkeypatch):
-    """Durable-KEEP regression: an absolute target inside an allowlisted root
-    must be recorded with a FRAMEWORK-RELATIVE ``rel_target`` so the KEEP
-    source-snapshot (which treats rel_target as framework-relative via
-    ``snapshot_source_layer``) captures the installed artifact. Previously
-    rel_target kept the raw absolute string, so the snapshot missed the artifact
-    and the KEEP did not survive resume / handoff / current_best relaunch."""
+    """An absolute target inside an allowlisted root must be recorded with a
+    FRAMEWORK-RELATIVE ``rel_target`` so the KEEP source-snapshot (which treats
+    rel_target as framework-relative via ``snapshot_source_layer``) captures the
+    installed artifact."""
     fw = tmp_path / "aiter"
     (fw / "configs" / "model_configs").mkdir(parents=True)
     ws = tmp_path / "ws"

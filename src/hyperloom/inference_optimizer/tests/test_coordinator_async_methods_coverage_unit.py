@@ -43,7 +43,6 @@ def coord(session_dir) -> Coordinator:
 # -- _promote_to_shared_state ----------------------------------------------
 @pytest.mark.asyncio
 async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator) -> None:
-    # Skip the heavy PRELUDE cascade by pre-marking a pending roofline task.
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"
     coord.shared_state.baseline_failure_streak = 2
     coord.shared_state.baseline_arg_error_streak = 1
@@ -60,7 +59,6 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
             "workspace": "/tmp/ws",
         },
     )
-    # Hot measure round is the conclusion baseline; cold warmup is audit-only.
     assert coord.shared_state.baseline_tput == 1000.0
     assert coord.shared_state.baseline_cold_tput == 900.0
     assert coord.shared_state.baseline_hot_tput == 1000.0
@@ -126,9 +124,8 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
     coord: Coordinator,
 ) -> None:
     """Mixed subprocess_nonzero + fast_exit_arg_error failures must still
-    fast-fail once 3 total baseline failures accrue — neither per-class streak
-    reaches its own threshold, so the combined backstop is what stops the run
-    (otherwise the session burns the whole budget -> time_exhausted)."""
+    fast-fail once 3 total baseline failures accrue, even though neither
+    per-class streak reaches its own threshold."""
     def _task() -> Task:
         return Task(
             task_id="bl-mixed", kind="baseline", state="running",
@@ -146,8 +143,6 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
         "baseline_failed", "baseline_arg_error",
     )
     await coord._handle_unpromotable_result(_task(), subproc)
-    # failure_streak=2 (<3) and arg_error_streak reset to 0 — neither per-class
-    # threshold trips, but 3 total failures does.
     assert coord.shared_state.baseline_failure_streak == 2
     assert coord.shared_state.baseline_total_failures == 3
     assert coord.shared_state.stop_reason == "baseline_failed"
@@ -193,7 +188,6 @@ async def test_promote_roofline_succeeded_and_skipped_and_failed(coord: Coordina
             "phase": "trace",
         },
     )
-    # failure streak bumped on the failed branch
     assert getattr(coord.shared_state, "roofline_failure_streak", 0) >= 1
 
 
@@ -247,7 +241,7 @@ async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator)
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
-    coord._run_deadline = time.monotonic() + 60.0  # < 5 min remaining
+    coord._run_deadline = time.monotonic() + 60.0
     coord.shared_state.max_minutes = 60
     coord.shared_state.closing_phase = False
     out = await coord._compose_prompt("orchestration")
@@ -273,7 +267,6 @@ def test_advisory_blocks_disabled_return_empty(coord: Coordinator) -> None:
 
 
 def test_plateau_advisory_block_no_signal(coord: Coordinator) -> None:
-    # No plateau override active -> empty advisory.
     assert isinstance(coord._plateau_advisory_block(), str)
 
 
@@ -283,7 +276,7 @@ def test_priors_match_advisory_block_no_variants(coord: Coordinator) -> None:
 
 # -- _harvest_research_scout -----------------------------------------------
 def test_harvest_research_scout_empty_and_populated(coord: Coordinator) -> None:
-    coord._harvest_research_scout({})  # no 'research' block -> fail-soft no-op
+    coord._harvest_research_scout({})
     coord._harvest_research_scout(
         {
             "research": {
@@ -312,7 +305,6 @@ def _escalate(hint: str) -> Intent:
 @pytest.mark.asyncio
 async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None:
     await coord._handle_escalate_strategy_change("orchestration", _escalate("bogus"))
-    # invalid hint isn't consumed
     assert coord.shared_state.last_consumed_escalate_hint != "bogus"
 
 
@@ -357,7 +349,6 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
         "orchestration",
         _escalate("skip_to_kernel"),
     )
-    # deferred hint queued for the next compute_next_phase
     assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
 
 
@@ -371,7 +362,6 @@ async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinat
         "orchestration",
         _escalate("skip_to_close"),
     )
-    # The premature close hint is NOT queued -> the enablement loop keeps going.
     assert coord.shared_state.pending_escalate_hint != "skip_to_close"
 
 
@@ -403,7 +393,7 @@ async def test_autosubmit_skipped_when_no_patches(coord: Coordinator) -> None:
     await coord._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": []},
-    )  # empty list -> early return
+    )
 
 
 @pytest.mark.asyncio
@@ -414,7 +404,7 @@ async def test_autosubmit_skipped_when_files_missing(coord: Coordinator) -> None
     await coord._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={"patches_written": ["ghost.py"]},
-    )  # claimed file does not exist -> records skip observation, returns
+    )
 
 
 @pytest.mark.asyncio
@@ -444,8 +434,7 @@ async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator
     """A specialist with NO source patch but a non-diff tuned artifact
     (``artifacts_written`` with a real file in its worktree) is a routable
     deliverable: autosubmit must create an integrate_patch proposal so the
-    artifact-install channel runs (regression aiter#4130: the tuned FMOE CSV was
-    silently dropped because routing keyed only on ``patches_written``)."""
+    artifact-install channel runs."""
     from hyperloom.orchestrator.state.task_registry import Task
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -478,9 +467,8 @@ async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(
 ) -> None:
     """An ``artifacts_written`` entry whose ``source`` is an ABSOLUTE path
     OUTSIDE the specialist sandbox must NOT be routable: integrate_patch would
-    reject it as ``source_outside_workspace``, so autosubmit must not burn a
-    round creating a proposal for it (source-sandbox parity with
-    ``_resolve_artifact_specs``)."""
+    reject it as ``source_outside_workspace``, so autosubmit must not create a
+    proposal for it."""
     from hyperloom.orchestrator.state.task_registry import Task
 
     outside = tmp_path / "outside.csv"
@@ -515,10 +503,9 @@ async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
     coord: Coordinator,
 ) -> None:
     """A RELATIVE artifact ``source`` that escapes the specialist sandbox via
-    ``..`` must NOT be routable, even though ``(base / source)`` resolves (the
-    OS follows ``..``) to a real file: integrate_patch rejects it as
-    ``source_outside_workspace``, so autosubmit must not route it. Full sandbox
-    parity for relative sources, not just absolute ones."""
+    ``..`` must NOT be routable, even though it resolves to a real file:
+    integrate_patch rejects it as ``source_outside_workspace``, so autosubmit
+    must not route it."""
     import os
 
     from hyperloom.orchestrator.state.task_registry import Task
@@ -548,10 +535,9 @@ async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
 @pytest.mark.asyncio
 async def test_autosubmit_routes_relative_source_in_workspace_parent(coord: Coordinator) -> None:
     """A relative artifact ``source`` that climbs out of ``worktree`` via ``..``
-    but lands INSIDE the workspace (``<spec>``) is still contained, so it MUST
-    remain routable: the sandbox tightening must not reject a legitimate
-    ``../file`` source that resolves within an allowed base (guards the
-    fail-safe / not-too-strict direction)."""
+    but lands INSIDE the workspace is still contained, so it MUST remain
+    routable: the sandbox check must not reject a legitimate ``../file`` source
+    that resolves within an allowed base."""
     from hyperloom.orchestrator.state.task_registry import Task
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -593,11 +579,10 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
     )
 
 
-# -- Journal no longer records a reverted patch as KEEP ----------------------
 def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator) -> None:
-    """Regression for the "fake KEEP" bug: a reverted integrate_patch reaches the
-    fact hook with kept=True (``status != failed`` is promotable), yet the
-    journal must record REVERT with the REAL measured delta (from delta_pct)."""
+    """A reverted integrate_patch reaches the fact hook with kept=True
+    (``status != failed`` is promotable), yet the journal must record REVERT
+    with the REAL measured delta (from delta_pct)."""
     from hyperloom.orchestrator.state.optimization_journal import (
         OUTCOME_REVERT,
     )
@@ -613,8 +598,7 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
     coord._record_fact_per_task(
         task=task,
         source_session_id="sess-a",
-        # The exact real-session signature: tput == baseline → delta_pct ~0,
-        # executor returns "reverted", dispatcher marks it promotable.
+        # tput == baseline → delta_pct ~0, executor returns "reverted", promotable.
         result_dict={
             "status": "reverted",
             "delta_pct": -0.44,
@@ -625,7 +609,7 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
     )
     entry = coord._ensure_journal().entries[-1]
     assert entry.outcome == OUTCOME_REVERT
-    assert entry.gain_pct == -0.44  # real delta shown, not null
+    assert entry.gain_pct == -0.44
     assert entry.reason and "keep_threshold" in entry.reason
 
 
@@ -652,9 +636,8 @@ def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> N
 
 
 def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coordinator) -> None:
-    """Guard the key Problem-3 constraint: we must NOT change routing — a reverted
-    integrate_patch stays promotable so it still runs the pending_integrate
-    cleanup in _promote_to_shared_state (only the journal semantics changed)."""
+    """A reverted integrate_patch stays promotable so it still runs the
+    pending_integrate cleanup in _promote_to_shared_state."""
     assert coord._is_promotable_result("integrate_patch", {"status": "reverted"}) is True
     assert coord._is_promotable_result("integrate_patch", {"status": "failed"}) is False
 
@@ -670,14 +653,13 @@ async def test_compose_prompt_orchestration_gain_objective(coord: Coordinator) -
     coord._current_objective = _Obj()
     coord.shared_state.cumulative_gain = 5.0
     await coord._compose_prompt("orchestration")
-    # target_gap_pct = max(0, 20 - 5)
     assert coord.shared_state.target_gap_pct == 15.0
 
 
 @pytest.mark.asyncio
 async def test_compose_prompt_conversational_delta(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
-    coord._orchestration_seeded = True  # DELTA turn -> push_full False
+    coord._orchestration_seeded = True
     out = await coord._compose_prompt("orchestration")
     assert "Context (pull on demand)" in out
 
@@ -685,7 +667,7 @@ async def test_compose_prompt_conversational_delta(coord: Coordinator, monkeypat
 @pytest.mark.asyncio
 async def test_compose_prompt_conversational_seed_memory(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
-    coord._orchestration_seeded = False  # SEED turn -> push_full True
+    coord._orchestration_seeded = False
     coord._orchestration_seed_memory = "=== recovered memory ==="
     out = await coord._compose_prompt("orchestration")
     assert "recovered memory" in out
@@ -717,7 +699,6 @@ def test_context_analysis_reader_fallback_path(coord: Coordinator, tmp_path) -> 
     md = tmp_path / "analysis.md"
     md.write_text("# roofline\n", encoding="utf-8")
     coord.shared_state.last_trace_analyze = {"analysis_md_path": str(md)}
-    # _format_analysis_md_full returns empty -> falls back to the path read
     coord.shared_state.analysis_md = ""
     out = coord._context_analysis_reader()
     assert isinstance(out, str)
@@ -830,7 +811,7 @@ async def test_auto_retry_caps_attempts(coord: Coordinator, monkeypatch) -> None
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY_MAX", "1")
     res = _result(result={"runner_status": "stale"}, error="timeout")
-    task = _spec_task(_auto_retry_attempt=1)  # already at cap
+    task = _spec_task(_auto_retry_attempt=1)
     assert await coord._maybe_auto_retry_specialist(task, res) is False
 
 
@@ -849,7 +830,7 @@ async def test_fan_out_wave_skips_invalid_entries(coord: Coordinator, monkeypatc
         intent,
         {"tasks": ["not-a-dict", {}, {"task_description": "   "}]},
     )
-    assert called == []  # every entry skipped, no delegate fired
+    assert called == []
 
 
 # -- _warm_specialist_params -----------------------------------------------
@@ -871,7 +852,6 @@ async def test_warm_specialist_params_fills_defaults(coord: Coordinator) -> None
 def test_cortex_finalize_recipe_and_journal_no_kb(coord: Coordinator) -> None:
     coord.shared_state.current_best = {"tput": 950.0}
     coord.shared_state.cumulative_gain_validated = 12.5
-    # cortex_kb is None in the mock harness -> journal finalize then early return
     coord.cortex_finalize_recipe_and_journal()
 
 
@@ -886,7 +866,6 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
         source_session_id="s",
         variant_outcome={"outcome": "SKIPPED_DEDUP", "variant_name": "v0"},
     )
-    # KEEP path
     coord._record_fact_per_variant(
         task=task,
         source_session_id="s",
@@ -897,7 +876,6 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
             "variant": {"name": "v1"},
         },
     )
-    # REVERT path with error_class/reason
     coord._record_fact_per_variant(
         task=task,
         source_session_id="s",

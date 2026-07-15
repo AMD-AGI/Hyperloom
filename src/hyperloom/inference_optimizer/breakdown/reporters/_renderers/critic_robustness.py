@@ -39,7 +39,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             skipped=True,
         )
 
-    # Normalize both historical shapes (V2 list[dict], V1 list[str]) into dicts.
+    # Normalize both shapes (list[dict], list[str]) into dicts.
     cr_norm: list[dict[str, Any]] = []
     for c in cr:
         if isinstance(c, dict):

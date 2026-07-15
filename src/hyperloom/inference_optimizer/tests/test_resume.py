@@ -3,8 +3,8 @@
 """Coordinator resume tests.
 
 Covers resume detection, ``replay_for_resume`` rebuilding undecided
-pending_proposals (skipping approved/rejected), pruned_families preservation,
-and lazy replay on the first ``tick()``.
+pending_proposals, pruned_families preservation, and lazy replay on the first
+``tick()``.
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ def _backends_full() -> dict[str, object]:
     }
 
 
-# Resume detection
 @pytest.mark.asyncio
 async def test_fresh_session_is_not_resume(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
@@ -78,7 +77,6 @@ async def test_existing_events_triggers_resume(session_dir):
         await c2.stop()
 
 
-# Resume rebuild — pending_proposals
 @pytest.mark.asyncio
 async def test_replay_rebuilds_undecided_proposals(session_dir):
     """One propose, no verdict → resume restores it as pending."""
@@ -261,7 +259,6 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         await c2.stop()
 
 
-# Resume + SharedState combined
 @pytest.mark.asyncio
 async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
@@ -329,9 +326,6 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
         assert len(c2.state.pending_proposals) == 1
     finally:
         await c2.stop()
-
-
-# --resume is N17-layout-aware (formerly test_n23_resume_per_session.py)
 
 
 class TestN23ResumePerSession:
@@ -426,11 +420,10 @@ class TestN23ResumePerSession:
 
 
 # _load_kernel_agent_env_fallback hard-fails on bad state
-# (formerly test_n24_kernel_agent_env_hardfail.py)
 
 
 class TestN24KernelAgentEnvHardFail:
-    """N24: a missing/empty ``kernel-agent.env.sh`` aborts with sys.exit(2) instead of warning-and-continuing."""
+    """A missing/empty ``kernel-agent.env.sh`` aborts with sys.exit(2)."""
 
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):
@@ -538,10 +531,8 @@ class TestN24KernelAgentEnvHardFail:
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/custom"
 
 
-# TraceLens root env-propagation regression: a stale/placeholder
-# TRACELENS_ROOT inherited by the coordinator must be corrected from the
-# installer-written env file, and unedited template placeholders must be
-# treated as unset, so trace_analyze never falls back to an empty pod-local dir.
+# A stale/placeholder TRACELENS_ROOT is corrected from the installer-written env
+# file; template placeholders are treated as unset.
 class TestTracelensRootEnvCorrection:
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):
@@ -632,8 +623,8 @@ class TestTracelensRootEnvCorrection:
 
     def test_check_root_noop_when_valid_or_unset(self, tmp_path, monkeypatch):
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        cli_preflight._check_tracelens_root_exists()  # unset -> no raise
+        cli_preflight._check_tracelens_root_exists()
         good = tmp_path / "TraceLens"
         good.mkdir()
         monkeypatch.setenv("TRACELENS_ROOT", str(good))
-        cli_preflight._check_tracelens_root_exists()  # valid -> no raise
+        cli_preflight._check_tracelens_root_exists()
