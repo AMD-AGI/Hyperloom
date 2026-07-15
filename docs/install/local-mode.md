@@ -132,20 +132,6 @@ source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 
 When it finishes, source `kernel-agent.env.sh` before launching.
 
-If you explicitly run the forge kernel backend, prepare KernelForge before
-`install.sh`:
-
-```bash
-export KERNEL_OPT_BACKEND_ORDER=forge
-bash src/hyperloom/inference_optimizer/assets/local_setup.sh --no-next-steps
-source "$USER_DATA_PATH/runtime/local-setup.env.sh"
-bash src/hyperloom/inference_optimizer/assets/install.sh
-source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
-```
-
-Only the forge backend requires KernelForge access. The standard LLM/runtime
-setup still happens through `install.sh`.
-
 ---
 
 ## Next Step

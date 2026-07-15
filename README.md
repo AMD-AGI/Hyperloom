@@ -23,7 +23,7 @@ Hyperloom combines:
 
 - Trace analysis through [TraceLens](https://github.com/AMD-AGI/TraceLens) and
   [Magpie](https://github.com/AMD-AGI/Magpie).
-- Kernel optimization through KernelForge, [GEAK](https://github.com/AMD-AGI/GEAK), Claude, Codex, and Cursor
+- Kernel optimization through [GEAK](https://github.com/AMD-AGI/GEAK), Claude, Codex, and Cursor
   backends.
 - A validated optimization loop that writes reproducible artifacts and
   `session_breakdown.json` for downstream consumers.
