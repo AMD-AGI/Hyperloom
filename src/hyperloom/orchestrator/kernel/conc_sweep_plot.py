@@ -11,10 +11,10 @@ Axes:
   x = output_throughput / conc  (tok/s per user — "interactivity")
   y = output_throughput / tp    (tok/s per GPU   — "efficiency")
 
-Colours follow the InferenceX palette:
-  baseline  — dark-red   ``#8B0000``
+Rendered on a black background for a high-contrast dashboard look. Colours:
+  baseline  — red        ``#FF4C4C``
   optimized — orange     ``#FF8C00``
-  ceiling   — light-grey ``#AAAAAA`` dashed
+  ceiling   — grey       ``#888888`` dashed (off by default)
 """
 
 from __future__ import annotations
@@ -36,9 +36,11 @@ def render_conc_sweep_curve(
     tp: int = 1,
     isl: int = 0,
     osl: int = 0,
-    draw_ceiling: bool = True,
+    draw_ceiling: bool = False,
 ) -> Path | None:
     """Render a throughput-vs-interactivity PNG from a ``conc_sweep_summary.json``.
+
+    Rendered on a dark (black) background for a high-contrast dashboard look.
 
     Args:
         payload: Either the already-parsed payload dict, or a file path to the
@@ -51,7 +53,7 @@ def render_conc_sweep_curve(
         isl: Input sequence length (informational, shown in title).
         osl: Output sequence length (informational, shown in title).
         draw_ceiling: When ``True`` and ``roofline_ceiling`` data is present,
-            draw a light-grey dashed theoretical peak line.
+            draw a dashed theoretical peak line. Off by default.
 
     Returns:
         The resolved ``Path`` of the written PNG, or ``None`` on any failure
@@ -183,66 +185,65 @@ def _render(
         log.debug("conc_sweep_plot: no valid data points in either arm — skipping plot")
         return None
 
+    # Dark theme palette.
+    bg = "#000000"
+    fg = "#E6E6E6"
+    grid_c = "#3A3A3A"
+    baseline_c = "#FF4C4C"
+    optimized_c = "#FF8C00"
+    ceiling_c = "#888888"
+
     fig, ax = plt.subplots(figsize=(10, 6))
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
 
     if draw_ceiling:
         ceiling_data = data.get("roofline_ceiling") or {}
         cx, cy = _ceiling_series(ceiling_data, tp_eff)
         if cx:
-            ax.plot(cx, cy, "--", color="#AAAAAA", linewidth=1.2, label="Theoretical peak (roofline)")
+            ax.plot(cx, cy, "--", color=ceiling_c, linewidth=1.2, label="Theoretical peak (roofline)")
 
     if bx:
-        ax.plot(
-            bx,
-            by,
-            "o-",
-            color="#8B0000",
-            linewidth=2,
-            markersize=6,
-            label="baseline",
-        )
+        ax.plot(bx, by, "o-", color=baseline_c, linewidth=2, markersize=6, label="baseline")
         for x, y in zip(bx, by):
             ax.annotate(
-                f"{y:.0f}", (x, y), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=7, color="#8B0000"
+                f"{y:.0f}", (x, y), textcoords="offset points", xytext=(0, 8),
+                ha="center", fontsize=7, color=baseline_c,
             )
 
     if ox:
-        ax.plot(
-            ox,
-            oy,
-            "s-",
-            color="#FF8C00",
-            linewidth=2,
-            markersize=6,
-            label="optimized",
-        )
+        ax.plot(ox, oy, "s-", color=optimized_c, linewidth=2, markersize=6, label="optimized")
         for x, y in zip(ox, oy):
             ax.annotate(
-                f"{y:.0f}",
-                (x, y),
-                textcoords="offset points",
-                xytext=(0, -14),
-                ha="center",
-                fontsize=7,
-                color="#FF8C00",
+                f"{y:.0f}", (x, y), textcoords="offset points", xytext=(0, -14),
+                ha="center", fontsize=7, color=optimized_c,
             )
 
-    ax.set_xlabel("Interactivity  (output_throughput / concurrency,  tok/s/user)", fontsize=10)
-    ax.set_ylabel(f"Efficiency  (output_throughput / tp={int(tp_eff)},  tok/s/GPU)", fontsize=10)
+    ax.set_xlabel("Interactivity  (output_throughput / concurrency,  tok/s/user)", fontsize=10, color=fg)
+    ax.set_ylabel(f"Efficiency  (output_throughput / tp={int(tp_eff)},  tok/s/GPU)", fontsize=10, color=fg)
 
     title_parts = [model_label or "Model"]
     if gpu_label:
         title_parts.append(gpu_label)
     if isl or osl:
         title_parts.append(f"ISL={isl} OSL={osl}")
-    ax.set_title("Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(title_parts), fontsize=11)
+    ax.set_title(
+        "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(title_parts),
+        fontsize=11,
+        color=fg,
+    )
 
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(True, alpha=0.3, color=grid_c)
+    ax.tick_params(colors=fg)
+    for spine in ax.spines.values():
+        spine.set_color(grid_c)
+    legend = ax.legend(loc="upper right", fontsize=9, facecolor=bg, edgecolor=grid_c)
+    for text in legend.get_texts():
+        text.set_color(fg)
     fig.tight_layout()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(out_path), dpi=150, format="png")
+    fig.savefig(str(out_path), dpi=150, format="png", facecolor=bg)
     plt.close(fig)
     log.info("conc_sweep_plot: wrote %s", out_path)
     return out_path

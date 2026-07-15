@@ -1008,7 +1008,7 @@ def _render_conc_sweep_curve_for_report(
         tp=tp,
         isl=isl,
         osl=osl,
-        draw_ceiling=True,
+        draw_ceiling=False,
     )
 
 
