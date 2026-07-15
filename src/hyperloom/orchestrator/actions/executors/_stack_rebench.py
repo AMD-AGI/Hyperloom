@@ -52,13 +52,12 @@ async def measure_stack_rebench(
 ) -> StackRebenchResult:
     """Run ``variant`` once on the stack and grade it against the floor.
 
-    ``soft_deadline_sec`` applies the existing overtime soft-kill so a
-    pathological post-sample server drain is bounded rather than running until
-    the hard ``variant_timeout_sec``. ``server_already_ready`` should be
-    ``True`` when ``server_lifecycle`` enables cleanup-reuse (the subprocess
-    re-attaches to a hot server and never writes a ready marker to its own
-    server.log, which would otherwise leave the from-ready soft clock permanently
-    un-armed).
+    ``soft_deadline_sec`` applies the overtime soft-kill so a pathological
+    post-sample server drain is bounded rather than running until the hard
+    ``variant_timeout_sec``. ``server_already_ready`` should be ``True`` when
+    ``server_lifecycle`` enables cleanup-reuse (the subprocess re-attaches to a
+    hot server and never writes a ready marker, which would otherwise leave the
+    from-ready soft clock un-armed).
     """
     output_slot.mkdir(parents=True, exist_ok=True)
     results = await run_grid(

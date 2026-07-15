@@ -63,7 +63,7 @@ def write_manifest(
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in records:
-        # final_status is only meaningful when --wait-for-completion was on.
+        # final_status is only meaningful with --wait-for-completion.
         final = r.final_status or ("-" if r.status == "submitted" else "")
         phase = "-" if r.final_phase is None else str(r.final_phase)
         artifacts_cell = f"{r.artifact_count} files in `{r.artifacts_dir}`" if r.artifact_count else "-"

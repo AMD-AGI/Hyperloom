@@ -6,9 +6,8 @@
 
 """Unit tests for the shared idle-gate helpers (_idle_gate).
 
-Locks the single source of truth consumed by both trace-analysis routes: the
-threshold resolution (default + env override + bad-value fallback) and the
-high-idle warning shape.
+Locks threshold resolution (default + env override + bad-value fallback) and
+the high-idle warning shape.
 """
 
 from __future__ import annotations

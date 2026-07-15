@@ -25,7 +25,6 @@ def _args(**over):
     return argparse.Namespace(**base)
 
 
-# -- _resolve_local_kb_root ------------------------------------------------
 def test_resolve_local_kb_root_explicit(tmp_path) -> None:
     out = cli_kb._resolve_local_kb_root(_args(local_kb_root=str(tmp_path / "kb")))
     assert out == tmp_path / "kb"
@@ -43,7 +42,6 @@ def test_resolve_local_kb_root_default(monkeypatch) -> None:
     assert out.name == "kb"
 
 
-# -- _build_recipe_kb_dispatcher -------------------------------------------
 def test_dispatcher_degraded_kb(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     kb = cli_kb._build_recipe_kb_dispatcher(_args(degraded_kb=True))
@@ -60,9 +58,7 @@ def test_dispatcher_local_only_no_gbrain(tmp_path, monkeypatch) -> None:
 
 
 def test_dispatcher_cortex_url_is_not_a_recipe_remote(tmp_path, monkeypatch) -> None:
- # CORTEX_KB_URL / --cortex-kb-url now only feed the critic agent; they must
-    # NOT wire a recipe-KB remote. Without gbrain configured, the dispatcher
-    # stays local-only even when a cortex URL is supplied.
+    # CORTEX_KB_URL / --cortex-kb-url feed only the critic agent, not a recipe-KB remote.
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     from hyperloom.orchestrator.knowledge.recipe_kb import gbrain_remote_client as grc
 
@@ -98,7 +94,6 @@ def test_dispatcher_gbrain_inline_mirror(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(grc, "build_gbrain_remote_from_env", lambda: _Remote())
     monkeypatch.setattr(gi, "build_mirror_mcp_from_env", object)
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
-    # inline mirror wraps the dispatcher
     assert isinstance(kb, gi.GbrainMirroringRecipeKB)
 
 
@@ -111,7 +106,6 @@ def test_dispatcher_gbrain_not_configured(tmp_path, monkeypatch) -> None:
     assert kb.remote is None
 
 
-# -- _attach_recipe_audit_hook ---------------------------------------------
 def test_attach_recipe_audit_hook_appends_jsonl(tmp_path) -> None:
     import json
 
@@ -144,7 +138,6 @@ def test_attach_recipe_audit_hook_unwraps_mirror(tmp_path, monkeypatch) -> None:
     kb = cli_kb._build_recipe_kb_dispatcher(_args())
     assert isinstance(kb, gi.GbrainMirroringRecipeKB)
     cli_kb._attach_recipe_audit_hook(kb, tmp_path)
-    # The hook lands on the inner RecipeKB whose reads emit the audit.
     assert callable(kb._inner.audit_hook)
 
 
@@ -156,7 +149,6 @@ def test_attach_recipe_audit_hook_noop_without_session_dir(tmp_path) -> None:
     assert kb.audit_hook is None
 
 
-# -- _bootstrap_cortex_kb --------------------------------------------------
 def test_bootstrap_cortex_kb_success(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
     monkeypatch.delenv("RECIPE_KB_REMOTE", raising=False)
@@ -169,7 +161,7 @@ def test_bootstrap_cortex_kb_success(tmp_path, monkeypatch) -> None:
         resume=False,
     )
     assert kb is not None
-    assert calls  # t0 anchor invoked
+    assert calls
 
 
 def test_bootstrap_cortex_kb_t0_failure_continues(tmp_path, monkeypatch) -> None:
@@ -191,7 +183,6 @@ def test_bootstrap_cortex_kb_t0_failure_continues(tmp_path, monkeypatch) -> None
     assert args.kb_degraded_reason == "t0_runtime_fail"
 
 
-# -- _bootstrap_knowledge_plane --------------------------------------------
 def test_bootstrap_knowledge_plane_enabled(tmp_path) -> None:
     plane = cli_kb._bootstrap_knowledge_plane(
         _args(pr_monitor_enabled=True),
@@ -241,7 +232,6 @@ def test_bootstrap_knowledge_plane_marker_write_failure(tmp_path, monkeypatch) -
     assert plane is not None
 
 
-# -- _attach_recipe_audit_hook extra branches ------------------------------
 def test_attach_recipe_audit_hook_target_without_hook_attr(tmp_path) -> None:
     """A target lacking ``audit_hook`` is a no-op (L67-68)."""
 
@@ -270,11 +260,9 @@ def test_attach_recipe_audit_hook_write_error_is_swallowed(tmp_path, monkeypatch
     bad.parent = bad  # type: ignore[assignment]
     monkeypatch.setattr(sp, "recipe_snapshot_audit_jsonl", lambda _sd: bad)
     cli_kb._attach_recipe_audit_hook(kb, tmp_path)
-    # Must not raise even though the underlying write path errors.
     kb.audit_hook({"method": "search"})
 
 
-# -- _resolve_specialist_kb_mcp --------------------------------------------
 def test_resolve_specialist_kb_mcp_override(monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_URL", "http://x/mcp")
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_KB_MCP_TOKEN", "secret")

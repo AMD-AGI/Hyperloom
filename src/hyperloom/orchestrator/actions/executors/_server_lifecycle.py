@@ -25,10 +25,9 @@ from ._subprocess_kill import _process_group_alive, _signal_group
 log = logging.getLogger(__name__)
 
 
-# Magpie built-in benchmark scripts that honour ``MAGPIE_RUN_PHASE`` and
-# support the server_lifecycle reuse protocol. Mirrors Magpie's
-# ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` (duplicated to avoid an import-time
-# Magpie dependency).
+# Magpie built-in benchmark scripts that support the server_lifecycle reuse
+# protocol. Mirrors Magpie's ``benchmarker.MAGPIE_BUILTIN_SCRIPTS`` (duplicated
+# to avoid an import-time Magpie dependency).
 MAGPIE_BUILTIN_SCRIPTS = frozenset(
     {
         "vllm_mi300x.sh",
@@ -86,9 +85,8 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     except (TypeError, ValueError):
         info["port"] = REUSE_PORT_DEFAULT
 
-    # Server-less (scriptable) frameworks — e.g. xDiT diffusion — never boot a
-    # persistent server, so the reuse protocol does not apply. Bail out before
-    # the Magpie built-in-script check (whose script names are serving-only).
+    # Server-less (scriptable) frameworks never boot a persistent server, so the
+    # reuse protocol does not apply; bail before the built-in-script check.
     from hyperloom.inference_optimizer import framework_registry
 
     if (

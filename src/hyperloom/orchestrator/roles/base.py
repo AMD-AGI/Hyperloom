@@ -87,11 +87,9 @@ class BackendError(RuntimeError):
 
 @dataclass(frozen=True)
 class RetryPolicy:
-    """Bounded exponential-backoff policy for transient LLM call failures (R6).
+    """Bounded exponential-backoff policy for transient LLM call failures.
 
-    A multi-day single-session run cannot afford to surface a transient gateway
-    stall / 5xx / connection blip as a hard turn failure. ``max_attempts`` counts
-    the FIRST try (so ``1`` disables retry). Delay grows
+    ``max_attempts`` counts the FIRST try (so ``1`` disables retry). Delay grows
     ``base_delay_s * multiplier**(attempt-1)`` capped at ``max_delay_s`` plus up
     to ``jitter_s`` of randomization.
     """

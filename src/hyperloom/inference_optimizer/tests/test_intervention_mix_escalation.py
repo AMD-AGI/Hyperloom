@@ -26,8 +26,7 @@ def test_single_config_keep_shows_counts_without_escalation():
 
 
 def test_two_consecutive_config_only_rounds_render_counter():
-    """consecutive_config_only_rounds is surfaced as a neutral count; no
-    directive is emitted."""
+    """consecutive_config_only_rounds is surfaced as a neutral count."""
     s = SharedState(session_id="im-escalate")
     s.record_intervention(change_type="config", action="explore", task_id="t1")
     s.record_intervention(change_type="config", action="explore", task_id="t2")
@@ -90,8 +89,7 @@ def test_reverted_integrate_patch_records_attempt_not_keep():
 
 
 def test_config_heavy_zero_patch_renders_counts_without_directive():
-    """Config-heavy ledger (>=5 config keeps, 0 code_patch) renders the
-    neutral counts; no directive is emitted."""
+    """Config-heavy ledger (>=5 config keeps, 0 code_patch) renders neutral counts."""
     s = SharedState(session_id="im-heavy")
     for i in range(5):
         s.record_intervention(

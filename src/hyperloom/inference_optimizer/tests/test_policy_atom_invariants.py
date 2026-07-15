@@ -2,9 +2,9 @@
 
 """atom-PolicyGate anti-regression guards.
 
-The ``framework_atom_action_unsupported`` rule scaffold (constant, helper, and
-two dispatch sites) was deleted from ``policy``; atom needs no framework-specific
-denial here. This file makes a future reintroduction intentional.
+The ``framework_atom_action_unsupported`` rule scaffold is absent from
+``policy``; atom needs no framework-specific denial. These guards make a
+future reintroduction intentional.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from hyperloom.orchestrator.policy.gate import (
 )
 
 
-# Source-level guards: the scaffold is fully removed.
+# Source-level guards.
 _POLICY_PATH = Path(policy_module.__file__)
 
 
@@ -93,8 +93,8 @@ def test_historical_rule_name_mention_is_documented_provenance_only():
     )
 
 
-# Behavioural guards: the cross-framework LLM-proposability rule still covers
-# framework under atom, keeping the LLM → framework hole closed.
+# Behavioural guards: cross-framework LLM-proposability still covers framework
+# under atom.
 class _BareSharedState:
     """Minimal SharedState surface for PolicyGate."""
 

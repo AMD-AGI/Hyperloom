@@ -23,7 +23,7 @@ def _ok_result(
     source_file: str = "",
     artifact: str = "",
 ) -> dict:
-    """kernel_optimization_handler-shaped result (mirrors test_shared_state_kernel_opt)."""
+    """kernel_optimization_handler-shaped result."""
     return {
         "status": "ok",
         "kernel_id": kernel_id,
@@ -119,7 +119,7 @@ async def test_auto_enqueue_dispatches_pending_keep_once_then_guards_inflight():
     await coord._auto_enqueue_pending_integrations()
     assert _dispatched_kids(coord) == ["k001"]
 
-    # No integrate recorded yet (request still in flight) -> no duplicate.
+    # Still in flight -> no duplicate.
     await coord._auto_enqueue_pending_integrations()
     assert _dispatched_kids(coord) == ["k001"]
 
@@ -143,7 +143,7 @@ async def test_auto_enqueue_retries_unexhausted_fault():
     await coord._auto_enqueue_pending_integrations()
     assert _dispatched_kids(coord) == ["k001"]
 
-    # The in-flight integrate completes as a fault (recorded -> count advances).
+    # In-flight integrate completes as a fault -> count advances.
     entry = state.record_kernel_integrate_result(
         _integrate_result(
             "k001",
@@ -175,7 +175,7 @@ async def test_auto_enqueue_stops_after_fault_budget_exhausted():
     )
     coord = _coord(state)
 
-    # Two faults exhaust the budget (2) -> rejected.
+    # Two faults exhaust the budget -> rejected.
     for _ in range(2):
         await coord._auto_enqueue_pending_integrations()
         state.record_kernel_integrate_result(
@@ -213,7 +213,7 @@ async def test_auto_enqueue_no_redispatch_after_keep():
     await coord._auto_enqueue_pending_integrations()
     assert _dispatched_kids(coord) == ["k001"]
 
-    # Integrate KEEPs -> lands in optimization_stack -> leaves pending.
+    # KEEP -> lands in optimization_stack -> leaves pending.
     state.record_kernel_integrate_result(
         _integrate_result(
             "k001",

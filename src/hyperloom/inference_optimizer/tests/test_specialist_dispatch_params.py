@@ -3,9 +3,8 @@
 """Dispatch-dial matrix + freeform sanity-gate tests for the unified specialist.
 
 Covers the four orthogonal dials (``scope`` / ``mode`` / ``bench`` / ``lane``)
-resolved by ``resolve_specialist_profile`` and the lightweight mechanical
-PolicyGate that guards ``scope='freeform'`` dispatches (the channel that
-absorbed the retired ``dynamic_specialist`` wave worker).
+resolved by ``resolve_specialist_profile`` and the mechanical PolicyGate that
+guards ``scope='freeform'`` dispatches.
 """
 
 from __future__ import annotations
@@ -67,13 +66,12 @@ def test_anchored_dispatch_keeps_legacy_patch_gpu_default():
 
 
 def test_unknown_values_fall_back_without_raising():
-    # Unknown scope + a domain anchor -> inferred single-domain, patch/gpu.
     prof = resolve_specialist_profile(
         {"scope": "galaxy", "mode": "telepathy", "lane": "quantum", "domain": "serving_specialist"},
     )
     assert prof.scope == DEFAULT_SCOPE
     assert prof.mode == DEFAULT_MODE
-    assert prof.lane == LANE_GPU  # mode resolved to patch -> gpu lane
+    assert prof.lane == LANE_GPU
 
 
 def test_unknown_scope_without_anchor_falls_back_to_freeform():
@@ -319,7 +317,7 @@ def test_gap_backfill_prefers_high_severity_then_least_attempted(orchestration_r
     )
     params = {"domain": "serving_specialist"}
     gate._validate_specialist_dispatch(orchestration_role, _dispatch(params))
- # framework is serving_specialist's kb_anchor, so both match; high wins.
+    # framework is serving_specialist's kb_anchor, so both match; high wins.
     assert params["gap_canonical_id"] == "gap.win"
 
 
@@ -454,9 +452,8 @@ def test_domain_gpu_request_still_governed_after_refactor(orchestration_role):
 
 def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role):
     """A bench-enabled (mode=patch & bench=true) specialist auto-defaults
-    needs_gpu=True at dispatch (_warm_specialist_params); the gate must mirror
-    that so it is rejected when the pool is disabled instead of slipping past
-    the no-needs_gpu early return and stalling as an unschedulable GPU task."""
+    needs_gpu=True at dispatch; the gate must mirror that so it is rejected
+    when the pool is disabled."""
     gate = _gate_with_gpu_capacity(0)
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
@@ -467,7 +464,7 @@ def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role
                     "task_description": "patch + bench the decode attention kernel",
                     "mode": "patch",
                     "bench": True,
-                    # NOTE: no explicit needs_gpu — the bench profile implies it.
+                    # no explicit needs_gpu — the bench profile implies it.
                 }
             ),
         )
@@ -475,20 +472,14 @@ def test_bench_specialist_without_explicit_needs_gpu_is_gated(orchestration_role
 
 
 def test_bench_specialist_whole_machine_lane_allows_full_node(orchestration_role, monkeypatch):
-    """A bench specialist takes the whole-machine, time-shared GPU lane
-    (serialized with serving via ``gpu_research_lane``; server torn down between
-    rounds), so serving occupying the whole node (TP == #GPUs) NO LONGER denies
-    it — the serving-disjoint carve does not apply to the whole-machine pool.
-
-    Regression for the EXPLORE-phase GPU-specialist fix: previously this was
-    rejected with ``specialist_gpu_request_exceeds_capacity`` (disjoint pool
-    size 0)."""
+    """A bench specialist takes the whole-machine, time-shared GPU lane, so
+    serving occupying the whole node (TP == #GPUs) does not deny it — the
+    serving-disjoint carve does not apply to the whole-machine pool."""
     for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
     gate = _gate_with_gpu_capacity(4, tp=4)
-    # gpu_count is floored to serving TP=4; the whole-machine pool has all 4
-    # cards (no serving carve), so this is now schedulable and must not raise.
+    # gpu_count floored to serving TP=4; whole-machine pool has all 4 cards.
     gate._validate_specialist_dispatch(
         orchestration_role,
         _dispatch(
@@ -551,7 +542,6 @@ def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
     """A non-bench (research) specialist needs no GPU, so the pool-disabled
     gate must NOT fire for it even when capacity is 0."""
     gate = _gate_with_gpu_capacity(0)
-    # Must not raise: research/CPU dispatch never contends for the GPU pool.
     gate._validate_specialist_dispatch(
         orchestration_role,
         _dispatch(
@@ -565,8 +555,7 @@ def test_research_specialist_without_needs_gpu_is_not_gated(orchestration_role):
 
 
 # --------------------------------------------------------------------------- #
-# Tool surface: TodoWrite and Task are granted (single-layer leaf fan-out;
-# leaves inherit the parent's VISIBLE_DEVICES so they cannot oversubscribe).
+# Tool surface: TodoWrite and Task are granted.
 # --------------------------------------------------------------------------- #
 def test_task_tool_granted_and_todowrite_granted():
     from hyperloom.orchestrator.specialists.runner import (
@@ -581,7 +570,6 @@ def test_task_tool_granted_and_todowrite_granted():
 
     runner = SpecialistRunner(backend_factory=lambda *a, **k: None)
 
-    # Default tool surface includes Task and TodoWrite.
     default_resolved = runner._resolve_tools(None)
     assert "Task" in default_resolved
     assert "TodoWrite" in default_resolved
@@ -591,13 +579,12 @@ def test_task_tool_granted_and_todowrite_granted():
 
 
 # --------------------------------------------------------------------------- #
-# domain KEY -> kb_anchor translation (fixes specialist_unknown_domain
-# on legitimate keys leaking through params.tags untranslated).
+# domain KEY -> kb_anchor translation
 # --------------------------------------------------------------------------- #
 def test_normalize_dispatch_tags_translates_key_to_anchor():
     from hyperloom.orchestrator.specialists.domains import normalize_dispatch_tags
 
- # A domain KEY in params.tags is translated to its kb_anchor.
+    # A domain KEY in params.tags is translated to its kb_anchor.
     assert normalize_dispatch_tags({"tags": ["serving_specialist"]}) == ["framework"]
     assert normalize_dispatch_tags({"tags": ["kernel_switch_specialist"]}) == ["kernel_agent"]
 
@@ -627,8 +614,7 @@ def test_normalize_dispatch_tags_domain_alias_translated():
 
 
 def test_dispatch_with_domain_key_tag_no_longer_rejected(gate, orchestration_role):
-    """The exact bug: tags=['serving_specialist'] (a KEY) used to be mis-rejected
-    as specialist_unknown_domain. It must now validate cleanly (key->framework)."""
+    """tags=['serving_specialist'] (a KEY) must validate cleanly (key->framework)."""
     gate._validate_specialist_dispatch(
         orchestration_role,
         _dispatch(
@@ -657,8 +643,7 @@ def test_dispatch_with_genuine_garbage_tag_still_rejected(gate, orchestration_ro
 
 
 def test_specialist_emit_hint_lists_all_eight_llm_domains():
-    """Fix 2: the specialist emit hint must enumerate all 8 LLM-selectable
-    domains (the two read-only scouts were previously omitted)."""
+    """The specialist emit hint must enumerate all 8 LLM-selectable domains."""
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -681,23 +666,19 @@ def test_specialist_emit_hint_lists_all_eight_llm_domains():
 
 
 # --------------------------------------------------------------------------- #
-# Medium #1 — gate gpu_count default aligned with dispatcher at serving_tp=0
+# gate gpu_count default aligned with dispatcher at serving_tp=0
 # --------------------------------------------------------------------------- #
 def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_role, monkeypatch):
-    """When serving_tp=0 (no serving yet), a bench specialist with no explicit
-    gpu_count must default to the whole-machine pool size in the gate, matching
-    the dispatcher's fallback to ``gpu_pool.capacity`` (Medium #1 fix).
-
-    Previously the gate defaulted to 1 (``serving_tp or 1``) while the
-    dispatcher fell back to the pool capacity, causing a default mismatch."""
+    """When serving_tp=0, a bench specialist with no explicit gpu_count must
+    default to the whole-machine pool size in the gate, matching the
+    dispatcher's fallback to ``gpu_pool.capacity``."""
     for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
     # tp=0: no serving, gpu_specialist_capacity=4 (4-card node).
     gate = _gate_with_gpu_capacity(4, tp=0)
-    # Must not raise: gate's default gpu_count must now be 4 (whole-machine)
-    # not 1 (the old ``serving_tp or 1`` when serving_tp=0), so the validation
-    # agrees with the dispatcher that actually leases all 4 cards.
+    # gate's default gpu_count must be 4 (whole-machine), agreeing with the
+    # dispatcher that leases all 4 cards.
     gate._validate_specialist_dispatch(
         orchestration_role,
         _dispatch(
@@ -707,7 +688,7 @@ def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(orchestration_
                 "mode": "patch",
                 "bench": True,
                 "needs_gpu": True,
-                # gpu_count omitted → gate must default to whole-machine size.
+                # gpu_count omitted → gate defaults to whole-machine size.
             }
         ),
     )

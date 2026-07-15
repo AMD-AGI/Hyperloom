@@ -197,7 +197,7 @@ def test_tracker_reset():
     assert t.last_phase == "EXPLORE"
 
 
-# ---- batch-1 #3: context-token guardrail ----
+# ---- context-token guardrail ----
 
 
 def test_context_window_known_and_unknown(monkeypatch):
@@ -234,7 +234,7 @@ def test_policy_context_token_soft_trigger():
 
 
 def test_policy_context_token_soft_disabled_by_default():
-    # Default policy has soft=0 (token trigger off) → huge token count alone does not fire.
+    # Default soft=0 → token trigger off; huge token count alone does not fire.
     p = CheckpointPolicy(on_phase_boundary=False, every_ticks=0, every_minutes=0, char_budget=0)
     assert not p.should_checkpoint(
         ticks_since_last=0,
@@ -260,12 +260,12 @@ def test_tracker_set_context_tokens_and_reset_preserves_level():
     assert t.context_tokens_now == 0
     t.set_context_tokens(123_456)
     t.reset(tick=1, minute_mark=2.0, phase="EXPLORE")
-    # reset clears the cadence counters but NOT the absolute token water level.
+    # reset clears cadence counters but NOT the absolute token water level.
     assert t.chars_since_last == 0
     assert t.context_tokens_now == 123_456
 
 
-# ---- batch-1 #1: degenerate detection + non-empty-inherit + fallback ----
+# ---- degenerate detection + non-empty-inherit + fallback ----
 
 
 def test_is_degenerate_parse_error():
@@ -323,7 +323,7 @@ def test_build_memory_record_new_value_wins():
     )
     assert rec["current_plan"] == "new"
     assert rec["hypotheses"] == ["h2"]
-    assert rec["pending"] == ["p1"]  # omitted → inherited
+    assert rec["pending"] == ["p1"]  # inherited
     assert rec["learnings"] == ["L1", "L2"]
 
 
@@ -350,6 +350,6 @@ def test_deterministic_memory_fallback_missing_attrs():
         pass
 
     fb = deterministic_memory_fallback(_Empty())
-    # Never raises; yields a usable (non-degenerate) record.
+    # Never raises; yields a usable record.
     assert fb["current_plan"].startswith("[auto]")
     assert not is_degenerate_checkpoint(fb)

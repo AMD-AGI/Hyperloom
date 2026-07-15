@@ -27,7 +27,6 @@ globals().update({k: v for k, v in vars(_delivery).items() if not k.startswith("
 
 def _sandbox_duration_seconds(last_task: dict) -> float | None:
     """SaFE-side sandbox wallclock = finishedAt - startedAt (from the task API).
-    None when either field is missing/unparseable so we don't fabricate a duration.
 
     Args:
         last_task (dict): SaFE task record carrying ``startedAt``/``finishedAt``.
@@ -55,9 +54,8 @@ def _sandbox_duration_seconds(last_task: dict) -> float | None:
 def _find_hyperloom_commit_sha(start: Path) -> str:
     """Resolve the Hyperloom git SHA the sandbox cloned (for audit fields).
 
-    First hit wins: (1) hyperloom_source_commit.txt written by the agent (depth
-    varies by which fallback collected it), then (2) the CI runner env
-    (HYPERLOOM_SOURCE_REF, else GITHUB_SHA).
+    First hit wins: (1) hyperloom_source_commit.txt written by the agent, then
+    (2) the CI runner env (HYPERLOOM_SOURCE_REF, else GITHUB_SHA).
 
     Args:
         start (Path): A path near the artifact, used to derive sibling
@@ -79,12 +77,11 @@ def _find_hyperloom_commit_sha(start: Path) -> str:
             sha = sha_path.read_text(encoding="utf-8").strip()
         except Exception:
             continue
-        # Accept only SHA-shaped strings; never trust a corrupted file.
+        # Accept only SHA-shaped strings.
         if 7 <= len(sha) <= 80 and all(c in "0123456789abcdef" for c in sha.lower()):
             return sha
 
-    # Fallback: CI runner env. HYPERLOOM_SOURCE_REF is the pinned commit
-    # (preferred); GITHUB_SHA is the unconditional fallback.
+    # Fallback: CI runner env (HYPERLOOM_SOURCE_REF preferred, then GITHUB_SHA).
     for env_var in ("HYPERLOOM_SOURCE_REF", "GITHUB_SHA"):
         env_sha = (os.environ.get(env_var) or "").strip()
         if 7 <= len(env_sha) <= 80 and all(c in "0123456789abcdef" for c in env_sha.lower()):
@@ -97,9 +94,8 @@ def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
     sandbox_duration_seconds) into ci_metrics.json / session_breakdown.json /
     manifest.json so each artifact is self-describing.
 
-    Writes the right shape per filename: ci_metrics.json → flat top-level;
-    session_breakdown.json → under session_meta; manifest.json → flat top-level
-    (V2 cli schema; category/duration are extra keys V2 ignores on re-read).
+    Shape per filename: ci_metrics.json and manifest.json → flat top-level;
+    session_breakdown.json → under session_meta.
 
     Args:
         path (Path): Target JSON file (ci_metrics / session_breakdown /
@@ -150,8 +146,7 @@ def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
             changed = True
 
     elif path.name == "session_breakdown.json":
-        # Keyed by a `session_meta` sub-dict; only write empty fields so we don't
-        # overwrite what the V2 collectors filled in.
+        # Keyed by a `session_meta` sub-dict; only write empty fields.
         meta = data.get("session_meta")
         if not isinstance(meta, dict):
             meta = {}
@@ -168,14 +163,12 @@ def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
         if rec.sandbox_duration_seconds is not None and not meta.get("session_duration_seconds"):
             meta["session_duration_seconds"] = rec.sandbox_duration_seconds
             changed = True
-        # `category` isn't in the schema but unknown fields are tolerated.
         if rec.category and not meta.get("category"):
             meta["category"] = rec.category
             changed = True
 
     elif path.name == "manifest.json":
-        # V2 cli schema: flat top-level keys, often null when the sandbox didn't
-        # set HYPERLOOM_IMAGE or git rev-parse failed; backfill from the CI side.
+        # V2 cli schema: flat top-level keys, often null; backfill from CI side.
         for key, value in {
             "model_name": rec.model,
             "claw_session_id": rec.claw_session_id,
@@ -206,13 +199,11 @@ def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
 
 def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
     """Reverse-write audit fields back into the wekafs SOURCE files so operators
-    see them under /wekafs/users/<uid>/<sess>/ without GHA artifact zips
-    (image/category/duration are SaFE-side facts the agent/V2 cli never had).
+    see them under /wekafs/users/<uid>/<sess>/ without GHA artifact zips.
 
-    Match (mirrors Stage B): exact `model` field, else conservative session-dir
-    match; only sessions modified in the last 24h. Updates ci_metrics.json,
-    manifest.json, session_breakdown[_v2].json across subdirs via
-    _backfill_ci_metrics_file. No-op when wekafs isn't mounted.
+    Match: exact `model` field, else conservative session-dir match; only
+    sessions modified in the last 24h. Updates ci_metrics.json, manifest.json,
+    session_breakdown[_v2].json across subdirs. No-op when wekafs isn't mounted.
 
     Args:
         rec (SubmissionRecord): Record used to match sessions and supply the
@@ -305,8 +296,8 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
                     continue
             except OSError:
                 continue
-            # Confirm session ownership: `model` field match (strongest), else
-            # the conservative session-dir-name heuristic.
+            # Confirm session ownership: `model` field match, else the
+            # conservative session-dir-name heuristic.
             matched = False
             for sub in subdirs:
                 ci = (
@@ -332,7 +323,7 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
                 continue
             n += _backfill_files(sess_path)
 
-        # Current layout: /wekafs/users/<uid>/<model-basename>/<YYYYmmddTHHMMSSZ>/.
+        # Layout: /wekafs/users/<uid>/<model-basename>/<YYYYmmddTHHMMSSZ>/.
         # A deleted ci_metrics.json must not block manifest.json backfill.
         if rec.safe_user_id and uid_dir != rec.safe_user_id:
             continue
@@ -495,10 +486,9 @@ def _resolve_record_claw_session_id(
 ) -> str | None:
     """Resolve a Claw session id for a submitted record.
 
-    SaFE's terminal task payload can occasionally omit ``clawSessionId`` even
-    though a subsequent task GET has it. Prefer the freshest terminal payload,
-    but fall back to the cached resolver before leaving the manifest without a
-    Claw id; otherwise Pulse classifies the dispatch as ``no_claw_session``.
+    SaFE's terminal task payload can omit ``clawSessionId`` even though a
+    subsequent task GET has it. Prefer the freshest terminal payload, else fall
+    back to the cached resolver.
     """
     for value in (
         (last_task or {}).get("clawSessionId"),

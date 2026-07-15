@@ -80,8 +80,8 @@ def test_analyze_fusion_payload():
 
 
 def test_fusable_time_and_count_cover_all_clusters_not_just_top_k():
-    # 3 fusable clusters (2 Elementwise each), separated by GEMM. With top_k=1 the
-    # LIST is capped to 1, but the total count/time must reflect ALL 3 clusters.
+    # 3 fusable clusters separated by GEMM: with top_k=1 the list is capped to 1
+    # but total count/time must reflect all 3.
     seq = []
     ts = 0.0
     for i in range(3):

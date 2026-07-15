@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Focused unit tests for ``SharedState`` helpers / audit trails (policy-denial bookkeeping, kernel-patch identity, prune families, attempt + failure logs)."""
+"""Unit tests for ``SharedState`` helpers / audit trails."""
 
 from __future__ import annotations
 
@@ -11,9 +11,6 @@ from hyperloom.orchestrator.state.shared_state import (
     _DEFAULT_LAST_FAILURES,
     SharedState,
 )
-
-
-# pruned families + policy denial book-keeping
 
 
 class TestPolicyDenialAndPruned:
@@ -96,12 +93,8 @@ class TestPolicyDenialAndPruned:
                 tick=tick,
             )
         summary = s.to_policy_denial_summary(top_k=2)
-        # Newest two rows surface in the summary.
         assert "a2" in summary
         assert "a3" in summary
-
-
-# apply_changes
 
 
 class TestApplyChanges:
@@ -120,9 +113,7 @@ class TestApplyChanges:
         assert s.model_name == "foo"
 
     def test_core_field_dropped_when_allow_core_false(self):
-        # Defense in depth: a non-privileged (allow_core=False) changes dict must
-        # not be able to write a Coordinator-only CORE_STATE_FIELDS entry, even
-        # if it reaches apply_changes off the PolicyGate-guarded intent path.
+        # A non-privileged (allow_core=False) changes dict must not write a core field.
         s = SharedState()
         before = s.cumulative_gain  # cumulative_gain is a core field
         applied = s.apply_changes(
@@ -138,9 +129,6 @@ class TestApplyChanges:
         applied = s.apply_changes({"cumulative_gain": 999.0}, allow_core=True)
         assert applied == {"cumulative_gain": 999.0}
         assert s.cumulative_gain == 999.0
-
-
-# kernel-patch identity helpers
 
 
 class TestKernelPatchIdentity:
@@ -195,9 +183,6 @@ class TestKernelPatchIdentity:
         assert SharedState().find_rejected_kernel_patch({"kernel_id": "x"}) is None
 
 
-# load_or_init / save round-trip
-
-
 class TestPersistence:
     def test_load_or_init_returns_default_when_missing(self, tmp_path):
         s = SharedState.load_or_init(tmp_path)
@@ -220,9 +205,6 @@ class TestPersistence:
         s = SharedState.from_dict(raw)
         assert s.session_id == "abc"
         assert not hasattr(s, "unknown_field")
-
-
-# Per-action attempt audit trail (record_action_attempt + <action>_attempts)
 
 
 @pytest.mark.parametrize(
@@ -263,7 +245,7 @@ def test_record_action_attempt_succeeded_populates_last_and_history(
 
 def test_record_action_attempt_failed_truncates_error_excerpt():
     s = SharedState()
-    long_err = "boom! " * 400  # > 800 chars
+    long_err = "boom! " * 400
     s.record_action_attempt(
         action="baseline",
         task_id="t-2",
@@ -294,9 +276,7 @@ def test_record_action_attempt_failed_truncates_error_excerpt():
 
 def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
     """A subprocess_nonzero baseline attempt records stderr_tail into the
-    attempts history so the breakdown exporter can surface the raw crash
-    (regression: the field was only filled on the last_action_failures
-    path, leaving baseline_attempts[].stderr_tail always None)."""
+    attempts history so the breakdown exporter can surface the raw crash."""
     s = SharedState()
     big_err = "x" * 2000 + "torch.OutOfMemoryError: HIP out of memory"
     s.record_action_attempt(
@@ -390,9 +370,6 @@ def test_save_load_round_trips_attempt_fields(tmp_path):
     assert s2.profile_attempts[-1]["extras"]["trace_path"] == "/tmp/trace.json"
 
 
-# Global last_action_failures rolling log
-
-
 def test_record_action_failure_basic_fields():
     s = SharedState()
     s.record_action_failure(
@@ -480,8 +457,7 @@ def test_save_load_round_trips_failure_log(tmp_path):
 
 
 def test_record_action_failure_captures_stderr_tail_for_kv_cache_oom():
-    # kv_cache_oom is a subprocess-style failure: its stderr tail is the whole
-    # signal, so it must be captured like subprocess_nonzero/timeout.
+    # kv_cache_oom is a subprocess-style failure, so its stderr tail is captured.
     s = SharedState()
     entry = s.record_action_failure(
         action="explore",
@@ -496,9 +472,7 @@ def test_record_action_failure_captures_stderr_tail_for_kv_cache_oom():
 
 
 def test_record_action_attempt_kv_cache_oom_captures_stderr_tail():
-    # kv_cache_oom is a subprocess-style failure, so record_action_attempt must
-    # capture its stderr_tail into <action>_attempts (parallel to the
-    # subprocess_nonzero path).
+    # record_action_attempt captures kv_cache_oom stderr_tail into <action>_attempts.
     s = SharedState()
     s.record_action_attempt(
         action="baseline",

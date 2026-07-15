@@ -2,17 +2,15 @@
 
 """Multi-node-only: per-round sglang/vllm restart helper.
 
-Single-node Magpie restarts the server on every benchmark invocation, baking
-that round's flags + profiler env into a fresh process. Multi-node used to run
-the whole grid against one long-lived server, silently dropping later variants'
-flags. This helper closes the gap: every executor calls
-:func:`restart_server_for_round` before spawning Magpie, invoking
-``multi_node restart-server`` with the round's framework/model/tp + extra-args
-(and a per-round profiler trace dir).
+Every executor calls :func:`restart_server_for_round` before spawning Magpie so
+the round's flags + profiler env are baked into a fresh server process (matching
+single-node Magpie's per-invocation restart). Invokes ``multi_node
+restart-server`` with the round's framework/model/tp + extra-args and a per-round
+profiler trace dir.
 
-No-op in single-node mode (``is_multi_node()`` False). Fail-fast: any failure
-raises :class:`ServerRestartFailed`, which callers let bubble so the round is
-marked failed rather than benchmarking a stale/half-dead server.
+No-op in single-node mode. Fail-fast: any failure raises
+:class:`ServerRestartFailed`, which callers let bubble so the round is marked
+failed rather than benchmarking a stale/half-dead server.
 """
 
 from __future__ import annotations
@@ -36,15 +34,12 @@ from ._multi_node_env import _read_state, is_multi_node
 log = logging.getLogger(__name__)
 
 
-# Default /health poll timeout (15 min, ~2x MoE cold-start headroom) so an
-# incompatible-config variant aborts promptly; override per-run via
-# HYPERLOOM_MN_HEALTH_WAIT_S.
+# Default /health poll timeout; override per-run via HYPERLOOM_MN_HEALTH_WAIT_S.
 DEFAULT_HEALTH_TIMEOUT_S = 900  # 15 min.
 
-# Magpie's sglang_mi*x.sh DEFAULT_ARGS, re-applied in multi-node so tput numbers
-# stay comparable to single-node. We diverge on --mem-fraction-static (0.75 vs
-# single-node 0.8) because cross-node RDMA buffers eat headroom (0.8 OOMs on
-# DSr1 671B FP8 when the second node joins). ``_merge_sglang_defaults`` skips a
+# Magpie's sglang_mi*x.sh DEFAULT_ARGS, re-applied in multi-node so tput stays
+# comparable to single-node. --mem-fraction-static is 0.75 (vs 0.8) because
+# cross-node RDMA buffers eat headroom. ``_merge_sglang_defaults`` skips a
 # default when the user already set ``flag_name``.
 _SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (
     ("--mem-fraction-static", "--mem-fraction-static=0.75"),
@@ -124,8 +119,7 @@ def _resolve_pd_args(
     if mode == "colocated":
         return out
 
-    # PD disaggregation requires >=2 nodes; defend against a mangled state.json
-    # so we surface a recoverable round failure, not a confusing launcher error.
+    # PD disaggregation requires >=2 nodes; defend against a mangled state.json.
     state_nodes = int(state.get("nodes") or 0)
     if state_nodes < 2:
         raise ServerRestartFailed(
@@ -172,12 +166,8 @@ def _resolve_pd_args(
         or ""
     ).strip()
     ib = (pd_ib_device or state.get("last_restart_pd_ib_device") or os.environ.get("PD_IB_DEVICE", "") or "").strip()
-    # Per-role EP / extra server args (InferenceX disagg recipes give
-    # prefill and decode different MoE topologies). Resolved from state +
-    # $PD_PREFILL_EP / $PD_DECODE_EP / $PD_PREFILL_EXTRA_ARGS /
-    # $PD_DECODE_EXTRA_ARGS only (no explicit kwarg — the prompt exports
-    # them). 0 / "" means "fall back to the shared --ep / --extra-args",
-    # so colocated and single-flag PD callers are unchanged.
+    # Per-role EP / extra server args, resolved from state + env only (no
+    # kwarg). 0 / "" falls back to the shared --ep / --extra-args.
     pep = _intf(None, "last_restart_pd_prefill_ep", "PD_PREFILL_EP")
     dep = _intf(None, "last_restart_pd_decode_ep", "PD_DECODE_EP")
     prefill_extra = (
@@ -344,7 +334,7 @@ async def restart_server_for_round(
         tp_int=tp_int,
     )
 
-    # PD-disaggregated × EP cross-check: ep must not exceed either group's TP.
+    # PD-disaggregated x EP cross-check: ep must not exceed either group's TP.
     if pd["pd_mode"] == "disaggregated" and ep_int > 1:
         min_grp_tp = min(pd["pd_prefill_tp"], pd["pd_decode_tp"])
         if ep_int > min_grp_tp:
@@ -371,15 +361,11 @@ async def restart_server_for_round(
             raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
         os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = torch_profiler_dir
     else:
-        # No profiler this round — drop stale env so the launcher doesn't
-        # reuse a previous round's path.
+        # No profiler this round — drop stale env.
         os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
 
-    # Per-variant env overrides → forwarded to the SSH-launched sglang via
-    # ``multi_node/cli.py::_collect_forward_env`` (which reads this control
-    # env). Mirrors the HYPERLOOM_MN_PROFILE_TRACE_DIR set/restore pattern:
-    # scoped to this single restart so a later arg-only round doesn't
-    # inherit this round's envs. Restored in the ``finally`` below.
+    # Per-variant env overrides, forwarded to the SSH-launched sglang. Scoped to
+    # this single restart (restored in the ``finally`` below).
     saved_fwd_env = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV")
     if extra_env:
         safe_env = filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True)
@@ -387,12 +373,10 @@ async def restart_server_for_round(
     else:
         os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
 
-    # Multi-node TraceLens SGLang patch fan-out (fail-soft). The controller
-    # can't ``import sglang`` (it lives in the pods), so the local patcher
-    # skips; without these patches the trace splitter ends every profile round
-    # in ``trace_split_no_steady_state``. Fan out (idempotent per pod) before
-    # ``cmd_restart_server``; on failure log a warning and proceed (trace
-    # unannotated, but other phases keep working).
+    # Multi-node TraceLens SGLang patch fan-out (fail-soft, idempotent per pod)
+    # before ``cmd_restart_server``. The controller can't ``import sglang`` (it
+    # lives in the pods); without these patches the trace splitter ends every
+    # profile round in ``trace_split_no_steady_state``. On failure warn and proceed.
     try:
         from ._server_patcher import _tracelens_patch_enabled
     except Exception:  # noqa: BLE001
@@ -476,8 +460,7 @@ async def restart_server_for_round(
             pd_decode_tp=pd.get("pd_decode_tp", 0),
             pd_transfer_backend=pd.get("pd_transfer_backend", ""),
             pd_ib_device=pd.get("pd_ib_device", ""),
-            # Per-role EP / extra-args (disaggregated only; 0 / "" => fall
-            # back to the shared ep / extra_args in the CLI fan-out).
+            # Per-role EP / extra-args (disaggregated only; 0 / "" => shared).
             pd_prefill_ep=pd.get("pd_prefill_ep", 0),
             pd_decode_ep=pd.get("pd_decode_ep", 0),
             pd_prefill_extra_args=pd.get("pd_prefill_extra_args", ""),
@@ -514,9 +497,8 @@ async def restart_server_for_round(
             torch_profiler_dir,
         )
 
-        # After kernel-agent patches sglang source, the resume fast-path would
-        # keep the old module imports; scope an override for this invocation so
-        # a fresh kill+launch runs.
+        # Scope an override so a fresh kill+launch runs (the resume fast-path
+        # would keep stale module imports after kernel-agent patches sglang).
         prev_resume = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING")
         if force_full_restart:
             os.environ["MULTI_NODE_RESTART_RESUME_RUNNING"] = "0"
@@ -538,8 +520,7 @@ async def restart_server_for_round(
             )
 
         # cmd_restart_server returns when actors are spawned, but a cold MoE
-        # weight-load can need 20-30 min before /health flips; poll it here so
-        # the downstream baseline doesn't fire against a not-yet-ready server.
+        # weight-load can need 20-30 min before /health flips; poll it here.
         try:
             await _wait_for_server_health_async(
                 timeout_s=health_wait_s,
@@ -555,21 +536,21 @@ async def restart_server_for_round(
         except Exception as exc:  # noqa: BLE001
             raise ServerRestartFailed(f"post-launch /health wait raised: {exc!r}") from exc
     finally:
-        # Restore env so this round's profiler path doesn't leak forward.
+        # Restore env so this round's settings don't leak forward.
         if saved_trace_env is None:
             os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
         else:
             os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = saved_trace_env
-        # Symmetric restore for the per-variant env forwarding control var.
+        # Symmetric restore for the per-variant env forwarding var.
         if saved_fwd_env is None:
             os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
         else:
             os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = saved_fwd_env
 
 
-# Dynamo system status server port (mirror of launch_dynamo_node.py
-# _DEFAULT_DYN_SYSTEM_PORT). The controller POSTs /engine/{start,stop}_profile
-# here to drive torch profiling on each disagg worker for roofline rounds.
+# Dynamo system status server port. The controller POSTs
+# /engine/{start,stop}_profile here to drive torch profiling on each disagg
+# worker for roofline rounds.
 DEFAULT_DYN_SYSTEM_PORT = 9090
 
 
@@ -601,19 +582,12 @@ async def trigger_dynamo_engine_profile(
     """Drive torch profiling on every dynamo disagg worker via the system
     server's ``/engine/{start,stop}_profile`` route.
 
-    No-op unless multi-node AND ``backend == "dynamo"``: the RayJob path
-    triggers profiling through Magpie's own /start_profile against the
-    sglang server, and single-node never reaches a multi-node restart.
+    No-op unless multi-node AND ``backend == "dynamo"``. Best-effort /
+    fail-soft: a worker that 404s or errors is logged and skipped so the
+    profile round still completes.
 
-    Best-effort / fail-soft: a worker that 404s (system server not enabled
-    on an older launch) or errors is logged and skipped so the profile
-    round still completes (an empty trace just surfaces the existing
-    roofline ``profile_no_trace`` path — no regression vs before this fix).
-
-    ``action`` is ``"start"`` or ``"stop"``. ``body`` is forwarded as the
-    JSON payload to ``start_profile`` (e.g. the optimizer-computed
-    ``PROFILE_EXTRA_BODY`` carrying start_step / num_steps); ignored for
-    stop.
+    ``action`` is ``"start"`` or ``"stop"``. ``body`` is forwarded as the JSON
+    payload to ``start_profile`` (ignored for stop).
 
     Args:
         action: ``"start"`` or ``"stop"`` — selects the engine profile route.
@@ -646,9 +620,8 @@ async def trigger_dynamo_engine_profile(
     )
     route = "start_profile" if action == "start" else "stop_profile"
     payload = dict(body or {}) if action == "start" else {}
-    # stop_profile blocks while torch.profiler flushes the (potentially
-    # large) trace to shared-FS synchronously, so it needs a much longer
-    # read timeout than the quick start_profile arm. Overridable via env.
+    # stop_profile blocks while torch.profiler flushes the trace synchronously,
+    # so it needs a much longer read timeout than start_profile. Env-overridable.
     if action == "start":
         client_timeout = 30.0
     else:
@@ -723,34 +696,20 @@ async def _wait_for_server_health_async(
         timeout_s,
         poll_every_s,
     )
-    # Dynamo-ONLY serving-readiness extension. STRICTLY gated on
-    # backend == "dynamo": for Dynamo the service_url points at the
-    # frontend, whose /health returns 200 the moment its HTTP server is up
-    # -- decoupled from whether the prefill/decode workers finished loading
-    # weights and registered with the frontend (KvStore/NATS discovery).
-    # On huge-shard models (e.g. GLM-5, 282 safetensors) the optimizer
-    # otherwise races baseline against an empty router and gets 0 completed
-    # requests -> baseline_failed. We therefore additionally require
-    # /v1/models non-empty AND a 1-token /v1/completions to succeed.
-    #
-    # Explicitly NOT applied to other backends:
-    #   * RayJob multi-node -> service_url is the sglang server itself,
-    #     whose /health already gates on weight-load; keep /health-only.
-    #   * single-node       -> never reaches here (restart_server_for_round
-    #     is a no-op when not is_multi_node).
+    # Dynamo-ONLY serving-readiness extension: for Dynamo the service_url points
+    # at the frontend, whose /health returns 200 before the prefill/decode
+    # workers have loaded weights and registered. Additionally require
+    # /v1/models non-empty AND a 1-token /v1/completions so baseline doesn't race
+    # an empty router. Other backends gate on weight-load in /health already.
     wait_model_ready = backend == "dynamo"
-    # When wait_model_ready is on, also do a 1-token completion probe to
-    # confirm workers actually serve traffic (Dynamo registers models in
-    # /v1/models before the worker is ready to accept requests; this
-    # causes the first benchmark to get 503 "Model temporarily
-    # unavailable" for every request, surfacing as `completed=0` →
-    # `baseline_failed`).
+    # The completion probe confirms workers actually serve traffic (Dynamo lists
+    # models in /v1/models before the worker accepts requests, else 503).
     models_url = service_url.rstrip("/") + "/v1/models"
     completions_url = service_url.rstrip("/") + "/v1/completions"
     health_ok_at = None
     models_ready_at = None
     consecutive_completion_ok = 0
-    # require N consecutive successful 1-token completions before declaring ready
+    # Require N consecutive 1-token completions before declaring ready.
     completion_probe_required = int(os.environ.get("HYPERLOOM_MN_COMPLETION_PROBE_COUNT", "2") or 2)
     async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:
@@ -786,7 +745,7 @@ async def _wait_for_server_health_async(
                                         len(models),
                                         health_ok_at,
                                     )
-                                # Worker-readiness probe: tiny completion
+                                # Worker-readiness probe: tiny completion.
                                 model_id = ""
                                 try:
                                     model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""

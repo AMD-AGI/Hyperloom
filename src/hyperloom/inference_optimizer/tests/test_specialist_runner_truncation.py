@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""SpecialistRunner._finalize must carry the specialist's ``proposal_set`` back unmodified (``max_proposals`` is a prompt-side target, not a runtime cap)."""
+"""SpecialistRunner._finalize must carry the specialist's ``proposal_set`` back unmodified."""
 
 from __future__ import annotations
 

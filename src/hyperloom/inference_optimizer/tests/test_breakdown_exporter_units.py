@@ -73,7 +73,7 @@ class TestCoerceRoundId:
         assert col._coerce_round_id("explore-001") == "explore-001"
 
     def test_task_id_hash_kept_as_string(self):
-        # The bug repro: a task-id hash must NOT raise on int() cast.
+        # A task-id hash must NOT raise on int() cast.
         assert col._coerce_round_id("607ba5c978a147d2a2b2ef8132fe2730") == "607ba5c978a147d2a2b2ef8132fe2730"
 
     def test_none_and_empty_collapse_to_zero(self):
@@ -83,7 +83,7 @@ class TestCoerceRoundId:
 
 class TestCollectSpecialistRuns:
     def test_hash_round_id_does_not_crash_and_is_preserved(self, tmp_path):
-        """Regression: a task-id-hash ``round_id`` used to raise ``ValueError`` and drop the whole specialist_runs section."""
+        """A task-id-hash ``round_id`` must not raise ``ValueError`` and drop the specialist_runs section."""
         warnings: list[str] = []
         state = {
             "specialist_rounds": [
@@ -105,11 +105,10 @@ class TestCollectSpecialistRuns:
         assert out[0]["round_id"] == "607ba5c978a147d2a2b2ef8132fe2730"
         assert out[1]["round_id"] == 2
         assert out[0]["proposals_kept"] == 1
-        # No ValueError surfaced into warnings for the hash round_id.
         assert not any("invalid literal" in w for w in warnings)
 
     def test_singular_domain_task_id_and_confidence_fallbacks(self, tmp_path):
-        """Rounds with singular ``domain`` / ``task_id`` + bare ``confidence`` must be surfaced rather than emitting empty fields."""
+        """Rounds with singular ``domain`` / ``task_id`` + bare ``confidence`` must be surfaced."""
         runs_dir = tmp_path / "runs" / "specialist" / "abc123"
         runs_dir.mkdir(parents=True)
         (runs_dir / "specialist_done.json").write_text(json.dumps({"domain": "comm_specialist", "proposal_set": []}))
@@ -297,9 +296,8 @@ class TestCollectRecovery:
         assert rec["steward_infra_failures_total"] == 0
 
     def test_crash_and_resume_signals_surface(self):
-        # The incident shape: crashed + steward-continued + accepted stack awaits
-        # post-resume revalidation. All must show, and epoch crash timestamps are
-        # rendered as ISO UTC.
+        # crashed + steward-continued + stack awaiting post-resume revalidation;
+        # all must show, and epoch crash timestamps render as ISO UTC.
         state = {
             "crash_count": 2,
             "crash_timestamps": [1782800000.0, 1782803600.5],
@@ -343,7 +341,7 @@ class TestCollectRecovery:
             }
         )
         assert rec["crash_count"] == 0
-        assert len(rec["crash_timestamps"]) == 1  # only the parseable epoch
+        assert len(rec["crash_timestamps"]) == 1
         assert rec["steward_infra_failures_total"] == 4
         assert rec["last_tick_exception"] is None
 

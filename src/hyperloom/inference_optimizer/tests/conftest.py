@@ -16,7 +16,7 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 @pytest.fixture(autouse=True)
 def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
-    """N17 isolation: drop the in-process session-dir pin between tests and point MULTI_NODE_STATE_FILE at a missing sentinel so tests run single-node."""
+    """Drop the session-dir pin and point MULTI_NODE_STATE_FILE at a missing sentinel so tests run single-node."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SESSION_LAYOUT", raising=False)
     mn_state_sentinel = tmp_path_factory.mktemp("mn_state") / "missing_state.json"
@@ -68,9 +68,6 @@ def seed_target_analysis_marker(session_dir: Path) -> Path:
 def session_dir(tmp_path, monkeypatch) -> Path:
     """A fresh session dir under an isolated ``USER_DATA_PATH``, seeded with the
     ``no_target_gpu_configured`` target-analysis marker.
-
-    Shared across the test package; individual modules may still shadow it with
-    a local fixture when they need different seeding.
     """
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
@@ -87,8 +84,7 @@ def init_git_repo(
     """Initialise a minimal git repo with one commit under ``path``.
 
     Seeds a single tracked file and commits it so ``git worktree add`` and
-    patch application have a base commit to branch from. A fixed non-interactive
-    author identity is used (tests do not assert on it).
+    patch application have a base commit to branch from.
     """
     path.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -118,11 +114,7 @@ def init_git_repo(
 
 
 def git_commit_all(path: Path, message: str) -> None:
-    """Stage everything under ``path`` and commit with a fixed non-interactive identity.
-
-    Mirrors the author identity used by :func:`init_git_repo` so tests do not rely
-    on a globally configured git ``user.name``/``user.email`` (absent in CI).
-    """
+    """Stage everything under ``path`` and commit with a fixed non-interactive identity."""
     env = os.environ.copy()
     env["GIT_AUTHOR_NAME"] = "Hyperloom Test"
     env["GIT_AUTHOR_EMAIL"] = "hyperloom@test.local"

@@ -106,7 +106,7 @@ def build_user_prompt(
     """
     payload = {
         "global_facts": global_facts.as_prompt_dict(),
-        # Skipped sections are withheld so the model can't "explain" a phantom section.
+        # Skipped sections are withheld.
         "sections": [_section_input(s) for s in rendered if not s.skipped],
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

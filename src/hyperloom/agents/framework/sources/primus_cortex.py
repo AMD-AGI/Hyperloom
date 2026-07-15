@@ -21,9 +21,7 @@ from ._shared import GitHubPr, _repo_slug
 
 
 class PrimusCortexError(RuntimeError):
-    """Raised when a primus-cortex request cannot be completed (CLI maps it to
-    exit code 2 via its blanket ``except Exception``).
-    """
+    """Raised when a primus-cortex request cannot be completed (CLI exit code 2)."""
 
 
 def _normalise_base_url(base_url: str) -> str:

@@ -7,20 +7,19 @@ decide whether the PR's change is **already present** in the local tree
 (``already_equivalent``), **absent but directly appliable**
 (``direct_apply``), **partially present / drifted** (``needs_rewrite``), or
 not judgeable (``unknown``). The verdict feeds the Coordinator's per-candidate
-routing so it can skip already-merged PRs and seed the authoring specialist
-with evidence instead of burning GPU on a redundant patch.
+routing so it can skip already-merged PRs and seed the authoring specialist.
 
 Two layers:
 
-* **static** (default, hermetic, no network/LLM): parse the diff, resolve each
-  touched file under ``framework_source_roots``, and measure how much of the
-  PR's added lines / symbols already exist locally + whether the diff's context
-  anchors are present (raw-apply feasibility).
+* **static** (default, hermetic): parse the diff, resolve each touched file
+  under ``framework_source_roots``, and measure how much of the PR's added
+  lines / symbols already exist locally + whether the diff's context anchors
+  are present (raw-apply feasibility).
 * **llm** (opt-in via ``use_llm``): a single chat-completion that may refine the
   static verdict. Best-effort; failure or missing creds keeps the static verdict.
 
-Per the plan's evidence rule, an ``already_*`` verdict is downgraded to
-``unknown`` when it has no concrete static evidence backing it.
+An ``already_*`` verdict is downgraded to ``unknown`` when it has no concrete
+static evidence backing it.
 """
 
 from __future__ import annotations
@@ -102,7 +101,7 @@ def _analyze_change(change: FileChange, roots: list[Path]) -> dict[str, Any]:
         "reason": "",
     }
     if change.is_new:
-        # A new file already existing locally => likely already merged.
+        # A new file existing locally => likely already merged.
         result["present_ratio"] = 1.0 if local is not None else 0.0
         result["reason"] = (
             "new-file PR target already exists locally" if local is not None else "new-file PR target absent locally"
@@ -124,7 +123,7 @@ def _analyze_change(change: FileChange, roots: list[Path]) -> dict[str, Any]:
         present = sum(1 for s in added_signal if s in local_lines)
         result["present_ratio"] = round(present / len(added_signal), 4)
     else:
-        # No added signal (pure deletion / formatting): treat as inconclusive.
+        # No added signal (pure deletion / formatting): inconclusive.
         result["present_ratio"] = 0.0
 
     ctx_signal = _signal_lines(change.context)
@@ -195,8 +194,7 @@ def _classify(
         (f.get("matched_symbols") or []) or float(f.get("present_ratio") or 0.0) > 0.0 for f in modify_files
     )
 
-    # No touched file exists in this tree => the PR is for a different package
-    # / area; raw apply impossible here.
+    # No touched file exists in this tree => raw apply impossible here.
     if not any_present:
         return _verdict(
             candidate_id=candidate_id,
@@ -212,7 +210,7 @@ def _classify(
     # Strongly present everywhere => already merged / equivalent.
     if all_present and mean_present >= ALREADY_PRESENT_RATIO:
         if not has_concrete_evidence:
-            # Evidence-gating: never claim "already" without a concrete hit.
+            # Never claim "already" without a concrete hit.
             return _verdict(
                 candidate_id=candidate_id,
                 semantic_status="unknown",
@@ -306,9 +304,7 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
     src_framework = str(request.get("framework") or "").strip().lower()
     dst_framework = str(request.get("target_framework") or "").strip().lower()
     if dst_framework and dst_framework != src_framework:
-        # Lazy import on purpose: keeps audit -> cross_framework off the
-        # module-level import graph so the audit<->cross_framework cycle stays
-        # broken (shared helpers live in the leaf module _audit_common).
+        # Lazy import to keep the audit<->cross_framework import cycle broken.
         from .cross_framework import run_cross_framework_audit
 
         result = run_cross_framework_audit(request)
@@ -432,8 +428,7 @@ def _maybe_llm_refine(
     if status not in _SEMANTIC_STATUSES or appl not in _APPLICABILITIES:
         static_result.setdefault("risks", []).append("llm refine produced invalid enum; kept static")
         return static_result
-    # Evidence-gating still applies: don't let the LLM upgrade to already_* with
-    # no static evidence behind it.
+    # Don't let the LLM upgrade to already_* with no static evidence.
     if status.startswith("already_") and not static_result.get("evidence"):
         static_result.setdefault("risks", []).append("llm already_* claim rejected (no static evidence)")
         return static_result
