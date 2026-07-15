@@ -61,6 +61,7 @@ def build_server_command(
     max_model_len: int | None,
     extra_args: list[str],
     profile_dir: str | None,
+    python_exe: str = "python3",
 ) -> list[str]:
     """Build the per-framework server launch argv.
 
@@ -72,6 +73,12 @@ def build_server_command(
         max_model_len: Optional max model length (vllm/atom).
         extra_args: Already-tokenized extra server args.
         profile_dir: Torch profiler dir when profiling, else None.
+        python_exe: Interpreter used to launch python-module servers
+            (sglang/atom); defaults to a PATH ``python3``. Callers should pass
+            the interpreter running the bypass runner so the server loads the
+            SAME venv (avoids a PATH ``python3`` that cannot import the
+            framework). vllm uses its own ``vllm`` console script and ignores
+            this.
 
     Returns:
         The server launch argv list.
@@ -82,7 +89,7 @@ def build_server_command(
     fw = framework.lower()
     if fw == "sglang":
         cmd = [
-            "python3", "-m", "sglang.launch_server",
+            python_exe, "-m", "sglang.launch_server",
             "--model-path", model,
             "--host", "0.0.0.0",
             "--port", str(port),
@@ -110,7 +117,7 @@ def build_server_command(
         return cmd + list(extra_args)
     if fw == "atom":
         cmd = [
-            "python3", "-m", "atom.entrypoints.openai_server",
+            python_exe, "-m", "atom.entrypoints.openai_server",
             "--model", model,
             "-tp", str(tp),
             "--server-port", str(port),

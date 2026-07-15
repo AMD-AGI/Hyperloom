@@ -190,7 +190,7 @@ def run_benchmark(
     server_log = workspace / "server.log"
     base_url = f"http://127.0.0.1:{port}"
 
-    # Multi-node remote client: Hyperloom injects BENCHMARK_BASE_URL (+ 
+    # Multi-node remote client: Hyperloom injects BENCHMARK_BASE_URL (+
     # MAGPIE_RUN_PHASE=client) so the benchmark targets a head-pod server
     # instead of launching one locally. bypass mirrors that: no local server,
     # client (+eval) against the remote base_url, no teardown (remote server is
@@ -280,6 +280,7 @@ def run_benchmark(
         server_cmd = bypass_engine.build_server_command(
             framework=framework, model=model, tp=tp, port=port,
             max_model_len=max_model_len_i, extra_args=extra_args, profile_dir=profile_dir,
+            python_exe=sys.executable,
         )
     except ValueError as exc:
         _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
@@ -319,6 +320,7 @@ def _run_server_phase(
         server_cmd = bypass_engine.build_server_command(
             framework=framework, model=model, tp=tp, port=port,
             max_model_len=max_model_len, extra_args=extra_args, profile_dir=profile_dir,
+            python_exe=sys.executable,
         )
     except ValueError as exc:
         _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)
@@ -396,6 +398,7 @@ def _run_lifecycle_all(
         server_cmd = bypass_engine.build_server_command(
             framework=framework, model=model, tp=tp, port=port,
             max_model_len=max_model_len, extra_args=extra_args, profile_dir=profile_dir,
+            python_exe=sys.executable,
         )
     except ValueError as exc:
         _emit_failure(output_dir, framework, model, str(exc), workspace=workspace)

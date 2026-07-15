@@ -42,6 +42,23 @@ def test_preflight_gates_magpie_on_backend():
     assert "3. InferenceX" in src
 
 
+def test_preflight_resolves_interpreter_via_backend_not_magpie():
+    """A bypass-only environment must not route installs through Magpie's venv.
+
+    The benchmark interpreter is resolved via ``resolve_benchmark_interpreter``
+    (sys.executable for bypass, the Magpie venv for Magpie), and preflight no
+    longer calls ``_resolve_magpie_python()`` unconditionally up front.
+    """
+    src = inspect.getsource(preflight_mod._preflight)
+    assert "resolve_benchmark_interpreter" in src
+    # Ray installs with the backend interpreter, not a hardcoded Magpie one.
+    assert "benchmark_python" in src
+    assert "[benchmark_python, \"-m\", \"pip\", \"install\"" in src
+    # Magpie interpreter is no longer resolved unconditionally in _preflight;
+    # it comes through resolve_benchmark_interpreter for the Magpie backend.
+    assert "_resolve_magpie_python" not in src
+
+
 def test_install_sh_gates_magpie_calls():
     install_sh = (
         Path(preflight_mod.__file__).resolve().parent.parent

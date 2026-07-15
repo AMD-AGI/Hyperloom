@@ -702,9 +702,20 @@ def _preflight(
                 os.environ[alias] = safe_key
                 print(f"Preflight: filled {alias} from SAFE_API_KEY")
     # --- Resolve install interpreters ---
-    from hyperloom.orchestrator.actions.executors._grid_runner import _resolve_magpie_python
+    # Resolve the ACTIVE benchmark backend first so a bypass-only environment
+    # (no Magpie / no /opt/venv) never routes installs through Magpie's
+    # interpreter. ``resolve_benchmark_interpreter()`` returns the current
+    # interpreter for bypass and the Magpie-importable venv for Magpie, so the
+    # bypass path never resolves the Magpie venv.
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
+        resolve_backend_name as _resolve_active_backend_name,
+        resolve_benchmark_interpreter as _resolve_benchmark_interpreter,
+    )
 
-    magpie_python = _resolve_magpie_python()
+    _magpie_backend_active = _resolve_active_backend_name() == "magpie"
+    # Interpreter used for benchmark-runtime installs (Ray). For bypass this is
+    # sys.executable; for Magpie it's the Magpie-importable venv.
+    benchmark_python = _resolve_benchmark_interpreter()
 
     # Outside a venv, add --break-system-packages so pip installs on bare-metal Debian/Ubuntu.
     pip_extra: list[str] = []
@@ -784,32 +795,33 @@ def _preflight(
     _check_shm_disk()
 
     # --- Runtime dep install ---
-    # 1. Ray — needed by Magpie for task scheduling even without kernel-agent.
+    # 1. Ray — used broadly (multi-node scheduling, kernel/profile/recover
+    # executors), not only by Magpie, so it is installed regardless of backend.
+    # Install it with the active backend's interpreter so a bypass-only box
+    # gets Ray in its own venv instead of Magpie's.
     if shutil.which("ray") is None:
         print("Preflight: ray not found, installing ray[default]==2.44.1 + click<8.3.0 ...")
         subprocess.run(
-            [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
+            [benchmark_python, "-m", "pip", "install", "--quiet", *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
             check=True,
         )
         print("Preflight: ray installed OK")
 
     # 2. Magpie — the benchmark engine the Magpie backend shells out to
-    # ($MAGPIE_PATH override; auto-clones if missing). Skipped when the active
-    # benchmark backend does not need Magpie (e.g. bypass).
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
-        resolve_backend_name as _resolve_active_backend_name,
-    )
-    _magpie_backend_active = _resolve_active_backend_name() == "magpie"
+    # ($MAGPIE_PATH override; auto-clones if missing). Skipped entirely when the
+    # active benchmark backend does not need Magpie (e.g. bypass): for the
+    # Magpie backend ``benchmark_python`` already resolves to the
+    # Magpie-importable venv (via resolve_benchmark_interpreter), so a
+    # bypass-only environment never resolves the Magpie venv / /opt/venv.
+    magpie_python = benchmark_python
     if not _magpie_backend_active:
         print(
             f"Preflight: benchmark backend is "
             f"{_resolve_active_backend_name()!r}; skipping Magpie install/import"
         )
-    check = (
-        subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
-        if _magpie_backend_active
-        else None
-    )
+        check = None
+    else:
+        check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
     if _magpie_backend_active and check is not None and check.returncode != 0:
         magpie_env = os.environ.get("MAGPIE_PATH")
         magpie_env_explicit = bool(magpie_env)

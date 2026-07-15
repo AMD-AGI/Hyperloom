@@ -113,6 +113,44 @@ def test_read_log_present_and_missing(tmp_path):
     assert bypass_runner._read_log(path) == "hello\n"
 
 
+def test_run_benchmark_launches_server_with_current_interpreter(tmp_path, monkeypatch):
+    """The sglang server subprocess must use the runner's own interpreter.
+
+    Regression: a PATH ``python3`` in a different venv cannot import sglang, so
+    the runner must pass sys.executable to build_server_command.
+    """
+    import sys
+
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, inferencex)
+
+    captured = {}
+    real_build = bypass_engine.build_server_command
+
+    def spy_build(**kwargs):
+        captured["python_exe"] = kwargs.get("python_exe")
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(bypass_engine, "build_server_command", spy_build)
+
+    class _FakeServer:
+        pid = 1
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+    _fake_client_run(monkeypatch)
+
+    rc = bypass_runner.run_benchmark(cfg_path, tmp_path / "out")
+    assert rc == 0
+    assert captured.get("python_exe") == sys.executable
+
+
 def test_server_command_sglang():
     cmd = bypass_engine.build_server_command(
         framework="sglang", model="/m", tp=2, port=8888,
@@ -121,6 +159,31 @@ def test_server_command_sglang():
     assert cmd[:3] == ["python3", "-m", "sglang.launch_server"]
     assert "--tensor-parallel-size" in cmd and "2" in cmd
     assert cmd[-2:] == ["--foo", "1"]
+
+
+def test_sglang_atom_server_command_honors_python_exe():
+    """sglang/atom launch under the provided interpreter (not a PATH python3)."""
+    sglang = bypass_engine.build_server_command(
+        framework="sglang", model="/m", tp=1, port=8888,
+        max_model_len=None, extra_args=[], profile_dir=None,
+        python_exe="/opt/venvA/bin/python",
+    )
+    assert sglang[0] == "/opt/venvA/bin/python"
+
+    atom = bypass_engine.build_server_command(
+        framework="atom", model="/m", tp=1, port=8888,
+        max_model_len=None, extra_args=[], profile_dir=None,
+        python_exe="/opt/venvA/bin/python",
+    )
+    assert atom[0] == "/opt/venvA/bin/python"
+
+    # vllm uses its own console script and ignores python_exe.
+    vllm = bypass_engine.build_server_command(
+        framework="vllm", model="/m", tp=1, port=8888,
+        max_model_len=None, extra_args=[], profile_dir=None,
+        python_exe="/opt/venvA/bin/python",
+    )
+    assert vllm[:2] == ["vllm", "serve"]
 
 
 def test_server_command_vllm_max_len():
