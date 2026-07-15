@@ -1,7 +1,7 @@
 """Tests for the unified KB-interface convergence.
 
 Covers the cross-cutting behaviour that the cortex-KB and gbrain
-adapters now share:
+adapters share:
 
 * the dispatcher runs a SINGLE ``_v2_to_arbor`` translation on any
   remote row (no per-backend ``returns_arbor_shape`` branch);
@@ -40,15 +40,12 @@ from hyperloom.orchestrator.knowledge.recipe_kb.dispatcher import (
 )
 
 
-# ===========================================================================
-# Fakes
-# ===========================================================================
 class _NestedRemote:
     """A remote that returns the unified nested KB-interface envelope.
 
-    Stands in for BOTH cortex and gbrain: the dispatcher must run the
-    same ``_v2_to_arbor`` translation regardless of which one served the
-    row. ``search`` filters by ``label_match`` against ``labels``.
+    Stands in for both cortex and gbrain: the dispatcher runs the same
+    ``_v2_to_arbor`` translation regardless of which served the row.
+    ``search`` filters by ``label_match`` against ``labels``.
     """
 
     enabled = True
@@ -96,8 +93,7 @@ def _nested_row(
         "best_config": {"extra_server_args": args, "extra_envs": dict(envs or {})},
         "best_throughput": throughput,
     }
-    # tp rides as a top-level extra so it survives _v2_to_arbor and the
-    # dispatcher rerank can read it.
+    # tp rides as a top-level extra so it survives _v2_to_arbor and the rerank can read it.
     row: dict[str, Any] = {
         "canonical_id": cid,
         "version": 1,
@@ -123,9 +119,7 @@ def _nested_row(
     return row
 
 
-# ===========================================================================
 # Single-translation: dispatcher always runs _v2_to_arbor on remote rows
-# ===========================================================================
 def test_dispatcher_translates_nested_remote_row(tmp_path: Path) -> None:
     cid = recipe_canonical_id(
         model="qwen3-32b",
@@ -157,9 +151,7 @@ def test_dispatcher_translates_nested_remote_row(tmp_path: Path) -> None:
     assert float(row["best_throughput"]) == pytest.approx(5430.9)
 
 
-# ===========================================================================
 # prefer rerank — reorders, never drops; required filter unchanged
-# ===========================================================================
 def test_prefer_score_counts_matches() -> None:
     row = {"framework_version": "0.5.11", "tp": 8, "conc": 32}
     assert _prefer_score(row, {"tp": 8}) == 1
@@ -217,9 +209,7 @@ def test_search_prefer_reorders_without_dropping(tmp_path: Path) -> None:
     assert remote.last_prefer == {"tp": 8}
 
 
-# ===========================================================================
 # seed-only detection + WarmStartContext
-# ===========================================================================
 def test_recipe_is_actionable() -> None:
     assert _recipe_is_actionable({"best_config": {"extra_server_args": "--x 1"}})
     assert _recipe_is_actionable({"best_config": {"extra_envs": {"A": "1"}}})
@@ -278,9 +268,7 @@ def test_build_warm_start_context_non_hit_has_empty_replay(status: str) -> None:
     assert ctx["do_not_repeat"] == []
 
 
-# ===========================================================================
 # T0 status matrix end-to-end (local-only dispatcher)
-# ===========================================================================
 @dataclass
 class _FakeState:
     cortex_session_id: str = ""

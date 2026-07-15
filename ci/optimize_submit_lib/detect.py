@@ -48,18 +48,16 @@ class DetectedConfig:
     image: str
     params_b: float
     max_context_tokens: int
-    # Raw ``config.json`` ``max_position_embeddings`` (0 when absent); used for
-    # the absolute small-context skip floor (``MIN_MAX_POSITION_EMBEDDINGS``).
+    # Raw config.json max_position_embeddings (0 when absent).
     max_position_embeddings: int = 0
-    # Raw ``config.json`` dict, used by the shared model_compat pre-flight.
+    # Raw config.json dict, used by the shared model_compat pre-flight.
     raw_config: dict = field(default_factory=dict)
 
 
 def _quant_type(config: dict) -> str:
     """Read the quantization tag from HF config.json (vendors disagree on the
-    field name). Priority: quant_algo (NVIDIA modelopt — quant_method there is
-    just the tool name) > quant_type > quantization_type > quant_method
-    (current de-facto standard) > method. First non-empty wins, lowercased.
+    field name). Priority: quant_algo > quant_type > quantization_type >
+    quant_method > method. First non-empty wins, lowercased.
 
     Args:
         config (dict): A HF ``config.json`` dict.
@@ -198,8 +196,7 @@ def context_too_short(
 
 def detect_tp(params_b: float, precision: str = "BF16", gpu_type: str | None = None) -> int:
     """Pick tensor parallelism from param count and GPU profile. precision is
-    kept for API compatibility but unused — CI policy stays predictable across
-    precision variants of the same model family.
+    kept for API compatibility but unused.
 
     Args:
         params_b (float): Parameter count in billions.
@@ -226,10 +223,9 @@ def detect_tp(params_b: float, precision: str = "BF16", gpu_type: str | None = N
 def detect_concurrency(tp: int, framework: str) -> int:
     """Pick a benchmark concurrency from tensor-parallel size and framework.
 
-    CI policy is now a single fixed concurrency of 64 across every framework
-    and TP size, so benchmark load stays directly comparable between models
-    regardless of how they are sharded or served. ``tp`` / ``framework`` are
-    kept for API compatibility.
+    CI policy is a single fixed concurrency of 64 across every framework and TP
+    size, so benchmark load stays comparable between models. ``tp`` /
+    ``framework`` are kept for API compatibility.
 
     Args:
         tp (int): Tensor-parallel size.
@@ -244,22 +240,14 @@ def detect_concurrency(tp: int, framework: str) -> int:
 def _sglang_image_for(repo_id: str = "") -> str:
     """Pick the sglang image, honoring per-model baseline-arch needs.
 
-    Default is the v0.5.12 profilerfix image. Older branches carried a MiMo-V2
-    exception that pinned ``primussafe/sglang:v0.5.11-rocm720-mi30x-mimo-
-    profilerfix`` because the then-current profilerfix image did not register
-    ``MiMoV2ForCausalLM``. The v0.5.12 profilerfix image now includes the MiMo
-    model files, so MiMo should use the same current base as other SGLang
-    models. It is still paired with ``--attention-backend triton`` (injected in
-    ``_workload_envs.materialize_config_with_envs``) to dodge the aiter
-    attention CUDA-graph-capture SIGABRT.
+    Returns the default v0.5.12 profilerfix image.
 
     Args:
         repo_id (str): Model repo id, matched on its basename for overrides.
 
     Returns:
-        str: The default sglang image. ``repo_id`` is accepted for backward
-        compatibility (and future per-model overrides) but no longer triggers a
-        MiMo-specific image; MiMo runs on the same default base.
+        str: The default sglang image. ``repo_id`` is accepted for future
+        per-model overrides.
     """
     return _default_sglang_image()
 
@@ -267,11 +255,9 @@ def _sglang_image_for(repo_id: str = "") -> str:
 def _vllm_image_for(repo_id: str = "") -> str:
     """Pick the vLLM image, honoring per-model baseline-arch needs.
 
-    Default is the standard vLLM image. Gemma-4 (e.g. google/gemma-4-26B-A4B-it)
-    is the exception: the stock vLLM build does not serve the gemma-4 arch, so it
-    needs the dedicated gemma4 image. Matched on the repo basename so it fires
-    for the HF repo id regardless of org casing. Only consulted on the vLLM path
-    (sglang is unaffected).
+    Default is the standard vLLM image; Gemma-4 needs the dedicated gemma4 image
+    since the stock build does not serve the gemma-4 arch. Matched on the repo
+    basename.
 
     Args:
         repo_id (str): Model repo id, matched on its basename for overrides.
@@ -325,8 +311,7 @@ def auto_detect(hf: HuggingFaceClient, repo_id: str, gpu_type: str | None = None
 
     arch = (config.get("architectures") or ["unknown"])[0]
 
-    # Refuse non-generative repos even with explicit --model: sglang/vllm won't
-    # start a server for them and the task would just burn a sandbox slot.
+    # Refuse non-generative repos: sglang/vllm won't serve them.
     if not is_generative_arch(arch):
         log.error(
             "[%s] arch=%s is not a generative LM "

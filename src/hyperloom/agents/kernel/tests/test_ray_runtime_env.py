@@ -60,14 +60,13 @@ def test_single_gateway_provider_key_never_overrides_safe(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("SAFE_API_KEY", "ak-safe")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    # A stray explicit provider key is preserved (setdefault no-op) but does not
-    # become the derivation source for the other aliases.
+    # A stray explicit provider key is preserved but is not the derivation source.
     monkeypatch.setenv("OPENAI_API_KEY", "sk-stray")
 
     env = ray_runtime.safe_runtime_env()["env_vars"]
 
-    assert env["OPENAI_API_KEY"] == "sk-stray"  # explicit value preserved
-    # All *derived* aliases still come from SAFE_API_KEY, not the stray key.
+    assert env["OPENAI_API_KEY"] == "sk-stray"
+    # Derived aliases still come from SAFE_API_KEY.
     for alias in ("GEAK_API_KEY", "LLM_API_KEY", "AMD_LLM_API_KEY", "LLM_GATEWAY_KEY"):
         assert env[alias] == "ak-safe", alias
 
@@ -87,7 +86,6 @@ def test_split_gateway_geak_takes_openai_key(monkeypatch):
     # Explicit provider keys are preserved as-is.
     assert env["OPENAI_API_KEY"] == "sk-openai"
     assert env["ANTHROPIC_API_KEY"] == "sk-ant"
-    # GEAK hits the OpenAI-side endpoint.
     assert env["GEAK_BASE_URL"] == "https://api.openai.com/v1"
 
 
@@ -99,7 +97,7 @@ def test_split_anthropic_only_reuses_url_and_key_for_openai_side(monkeypatch):
 
     env = ray_runtime.safe_runtime_env()["env_vars"]
 
-    # No SAFE/OPENAI key, but the Anthropic key backfills the OpenAI side.
+    # The Anthropic key backfills the OpenAI side.
     assert env["GEAK_API_KEY"] == "sk-ant"
     assert env["GEAK_BASE_URL"] == "https://api.anthropic.com"
 

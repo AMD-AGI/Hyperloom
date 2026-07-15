@@ -91,13 +91,8 @@ class BenchmarkAnalyzer:
                 start = node.lineno - 1
                 end = node.end_lineno or node.lineno
                 block = "\n".join(self.lines[start:end])
-                # ast.walk also yields imports nested inside functions / classes /
-                # try blocks, which keep their source indentation. Emitted verbatim
-                # at the harness module top level they raise "unexpected indent" and
-                # break static_check (the whole harness is then unusable). Dedent
-                # each block so a function-local ``    import math`` becomes a valid
-                # top-level ``import math``; module-level imports (no indent) are
-                # unchanged.
+                # Dedent so nested (function/class-local) imports become valid
+                # top-level imports; module-level imports are unchanged.
                 import_lines.append(textwrap.dedent(block))
         return import_lines
 
@@ -206,8 +201,11 @@ class BenchmarkAnalyzer:
         return ref, kernel
 
     def get_test_function(self, decorated: dict[str, FuncInfo]) -> FuncInfo | None:
-        """Find the main test/benchmark orchestrator function."""
-        # Prefer a @benchmark-decorated function; else a top-level test_*/bench_* caller.
+        """Find the main test/benchmark orchestrator function.
+
+        Prefers a @benchmark-decorated function, else a top-level
+        test_*/bench_* caller.
+        """
         for fi in decorated.values():
             if fi.decorator == "benchmark":
                 return fi
@@ -397,11 +395,9 @@ def _is_heterogeneous_multi_tensor(candidate: dict) -> bool:
 
     The generic ``_build_configs`` path assumes a single GEMM-like operand whose
     leading dim is swept (M×N×K). When TraceLens captures an op with several
-    *different-rank* tensors (e.g. paged attention: query (b,h,d), KV cache
-    (pages,1,h,d), kv_indptr (n,), workspace (bytes,) ...) that assumption is
-    wrong: ``_build_configs`` keeps only the highest-rank shapes and drops the
-    rest, silently fabricating a GEMM harness that mismeasures the real op. We
-    detect that here so the caller can REFUSE to fabricate rather than guess.
+    different-rank tensors that assumption is wrong: ``_build_configs`` keeps
+    only the highest-rank shapes and drops the rest. Detecting that here lets the
+    caller REFUSE to fabricate rather than guess.
 
     Heuristic: >=2 input_shapes with >=2 distinct ranks (dim counts). Same-rank
     multi-shape (a normal shape sweep) is fine and returns False.
@@ -469,14 +465,11 @@ def _generate_setup_inputs(
 
     Inputs are created for the UNION of the kernel and reference function
     parameters, so ``run_ref`` can never reference a key that ``setup_inputs``
-    did not create (root cause of the forge smoke-test ``KeyError`` that made
-    every attention-kernel session spin with zero gain).
+    did not create.
 
     Parameter element type is inferred from the parameter-name class
     (index / int-scalar / float-scalar / dtype / weight) instead of defaulting
-    every argument to a 2D float tensor, which previously produced invalid
-    inputs (e.g. float ``block_tables`` / ``seq_lens``) that crashed on the
-    very first call.
+    every argument to a 2D float tensor.
     """
     dim_vars = cfg_unpack.replace(" = cfg", "").split(", ")
     dim_vars = [v.strip() for v in dim_vars if v.strip() != "dtype"]
@@ -493,8 +486,7 @@ def _generate_setup_inputs(
     shape_2d = ", ".join(dim_vars[:2]) if len(dim_vars) >= 2 else dim_vars[0]
     shape_1d = dim_vars[-1] if dim_vars else "N"
 
-    # Union of kernel + ref params (dedup by name, preferring a concrete
-    # literal call value when one is available).
+    # Union of kernel + ref params, preferring a concrete literal call value.
     used_params: list[tuple[str, str | None]] = []
     index_of: dict[str, int] = {}
     for fn in (kernel_func, ref_func):
@@ -514,7 +506,7 @@ def _generate_setup_inputs(
         p_lower = param_name.lower()
 
         # A literal call arg is stored directly.
-        if call_value and not _is_variable(call_value):
+        if call_value and not _is_variable(call_value):  # A literal call arg.
             lines.append(f"    {param_name} = {call_value}")
         elif _is_dtype_param(p_lower):
             lines.append(f"    {param_name} = dtype")
@@ -763,15 +755,14 @@ def _generate_run_func_body(
 
     if call:
         used = _match_call_args_to_params(call, params)
-        # Use .get so a ref-only param missing from setup_inputs degrades to
-        # None instead of raising KeyError at smoke-test time.
+        # .get so a ref-only param missing from setup_inputs degrades to None.
         args_parts: list[str] = [f'inputs.get("{param_name}")' for param_name, _ in used]
     else:
         args_parts = [f'inputs.get("{p}")' for p in params]
 
     call_str = f"    result = {target_func.name}({', '.join(args_parts)})"
     lines = [call_str]
-    # Unwrap nested @perftest tuples down to the func result.
+    # Unwrap nested @perftest tuples.
     lines.append("    while isinstance(result, tuple) and len(result) >= 2:")
     lines.append("        result = result[0]")
     lines.append("    return result")
@@ -1132,18 +1123,13 @@ def _try_generate_aiter_harness(
     imports = analyzer.get_imports()
     if not any("aiter" in imp for imp in imports):
         return None
-    # Recognize both aiter perf decorators. Many aiter op_tests time the op with
-    # @perftest rather than @benchmark (e.g. test_batch_prefill.py), so matching
-    # only @benchmark misses them and forces the weaker generic path. A bare
-    # passthrough wrapper (e.g. @perftest def profile_func(target_func, *args,
-    # **kwargs)) carries no mappable shape params and is filtered by the kwargs
-    # guard below, so widening to @perftest only adds real benchmark fns.
+    # Recognize both aiter perf decorators (@benchmark and @perftest); passthrough
+    # wrappers carry no mappable shape params and are filtered by the kwargs guard.
     bench_fns = [fi for fi in decorated.values()
                  if fi.decorator in ("benchmark", "perftest")]
     if not bench_fns:
         return None
-    # Pick the first perf fn that actually times an op (run_perftest / aiter.<op>);
-    # this also skips passthrough wrappers whose body just forwards to target_func.
+    # Pick the first perf fn that actually times an op (run_perftest / aiter.<op>).
     test_fn = next(
         (fi for fi in bench_fns
          if "run_perftest" in fi.source or "aiter." in fi.source),
@@ -1151,15 +1137,11 @@ def _try_generate_aiter_harness(
     )
     log(f"aiter idiom: reusing @benchmark fn {test_fn.name!r}")
 
-    # Map the candidate's traced shapes to the test fn's int params so the
-    # harness pins the EXACT serving shape (user_task:production), never the
-    # test's own synthetic sweep. Two mapping layers:
-    #  (1) NAME-aware: pin params whose name matches a known dim role (token /
-    #      model_dim / inter_dim / m / n / k / seqlen / batch). This is what
-    #      lets MoE fns like test_fmoe(dtype, token, model_dim, inter_dim, ...)
-    #      bind correctly — previously `token`/`model_dim` were unrecognized and
-    #      the harness fell back to a CSV token sweep (wrong shapes).
-    #  (2) POSITIONAL fallback for the classic (m, n, k) GEMM idiom.
+    # Map the candidate's traced shapes to the test fn's int params so the harness
+    # pins the exact serving shape, never the test's own synthetic sweep. Two
+    # mapping layers: (1) name-aware, pinning params matching a known dim role
+    # (token / model_dim / inter_dim / m / n / k / seqlen / batch); (2) positional
+    # fallback for the classic (m, n, k) GEMM idiom.
     shape = _aiter_shape_from_candidate(candidate)
     kwargs: dict[str, object] = {}
     # Role -> value from the traced operands.
@@ -1183,8 +1165,7 @@ def _try_generate_aiter_harness(
         elif pl in ("m", "n", "k", "b", "batch", "num_tokens", "seqlen", "dim") and si < len(positional):
             kwargs[p] = positional[si]
             si += 1
-    # Require that we pinned at least the leading dim (token/M); otherwise the
-    # harness would benchmark unfaithful shapes — refuse rather than mislead.
+    # Require at least the leading dim (token/M) pinned; else refuse.
     pinned_dims = [v for k, v in kwargs.items() if v != "__DTYPE__"]
     if not pinned_dims:
         log("aiter idiom: could not map any candidate shape to fn params")
@@ -1198,8 +1179,8 @@ def _try_generate_aiter_harness(
         kw_items.append(f"{k!r}: {dtype_literal}" if v == "__DTYPE__" else f"{k!r}: {v}")
     call_kwargs = "{" + ", ".join(kw_items) + "}"
 
-    # Copy module-level helper functions (e.g. torch_* references) that the
-    # test fn may call, excluding decorated functions (kept separately).
+    # Copy module-level helper functions the test fn may call, excluding
+    # decorated functions (kept separately).
     helper_defs = _aiter_module_funcs(analyzer, exclude=set(decorated.keys()))
 
     harness_code = (
@@ -1274,13 +1255,10 @@ def _aiter_shape_from_candidate(candidate: dict) -> dict:
             v = shapes.get(k) or shapes.get(k.lower())
             if isinstance(v, int):
                 out[k] = v
-    # List/string TraceLens form: derive M/N from the FIRST 2-D operand (the
-    # activation, e.g. (token, model_dim)), and the reduction/inter dim from the
-    # expert-weight tensors. For MoE the weights are 3-D (E, *, *):
-    #   w1 = (E, 2*inter_dim, model_dim), w2 = (E, model_dim, inter_dim).
-    # inter_dim is therefore w2's LAST axis (NOT a middle axis — that earlier
-    # heuristic mis-read topk/2*inter and pinned an unfaithful shape). We detect
-    # w2 as the 3-D weight whose middle dim == model_dim (N).
+    # List/string TraceLens form: derive M/N from the first 2-D operand (the
+    # activation, e.g. (token, model_dim)) and the inter dim from expert weights.
+    # For MoE the weights are 3-D: w2 = (E, model_dim, inter_dim), so inter_dim is
+    # w2's last axis; detect w2 as the 3-D weight whose middle dim == model_dim.
     if not out:
         dims = _parse_traced_operand_dims(candidate)
         first_2d = next((d for d in dims if len(d) == 2), None)
@@ -1290,7 +1268,7 @@ def _aiter_shape_from_candidate(candidate: dict) -> dict:
         model_dim = out.get("N")
         inter = None
         if model_dim is not None:
-            # w2 = (E, model_dim, inter_dim): match middle axis to model_dim.
+            # Match w2's middle axis to model_dim.
             w2 = next((d for d in weights_3d if d[1] == model_dim), None)
             if w2 is not None:
                 inter = w2[2]
@@ -1373,7 +1351,6 @@ def maybe_generate_harness(
             try:
                 log_fn(f"[harness_gen] {msg}")
             except Exception:
-                # Logging callback errors are non-fatal.
                 pass
 
     benchmark_path = _Path(benchmark_file)
@@ -1381,7 +1358,7 @@ def maybe_generate_harness(
         _log(f"benchmark file not found: {benchmark_file}")
         return None
 
-    # L1: skip generation if the benchmark is already a valid harness.
+    # Skip generation if the benchmark is already a valid harness.
     try:
         validator_path = _Path(__file__).parent.parent / "skills" / "unittest" / "validate_harness.py"
         if validator_path.is_file():
@@ -1440,10 +1417,9 @@ def maybe_generate_harness(
          f"test={test_func.name if test_func else None}")
 
     if not kernel_func and not ref_func:
-        # aiter op_tests don't expose standalone kernel/ref funcs: a single
-        # @benchmark function builds inputs, computes a torch ref inline, and
-        # times aiter.<op> via run_perftest (returning a dict with us/err).
-        # Reuse that function directly instead of failing (RCA compiled-kernel A).
+        # aiter op_tests expose no standalone kernel/ref funcs; a single perf fn
+        # builds inputs, computes a torch ref inline, and times aiter.<op>. Reuse
+        # it directly instead of failing.
         aiter_hr = _try_generate_aiter_harness(
             analyzer, decorated, candidate, source_file, benchmark_path,
             out_dir, _log,
@@ -1453,13 +1429,10 @@ def maybe_generate_harness(
         _log("could not identify kernel or reference function")
         return None
 
-    # Refuse to fabricate a GEMM harness for a heterogeneous multi-tensor op.
-    # _build_configs would keep only the highest-rank shapes and drop the rest,
-    # silently mismeasuring (this is what broke paged-attention: the flat
-    # multi-tensor shapes were flattened to M/N/K -> broken unpack). First RETRY
-    # via the op_test idiom (reuses the kernel's own @perftest/@benchmark fn,
-    # which builds the real multi-tensor inputs); only if that also fails do we
-    # refuse, so the caller skips-with-reason instead of dispatching a blind one.
+    # Refuse to fabricate a GEMM harness for a heterogeneous multi-tensor op
+    # (_build_configs would drop lower-rank shapes and mismeasure). First retry
+    # via the op_test idiom, which builds the real multi-tensor inputs; only if
+    # that also fails do we refuse so the caller skips-with-reason.
     if _is_heterogeneous_multi_tensor(candidate):
         _log("heterogeneous multi-tensor input_shapes; GEMM config builder "
              "unsafe, retrying via op_test idiom")
@@ -1485,7 +1458,7 @@ def maybe_generate_harness(
         analyzer, test_func, ref_func, kernel_func,
     )
 
-    # Copy decorated defs, excluding the test orchestrator (its argparse would conflict).
+    # Copy decorated defs, excluding the test orchestrator.
     func_defs_to_copy: list[str] = []
     for fi in decorated.values():
         if fi.decorator != "benchmark":
@@ -1518,7 +1491,7 @@ def maybe_generate_harness(
     harness_path.write_text(harness_code)
     _log(f"wrote harness: {harness_path}")
 
-    # L2: Validate with static_check
+    # Validate with static_check.
     try:
         from validate_harness import static_check
         ok, errs = static_check(str(harness_path))
@@ -1531,6 +1504,6 @@ def maybe_generate_harness(
         _log(f"static_check validation failed: {exc}")
         # Can't validate, but the harness was generated — try it anyway.
 
-    # Append --correctness so GEAK's SaveAndTest validator (runs test_command verbatim) can execute it.
+    # Append --correctness so GEAK's SaveAndTest validator can execute it.
     test_command = f"python {harness_path} --correctness"
     return SimpleNamespace(harness_path=str(harness_path), test_command=test_command)

@@ -638,7 +638,7 @@ class TestResolveEffectiveConcurrency:
         self,
         tmp_path,
     ):
-        """The materialized baseline yaml's ``CONC`` wins over ``state.conc`` (session 095726Z: state stayed at default 8 while the run used 64)."""
+        """The materialized baseline yaml's ``CONC`` wins over ``state.conc``."""
         from hyperloom.orchestrator.kernel.roofline_ceiling import (
             _resolve_effective_concurrency,
         )
@@ -809,7 +809,7 @@ class TestMoEBatchSaturation:
 
 
 class TestMoEUnionUpperBound:
-    """Decode ceiling must stay an upper bound on real throughput at every batch (Qwen3-30B-A3B 1xMI300X measured 1754.16 tok/s at conc=16); the coupon union ``1-(1-k/n)^B`` keeps the ceiling above the measurement where the linear ``min(1,B*k/n)`` bound under-estimates it."""
+    """Decode ceiling must stay an upper bound on real throughput at every batch; the coupon union ``1-(1-k/n)^B`` keeps the ceiling above the measurement where the linear ``min(1,B*k/n)`` bound under-estimates it."""
 
     # Real Qwen3-30B-A3B geometry (config.json) + safetensors total_size.
     _NUM_LAYERS = 48
@@ -1029,8 +1029,7 @@ class TestDiffusionComputeCeiling:
         assert bd.bound_kind == "memory"
         assert bd.peak_tok_per_sec == pytest.approx(bd.mem_tok_per_sec, rel=1e-9)
 
-    # ── Finding 1: FLUX has no sample_size; latent tokens come from the runtime
-    #    resolution (config-derived vae_scale x transformer packing). ──────────
+    # FLUX has no sample_size; latent tokens come from the runtime resolution.
     def _write_flux_configs(self, tmp_path):
         import json as _json
         td = tmp_path / "transformer"
@@ -1096,13 +1095,10 @@ class TestDiffusionComputeCeiling:
         # current code: FLUX -> _read_diffusion_dit_meta None -> cmp == 0 (memory-only)
         assert bd.cmp_tok_per_sec > 0
 
-    # ── Finding 2: per denoising step only the DiT runs; memory ceiling uses
-    #    DiT-only weight bytes, not the full checkpoint (encoder + VAE). ───────
+    # Per denoising step only the DiT runs; memory ceiling uses DiT-only bytes.
     def test_breakdown_flux_ceiling_when_load_model_meta_fails(self, tmp_path, monkeypatch):
-        # FLUX's single-file checkpoint layout can defeat load_model_meta
-        # (returns None), but the resolution-derived DiT meta alone still drives
-        # the compute + DiT-only memory ceiling -- the early bail must not
-        # suppress it. (End-to-end gap found profiling real FLUX.1-dev.)
+        # When load_model_meta returns None, the resolution-derived DiT meta
+        # alone still drives the compute + DiT-only memory ceiling.
         import hyperloom.orchestrator.kernel.roofline_ceiling as rc
         self._write_flux_configs(tmp_path)
         monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: None)
@@ -1398,7 +1394,7 @@ class TestRooflineBreakdownClassification:
 
 
 class TestPhysicalInterpretation095726Z:
-    """End-to-end anchor (session 095726Z, Qwen3-30B-A3B/MI355X/bf16/CONC=64): decode-stage MoE stays memory-bound so adding T_cmp doesn't change T_peak (within% ~77%)."""
+    """Decode-stage MoE stays memory-bound so adding T_cmp doesn't change T_peak (within% ~77%)."""
 
     _A3B_META = dict(
         gpu_type="mi355x",
@@ -1463,12 +1459,10 @@ class TestPhysicalInterpretation095726Z:
         br = compute_roofline_breakdown_from_state(state)
         # T_cmp must be present but must NOT cap the ceiling at decode (bound stays memory).
         assert br.cmp_tok_per_sec > br.mem_tok_per_sec
-        # PerfModel (FusedMoE coupon formula) now drives peak_tok_per_sec;
-        # it agrees with the legacy T_mem ceiling within < 1% here, so the
-        # within% anchor remains valid. The peak must stay > measured.
+        # PerfModel (FusedMoE coupon formula) drives peak_tok_per_sec and must stay > measured.
         assert br.bound_kind == "memory"
         assert br.peak_tok_per_sec >= self._ACHIEVED_TOK_S
-        # within% recomputed from achieved must still match the PR-9749520 anchor (~77%).
+        # within% recomputed from achieved must still match the ~77% anchor.
         within_pct = 100.0 * self._ACHIEVED_TOK_S / br.peak_tok_per_sec
         assert 70.0 < within_pct < 85.0
 

@@ -70,7 +70,7 @@ def test_metadata_expected_gain_pct_must_be_pair():
 
 
 def test_metadata_no_allowed_modes_field():
-    """allowed_modes is no longer accepted because full mode is the only supported mode."""
+    """allowed_modes is not accepted because full mode is the only supported mode."""
     payload = _good_payload()
     payload["allowed_modes"] = ["quick"]  # extra fields silently ignored
     meta = ActionMetadata.from_yaml_dict(payload, expected_name="baseline")
@@ -133,7 +133,7 @@ def test_registry_validates_filename_matches_yaml_name(tmp_path):
     bad_path.write_text(
         yaml.safe_dump(
             {
-                "name": "wrong_name",  # doesn't match filename
+                "name": "wrong_name",
                 "family": "prep",
                 "cost_minutes_p50": 1.0,
                 "cost_minutes_p75": 2.0,

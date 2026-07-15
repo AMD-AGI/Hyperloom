@@ -7,8 +7,7 @@
 """End-to-end tests for the bypass CLI (bypass_trace_analysis.main).
 
 Covers the failure-fallback contract (bad/missing trace still yields valid
-artifacts + health warnings), the
-stdout-is-a-single-result-JSON invariant the handler relies on.
+artifacts + health warnings) and the stdout-is-a-single-result-JSON invariant.
 """
 
 from __future__ import annotations
@@ -34,8 +33,7 @@ _TRACE_EVENTS = [
     {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 1300, "dur": 200, "args": {"correlation": 7}},
 ]
 
-# Same two kernels but separated by a large idle gap so the GPU busy span is a
-# tiny fraction of the trace wall span (idle_pct ~ 99%), tripping the idle gate.
+# Two kernels separated by a large idle gap so idle_pct ~ 99%, tripping the idle gate.
 _HIGH_IDLE_TRACE_EVENTS = [
     {"cat": "cpu_op", "name": "aten::paged_attn", "args": {"External id": 100}},
     {"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 200}},
@@ -51,8 +49,7 @@ def _run(argv, capsys):
     out = capsys.readouterr()
     lines = [ln for ln in out.out.splitlines() if ln.strip()]
     assert lines, "no stdout produced"
-    # The handler consumes stdout as a single JSON object; enrichment logs must
-    # not leak here.
+    # The handler consumes stdout as a single JSON object.
     result = json.loads(lines[-1])
     return rc, result, out
 
@@ -84,9 +81,7 @@ def test_dry_run_emits_valid_artifacts(tmp_path, capsys, monkeypatch):
 
 
 def test_num_denoise_steps_accepted_and_recorded(tmp_path, capsys, monkeypatch):
-    # F1: the coordinator forwards --num-denoise-steps for scriptable workloads;
-    # bypass must accept it (no argparse crash -> no degraded roofline) and surface
-    # it in the result (effective = requested when the trace infers no steps).
+    # bypass must accept --num-denoise-steps and surface it in the result.
     rc, result, _ = _run(
         _base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run", "--num-denoise-steps", "20"]),
         capsys,
@@ -113,9 +108,7 @@ def test_real_trace_end_to_end(tmp_path, capsys, monkeypatch):
     assert rc == 0
     assert result["status"] == "ok"
     cats = {k["kernel_category"] for k in result["hot_kernels"]}
-    # attention + gemm kernels both classified
     assert "SDPA" in cats and "GEMM" in cats
-    # sidecar has one row per hot kernel
     kr = json.loads(Path(result["artifact_paths"]["kernel_roofline"]).read_text())
     assert len(kr["kernels"]) == len(result["hot_kernels"])
 
@@ -147,9 +140,8 @@ def test_multi_rank_provenance_and_warning(tmp_path, capsys, monkeypatch):
 
 
 def test_high_gpu_idle_gate_suppresses_hot_kernels(tmp_path, capsys, monkeypatch):
-    # F3: contract parity with the TraceLens route -- when the GPU is idle beyond
-    # the shared threshold, bypass suppresses every candidate list and surfaces a
-    # high_gpu_idle_pct warning so the Coordinator routes to parameter opt.
+    # When the GPU is idle beyond the threshold, bypass suppresses every candidate
+    # list and surfaces a high_gpu_idle_pct warning.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
     trace = tmp_path / "idle.trace.json"
@@ -157,22 +149,21 @@ def test_high_gpu_idle_gate_suppresses_hot_kernels(tmp_path, capsys, monkeypatch
     rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
     assert rc == 0
     assert result["status"] == "ok"
-    # timeline confirms the high-idle regime that trips the default 80% gate
     assert result["timeline"]["idle_pct"] > 80.0
-    # every candidate list is suppressed (parity with TraceLens agent_candidates=[])
+    # every candidate list is suppressed
     assert result["hot_kernels"] == []
     assert result["routable_kernels"] == []
     assert result["skipped_kernels"] == []
     warn = next(w for w in result["trace_health_warnings"] if w["code"] == "high_gpu_idle_pct")
     assert warn["threshold_pct"] == 80.0
     assert warn["idle_pct"] > 80.0
-    # kernel_candidates.json on disk is suppressed too (downstream dispatch reads it)
+    # kernel_candidates.json on disk is suppressed too
     kc = json.loads(Path(result["artifact_paths"]["kernel_candidates"]).read_text())
     assert kc["hot_kernels"] == [] and kc.get("routable_kernels") == []
 
 
 def test_high_idle_gate_respects_threshold_env(tmp_path, capsys, monkeypatch):
-    # A high threshold disables the gate: the same idle trace keeps its hot kernels.
+    # A high threshold disables the gate.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     monkeypatch.setenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", "99.999")
     trace = tmp_path / "idle.trace.json"
@@ -183,13 +174,12 @@ def test_high_idle_gate_respects_threshold_env(tmp_path, capsys, monkeypatch):
     assert "high_gpu_idle_pct" not in {w["code"] for w in result["trace_health_warnings"]}
 
 
-# ── diffusion workload roofline (F4) ─────────────────────────────────────────
+# ── diffusion workload roofline ──────────────────────────────────────────────
 
 
 def test_bypass_diffusion_aggregation_numerics():
-    # aggregate_bypass_candidates: sigma_ideal = sum(actual * eff); placeholder
-    # kernels (no analytical roofline) count only toward no_perf_model_us.
-    # sigma_ideal weights by the binding-side attainment (roofline_attainment_pct).
+    # sigma_ideal = sum(actual * eff); placeholder kernels count only toward
+    # no_perf_model_us.
     hot = [
         {"duration_us": 100.0, "roofline_attainment_pct": 50.0, "bound_type": "compute_bound", "roofline_source": "analytical", "name": "gemm_k", "kernel_category": "GEMM"},
         {"duration_us": 60.0, "roofline_attainment_pct": 25.0, "bound_type": "memory_bound", "roofline_source": "analytical", "name": "attn_k", "kernel_category": "SDPA"},
@@ -211,14 +201,14 @@ def test_bypass_diffusion_aggregation_numerics():
 
 
 def test_diffusion_report_totals_param_marks_full_scope():
-    # Q2: when workload totals (all device kernels) are supplied, the report uses
-    # them verbatim and marks kernel_scope=all_device_kernels (not the top-k set).
+    # When workload totals are supplied, the report uses them verbatim and marks
+    # kernel_scope=all_device_kernels.
     totals = {
         "sigma_actual_kernel_us": 100.0, "sigma_ideal_roofline_us": 30.0,
         "kernel_roofline_efficiency": 0.3, "compute_bound_us": 60.0,
         "memory_bound_us": 40.0, "no_perf_model_us": 0.0,
     }
-    # kernels_aggregated must reflect the all-kernel count, not len(hot_kernels).
+    # kernels_aggregated reflects the all-kernel count, not len(hot_kernels).
     r = dr.build_report_from_bypass([], {"busy_pct": 90.0}, 8, 10, totals=totals, kernels_aggregated=137)
     assert r["kernel_scope"] == "all_device_kernels"
     assert r["kernels_aggregated"] == 137
@@ -227,8 +217,7 @@ def test_diffusion_report_totals_param_marks_full_scope():
 
 
 def test_bypass_diffusion_report_shape_without_steps():
-    # No denoise steps -> no per_step block, but the core report keys stay put
-    # (identical shape to the TraceLens CSV path via the shared assembler).
+    # No denoise steps -> no per_step block, but the core report keys stay put.
     r = dr.build_report_from_bypass([], {"busy_pct": 0.0}, None, 10)
     for key in ("source", "totals", "gpu_timeline_pct", "gpu_busy_ratio", "end_to_end_efficiency_estimate", "top_kernels"):
         assert key in r
@@ -236,8 +225,8 @@ def test_bypass_diffusion_report_shape_without_steps():
 
 
 def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
-    # F4: parity with the TraceLens route -- the xDiT/scriptable path emits a
-    # workload-level diffusion_roofline.json that consumes --num-denoise-steps.
+    # The xDiT/scriptable path emits a workload-level diffusion_roofline.json
+    # that consumes --num-denoise-steps.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "t.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
@@ -259,10 +248,8 @@ def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
 
 
 def test_bypass_cli_accepts_forwarded_diffusion_flags():
-    # Regression: kernel_request_handlers forwards --model-path/--precision to
-    # BOTH routes for scriptable (xDiT) workloads; the bypass parser MUST accept
-    # them (+ the diffusion-ceiling siblings, for CLI-surface parity with the
-    # TraceLens tool) or strict parse_args exits 2 -> trace_analyze_failed.
+    # The bypass parser must accept --model-path/--precision (and the
+    # diffusion-ceiling siblings) or strict parse_args exits 2.
     args = bta._build_arg_parser().parse_args([
         "--trace-input", "/x", "--framework", "xdit",
         "--model-path", "/models/flux", "--precision", "fp8",
@@ -284,12 +271,11 @@ def test_non_xdit_omits_diffusion_roofline(tmp_path, capsys, monkeypatch):
     assert "diffusion_roofline_path" not in result
 
 
-# ── steady-state mode coverage (Finding 3) ───────────────────────────────────
+# ── steady-state mode coverage ───────────────────────────────────────────────
 
 
 def test_should_enable_steady_recognizes_tracelens_modes():
-    # Finding 3: the coordinator forwards TraceLens splitter chunk types; bypass
-    # must window them (not silently full-trace) to match the TraceLens route.
+    # bypass must window TraceLens splitter chunk types, not silently full-trace.
     for m in ("mixed", "decode_only", "prefilldecode"):
         assert bta._should_enable_steady(steady_state_mode=m, framework="vllm", env_steady=False) is True
 
@@ -306,13 +292,13 @@ def test_should_enable_steady_legacy_and_xdit_and_env():
     assert bta._should_enable_steady(steady_state_mode="", framework="vllm", env_steady=True) is True
 
 
-# ── boundary inputs end-to-end (P0-3) ────────────────────────────────────────
+# ── boundary inputs end-to-end ───────────────────────────────────────────────
 
 
 def test_non_kineto_json_yields_valid_artifacts_and_warns(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
-    # A valid JSON that is not a Kineto trace: the pipeline must still emit the
-    # full artifact set + a no-GPU-kernels warning instead of crashing.
+    # Valid JSON that is not a Kineto trace: still emit the full artifact set
+    # plus a no-GPU-kernels warning instead of crashing.
     trace = tmp_path / "notrace.json"
     trace.write_bytes(json.dumps({"foo": "bar"}).encode("utf-8"))
     rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
@@ -335,7 +321,7 @@ def test_empty_trace_events_end_to_end(tmp_path, capsys, monkeypatch):
     _assert_artifacts(result)
 
 
-# ── analysis-quality health signals (P0-2, _emit_quality_warnings) ───────────
+# ── analysis-quality health signals (_emit_quality_warnings) ─────────────────
 
 
 def _analyze(*, kernels=None, attributed_pct=100.0, steady_status=None, capture_fragment=False):
@@ -391,7 +377,7 @@ def test_quality_warning_low_op_correlation(monkeypatch):
     bta._emit_quality_warnings(_analyze(kernels=_HEALTHY_KERNELS, attributed_pct=5.0), warnings)
     codes = _codes(warnings)
     assert "bypass_low_op_correlation" in codes
-    assert "bypass_high_unclassified_share" not in codes  # Others share is only 10%
+    assert "bypass_high_unclassified_share" not in codes  # Others share only 10%
 
 
 def test_quality_warning_steady_fallback(monkeypatch):
@@ -406,8 +392,7 @@ def test_quality_warning_steady_fallback(monkeypatch):
 
 
 def test_quality_warning_only_capture_fragments(monkeypatch):
-    # F2: analysis ran on a sglang CUDA-graph capture shard (no main trace) ->
-    # a warning-severity signal so the sparse analysis is never silent.
+    # Analysis ran on a capture shard (no main trace) -> warning-severity signal.
     monkeypatch.delenv("HYPERLOOM_BYPASS_OTHERS_WARN_PCT", raising=False)
     monkeypatch.delenv("HYPERLOOM_BYPASS_CORR_WARN_PCT", raising=False)
     warnings: list = []
@@ -425,7 +410,7 @@ def test_quality_warning_only_capture_fragments(monkeypatch):
 
 def test_quality_warning_others_threshold_env(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_BYPASS_CORR_WARN_PCT", raising=False)
-    # Healthy kernels have 10% Others; a low env threshold flips the verdict.
+    # A low env threshold flips the verdict on 10% Others.
     monkeypatch.setenv("HYPERLOOM_BYPASS_OTHERS_WARN_PCT", "5")
     warnings: list = []
     bta._emit_quality_warnings(_analyze(kernels=_HEALTHY_KERNELS, attributed_pct=80.0), warnings)
@@ -434,7 +419,7 @@ def test_quality_warning_others_threshold_env(monkeypatch):
 
 def test_quality_warning_corr_threshold_env(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_BYPASS_OTHERS_WARN_PCT", raising=False)
-    # attributed_pct=50 is healthy by default (>=10) but trips a stricter env.
+    # attributed_pct=50 is healthy by default but trips a stricter env.
     monkeypatch.setenv("HYPERLOOM_BYPASS_CORR_WARN_PCT", "60")
     warnings: list = []
     bta._emit_quality_warnings(_analyze(kernels=_HEALTHY_KERNELS, attributed_pct=50.0), warnings)
@@ -447,7 +432,7 @@ def test_quality_warning_bad_env_falls_back_to_default(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_BYPASS_CORR_WARN_PCT", raising=False)
     warnings: list = []
     bta._emit_quality_warnings(_analyze(kernels=_HEALTHY_KERNELS, attributed_pct=80.0), warnings)
-    # 10% Others < default 40 -> no unclassified warning, and no crash.
+    # 10% Others < default 40 -> no warning, no crash.
     assert "bypass_high_unclassified_share" not in _codes(warnings)
 
 
@@ -461,13 +446,12 @@ def test_steady_state_mode_flag_enables_windowing(tmp_path, capsys, monkeypatch)
     assert result["steady_window"] and result["steady_window"]["step_name"] == "ProfilerStep"
     # only the in-window kernel is ranked.
     assert {k["device_kernel_name"] for k in result["hot_kernels"]} == {"paged_attention_v1"}
-    assert result["estimated"] is False  # vllm framework
+    assert result["estimated"] is False
 
 
 def test_xdit_steady_anchored_is_not_estimated(tmp_path, capsys, monkeypatch):
-    # xDiT auto-enables steady-state; when the repeating ProfilerStep window is
-    # found the per-step kernel shares are trace-anchored, so the result is NOT
-    # estimated (parity with text-gen) and carries a steady-anchored info signal.
+    # When the repeating ProfilerStep window is found, per-step shares are
+    # trace-anchored, so the result is NOT estimated.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "x.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _STEADY_EVENTS}).encode("utf-8"))
@@ -494,8 +478,8 @@ def test_xdit_steady_anchored_is_not_estimated(tmp_path, capsys, monkeypatch):
 
 
 def test_xdit_full_trace_fallback_is_estimated(tmp_path, capsys, monkeypatch):
-    # No per-step annotations -> steady-state windowing falls back to full_trace,
-    # so the xDiT result is estimated and flags bypass_xdit_estimated.
+    # No per-step annotations -> falls back to full_trace, so the result is
+    # estimated and flags bypass_xdit_estimated.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "x.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
@@ -518,14 +502,12 @@ def test_xdit_full_trace_fallback_is_estimated(tmp_path, capsys, monkeypatch):
 
 
 def test_parse_failure_flags_analysis_degraded(tmp_path, capsys, monkeypatch):
-    # An unresolvable/failed trace must NOT masquerade as a successful empty
-    # analysis: the pipeline still degrades gracefully (status=ok, no abort) but
-    # flags analysis_degraded so record_trace_analyze / the LLM know it actually
-    # failed (rather than trusting the forced-empty result).
+    # An unresolvable trace degrades gracefully (status=ok) but flags
+    # analysis_degraded so consumers know it actually failed.
     missing = tmp_path / "does_not_exist.trace.json"  # resolve_trace_file -> None -> status failed
     rc, result, _ = _run(_base_argv(tmp_path, str(missing)), capsys)
     assert rc == 0
-    assert result["status"] == "ok"  # graceful: never aborts the pipeline
+    assert result["status"] == "ok"  # graceful: never aborts
     assert result["analysis_degraded"] is True
     codes = {w["code"] for w in result["trace_health_warnings"]}
     assert "bypass_trace_parse_failed" in codes
@@ -552,9 +534,8 @@ _STEADY_EVENTS = [
 
 
 def test_text_gen_steady_fallback_is_estimated(tmp_path, capsys, monkeypatch):
-    # Parity with xDiT: when steady-state windowing is requested for text-gen but
-    # no repeating window is found, the full-trace shares are equally a mixed
-    # estimate -> estimated=True (not silently False).
+    # When steady-state windowing is requested but no repeating window is found,
+    # the full-trace shares are an estimate -> estimated=True.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "ng.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))  # no ProfilerStep
@@ -565,8 +546,7 @@ def test_text_gen_steady_fallback_is_estimated(tmp_path, capsys, monkeypatch):
 
 
 def test_text_gen_default_full_trace_not_estimated(tmp_path, capsys, monkeypatch):
-    # Default text-gen (no steady-state requested): full-trace IS the norm, so it
-    # is NOT flagged estimated.
+    # Default text-gen: full-trace is the norm, so it is NOT flagged estimated.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "d.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
@@ -586,8 +566,8 @@ _FUSION_EVENTS = [
 
 
 def test_fusion_artifact_and_result(tmp_path, capsys, monkeypatch):
-    # Two consecutive Elementwise launches -> one fusable cluster; emitted both in
-    # the result summary and the kernel_sequence.json artifact.
+    # Two consecutive Elementwise launches -> one fusable cluster, emitted in
+    # both the result summary and the kernel_sequence.json artifact.
     trace = tmp_path / "f.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _FUSION_EVENTS}).encode("utf-8"))
     _, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
@@ -609,7 +589,7 @@ def test_csv_artifacts_written_and_paths_exposed(tmp_path, capsys, monkeypatch):
     assert Path(mpath).is_file() and Path(spath).is_file()
     assert result["kernel_metrics_csv_path"] == mpath
     rows = list(csv.DictReader(io.StringIO(Path(mpath).read_text())))
-    assert rows  # the two elementwise launches -> rows
+    assert rows
     assert "optimization_priority" in rows[0] and "suggestion" in rows[0]
     srows = list(csv.DictReader(io.StringIO(Path(spath).read_text())))
     assert srows and "kernel_category" in srows[0]

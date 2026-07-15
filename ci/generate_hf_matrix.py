@@ -36,9 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from optimize_submit import HuggingFaceClient  # noqa: E402
 
-# The schedule always sets INPUT_CANDIDATES_FILE explicitly (built from the
-# WEKAFS_CHENYI_DIR secret), so this is only the empty-env fallback. Keep the
-# personal /wekafs root out of source; allow a CRON_CANDIDATES_FILE env override.
+# Empty-env fallback; the schedule sets INPUT_CANDIDATES_FILE explicitly.
 DEFAULT_CRON_CANDIDATES_FILE = os.environ.get(
     "CRON_CANDIDATES_FILE",
     "ci/candidates/hf_downloads_gt100_rotate_2026-06-11.json",
@@ -360,9 +358,8 @@ def _filter_entries_by_explicit_models(
 ) -> list[dict | str]:
     """Filter candidate entries by repo id while preserving fixed config.
 
-    Historically INPUT_MODELS returned bare repo strings and therefore lost
-    framework / precision / tp / conc from candidates JSON. For manual reruns
-    of a small subset from a fixed pool, keep the candidate dicts intact.
+    Keeps the candidate dicts intact (framework / precision / tp / conc) for
+    manual reruns of a small subset from a fixed pool.
 
     Args:
         entries: Candidate entries (dicts and/or repo id strings).
@@ -538,18 +535,12 @@ def _resolve_batch_index(pool_size: int, batch_size: int) -> int:
     return _cron_batch_index(pool_size, batch_size)
 
 
-# Anchor fire: the first scheduled run at/after this instant maps to batch 0.
-# The rotation pool is ordered not-run-first, so batch 0 hits the not-yet-run
-# head. Merge the candidate-pool change before this fire so the very next cron
-# starts at batch 0; bump this if the merge slips to a later fire.
-# 2026-06-26: reset to restart the rotation at batch 0 on the new
-# hf_sub100_part1_20260626.json pool. The next scheduled fire (12:07 UTC) is the
-# first at/after this anchor -> batch 0.
+# Anchor fire: the first scheduled run at/after this instant maps to batch 0
+# (the not-yet-run head of the not-run-first rotation pool).
 _CRON_ANCHOR_UTC = datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc)
 
-# Fallback optimizer budget (hours) used as the rotation step size when
-# INPUT_MAX_HOURS is unset/invalid. Keep in sync with the optimize-submit
-# max_hours default.
+# Fallback rotation step size (hours) when INPUT_MAX_HOURS is unset/invalid.
+# Keep in sync with the optimize-submit max_hours default.
 _DEFAULT_MAX_HOURS = 6.0
 
 
@@ -581,14 +572,10 @@ def _cron_batch_index(pool_size: int, batch_size: int) -> int:
     so the pool is marched in order then repeated. It is independent of ad-hoc
     manual dispatches (which would otherwise perturb a run-number scheme).
 
-    INVARIANT (must hold): the schedule cron PERIOD must equal ``max_hours``.
-    ``steps = floor(elapsed / max_hours)`` advances exactly one batch per fire
-    ONLY when fires are ``max_hours`` apart. If the cron fires FASTER than
-    max_hours, consecutive fires resolve to the same step -> the same batch is
-    dispatched twice; if SLOWER, some batches are skipped. optimize-submit pairs
-    a 6h cron with max_hours=6 on purpose; change one and you must change the
-    other. (Schedule sets exclude_active_workflows=true, so a transient mismatch
-    is de-duped against in-flight jobs, but the pairing must still be kept.)
+    INVARIANT (must hold): the schedule cron PERIOD must equal ``max_hours``,
+    since ``steps = floor(elapsed / max_hours)`` advances exactly one batch per
+    fire only when fires are ``max_hours`` apart. Firing faster re-dispatches a
+    batch; firing slower skips batches.
 
     Fires strictly before the anchor are clamped to batch 0 (the not-run head)
     rather than wrapping to the tail, so the not-run backlog is drained first.
@@ -780,7 +767,7 @@ def collect_entries() -> list[dict | str]:
     if cands_file:
         cands_path = Path(cands_file)
         if not cands_path.is_absolute():
-            # Resolve relative to CWD and its parent (workflow CWD is ci/).
+            # Resolve relative to CWD and its parent.
             cwd = Path.cwd()
             for base in [cwd, cwd.parent]:
                 p = base / cands_file
@@ -798,7 +785,6 @@ def collect_entries() -> list[dict | str]:
         exclude_leaderboard = _truthy(os.environ.get("INPUT_EXCLUDE_LEADERBOARD"))
         exclude_active = _truthy(os.environ.get("INPUT_EXCLUDE_ACTIVE_WORKFLOWS"))
         if exclude_leaderboard:
-            # Discovery mode only; production reruns set this false.
             excluded_models = _leaderboard_models()
             print(f"leaderboard exclusion: {len(excluded_models)} models", file=sys.stderr)
             entries = [e for e in entries if _entry_repo(e).lower() not in excluded_models]
@@ -889,7 +875,6 @@ def main() -> int:
     entries = collect_entries()
     if not entries:
         print("no models selected — empty matrix", file=sys.stderr)
-        # Empty include sentinel; GitHub Actions errors on a truly empty matrix.
         matrix = {"include": []}
     else:
         matrix = {"include": [_matrix_entry(e) for e in entries]}

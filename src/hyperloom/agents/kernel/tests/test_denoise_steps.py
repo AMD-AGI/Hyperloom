@@ -19,8 +19,7 @@ import _denoise_steps as ds  # noqa: E402
 
 
 def test_divisor_prefers_inferred_over_requested():
-    # The bug: per-step divided by the requested full schedule (20) instead of
-    # the steps actually in the analyzed window (8). Inferred must win.
+    # Inferred steps in the analyzed window must win over the requested schedule.
     assert ds.resolve_perstep_divisor(8, 20) == 8
     assert ds.resolve_perstep_divisor(16, 0) == 16
 
@@ -56,8 +55,8 @@ def test_count_profiler_steps_gz_and_plain(tmp_path):
 
 
 def test_count_profiler_steps_across_chunk_boundary(tmp_path, monkeypatch):
-    # Tiny chunks force ProfilerStep#N markers to straddle chunk boundaries; the
-    # overlap carry must still match them and the set must not double-count.
+    # Tiny chunks force ProfilerStep#N markers to straddle boundaries; the
+    # overlap carry must still match them without double-counting.
     monkeypatch.setattr(ds, "_CHUNK_BYTES", 8)
     names = ["ProfilerStep#1", "aten::mm", "ProfilerStep#2", "ProfilerStep#3", "ProfilerStep#2"]
     gzp = tmp_path / "t.pt.trace.json.gz"

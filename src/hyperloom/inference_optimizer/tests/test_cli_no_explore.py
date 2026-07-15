@@ -10,7 +10,6 @@ import pytest
 from hyperloom.inference_optimizer import cli
 
 
-# Parser default — CLI-only, defaults False, no env fallback.
 def _parse_optimize(argv: list[str]) -> object:
     parser = cli._build_parser()
     return parser.parse_args(["optimize", "--model", "/tmp/m", *argv])
@@ -27,32 +26,28 @@ def test_no_explore_flag_sets_true():
 
 
 def test_no_explore_has_no_env_fallback(monkeypatch):
-    # Unlike --no-framework-agent, --no-explore does not read an env var.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NO_EXPLORE", "1")
     args = _parse_optimize([])
     assert getattr(args, "no_explore") is False
 
 
-# explore_enabled flows into SharedState construction.
 def test_shared_state_explore_enabled_defaults_true():
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     assert SharedState(session_id="t").explore_enabled is True
 
 
-# Pre-EXPLORE guard — a resume may only retroactively honour --no-explore while
-# the persisted phase is still upstream of EXPLORE. The list MUST include the
-# legacy "FRAMEWORK" name (pre-rename sessions persisted before commit 33ac6ccc)
-# alongside the current "FRAMEWORK_AGENT"; otherwise those resumes silently keep
-# EXPLORE enabled.
+# Pre-EXPLORE guard: a resume may retroactively honour --no-explore only while the
+# persisted phase is still upstream of EXPLORE. The list must include both the legacy
+# "FRAMEWORK" name and the current "FRAMEWORK_AGENT".
 @pytest.mark.parametrize(
     "phase,expected",
     [
         ("", True),
         ("PRELUDE", True),
         ("prelude", True),
-        ("FRAMEWORK", True),  # legacy pre-rename phase name
-        ("framework", True),  # case-insensitive
+        ("FRAMEWORK", True),
+        ("framework", True),
         ("FRAMEWORK_AGENT", True),
         ("EXPLORE", False),
         ("KERNEL_AGENT", False),
@@ -64,7 +59,6 @@ def test_resume_can_disable_explore(phase: str, expected: bool) -> None:
     assert cli._resume_can_disable_explore(phase) is expected
 
 
-# Resume write-back — exercises the real cli guard (no mirrored literals).
 class _ResumeStateStub:
     def __init__(self, *, explore_enabled: bool, phase: str) -> None:
         self.explore_enabled = explore_enabled
@@ -77,9 +71,8 @@ class _ArgsStub:
 
 
 def _apply_resume_writeback(state: _ResumeStateStub, args: _ArgsStub) -> str:
-    """Mirror the resume-branch control flow from cli.py, delegating the actual
-    phase check to the real ``cli._resume_can_disable_explore`` helper so this
-    test cannot drift from production."""
+    """Mirror the resume-branch control flow from cli.py, delegating the phase
+    check to the real ``cli._resume_can_disable_explore`` helper."""
     msg = ""
     if not bool(getattr(state, "explore_enabled", True)):
         args.no_explore = True
@@ -109,7 +102,6 @@ def test_resume_writeback_allows_disable_in_framework():
 
 
 def test_resume_writeback_allows_disable_in_legacy_framework():
-    # Pre-rename sessions persist phase="FRAMEWORK"; --no-explore must still win.
     state = _ResumeStateStub(explore_enabled=True, phase="FRAMEWORK")
     args = _ArgsStub(no_explore=True)
     assert _apply_resume_writeback(state, args) == "DISABLING_RESUME"

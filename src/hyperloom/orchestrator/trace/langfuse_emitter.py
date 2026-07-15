@@ -2,12 +2,11 @@
 
 """Live Langfuse push for the trace subsystem (opt-in, best-effort).
 
-This is the *second* of the two parallel trace sinks. The first -- the
-local ``reports/trace/*.jsonl`` ledger -- is always written and its format
-is unchanged. This module mirrors each LLM call into Langfuse as a Generation
-*while the run is live*, plus a session-end ``flush_session`` that backfills
-the recipe-KB / specialist-intel audit spans and the KEEP/REVERT decision
-Scores.
+The second of two parallel trace sinks (the local ``reports/trace/*.jsonl``
+ledger is always written). This module mirrors each LLM call into Langfuse as a
+Generation while the run is live, plus a session-end ``flush_session`` that
+backfills the recipe-KB / specialist-intel audit spans and the KEEP/REVERT
+decision Scores.
 
 Three gates decide whether anything is sent (all must pass, else no-op):
 
@@ -15,16 +14,11 @@ Three gates decide whether anything is sent (all must pass, else no-op):
 2. the three ``LANGFUSE_*`` connection vars are all set;
 3. the ``langfuse`` SDK is importable.
 
-Fault posture mirrors :func:`..llm_trace.append_llm_call`: every send is
-best-effort and any exception is logged-and-swallowed. A Langfuse outage,
-a missing SDK, or a malformed row must never break the optimization loop or
-the local jsonl write.
-
-The Generation needs model + usage + prompt/response together, but those
-arrive as two separate calls (``record_llm_call`` for tokens,
-``record_conversation`` for text) a few ms apart. The emitter buffers by
-:func:`..langfuse_mapping.pair_key` and emits as soon as both halves are in
-(or at ``flush_session`` for whichever half never paired).
+Every send is best-effort and any exception is logged-and-swallowed. A Generation
+needs model + usage + prompt/response together, but those arrive as two separate
+calls (tokens, text) a few ms apart; the emitter buffers by
+:func:`..langfuse_mapping.pair_key` and emits once both halves are in (or at
+``flush_session`` for whichever half never paired).
 """
 
 from __future__ import annotations
@@ -99,8 +93,7 @@ def _to_ns(dt: Any) -> int | None:
     """Datetime -> integer nanoseconds since epoch (langfuse v4 ``end_time``).
 
     v4's OTEL-based SDK wants integer ns for ``end_time``; v2/v3 accepted a
-    ``datetime``. Returns None for a None/zero input so callers can omit the
-    kwarg entirely. Best-effort: an unparseable value yields None.
+    ``datetime``. Returns None for a None input; best-effort.
 
     Args:
         dt: the datetime to convert (any other type yields ``None``).
@@ -124,12 +117,9 @@ def _to_ns(dt: Any) -> int | None:
 def _start_obs(parent: Any, **kwargs: Any) -> Any:
     """Create a child/root observation, tolerant of v2/v3 vs v4 signatures.
 
-    v2/v3 accepted ``start_time=<datetime>`` on ``start_observation``; v4
-    removed it (the start is auto-stamped at creation). We try with the
-    caller's kwargs first and, if the SDK rejects ``start_time`` with a
-    TypeError, retry without it. This keeps backdated timestamps where the
-    SDK supports them and degrades to "start = now" only on the SDKs that
-    require it, instead of unconditionally dropping the timestamp.
+    Tries the caller's kwargs first and, if the SDK rejects ``start_time`` with a
+    TypeError (v4 removed it), retries without it — keeping backdated timestamps
+    where supported and degrading to "start = now" only where required.
 
     Args:
         parent: the parent observation (or client) to create the child on.
@@ -150,10 +140,8 @@ def _end_time_wants_int(obs: Any) -> bool:
     """Whether this SDK's ``end(end_time=...)`` wants integer ns (v4) vs a
     datetime (v2/v3), decided by inspecting the parameter annotation.
 
-    We must get the type right on the FIRST call: v4's ``end(datetime)``
-    raises a TypeError only *after* it has already ended the underlying
-    OTEL span, so a "try datetime then retry int" pattern double-ends the
-    span and emits a noisy "Calling end() on an ended span" warning.
+    The type must be right on the first call: v4's ``end(datetime)`` raises only
+    after already ending the span, so a try-then-retry pattern double-ends it.
     Falls back to datetime (False) when the annotation can't be read.
 
     Args:
@@ -207,11 +195,8 @@ def _otel_attr_value(v: Any) -> Any:
     """Coerce a metadata value into an OTEL-acceptable attribute, or None to
     skip it.
 
-    OTEL span attributes accept only str/bool/int/float (and homogeneous
-    sequences of those). Passing ``None`` or a ``dict``/nested value makes
-    the SDK log ``Invalid type ... for attribute`` and drop it. So: skip
-    ``None``, pass scalars through, and JSON-stringify everything else
-    (e.g. the ``workload`` dict) so it still lands on the trace as text.
+    OTEL span attributes accept only str/bool/int/float. Skip ``None``, pass
+    scalars through, and JSON-stringify everything else so it still lands as text.
 
     Args:
         v: the metadata value to coerce.
@@ -241,11 +226,9 @@ def _set_trace_attrs(
 ) -> None:
     """Stamp trace-level name/session_id/metadata, tolerant of v2/v3 vs v4.
 
-    v2/v3 exposed ``span.update_trace(...)``. v4 removed it (decomposed the
-    method), so we fall back to writing the documented v4 OTEL trace
-    attributes directly on the underlying span (``langfuse.trace.name``,
-    ``session.id``, ``langfuse.trace.metadata.*``). Best-effort: a missing
-    API on either side just means the trace label isn't set, never a raise.
+    Uses ``span.update_trace(...)`` (v2/v3); when absent (v4) falls back to
+    writing the v4 OTEL trace attributes directly on the underlying span.
+    Best-effort: a missing API just means the label isn't set, never a raise.
 
     Args:
         span: the span/observation whose trace-level attributes are stamped.
@@ -257,7 +240,7 @@ def _set_trace_attrs(
         span.update_trace(name=name, session_id=session_id, metadata=metadata)
         return
     except AttributeError:
-        pass  # v4: no update_trace — fall through to OTEL attributes
+        pass  # v4: no update_trace
     except Exception:  # noqa: BLE001
         log.debug("langfuse: update_trace failed", exc_info=True)
         return
@@ -273,7 +256,7 @@ def _set_trace_attrs(
         for k, v in (metadata or {}).items():
             clean = _otel_attr_value(v)
             if clean is None:
-                continue  # OTEL rejects None / drops it with a warning
+                continue  # OTEL rejects None
             try:
                 otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
             except Exception:  # noqa: BLE001 — skip unserialisable values
@@ -324,9 +307,8 @@ class LangfuseEmitter:
     def __init__(self, session_dir: Path) -> None:
         """Initialize the per-session emitter.
 
-        Resolves the manifest and correlation labels unconditionally (even when
-        the live push is disabled) so the receipt always reports the right trace
-        and correlation ids.
+        Resolves the manifest and correlation labels unconditionally so the
+        receipt always reports the right trace and correlation ids.
 
         Args:
             session_dir: Session directory whose traces are emitted.
@@ -336,10 +318,9 @@ class LangfuseEmitter:
         # pair_key -> partial generation parts ({"llm": row} / {"conv": row}).
         self._pending: dict[tuple, dict[str, dict[str, Any]]] = {}
         self._client: Any = None
-        # Manifest + correlation are resolved unconditionally (even when the
-        # push is disabled) so the receipt always reports the right trace id /
-        # correlation key. Live push, offline backfill, and any claw-side
-        # upload correlate on claw_session_id (fallback internal session id).
+        # Manifest + correlation resolved unconditionally so the receipt always
+        # reports the right ids. Push / backfill / claw upload correlate on
+        # claw_session_id (fallback internal session id).
         self._manifest: dict[str, Any] = _load_json(_manifest_path(self.session_dir))
         self._session_label: str | None = lfmap.langfuse_session_id(
             self._manifest,
@@ -348,14 +329,12 @@ class LangfuseEmitter:
         self._trace_id: str | None = lfmap.derive_trace_id(
             lfmap.correlation_seed(self._manifest, self.session_dir.name),
         )
-        # Span hierarchy caches (lazy): root trace span; one span per phase;
-        # one span per (phase, agent). Each Generation nests in its agent span.
+        # Span hierarchy caches (lazy): root; one per phase; one per (phase, agent).
         self._root_span: Any = None
         self._phase_spans: dict[str, Any] = {}
         self._agent_spans: dict[tuple[str, str], Any] = {}
         self._trace_attrs_set = False
         # Receipt counters (for the session_breakdown ``langfuse`` section).
-        # ``disabled_reason`` is the gate that tripped when not enabled.
         self._disabled_reason: str | None = None
         self._counts: dict[str, int] = {
             "generations_sent": 0,  # Generations successfully started
@@ -376,10 +355,8 @@ class LangfuseEmitter:
             "errors": 0,  # swallowed send failures
         }
         self._flushed = False
-        # Live-status mirror throttle (process-wide via the singleton registry):
-        # the last pushed status signature + monotonic timestamp, so a status
-        # snapshot is only sent on-change or after a slow refresh interval even
-        # though ``SharedState.save`` (its caller) runs many times per tick.
+        # Live-status mirror throttle: last pushed signature + monotonic ts, so a
+        # snapshot is sent only on-change or after a slow refresh interval.
         self._last_status_sig: tuple | None = None
         self._last_status_ts: float = 0.0
         self._enabled = self._init_client()
@@ -419,9 +396,8 @@ class LangfuseEmitter:
             )
             return False
         try:
-            # Tighten the SDK auto-flush cadence before the singleton is built
-            # so a session killed before cli.finally still lands its latest
-            # observations (marking where the run died).
+            # Tighten the SDK auto-flush cadence before the singleton is built so
+            # a session killed early still lands its latest observations.
             apply_flush_defaults()
             creds = langfuse_credentials()
             self._client = get_client()
@@ -593,13 +569,10 @@ class LangfuseEmitter:
     ) -> None:
         """Emit one non-LLM KB trace as a span nested under its agent span.
 
-        Used for the KB integration trace (substrate ``kb_assess`` /
-        historical ``kb_priors`` per critic iteration, and recipe-snapshot /
-        gbrain remote reads) so the "was KB used, what did we ask, what came
-        back, did it influence the decision" evidence lands on the same trace
-        as the LLM generations. The full trace dict goes in ``output``; a small
-        scalar summary goes in ``metadata`` for filtering. Best-effort and a
-        no-op unless live push is enabled.
+        Used for the KB integration trace so KB-usage evidence lands on the same
+        trace as the LLM generations. The full trace dict goes in ``output``; a
+        scalar summary goes in ``metadata`` for filtering. Best-effort and a no-op
+        unless live push is enabled.
 
         Args:
             name (str): Span name (e.g. ``"kb_assess:iter_3"``).
@@ -645,12 +618,9 @@ class LangfuseEmitter:
         base = token_row or conv_row or {}
         phase = lfmap.phase_of(base)
         agent = lfmap.agent_of(base)
-        # ``ts`` is stamped at write time (just after the model call returns),
-        # so it approximates the call END. When the token row carries a
-        # measured ``latency_ms`` we backdate the generation start to
-        # ``ts - latency`` and end at ``ts`` so the leaf shows a real duration
-        # instead of a zero-width point. Without a latency we fall back to the
-        # legacy behaviour (start == end == ts).
+        # ``ts`` approximates the call END. With a measured ``latency_ms`` the
+        # start is backdated to ``ts - latency`` so the leaf shows a real
+        # duration; otherwise start == end == ts.
         end = lfmap.parse_ts(base.get("ts"))
         start = lfmap.generation_start(end, (token_row or {}).get("latency_ms"))
         has_text = conv_row is not None
@@ -683,17 +653,12 @@ class LangfuseEmitter:
     def flush_session(self) -> None:
         """Emit leftover halves + audit spans + decision Scores, then flush.
 
-        Run once at session end (from the Coordinator/CLI). Safe to call when
-        disabled (no-op). **Idempotent**: a second call is a no-op for the
-        push side -- it only re-writes the receipt. Without this guard a
-        re-run would re-scan the audit logs + ``decision_trace`` and re-emit
-        the same audit spans / Scores, producing duplicates in Langfuse (the
-        derived trace_id keeps re-runs on one trace, but the children would
-        still double up).
+        Run once at session end. Safe to call when disabled (no-op) and
+        idempotent: a second call only re-writes the receipt, avoiding duplicate
+        audit spans / Scores in Langfuse.
         """
         if not self._enabled:
-            # Still drop a receipt so the breakdown can report *why* nothing
-            # was pushed (disabled / no_credentials / sdk_missing).
+            # Still drop a receipt so the breakdown can report why nothing was pushed.
             self._write_receipt()
             return
         if self._flushed:
@@ -724,19 +689,16 @@ class LangfuseEmitter:
     def record_session_start(self) -> None:
         """Emit a one-shot ``session_start`` marker the moment a session begins.
 
-        Attached directly to the session's ``trace_id`` (independent of the
-        lazy root span and of any LLM traffic), so a run that aborts in
-        pre-flight or is killed before producing a breakdown still leaves a
-        Langfuse trace tying the WekaFS user dir + session dir to its
+        Attached directly to the session's ``trace_id`` so a run aborted in
+        pre-flight still leaves a Langfuse trace tying the session dir to its
         ``code_revision`` and dependency commits. Idempotent (cross-process via
-        the persisted receipt) and best-effort (never raises).
+        the persisted receipt) and best-effort.
         """
         if not self._enabled:
             return
         if self._counts.get("session_start_recorded"):
             return
-        # Cross-process guard mirrors record_session_breakdown: a prior process
-        # (original run or a `recover-session`) may have already marked start.
+        # Cross-process guard: a prior process may have already marked start.
         persisted = read_receipt(self.session_dir) or {}
         if (persisted.get("counts") or {}).get("session_start_recorded"):
             self._counts["session_start_recorded"] = 1
@@ -766,8 +728,7 @@ class LangfuseEmitter:
                     "image": payload.get("image"),
                 },
             )
-            # Stamp trace name/session_id so the trace is grouped and visible
-            # from the very first observation, even with no LLM calls.
+            # Stamp trace name/session_id so the trace is grouped from the first observation.
             _set_trace_attrs(
                 obs,
                 name=self._trace_name(),
@@ -785,18 +746,16 @@ class LangfuseEmitter:
             except Exception:  # noqa: BLE001
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush after session_start failed", exc_info=True)
-            # Persist the flag so a later process (recovery) skips re-emitting.
+            # Persist the flag so a later process skips re-emitting.
             self._write_receipt()
 
     def record_session_breakdown(self, breakdown: dict[str, Any]) -> None:
         """Attach the complete ``session_breakdown.json`` document to the trace.
 
-        Emitted as one ``session_breakdown`` observation whose ``output`` is the
-        full JSON, attached to this session's ``trace_id`` so it lands on the
-        same trace even when called after :meth:`flush_session` has closed the
-        live spans (the normal order: write file -> flush -> patch langfuse ->
-        record here). Idempotent (a second call is a no-op) and best-effort:
-        any send failure is swallowed and never breaks shutdown.
+        Emitted as one ``session_breakdown`` observation attached to this
+        session's ``trace_id`` so it lands on the same trace even when called
+        after :meth:`flush_session` closed the live spans. Idempotent and
+        best-effort: any send failure is swallowed.
 
         Args:
             breakdown: the complete ``session_breakdown.json`` document to
@@ -806,10 +765,7 @@ class LangfuseEmitter:
             return
         if self._counts.get("breakdown_recorded"):
             return
-        # Cross-process guard: a prior process (the original run, or an earlier
-        # `recover-session`) may have already attached the document. The
-        # persisted receipt is the only state shared across processes, so an
-        # offline recovery in a fresh process stays idempotent.
+        # Cross-process guard via the persisted receipt (the only shared state).
         persisted = read_receipt(self.session_dir) or {}
         if (persisted.get("counts") or {}).get("breakdown_recorded"):
             self._counts["breakdown_recorded"] = 1
@@ -828,8 +784,7 @@ class LangfuseEmitter:
                     "stop_reason": (breakdown.get("session") or {}).get("stop_reason"),
                 },
             )
-            # Stamp trace name/session_id too, so a session whose only trace
-            # artifact is the breakdown (e.g. no LLM calls) is still grouped.
+            # Stamp trace name/session_id so a breakdown-only session is still grouped.
             _set_trace_attrs(
                 obs,
                 name=self._trace_name(),
@@ -846,8 +801,7 @@ class LangfuseEmitter:
             except Exception:  # noqa: BLE001
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush after breakdown failed", exc_info=True)
-            # Persist the breakdown_recorded flag so a later process (recovery)
-            # sees it and skips re-attaching the document.
+            # Persist the flag so a later process skips re-attaching the document.
             self._write_receipt()
 
     def record_status(
@@ -858,22 +812,14 @@ class LangfuseEmitter:
     ) -> None:
         """Mirror a live ``state.json`` status snapshot onto the session's trace.
 
-        Two effects, both keyed to this session's ``trace_id`` so they land on
-        the same trace as the orchestration/kernel spans:
+        Two effects, both keyed to this session's ``trace_id``: trace-level
+        **metadata** is upserted from ``status`` (always the current snapshot),
+        and a lightweight ``session_status`` **observation** is appended so the
+        status timeline is queryable.
 
-        * trace-level **metadata** is upserted from ``status`` (the ``traces``
-          table is a ReplacingMergeTree keyed by trace_id, so this is always the
-          *current* snapshot — one row, directly filterable by
-          ``metadata['phase']`` etc.);
-        * a lightweight ``session_status`` **observation** is appended so the
-          status **timeline** is queryable (latest = max ``start_time``).
-
-        Throttled to avoid flooding the trace / adding latency on the save hot
-        path: a snapshot is sent only when its signature changed from the last
-        push, or after ``min_refresh_sec`` elapsed (a slow heartbeat so a
-        long-lived phase still refreshes). Never flushes the client (relies on
-        the SDK's auto-flush cadence). Best-effort and a no-op unless live push
-        is enabled; any send failure is swallowed.
+        Throttled to avoid flooding the trace: a snapshot is sent only when its
+        signature changed or after ``min_refresh_sec`` elapsed. Never flushes the
+        client; best-effort and a no-op unless live push is enabled.
 
         Args:
             status (dict[str, Any]): Flat scalar status summary (str/bool/int/
@@ -904,8 +850,7 @@ class LangfuseEmitter:
                 output=status,
                 metadata=status,
             )
-            # Upsert the trace-level snapshot so external consumers can read the
-            # current status straight off the trace row (not just observations).
+            # Upsert the trace-level snapshot so consumers can read status off the trace row.
             _set_trace_attrs(
                 obs,
                 name=self._trace_name(),
@@ -956,9 +901,8 @@ class LangfuseEmitter:
         """Backfill out-of-process children's token rows from ext/*.jsonl.
 
         Children (geak / forge / robustness / specialist subprocess) never
-        connect to Langfuse; their tokens land in ``ext/<component>-<pid>.
-        jsonl`` once the parent parses them. We emit those as text-less
-        Generations here so the trace still accounts their spend.
+        connect to Langfuse; their tokens land in ``ext/<component>-<pid>.jsonl``.
+        Emitted as text-less Generations so the trace still accounts their spend.
         """
         ext_dir = trace_ext_dir(self.session_dir)
         if not ext_dir.is_dir():
@@ -972,11 +916,9 @@ class LangfuseEmitter:
         """Backfill recipe-snapshot / gbrain remote reads from the audit log.
 
         The recipe KB dispatcher appends one row per remote read to
-        ``runtime/recipe_snapshot/.audit.jsonl`` (it has no Langfuse handle, by
-        design). Each row becomes a ``kb:recipe_snapshot:<method>`` span under
-        the ``recipe_kb`` agent so the trace shows which backend served the
-        warm-start recipe, the request, and how it resolved. Read out-of-band
-        at session end; idempotent via the ``flush_session`` guard.
+        ``runtime/recipe_snapshot/.audit.jsonl``. Each row becomes a
+        ``kb:recipe_snapshot:<method>`` span under the ``recipe_kb`` agent. Read
+        out-of-band at session end; idempotent via the ``flush_session`` guard.
         """
         rows = _load_jsonl(recipe_snapshot_audit_jsonl(self.session_dir))
         for row in rows:
@@ -1000,12 +942,9 @@ class LangfuseEmitter:
         """Backfill specialist intel/tool calls as per-call ``intel:<tool>`` spans.
 
         The specialist runner appends one row per recovered tool call to
-        ``reports/trace/specialist_intel.jsonl`` (the production specialist is a
-        subprocess with no Langfuse handle, so the parent persists the audit).
-        Each row becomes an ``intel:<tool>`` span under the ``specialist`` agent
-        so the trace shows what a specialist actually read (WebSearch / WebFetch
-        / pr_monitor / cortex_kb / Read / Grep / ...), not just its token total.
-        Read out-of-band at session end (mirrors :meth:`_flush_recipe_kb_audit`);
+        ``reports/trace/specialist_intel.jsonl``. Each row becomes an
+        ``intel:<tool>`` span under the ``specialist`` agent so the trace shows
+        what a specialist actually read. Read out-of-band at session end;
         idempotent via the ``flush_session`` guard.
         """
         rows = _load_jsonl(specialist_intel_path(self.session_dir))
@@ -1030,12 +969,10 @@ class LangfuseEmitter:
         """Backfill the Kernel-Forge loop's key steps as ``forge:*`` spans.
 
         ``kernel_request_handlers`` records each forge attempt's per-iteration
-        steps (rationale / validation / bench / keep-revert) and a run summary
-        to ``reports/trace/forge_steps.jsonl``. Each row becomes a
-        ``forge:iter:<n>`` (or ``forge:summary``) span under the ``forge`` agent
-        so a trace shows forge's decision process, not just its token total.
-        Read out-of-band at session end (mirrors :meth:`_flush_specialist_intel`);
-        idempotent via the ``flush_session`` guard.
+        steps and a run summary to ``reports/trace/forge_steps.jsonl``. Each row
+        becomes a ``forge:iter:<n>`` (or ``forge:summary``) span under the
+        ``forge`` agent. Read out-of-band at session end; idempotent via the
+        ``flush_session`` guard.
         """
         for row in _load_jsonl(forge_steps_path(self.session_dir)):
             self._counts["forge_steps_read"] += 1
@@ -1072,12 +1009,10 @@ class LangfuseEmitter:
         """Backfill each deterministic GEMM-tuning run as a ``gemm_tuning:*`` span.
 
         ``run_gemm_tuning_handler`` appends one row per run to
-        ``reports/trace/gemm_tuning.jsonl`` (the tuner is a subprocess with no
-        Langfuse handle, so the parent persists the audit). Each row becomes a
+        ``reports/trace/gemm_tuning.jsonl``. Each row becomes a
         ``gemm_tuning:<engine>`` span under the ``gemm_tuning`` agent so a trace
-        attributes the forge / geak tuner as its own source, not just folds its
-        gain into the kernel total. Read out-of-band at session end (mirrors
-        :meth:`_flush_forge_steps`); idempotent via the ``flush_session`` guard.
+        attributes the tuner as its own source. Read out-of-band at session end;
+        idempotent via the ``flush_session`` guard.
         """
         for row in _load_jsonl(gemm_tuning_steps_path(self.session_dir)):
             self._counts["gemm_tuning_read"] += 1
@@ -1103,11 +1038,9 @@ class LangfuseEmitter:
     def _flush_decision_scores(self) -> None:
         """Convert each decision_trace row into Langfuse Score(s).
 
-        Each score targets the agent span that owns the decision -- (phase,
-        component) from the decision metadata -- so the KEEP/REVERT/gain_pct
-        attaches to "which agent did this". When no matching span exists (the
-        agent produced a decision but no LLM call, or phase/component is
-        missing), it falls back to a trace-level score.
+        Each score targets the agent span that owns the decision (phase,
+        component from the decision metadata). Falls back to a trace-level score
+        when no matching span exists.
         """
         for drow in _load_jsonl(decision_trace_path(self.session_dir)):
             scores = lfmap.decision_to_scores(drow)
@@ -1116,9 +1049,8 @@ class LangfuseEmitter:
             meta0 = scores[0].get("metadata") or {}
             phase = str(meta0.get("phase") or lfmap.UNPHASED)
             agent = self._span_agent_for(str(meta0.get("component") or ""))
-            # Per-decision span carrying ``operation_kind`` (+ proposer / effect)
-            # so the trace can be filtered by "what this step did". Scores attach
-            # to this step span when it opens, else to the owning agent span.
+            # Per-decision span carrying ``operation_kind`` so the trace can be
+            # filtered by step. Scores attach here when it opens, else to the agent span.
             step_span = self._open_decision_span(drow, phase, agent)
             for score in scores:
                 self._create_score(
@@ -1135,9 +1067,8 @@ class LangfuseEmitter:
         """Map a resolved proposer back to a span-attachable agent name.
 
         ``specialist:<domain>`` collapses to the ``specialist`` agent span and
-        ``grid`` to ``orchestration`` (grid proposals are orchestration-driven),
-        so the per-decision score still lands under a real agent span instead of
-        always falling back to the trace level.
+        ``grid`` to ``orchestration`` so the per-decision score lands under a
+        real agent span.
 
         Args:
             proposer: the resolved proposer label from the decision metadata.
@@ -1163,9 +1094,8 @@ class LangfuseEmitter:
         """Open an ``optimization_step:<operation_kind>`` span for one decision.
 
         Parented to the owning agent span (then phase span, then root). Carries
-        operation_kind + proposer + effect in metadata so dashboards/Langfuse can
-        filter steps directly. Returns the span, or ``None`` when no parent is
-        open or the SDK rejects the call (best-effort; never raises).
+        operation_kind + proposer + effect in metadata for step filtering.
+        Best-effort; returns ``None`` when no parent is open or the SDK rejects it.
 
         Args:
             drow: the decision_trace row carrying the ``decision`` payload.
@@ -1181,8 +1111,7 @@ class LangfuseEmitter:
             return None
         dec = drow.get("decision") or {}
         op_kind = str(dec.get("operation_kind") or "decision")
-        # Per-decision token cost (incl. the specialist + scorer spend now
-        # keyed to this task) so a trace can rank decisions by what they cost.
+        # Per-decision token cost so a trace can rank decisions by cost.
         tokens = drow.get("tokens") if isinstance(drow.get("tokens"), dict) else {}
         cost_total = None
         try:
@@ -1273,11 +1202,9 @@ class LangfuseEmitter:
         """A redacted record of whether/where/how much was pushed.
 
         Shape mirrors the ``langfuse`` section of ``session_breakdown.json``.
-        Credentials are never included verbatim -- only the host URL (not a
-        secret) and booleans noting that the keys were present. ``counts_final``
-        is True once :meth:`flush_session` has run (so the out-of-process ext
-        shards and decision scores are reflected); before that it reports the
-        in-process running totals.
+        Credentials are never included verbatim (only the host URL and
+        key-presence booleans). ``counts_final`` is True once
+        :meth:`flush_session` has run, else it reports in-process running totals.
 
         Returns:
             dict[str, Any]: a redacted receipt dict (enabled flag, disabled
@@ -1309,8 +1236,7 @@ class LangfuseEmitter:
         """Persist :meth:`receipt` to ``reports/trace/langfuse_receipt.json``.
 
         Best-effort: a failed receipt write must never break shutdown. The
-        breakdown collector prefers this file (it reflects the post-flush
-        final counts) over a live read of the emitter singleton.
+        breakdown collector prefers this file over a live read of the singleton.
         """
         import json
 
@@ -1325,9 +1251,7 @@ class LangfuseEmitter:
             log.debug("langfuse: receipt write failed", exc_info=True)
 
 
-# ---------------------------------------------------------------------------
 # Process-wide singleton registry (one emitter per session_dir).
-# ---------------------------------------------------------------------------
 _REGISTRY: dict[str, LangfuseEmitter] = {}
 _REGISTRY_LOCK = threading.Lock()
 
@@ -1353,9 +1277,8 @@ def get_emitter(session_dir: Path) -> LangfuseEmitter:
 def record_session_start(session_dir: Path) -> None:
     """Module-level convenience: emit the startup marker for ``session_dir``.
 
-    Call once right after ``manifest.json`` is written, before any heavy
-    bring-up / pre-flight, so the session's Langfuse trace exists from the
-    start. No-op when live push is disabled; best-effort (never raises).
+    Call once right after ``manifest.json`` is written so the session's Langfuse
+    trace exists from the start. No-op when disabled; best-effort.
 
     Args:
         session_dir: Session directory whose startup marker is emitted.
@@ -1394,10 +1317,9 @@ def record_session_breakdown(
 ) -> None:
     """Attach the final ``session_breakdown.json`` to the session's trace.
 
-    Call after the breakdown is written and the langfuse section patched (so
-    the attached document is the complete, post-flush form). Reads the file
-    from disk when ``breakdown`` is not supplied. No-op when live push is
-    disabled; best-effort (never raises).
+    Call after the breakdown is written and the langfuse section patched. Reads
+    the file from disk when ``breakdown`` is not supplied. No-op when disabled;
+    best-effort.
 
     Args:
         session_dir: Session directory whose trace the breakdown attaches to.
@@ -1416,9 +1338,8 @@ def record_status(
 ) -> None:
     """Module-level convenience: mirror a status snapshot for ``session_dir``.
 
-    Reuses the per-session emitter singleton (so its throttle state persists
-    across the many short-lived ``SharedState`` instances a run creates). No-op
-    when live push is disabled; best-effort (never raises).
+    Reuses the per-session emitter singleton so its throttle state persists. No-op
+    when disabled; best-effort.
 
     Args:
         session_dir: Session directory whose trace the status attaches to.
@@ -1431,10 +1352,8 @@ def record_status(
 def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     """Read the persisted ``langfuse_receipt.json`` for ``session_dir``.
 
-    Returns the post-flush receipt dict (preferred by the breakdown
-    collector, since its counts are final) or ``None`` if no receipt was
-    written -- e.g. the breakdown is being assembled before ``flush_session``
-    ran, or live push never happened.
+    Returns the post-flush receipt dict (preferred by the breakdown collector
+    since its counts are final) or ``None`` if no receipt was written.
 
     Args:
         session_dir: Session directory whose persisted receipt is read.

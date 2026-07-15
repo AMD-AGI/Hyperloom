@@ -12,17 +12,13 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-#: breakdown schema version. v2 adds specialist_runs, the specialist
-#: capability row, kb_writes_summary, the action_timeline alias, the
-#: explore_search ledger, and the kernel_optimization_summary /
-#: conc_sweep_summary sections. Additive-only, so v1 readers still parse v2.
-#: Emitted only on the legacy fallback path (no recorder fragments).
+#: breakdown schema version. Emitted on the legacy fallback path (no recorder fragments).
 SCHEMA_VERSION = "hyperloom.session_breakdown.v2"
 
 #: breakdown schema version stamped when the file was assembled from the
-#: author-time recorder fragments ("new way"). Same additive wire shape as v2
-#: plus the recorder-only sections; the version bump just lets consumers tell
-#: a recorder-aggregated breakdown apart from a legacy collector fallback.
+#: author-time recorder fragments. Same wire shape as v2 plus recorder-only
+#: sections; lets consumers tell a recorder-aggregated breakdown apart from a
+#: legacy collector fallback.
 SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
 
 
@@ -30,12 +26,8 @@ SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
 class Recovery(TypedDict, total=False):
     """Crash / interruption / resume history for one optimization session.
 
-    Surfaces the recovery-relevant signals SharedState already tracks so the
-    breakdown records WHEN a run was interrupted and continued — the exact
-    context behind gaps like an empty ``geak_result`` (a tick's in-memory
-    result lost to an external kill before the tick-boundary ``state.save``,
-    then a resume). Without this the breakdown shows only the symptom; here it
-    shows the run did not proceed monotonically.
+    Records the recovery-relevant signals SharedState tracks so the breakdown
+    captures when a run was interrupted and continued.
 
     Attributes:
         recovered (bool): True when the run crashed and/or was continued after
@@ -110,7 +102,7 @@ class SessionMeta(TypedDict, total=False):
     code_revision: str
     pid: int
     session_dir: str
-    user_data_path: str  # USER_DATA_PATH root the run wrote under (session_dir nests beneath it)
+    user_data_path: str  # USER_DATA_PATH root the run wrote under
     tick_count: int
     image: str | None  # container image fully-qualified (or None if not configured)
     recovery: Recovery  # crash / interruption / resume history
@@ -168,10 +160,7 @@ class Workload(TypedDict, total=False):
     objective: WorkloadObjective
 
 
-# Model basics — architecture/scale summary parsed from the served model's
-# ``config.json`` (see ``model_config_utils.summarize_model_config``). Empty
-# ``{}`` on non-transformers models (e.g. diffusion) and on sessions whose
-# state predates the field. Mirrored verbatim from ``state.model_info``.
+# Model basics — architecture/scale summary parsed from the served model's config.json.
 class ModelInfo(TypedDict, total=False):
     """Structural summary of the served model (architecture / scale / attention).
 
@@ -246,8 +235,7 @@ class BaselineAttemptSummary(TypedDict, total=False):
     key_metric: float | None
     workspace: str | None
     error_class: str | None
-    # Real failure text from the executor; lets RCA read the cause
-    # without crawling server logs. None on success / reconstruction.
+    # Real failure text from the executor; None on success / reconstruction.
     error_excerpt: str | None
     stderr_tail: str | None
     stderr_log_path: str | None
@@ -261,8 +249,7 @@ class BenchmarkInvocation(TypedDict, total=False):
 
     framework_args: str  # e.g. "python -m sglang.launch_server --model ... --tp 8"
     framework_args_source: str
-    # framework_args_source vocab: log_non_default_args / log_args_line /
-    # log_python_cmd / yaml_cmd / yaml_benchmark / unknown.
+    # vocab: log_non_default_args / log_args_line / log_python_cmd / yaml_cmd / yaml_benchmark / unknown.
     extra_envs: dict[str, str]  # allowlisted env vars only (no secrets)
     config_path: str | None  # baseline_config.with_envs.yaml or variant config
     server_log_path: str | None  # for debug
@@ -447,7 +434,6 @@ class CapabilitySummary(TypedDict, total=False):
     params: CapabilityEntry
     sweep: CapabilityEntry
     validate_stack: CapabilityEntry
-    # specialist row: tested=proposals_total, keeps=proposals_kept, attempts=rounds.
     specialist: CapabilityEntry
 
 
@@ -1205,15 +1191,11 @@ class SourceBreakdown(TypedDict, total=False):
     geak_pct_of_total: float
     # primary explore family bucket.
     explore_pct_of_total: float
-    # REPLAY_WARM_RECIPE (warm-recipe / cortex best_config replay) contribution,
-    # bucketed separately so its gain reconciles against validated_total_pct
-    # instead of vanishing into the non-emitted ``other`` family.
+    # REPLAY_WARM_RECIPE (warm-recipe / cortex best_config replay) contribution.
     replay_warm_recipe_pct_of_total: float
-    # FRAMEWORK_AGENT phase contribution (upstream-PR bake-ins), bucketed
-    # separately so per-source totals reconcile against validated_total_pct.
+    # FRAMEWORK_AGENT phase contribution (upstream-PR bake-ins).
     framework_pct_of_total: float
-    # GEMM_TUNING (deterministic FP8 GEMM tuner) gain, split from the
-    # kernel family; always emitted (0.0 when it skipped / no KEEP).
+    # GEMM_TUNING (deterministic FP8 GEMM tuner) gain; always emitted (0.0 when skipped / no KEEP).
     gemm_tuning_pct_of_total: float
     backends_pct_of_total: float
     params_pct_of_total: float
@@ -1278,10 +1260,9 @@ class PhaseBreakdown(TypedDict, total=False):
     """
 
     prelude: PhaseBreakdownExplore  # always 0 by definition
-    framework: PhaseBreakdownFramework  # PRELUDE → FRAMEWORK_AGENT → EXPLORE
+    framework: PhaseBreakdownFramework
     explore: PhaseBreakdownExplore
     kernel: PhaseBreakdownKernel
-    # GEMM_TUNING is bucketed separately from source-level kernel rewrite gain.
     gemm_tuning: PhaseBreakdownGemmTuning
     sweep: PhaseBreakdownExplore  # usually 0 (sweep is measurement)
     close: PhaseBreakdownExplore  # usually 0
@@ -1547,7 +1528,7 @@ class RooflineSnapshot(TypedDict, total=False):
 
 
 class RooflineProgress(TypedDict, total=False):
-    """Top-level ``roofline_progress`` section (renamed from ``roofline`` to avoid the markdown-renderer key clash).
+    """Top-level ``roofline_progress`` section.
 
     Carries reference lines (ceiling = vendor peak, target = ceiling ×
     ratio, default 0.70), the ``trajectory[]`` stepped line
@@ -1600,8 +1581,7 @@ class OptimizationStackEntry(TypedDict, total=False):
     ts: str
     workspace: str | None
     validated: bool
-    # gemm_tuning evidence
-    # Tuning engine provenance: "geak" today; a forge-backed tuner will set "forge".
+    # gemm_tuning evidence; engine is the tuning provenance ("geak" / "forge").
     engine: str
     tuned_file: str
     final_report_path: str
@@ -1618,11 +1598,9 @@ class OptimizationStackEntry(TypedDict, total=False):
     scope: str
 
 
-# GEMM tuning — top-level section for the fixed FP8 block-scale GEMM tuning
-# stage that runs at KERNEL entry. A peer of the source-level kernel rewrite
-# lanes; engine-tagged so the GEAK tuner ("geak") and a future forge-backed
-# tuner ("forge") share one home. Gain is mirrored here (optimization-layer
-# convenience) while ``attribution`` stays the authoritative roll-up.
+# GEMM tuning — fixed FP8 block-scale GEMM tuning stage that runs at KERNEL
+# entry. Engine-tagged so GEAK ("geak") and a forge-backed tuner ("forge")
+# share one home; gain is mirrored here while ``attribution`` stays authoritative.
 class GemmTuningRun(TypedDict, total=False):
     """One GEMM-tuning run, keyed by the produced ``tuned_file`` CSV.
 
@@ -1704,8 +1682,7 @@ class GemmTuning(TypedDict, total=False):
     total_gain_pct: float
 
 
-# Kernel Roofline — hot-kernel table for the dashboard, mirroring
-# ``<session_dir>/reports/kernel_roofline.json``.
+# Kernel Roofline — hot-kernel table mirroring reports/kernel_roofline.json.
 class KernelRooflineEntry(TypedDict, total=False):
     """One hot-kernel row (on-disk shape passed through verbatim)."""
 
@@ -1735,9 +1712,9 @@ class KernelRoofline(TypedDict, total=False):
     kernels: list[KernelRooflineEntry]
 
 
-# Kernel Optimization Summary (spec A1; PR #399 lishuoshuo): mirror of
-# ``reports/kernel_optimization_summary.json``, passed through verbatim so
-# new producer fields ride through; ``by_kernel[]`` rows stay loose.
+# Kernel Optimization Summary — mirror of
+# ``reports/kernel_optimization_summary.json``, passed through verbatim;
+# ``by_kernel[]`` rows stay loose.
 class KernelOptimizationSummary(TypedDict, total=False):
     schema_version: int  # producer schema (currently 1; int, unlike conc_sweep's str)
     session_id: str  # global id ``{model}_{ts}_{short_uuid}``
@@ -1754,10 +1731,9 @@ class KernelOptimizationSummary(TypedDict, total=False):
     report_path: str  # rel-to-session path to the mirrored source report
 
 
-# Conc Sweep Summary (spec A2; PR #399 lishuoshuo): mirror of
-# ``reports/conc_sweep_summary.json``, a baseline-vs-current_best curve
-# across a CONC ladder. When ``status="skipped"`` the baseline/optimized/
-# comparison/summary blocks are omitted — read ``status`` first.
+# Conc Sweep Summary — mirror of ``reports/conc_sweep_summary.json``, a
+# baseline-vs-current_best curve across a CONC ladder. When ``status="skipped"``
+# the baseline/optimized/comparison/summary blocks are omitted — read ``status`` first.
 class ConcSweepSummary(TypedDict, total=False):
     schema_version: str  # producer schema (currently "1.0"; str, unlike kernel summary's int)
     status: str  # succeeded / failed / skipped
@@ -1813,7 +1789,7 @@ class DecisionTraceEntry(TypedDict, total=False):
     phase: str  # phase active at the decision (declared or ts-window backfill)
     tick: int | None  # orchestrator tick (None when the producer didn't stamp one)
     ts: str  # ISO ...Z of the decision
-    # ``decision`` now carries proposer attribution + a filter label:
+    # ``decision`` carries proposer attribution + a filter label:
     # {component (resolved proposer: specialist:<domain> / grid / orchestration),
     #  operation_kind (backend / param / env / kernel_opt / kernel_integrate / ...),
     #  change/event/verdict, outcome, gain_pct, task_id/dyn_id,
@@ -2099,10 +2075,7 @@ class SessionBreakdown(TypedDict, total=False):
 
     session: SessionMeta
     workload: Workload
-    # Structural model summary parsed from config.json (state.model_info
-    # mirror). Additive optional section: empty {} on non-transformers models
-    # (diffusion etc.) and on sessions whose state predates the field, so
-    # v1/v2 readers that don't know it simply ignore it.
+    # Structural model summary parsed from config.json (state.model_info mirror); {} when absent.
     model_info: ModelInfo
     baseline: Baseline
     final: Final
@@ -2119,22 +2092,16 @@ class SessionBreakdown(TypedDict, total=False):
     param_search: ParamSearch
     explore_search: ParamSearch
     sweep: Sweep
-    # GEAK e2e KERNEL-phase section (KERNEL_OPT_BACKEND_ORDER=geak).
-    # Additive + optional: ``{}`` (omitted) on native sessions, so v1/v2 readers
-    # that don't know it simply ignore it and historic breakdowns are unchanged.
+    # GEAK e2e KERNEL-phase section; ``{}`` on native sessions.
     geak: Geak
     critic_robustness: CriticRobustness
     telemetry: Telemetry
     attribution: Attribution
     kb_provenance: KBProvenance  # Cortex KB audit
     specialist_runs: list[SpecialistRound]
-    # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``
-    # with full per-entry evidence; the stack-derived sections summarise it.
+    # Raw KEEP ledger passthrough mirroring ``state.optimization_stack[]``.
     optimization_stack: list["OptimizationStackEntry"]
-    # Fixed FP8 block-scale GEMM-tuning stage (KERNEL entry). Engine-tagged
-    # (geak today, forge later) top-level section; gain mirrored here while
-    # ``attribution`` stays authoritative. Additive optional — empty {} on
-    # non-fp8/sglang sessions and on sessions that predate it.
+    # Fixed FP8 block-scale GEMM-tuning stage (KERNEL entry), engine-tagged; {} when absent.
     gemm_tuning: GemmTuning
     # Hot-kernel table, mirror of ``reports/kernel_roofline.json``.
     kernel_roofline: KernelRoofline
@@ -2144,33 +2111,17 @@ class SessionBreakdown(TypedDict, total=False):
     conc_sweep_summary: ConcSweepSummary
     # Per-snapshot roofline comparison list driving the markdown ``## Roofline`` section.
     roofline: list[dict[str, Any]]
-    # Optimization-progress curve; renamed from ``roofline`` to
-    # coexist with the list-shaped ``roofline`` above.
+    # Optimization-progress curve (coexists with the list-shaped ``roofline`` above).
     roofline_progress: RooflineProgress
-    # Full-trace token + decision timeline. New
-    # optional section: a v1/v2 reader that doesn't know about it simply
-    # ignores it. Empty dict on sessions that ran before the trace
-    # subsystem landed (no reports/trace/ files).
+    # Full-trace token + decision timeline; {} on pre-trace-subsystem sessions.
     decision_trace: DecisionTrace
-    # Promoted, discoverable token-spend rollup (full total + by component /
-    # phase + decision attribution + action_timeline correlation). Derived
-    # from decision_trace.token_rollup, so always reconciles with it. Additive
-    # optional section; v1 readers ignore it.
+    # Promoted token-spend rollup derived from decision_trace.token_rollup.
     token_usage: TokenUsage
-    # Live-Langfuse push receipt: enabled?/redacted config/how much was sent.
-    # Additive optional section; the local trace jsonl is always written
-    # regardless. ``enabled`` is False (with a ``disabled_reason``) on the
-    # default path where HYPERLOOM_LANGFUSE_ENABLE is off.
+    # Live-Langfuse push receipt; ``enabled`` False (with ``disabled_reason``) when the push is off.
     langfuse: LangfusePush
-    # Kernel-major unified lifecycle view (discovery -> dispatch -> backend
-    # attempts -> e2e). Additive optional section composed from recorder
-    # substreams; empty {} on sessions that predate it, so v1/v2 readers that
-    # don't know it simply ignore it.
+    # Kernel-major unified lifecycle view (discovery -> dispatch -> backend attempts -> e2e); {} when absent.
     kernel_journey: KernelJourney
-    # Authoritative external-tool versions, one ``KernelToolMetadata`` object
-    # per tool (geak / tracelens / claude / codex / ...), keyed by tool name.
-    # Additive optional section recorded at author time; empty {} on sessions
-    # that predate the recorder.
+    # Authoritative external-tool versions keyed by tool name; {} when absent.
     versions: dict[str, KernelToolMetadata]
 
     warnings: list[str]

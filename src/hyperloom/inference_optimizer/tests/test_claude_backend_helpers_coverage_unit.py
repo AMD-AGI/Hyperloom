@@ -16,7 +16,6 @@ from hyperloom.orchestrator.roles import (
 )
 
 
-# -- SDK fakes -------------------------------------------------------------
 @dataclass
 class _FakeToolUse:
     name: str
@@ -60,7 +59,6 @@ def _backend(**over: Any) -> ClaudeBackend:
     return ClaudeBackend(**kwargs)
 
 
-# -- _safe_int -------------------------------------------------------------
 def test_safe_int() -> None:
     assert ClaudeBackend._safe_int(None) == 0
     assert ClaudeBackend._safe_int("bad") == 0
@@ -68,7 +66,6 @@ def test_safe_int() -> None:
     assert ClaudeBackend._safe_int("9") == 9
 
 
-# -- _compose_prompt -------------------------------------------------------
 def test_compose_prompt_raw_vs_normal() -> None:
     raw = _backend(raw_completion=True)
     assert raw._compose_prompt("hello") == "hello"
@@ -78,7 +75,6 @@ def test_compose_prompt_raw_vs_normal() -> None:
     assert len(out) > len("hello")  # suffix appended
 
 
-# -- context provider + emit_intent wiring --------------------------------
 def test_set_context_provider_none_clears() -> None:
     b = _backend()
     b.set_context_provider(None)
@@ -143,12 +139,10 @@ def test_build_options_maps_openai_gateway_env_for_claude_code(monkeypatch) -> N
     assert opts.kwargs["setting_sources"] == []
     assert child_env["ANTHROPIC_API_KEY"] == "openai-key"
     assert child_env["ANTHROPIC_AUTH_TOKEN"] == "openai-key"
-    # Strict header separation: OPENAI_CUSTOM_HEADERS is NOT copied to the
-    # Anthropic side (the claude path reads only ANTHROPIC_CUSTOM_HEADERS).
+    # OPENAI_CUSTOM_HEADERS is not copied to the Anthropic side.
     assert "ANTHROPIC_CUSTOM_HEADERS" not in child_env
 
 
-# -- block helpers ---------------------------------------------------------
 def test_iter_blocks() -> None:
     assert ClaudeBackend._iter_blocks(_Msg(content=[1, 2])) == [1, 2]
     assert ClaudeBackend._iter_blocks(_Msg(content=None)) == []

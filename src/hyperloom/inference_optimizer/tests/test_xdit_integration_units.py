@@ -2,9 +2,9 @@
 
 """Unit coverage for the xDiT (scriptable diffusion) framework integration.
 
-Covers the new cross-cutting contracts added for xDiT: the framework registry,
-the server-args env resolver, the do-not-set blacklist + compatibility filter,
-the scriptable quality gate, scriptable measurement validity, the per-framework
+Covers the cross-cutting contracts for xDiT: the framework registry, the
+server-args env resolver, the do-not-set blacklist + compatibility filter, the
+scriptable quality gate, scriptable measurement validity, the per-framework
 YAML resolvers, and the explore cold-start grid.
 """
 
@@ -55,8 +55,7 @@ class TestFormatPrimaryMetric:
         assert fr.format_primary_metric("vllm", 0.0) == "0.0 tok/s/GPU"
 
     def test_xdit_shows_e2el_mean_ms_not_tok_s(self):
-        # xDiT throughput is img/s (1/latency); display the equivalent
-        # per-image latency e2el_mean_ms = 1000 / img_per_s.
+        # xDiT throughput is img/s; display equivalent per-image latency ms.
         out = fr.format_primary_metric("xdit", 0.15528)
         assert out == "6440.0 ms"
         assert "tok/s" not in out
@@ -69,14 +68,12 @@ class TestFormatPrimaryMetric:
         assert fr.format_primary_metric("rust-burn", 10.0) == "10.0 tok/s/GPU"
 
     def test_none_or_empty_framework_falls_back_to_serving(self):
-        # A None/empty framework (partial state, missing attr) must not crash
-        # and defaults to the serving unit.
+        # A None/empty framework must not crash and defaults to serving unit.
         assert fr.primary_metric_unit(None) == "tok/s/GPU"
         assert fr.primary_metric_unit("") == "tok/s/GPU"
         assert fr.primary_metric_value(None, 12.0) == 12.0
         assert fr.format_primary_metric(None, 12.0) == "12.0 tok/s/GPU"
         assert fr.format_primary_metric("", 12.0) == "12.0 tok/s/GPU"
-        # None/0 throughput must not raise on the serving path.
         assert fr.format_primary_metric(None, None) == "0.0 tok/s/GPU"
 
 
@@ -135,8 +132,7 @@ class TestQualityGate:
         # Scriptable (require=True): missing/empty/ambiguous gate fails closed.
         assert ag.quality_gate_passed(None, require=True) is False
         assert ag.quality_gate_passed({}, require=True) is False
-        # A non-empty gate with no ``passed`` and no usable thresholds is
-        # ambiguous and must fail when required.
+        # Non-empty gate with no passed and no usable thresholds fails when required.
         assert ag.quality_gate_passed({"note": "n/a"}, require=True) is False
         # An explicit pass / usable thresholds still pass when required.
         assert ag.quality_gate_passed({"passed": True}, require=True) is True
@@ -145,28 +141,24 @@ class TestQualityGate:
         ) is True
 
     def test_quality_gate_passed_skipped_reference_established(self, monkeypatch):
-        # The baseline establishing the reference (skipped) is legitimate and
-        # must pass even when required and a reference is configured.
+        # The baseline establishing the reference (skipped) must pass even when
+        # required and a reference is configured.
         monkeypatch.setenv("XDIT_QUALITY_REF", "/tmp/ref.png")
         gate = {"passed": True, "skipped": True, "reason": "reference_established"}
         assert ag.quality_gate_passed(gate, require=True) is True
 
     def test_quality_gate_passed_skipped_fails_closed_when_ref_configured(self, monkeypatch):
         # A variant that SKIPPED the gate while a reference was configured did
-        # not actually compare -> fail closed (scriptable require=True), even
-        # though the bench wrapper stamped passed=True on the skip.
+        # not actually compare -> fail closed (scriptable require=True).
         monkeypatch.setenv("XDIT_QUALITY_REF", "/tmp/ref.png")
         for reason in ("no_reference_or_image", "reference_missing", "image_libs_unavailable"):
             gate = {"passed": True, "skipped": True, "reason": reason}
             assert ag.quality_gate_passed(gate, require=True) is False, reason
 
     def test_quality_gate_passed_skipped_fails_closed_regardless_of_env(self, monkeypatch):
-        # _workload_envs auto-defaults a per-session reference for every
-        # scriptable variant, so a comparison is ALWAYS expected. A
-        # non-established skip is unverifiable and fails closed even when the
-        # orchestrator process env carries no XDIT_QUALITY_REF (the reference is
-        # injected via benchmark.envs for the wrapper subprocess, not the
-        # process env, so the old env probe fail-opened here).
+        # A comparison is always expected, so a non-established skip is
+        # unverifiable and fails closed even when the process env carries no
+        # XDIT_QUALITY_REF.
         monkeypatch.delenv("XDIT_QUALITY_REF", raising=False)
         gate = {"passed": True, "skipped": True, "reason": "no_reference_or_image"}
         assert ag.quality_gate_passed(gate, require=True) is False
@@ -199,8 +191,7 @@ class TestQualityGate:
         assert out["accuracy"] == 1.0
 
     def test_parse_eval_results_scriptable_missing_gate_fails_closed(self, tmp_path):
-        # No benchmark_report.json / no quality_gate. For a scriptable framework
-        # this must fail closed (accuracy 0.0) rather than fall back to GSM8K.
+        # No quality_gate: scriptable must fail closed (accuracy 0.0), not GSM8K.
         out = ag.parse_eval_results(tmp_path, framework="xdit")
         assert out["accuracy"] == 0.0
         assert out["task"] == "quality_gate"
@@ -222,8 +213,7 @@ class TestQualityGate:
         assert out["accuracy"] == 0.0
 
     def test_parse_eval_results_serving_missing_gate_skips(self, tmp_path):
-        # Serving framework with no gate and no GSM8K results: not fail-closed,
-        # returns accuracy None so the caller skips the gate.
+        # Serving with no gate/GSM8K: returns accuracy None so the caller skips.
         out = ag.parse_eval_results(tmp_path, framework="vllm")
         assert out.get("accuracy") is None
 
@@ -242,8 +232,7 @@ class TestScriptableMeasurement:
         assert br.is_valid_measurement(m) is False
 
     def test_quality_threshold_fail_rejected_without_passed_key(self):
-        # Single source of truth with quality_gate_passed: a gate that fails on
-        # thresholds (no explicit passed=False) is also rejected for selection.
+        # A gate that fails on thresholds (no explicit passed=False) is rejected.
         m = {
             "workload_kind": "scriptable",
             "output_throughput": 0.29,
@@ -253,7 +242,7 @@ class TestScriptableMeasurement:
 
     def test_quality_missing_gate_still_valid(self):
         # A missing/empty gate stays non-blocking for selection (require=False);
-        # the required-gate enforcement happens upstream (Magpie / accuracy gate).
+        # required-gate enforcement happens upstream.
         m = {"workload_kind": "scriptable", "output_throughput": 0.29}
         assert br.is_valid_measurement(m) is True
 
@@ -296,7 +285,6 @@ class TestExploreGrid:
         assert grid, "xdit cold-start grid must be non-empty"
         for v in grid:
             assert v.name.startswith("xdit_")
-            # No seeded variant may trip the do-not-set blacklist.
             assert gr.xdit_blacklist_reason(v.extra_envs) is None
 
 
@@ -355,8 +343,8 @@ class TestLifecycleScriptableSkip:
 
 
 class TestRooflineSnapshotUnits:
-    """D10: the roofline snapshot table renders the achieved primary metric in
-    the framework-correct unit (serving tok/s vs scriptable per-image ms)."""
+    """The roofline snapshot table renders the achieved primary metric in the
+    framework-correct unit (serving tok/s vs scriptable per-image ms)."""
 
     def test_fmt_tput_serving_tok_s(self):
         from hyperloom.orchestrator.kernel import roofline_snapshot as rs
@@ -388,7 +376,6 @@ class TestRooflineSnapshotUnits:
         cmp = rs.build_roofline_comparison_from_history([snap])
         table = "\n".join(rs.format_roofline_metrics_table(cmp))
         assert "6440.0 ms" in table
-        # Scriptable runs have no decode memory-roofline ceiling.
         assert "decode memory-roofline ceiling" not in table
 
     def test_snapshot_carries_latency_siblings_and_within(self):
@@ -407,7 +394,7 @@ class TestRooflineSnapshotUnits:
         )
         assert snap["e2e_mean_ms"] == 6440.0
         assert snap["roofline_ideal_ms"] == 644.0
-        # No tok/s ceiling -> within = ideal / measured = 644 / 6440 = 10%.
+        # No tok/s ceiling -> within = ideal / measured.
         assert snap["within_roofline_pct"] == 10.0
         assert snap["gap_to_roofline_pct"] == 90.0
         assert snap["theoretical_peak_tok_per_sec"] is None
@@ -507,7 +494,7 @@ class TestScriptableLatencyRooflineSidecar:
 
 
 class TestHyperloomArchSpec:
-    """A3: TraceLens arch spec derived from hyperloom's HW_SPECS_ACHIEVABLE."""
+    """TraceLens arch spec derived from hyperloom's HW_SPECS_ACHIEVABLE."""
 
     def _tab(self):
         import sys
@@ -526,7 +513,6 @@ class TestHyperloomArchSpec:
         assert spec is not None
         assert spec["mem_bw_gbps"] == pytest.approx(8000.0)
         maf = spec["max_achievable_tflops"]
-        # bf16 achievable + fp8 + fp4 derived from HW_SPECS_ACHIEVABLE.
         assert maf["matrix_bf16"] == pytest.approx(1686.0)
         assert maf["matrix_fp8"] == pytest.approx(3567.0)
         assert maf["matrix_fp4"] == pytest.approx(5663.0)
@@ -544,7 +530,6 @@ class TestHyperloomArchSpec:
 
     def test_write_spec_roundtrip(self, tmp_path):
         tab = self._tab()
-        # default_arch_output_path writes under <root>/TraceLens/Agent/Analysis/utils/arch/
         out = tab.write_hyperloom_arch_spec(tmp_path, "mi355x", lambda _m: None)
         assert out is not None and out.is_file()
 
@@ -553,18 +538,17 @@ class TestHyperloomArchSpec:
 
 
 class TestValidateTraceStructureScriptable:
-    """B5: for scriptable (xDiT) traces, the LLM/InferenceX structure checks are
+    """For scriptable (xDiT) traces, the LLM/InferenceX structure checks are
     skipped; only the zero-ops (repeat=0 empty window) health signal applies."""
 
     def _write_trace(self, trace_dir, *, with_kernels: bool) -> None:
         import gzip
 
         if with_kernels:
-            # A healthy diffusion trace: real cpu_op + kernel events, but still
-            # no execute_* / user_annotation (plain torch-profiler, no InferenceX).
+            # Healthy diffusion trace: cpu_op + kernel, no execute_*/user_annotation.
             events = [{"name": "cpu_op", "cat": "cpu_op"}, {"name": "some_gemm", "cat": "kernel"}]
         else:
-            # A metadata-only (repeat=0 empty window) trace: no cpu_op / kernel.
+            # Metadata-only (repeat=0 empty window) trace: no cpu_op / kernel.
             events = [{"name": "process_labels", "cat": "process_labels"}]
         payload = {"traceEvents": events}
         p = trace_dir / "profile.trace.json.gz"
@@ -587,7 +571,7 @@ class TestValidateTraceStructureScriptable:
 
         self._write_trace(tmp_path, with_kernels=False)
         health = pf._validate_trace_structure(tmp_path, "xdit")
-        # The one diffusion-relevant health signal is preserved.
+        # The diffusion-relevant health signal is preserved.
         assert health["zero_ops"] is True
 
     def test_serving_still_flags_missing_annotations(self, tmp_path):
@@ -595,8 +579,8 @@ class TestValidateTraceStructureScriptable:
 
         self._write_trace(tmp_path, with_kernels=True)
         health = pf._validate_trace_structure(tmp_path, "vllm")
-        # Same trace, serving framework: the LLM checks DO run and flag the
-        # missing execute_*/user_annotation events.
+        # Same trace, serving framework: the LLM checks run and flag the missing
+        # execute_*/user_annotation events.
         assert health["per_kernel_attribution_degraded"] is True
 
 

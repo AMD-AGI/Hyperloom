@@ -118,7 +118,7 @@ def test_review_verdict_critic_only():
     assert REVIEW_VERDICT_SOURCE_ALLOWLIST == frozenset({"critic"})
     assert "approve" in REVIEW_VERDICTS
     assert "needs_review" in REVIEW_VERDICTS
-    assert "objection" not in REVIEW_VERDICTS  # parliament removed
+    assert "objection" not in REVIEW_VERDICTS
 
 
 def test_kill_and_robustness_only_renamed():
@@ -171,9 +171,7 @@ def test_gate_orchestration_delegate_kernel_owned_rejected(gate):
 
 
 def test_gate_orchestration_propose_kernel_owned_rejected():
-    """Kernel-owned actions are REQUEST-only on BOTH channels: propose_action of
-    a kernel_agent-owned action is denied exactly like delegate (the ownership guard
-    fires before the fp8 / phase checks)."""
+    """Kernel-owned actions are REQUEST-only on both channels: propose_action is denied like delegate."""
     state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     for action in ("kernel_opt", "gemm_tuning", "integrate", "deep_kernel_analysis"):
@@ -240,7 +238,7 @@ def test_gate_orchestration_delegate_normal_action_ok(gate):
     )
 
 
-# Per-action delegate source allowlist: recover is robustness-only so PolicyGate is the single chokepoint against a kill spree.
+# Per-action delegate source allowlist: recover is robustness-only.
 def test_delegate_action_source_allowlist_constant_shape():
     """``recover`` is the only entry today."""
     assert DELEGATE_ACTION_SOURCE_ALLOWLIST == {
@@ -328,7 +326,7 @@ def test_gate_orchestration_propose_recover_rejected_by_source(gate):
 
 
 def test_gate_robustness_delegate_recover_in_phase_ok():
-    """The robustness ``gpu_memory_leaked`` ladder still delegates ``recover`` with a live phase set via the ROBUSTNESS_DELEGATE_ONLY bypass."""
+    """The robustness ``gpu_memory_leaked`` ladder delegates ``recover`` with a live phase set."""
     state = SharedState(phase="EXPLORE", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     gate.validate_intent(
@@ -453,7 +451,7 @@ def test_gate_kernel_request_rejected_by_role(gate):
                 payload={"target_agent": "orchestration", "kind": "x"},
             ),
         )
-    assert exc.value.rule == "role"  # kernel.allowed_intents lacks REQUEST
+    assert exc.value.rule == "role"
 
 
 def test_gate_kernel_propose_rejected_by_role(gate):
@@ -566,7 +564,7 @@ def test_gate_robustness_prune_branch_requires_family(gate):
 
 
 def test_gate_orchestration_prune_branch_allowed_with_family(gate):
-    """Roofline-v2 C3: Orchestration was granted PRUNE_BRANCH so it can forward ``suggested_prunes`` advice to the Coordinator."""
+    """Orchestration has PRUNE_BRANCH so it can forward ``suggested_prunes`` advice to the Coordinator."""
     gate.validate_intent(
         "orchestration",
         Intent(
@@ -599,7 +597,7 @@ def test_gate_orchestration_update_state_core_field_rejected(gate):
 
 
 def test_core_state_fields_includes_model_arch_tags():
-    """``model_architectures`` / ``model_type`` are config.json fact-layer tags; locking them stops an LLM ``update_state`` from polluting the recipe snapshot."""
+    """``model_architectures`` / ``model_type`` are config.json fact-layer tags that stay locked."""
     assert "model_architectures" in CORE_STATE_FIELDS
     assert "model_type" in CORE_STATE_FIELDS
 
@@ -619,9 +617,7 @@ def test_gate_update_state_model_arch_tags_rejected(gate):
 
 
 def test_core_state_fields_includes_degraded_markers():
-    """``degraded_mode`` / ``model_warnings`` are preflight-authored facts that
-    drive the final report's degraded warning; locking them stops an LLM from
-    forging or clearing a degraded-run verdict."""
+    """``degraded_mode`` / ``model_warnings`` are preflight-authored facts that stay locked."""
     assert "degraded_mode" in CORE_STATE_FIELDS
     assert "model_warnings" in CORE_STATE_FIELDS
 

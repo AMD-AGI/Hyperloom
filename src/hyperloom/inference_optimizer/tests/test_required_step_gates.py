@@ -24,7 +24,6 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 
 
-# Fixtures
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -67,7 +66,6 @@ def _seed_post_baseline(coord: Coordinator) -> None:
     }
 
 
-# target_analysis is no longer sequence-gated (only baseline-first remains)
 def test_baseline_allowed_without_target_analysis(session_dir):
     """``baseline`` is no longer blocked on a missing target_baseline.json."""
     coord = Coordinator(
@@ -90,7 +88,6 @@ def test_baseline_first_still_blocks_other_actions(session_dir):
     assert coord._sequence_denial_for_action("target_analysis") is None
 
 
-# integrate gate
 def test_integrate_gate_inactive_without_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
@@ -183,7 +180,6 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
         )
 
 
-# Hot-kernel report gate.
 def _seed_trace_analyze(coord, *, hot_kernels, task_groups=None):
     coord.shared_state.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz",
@@ -234,7 +230,7 @@ def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
     assert "untried_hot_kernels" in summary
     assert "k001" in summary
     assert "k002" in summary
-    assert summary.find("k002") < summary.find("k001"), summary  # highest gpu_pct first
+    assert summary.find("k002") < summary.find("k001"), summary
 
 
 def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
@@ -251,7 +247,6 @@ def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
     assert coord._sequence_denial_for_action("report") is None
 
 
-# trace_analyze gate — DEMOTED to a data-contract check in the handler.
 def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
     """An empty ``last_trace_analyze`` cache must not action-layer-deny explore actions."""
     coord = Coordinator(session_dir, backends=_backends_full())

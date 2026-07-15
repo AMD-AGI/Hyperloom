@@ -24,34 +24,31 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 
 # Expected action catalogue.
 EXPECTED_ACTIONS_V06: dict[str, str] = {
-    # prep (3)
+    # prep
     "target_analysis": "prep",
     "baseline": "prep",
-    # GAP 1 — Coordinator-internal one-shot warm-recipe replay.
     "replay_warm_recipe": "prep",
-    # analysis (2) — Coordinator-internal, selected by enable_roofline.
+    # analysis
     "roofline": "analysis",
     "profile": "analysis",
-    # shallow (5) — ``explore`` is the merged grid-runner entry.
+    # shallow
     "explore": "shallow",
     "integrate_patch": "shallow",
-    # FRAMEWORK_AGENT phase: per-candidate Coordinator-internal executor.
     "framework_agent": "shallow",
     "sweep": "shallow",
-    # SWEEP-phase post-sweep concurrency comparison.
     "conc_sweep": "shallow",
     "report": "shallow",
     "session_breakdown": "shallow",
-    # creative (1) — unified specialist dispatch (scope: domain/domains/freeform).
+    # creative
     "specialist": "creative",
-    # deep_kernel (6)
+    # deep_kernel
     "kernel_opt": "deep_kernel",
     "integrate": "deep_kernel",
     "deep_kernel_analysis": "deep_kernel",
     "operator_tuning": "deep_kernel",
     "vendor_kernel_config": "deep_kernel",
     "gemm_tuning": "deep_kernel",
-    # resilience (1)
+    # resilience
     "recover": "resilience",
 }
 
@@ -158,9 +155,7 @@ def test_gemm_tuning_action_metadata(registry):
     assert m.pipeline_phase == "deep"
     assert set(m.requires_lanes) == {"server_lifecycle", "workspace_mutation", "benchmark_lane"}
     assert "framework in ('sglang', 'vllm', 'vllm-aiter')" in m.applicable_when
-    # forge handles any precision (bf16/fp16/fp8/fp4/mxfp4), dense or MoE; the
-    # action must NOT pre-filter on precision/MoE or bf16 dense (which has real
-    # e2e KEEPs) gets blocked. Gate only on framework + the deep phase.
+    # Gate only on framework + the deep phase, not precision/MoE.
     assert any("phase == 'deep'" in cond for cond in m.applicable_when)
     assert not any("precision" in cond for cond in m.applicable_when)
 
@@ -178,8 +173,6 @@ def test_every_action_has_valid_family(registry):
 
 
 def test_every_action_uses_only_known_lanes(registry):
-    # ``research_lane`` supports the LLM specialist sub-agent; known-lanes set
-    # must include it.
     known = {
         "server_lifecycle",
         "workspace_mutation",
@@ -285,7 +278,6 @@ def test_cli_real_executors_consistent_with_runs_actions():
     )
 
 
-# Prompt-builder fields — see ActionMetadata docstring.
 def test_every_action_has_non_empty_description(registry):
     for m in registry.all():
         assert m.description, f"{m.name}: description must be non-empty"

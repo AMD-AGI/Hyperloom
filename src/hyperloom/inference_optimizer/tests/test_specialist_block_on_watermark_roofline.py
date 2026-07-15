@@ -17,7 +17,6 @@ import pytest
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
-# Stubs — minimal SharedState + TaskRegistry doubles.
 @dataclass
 class _BareState:
     baseline_tput: float = 100.0
@@ -97,7 +96,7 @@ def coord(tmp_path: Path) -> Coordinator:
     return c
 
 
-# 1. _needs_roofline_for_watermark — guards + threshold
+# _needs_roofline_for_watermark — guards + threshold
 def test_watermark_check_false_before_first_roofline(coord: Coordinator):
     """Bootstrap guard: with ``last_roofline_tput=0`` the watermark never fires."""
     coord.shared_state.baseline_tput = 100.0
@@ -146,7 +145,7 @@ def test_watermark_ratio_resolver_returns_default():
     assert _resolve_roofline_watermark_ratio() == 1.10
 
 
-# 2. _maybe_enqueue_watermark_roofline — enqueue + pending stamp
+# _maybe_enqueue_watermark_roofline — enqueue + pending stamp
 @pytest.mark.asyncio
 async def test_maybe_enqueue_watermark_skips_when_not_needed(coord: Coordinator):
     coord.shared_state.last_roofline_tput = 100.0

@@ -41,12 +41,10 @@ from .errors import InboxParseError
 from .request_models import Proposal
 
 
-# ``=== Section title ===`` marker. Title may include parentheses, spaces and
-# words. Capture group 1 is the trimmed title.
+# ``=== Section title ===`` marker; capture group 1 is the trimmed title.
 _SECTION_RE = re.compile(r"^\s*===\s*(.+?)\s*===\s*$")
 
-# Inbox row layout (matches Coordinator._compose_prompt). Hex32 is the legacy
-# canonical msg_id, but we accept any non-empty hex run.
+# Inbox row layout (matches Coordinator._compose_prompt).
 _INBOX_ROW_RE = re.compile(
     r"^\s*seq=(?P<seq>\d+)\s+"
     r"msg_id=(?P<msg_id>[A-Za-z0-9_\-]+)\s+"
@@ -289,8 +287,7 @@ def parse_inbox_prompt(text: str) -> ParsedPrompt:
                     continue
                 row = _parse_inbox_row(raw_line)
                 if row is None:
-                    # Malformed line is a coordinator bug, not fatal — surface
-                    # via ``extras['malformed_inbox']`` for audit.
+                    # Malformed line — surface via ``extras['malformed_inbox']``.
                     bucket = parsed.extras.setdefault("malformed_inbox", "")
                     parsed.extras["malformed_inbox"] = bucket + ("\n" if bucket else "") + raw_line.strip()
                     continue

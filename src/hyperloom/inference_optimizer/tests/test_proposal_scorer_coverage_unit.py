@@ -23,7 +23,7 @@ def test_extract_scores_json_empty():
 
 
 def test_extract_scores_json_bare_with_trailing():
-    # bare object followed by trailing prose -> shrink loop trims to valid JSON.
+    # bare object with trailing prose -> shrink loop trims to valid JSON.
     text = 'here are scores {"scores": {"a": {"score": 1, "reason": "x"}}} thanks'
     out = _extract_scores_json(text)
     assert out["scores"]["a"]["score"] == 1
@@ -95,7 +95,7 @@ def test_ensure_client_builds_with_key(monkeypatch):
 
 
 def test_ensure_client_prefers_explicit_openai_key(monkeypatch):
-    """Plan B: explicit OPENAI_API_KEY wins over SAFE-filled ANTHROPIC_AUTH_TOKEN."""
+    """Explicit OPENAI_API_KEY wins over SAFE-filled ANTHROPIC_AUTH_TOKEN."""
     import openai
 
     monkeypatch.setenv("OPENAI_API_KEY", "openai-user-key")
@@ -109,7 +109,7 @@ def test_ensure_client_prefers_explicit_openai_key(monkeypatch):
 
 
 def test_ensure_client_falls_back_to_anthropic_token(monkeypatch):
-    """Single-gateway: only ANTHROPIC_AUTH_TOKEN set still builds a client."""
+    """Only ANTHROPIC_AUTH_TOKEN set still builds a client."""
     import openai
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -175,7 +175,7 @@ async def test_score_caps_proposals():
     scorer = ProposalScorer(models=("m",), client_factory=lambda: client)
     proposals = [{"name": f"p{i}"} for i in range(30)]
     await scorer.score(gap={"domain": "d"}, proposals=proposals)
-    # only one model call, but prompt built from capped list (<=16)
+    # one model call; prompt built from capped list (<=16)
     assert scorer._client.chat.completions.calls == ["m"]
 
 
@@ -190,7 +190,7 @@ async def test_score_timeout_recorded_as_error():
 
 @pytest.mark.asyncio
 async def test_score_no_usable_scores():
-    # model returns valid JSON but only unknown names -> empty after normalise
+    # valid JSON but only unknown names -> empty after normalise
     client = _FakeClient({"m": '{"scores": {"ghost": {"score": 5, "reason": "x"}}}'})
     scorer = ProposalScorer(models=("m",), client_factory=lambda: client)
     out = await scorer.score(gap={"domain": "d"}, proposals=[{"name": "p"}])
