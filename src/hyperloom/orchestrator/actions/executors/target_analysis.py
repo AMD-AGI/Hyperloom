@@ -2,10 +2,13 @@
 
 """Real ``target_analysis`` ActionRunner — external baseline comparison.
 
-Pulls matching reference rows from InferenceX into a ``BaselineSummary`` and
-persists ``target_analysis/target_baseline.json`` + report MD. Report-only:
-the persisted artefacts are read solely by :class:`ReportExecutor` — never
-touches SharedState or any Objective.
+Fetches matching reference rows live from the InferenceX benchmarks API into a
+``BaselineSummary`` and persists ``target_analysis/target_baseline.json`` +
+report MD. On a successful, dimension-aligned match it also writes a measured
+``competitor_target.json`` (``source`` = the API URL) that the EXPLORE gap
+advisory consumes as *direction, not a gate*. It never writes SharedState, the
+Objective, or scoring, and never gates any KEEP/REVERT decision — so any
+reference number reaching a prompt is API-measured, never LLM-authored.
 
 Failure policy: never fail the task. Any error (HTTP, mapping miss, zero rows,
 malformed env) is recorded in ``BaselineSummary.status`` / ``.warning`` and the
@@ -116,8 +119,9 @@ class TargetAnalysisExecutor:
         Resolves the session dir and comparison reference, invokes
         :func:`analyze` (folding matching InferenceX rows into a
         ``BaselineSummary`` and writing JSON / MD artefacts), and returns a
-        report-only result. Never fails the task: upstream / mapping errors are
-        recorded in the summary status and ``status="succeeded"`` is returned.
+        bus-friendly summary result. Never fails the task: upstream / mapping
+        errors are recorded in the summary status and ``status="succeeded"``
+        is returned.
 
         Args:
             ctx (RunnerContext): The runner context carrying ``task.params``
