@@ -287,6 +287,18 @@ def parse_eval_results(
     result_files: list[Path] = []
     for pattern in search_paths:
         result_files.extend(Path(f) for f in glob.glob(str(pattern), recursive=True))
+    # Never grade a discarded cold-start warmup round: ``run_grid`` (used by
+    # integrate_patch) and the baseline double-run both nest the throwaway round
+    # under a ``warmup_round/`` slot whose eval output is discarded. When the
+    # search root sits ABOVE such a round (e.g. integrate_patch grades from the
+    # grid slot, the parent of the measured ``benchmark_*`` workspace), the
+    # recursive glob would otherwise also match the warmup eval and
+    # ``sorted(...)[-1]`` can lexicographically favor it over the measured round.
+    # Drop nested ``warmup_round/`` results using a workspace-relative check so a
+    # parse rooted AT the warmup slot itself still finds its own output.
+    result_files = [
+        p for p in result_files if "warmup_round" not in p.relative_to(workspace).parts
+    ]
     if not result_files:
         return {"accuracy": None, "error": f"no results*.json in {workspace}"}
 
