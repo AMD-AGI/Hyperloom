@@ -1174,7 +1174,7 @@ class KernelPhase(PhaseHandler):
         if not self._ck_switch_precision_is_fp8(result):
             return False
 
-        from hyperloom.inference_optimizer.cli.model_gate import _resolve_amd_gpu_type
+        from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
         from ..actions.executors._workload_envs import _GFX942_GPU_TYPES
 
         gpu = _resolve_amd_gpu_type(getattr(self.shared_state, "gpu_type", "") or "")

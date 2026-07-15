@@ -14,15 +14,6 @@ import json
 import logging
 import os
 import shlex
-
-# shutil / subprocess are re-exported (not directly used in this module
-# anymore after the .preflight split) because tests patch the stdlib module
-# singletons via ``cli.shutil.which`` / ``cli.subprocess.run`` /
-# ``"hyperloom.inference_optimizer.cli.subprocess.run"``; that attribute path
-# must keep resolving through this package because stdlib module patches are
-# global and only work here if the ``cli.<module>`` attribute itself exists.
-import shutil  # noqa: F401 - re-exported for callers/tests
-import subprocess  # noqa: F401 - re-exported for callers/tests
 import sys
 import time
 from pathlib import Path

@@ -1063,7 +1063,7 @@ def materialize_config_with_envs(
     # Hyperloom, strictly scoped to sglang + fp8 + gfx942 + that exact quant
     # scheme so per-tensor and block-scale FP8 are never touched. setdefault so
     # an operator-set value (YAML / extra_envs) always wins.
-    from hyperloom.inference_optimizer.cli.model_gate import _resolve_amd_gpu_type
+    from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
 
     _model_for_quant = str(model_path or os.environ.get("MODEL_PATH", ""))
     if (
