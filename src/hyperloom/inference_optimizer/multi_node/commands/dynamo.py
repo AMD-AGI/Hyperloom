@@ -408,21 +408,6 @@ def _collect_forward_env() -> dict[str, str]:
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
-    # Explicit per-variant env overrides (e.g. specialist-proposed MoE
-    # tuning) come through HYPERLOOM_MN_EXTRA_FWD_ENV as a JSON object set
-    # by restart_server_for_round. Unlike _FORWARD_ENV_PREFIXES these are
-    # forwarded verbatim regardless of key prefix, so an explore variant's
-    # ``extra_envs`` reach the SSH-launched sglang. They take precedence
-    # over prefix-matched values for the same key (explicit > ambient).
-    extra_fwd = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
-    if extra_fwd:
-        try:
-            parsed = json.loads(extra_fwd)
-            if isinstance(parsed, dict):
-                for k, v in parsed.items():
-                    fwd[str(k)] = str(v)
-        except (ValueError, TypeError):
-            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
     unset_fwd = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
     if unset_fwd:
         try:
@@ -432,6 +417,22 @@ def _collect_forward_env() -> dict[str, str]:
                     fwd.pop(str(key), None)
         except (ValueError, TypeError):
             warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
+    # Explicit per-variant env overrides (e.g. specialist-proposed MoE
+    # tuning) come through HYPERLOOM_MN_EXTRA_FWD_ENV as a JSON object set
+    # by restart_server_for_round. Unlike _FORWARD_ENV_PREFIXES these are
+    # forwarded verbatim regardless of key prefix, so an explore variant's
+    # ``extra_envs`` reach the SSH-launched sglang. They take precedence
+    # over prefix-matched values for the same key (explicit > ambient) and
+    # intentionally win after unset_fwd, matching single-node YAML semantics.
+    extra_fwd = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
+    if extra_fwd:
+        try:
+            parsed = json.loads(extra_fwd)
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    fwd[str(k)] = str(v)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
     return filter_forward_env(fwd, warn_on_drop=True)
 
 def _dynamo_fanout_launch(

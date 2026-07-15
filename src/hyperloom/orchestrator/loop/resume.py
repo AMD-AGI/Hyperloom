@@ -350,7 +350,10 @@ class ResumeCollaborator:
             cb_now = state.current_best if isinstance(state.current_best, dict) else {}
             cb_args = str(cb_now.get("extra_server_args") or "").strip()
             cb_envs = cb_now.get("extra_envs") if isinstance(cb_now.get("extra_envs"), Mapping) else {}
-            if cb_args or cb_envs:
+            cb_remove = cb_now.get("remove_args")
+            cb_unset = cb_now.get("unset_envs")
+            cb_replace = str(cb_now.get("args_mode") or "").strip().lower() == "replace"
+            if cb_args or cb_envs or cb_remove or cb_unset or cb_replace:
                 try:
                     tput = cb_now.get("tput")
                     params: dict[str, Any] = {
@@ -368,6 +371,12 @@ class ResumeCollaborator:
                         "base_tput": float(tput) if isinstance(tput, (int, float)) and tput > 0 else 0.0,
                         "enable_stack_rebench": False,
                     }
+                    if cb_remove:
+                        params["base_remove_args"] = [cb_remove] if isinstance(cb_remove, str) else list(cb_remove or [])
+                    if cb_unset:
+                        params["base_unset_envs"] = [cb_unset] if isinstance(cb_unset, str) else list(cb_unset or [])
+                    if cb_replace:
+                        params["base_args_mode"] = "replace"
                     if state.baseline_config_path:
                         params["config_path"] = state.baseline_config_path
                     task, existing = await self.tasks.create_or_return_existing(
@@ -711,7 +720,11 @@ class ResumeCollaborator:
         args = str(rebuilt.get("extra_server_args") or "").strip()
         envs = rebuilt.get("extra_envs") or {}
         overlay = str(rebuilt.get("final_overlay") or "").strip()
-        if not (args or envs):
+        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        cb_remove = cb_now.get("remove_args")
+        cb_unset = cb_now.get("unset_envs")
+        cb_replace = str(cb_now.get("args_mode") or "").strip().lower() == "replace"
+        if not (args or envs or cb_remove or cb_unset or cb_replace):
             return {"skipped": True, "reason": "empty_stack"}
         params: dict[str, Any] = {
             "source": "resume_stack_revalidate",
@@ -731,6 +744,12 @@ class ResumeCollaborator:
             "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
             "enable_stack_rebench": False,
         }
+        if cb_remove:
+            params["base_remove_args"] = [cb_remove] if isinstance(cb_remove, str) else list(cb_remove or [])
+        if cb_unset:
+            params["base_unset_envs"] = [cb_unset] if isinstance(cb_unset, str) else list(cb_unset or [])
+        if cb_replace:
+            params["base_args_mode"] = "replace"
         if self.shared_state.baseline_config_path:
             params["config_path"] = self.shared_state.baseline_config_path
         task, existing = await self.tasks.create_or_return_existing(
