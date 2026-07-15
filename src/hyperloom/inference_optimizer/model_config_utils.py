@@ -269,7 +269,10 @@ def _fp8_weight_scale_is_per_channel(model_path: str) -> bool | None:
     """
     if not model_path:
         return None
-    files = sorted(Path(model_path).glob("*.safetensors"))
+    # --model may be an HF repo id; resolve to the local weights dir so the
+    # safetensors scan works for repo-id launches.
+    base = resolve_local_model_dir(model_path) or Path(model_path)
+    files = sorted(base.glob("*.safetensors"))
     if not files:
         return None
     for fpath in files:

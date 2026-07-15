@@ -1821,7 +1821,13 @@ def _read_model_config(model_path: str) -> dict | None:
     """Load a HF ``config.json`` as a dict; ``None`` when unavailable/unreadable."""
     if not model_path:
         return None
-    cfg = Path(model_path) / "config.json"
+    # ``model_path`` may be an HF repo id; resolve to the local weights dir
+    # (shared resolver) so the config read works for repo-id launches.
+    from hyperloom.inference_optimizer.model_config_utils import (
+        resolve_local_model_dir,
+    )
+
+    cfg = (resolve_local_model_dir(model_path) or Path(model_path)) / "config.json"
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))
     except (OSError, ValueError):

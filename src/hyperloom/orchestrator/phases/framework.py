@@ -1182,6 +1182,16 @@ class FrameworkPhase(PhaseHandler):
             if not offending:
                 return ""
             model_path = str(getattr(self.shared_state, "model_path", "") or "").strip()
+            if model_path:
+                # ``model_path`` may be an HF repo id; resolve to the local
+                # weights dir so the sharded-index read works for repo-id launches.
+                from hyperloom.inference_optimizer.model_config_utils import (
+                    resolve_local_model_dir,
+                )
+
+                _resolved = resolve_local_model_dir(model_path)
+                if _resolved is not None:
+                    model_path = str(_resolved)
             if not model_path or not _Path(model_path).is_dir():
                 return ""
             # Load the checkpoint weight_map (sharded index) or list single-file keys.
