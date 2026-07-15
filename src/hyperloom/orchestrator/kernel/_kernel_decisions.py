@@ -14,9 +14,9 @@ Also carries the "honest E2E" hardening-flag helper (``_honest_flag`` + its
 constants), shared by both this cluster and the request handlers that stayed
 in the origin module.
 
-Dependencies on ``shared_state`` constants are imported lazily inside the
-functions that need them (cycle-free, one-way dependency), matching the
-original module's design.
+Dependencies on retry/default settings come from
+``state.kernel_decision_settings`` so this module does not import
+``shared_state``.
 """
 
 from __future__ import annotations
@@ -27,6 +27,15 @@ from typing import Any
 
 from hyperloom.common.env import env_bool
 
+from ..state.kernel_decision_settings import (
+    _DEFAULT_ATTEMPTS_HISTORY,
+    _DEFAULT_HOT_KERNEL_GATE_TOP_N,
+    _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+    _DEFAULT_KERNEL_OPT_MAX_PARTIAL,
+    _MAX_INTEGRATE_FAULT_ATTEMPTS,
+    _now_iso,
+    resolve_kernel_opt_max_failures,
+)
 from ..trace.trace_env import env_flag
 
 
@@ -75,10 +84,8 @@ def _honest_flag(specific_env: str) -> bool:
 # keeps thin forwarding shims so existing callers
 # (``state.record_kernel_opt(...)`` etc.) keep working.
 #
-# The shared_state default constants are imported lazily inside the functions
-# that need them: ``kernel_request_handlers`` has no module-level shared_state
-# import (shared_state imports only stdlib), so a function-local import keeps
-# the dependency one-way and cycle-free.
+# Retry/default settings are intentionally below both SharedState and kernel
+# decision code to keep the dependency graph one-way.
 # ===========================================================================
 def _format_last_kernel_opt(state) -> str:
     """Single-line repr of last kernel-opt outcome for prompt injection.
@@ -234,8 +241,6 @@ def record_kernel_integrate_result(
             ``retryable=True`` for an un-exhausted fault), or ``None`` when
             ``result`` is not a dict or its patch key is unresolvable.
     """
-    from ..state.shared_state import _MAX_INTEGRATE_FAULT_ATTEMPTS, _now_iso
-
     if max_fault_attempts is None:
         max_fault_attempts = _MAX_INTEGRATE_FAULT_ATTEMPTS
 
@@ -376,12 +381,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         result (dict[str, Any]): The kernel_optimization_handler result
             envelope; non-dicts and empty ``kernel_id`` are no-ops.
     """
-    from ..state.shared_state import (
-        _DEFAULT_KERNEL_OPT_MAX_PARTIAL,
-        _now_iso,
-        resolve_kernel_opt_max_failures,
-    )
-
     if not isinstance(result, dict):
         return
     # Capture an empty-queue skip (no eligible kernels, no named kernel) as a
@@ -394,8 +393,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         and str(result.get("reason") or "") == "no_eligible_kernels"
     )
     if is_no_eligible_dispatch_skip:
-        from ..state.shared_state import _now_iso
-
         state.last_kernel_opt_dispatch_skip = {
             "reason": "no_eligible_kernels",
             "kernels_considered": int(result.get("kernels_considered") or 0),
@@ -649,8 +646,6 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
     Args:
         result (dict[str, Any]): The GEMM tuning result envelope.
     """
-    from ..state.shared_state import _DEFAULT_ATTEMPTS_HISTORY, _now_iso
-
     if not isinstance(result, dict):
         result = {"status": "failed", "error": "non-dict gemm tuning result"}
     entry = dict(result)
@@ -889,11 +884,6 @@ def untried_hot_reusable_kernels(
         list[str]: The untried hot-reusable ``kernel_id`` values (one per
             task_group), sorted strongest-first.
     """
-    from ..state.shared_state import (
-        _DEFAULT_HOT_KERNEL_GATE_TOP_N,
-        _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
-    )
-
     info = state.last_trace_analyze or {}
     hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
     task_groups = info.get("task_groups") or []

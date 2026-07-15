@@ -182,7 +182,7 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
 
     * NESTED (authoritative local shape from
       ``coordinator._build_recipe_payload``): launch args under the
-      canonical key and the env map nested under ``extra_envs`` / ``envs``.
+      canonical key and the env map nested under ``extra_envs``.
       The nested dict MUST be unwrapped —
       treating ``extra_envs`` as a scalar env and ``str()``-ing it would
       serialize a Python ``dict`` repr into a single bogus env value and
@@ -201,8 +201,6 @@ def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, s
     """
     args = _coerce_server_args(best_config.get(_EXTRA_SERVER_ARGS_KEY)).strip()
     nested = best_config.get("extra_envs")
-    if not isinstance(nested, Mapping):
-        nested = best_config.get("envs")
     if isinstance(nested, Mapping):
         envs = {str(k): str(v) for k, v in nested.items()}
     else:
