@@ -98,7 +98,12 @@ _resolve_magpie_python() {
   printf '%s' "${candidate:-/opt/venv/bin/python}"
 }
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
-PYTHONPATH="${MAGPIE_PATH}:${PYTHONPATH:-}"
+# Keep REPO_ROOT on PYTHONPATH so subprocesses can ``import hyperloom`` under a
+# ``pip install --target $REPO_ROOT`` layout (the target dir is not on the
+# default sys.path). Append rather than replace so any pre-existing PYTHONPATH
+# and MAGPIE_PATH survive; this file is sourced last, so dropping REPO_ROOT here
+# cannot be recovered by an operator export.
+PYTHONPATH="${REPO_ROOT}:${MAGPIE_PATH}:${PYTHONPATH:-}"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
