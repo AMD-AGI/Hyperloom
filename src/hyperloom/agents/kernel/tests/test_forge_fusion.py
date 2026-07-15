@@ -413,3 +413,53 @@ def test_terminate_process_tree_escalates_to_sigkill_on_posix(monkeypatch):
     forge_fusion._terminate_process_tree(FakeProc())
 
     assert killed == [(9999, 15), (9999, 9)]
+
+
+def test_terminate_process_tree_noop_when_already_exited():
+    class FakeProc:
+        def poll(self):
+            return 0
+
+    forge_fusion._terminate_process_tree(FakeProc())
+
+
+def test_terminate_process_tree_falls_back_when_same_pgid(monkeypatch):
+    terminated: list[bool] = []
+
+    class FakeProc:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            terminated.append(True)
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(forge_fusion.os, "name", "posix")
+    monkeypatch.setattr(forge_fusion.os, "getpgid", lambda _pid: 42, raising=False)
+
+    forge_fusion._terminate_process_tree(FakeProc())
+
+    assert terminated == [True]
+
+
+def test_emit_swallows_write_errors(tmp_path, monkeypatch, capsys):
+    def _raise_oserror(*_args, **_kwargs):
+        raise OSError("denied")
+
+    monkeypatch.setattr(forge_fusion.Path, "write_text", _raise_oserror)
+
+    forge_fusion._emit({"status": "ok"}, str(tmp_path))
+
+    assert forge_fusion.RESULT_BEGIN in capsys.readouterr().out
+
+
+def test_new_session_kwargs_empty_on_windows(monkeypatch):
+    monkeypatch.setattr(forge_fusion.os, "name", "nt")
+    assert forge_fusion._new_session_kwargs() == {}
