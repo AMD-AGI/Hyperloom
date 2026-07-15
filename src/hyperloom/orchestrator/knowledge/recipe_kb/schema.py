@@ -42,7 +42,63 @@ v2 directly.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
+
+try:
+    from .gbrain_ingest import _best_config_split, _coerce_server_args
+except ImportError:  # pragma: no cover - defensive fallback
+
+    def _coerce_server_args(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple)):
+            return " ".join(str(v).strip() for v in value if str(v).strip())
+        return str(value)
+
+    def _best_config_split(best_config: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
+        args = _coerce_server_args(best_config.get("extra_server_args")).strip()
+        nested = best_config.get("extra_envs")
+        if not isinstance(nested, Mapping):
+            nested = best_config.get("envs")
+        if isinstance(nested, Mapping):
+            envs = {str(k): str(v) for k, v in nested.items()}
+        else:
+            non_env_keys = {"extra_server_args", "extra_envs", "envs", "args", "name", "tput", "accuracy"}
+            envs = {
+                str(k): str(v)
+                for k, v in best_config.items()
+                if k not in non_env_keys and not isinstance(v, (Mapping, list, tuple))
+            }
+        return args, envs
+
+
+def _normalize_best_config(best_config: Mapping[str, Any]) -> dict[str, Any]:
+    """Canonicalize a legacy ``{args, envs}`` best_config shape on read.
+
+    Some producers (KG-derived warm-start candidates, older writers) emit
+    ``args`` / ``envs`` (or a nested ``envs`` map) instead of the canonical
+    ``extra_server_args`` / ``extra_envs`` keys. Unwrap that shape here so
+    every in-memory ``Recipe`` uses the canonical keys; already-canonical
+    dicts and any other unknown keys pass through unchanged.
+    """
+    if "args" not in best_config and "envs" not in best_config:
+        return dict(best_config)
+    remapped = dict(best_config)
+    if "extra_server_args" not in remapped and "args" in remapped:
+        remapped["extra_server_args"] = remapped["args"]
+    envs_val = remapped.get("envs")
+    if "extra_envs" not in remapped and isinstance(envs_val, Mapping):
+        remapped["extra_envs"] = envs_val
+    args, envs = _best_config_split(remapped)
+    drop = {"args", "envs", *envs.keys()}
+    out = {k: v for k, v in best_config.items() if k not in drop}
+    if args:
+        out.setdefault("extra_server_args", args)
+    if envs:
+        out.setdefault("extra_envs", envs)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +494,10 @@ class Recipe:
             "confidence",
             "evidence_refs",
             "provenance",
+            # Composite-Cortex provenance markers — dead weight in a local
+            # recipe row, never persisted into extras.
+            "_field_sources",
+            "_sources",
         }
         extras = {k: v for k, v in d.items() if k not in well_known}
         return cls(
@@ -452,7 +512,7 @@ class Recipe:
             framework_name=str(d.get("framework_name") or d.get("framework") or ""),
             framework_version=str(d.get("framework_version") or ""),
             precision=str(d.get("precision") or ""),
-            best_config=dict(d.get("best_config") or {}),
+            best_config=_normalize_best_config(d.get("best_config") or {}),
             best_throughput=float(d.get("best_throughput") or 0.0),
             what_worked=[
                 Finding(

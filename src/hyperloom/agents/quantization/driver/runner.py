@@ -318,7 +318,7 @@ async def run_one_attempt(
 
     try:
         options = sdk_options_cls(**kwargs)
-    except TypeError as exc:
+    except TypeError:
         # Older SDK builds may not support cwd; prompt + SKILL.md use absolute
         # paths so retrying without cwd is safe.
         kwargs.pop("cwd", None)
@@ -329,13 +329,11 @@ async def run_one_attempt(
             # mutating process-global os.environ across async awaits. If this
             # SDK predates the env option, fail clearly instead of silently
             # running Quark 0.12 in an incompatible Python 3.10 environment.
-            if "env" in kwargs:
-                raise RuntimeError(
-                    "claude_agent_sdk.ClaudeAgentOptions does not support env; "
-                    "upgrade claude-agent-sdk so Hyperloom can pass the Quark "
-                    "Python 3.10 compatibility shim to SDK subprocesses"
-                ) from env_exc
-            raise env_exc from exc
+            raise RuntimeError(
+                "claude_agent_sdk.ClaudeAgentOptions does not support env; "
+                "upgrade claude-agent-sdk so Hyperloom can pass the Quark "
+                "Python 3.10 compatibility shim to SDK subprocesses"
+            ) from env_exc
 
     chunks: list[str] = []
     sdk_error = ""
