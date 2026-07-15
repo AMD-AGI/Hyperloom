@@ -563,6 +563,97 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
     assert "installed claude-agent-sdk" in captured
 
 
+# _ensure_ray
+def test_ensure_ray_skips_when_importable(monkeypatch, capsys):
+    """`import ray` returns rc=0 → no pip install fires (probe uses the interpreter)."""
+    runner = _RecordingRun([_Completed(returncode=0)])
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_ray("/opt/venv/bin/python", [])
+
+    assert len(runner.calls) == 1
+    probe = runner.calls[0]
+    # Probe imports ray with the SAME interpreter, not shutil.which on PATH.
+    assert probe == ["/opt/venv/bin/python", "-c", "import ray"]
+    assert "ray OK" in capsys.readouterr().out
+
+
+def test_ensure_ray_installs_when_not_importable(monkeypatch, capsys):
+    """When `import ray` fails, pip install runs with the SAME interpreter.
+
+    Guards the bypass-only regression: a stray ``ray`` on PATH must not stop
+    the install when the active interpreter cannot import ray.
+    """
+    runner = _RecordingRun([_Completed(returncode=1), _Completed(returncode=0)])
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_ray("/opt/venv/bin/python", ["--break-system-packages"])
+
+    assert len(runner.calls) == 2
+    install_call = runner.calls[1]
+    assert install_call[0] == "/opt/venv/bin/python"
+    assert install_call[1:4] == ["-m", "pip", "install"]
+    assert "--break-system-packages" in install_call
+    assert any(arg.startswith("ray[default]==") for arg in install_call)
+    captured = capsys.readouterr().out
+    assert "ray not importable" in captured
+    assert "ray installed OK" in captured
+
+
+# _ensure_bench_serving_deps
+def test_ensure_bench_serving_deps_skips_when_all_present(monkeypatch, capsys):
+    """find_spec probe reports nothing missing -> no pip install fires."""
+    runner = _RecordingRun([_Completed(returncode=0, stdout="")])
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_bench_serving_deps("/opt/venv/bin/python", [])
+
+    assert len(runner.calls) == 1
+    probe = runner.calls[0]
+    assert probe[0] == "/opt/venv/bin/python"
+    assert probe[1] == "-c"
+    # every dep name is handed to the probe as argv (checked via find_spec).
+    for dep in cli_preflight._BENCH_SERVING_DEPS:
+        assert dep in probe
+    assert "benchmark_serving client deps OK" in capsys.readouterr().out
+
+
+def test_ensure_bench_serving_deps_installs_only_missing_subset(monkeypatch, capsys):
+    """Only the modules the probe reports missing are pip-installed (same interp)."""
+    runner = _RecordingRun(
+        [
+            _Completed(returncode=0, stdout="transformers\ndatasets\n"),
+            _Completed(returncode=0),
+        ]
+    )
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_bench_serving_deps("/opt/venv/bin/python", ["--break-system-packages"])
+
+    assert len(runner.calls) == 2
+    install = runner.calls[1]
+    assert install[0] == "/opt/venv/bin/python"
+    assert install[1:4] == ["-m", "pip", "install"]
+    assert "--break-system-packages" in install
+    assert "transformers" in install and "datasets" in install
+    assert "aiohttp" not in install  # present deps are not reinstalled
+    assert "installing benchmark_serving client deps" in capsys.readouterr().out
+
+
+def test_ensure_bench_serving_deps_probe_failure_installs_all(monkeypatch):
+    """A crashed probe falls back to attempting the full dep set."""
+    runner = _RecordingRun([_Completed(returncode=2, stdout=""), _Completed(returncode=0)])
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+
+    cli_preflight._ensure_bench_serving_deps("/opt/venv/bin/python", [])
+
+    assert len(runner.calls) == 2
+    install = runner.calls[1]
+    for dep in cli_preflight._BENCH_SERVING_DEPS:
+        assert dep in install
+
+
+# _unset_hip_visible_devices
 def test_unset_hip_visible_devices_pops_when_rocr_present(monkeypatch, capsys):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")

@@ -36,6 +36,7 @@ from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
 )
+from .benchmark_backend import build_benchmark_command
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -796,19 +797,11 @@ def _run_magpie(
     # redirect into a prior run's slot.
     env["SERVER_LOG"] = str(output_dir / "server.log")
     env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
-    cmd = [
-        magpie_python,
-        "-m",
-        "Magpie",
-        "-v",
-        "benchmark",
-        "--benchmark-config",
-        str(config_path),
-        "--output-dir",
-        str(output_dir),
-        "--run-mode",
-        "local",
-    ]
+    cmd = build_benchmark_command(
+        python_exe=magpie_python,
+        config_path=config_path,
+        output_dir=output_dir,
+    )
     # run_with_session_kill launches Magpie in its own POSIX session and tears
     # down the whole descendant tree on every exit path.
     proc = run_with_session_kill(
@@ -845,7 +838,10 @@ async def run_grid(
 ) -> list[VariantResult]:
     """Execute each grid variant and return all per-variant results."""
     if not magpie_python:
-        magpie_python = _resolve_magpie_python()
+        # Backend-aware: bypass uses a plain python3, not Magpie's venv.
+        from .benchmark_backend import resolve_benchmark_interpreter
+
+        magpie_python = resolve_benchmark_interpreter()
     if warmup_before_measure is None:
         warmup_before_measure = _run_grid_warmup_enabled()
     auto_warmup_requested = bool(warmup_before_measure and server_lifecycle is None)
