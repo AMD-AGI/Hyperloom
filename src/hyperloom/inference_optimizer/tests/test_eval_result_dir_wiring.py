@@ -243,3 +243,48 @@ def test_baseline_parses_accuracy_from_eval_result_dir(tmp_path):
     assert result["status"] == "succeeded"
     assert result.get("accuracy") == pytest.approx(0.83)
     assert result.get("accuracy_task") == "gsm8k"
+
+
+def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
+    """RUN_EVAL off -> no accuracy parse, even if the slot holds stale results.
+
+    The eval-failure fallback reruns with ``RUN_EVAL=false`` reusing the same
+    ``output_dir``; a prior attempt's ``results*.json`` may still sit in the slot
+    (== ``$EVAL_RESULT_DIR``). Reading eval output must strictly follow running
+    eval, so accuracy stays unset and cannot be promoted into baseline_accuracy.
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        env = dict(kwargs.get("env") or {})
+        _fake_workspace(slot)
+        # A stale eval artifact already present in the reused slot: even though
+        # THIS run has RUN_EVAL disabled (so lm-eval did not run), the file is
+        # here from a prior attempt. It must be ignored.
+        eval_root = env.get("EVAL_RESULT_DIR") or str(slot)
+        _write_lm_eval_output(Path(eval_root))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx(
+        {"output_dir": str(output_dir), "timeout_sec": 10, "disable_run_eval": True}
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = asyncio.run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    # Stale results*.json present in the slot, but RUN_EVAL was off this run:
+    # accuracy must NOT be set (no stale promotion into baseline_accuracy).
+    assert result.get("accuracy") is None
