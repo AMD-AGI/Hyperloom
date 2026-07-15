@@ -375,7 +375,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_enabled: bool = True
     # CONC ladder for conc_sweep (mirrors conc_sweep.DEFAULT_CONCS). Empty => skip_reason=empty_conc_list.
     conc_sweep_concs: list[int] = field(
-        default_factory=lambda: [1, 2, 4, 8, 16, 32, 64, 128],
+        default_factory=lambda: [256, 128, 64, 32, 16, 8, 4, 2],
     )
     # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000

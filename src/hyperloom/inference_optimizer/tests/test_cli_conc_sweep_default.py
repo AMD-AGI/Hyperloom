@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Regression tests pinning the ``--enable-conc-sweep`` default to True."""
+"""Regression tests pinning the ``--enable-conc-sweep`` defaults."""
 
 from __future__ import annotations
 
@@ -62,3 +62,38 @@ def test_cli_rejects_no_baseline_double_run_flag(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(SystemExit) as exc_info:
         _parse("--no-baseline-double-run")
     assert exc_info.value.code == 2
+
+
+_EXPECTED_CONCS = [256, 128, 64, 32, 16, 8, 4, 2]
+_EXPECTED_CONCS_STR = "256,128,64,32,16,8,4,2"
+
+
+def test_shared_state_default_concs():
+    """SharedState default ladder must be high-to-low for single-server arm reuse."""
+    state = SharedState()
+    assert state.conc_sweep_concs == _EXPECTED_CONCS, (
+        f"SharedState.conc_sweep_concs default mismatch. "
+        f"Expected {_EXPECTED_CONCS}, got {state.conc_sweep_concs}. "
+        "Update all three sources: DEFAULT_CONCS, parser.py, shared_state.py."
+    )
+
+
+def test_cli_default_concs():
+    """CLI --conc-sweep-concs default must match DEFAULT_CONCS."""
+    ns = _parse()
+    assert ns.conc_sweep_concs == _EXPECTED_CONCS_STR
+
+
+def test_conc_sweep_module_default_concs():
+    """conc_sweep.DEFAULT_CONCS must be kept in sync with CLI/state defaults."""
+    from hyperloom.orchestrator.kernel.conc_sweep import DEFAULT_CONCS
+
+    assert DEFAULT_CONCS == _EXPECTED_CONCS, (
+        f"DEFAULT_CONCS mismatch: expected {_EXPECTED_CONCS}, got {DEFAULT_CONCS}"
+    )
+
+
+def test_cli_custom_concs():
+    """Custom --conc-sweep-concs is parsed as a raw string (parsing happens in run_optimize)."""
+    ns = _parse("--conc-sweep-concs", "4,8,16")
+    assert ns.conc_sweep_concs == "4,8,16"

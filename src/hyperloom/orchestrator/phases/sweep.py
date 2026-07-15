@@ -112,12 +112,26 @@ class SweepPhase(PhaseHandler):
             enqueue error.
         """
         state = self.shared_state
+        configured_budget = int(state.conc_sweep_total_budget_sec or 0)
+        # Clamp total_budget_sec to the remaining session wall-clock budget so
+        # a long conc_sweep cannot outlive --max-hours.  A 120 s reserve is kept
+        # for the CLOSE phase.  When remaining_minutes() returns None (or the
+        # state stub lacks it) the session has no wall-clock cap and we use the
+        # configured value as-is.
+        _CLOSE_RESERVE_SEC = 120
+        _rem_fn = getattr(state, "remaining_minutes", None)
+        session_rem = _rem_fn() if callable(_rem_fn) else None
+        if session_rem is not None:
+            session_rem_sec = int(max(0.0, session_rem * 60.0) - _CLOSE_RESERVE_SEC)
+            clamped_budget = min(configured_budget, max(0, session_rem_sec)) if configured_budget > 0 else max(0, session_rem_sec)
+        else:
+            clamped_budget = configured_budget
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
             "concs": list(state.conc_sweep_concs or []),
             "variant_timeout_sec": int(state.conc_sweep_variant_timeout_sec or 0),
-            "total_budget_sec": int(state.conc_sweep_total_budget_sec or 0),
+            "total_budget_sec": clamped_budget,
         }
         try:
             task, was_existing = await self.tasks.create_or_return_existing(
