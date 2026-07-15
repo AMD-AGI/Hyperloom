@@ -10,14 +10,14 @@ name: SaFE Optimize Submit
 #   1. prepare    (ubuntu-latest)  — pick model source by priority:
 #                                    models > candidates_file (+ batch slice).
 #                                    Emits matrix JSON for stage 2.
-#   2. optimize   (matrix, private runner) — one model per parallel job.
+#   2. optimize   (matrix, configured runner) — one model per parallel job.
 #                                    If CI_MODELS_DIR is configured, each job
 #                                    can pre-pull its own repo before calling
 #                                    SaFE register so download is overlapped.
 #                                    schedule forces max_parallel=240 so the
 #                                    whole 240-model batch dispatches at once
 #                                    (dispatch default stays 60).
-#   3. summarize  (private runner) — aggregate per-task artifacts into a
+#   3. summarize  (configured runner) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
 #                                    Gain% desc, with medals), publish the
 #                                    normalized results to the Hyperloom
@@ -200,7 +200,7 @@ jobs:
   # ── Stage 1: build matrix ────────────────────────────────────────────────────
   prepare:
     name: Build matrix
-    runs-on: hyperloom-mh826
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -280,8 +280,8 @@ jobs:
   optimize:
     name: optimize-${{ matrix.key }}
     needs: prepare
-    if: needs.prepare.outputs.count != '0'
-    runs-on: hyperloom-4hhzn
+    if: needs.prepare.outputs.count != '0' && (github.event.inputs.dry_run == 'true' || vars.HYPERLOOM_ENABLE_LIVE_SUBMIT == 'true')
+    runs-on: ${{ github.event.inputs.dry_run == 'true' && 'ubuntu-latest' || vars.HYPERLOOM_OPTIMIZE_RUNNER || 'ubuntu-latest' }}
     # GitHub job timeout = max_hours + 1h (computed in the prepare job since
     # Actions expressions can't do arithmetic). Covers register + wait + collect
     # for the per-task optimizer budget. schedule/6h -> 420m; gte100/12h -> 780m.
@@ -964,20 +964,16 @@ jobs:
     # ``optimize`` already needs ``prepare``, so listing both here only makes
     # ``needs.prepare.outputs`` reachable in this job's ``if`` expression.
     needs: [prepare, optimize]
-    if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
-    # Live submit deployments should run this on the same private runner pool
+    if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true' && vars.HYPERLOOM_ENABLE_LIVE_SUBMIT == 'true'
+    # Live submit deployments should run this on the same configured runner pool
     # used by the optimize jobs so collected artifacts and optional publish
     # endpoints are reachable.
-    runs-on: hyperloom-4hhzn
+    runs-on: ${{ vars.HYPERLOOM_OPTIMIZE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
       - name: Install dependencies
-        # No setup-python on the self-hosted runner — it has system python3
-        # already (we use it for the optimize stage too); the pip on this
-        # runner image is older and doesn't accept --break-system-packages,
-        # but it has no PEP 668 marker either so a plain install works.
         run: pip install --quiet requests pyyaml
 
       - name: Download all submission manifests
