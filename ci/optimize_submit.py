@@ -31,10 +31,10 @@ Usage:
 
 Env vars (all optional, CLI flags take precedence):
   CLAW_API_KEY | SAFE_API_KEY        bearer token (ak-xxx)
-  SAFE_BASE_URL | SAFE_API_URL       base URL (default: https://core42.example-internal-host.invalid)
+  SAFE_BASE_URL | SAFE_API_URL       base URL for a compatible SaFE deployment
   HF_TOKEN                           HuggingFace token (gated models)
-  SAFE_OPTIMIZE_WORKSPACE            override default 'core42-hyperloom'
-  SAFE_OPTIMIZE_VOLUME               override default '/wekafs'
+  SAFE_OPTIMIZE_WORKSPACE            shorthand for register + submit workspace
+  SAFE_OPTIMIZE_VOLUME               shared storage volume mounted by the backend
 
 This file is the stable CLI/import facade; the implementation lives under
 ci/optimize_submit_lib/.
@@ -211,8 +211,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--submit-workspaces",
         default="",
         help="Comma-separated list of submit workspaces for "
-        "round-robin task distribution (e.g. "
-        "'core42-sandbox,core42-hyperloom'). When set, "
+        "round-robin task distribution. When set, "
         "overrides --submit-workspace and spreads the "
         "batch evenly across the listed workspaces. "
         "Each must independently accept the same model "
@@ -235,8 +234,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help=f"GPU type tag for the prompt (defaults to "
         f"$SAFE_OPTIMIZE_GPU_TYPE then '{DEFAULT_GPU_TYPE}'). "
-        f"Known profiles: {', '.join(GPU_PROFILES)}. "
-        f"SaFE backend default is MI355X — must override on core42.",
+        f"Known profiles: {', '.join(GPU_PROFILES)}.",
     )
     parser.add_argument(
         "--inferencex-path",
@@ -461,9 +459,21 @@ def main() -> int:
         log.error("%s", e)
         return 2
 
-    if not api_key and not args.dry_run:
-        log.error("no API key set (CLAW_API_KEY / SAFE_API_KEY / --api-key)")
-        return 2
+    if not args.dry_run:
+        missing_live_settings = []
+        if not base_url:
+            missing_live_settings.append("SAFE_BASE_URL / SAFE_API_URL / --api-url")
+        if not api_key:
+            missing_live_settings.append("CLAW_API_KEY / SAFE_API_KEY / --api-key")
+        if not register_workspace:
+            missing_live_settings.append("SAFE_OPTIMIZE_REGISTER_WORKSPACE / --register-workspace")
+        if not submit_workspace and not submit_workspaces_pool:
+            missing_live_settings.append("SAFE_OPTIMIZE_SUBMIT_WORKSPACE / --submit-workspace")
+        if not volume:
+            missing_live_settings.append("SAFE_OPTIMIZE_VOLUME / --volume")
+        if missing_live_settings:
+            log.error("live submit requires explicit configuration: %s", ", ".join(missing_live_settings))
+            return 2
 
     log.info(
         "SaFE base_url=%s register_workspace=%s submit_workspace=%s volume=%s",

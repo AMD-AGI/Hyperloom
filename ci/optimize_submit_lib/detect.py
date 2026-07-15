@@ -240,7 +240,7 @@ def detect_concurrency(tp: int, framework: str) -> int:
 def _sglang_image_for(repo_id: str = "") -> str:
     """Pick the sglang image, honoring per-model baseline-arch needs.
 
-    Returns the default v0.5.12 profilerfix image.
+    Returns the configured default SGLang image.
 
     Args:
         repo_id (str): Model repo id, matched on its basename for overrides.
@@ -255,19 +255,22 @@ def _sglang_image_for(repo_id: str = "") -> str:
 def _vllm_image_for(repo_id: str = "") -> str:
     """Pick the vLLM image, honoring per-model baseline-arch needs.
 
-    Default is the standard vLLM image; Gemma-4 needs the dedicated gemma4 image
-    since the stock build does not serve the gemma-4 arch. Matched on the repo
-    basename.
+    Default is the standard vLLM image. Deployments that need a dedicated
+    Gemma-4 image can provide ``SAFE_OPTIMIZE_GEMMA4_VLLM_IMAGE``; otherwise
+    public forks keep using the configured default image.
 
     Args:
         repo_id (str): Model repo id, matched on its basename for overrides.
 
     Returns:
-        str: The gemma4 vLLM image for gemma-4 repos, else the default vLLM image.
+        str: The configured Gemma-4 vLLM image for gemma-4 repos when set,
+        else the default vLLM image.
     """
     basename = (repo_id or "").split("/")[-1].lower()
     if "gemma-4" in basename or "gemma4" in basename:
-        return "harbor.core42.example-internal-host.invalid/sync/vllm-openai-rocm:gemma4"
+        override = os.environ.get("SAFE_OPTIMIZE_GEMMA4_VLLM_IMAGE", "").strip()
+        if override:
+            return override
     return _default_vllm_image()
 
 
