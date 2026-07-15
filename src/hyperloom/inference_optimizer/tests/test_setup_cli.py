@@ -377,6 +377,92 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     assert "OPENAI_API_KEY=" not in dotenv_text
 
 
+def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
+    """Fresh-shell CLI starts from .env, so GEAK_CLAUDE_MODEL must be persisted
+    there in addition to kernel-agent.env.sh."""
+    def bash_path(path: Path) -> str:
+        text = str(path)
+        if path.drive:
+            rest = text[len(path.drive):].replace("\\", "/")
+            return f"/mnt/{path.drive[0].lower()}{rest}"
+        return text
+
+    install_script = (
+        Path(setup.__file__).resolve().parents[1]
+        / "agents"
+        / "kernel"
+        / "scripts"
+        / "install.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    upsert_start = script_text.index("upsert_dotenv_var() {")
+    upsert_end = script_text.index("\n# In --check-only mode")
+    env_start = script_text.index("write_env_file() {")
+    env_end = script_text.index("\nensure_geak() {")
+    dotenv_helpers = script_text[upsert_start:upsert_end]
+    write_env_file = script_text[env_start:env_end]
+    dotenv = tmp_path / ".env"
+    kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
+    dotenv.write_text(
+        f"HYPERLOOM_KERNEL_AGENT_ROOT={tmp_path / 'kernel-agent'}\n",
+        encoding="utf-8",
+    )
+    runner = tmp_path / "kernel-run.sh"
+    runner_text = (
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"DOTENV={bash_path(dotenv)}",
+                f"KERNEL_AGENT_ENV={bash_path(kernel_env)}",
+                f"USER_DATA_PATH={bash_path(tmp_path / 'session')}",
+                f"HYPERLOOM_RUNTIME_DIR={bash_path(tmp_path / 'runtime')}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "_ANTHROPIC_BASE_URL_VAL=",
+                "_ANTHROPIC_KEY_VAL=",
+                "_OPENAI_BASE_URL_VAL=",
+                "_OPENAI_KEY_VAL=",
+                "GEAK_API_KEY_VAL=",
+                "LLM_GATEWAY_KEY=",
+                "LLM_API_KEY=",
+                "GEAK_BASE_URL_VAL=",
+                "HYPERLOOM_KERNEL_AGENT_ROOT=",
+                "KERNEL_AGENT_ROOT=",
+                "MAGPIE_PATH=",
+                "MAGPIE_PYTHON=",
+                "PYTHONPATH=",
+                "INFERENCEX_PATH=",
+                "TRACELENS_ROOT=",
+                "TRACELENS_INTERNAL_ROOT=",
+                "HYPERLOOM_ROOT=",
+                "GEAK_E2E_RUNNER=",
+                "GEAK_ROOT=",
+                "GEAK_CLAUDE_MODEL_VAL=claude-opus-4-8",
+                "GEAK_RUN_MODE_VAL=",
+                "GEAK_SCORE_TARGET=",
+                "GEAK_SKIP_PROFILE=",
+                "GEAK_MAX_BENCHMARK_SHAPES=",
+                "log() { :; }",
+                "warn() { :; }",
+                dotenv_helpers,
+                write_env_file,
+                "write_env_file",
+            ]
+        )
+        + "\n"
+    )
+    with runner.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(runner_text)
+
+    subprocess.run(["bash", bash_path(runner)], check=True)
+
+    kernel_text = kernel_env.read_text(encoding="utf-8")
+    dotenv_text = dotenv.read_text(encoding="utf-8")
+    assert "export GEAK_CLAUDE_MODEL='claude-opus-4-8'" in kernel_text
+    assert "GEAK_CLAUDE_MODEL=claude-opus-4-8" in dotenv_text
+
+
 def test_setup_cli_reports_missing_installer(tmp_path: Path, monkeypatch, capsys):
     missing = tmp_path / "missing.sh"
     monkeypatch.setattr(setup, "_INSTALL_BAREMETAL_SH", missing)
