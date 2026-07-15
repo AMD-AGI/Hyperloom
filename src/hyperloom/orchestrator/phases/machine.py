@@ -89,7 +89,8 @@ class MachinePhase(PhaseHandler):
             ``True`` if the kernel_agent role exists and the persisted
             ``kernel_enabled`` flag is set.
         """
-        return "kernel_agent" in self.role_registry and bool(getattr(self.shared_state, "kernel_enabled", True))
+        # Mirror persisted kernel_enabled flag; --no-kernel removes the kernel_agent role.
+        return "kernel_agent" in self.role_registry and bool(self.shared_state.kernel_enabled)
 
     def _explore_enabled(self) -> bool:
         """Whether the EXPLORE phase is enabled for this run.
@@ -98,7 +99,8 @@ class MachinePhase(PhaseHandler):
             ``True`` unless ``--no-explore`` disabled it (collapsing to
             KERNEL/SWEEP).
         """
-        return bool(getattr(self.shared_state, "explore_enabled", True))
+        # Mirror persisted explore_enabled flag; --no-explore collapses to KERNEL/SWEEP. EXPLORE is a phase, not a role.
+        return bool(self.shared_state.explore_enabled)
 
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick.
@@ -114,8 +116,7 @@ class MachinePhase(PhaseHandler):
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
-            # Default True to match SharedState + the cli resume fallback.
-            framework_agent_phase_enabled=bool(getattr(state, "framework_agent_phase_enabled", True)),
+            framework_agent_phase_enabled=bool(state.framework_agent_phase_enabled),
             explore_enabled=self._explore_enabled(),
             max_hours=max_hours_arg,
         )

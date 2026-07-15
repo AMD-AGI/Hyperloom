@@ -800,6 +800,23 @@ class BaselineExecutor:
             return Path(extra["workspace"])
         return runs_dir(self.session_dir, action, ctx.task.task_id)
 
+    def _resolve_shared_state(self, shared_state: Any | None = None) -> Any:
+        """Resolve the live SharedState to read/mutate the eager-fallback flag.
+
+        Args:
+            shared_state: Optional live SharedState; falls back to
+                ``self.shared_state`` and then a loaded session state.
+
+        Returns:
+            The resolved SharedState instance.
+        """
+        state = shared_state or self.shared_state
+        if state is None:
+            from ...state.shared_state import SharedState
+
+            state = SharedState.load_or_init(self.session_dir)
+        return state
+
     def _eager_fallback_armed(self, shared_state: Any | None = None) -> bool:
         """Peek the one-shot eager fallback flag WITHOUT consuming it.
 
@@ -815,11 +832,7 @@ class BaselineExecutor:
             ``True`` when the one-shot eager-fallback flag is currently armed.
         """
         try:
-            state = shared_state or self.shared_state
-            if state is None:
-                from ...state.shared_state import SharedState
-
-                state = SharedState.load_or_init(self.session_dir)
+            state = self._resolve_shared_state(shared_state)
             return bool(getattr(state, "baseline_eager_fallback", False))
         except Exception:  # noqa: BLE001 — fallback must never break baseline
             log.debug(
@@ -843,11 +856,7 @@ class BaselineExecutor:
             ``False``.
         """
         try:
-            state = shared_state or self.shared_state
-            if state is None:
-                from ...state.shared_state import SharedState
-
-                state = SharedState.load_or_init(self.session_dir)
+            state = self._resolve_shared_state(shared_state)
             if not getattr(state, "baseline_eager_fallback", False):
                 return False
             state.baseline_eager_fallback = False

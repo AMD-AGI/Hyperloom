@@ -161,7 +161,7 @@ class Reactor:
         Returns:
             The resolved authoritative tick index.
         """
-        shared_tick = getattr(ctx.shared_state, "tick", 0) or 0
+        shared_tick = ctx.shared_state.tick or 0
         if shared_tick > 0:
             return int(shared_tick)
         return self._tick_index

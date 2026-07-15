@@ -98,19 +98,6 @@ async def test_local_probe_reads_v6_events_schema(session_dir: Path):
 
 
 @pytest.mark.asyncio
-async def test_local_probe_reads_legacy_events_schema(session_dir: Path):
-    _seed_coordinator_db(
-        session_dir,
-        [{"agent": "kernel_agent", "intent_type": "alert", "topic": "alert", "timestamp": 1.0}],
-        schema="legacy",
-    )
-    cfg = LocalProbeConfig(session_dir=session_dir, disk_mountpoints=())
-    data = await LocalProbeSource(cfg).fetch(ctx=None)
-    assert len(data.coordinator_events) == 1
-    assert data.coordinator_events[0]["agent"] == "kernel_agent"
-
-
-@pytest.mark.asyncio
 async def test_local_probe_returns_disk_usage(tmp_path: Path):
     cfg = LocalProbeConfig(
         session_dir=None,

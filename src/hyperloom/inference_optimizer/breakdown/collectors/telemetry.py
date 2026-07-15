@@ -519,32 +519,12 @@ def collect_kb_provenance(
 
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
-    # Which path supplied the warm recipe applied this session. Prefer the
-    # merged row's field provenance, then the WarmStartContext source tag.
-    warm_recipe_row = warm.get("recipe") if isinstance(warm, dict) else {}
-    warm_start_recipe_source = ""
-    # 1) Self-case: the merged identity row owns its replayable config, so its
-    #    per-field provenance is authoritative.
-    if isinstance(warm_recipe_row, dict):
-        warm_field_sources = warm_recipe_row.get("_field_sources")
-        if isinstance(warm_field_sources, dict):
-            bc_src = warm_field_sources.get("best_config")
-            if isinstance(bc_src, str) and bc_src:
-                warm_start_recipe_source = bc_src
-            elif isinstance(bc_src, list) and bc_src:
-                warm_start_recipe_source = str(bc_src[0])
-    # 2) Config-donor case: the identity row borrowed its best_config from a
-    #    sibling, so the T0 WarmStartContext source is authoritative.
-    if not warm_start_recipe_source:
-        wsc = state.get("warm_start_context") or {}
-        warm_start_recipe_source = str(
-            ((wsc.get("match") or {}).get("source") or "")
-        ) if isinstance(wsc, dict) else ""
-    # 3) Last resort: the identity row's first contributing source.
-    if not warm_start_recipe_source and isinstance(warm_recipe_row, dict):
-        warm_sources = warm_recipe_row.get("_sources")
-        if isinstance(warm_sources, list) and warm_sources:
-            warm_start_recipe_source = str(warm_sources[0])
+    # FINAL reference attribution: which path supplied the warm recipe that was
+    # actually applied this session, per the WarmStartContext source tag set at T0.
+    wsc = state.get("warm_start_context") or {}
+    warm_start_recipe_source = str(
+        ((wsc.get("match") or {}).get("source") or "")
+    ) if isinstance(wsc, dict) else ""
     pitfalls = state.get("warm_start_pitfalls") or []
     lessons = state.get("warm_start_lessons") or []
     # warm-recipe replay outcome; empty before completion / when --no-warm-replay.

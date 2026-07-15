@@ -24,15 +24,11 @@ Optional environment overrides:
 from __future__ import annotations
 
 import gzip
-import json
 import logging
 import os
 import socket
 import ssl
-import time
-import urllib.parse
 import urllib.request
-from typing import Any
 from urllib.error import HTTPError, URLError
 
 
@@ -45,7 +41,7 @@ DEFAULT_MAX_ATTEMPTS = 2
 
 
 class InferenceXFetchError(Exception):
-    """Internal — only raised by ``_fetch_raw``; ``fetch_rows`` swallows it."""
+    """Internal — raised by ``_fetch_raw`` on any fetch failure."""
 
     pass
 
@@ -159,57 +155,9 @@ def _fetch_raw(url: str) -> bytes:
         raise InferenceXFetchError(f"transport error: {exc}") from exc
 
 
-def fetch_rows(model: str) -> tuple[list[dict[str, Any]] | None, str]:
-    """Pull every benchmark row for one model from InferenceX.
-
-    Filtering by gpu / precision / isl / osl is done by the caller
-    (``target_analyzer``) so this module stays a thin transport. Never
-    raises; retries up to ``INFERENCEX_MAX_ATTEMPTS`` times with linear
-    back-off between attempts.
-
-    Args:
-        model (str): The InferenceX display name to query benchmarks for.
-
-    Returns:
-        tuple[list[dict[str, Any]] | None, str]: ``(rows, warning)`` where
-            ``rows`` is the raw upstream list on success (else ``None``) and
-            ``warning`` is empty on success or a short failure note.
-    """
-    if not model:
-        return None, "model is empty"
-    url = f"{_base_url()}/benchmarks?{urllib.parse.urlencode({'model': model})}"
-    attempts = _max_attempts()
-    last_err = ""
-    for attempt in range(1, attempts + 1):
-        try:
-            body = _fetch_raw(url)
-        except InferenceXFetchError as exc:
-            last_err = str(exc)
-            log.warning(
-                "inferencex_client: fetch attempt %d/%d failed: %s",
-                attempt,
-                attempts,
-                exc,
-            )
-            if attempt < attempts:
-                time.sleep(0.5 * attempt)
-            continue
-        try:
-            rows = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            log.warning("inferencex_client: JSON decode failed: %s", exc)
-            return None, f"decode error: {exc}"
-        if not isinstance(rows, list):
-            log.warning("inferencex_client: upstream returned non-list payload")
-            return None, "upstream did not return a JSON array"
-        return rows, ""
-    return None, last_err or "unknown fetch failure"
-
-
 __all__ = [
     "DEFAULT_BASE_URL",
     "DEFAULT_TIMEOUT_SEC",
     "DEFAULT_MAX_ATTEMPTS",
     "InferenceXFetchError",
-    "fetch_rows",
 ]

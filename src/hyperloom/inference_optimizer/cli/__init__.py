@@ -14,12 +14,6 @@ import json
 import logging
 import os
 import shlex
-
-# shutil / subprocess are re-exported so tests can patch the stdlib module
-# singletons via ``cli.shutil.which`` / ``cli.subprocess.run``; the
-# ``cli.<module>`` attribute must exist for those patches to resolve.
-import shutil  # noqa: F401 - re-exported for callers/tests
-import subprocess  # noqa: F401 - re-exported for callers/tests
 import sys
 import time
 from pathlib import Path

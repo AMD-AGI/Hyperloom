@@ -272,11 +272,8 @@ class IntentRouter:
                 pa_params.get("specialist_task_id") or ""
             ).strip()
         elif pending.action_name == "specialist":
-            # Critic verdict on the specialist proposal counts as the verdict on
-            # its patches; task_id is the key (fall back to params defensively).
-            sid_candidate = str(
-                getattr(pending, "task_id", None) or pa_params.get("task_id") or ""
-            ).strip()
+            # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
+            sid_candidate = str(pa_params.get("task_id") or "").strip()
         if sid_candidate and verdict:
             try:
                 self.shared_state.record_specialist_patch_verdict(

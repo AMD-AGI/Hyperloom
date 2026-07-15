@@ -1111,9 +1111,7 @@ class ExplorePhase(PhaseHandler):
             A ``(layer, domain_hint)`` tuple for the action.
         """
         a = str(action or "").strip().lower()
-        if a in {"kernel_opt", "integrate", "trace_analyze", "run_gemm_tuning", "run_optimization"}:
-            return ("kernel_agent", "kernel_switch_specialist")
-        if a in {"profile", "roofline"}:
+        if a in {"kernel_opt", "integrate", "trace_analyze", "run_gemm_tuning", "run_optimization", "profile", "roofline"}:
             return ("kernel_agent", "kernel_switch_specialist")
         if a in {"sweep", "explore"}:
             return ("framework", "serving_specialist")

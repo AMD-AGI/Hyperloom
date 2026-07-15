@@ -191,9 +191,8 @@ class ClaudeBackend:
     # SDK session token captured last turn; replayed via ``resume`` in
     # conversational mode. ``reset_conversation()`` clears it.
     _session_id: str | None = field(default=None, init=False)
-    # Stable llm_calls.jsonl key for cache diagnostics / consumers.
-    _resume_downgraded: bool = field(default=False, init=False)
-    # Read-only context-pull MCP server config, set via ``set_context_provider``.
+    # Read-only context-pull MCP server config, set via
+    # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
@@ -408,9 +407,11 @@ class ClaudeBackend:
                 "cache_read_input_tokens": cache_read,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "resume_downgraded": self._resume_downgraded,
-                # Full conversation text for the caller to persist to
-                # conversations.jsonl.
+                # Full conversation text so the caller (which holds the
+                # session_dir / component / tick context the stateless
+                # backend lacks) can persist it to conversations.jsonl.
+                # The composed prompt carries the user turn; the system
+                # prompt is snapshotted once under agents/<role>/.
                 "prompt": full_prompt,
                 "response": raw_text,
             },
@@ -553,8 +554,7 @@ class ClaudeBackend:
     def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
         """Add env-driven reasoning effort + adaptive thinking to the options.
 
-        Role is inferred from ``conversational`` (True => orchestration). Unknown
-        SDK builds that reject these kwargs degrade via ``_instantiate_options``.
+        Role is inferred from ``conversational`` (True => orchestration).
         """
         role_env = _EFFORT_ENV_ORCH if self.conversational else _EFFORT_ENV_KERNEL
         default = "medium" if self.conversational else "low"

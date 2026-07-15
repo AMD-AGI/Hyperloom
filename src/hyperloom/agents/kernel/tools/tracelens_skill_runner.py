@@ -916,8 +916,7 @@ async def run_tracelens_skill(
         "allowed_tools": DEFAULT_ALLOWED_TOOLS,
         "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
     }
-    # Keep model resolution stable even if DEFAULT_MODEL was mutated.
-    resolved_model = resolved_model or str(globals().get("DEFAULT_MODEL", "claude-opus-4-8")).strip()
+    resolved_model = resolved_model or "claude-opus-4-8"
     kwargs["model"] = resolved_model
     # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
     kwargs["cwd"] = str(tracelens_root)

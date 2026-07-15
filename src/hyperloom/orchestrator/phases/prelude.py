@@ -98,8 +98,8 @@ class PreludePhase(PhaseHandler):
         for row in what_failed:
             if not isinstance(row, dict):
                 continue
-            args = str(row.get("extra_server_args") or row.get("args") or "").strip()
-            envs = row.get("extra_envs") or row.get("envs") or {}
+            args = str(row.get("extra_server_args") or "").strip()
+            envs = row.get("extra_envs") or {}
             if not isinstance(envs, dict):
                 envs = {}
             if not args and not envs:
@@ -282,8 +282,8 @@ class PreludePhase(PhaseHandler):
             best_config = recipe_attrs.get("best_config") or {}
             if not isinstance(best_config, dict):
                 best_config = {}
-            bc_args = str(best_config.get("extra_server_args") or best_config.get("args") or "").strip()
-            bc_envs = best_config.get("extra_envs") or best_config.get("envs") or {}
+            bc_args = str(best_config.get("extra_server_args") or "").strip()
+            bc_envs = best_config.get("extra_envs") or {}
             if not isinstance(bc_envs, dict):
                 bc_envs = {}
             replay_conf = float(conf or 0.0)

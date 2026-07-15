@@ -215,6 +215,7 @@ class ProposalsCollaborator:
             "updated_at",
             "model",
             "hardware",
+            "framework",
             "framework_name",
             "framework_version",
             "precision",

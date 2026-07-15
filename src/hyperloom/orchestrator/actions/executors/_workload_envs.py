@@ -919,11 +919,15 @@ def materialize_config_with_envs(
                 "SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched "
                 "sglang fp8_utils.py (serving run continues unaffected)."
             )
-    # sglang FP8 per-channel/per-token CK fast path: SGLANG_USE_AITER_FP8_PER_TOKEN=1
-    # routes the GEMM to aiter's CK gemm_a8w8_bpreshuffle instead of the slow
-    # unfused fallback. Scoped to sglang + fp8 + gfx942 + that exact quant scheme.
-    # setdefault so an operator-set value always wins.
-    from hyperloom.inference_optimizer.cli.model_gate import _resolve_amd_gpu_type
+    # sglang FP8 per-channel/per-token CK fast path: a dense FP8 checkpoint
+    # with per-channel weight + per-token (dynamic) activation falls into the
+    # slow unfused _apply_fallback_scaled_mm in sglang's apply_fp8_linear
+    # unless SGLANG_USE_AITER_FP8_PER_TOKEN=1 flips use_per_token_if_dynamic on
+    # and routes the GEMM to aiter's CK gemm_a8w8_bpreshuffle. Inject it from
+    # Hyperloom, strictly scoped to sglang + fp8 + gfx942 + that exact quant
+    # scheme so per-tensor and block-scale FP8 are never touched. setdefault so
+    # an operator-set value (YAML / extra_envs) always wins.
+    from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
 
     _model_for_quant = str(model_path or os.environ.get("MODEL_PATH", ""))
     if (

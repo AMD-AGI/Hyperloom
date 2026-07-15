@@ -231,21 +231,19 @@ def test_missing_rules_fragment_yields_placeholder(tmp_path, registry):
     assert "rules fragment not found" in text
 
 
-def test_unknown_enabled_action_is_silently_skipped(registry, rules_path):
-    """Pass a phantom action name; builder must skip it without raising."""
-    text = build_orchestration_prompt(
-        action_registry=registry,
-        enabled_actions=("baseline", "no_such_action", "report"),
-        framework="sglang",
-        objective_kind="time_only",
-        objective_value=None,
-        max_minutes=60,
-        rules_fragment_path=rules_path,
-        kernel_enabled=False,
-    )
-    assert "**baseline**" in text
-    assert "**report**" in text
-    assert "no_such_action" not in text
+def test_unknown_enabled_action_raises(registry, rules_path):
+    """Enabled actions come from the closed FULL_ENABLED_ACTIONS set; a phantom name is a bug."""
+    with pytest.raises(AssertionError):
+        build_orchestration_prompt(
+            action_registry=registry,
+            enabled_actions=("baseline", "no_such_action", "report"),
+            framework="sglang",
+            objective_kind="time_only",
+            objective_value=None,
+            max_minutes=60,
+            rules_fragment_path=rules_path,
+            kernel_enabled=False,
+        )
 
 
 def test_explicit_kernel_enabled_override_wins(registry, rules_path):

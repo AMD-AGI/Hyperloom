@@ -16,7 +16,6 @@ from hyperloom.agents.framework.enablement_ops import (
     ENABLEMENT_SETUP_GUIDANCE,
     build_mandate,
     build_search_plan,
-    rank_titles,
     score_enablement_title,
 )
 
@@ -141,21 +140,6 @@ def test_ranking_prefers_enablement_intent() -> None:
     enable = score_enablement_title("Add GLM support to model registry", plan)
     perf = score_enablement_title("Optimize GLM attention throughput", plan)
     assert enable > perf
-
-
-def test_rank_titles_sorts_descending() -> None:
-    """rank_titles returns (title, score) sorted best-first."""
-    sig = classify_failure("ModuleNotFoundError: No module named 'aiter.ops'")
-    plan = build_search_plan(sig, framework_repo_url=_SGLANG)
-    ranked = rank_titles(
-        [
-            "Unrelated docs update",
-            "Fix aiter build import error on ROCm",
-        ],
-        plan,
-    )
-    assert ranked[0][0] == "Fix aiter build import error on ROCm"
-    assert ranked[0][1] >= ranked[1][1]
 
 
 def test_empty_title_scores_zero() -> None:

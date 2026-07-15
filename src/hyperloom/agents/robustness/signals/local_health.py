@@ -404,8 +404,8 @@ def _ray_head_dead_symptoms(data: SourceData) -> list[Symptom]:
     Returns:
         A list with one :class:`Symptom` when unhealthy, else empty.
     """
-    ray_info = getattr(data, "local_ray", None)
-    if not isinstance(ray_info, dict) or not ray_info:
+    ray_info = data.local_ray
+    if not ray_info:
         return []
     healthy = ray_info.get("healthy")
     if healthy is None or healthy:
@@ -447,8 +447,8 @@ def _fd_pressure_symptoms(
     Returns:
         A list with one :class:`Symptom` when FD pressure trips, else empty.
     """
-    fd_info = getattr(data, "local_fd", None)
-    if not isinstance(fd_info, dict) or not fd_info:
+    fd_info = data.local_fd
+    if not fd_info:
         return []
     used_pct = fd_info.get("used_pct")
     if not isinstance(used_pct, (int, float)):

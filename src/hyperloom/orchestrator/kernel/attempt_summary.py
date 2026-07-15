@@ -287,10 +287,7 @@ def _load_backend_ladder(
         # Backend self-skip marker for the outcome classifier.
         if a.get("skipped"):
             row["skipped"] = True
-        # Canonical source is elapsed_s; elapsed_sec read as a fallback.
         elapsed = a.get("elapsed_s")
-        if elapsed is None:
-            elapsed = a.get("elapsed_sec")
         if isinstance(elapsed, (int, float)):
             row["elapsed_sec"] = float(elapsed)
         err_class, err_msg = _classify_attempt_failure(a)

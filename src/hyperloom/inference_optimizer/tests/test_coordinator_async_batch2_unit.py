@@ -32,6 +32,15 @@ def _silent_plan() -> ScriptedPlan:
     return ScriptedPlan(turns=[], default_intent=_heartbeat())
 
 
+def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    coord = Coordinator.__new__(Coordinator)
+    stale_name = "_stale_delegated_for_test"
+    monkeypatch.setitem(Coordinator._DELEGATED, stale_name, "phase_kernel")
+
+    with pytest.raises(AttributeError, match="does not define"):
+        getattr(coord, stale_name)
+
+
 def _build_backends() -> dict[str, Backend]:
     return {
         name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")

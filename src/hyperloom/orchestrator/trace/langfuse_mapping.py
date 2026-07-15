@@ -65,20 +65,13 @@ def correlation_seed(manifest: dict[str, Any], fallback: str) -> str:
     return sid or str(fallback)
 
 
-def langfuse_session_id(manifest: dict[str, Any], fallback: str) -> str:
-    """The value for Langfuse's ``session_id`` grouping dimension.
+langfuse_session_id = correlation_seed
+"""The value for Langfuse's ``session_id`` grouping dimension.
 
-    Same precedence as :func:`correlation_seed` (claw id wins); the
-    human-facing session grouping, whereas the trace_id is its hashed form.
-
-    Args:
-        manifest: Session manifest dict carrying id fields.
-        fallback: Seed used when no id is present in the manifest.
-
-    Returns:
-        The Langfuse session grouping id.
-    """
-    return correlation_seed(manifest, fallback)
+Same precedence as :func:`correlation_seed` (claw id wins) -- this is the
+human-facing session grouping in the Langfuse UI, whereas the trace_id is its
+hashed form.
+"""
 
 
 def agent_of(row: dict[str, Any]) -> str:

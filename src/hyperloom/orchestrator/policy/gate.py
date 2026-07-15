@@ -178,18 +178,16 @@ def detect_gpu_count() -> int:
         ids = [tok for tok in raw.split(",") if tok.strip() != ""]
         if ids:
             return len(ids)
-    try:
-        import subprocess
+    import subprocess
 
+    try:
         proc = subprocess.run(
             ["rocm-smi", "--showid"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-    except (FileNotFoundError, OSError, ValueError):
-        return 0
-    except Exception:  # noqa: BLE001
+    except (FileNotFoundError, OSError, ValueError, subprocess.TimeoutExpired):
         return 0
     if proc.returncode != 0:
         return 0
@@ -521,14 +519,7 @@ def _resolved_within(value: str, root: str) -> bool:
         r = Path(str(root)).resolve()
     except (OSError, RuntimeError):
         return False
-    try:
-        return v == r or v.is_relative_to(r)
-    except AttributeError:  # pragma: no cover — Python <3.9
-        try:
-            v.relative_to(r)
-            return True
-        except ValueError:
-            return False
+    return v == r or v.is_relative_to(r)
 
 
 # Subset of PATH_LIKE_FIELDS that also accept :func:`_trace_path_allowlist` (others stay strictly session-rooted).
@@ -1617,6 +1608,7 @@ class PolicyGate:
             try:
                 verdict = ss.get_specialist_patch_verdict(sid)
             except AttributeError:
+                # Guards a null specialist_patch_verdicts deserialized from state.json.
                 verdict = ""
         if not verdict:
             raise PolicyDenied(
@@ -2271,14 +2263,7 @@ class PolicyGate:
             v = Path(str(value)).resolve()
         except (OSError, RuntimeError):
             return False
-        try:
-            return v == sd or v.is_relative_to(sd)
-        except AttributeError:  # pragma: no cover — Python <3.9
-            try:
-                v.relative_to(sd)
-                return True
-            except ValueError:
-                return False
+        return v == sd or v.is_relative_to(sd)
 
     def _path_in_source_allowlist(self, value: str) -> bool:
         """Return whether a path falls under a framework source allowlist.

@@ -360,18 +360,9 @@ class SpecialistRunner:
         tools = list(task_allowed_tools) if task_allowed_tools else list(self.default_tools)
         plane = self.knowledge_plane
         if plane is not None:
-            try:
-                pr_enabled = bool(plane.pr_monitor_enabled)
-            except AttributeError:
-                pr_enabled = True  # unknown surface; trust default
-            if not pr_enabled:
+            if not bool(plane.pr_monitor_enabled):
                 tools = [t for t in tools if not t.startswith("mcp__pr_monitor__")]
-            cortex_enabled = True
-            try:
-                cortex_enabled = bool(plane.cortex_enabled)
-            except AttributeError:
-                cortex_enabled = True
-            if not cortex_enabled:
+            if not bool(plane.cortex_enabled):
                 tools = [t for t in tools if not t.startswith("mcp__cortex_kb__")]
         tools = [t for t in tools if t not in SPECIALIST_TOOL_DENYLIST]
         return tuple(tools)

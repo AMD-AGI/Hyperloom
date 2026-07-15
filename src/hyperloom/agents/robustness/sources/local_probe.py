@@ -321,9 +321,9 @@ def _read_coordinator_events(
 ) -> list[dict[str, Any]]:
     """Read recent Coordinator events from the session SQLite DB.
 
-    Opens the DB read-only and tries both known schemas for the
-    ``events`` table, decoding any JSON ``payload`` column. Any error
-    (missing file, open failure, bad query) yields an empty list.
+    Opens the DB read-only and selects from the ``events`` table,
+    decoding any JSON ``payload`` column. Any error (missing file, open
+    failure, bad query) yields an empty list.
 
     Args:
         db_path (Path | None): Path to ``coordinator.db``; ``None`` or a
@@ -347,13 +347,9 @@ def _read_coordinator_events(
         return []
     try:
         conn.row_factory = sqlite3.Row
-        # ``events`` uses ``seq`` as monotonic id; some schemas alias it to ``id``.
         rows = _try_select(
             conn,
-            [
-                "SELECT seq AS id, from_agent AS agent, topic, payload, ts " + "FROM events ORDER BY seq DESC LIMIT ?",
-                "SELECT id, agent, topic, payload, timestamp AS ts " + "FROM events ORDER BY id DESC LIMIT ?",
-            ],
+            ["SELECT seq AS id, from_agent AS agent, topic, payload, ts FROM events ORDER BY seq DESC LIMIT ?"],
             (limit,),
         )
         if not rows:
@@ -2014,8 +2010,9 @@ def _probe_external_mounts(
     """``os.stat`` each external mount, time it, flag slow / failing.
 
     Mount paths are read from the env names in
-    :data:`_EXTERNAL_MOUNT_ENVS` (falling back to their defaults) at
-    probe time so an operator can relocate them without a rebuild.
+    :data:`_EXTERNAL_MOUNT_ENVS` at probe time so an operator can
+    relocate them without a rebuild; unset envs are skipped rather than
+    falling back to a default path.
 
     Args:
         timeout_s (float): Stat-latency budget in seconds; echoed back

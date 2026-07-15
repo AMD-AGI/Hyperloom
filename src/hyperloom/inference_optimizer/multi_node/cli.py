@@ -34,9 +34,7 @@ from ._internal import safe_client, ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts
 from ._internal.log import info, warn, err
 from ._internal.server_args_safety import ServerArgsRejected, validate_server_args
-from .state_paths import legacy_state_file, resolve_state_file, state_file_safe_to_read
-
-STATE_FILE = resolve_state_file()
+from .state_paths import resolve_state_file, state_file_safe_to_read
 
 # Default poll budget sized under the sandbox 120s ceiling.
 _DEFAULT_POLL_INTERVAL_S = 6
@@ -159,12 +157,7 @@ def _load_state() -> dict[str, Any]:
     """
     path = _state_file()
     if not path.is_file():
-        legacy = legacy_state_file()
-        if path != legacy and legacy.is_file() and state_file_safe_to_read(legacy):
-            warn(f"state file {path} missing; reading legacy {legacy}")
-            path = legacy
-        else:
-            return {}
+        return {}
     if not state_file_safe_to_read(path):
         warn(f"state file {path} failed ownership/permission check; ignoring")
         return {}

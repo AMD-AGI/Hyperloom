@@ -727,31 +727,6 @@ class DispatcherCollaborator:
                 return False
         return True
 
-    # Execution-order gates (folded in from the former GatingCollaborator).
-    def _target_analysis_baseline_exists(self) -> bool:
-        """True iff target_analysis produced ``target_baseline.json`` (file existence is a sufficient gate signal).
-
-        Returns:
-            ``True`` when the target baseline file exists (or the helper is
-            unavailable, treated as done); ``False`` otherwise.
-        """
-        try:
-            from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
-
-            return target_baseline_json(self.session_dir).exists()
-        except ImportError:
-            # Missing helper -> treat the gate as satisfied (legacy/partial build).
-            log.debug("_target_analysis_baseline_exists: helper unavailable", exc_info=True)
-            return True
-
-    def _kernel_opt_keep_pending(self) -> str:
-        """Return the next kernel_id awaiting integrate, or "" if none (delegates to SharedState.next_pending_keep_kernel_id).
-
-        Returns:
-            The next kernel id pending integrate, or ``""`` when none.
-        """
-        return self.shared_state.next_pending_keep_kernel_id()
-
     def _sequence_denial_for_action(
         self,
         action_name: str,

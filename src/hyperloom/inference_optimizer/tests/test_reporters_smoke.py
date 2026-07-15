@@ -126,6 +126,7 @@ def test_all_renderers_register_in_stable_order() -> None:
         "kernel_decision_path",
         "roofline",
         "geak_invocations",
+        "forge_invocations",
         "param_search",
         "decision_journal",
         "sweep",

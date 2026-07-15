@@ -80,7 +80,6 @@ _ROW_FIELDS: frozenset[str] = frozenset(
         "cache_read_input_tokens",
         "latency_ms",
         "reviewed_msg_ids",
-        "resume_downgraded",
     }
 )
 
@@ -144,9 +143,6 @@ class LLMCallRecord:
     # Proposal ``msg_id``s this call reviewed (critic only), so the call can be
     # attributed to the decision it served. ``None`` for non-critic producers.
     reviewed_msg_ids: list[str] | None = None
-    # True when a conversational turn's ``resume=`` was rejected by the SDK and
-    # dropped to a stateless call (Claude only); ``None`` otherwise.
-    resume_downgraded: bool | None = None
 
     def to_row(self) -> dict[str, Any]:
         """Serialize to the on-disk row dict, stamping ``ts`` (UTC µs).
@@ -175,7 +171,6 @@ class LLMCallRecord:
             "cache_read_input_tokens": _coerce_optional_int(self.cache_read_input_tokens),
             "latency_ms": _coerce_optional_int(self.latency_ms),
             "reviewed_msg_ids": _coerce_optional_str_list(self.reviewed_msg_ids),
-            "resume_downgraded": self.resume_downgraded,
         }
 
     @classmethod
@@ -230,7 +225,6 @@ class LLMCallRecord:
             cache_creation_input_tokens=md.get("cache_creation_input_tokens"),
             cache_read_input_tokens=md.get("cache_read_input_tokens"),
             latency_ms=latency_ms if latency_ms is not None else md.get("latency_ms"),
-            resume_downgraded=md.get("resume_downgraded"),
         )
 
 

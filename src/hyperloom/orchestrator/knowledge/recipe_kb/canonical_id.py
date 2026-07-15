@@ -78,10 +78,9 @@ def cid_to_path_components(
     shadow a real recipe.
 
     Returns the tuple in the order
-    ``(model, hardware, framework_name, framework_version, precision,
-    model_type, architectures)``,
-    matching :func:`recipe_canonical_id`'s keyword order so callers
-    can splat the result directly into a downstream call.
+    ``(model, hardware, framework_name, model_type, architectures,
+    framework_version, precision)``, matching the order the segments
+    are unpacked from the canonical id.
 
     Args:
         canonical_id (str): The canonical id to decompose.

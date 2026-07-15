@@ -236,7 +236,7 @@ def _run_github(request: ExploreRequest) -> list[Candidate]:
         request.repo_url,
         gap_description=request.gap_description,
         limit=request.max_search_candidates,
-        states=request.pr_states or ("open",),
+        states=request.pr_states,
     )
     return [_pr_to_candidate(pr, request.repo_url, "github") for pr in prs]
 
@@ -311,9 +311,11 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
     label = cfg.default_label
     requested = max(1, request.max_search_candidates)
 
-    # Broaden PR-state coverage: merged/closed PRs may already be in the local
-    # build (audit dedups them). Default stays open-only when pr_states is unset.
-    states = request.pr_states or ("open",)
+    # Step 4: broaden PR-state coverage. merged/closed PRs are the
+    # backport-relevant ones that may already be in the local dev build;
+    # semantic audit downstream judges + dedups them. "all" is the API's broad
+    # filter; default stays open-only when pr_states is unset.
+    states = request.pr_states
     broad = any(s in ("merged", "closed", "all") for s in states)
     search_state = "all" if broad else "open"
     # Only forward ``state`` to the label-only list endpoint when broadening.

@@ -184,7 +184,7 @@ def _bootstrap_cortex_kb(
         if merged_meta:
             state.stack_fingerprint_meta = merged_meta
     extra_attrs = {
-        "framework": state.framework or manifest.get("framework", ""),
+        "framework_name": state.framework or manifest.get("framework", ""),
         "model_class": state.model_class or "",
         # Operator traceability.
         "claw_session_id": manifest.get("claw_session_id") or "",

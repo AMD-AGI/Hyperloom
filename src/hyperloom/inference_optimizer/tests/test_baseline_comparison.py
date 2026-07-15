@@ -4,17 +4,9 @@
 
 from __future__ import annotations
 
-import gzip
-import http.server
-import io
 import json
-import socketserver
-import threading
-import time
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 
 # name_mapping
@@ -83,130 +75,6 @@ _SAMPLE_ROW = {
     "date": "2026-04-17",
     "run_url": "https://example/runs/x",
 }
-
-
-class _StaticHandler(http.server.BaseHTTPRequestHandler):
-    """Serves a fixed JSON payload, optionally gzipped, on every GET."""
-
-    payload: list[dict[str, Any]] = []
-    delay_sec: float = 0.0
-    gzip_response: bool = False
-    response_status: int = 200
-
-    def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
-        if self.delay_sec:
-            time.sleep(self.delay_sec)
-        body = json.dumps(self.payload).encode("utf-8")
-        self.send_response(self.response_status)
-        self.send_header("Content-Type", "application/json")
-        if self.gzip_response:
-            buf = io.BytesIO()
-            with gzip.GzipFile(fileobj=buf, mode="wb") as f:
-                f.write(body)
-            body = buf.getvalue()
-            self.send_header("Content-Encoding", "gzip")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format, *args):  # noqa: A002, ARG002
-        return
-
-
-def _mock_server(payload, *, delay_sec=0.0, gzip_response=False, status=200):
-    """Start a local HTTP server thread on a free port."""
-    handler = _StaticHandler
-    handler.payload = payload
-    handler.delay_sec = delay_sec
-    handler.gzip_response = gzip_response
-    handler.response_status = status
-    server = socketserver.TCPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    host, port = server.server_address
-    return f"http://{host}:{port}", server.shutdown
-
-
-@pytest.fixture
-def mock_inferencex(monkeypatch):
-    """Yield ``(set_payload, set_delay)`` for tests to drive the server."""
-    state: dict[str, Any] = {
-        "shutdown": None,
-        "payload": [],
-        "delay": 0.0,
-        "gzip": False,
-        "status": 200,
-    }
-
-    def _start():
-        url, shutdown = _mock_server(
-            state["payload"],
-            delay_sec=state["delay"],
-            gzip_response=state["gzip"],
-            status=state["status"],
-        )
-        state["shutdown"] = shutdown
-        monkeypatch.setenv("INFERENCEX_BASE_URL", url)
-        # Short retry budget so timeout tests don't hang.
-        monkeypatch.setenv("INFERENCEX_TIMEOUT_SEC", "0.5")
-        monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "1")
-        return url
-
-    yield state, _start
-
-    if state["shutdown"]:
-        state["shutdown"]()
-
-
-def test_fetch_rows_happy_path(mock_inferencex):
-    state, start = mock_inferencex
-    state["payload"] = [_SAMPLE_ROW, dict(_SAMPLE_ROW, conc=128)]
-    start()
-
-    from hyperloom.inference_optimizer.baseline_comparison import fetch_rows
-
-    rows, warning = fetch_rows("MiniMax-M2.5")
-    assert warning == ""
-    assert rows is not None
-    assert len(rows) == 2
-    assert rows[0]["metrics"]["tput_per_gpu"] == 2781.5
-
-
-def test_fetch_rows_gzip_decode(mock_inferencex):
-    state, start = mock_inferencex
-    state["payload"] = [_SAMPLE_ROW]
-    state["gzip"] = True
-    start()
-
-    from hyperloom.inference_optimizer.baseline_comparison import fetch_rows
-
-    rows, warning = fetch_rows("MiniMax-M2.5")
-    assert warning == ""
-    assert rows is not None and len(rows) == 1
-
-
-def test_fetch_rows_http_error_returns_none(mock_inferencex):
-    state, start = mock_inferencex
-    state["status"] = 500
-    state["payload"] = []
-    start()
-
-    from hyperloom.inference_optimizer.baseline_comparison import fetch_rows
-
-    rows, warning = fetch_rows("MiniMax-M2.5")
-    assert rows is None
-    assert "500" in warning
-
-
-def test_fetch_rows_empty_model_returns_none(mock_inferencex):
-    state, start = mock_inferencex
-    state["payload"] = [_SAMPLE_ROW]
-    start()
-    from hyperloom.inference_optimizer.baseline_comparison import fetch_rows
-
-    rows, warning = fetch_rows("")
-    assert rows is None
-    assert "empty" in warning.lower()
 
 
 # target_analyzer — end-to-end with mocked upstream

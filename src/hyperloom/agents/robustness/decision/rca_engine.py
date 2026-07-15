@@ -200,10 +200,11 @@ class LlmRcaEngine:
     max_chars: int = 1500
     throttle: RcaThrottle | None = None
     client: httpx.AsyncClient | None = None
-    extra_evidence_provider: Any | None = None
     _owns_client: bool = field(default=False, init=False, repr=False)
     _config_warned: bool = field(default=False, init=False, repr=False)
-    # Token-usage accumulator drained by the host into its trace ledger.
+    _current_tick_id: int = field(default=-1, init=False, repr=False)
+    # Token-usage accumulator across the calls made since the last drain, so
+    # the host (Coordinator) can fold the RCA LLM spend into its trace ledger.
     _usage_in: int = field(default=0, init=False, repr=False)
     _usage_out: int = field(default=0, init=False, repr=False)
     _usage_calls: int = field(default=0, init=False, repr=False)
@@ -274,8 +275,9 @@ class LlmRcaEngine:
         if not self.base_url or not self.api_key:
             return ""
         now_unix = time.time()
-        # tick_id = -1 = single shared bucket when no caller sets one.
-        tick_id = getattr(self, "_current_tick_id", -1)
+        # tick_id = -1 = single shared bucket when no caller sets one;
+        # ActionLadder scopes per-tick buckets via set_tick (see decide()).
+        tick_id = self._current_tick_id
         assert self.throttle is not None
         if not self.throttle.should_call(symptom, now_unix=now_unix, tick_id=tick_id):
             return ""
@@ -328,7 +330,7 @@ class LlmRcaEngine:
         Returns:
             str: The model's reply content, or an empty string on any failure.
         """
-        prompt = _build_user_prompt(symptom, self.extra_evidence_provider)
+        prompt = _build_user_prompt(symptom)
         payload = {
             "model": self.model,
             "messages": [
@@ -412,7 +414,7 @@ class AnthropicRcaEngine(LlmRcaEngine):
 
     async def _call(self, symptom: Symptom) -> str:
         """Issue an Anthropic Messages request and extract text content."""
-        prompt = _build_user_prompt(symptom, self.extra_evidence_provider)
+        prompt = _build_user_prompt(symptom)
         payload = {
             "model": self.model,
             "system": _SYSTEM_PROMPT,
@@ -480,16 +482,11 @@ class AnthropicRcaEngine(LlmRcaEngine):
             pass
 
 
-def _build_user_prompt(
-    sym: Symptom,
-    extra_evidence_provider: Any | None,
-) -> str:
-    """Render a symptom (plus optional extra evidence) into a prompt string.
+def _build_user_prompt(sym: Symptom) -> str:
+    """Render a symptom into a prompt string.
 
     Args:
         sym (Symptom): The symptom to describe.
-        extra_evidence_provider (Any | None): Optional callable returning extra
-            evidence lines (e.g. recent log errors) for the symptom.
 
     Returns:
         str: The newline-joined user prompt.
@@ -508,11 +505,6 @@ def _build_user_prompt(
         lines.extend(_format_evidence(sym.evidence))
     if sym.suggestion:
         lines.append(f"suggestion_hint: {sym.suggestion}")
-    extra = _safe_extra_evidence(extra_evidence_provider, sym)
-    if extra:
-        lines.append("recent_log_errors:")
-        for entry in extra[:5]:
-            lines.append(f"  - {entry}")
     return "\n".join(lines)
 
 
@@ -547,30 +539,6 @@ def _format_evidence(payload: Any, prefix: str = "  ") -> list[str]:
     if isinstance(payload, (list, tuple)):
         return [f"{prefix}- {item}" for item in payload[:10]]
     return [f"{prefix}{payload}"]
-
-
-def _safe_extra_evidence(provider: Any | None, sym: Symptom) -> list[str]:
-    """Call an extra-evidence provider defensively, swallowing failures.
-
-    Args:
-        provider (Any | None): Optional callable taking a symptom and returning
-            a list of evidence items.
-        sym (Symptom): The symptom passed to the provider.
-
-    Returns:
-        list[str]: Up to ten stringified, length-capped evidence items; empty
-        when the provider is absent, errors, or returns a non-list.
-    """
-    if provider is None:
-        return []
-    try:
-        items = provider(sym)
-    except Exception:
-        log.exception("rca extra evidence provider failed")
-        return []
-    if not isinstance(items, list):
-        return []
-    return [str(it)[:240] for it in items][:10]
 
 
 def _truncate(text: str, max_chars: int) -> str:

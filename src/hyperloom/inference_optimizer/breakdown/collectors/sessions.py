@@ -206,15 +206,11 @@ def _load_yaml_dict_safe(config_yaml: Path) -> dict | None:
         config_yaml (Path): The YAML file to parse.
 
     Returns:
-        dict | None: The decoded top-level mapping, or ``None`` when PyYAML is
-        unavailable, the file fails to read/parse, or the document is not a
-        dict.
+        dict | None: The decoded top-level mapping, or ``None`` when the file
+        fails to read/parse, or the document is not a dict.
     """
-    try:
-        import yaml  # type: ignore[import-not-found]
-    except ImportError:
-        log.debug("PyYAML unavailable; skipping yaml framework_args fallback")
-        return None
+    import yaml
+
     try:
         text = config_yaml.read_text(encoding="utf-8", errors="replace")
         data = yaml.safe_load(text)
@@ -397,7 +393,7 @@ def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
 
     Returns:
         dict[str, str]: The allowlisted, secret-stripped env subset. Empty when
-        the path is missing, PyYAML is unavailable, or parsing fails.
+        the path is missing or parsing fails.
     """
     if config_path is None:
         return {}
@@ -406,11 +402,8 @@ def _read_invocation_envs(config_path: Path | None) -> dict[str, str]:
             return {}
     except OSError:
         return {}
-    try:
-        import yaml
-    except ImportError:
-        log.debug("PyYAML unavailable; skipping invocation env extraction")
-        return {}
+    import yaml
+
     try:
         text = config_path.read_text(encoding="utf-8", errors="replace")
         data = yaml.safe_load(text)
