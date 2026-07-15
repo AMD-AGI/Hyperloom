@@ -76,10 +76,7 @@ log = logging.getLogger("robustness_agent.runtime.cli")
 COORDINATOR_INBOX = "coordinator_inbox"
 REQUEST_KINDS: frozenset[str] = frozenset({COORDINATOR_INBOX})
 
-# RuntimeAdapterError / _read_json / _emit_json are re-exported from
-# hyperloom.common.subprocess_bridge above; kept as module-level bindings so
-# any `setattr(cli_module, "_read_json"/"_emit_json"/"RuntimeAdapterError",
-# fake)`-style monkeypatch still resolves through this module's own __dict__.
+# Re-exported as module-level bindings so monkeypatches resolve through this module's __dict__.
 
 
 def _coerce_request(raw: Any) -> dict[str, Any]:
@@ -174,28 +171,22 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             # Invalid --nodes value; keep the existing default.
             pass
-    # Opt out of the default inference-server health probe (heartbeat tests /
-    # sandboxes auditing health out-of-band) without reconfiguring targets.
+    # Opt out of the default inference-server health probe.
     if "auto_probe_inference_server" in options:
         config.auto_probe_inference_server = bool(options["auto_probe_inference_server"])
-    # Disable the per-tick ``ray status`` probe on hosts without a Ray head to
-    # avoid false-positive ``ray_head_dead`` alerts.
+    # Disable the per-tick ``ray status`` probe on hosts without a Ray head.
     if "ray_probe_enabled" in options:
         config.ray_probe_enabled = bool(options["ray_probe_enabled"])
-    # Disable the ``external_deps`` probe (TraceLens CLI / WekaFS mount) on inert
-    # CI hosts that would otherwise fire ``tracelens_cli_missing`` / ``wekafs_degraded``.
+    # Disable the ``external_deps`` probe (TraceLens CLI / WekaFS mount) on inert CI hosts.
     if "external_deps_enabled" in options:
         config.external_deps_enabled = bool(options["external_deps_enabled"])
-    # B3 ``no_levers_found`` floor knobs override the default 45 min / 8 tick window;
-    # multi-node setups inject 60.0 (single-node stays 45.0) since cold start +
-    # baseline + profile consume 35-50 min before any explore family runs.
+    # B3 ``no_levers_found`` floor knobs override the default window.
     if "progress_no_levers_min_minutes" in options:
         config.progress_no_levers_min_minutes = float(options["progress_no_levers_min_minutes"])
     if "progress_no_levers_min_ticks" in options:
         config.progress_no_levers_min_ticks = int(options["progress_no_levers_min_ticks"])
 
-    # L4 — advertise session_dir so co-deployed Critic ``prepare-review`` finds
-    # the findings jsonl; setdefault keeps an operator override intact.
+    # Advertise session_dir so co-deployed Critic ``prepare-review`` finds the findings jsonl.
     os.environ.setdefault(
         "ROBUSTNESS_AGENT_SESSION_DIR",
         str(config.session_dir),
@@ -231,8 +222,7 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     bundle = build_reactor_components(config, session_id=session_id)
     try:
         intents = await bundle.reactor.tick(reactor_ctx)
-        # Surface any RCA-LLM token spend this tick so the host can fold it
-        # into its trace ledger (None on the common no-LLM / Noop path).
+        # Surface any RCA-LLM token spend this tick for the host's trace ledger.
         llm_usage = None
         rca = getattr(bundle.components, "rca", None)
         drain = getattr(rca, "drain_usage", None)

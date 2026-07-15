@@ -10,7 +10,7 @@ python -m hyperloom.agents.critic.runtime.cli prepare-review   --request request
 python -m hyperloom.agents.critic.runtime.cli commit-review    --request request.json --review review.json [--out emit.json]
 python -m hyperloom.agents.critic.runtime.cli close-session    --request request.json [--kb-draft draft.json]
 
-# Low-level KB ops (kept for backward compat / tooling).
+# Low-level KB ops.
 python -m hyperloom.agents.critic.runtime.cli list-priors      --packet packet.json [--kind ...] [--topic ...]
 python -m hyperloom.agents.critic.runtime.cli write-verdict    --packet packet.json --verdict verdict.json --ctx ctx.json
 python -m hyperloom.agents.critic.runtime.cli write-kb-drafts  --packet packet.json --kb-draft kb_draft.json --ctx ctx.json
@@ -44,10 +44,8 @@ from .scope_builder import build_scope, scope_cache_key
 from .session_memory import SessionMemory
 
 
-# ---------------------------------------------------------------------------
-# _read_json / _emit_json are re-exported from hyperloom.common.subprocess_bridge
-# above; kept as module-level bindings so monkeypatches on this module still
-# resolve through its own __dict__.
+# _read_json / _emit_json are kept as module-level bindings so monkeypatches on
+# this module resolve through its own __dict__.
 
 
 def _resolve_kb_client() -> KBClient:
@@ -92,7 +90,6 @@ def _resolve_reviewer() -> DecisionReviewer:
     return DecisionReviewer(session_memory=sm, kb_client=client, kb_writer=writer)
 
 
-# ---------------------------------------------------------------------------
 def _cmd_init_session(args: argparse.Namespace) -> None:
     """Handle ``init-session``: merge a request's context and emit it.
 
@@ -150,7 +147,6 @@ def _cmd_close_session(args: argparse.Namespace) -> None:
     _emit_json(outcome.to_dict(), args.out)
 
 
-# ---------------------------------------------------------------------------
 def _cmd_list_priors(args: argparse.Namespace) -> None:
     """Handle ``list-priors``: look up KB priors for a packet's scope.
 
@@ -292,7 +288,6 @@ def _replay_dispatch(client: KBClient, endpoint: str, payload: dict[str, Any]) -
         raise RuntimeAdapterError(f"replay-dead-letter: unknown endpoint {endpoint!r}")
 
 
-# ---------------------------------------------------------------------------
 def _make_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with all Critic CLI subcommands.
 
@@ -303,7 +298,6 @@ def _make_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hyperloom.agents.critic.runtime.cli", description="Critic runtime CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # Session bootstrap commands
     init = sub.add_parser("init-session")
     init.add_argument("--request", required=True)
     init.add_argument("--out", default="-")
@@ -315,7 +309,6 @@ def _make_parser() -> argparse.ArgumentParser:
     close.add_argument("--out", default="-")
     close.set_defaults(func=_cmd_close_session)
 
-    # Review preparation and commit commands
     prep = sub.add_parser("prepare-review")
     prep.add_argument("--request", required=True)
     prep.add_argument("--out", default="-")
@@ -327,7 +320,6 @@ def _make_parser() -> argparse.ArgumentParser:
     commit.add_argument("--out", default="-")
     commit.set_defaults(func=_cmd_commit_review)
 
-    # Low-level
     listp = sub.add_parser("list-priors")
     listp.add_argument("--packet", required=True)
     listp.add_argument("--kind", default=None)

@@ -55,9 +55,8 @@ from .scope_builder import build_scope, scope_cache_key
 from .session_memory import SessionMemory
 
 
-# Proposal-payload keys that carry environment-variable / CLI-arg levers as
-# containers rather than direct param values; pulled out so the rest of
-# ``params`` resolves cleanly to substrate knobs.
+# Payload keys carrying env-var / CLI-arg lever containers, pulled out so
+# ``params`` resolves to substrate knobs.
 _LEVER_ENV_KEYS: tuple[str, ...] = ("extra_envs", "envs", "env")
 _LEVER_ARG_KEYS: tuple[str, ...] = ("extra_server_args", "server_args", "args")
 _LEVER_CONTAINER_KEYS: frozenset[str] = frozenset(_LEVER_ENV_KEYS + _LEVER_ARG_KEYS + ("grid",))
@@ -80,9 +79,7 @@ def _proposal_levers(
     """
     if not isinstance(payload, dict):
         return {}, {}, ""
-    # Levers live under ``params``; the top-level payload is proposal metadata
-    # (action_name / predicted_gain_pct / reason) and must not be mistaken for
-    # tunable levers. No ``params`` dict → nothing to assess.
+    # Levers live under ``params``; top-level payload is proposal metadata.
     src = payload.get("params")
     if not isinstance(src, dict):
         return {}, {}, ""
@@ -108,11 +105,8 @@ def _proposal_levers(
     return params, envs, args
 
 
-# Review-constraints taxonomy: a single strict checklist would deadlock the
-# explore loop, so proposals split into three classes (patch_landing strict;
-# evidence_producer structural-only; framework_op empty; unknown →
-# evidence_producer, cold-start safe). Bundle-level ``approve_requires``
-# collapses a batch to its strictest class.
+# Review-constraints taxonomy: proposals split into three classes and the
+# bundle-level ``approve_requires`` collapses a batch to its strictest class.
 ACTION_CLASS_PATCH_LANDING = "patch_landing"
 ACTION_CLASS_EVIDENCE_PRODUCER = "evidence_producer"
 ACTION_CLASS_FRAMEWORK_OP = "framework_op"
@@ -125,8 +119,7 @@ _PATCH_LANDING_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
-# Actions that produce the evidence patch_landing expects; explicit so it's
-# clear what Critic default-approves when KB priors are silent.
+# Actions that produce the evidence patch_landing expects.
 _EVIDENCE_PRODUCER_ACTIONS: frozenset[str] = frozenset(
     {
         "explore",
@@ -148,8 +141,7 @@ _FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset(
         "recover",
         "report",
         "session_breakdown",
-        # Candidate-selection gate only; patches still land through
-        # integrate_patch's strict checks, so no extra approve_requires.
+        # Candidate-selection gate only; patches land via integrate_patch.
         "framework_agent",
     }
 )
@@ -162,9 +154,7 @@ _APPROVE_REQUIRES_PATCH_LANDING: tuple[str, ...] = (
 )
 
 _APPROVE_REQUIRES_EVIDENCE_PRODUCER: tuple[str, ...] = (
-    # Trace to a specialist proposal_set or carry provenance='default_grid'.
     "specialist_or_default_grid_provenance",
-    # Soft mirror of PolicyGate's allowed_actions for the current phase.
     "in_phase_allowed_action",
     # Reject on a contradicting KB prior; absence of priors is NOT a blocker.
     "no_contradicting_kb_prior",
@@ -172,8 +162,7 @@ _APPROVE_REQUIRES_EVIDENCE_PRODUCER: tuple[str, ...] = (
 
 _APPROVE_REQUIRES_FRAMEWORK_OP: tuple[str, ...] = ()
 
-# Class precedence used to collapse a heterogeneous batch into a single
-# bundle-level ``approve_requires`` payload — strictest class wins.
+# Class precedence for collapsing a batch — strictest class wins.
 _CLASS_RANK: dict[str, int] = {
     ACTION_CLASS_FRAMEWORK_OP: 0,
     ACTION_CLASS_EVIDENCE_PRODUCER: 1,
@@ -211,15 +200,12 @@ def classify_proposal_action(action_name: str | None) -> str:
     return ACTION_CLASS_EVIDENCE_PRODUCER
 
 
-# ---------------------------------------------------------------------------
-# L4 helpers — Robustness finding discovery / load
-# ---------------------------------------------------------------------------
+# Robustness finding discovery / load helpers.
 
 # Severity rank for the "min_severity" filter: high > medium > low.
 _SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
 
-# Findings-sink JSONL subdir; kept in sync with
-# ``robustness_agent.findings.sink.FindingSinkConfig.subdir``.
+# Findings-sink JSONL subdir; kept in sync with the robustness agent's sink.
 _ROBUSTNESS_FINDINGS_SUBDIR: str = "agents/robustness/findings"
 
 
@@ -294,7 +280,7 @@ def _load_robustness_priors(
     if not rows:
         return []
     selected = rows[-limit:]
-    # Narrow projection — only what the SKILL needs to reason about the failure.
+    # Narrow projection to what the SKILL needs.
     out: list[dict[str, Any]] = []
     for row in selected:
         out.append(
@@ -355,22 +341,13 @@ class JudgeBundle:
     decision: dict[str, Any] = field(default_factory=dict)
     kb_priors_by_proposal: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     kb_priors_for_decision: list[dict[str, Any]] = field(default_factory=list)
-    # Substrate KB per-proposal reasonableness verdicts (optional enrichment),
-    # keyed by proposal ``msg_id``; empty when assess is unconfigured/skipped.
+    # Per-proposal reasonableness verdicts keyed by ``msg_id``; empty when skipped.
     kb_assess_by_proposal: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # Audit trail for the KB assess call: whether it was configured, why it was
-    # skipped (if so), the focus used, and the exact request levers sent per
-    # proposal. Consumed by the Coordinator backend for trace/SBD; NOT fed to
-    # the LLM (the verdicts in ``kb_assess_by_proposal`` are the LLM-facing view).
+    # Audit trail for the KB assess call; consumed by the Coordinator, not the LLM.
     kb_assess_trace: dict[str, Any] = field(default_factory=dict)
-    # Audit trail for the historical KB prior reads (``list_priors``): the shared
-    # scope_filter/limit and the exact per-proposal request (topic/kind) plus the
-    # cache/count of each lookup. Consumed by the Coordinator backend for
-    # trace/SBD; the priors themselves live in ``kb_priors_by_proposal`` /
-    # ``kb_priors_for_decision`` (which ARE fed to the LLM).
+    # Audit trail for the historical KB prior reads; consumed by the Coordinator.
     kb_priors_trace: dict[str, Any] = field(default_factory=dict)
-    # Recent Robustness findings so the SKILL can factor in what already broke;
-    # empty when absent or disabled.
+    # Recent Robustness findings; empty when absent or disabled.
     robustness_priors: list[dict[str, Any]] = field(default_factory=list)
     kb_read_skipped_reason: str | None = None
     review_constraints: dict[str, Any] = field(default_factory=dict)
@@ -612,8 +589,7 @@ class DecisionReviewer:
         if isinstance(known, list) and known:
             bundle.review_constraints["known_actions"] = sorted(str(a) for a in known if isinstance(a, str))
 
-        # Hard requirement: if model/framework still unknown, KB reads must be
-        # skipped and the Critic should fall back to needs_review.
+        # If model/framework unknown, skip KB reads and fall back to needs_review.
         critical_missing = [k for k in CRITICAL_CONTEXT_KEYS if merge.merged.get(k) in (None, "", "unknown")]
         if critical_missing:
             bundle.required_context = critical_missing
@@ -737,9 +713,7 @@ class DecisionReviewer:
                 }
             )
 
-        # Audit trail for the historical KB prior reads (always injected; no
-        # env gate). The priors themselves feed the LLM; this records what we
-        # asked and what came back so the Coordinator can trace it into the SBD.
+        # Audit trail for the historical KB prior reads (always injected).
         bundle.kb_priors_trace = {
             "configured": True,
             "mode": "per_proposal" if req.proposals else "per_decision",
@@ -758,21 +732,13 @@ class DecisionReviewer:
             bundle.notes.append("scope partially unknown — proceed with caution")
         bundle.notes.append(f"scope_cache_key={scope_cache_key(scope_filter)}")
 
-        # Best-effort substrate KB per-proposal reasonableness verdicts; only
-        # runs when ``CRITIC_KB_ASSESS_URL`` is configured, never blocks review.
+        # Best-effort per-proposal reasonableness verdicts; never blocks review.
         self._inject_kb_assess(bundle, req)
 
-        # Best-effort last-N high-severity Robustness findings; never blocks
-        # the review. Disabled via ``CRITIC_ROBUSTNESS_PRIORS_DISABLED=1``.
+        # Best-effort recent Robustness findings; never blocks the review.
         self._inject_robustness_priors(bundle)
         return bundle
 
-    # ------------------------------------------------------------------
-    # Optional: associate each proposal's raw levers to the substrate KB's
-    # calibrated mechanism evidence to judge reasonableness. Opt-in via
-    # ``CORTEX_KB_URL`` (same cortex KB recipe-snapshot uses); best-effort
-    # and never blocks the review.
-    # ------------------------------------------------------------------
     def _inject_kb_assess(self, bundle: JudgeBundle, req: CriticRequest) -> None:
         """Populate ``bundle.kb_assess_by_proposal`` from the substrate KB.
 
@@ -865,10 +831,6 @@ class DecisionReviewer:
         }
         return {k: v for k, v in candidate.items() if v not in (None, "", "unknown")}
 
-    # ------------------------------------------------------------------
-    # L4 helper: pull recent HIGH-severity Robustness findings into the
-    # bundle so the SKILL can warn about what already broke this session.
-    # ------------------------------------------------------------------
     def _inject_robustness_priors(self, bundle: JudgeBundle) -> None:
         """Populate ``bundle.robustness_priors`` from recent findings.
 
@@ -888,7 +850,7 @@ class DecisionReviewer:
             limit = int(os.environ.get("CRITIC_ROBUSTNESS_PRIORS_LIMIT", "5"))
         except ValueError:
             limit = 5
-        # Severity floor: HIGH by default; drop to MEDIUM via the env knob.
+        # Severity floor: HIGH by default; drop via the env knob.
         min_severity = os.environ.get("CRITIC_ROBUSTNESS_PRIORS_MIN_SEVERITY", "high").lower()
         try:
             priors = _load_robustness_priors(
@@ -1161,7 +1123,7 @@ class DecisionReviewer:
                 continue
             intents.append(build_advice_intent(body, target_proposal_msg_id=advisory.get("target_proposal_msg_id")))
 
-        # Heartbeat fallback if no proposals to review.
+        # Heartbeat fallback when nothing to review.
         if not intents:
             intents.append(build_heartbeat_intent())
 
@@ -1218,7 +1180,7 @@ class DecisionReviewer:
                 "decision_review": decision_review,
             },
         )
-        # Translate adopt/reject into KB writes when there's reusable lesson.
+        # Translate the verdict into a KB write verdict.
         verdict_for_kb = {
             "adopt": "approve",
             "reject": "reject",
@@ -1317,7 +1279,7 @@ class DecisionReviewer:
         verdict = verdict_item.get("verdict")
         if verdict not in {"reject", "redirect", "approve"}:
             return
-        # Only persist when the SKILL flagged a reusable lesson.
+        # Only persist when the SKILL opted in.
         if not verdict_item.get("persist_to_kb"):
             return
         ctx = WriteContext(

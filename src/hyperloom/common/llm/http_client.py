@@ -3,29 +3,18 @@
 """Minimal OpenAI-compatible / Anthropic Messages-API POST-and-parse helpers.
 
 Each function issues exactly one synchronous HTTP request and returns the
-completion text (or raises :class:`LLMClientError`). This is the shared
-"protocol skeleton" that ``hyperloom.inference_optimizer``'s report-narrative
-client builds on (``breakdown/reporters/llm_client.py``); it is deliberately
-NOT an SDK replacement — role backends that need streaming, tool-calling, or
-retry policies (``orchestrator/roles/{claude,codex,critic_agent}.py``,
-``orchestrator/scoring/proposal_scorer.py``) continue to use the ``openai`` /
-``claude_agent_sdk`` packages directly (tree-reform.MD §12.2: role-specific
-agentic behavior stays in ``orchestrator/roles/``).
-
-Callers own credential resolution (which env var, what fallback order); this
-module only accepts an already-resolved ``base_url``/``api_key`` pair.
-
-``httpx`` is imported lazily so importing this module never pays the cost for
-callers that end up not needing it (mirrors the prior per-call-site lazy
-import convention in ``breakdown/reporters/llm_client.py``).
+completion text (or raises :class:`LLMClientError`). This is a shared protocol
+skeleton, not an SDK replacement: role backends needing streaming, tool-calling,
+or retry policies continue to use the ``openai`` / ``claude_agent_sdk`` packages
+directly. Callers own credential resolution and pass an already-resolved
+``base_url``/``api_key`` pair. ``httpx`` is imported lazily so importing this
+module never pays the cost for callers that do not need it.
 """
 
 from __future__ import annotations
 
 import json
 
-# Matches the previous per-call-site default in
-# ``breakdown/reporters/llm_client.py`` (``timeout_sec: float = 60.0``).
 DEFAULT_HTTP_TIMEOUT_SEC = 60.0
 
 

@@ -3,10 +3,9 @@
 
 """Run forge-gemm-tune as a Hyperloom kernel-agent tool.
 
-This wrapper mirrors ``gemm_tuning.py`` (GEAK) at the kernel-agent tool layer:
-the orchestrator writes an input JSON file and calls this script; the actual
-deterministic tuning implementation remains in the standalone
-``forge_gemm_tune`` package.
+The orchestrator writes an input JSON file and calls this script; the
+deterministic tuning implementation lives in the standalone ``forge_gemm_tune``
+package.
 """
 
 from __future__ import annotations
@@ -19,8 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Sibling import works whether run as a standalone script or loaded via
-# importlib; the kernel-agent tools cannot rely on the ``hyperloom`` import root.
+# Sibling import: kernel-agent tools cannot rely on the ``hyperloom`` import root.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _io_utils import truthy as _truthy  # noqa: E402
 
@@ -85,8 +83,7 @@ def _add_kb_read_opts(cmd: list[str], args: dict[str, Any]) -> None:
     """Forward gemm-tune-kb read-side flags from input-json or env.
 
     The input-json takes precedence; env vars let the pipeline enable KB read
-    without the orchestrator having to populate input-json (e.g. via
-    setup_env.sh). Disabled by default so existing behavior is unchanged.
+    without populating input-json. Disabled by default.
     """
     kb_read = args.get("kb_read")
     if kb_read is None:

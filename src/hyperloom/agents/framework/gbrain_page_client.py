@@ -4,8 +4,7 @@
 
 Self-contained (no reverse import of ``inference_optimizer``) so the
 framework-agent package stays independently installable. The MCP/SSE
-contract mirrors ``inference_optimizer/recipe_kb/gbrain_remote_client.py``;
-``tests/test_pr_kb.py`` pins parity — update both in lock-step.
+contract mirrors ``inference_optimizer/recipe_kb/gbrain_remote_client.py``.
 
 Exposes only the read surface PR KB consumption needs: ``get_page`` /
 ``query`` (MCP ``search`` tool) / ``list_pages``. All failures raise
@@ -34,7 +33,7 @@ def _iter_sse_objects(raw: str):
         try:
             yield json.loads(text)
         except json.JSONDecodeError:
-            # Tolerate malformed non-SSE payloads: yield nothing, caller handles no-match.
+            # Malformed non-SSE payload: yield nothing.
             return
         return
     for block in re.split(r"\r?\n\r?\n", raw):
@@ -49,7 +48,7 @@ def _iter_sse_objects(raw: str):
         try:
             yield json.loads(payload)
         except json.JSONDecodeError:
-            # Skip a malformed SSE event block and keep scanning the rest.
+            # Skip a malformed SSE event block.
             continue
 
 

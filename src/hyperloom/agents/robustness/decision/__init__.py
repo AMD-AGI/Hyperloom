@@ -2,9 +2,9 @@
 
 """Decision layer.
 
-* :mod:`policy_aware` — local mirror of upstream PolicyGate payload schema.
+* :mod:`policy_aware` — local mirror of PolicyGate payload schema.
 * :mod:`action_ladder` — symptom -> intent (observe/diagnose/recommend).
-* :mod:`rca_engine` — LLM-backed RCA, disabled by default in M1.
+* :mod:`rca_engine` — LLM-backed RCA, disabled by default.
 """
 
 from .action_ladder import ActionLadder, ActionLadderConfig, Finding

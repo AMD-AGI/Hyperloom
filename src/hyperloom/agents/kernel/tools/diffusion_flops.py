@@ -34,10 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# Hardware matrix-core peak TFLOPS (self-contained; mirrors
-# roofline_ceiling.HW_SPECS so this tool runs standalone in kernel-agent).
-# ---------------------------------------------------------------------------
+# Hardware matrix-core peak TFLOPS (mirrors roofline_ceiling.HW_SPECS).
 _PEAK_TFLOPS: dict[str, dict[str, float]] = {
     "mi300x": {"bf16": 1307.4, "fp16": 1307.4, "fp8": 2614.9, "fp32": 163.4},
     "mi308x": {"bf16": 1307.4, "fp16": 1307.4, "fp8": 2614.9, "fp32": 163.4},
@@ -63,9 +60,7 @@ def peak_tflops(gpu_type: str, precision: str) -> float:
     return float(table.get(key, 0.0))
 
 
-# ---------------------------------------------------------------------------
 # Low-level FLOPs primitives (2 FLOPs / MAC).
-# ---------------------------------------------------------------------------
 def _linear_flops(tokens: float, k_in: float, n_out: float) -> float:
     """Dense matmul ``[tokens, k_in] x [k_in, n_out]``."""
     return 2.0 * tokens * k_in * n_out
@@ -101,9 +96,7 @@ def _linear_attention_flops(seq: float, h: float, head_dim: float) -> float:
     return 4.0 * seq * h * head_dim
 
 
-# ---------------------------------------------------------------------------
 # Model family resolution.
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class DenoiserGeometry:
     """Resolved denoiser architecture for the analytic FLOPs estimator."""
@@ -147,8 +140,8 @@ _CLASS_FAMILY: dict[str, str] = {
     "UNet2DConditionModel": "unet",
 }
 
-# Per-class overrides for constants the config does not expose.
-# steps/cfg are diffusers pipeline defaults; turbo/schnell are few-step & CFG-free.
+# Per-class overrides for constants the config does not expose (diffusers
+# pipeline defaults).
 _CLASS_DEFAULTS: dict[str, dict[str, Any]] = {
     "SD3Transformer2DModel": {"text_tokens": 333, "default_steps": 28, "default_cfg_batch": 2},
     "FluxTransformer2DModel": {"text_tokens": 512, "default_steps": 28, "default_cfg_batch": 1},
@@ -388,9 +381,8 @@ def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
         patch = int(ps[0])
     elif isinstance(ps, int):
         patch = int(ps)
-    # FLUX / ERNIE / Sana declare patch_size=1 but pack 2x2 (or use a high-
-    # compression VAE); their effective latent token stride is captured by the
-    # per-family vae_spatial + a forced patch=2 for the pixel->token count.
+    # FLUX / ERNIE / Sana declare patch_size=1 but pack 2x2; force patch=2 for
+    # the pixel->token count.
     if family in ("flux", "moe_flux") or model_class in ("ErnieImageTransformer2DModel",):
         patch = 2
 
@@ -427,9 +419,7 @@ def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
     )
 
 
-# ---------------------------------------------------------------------------
 # Per-family single-forward FLOPs.
-# ---------------------------------------------------------------------------
 def _image_tokens(g: DenoiserGeometry, height: int, width: int) -> int:
     lat_h = max(height // g.vae_spatial // g.patch, 1)
     lat_w = max(width // g.vae_spatial // g.patch, 1)

@@ -41,8 +41,7 @@ ENABLEMENT_INTENT_TERMS: frozenset[str] = frozenset(
     }
 )
 
-# Per-kind seed keywords appended to the auto-extracted set. Keys are failure
-# ``kind`` ids.
+# Per-kind seed keywords appended to the auto-extracted set, keyed by failure kind.
 _KIND_SEED_KEYWORDS: dict[str, tuple[str, ...]] = {
     "missing_model_arch": ("model", "architecture", "support", "add"),
     "unsupported_dtype": ("dtype", "fp8", "quant", "support"),

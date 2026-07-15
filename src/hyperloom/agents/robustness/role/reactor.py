@@ -43,11 +43,9 @@ class ReactorComponents:
     policy: PolicyAware
     sink: FindingSink | None = None
     rca: RcaEngine | None = None
-    # Session-end finalizer: invoked once on ``stop_reason`` empty→non-empty
-    # via the ``_finalize_fired`` latch; disk-level idempotency via marker file.
+    # Session-end finalizer: invoked once on ``stop_reason`` empty→non-empty.
     finalizer: PostmortemFinalizer | None = None
-    # Cross-tick state persistence (subprocess-per-tick transport loses memory
-    # otherwise, so consecutive-tick rules can't fire). ``None`` disables (tests).
+    # Cross-tick state persistence; ``None`` disables (tests).
     state_store: DetectorStateStore | None = None
 
 
@@ -76,8 +74,7 @@ class Reactor:
         self._finalizer = components.finalizer
         self._state_store = components.state_store
         self._tick_index = 0
-        # In-memory latch: ``finalizer.finalize`` runs at most once per instance,
-        # complementing the finalizer's disk marker for cross-process resume.
+        # In-memory latch: ``finalizer.finalize`` runs at most once per instance.
         self._finalize_fired: bool = False
 
     @property
@@ -109,8 +106,8 @@ class Reactor:
 
         data = await self._router.collect(ctx)
         symptoms = self._classifier.classify(data, ctx)
-        # Prefer the Coordinator's session-wide ``ctx.shared_state.tick`` so ladder
-        # cooldowns and finding stamps survive subprocess restarts.
+        # Prefer the session-wide tick so ladder cooldowns and finding stamps
+        # survive subprocess restarts.
         authoritative_tick = self._resolve_authoritative_tick(ctx)
         result = await self._ladder.decide(
             symptoms,
@@ -146,8 +143,7 @@ class Reactor:
         # Run after the sink write so this tick's findings are in the corpus.
         await self._maybe_finalize(ctx)
 
-        # Flush mutated detector/ladder/throttle state last; off the event loop
-        # because fsync blocks.
+        # Flush mutated detector/ladder/throttle state last, off the event loop.
         await self._flush_state_store()
 
         return validated_intents

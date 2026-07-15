@@ -133,8 +133,7 @@ def build_reactor_components(
             "config.robustness_server_url is empty",
         )
 
-    # Auto-include the local inference server health endpoint so an
-    # SGLang/vLLM/Magpie SIGSTOP fires a symptom (operators forget to add it).
+    # Auto-include the local inference server health endpoint.
     probe_targets = list(config.health_probe_targets)
     if (
         config.auto_probe_inference_server
@@ -147,8 +146,6 @@ def build_reactor_components(
         "runs/*/*/server.log",
         "runs/*/*/server_log",
         "runs/*/server.log",
-        # Mirrors ``LocalProbeConfig.extra_server_log_globs`` defaults —
-        # see that field for the rationale (grid_runner variant layout).
         "runs/*/*/*/server.log",
         "runs/*/*/*/*/server.log",
     )
@@ -158,10 +155,7 @@ def build_reactor_components(
             *(g.strip() for g in config.server_log_extra_globs.split(":") if g.strip()),
         )
 
-    # Multi-node guard: ``disable_local_probe`` swaps LocalProbe for a quiet
-    # stub so per-pod probes (ps, rocm-smi, local HTTP) can't false-fire on
-    # Ray workers without the inference server; the stub yields empty
-    # SourceData with a degraded_reason instead of a high-severity symptom.
+    # Multi-node guard: ``disable_local_probe`` swaps LocalProbe for a quiet stub.
     fallback: Source
     if config.disable_local_probe:
         fallback = _QuietFallback(
@@ -201,9 +195,7 @@ def build_reactor_components(
         recheck_interval_s=config.source_recheck_interval_s,
     )
 
-    # Disk-backed state store surviving subprocess restarts (detectors,
-    # ladder cooldown, RCA throttle). Built before the classifier, which
-    # wires it to all stateful sub-detectors.
+    # Disk-backed state store surviving subprocess restarts; built before the classifier.
     state_store: DetectorStateStore | None = (
         DetectorStateStore(session_dir=config.session_dir) if config.state_store_enabled else None
     )

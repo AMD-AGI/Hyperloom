@@ -10,8 +10,8 @@ Two complementary axes, both gated on no validated gain:
   ``deadline_hard_cutoff`` (remaining <= 5min, always HIGH + ``delegate(report)``).
 
 Reads the Coordinator time-budget block via :class:`SharedStateSnapshot`; silent when absent.
-Uses ``cumulative_gain_validated`` to target the regress-in-validate_stack mode. The two axes
-intentionally overlap; absolute-time is the fallback when the percentage gate is silenced by healthy gain.
+The two axes intentionally overlap; absolute-time is the fallback when the percentage gate is
+silenced by healthy gain.
 """
 
 from __future__ import annotations

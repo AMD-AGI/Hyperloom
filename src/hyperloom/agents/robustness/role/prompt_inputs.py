@@ -42,8 +42,8 @@ from hyperloom.common.coerce import to_float, to_int
 log = logging.getLogger(__name__)
 
 
-# Anchored to the two-space row prefix the Coordinator emits; ``\S+`` topic
-# guards against payloads whose dict repr contains a literal ``topic=``.
+# Anchored to the two-space row prefix; ``\S+`` topic guards against payloads
+# whose dict repr contains a literal ``topic=``.
 _INBOX_LINE_RE = re.compile(
     r"^\s+seq=(?P<seq>\d+)\s+msg_id=(?P<msg_id>\S+)\s+from=(?P<from_agent>\S+)\s+"
     r"topic=(?P<topic>\S+)\s+payload=(?P<payload>.+)$"
@@ -65,7 +65,7 @@ _SCALAR_KEYS = {
     "tick",
     "stop_reason",
     "optimization_stack",
-    # In-flight kernel-opt visibility lets ``_no_levers_symptom`` short-circuit when in-flight work explains stack_size=0.
+    # In-flight kernel-opt visibility lets ``_no_levers_symptom`` short-circuit.
     "kernel_opt_attempts_count",
     "has_keep_pending_integrate",
     # Aggregated into ``SharedStateSnapshot.explore_started``; ``(none)`` is the never-yet sentinel.
@@ -158,19 +158,14 @@ class SharedStateSnapshot:
     cumulative_gain_validated: float = 0.0
     crash_count: int = 0
     current_action: str = ""
-    # ``tick`` is the Coordinator's monotonic per-pass counter; non-empty ``stop_reason`` means winding down so stagnation signals skip.
     tick: int = 0
     stop_reason: str = ""
-    # Validated-entry count from ``optimization_stack=``; 0 + many ticks is the ``no_levers_found`` signature.
     optimization_stack_size: int = 0
-    # True once any explore family (explore / sweep) emitted a non-``(none)`` record; defers ``no_levers_found`` past cold-start.
     explore_started: bool = False
-    # Populated from the ``=== Time budget ===`` section; absent section leaves defaults so deadline signals short-circuit safely.
     elapsed_minutes: float = 0.0
     remaining_minutes: float = 0.0
     budget_minutes: float = 0.0
     closing_phase: bool = False
-    # Non-zero ``kernel_opt_attempts_count`` or a pending integrate means do NOT claim ``no_levers_found``.
     kernel_opt_attempts_count: int = 0
     has_keep_pending_integrate: bool = False
 
@@ -326,7 +321,7 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
         elif key == "cumulative_gain":
             snapshot.cumulative_gain = to_float(head.rstrip("%"), default=0.0)
         elif key == "cumulative_gain_validated":
-            # Rendered as ``20.5%`` or ``20.5% (stack_len_at_validation=2, ts=...)``; take the leading number.
+            # Take the leading number from ``20.5%`` or ``20.5% (stack_len_at_validation=2, ...)``.
             head_clean = head.rstrip("%")
             for sep in (" ", "%"):
                 head_clean = head_clean.split(sep, 1)[0]
@@ -346,7 +341,7 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
         elif key == "has_keep_pending_integrate":
             snapshot.has_keep_pending_integrate = head.lower() == "true"
         elif key in _EXPLORE_FAMILY_KEYS:
-            # Any non-``(none)`` value flips ``explore_started`` True; idempotent so a later ``(none)`` must not clear it.
+            # Any non-``(none)`` value flips ``explore_started`` True; never cleared once set.
             if head and head != "(none)":
                 snapshot.explore_started = True
     return snapshot
@@ -369,7 +364,7 @@ def _count_optimization_stack(head: str) -> int:
     try:
         value = ast.literal_eval(head)
     except (SyntaxError, ValueError):
-        # Fallback: comma-joined string, defensive against format drift.
+        # Fallback: comma-joined string.
         return len([part for part in head.split(",") if part.strip()])
     if isinstance(value, (list, tuple)):
         return len(value)

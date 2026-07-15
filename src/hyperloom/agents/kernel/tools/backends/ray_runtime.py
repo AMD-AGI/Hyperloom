@@ -18,19 +18,13 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
-# Minimum soft RLIMIT_NOFILE the Ray raylet needs to stay up (issue #433).
-# The raylet opens a large number of fds (sockets, plasma store, per-worker
-# pipes); at the container default soft limit (1024) it aborts on startup /
-# is left as a zombie that only `ray stop --force` can clear. Operators can
-# override via RAY_MIN_NOFILE.
+# Minimum soft RLIMIT_NOFILE the Ray raylet needs to stay up. Override via
+# RAY_MIN_NOFILE.
 DEFAULT_MIN_NOFILE = 65536
 
 
 def _fd_limit_warn(msg: str) -> None:
     """Emit an fd-limit warning to stderr with a stable prefix.
-
-    Kept as a module function so tests can capture it and so every warning
-    carries the same prefix.
 
     Args:
         msg: The warning message body.
@@ -63,8 +57,7 @@ def ensure_fd_limit(
     cap needs no privileges; lifting the hard cap does (CAP_SYS_RESOURCE),
     so when the hard cap is itself below ``min_soft`` we raise soft as high
     as allowed and warn — only ``docker run --ulimit nofile=...`` at
-    container launch can lift the hard cap in an unprivileged container
-    (issue #433).
+    container launch can lift the hard cap in an unprivileged container.
 
     Args:
         min_soft: Target soft limit; defaults to the configured target.
@@ -77,9 +70,7 @@ def ensure_fd_limit(
         min_soft = _min_nofile_target()
     inf = resource.RLIM_INFINITY
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    # RLIM_INFINITY (-1) means "unlimited". Guard against treating it as a
-    # tiny number: an unlimited soft limit is already sufficient, and an
-    # unlimited hard cap imposes no ceiling on the target (issue #433).
+    # RLIM_INFINITY (-1) means "unlimited"; don't treat it as a tiny number.
     if soft == inf or soft >= min_soft:
         return soft, hard
     target = min_soft if hard == inf else min(min_soft, hard)
@@ -189,14 +180,10 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     """
     if ray_status_ok():
         return False
-    # issue #433: raise the open-files limit before the raylet starts so it
-    # inherits a high enough ceiling and does not abort / zombie at the
-    # container default (1024).
+    # Raise the open-files limit before the raylet starts.
     ensure_fd_limit(log_path=log_path)
-    # Bind the dashboard/jobs API to loopback: this is a local single-node head
-    # (forge/geak local Ray), so nothing off-box needs :8265. GCS (:6379) is
-    # unaffected, so local ray.init(address="auto") still works. Avoids exposing
-    # the unauthenticated Ray Jobs RCE surface on the pod network.
+    # Bind the dashboard/jobs API to loopback (avoids exposing the
+    # unauthenticated Ray Jobs RCE surface); GCS (:6379) is unaffected.
     cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         cmd.append(f"--num-gpus={num_gpus}")
@@ -238,9 +225,6 @@ def stop_ray_if_owned(started: bool, log_path: Optional[Path] = None) -> None:
 def _is_ray_version_mismatch(text: str) -> bool:
     """Detect Ray's version-mismatch banner in captured output.
 
-    Indicates the cluster was started under a different Python/Ray than this
-    process (issue #432).
-
     Args:
         text: The captured error or output text.
 
@@ -257,8 +241,8 @@ def force_restart_local_cluster(
     """Tear down any reachable Ray cluster and start a fresh local head.
 
     The fresh head runs under this interpreter, recovering from a
-    stale/foreign cluster (issue #432) whose version mismatch otherwise
-    mislabels as a "compile failed" REVERT; this also clears raylet zombies.
+    stale/foreign cluster whose version mismatch otherwise mislabels as a
+    "compile failed" REVERT; this also clears raylet zombies.
 
     Args:
         num_gpus: Optional GPU count for the fresh head node.
@@ -267,13 +251,10 @@ def force_restart_local_cluster(
     Raises:
         RuntimeError: If the fresh head node fails to start.
     """
-    # issue #433: raise the open-files limit before the fresh raylet starts
-    # so it inherits a high enough ceiling (the container default 1024 makes
-    # the raylet abort on startup / linger as a zombie).
+    # Raise the open-files limit before the fresh raylet starts.
     ensure_fd_limit(log_path=log_path)
     stop_cmd = ["ray", "stop", "--force"]
-    # Bind the dashboard/jobs API to loopback (see ensure_ray_cluster): local
-    # single-node head; GCS (:6379) is unaffected so ray.init still works.
+    # Bind the dashboard/jobs API to loopback (see ensure_ray_cluster).
     start_cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         start_cmd.append(f"--num-gpus={num_gpus}")
@@ -299,7 +280,7 @@ SAFE_ENV_KEYS = (
     "LD_LIBRARY_PATH",
     "HYPERLOOM_KERNEL_AGENT_ROOT",
     "KERNEL_AGENT_ROOT",
-    # USER_DATA_PATH is the single artefact root others default under.
+    # Single artefact root others default under.
     "USER_DATA_PATH",
     "HYPERLOOM_RUNTIME_DIR",
     "KERNEL_AGENT_ENV",
@@ -318,23 +299,18 @@ SAFE_ENV_KEYS = (
     "LLM_API_BASE",
     "LLM_PROXY_API_KEY",
     "LLM_PROXY_BASE_URL",
-    # GEAK LLM connection (e2e runner reads these; parallel_e2e_runner also
-    # derives them from the gateway key/URL).
+    # GEAK LLM connection (e2e runner reads these).
     "GEAK_API_KEY",
     "GEAK_BASE_URL",
     # GEAK/Forge harness contract: patched candidate dir the generated harness
-    # prepends to sys.path (see harness_generator.py).
+    # prepends to sys.path.
     "GEAK_WORK_DIR",
-    # e2e optimizer (GEAK@GEAK): the runner path + repo
-    # root so a Ray worker can locate interface/run_e2e.py and the e2e_workflow/
-    # checkout.
+    # e2e optimizer runner path + repo root so a Ray worker can locate
+    # interface/run_e2e.py and the e2e_workflow/ checkout.
     "GEAK_ROOT", "GEAK_E2E_RUNNER",
     "GEAK_CLAUDE_EFFORT", "GEAK_CLAUDE_MODEL", "GEAK_E2E_TIMEOUT_S",
-    # Scoring/profiler/run knobs read by GEAK itself (the Ray actor); without these
-    # in the allowlist they are stripped at the Ray boundary and silently ignored:
-    # GEAK_SCORE_TARGET (kernel vs wall best-patch selection — the E2E-transferable
-    # signal), GEAK_SKIP_PROFILE (skip the advisory profiler-mcp roofline pass),
-    # GEAK_MAX_BENCHMARK_SHAPES (harness shape cap), GEAK_RUN_MODE (full vs quick).
+    # Scoring/profiler/run knobs read by GEAK itself; stripped at the Ray
+    # boundary without this allowlist entry.
     "GEAK_SCORE_TARGET",
     "GEAK_SKIP_PROFILE",
     "GEAK_MAX_BENCHMARK_SHAPES",
@@ -356,10 +332,8 @@ def safe_runtime_env() -> dict:
             Ray's ``runtime_env``.
     """
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
-    # Key derivation source. SAFE_API_KEY stays the primary so the single-gateway
-    # setup is unchanged; a split deploy (no SAFE_API_KEY) falls back to the
-    # per-provider key instead. GEAK speaks the OpenAI protocol (its base
-    # URL derives from OPENAI_BASE_URL below), so it takes the OpenAI-side key.
+    # SAFE_API_KEY is primary; a split deploy falls back to the per-provider
+    # key. GEAK speaks the OpenAI protocol, so it takes the OpenAI-side key.
     openai_key = (
         env.get("SAFE_API_KEY")
         or env.get("OPENAI_API_KEY")
@@ -381,8 +355,7 @@ def safe_runtime_env() -> dict:
     if anthropic_key:
         env.setdefault("ANTHROPIC_API_KEY", anthropic_key)
         env.setdefault("ANTHROPIC_AUTH_TOKEN", anthropic_key)
-    # Base URL source: OPENAI_BASE_URL primary (single-gateway unchanged); a
-    # split deploy with only ANTHROPIC_BASE_URL reuses it for the OpenAI side.
+    # OPENAI_BASE_URL primary; fall back to ANTHROPIC_BASE_URL.
     base_url = env.get("OPENAI_BASE_URL") or env.get("ANTHROPIC_BASE_URL")
     if base_url:
         env.setdefault("ANTHROPIC_BASE_URL", base_url)
@@ -397,15 +370,9 @@ def safe_runtime_env() -> dict:
 def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = None):
     """Initialize ray while suppressing the connect banner on stdout.
 
-    If the reachable cluster was started under a different Python/Ray than
-    this process (issue #432 — e.g. cluster py3.10 vs submitter py3.12),
-    ``ray.init`` raises a "Version mismatch" RuntimeError in ~0.8s. Rather
-    than letting that bubble up as a mislabeled "compile failed" REVERT, we
-    tear the foreign cluster down, bring up a fresh local head under THIS
-    interpreter (``force_restart_local_cluster``), and retry ``ray.init``
-    once. ``num_gpus`` / ``log_path`` are threaded through to the restart so
-    the new head matches the requested GPU count and the action is audited
-    in ``ray_lifecycle.log``.
+    On a "Version mismatch" RuntimeError (foreign cluster under a different
+    Python/Ray), tear the foreign cluster down, bring up a fresh local head
+    under this interpreter, and retry ``ray.init`` once.
 
     Args:
         num_gpus: Optional GPU count forwarded to a restart, if needed.
@@ -434,8 +401,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
     except Exception as exc:  # noqa: BLE001
         if not _is_ray_version_mismatch(str(exc)):
             raise
-        # Foreign cluster under a different interpreter — replace it with a
-        # local head under this Python, then retry exactly once.
+        # Foreign cluster: replace with a local head, then retry exactly once.
         try:
             ray.shutdown()
         except Exception:  # noqa: BLE001

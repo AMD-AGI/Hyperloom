@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Append-only KB dead-letter queue (contract §6 / G-5).
+"""Append-only KB dead-letter queue.
 
 Failed KB writes go into ``KB_DEAD_LETTER_DIR/<endpoint>.jsonl`` (one JSON
 record per line: ``endpoint``, ``payload``, ``attempts``, ``last_error``,

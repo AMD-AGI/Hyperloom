@@ -41,7 +41,6 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-# Lives under ``<session_dir>/<subdir>/`` so ``rm -r agents/robustness`` resets all artefacts together.
 _STATE_FILENAME: str = "detector_state.json"
 
 # Keep aligned with ``FindingSinkConfig.subdir.parent`` so the disk layout is uniform.

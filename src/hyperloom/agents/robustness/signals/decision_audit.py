@@ -36,8 +36,7 @@ _CI_METRICS_REQUIRED_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# Legacy field names ci_metrics drift detection rejects (they exist in
-# old artefacts but the schema migration replaced them).
+# Legacy field names ci_metrics drift detection rejects.
 _CI_METRICS_LEGACY_FIELDS: frozenset[str] = frozenset(
     {
         "baseline_throughput",

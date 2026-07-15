@@ -97,8 +97,6 @@ class PolicyAware:
                 violations.append(exc)
         return violations
 
-    # -- internal checks -------------------------------------------------
-
     def _check_role(self, intent: Intent) -> None:
         """Verify the intent type is in the robustness role allowlist.
 
@@ -160,8 +158,7 @@ class PolicyAware:
             self._check_send_message(payload)
 
         if intent.type in ROBUSTNESS_ONLY_INTENTS:
-            # ``source`` is not validatable locally; upstream PolicyGate
-            # enforces source=robustness via ROBUSTNESS_ONLY_SOURCE_ALLOWLIST.
+            # ``source`` is enforced upstream, not locally.
             pass
 
     def _check_alert(self, payload: dict[str, Any]) -> None:
@@ -323,4 +320,3 @@ class PolicyAware:
         topic = str(payload.get("topic", "")).strip()
         if not topic:
             raise PolicyViolation("send_message.topic must be non-empty", rule="payload")
-        # Unknown topics are not rejected (upstream soft-degrades to observation).
