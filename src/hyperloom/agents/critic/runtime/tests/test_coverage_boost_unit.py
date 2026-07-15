@@ -21,14 +21,12 @@ from hyperloom.agents.critic.runtime.intent_envelope import validate_envelope
 from hyperloom.agents.critic.runtime.slugify import slugify, slugify_safe
 
 
-# --------------------------------------------------------------------------- #
-# category_mapping                                                            #
-# --------------------------------------------------------------------------- #
+# category_mapping
 def test_map_category_to_kind() -> None:
     assert map_category_to_kind("pitfall") == "pitfall"
     assert map_category_to_kind("kernel_optimization") == "technique"
     with pytest.raises(RuntimeAdapterError):
-        map_category_to_kind(123)  # type: ignore[arg-type]  # line 60
+        map_category_to_kind(123)  # type: ignore[arg-type]
     with pytest.raises(RuntimeAdapterError):
         map_category_to_kind("no_such_category")
 
@@ -39,14 +37,11 @@ def test_filter_supported_categories() -> None:
     assert rejected == ["bogus"]
 
 
-# --------------------------------------------------------------------------- #
-# importance_mapping                                                          #
-# --------------------------------------------------------------------------- #
+# importance_mapping
 def test_importance_for_verdict() -> None:
     assert importance_for_verdict(verdict="advise") == 0.4
     assert importance_for_verdict(verdict="approve", confidence="high", has_measurement=True) == 0.7
     assert importance_for_verdict(verdict="approve", confidence="high", has_measurement=False) == 0.4
-    # Low confidence branch (line 52).
     assert importance_for_verdict(verdict="approve", confidence="low") == 0.4
     assert importance_for_verdict(verdict="approve", confidence="medium", has_measurement=True) == 0.5
     assert importance_for_verdict(verdict="approve", confidence=None) == 0.4
@@ -54,7 +49,6 @@ def test_importance_for_verdict() -> None:
 
 def test_importance_for_kb_draft() -> None:
     assert importance_for_kb_draft(confidence=None) == 0.5
-    # High-confidence draft (line 74).
     assert importance_for_kb_draft(confidence=0.9) == 0.6
     assert importance_for_kb_draft(confidence=0.5) == 0.5
 
@@ -65,13 +59,11 @@ def test_cap_importance() -> None:
     assert cap_importance(0.3) == pytest.approx(0.3)
 
 
-# --------------------------------------------------------------------------- #
-# slugify                                                                     #
-# --------------------------------------------------------------------------- #
+# slugify
 def test_slugify_errors_and_success() -> None:
     assert slugify("Hello World Optimization") == "hello-world-optimization"
     with pytest.raises(SlugifyError):
-        slugify(123)  # type: ignore[arg-type]  # line 63
+        slugify(123)  # type: ignore[arg-type]
     with pytest.raises(SlugifyError):
         slugify("   ")
     with pytest.raises(SlugifyError):
@@ -83,9 +75,9 @@ def test_slugify_errors_and_success() -> None:
 def test_slugify_safe_paths() -> None:
     assert slugify_safe("plain-ascii-topic") == "plain-ascii-topic"
     with pytest.raises(SlugifyError):
-        slugify_safe("   ")  # line 115
+        slugify_safe("   ")
 
-    # translate_fn that raises -> deterministic fallback (lines 127-128 via except).
+    # translate_fn that raises -> deterministic fallback.
     def _boom(_t: str) -> str:
         raise RuntimeError("translate failed")
 
@@ -101,43 +93,42 @@ def test_slugify_safe_paths() -> None:
     assert out3.startswith("p-")
 
 
-# --------------------------------------------------------------------------- #
-# intent_envelope.validate_envelope                                           #
-# --------------------------------------------------------------------------- #
+# intent_envelope.validate_envelope
 def test_validate_envelope_structural() -> None:
     with pytest.raises(IntentEnvelopeValidationError):
-        validate_envelope("nope")  # type: ignore[arg-type]  # line 186
+        validate_envelope("nope")  # type: ignore[arg-type]
     with pytest.raises(IntentEnvelopeValidationError):
-        validate_envelope({})  # line 188
+        validate_envelope({})
     with pytest.raises(IntentEnvelopeValidationError):
         validate_envelope({"intents": []})  # empty list
     with pytest.raises(IntentEnvelopeValidationError):
-        validate_envelope({"intents": ["x"]})  # line 195
+        validate_envelope({"intents": ["x"]})
     with pytest.raises(IntentEnvelopeValidationError):
-        validate_envelope({"intents": [{"intent_type": "alert"}]})  # line 197
+        validate_envelope({"intents": [{"intent_type": "alert"}]})
     with pytest.raises(IntentEnvelopeValidationError):
         validate_envelope({"intents": [{"intent_type": "not_allowed", "payload": {}}]})
 
 
 def test_validate_envelope_payload_rules() -> None:
-    # payload not a dict (line 144).
     with pytest.raises(IntentEnvelopeValidationError):
         validate_envelope({"intents": [{"intent_type": "alert", "payload": "x"}]})
 
-    # review_verdict empty target (line 159).
     with pytest.raises(IntentEnvelopeValidationError):
         validate_envelope(
-            {"intents": [{"intent_type": "review_verdict", "payload": {"verdict": "approve", "target_proposal_msg_id": ""}}]}
+            {"intents": [{"intent_type": "review_verdict", "payload": {"target_proposal_msg_id": "m1"}}]}
         )
 
-    # review_verdict bad source (line 162).
     with pytest.raises(IntentEnvelopeValidationError):
         validate_envelope(
             {
                 "intents": [
                     {
                         "intent_type": "review_verdict",
-                        "payload": {"verdict": "approve", "target_proposal_msg_id": "m1", "source": "bogus"},
+                        "payload": {
+                            "verdict": "approve",
+                            "verdict_map": {"v1": {"verdict": "reject"}},
+                            "target_proposal_msg_id": "m1",
+                        },
                     }
                 ]
             }

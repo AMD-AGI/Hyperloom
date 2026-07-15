@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-# Public port the router binds (matches launch_multinode._INFERENCE_PORT and SaFE Service.targetPort).
+# Public port the router binds (matches launch_multinode._INFERENCE_PORT).
 _PUBLIC_PORT = 8888
 _DEFAULT_PID_FILE = "/tmp/multi_node_pids/router.pid"
 _DEFAULT_LOG_FILE = "/tmp/multi_node_logs/router.log"
@@ -44,7 +44,7 @@ def _build_sglang_router_cmd(
     decode_url: str,
     public_port: int,
 ) -> list[str]:
-    """Compose the sglang_router PD-disaggregation launch command (one prefill + one decode group).
+    """Compose the sglang_router PD-disaggregation launch command.
 
     Args:
         prefill_url: Internal prefill group HTTP endpoint.
@@ -76,7 +76,7 @@ def _build_vllm_router_cmd(
     public_port: int,
     override_cmd: str = "",
 ) -> list[str]:
-    """Compose the vllm router/proxy launch command; ``--vllm-router-cmd`` overrides it ({prefill}/{decode}/{port} placeholders).
+    """Compose the vllm router/proxy launch command (``override_cmd`` supports {prefill}/{decode}/{port} placeholders).
 
     Args:
         prefill_url: Internal prefill group HTTP endpoint.
@@ -115,7 +115,7 @@ def _detach_router(
     log_file: Path,
     pid_file: Path,
 ) -> int:
-    """Run ``cmd`` detached via bash+nohup+setsid so it survives the dashboard job exit and dies cleanly under kill_multinode.
+    """Run ``cmd`` detached via bash+nohup+setsid so it survives the dashboard job exit.
 
     Args:
         cmd: The router argv to launch.

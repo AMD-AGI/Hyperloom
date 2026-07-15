@@ -15,27 +15,27 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hyperloom.common.llm_config import derive_openai_base_url
+
 log = logging.getLogger(__name__)
 
 _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
-# Hard model allowlist (_CLAUDE_ALLOWED_MODELS): orchestration MUST resolve to Opus 4-8
-# (preferred) or a known-good fallback before Coordinator boots; other models drifted
-# behaviour measurably (operator 2026-05-09).
+# Hard model allowlist: orchestration MUST resolve to Opus 4-8 (preferred) or a
+# known-good fallback before Coordinator boots.
 _CLAUDE_PREFERRED_MODEL = "claude-opus-4-8"
 
 _CLAUDE_FALLBACK_MODEL = "claude-opus-4-6"
 
 _CLAUDE_ALLOWED_MODELS = (_CLAUDE_PREFERRED_MODEL, "claude-opus-4-7", _CLAUDE_FALLBACK_MODEL)
 
-# Catalog probe retry contract: gateway is documented-flaky. Sleep N seconds before attempt i+1;
-# len(_CATALOG_RETRY_DELAYS_SEC) is the retry count after the initial attempt.
+# Catalog probe retry delays: sleep N seconds before attempt i+1; the length is
+# the retry count after the initial attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
 
-# Critic-agent skill root resolution. Env wins; else use the in-tree
-# ``src/hyperloom/agents/critic/`` package and its package-qualified CLI module.
+# Critic-agent skill root resolution. Env wins; else the in-tree package.
 _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 def _resolve_critic_agent_root() -> Path | None:
@@ -65,10 +65,8 @@ def _validate_critic_agent_runtime(root: Path) -> None:
             non-zero.
     """
     cmd = [sys.executable, "-m", "hyperloom.agents.critic.runtime.cli", "--help"]
-    # The probe cost is dominated by Python import time, which can spike on a
-    # loaded / shared pod (heavy transitive imports over a busy filesystem).
-    # Keep a safe default but allow operators to widen it via env so a slow-but-
-    # healthy runtime is not misdiagnosed as broken.
+    # Probe cost is import-bound and can spike on a loaded pod; allow an env
+    # override so a slow-but-healthy runtime is not misdiagnosed as broken.
     try:
         _probe_timeout = float(os.environ.get("CRITIC_AGENT_PROBE_TIMEOUT_SEC", "90"))
     except (TypeError, ValueError):
@@ -101,8 +99,7 @@ def _validate_critic_agent_runtime(root: Path) -> None:
         )
         sys.exit(2)
 
-# Robustness-agent runtime location resolution; mirrors critic-agent helpers
-# above and uses the in-tree ``src/hyperloom/agents/robustness/`` package.
+# Robustness-agent runtime location resolution; mirrors the critic-agent helpers.
 _ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
 
 def _resolve_robustness_agent_root() -> Path | None:
@@ -135,8 +132,7 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         SystemExit: With code 2 when the runtime cannot start or exits non-zero.
     """
     cmd = [sys.executable, "-m", "hyperloom.agents.robustness.runtime.cli", "--help"]
-    # See _validate_critic_agent_runtime: probe cost is import-bound and can
-    # spike on a loaded / shared pod. Widen the default and allow an env
+    # Probe cost is import-bound and can spike on a loaded pod; allow an env
     # override so a slow-but-healthy runtime is not misdiagnosed as broken.
     try:
         _probe_timeout = float(os.environ.get("ROBUSTNESS_AGENT_PROBE_TIMEOUT_SEC", "90"))
@@ -170,21 +166,16 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         )
         sys.exit(2)
 
-# Matches the ``base_url:`` line in the GEAK litellm yaml (two-space indent
-# written by src/hyperloom/agents/kernel/scripts/install.sh, but tolerant of any indent).
+# Matches the ``base_url:`` line in a legacy / explicitly supplied GEAK litellm yaml.
 _GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
 
 def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
-    """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url`` (#521).
+    """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url``.
 
-    GEAK reads its endpoint from ``--config $GEAK_CONFIG`` — a yaml written
-    once at install time — not from ``$GEAK_BASE_URL`` at runtime. So when an
-    operator points ``GEAK_BASE_URL`` at a reachable endpoint (e.g. a
-    host-local reverse tunnel) AFTER install, the env override alone is not
-    enough: the stale yaml still sends GEAK at the unreachable gateway and the
-    KERNEL_AGENT phase burns budget on connection-error retries. Syncing the yaml in
-    place closes that gap so the Kernel-agent actually dials the operator's
-    endpoint.
+    Legacy GEAK invocations can pass ``--config $GEAK_CONFIG`` with an endpoint
+    embedded in yaml. When an operator points ``GEAK_BASE_URL`` at a reachable
+    endpoint, sync the yaml in place so that config does not keep dialing a
+    stale gateway.
 
     Best-effort: returns ``False`` (never raises) when the path is empty, the
     file is missing/unreadable/unwritable, it has no ``base_url:`` line, or it
@@ -212,8 +203,7 @@ def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     current = match.group(0)[len(match.group(1)) :].strip()
     if current == base_url:
         return False
-    # Use a function replacement so a URL containing regex backreference
-    # characters (e.g. ``\g``) cannot corrupt the rewrite.
+    # Function replacement so a URL with regex backreference chars can't corrupt it.
     new_text = _GEAK_BASE_URL_RE.sub(
         lambda m: m.group(1) + base_url,
         text,
@@ -341,8 +331,10 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
         and not _is_official_anthropic_url(anthropic_url)
         and not _is_deepseek_anthropic_url(anthropic_url)
     ):
-        # Anthropic-compatible gateway: let the OpenAI/Codex side reuse the same URL.
-        return anthropic_url, anthropic_url
+        # Anthropic-compatible gateway: the OpenAI/Codex side reuses the same
+        # gateway with a different chat-completions path. Derive it so
+        # OPENAI_BASE_URL isn't left without ``/v1`` (which 404s).
+        return anthropic_url, derive_openai_base_url(anthropic_url) or anthropic_url
     if anthropic_url or openai_url:
         return anthropic_url, openai_url
     return "", ""

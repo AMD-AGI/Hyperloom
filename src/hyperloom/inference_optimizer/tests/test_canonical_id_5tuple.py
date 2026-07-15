@@ -23,12 +23,10 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     F_LABEL_PRECISION,
     canonical_labels,
     detect_framework_version,
-    format_recipe_path,
     recipe_canonical_id,
 )
 
 
-# Shape — mhfvp+mt+arch ordering, eight segments, ``inference:`` prefix
 def test_canonical_id_shape_is_mhfvp_with_inference_prefix() -> None:
     """``inference:{model}:{hw}:{fw}:{fwver}:{precision}:{model_type}:{arch}`` — eight segments."""
     cid = recipe_canonical_id(
@@ -60,7 +58,7 @@ def test_canonical_id_lowercases_every_component() -> None:
         precision="BF16",
     )
     assert cid.startswith("inference:")
-    parts = cid.split(":")[1:]  # strip prefix
+    parts = cid.split(":")[1:]
     for part in parts:
         assert part == part.lower(), part
 
@@ -86,8 +84,7 @@ def test_canonical_id_basenames_path_style_model() -> None:
 
 def test_canonical_id_is_keyword_only() -> None:
     """Positional args must raise ``TypeError`` — prevents accidental re-ordering."""
-    # Splat a runtime-built arg list so the intentional positional drift stays a
-    # runtime check; CodeQL can't statically count *args, so no false arity alert.
+    # Splat a runtime-built arg list to keep the positional drift a runtime check.
     bad_positional_args = ["m", "h", "f", "v", "p"]
     with pytest.raises(TypeError):
         recipe_canonical_id(*bad_positional_args)  # type: ignore[misc]
@@ -105,7 +102,6 @@ def test_canonical_id_normalises_whitespace_and_slashes() -> None:
     assert cid == "inference:a_b:mi_355x:sg_lang:unknown_model_type:unknown_arch:0.4_5:fp_8"
 
 
-# Defaults — every empty component substitutes the documented slug
 def test_canonical_id_substitutes_defaults_for_each_empty_component() -> None:
     from hyperloom.inference_optimizer.recipe_snapshot_constants import (
         DEFAULT_MODEL_TYPE_SLUG,
@@ -186,7 +182,6 @@ def test_canonical_id_defaults_empty_architecture_list() -> None:
     assert cid.split(":")[5] == DEFAULT_ARCHITECTURES_SLUG
 
 
-# canonical_labels — 7-key dict mirroring the canonical_id
 def test_canonical_labels_keys_match_documented_constants() -> None:
     from hyperloom.inference_optimizer.recipe_snapshot_constants import (
         F_LABEL_MODEL_TYPE,
@@ -227,7 +222,7 @@ def test_canonical_labels_values_match_canonical_id_components() -> None:
         framework_version="0.6.0",
         precision="bf16",
     )
-    parts = cid.split(":")[1:]  # drop ``inference``
+    parts = cid.split(":")[1:]
     assert labels[F_LABEL_MODEL] == parts[0]
     assert labels[F_LABEL_HARDWARE] == parts[1]
     assert labels[F_LABEL_FRAMEWORK_NAME] == parts[2]
@@ -261,7 +256,6 @@ def test_canonical_labels_substitutes_defaults_for_empty() -> None:
     }
 
 
-# detect_framework_version — auto-detect via importing __version__
 def test_detect_framework_version_returns_default_for_blank_framework_name() -> None:
     assert detect_framework_version("") == DEFAULT_FRAMEWORK_VERSION_SLUG
     assert detect_framework_version("   ") == DEFAULT_FRAMEWORK_VERSION_SLUG
@@ -289,7 +283,7 @@ def test_detect_framework_version_falls_back_to_VERSION_constant(
 ) -> None:
     """Falls back to ``VERSION`` when ``__version__`` is absent (PEP 396)."""
     fake = types.ModuleType("sglang")
-    # Intentionally no __version__ — only VERSION.
+    # No __version__ — only VERSION.
     fake.VERSION = "0.4.5"  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sglang", fake)
     assert detect_framework_version("sglang") == "0.4.5"
@@ -320,8 +314,3 @@ def test_detect_framework_version_strips_dunder_version_whitespace(
     fake.__version__ = "  0.6.0\n"  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "vllm", fake)
     assert detect_framework_version("vllm") == "0.6.0"
-
-
-def test_format_recipe_path_preserves_raw_canonical_id() -> None:
-    cid = "inference:m:hw:framework:mt:arch:v:p"
-    assert format_recipe_path("/recipes/{canonical_id}/history", cid) == f"/recipes/{cid}/history"

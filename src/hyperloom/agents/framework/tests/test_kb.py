@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for framework_agent.kb and the `fa kb <op>` CLI surface. Hermetic - redirects KB_ROOT via FRAMEWORK_AGENT_KB_DIR so no real workspace KB is touched."""
+"""Tests for framework_agent.kb and the `fa kb <op>` CLI surface. Hermetic - redirects KB_ROOT via FRAMEWORK_AGENT_KB_DIR."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ class TestListAndMatch:
         assert kb._match_domains("totally unrelated free-form text") == []
 
     def test_match_domains_atom_keyword_hit(self) -> None:
-        """``atom`` must hit the framework domain (pinned so a future trim of DOMAIN_KEYWORDS doesn't silently drop it)."""
+        """``atom`` must hit the framework domain."""
         domains = kb._match_domains("improve atom moe throughput on mi300x")
         assert "framework" in domains, f"atom must hit the framework domain; got {domains!r}"
 
@@ -233,7 +233,7 @@ class TestKbCli:
             ]
         )
         assert rc == 0
-        capsys.readouterr()  # discard contribute output
+        capsys.readouterr()
         rc = cli.main(["kb", "list"])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
@@ -335,14 +335,12 @@ class TestPathForFramework:
         assert path == kb_root / "framework_optimization" / framework
 
     def test_path_lowercases_and_strips(self, kb_root: Path) -> None:
-        # Casing/whitespace variants must resolve to the same partition.
         path_a = kb.path_for_framework("  Atom  ")
         path_b = kb.path_for_framework("ATOM")
         path_c = kb.path_for_framework("atom")
         assert path_a == path_b == path_c
 
     def test_empty_framework_returns_partition_root(self, kb_root: Path) -> None:
-        # Empty/whitespace framework resolves to the partition root (detect "not selected").
         assert kb.path_for_framework("") == kb_root / "framework_optimization"
         assert kb.path_for_framework("   ") == kb_root / "framework_optimization"
 
@@ -350,86 +348,3 @@ class TestPathForFramework:
         # path_for_framework is read-only; it must NOT create the dir.
         _ = kb.path_for_framework("atom")
         assert not (kb_root / "framework_optimization" / "atom").exists()
-
-
-class TestContributeToKbForFramework:
-    """``contribute_to_kb_for_framework`` writes to the framework sub-partition lazily."""
-
-    def test_creates_partition_on_first_write(self, kb_root: Path) -> None:
-        path = kb.contribute_to_kb_for_framework(
-            "atom",
-            finding="MTP with `--num-speculative-tokens 3` regressed on FP8 Qwen3-32B",
-            source="explore",
-            session_id="sess-atom-001",
-        )
-        expected = kb_root / "framework_optimization" / "atom" / "empirical_kb.md"
-        assert path == expected
-        assert expected.is_file()
-        body = expected.read_text()
-        assert "source=`explore`" in body
-        assert "sess-atom-001" in body
-        assert "MTP" in body
-
-    def test_appends_subsequent_findings(self, kb_root: Path) -> None:
-        kb.contribute_to_kb_for_framework(
-            "atom",
-            finding="first",
-            source="explore",
-            session_id="s1",
-        )
-        kb.contribute_to_kb_for_framework(
-            "atom",
-            finding="second",
-            source="explore",
-            session_id="s1",
-        )
-        body = (kb_root / "framework_optimization" / "atom" / "empirical_kb.md").read_text()
-        # Both findings present, separated by the `---` divider the helper emits.
-        assert body.count("---") == 2
-        assert "first" in body
-        assert "second" in body
-
-
-class TestFrameworkPrLedger:
-    """Framework PR ledger helpers used by rating/prior ranking."""
-
-    def test_leaderboard_rejected_zero_gain_scores_zero(self) -> None:
-        """A failed historical apply should not get positive quality from association alone."""
-        board = kb.leaderboard_for_gap(
-            framework="vllm",
-            gap_canonical_id="g1",
-            gap_keywords=["moe"],
-            ledger=[
-                {
-                    "framework": "vllm",
-                    "pr_url": "https://example/pr/1",
-                    "gap_canonical_id": "g1",
-                    "gap_keywords": ["moe"],
-                    "outcome": "rejected_apply_fail",
-                    "tps_delta_pct": 0.0,
-                }
-            ],
-        )
-        assert board[0]["quality_score"] == 0.0
-        assert board[0]["apply_rate"] == 0.0
-
-    def test_leaderboard_tolerates_bad_numeric_fields(self) -> None:
-        """Malformed numeric ledger fields must not abort leaderboard creation."""
-        board = kb.leaderboard_for_gap(
-            framework="vllm",
-            gap_canonical_id="g1",
-            gap_keywords=["moe"],
-            ledger=[
-                {
-                    "framework": "vllm",
-                    "pr_url": "https://example/pr/2",
-                    "gap_canonical_id": "g1",
-                    "gap_keywords": ["moe"],
-                    "outcome": "integrated",
-                    "tps_delta_pct": "bad",
-                    "ts": "also-bad",
-                }
-            ],
-        )
-        assert board[0]["pr_url"] == "https://example/pr/2"
-        assert board[0]["quality_score"] > 0.0

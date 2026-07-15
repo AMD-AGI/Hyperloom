@@ -3,12 +3,9 @@
 
 """Run forge-fusion as a Hyperloom kernel-agent tool.
 
-Mirrors ``forge_gemm_tuning.py`` at the kernel-agent tool layer: the orchestrator
-writes an input JSON and calls this script; the autonomous fusion loop itself
-lives in the standalone ``forge_fusion`` package (``forge-fusion run``: diagnose
--> discover(llm) -> author(few-shot) -> kernel-validate -> serving-smoke -> keep).
+The orchestrator writes an input JSON and calls this script; the autonomous
+fusion loop itself lives in the standalone ``forge_fusion`` package.
 
-Unlike the GEMM wrapper (which relays forge-gemm-tune's own result sentinel),
 forge-fusion emits a ``fusion_manifest.json``; this wrapper normalizes that into
 the Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
 sentinel + an on-disk ``result.json``) that ``run_fusion_handler`` parses. A KEPT
@@ -22,35 +19,39 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-# Sibling import works whether run as a standalone script or loaded via
-# importlib; the kernel-agent tools cannot rely on the ``hyperloom`` import root.
+# Sibling import: kernel-agent tools cannot rely on the ``hyperloom`` import root.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import truthy as _truthy  # noqa: E402
+from _io_utils import truthy  # noqa: E402
+
+sys.path.pop(0)
+sys.path.insert(0, str(Path(__file__).resolve().parent / "backends"))
+from _llm_stability_env import apply_llm_stability_env  # noqa: E402
 
 sys.path.pop(0)
 
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
+DEFAULT_TIMEOUT_SEC = 7200
 
 
 def _inject_author_gateway_env() -> None:
     """Seed the ``claude`` author subprocess's gateway auth from the OpenAI-proxy env.
 
     forge-fusion's ``author`` stage drives the ``claude`` CLI, which authenticates
-    via ``ANTHROPIC_*``. Hyperloom's session env (sourced from ``.env``) only carries
-    ``OPENAI_BASE_URL`` / ``SAFE_API_KEY`` for the OpenAI-compatible LLM proxy, so
-    derive the ``ANTHROPIC_*`` equivalents here (the old ``forge_submit`` backend did
-    the same) — otherwise the author has no gateway auth when only ``.env`` is sourced.
-    Only fills what is absent; explicit operator values always win.
+    via ``ANTHROPIC_*``. Hyperloom's session env only carries ``OPENAI_BASE_URL`` /
+    ``SAFE_API_KEY`` for the OpenAI-compatible LLM proxy, so derive the
+    ``ANTHROPIC_*`` equivalents here. Only fills what is absent; explicit operator
+    values always win.
     """
     openai_base = str(os.environ.get("OPENAI_BASE_URL") or "").strip()
     if openai_base and not os.environ.get("ANTHROPIC_BASE_URL"):
-        # ``.../api/v1/llm-proxy/v1`` -> ``.../api/v1/llm-proxy`` (claude appends /v1).
+        # Strip trailing /v1 (claude appends its own).
         os.environ["ANTHROPIC_BASE_URL"] = openai_base[:-3] if openai_base.endswith("/v1") else openai_base
     token = str(
         os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
@@ -60,6 +61,7 @@ def _inject_author_gateway_env() -> None:
         os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     os.environ.setdefault("IS_SANDBOX", "1")
+    apply_llm_stability_env(os.environ)
 
 
 def _git_toplevel(path: str) -> str:
@@ -105,18 +107,88 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "ab_isl", "--ab-isl")
     _add_opt(cmd, args, "ab_osl", "--ab-osl")
     _add_opt(cmd, args, "framework_root", "--framework-root")
-    # Fusion authors ALL source-confirmed patterns together by default (the T3
-    # ZAYA recipe stacks 3 fusions and the A/B measures the combined gain);
-    # set fuse_all_confirmed=false to author only the top recipe.
+    # Author all source-confirmed patterns together by default; set
+    # fuse_all_confirmed=false to author only the top recipe.
     if bool(args.get("fuse_all_confirmed", True)):
         cmd.append("--fuse-all-confirmed")
     if not bool(args.get("author", True)):
         cmd.append("--no-author")
     if not bool(args.get("validate", True)):
         cmd.append("--no-validate")
-    if _truthy(args.get("verbose", False)):
+    if truthy(args.get("verbose", False)):
         cmd.append("--verbose")
     return cmd
+
+
+def _timeout_sec(args: dict[str, Any]) -> int:
+    """Resolve the forge-fusion subprocess wall-clock timeout."""
+    raw = args.get("timeout") or args.get("timeout_sec") or os.environ.get("FORGE_FUSION_TIMEOUT")
+    try:
+        return max(1, int(float(raw or DEFAULT_TIMEOUT_SEC)))
+    except (OverflowError, TypeError, ValueError):
+        return DEFAULT_TIMEOUT_SEC
+
+
+def _new_session_kwargs() -> dict[str, bool]:
+    """Popen kwargs that isolate the child into its own killable session."""
+    return {"start_new_session": True} if os.name == "posix" else {}
+
+
+def _terminate_process_tree(proc: subprocess.Popen, *, grace_seconds: float = 5.0) -> None:
+    """Best-effort teardown for the forge-fusion subprocess and descendants."""
+    if proc.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            pgid = os.getpgid(proc.pid)
+            own_pgid = os.getpgid(0)
+        except OSError:
+            pgid = None
+            own_pgid = None
+        if pgid is not None and pgid != own_pgid:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=grace_seconds)
+                return
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError:
+                    pass
+                return
+    try:
+        proc.terminate()
+        proc.wait(timeout=grace_seconds)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _run_with_tree_timeout(cmd: list[str], timeout_sec: int) -> subprocess.CompletedProcess:
+    """Run forge-fusion in a killable process group and reap it on timeout."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **_new_session_kwargs(),
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_sec)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            stdout = ""
+            stderr = ""
+        raise subprocess.TimeoutExpired(cmd, timeout_sec, output=stdout, stderr=stderr)
 
 
 def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
@@ -166,16 +238,54 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         "baseline_env_flags": {f: "0" for f in best_flags},
         "artifact_files": changed,
         "patch": artifacts.get("patch"),
-        # For integrate's patch-apply path: primary edited source + its repo root.
+        # For integrate's patch-apply path.
         "source_file": src_file,
         "kernel_repo": _git_toplevel(src_file) if src_file else "",
         "best_pattern": loop.get("best_pattern"),
         "verdict": m.get("verdict"),
         # A KEPT fusion passed kernel parity + serving smoke; the orchestrator
-        # still confirms the real e2e gain (and applies patch+env) via integrate.
+        # still confirms the real e2e gain via integrate.
         "requires_e2e_validation": kept,
     })
     return result
+
+
+def _timeout_result(output_dir: str, timeout_sec: int, exc: subprocess.TimeoutExpired) -> dict[str, Any]:
+    """Shape a timed-out forge-fusion run as a normal REVERT result."""
+    cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or []))
+    return {
+        "status": "failed",
+        "engine": "forge_fusion",
+        "micro_decision": "failed",
+        "decision": "REVERT",
+        "kept": False,
+        "kernel_speedup": None,
+        "env_flags": {},
+        "baseline_env_flags": {},
+        "artifact_files": [],
+        "patch": None,
+        "requires_e2e_validation": False,
+        "workspace": str(output_dir or ""),
+        "error_class": "subprocess_timeout",
+        "error": f"TimeoutExpired after {timeout_sec}s: {cmd_repr[:1500]}",
+    }
+
+
+def _as_text(data: Any) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return str(data)
+
+
+def _relay_streams(stdout: Any, stderr: Any) -> None:
+    out = _as_text(stdout)
+    err = _as_text(stderr)
+    if out:
+        sys.stdout.write(out)
+    if err:
+        sys.stderr.write(err)
 
 
 def _emit(result: dict[str, Any], output_dir: str) -> None:
@@ -209,17 +319,20 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     _inject_author_gateway_env()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.stdout:
-        sys.stdout.write(proc.stdout)
-    if proc.stderr:
-        sys.stderr.write(proc.stderr)
-
     output_dir = str(payload.get("output_dir") or "")
+    timeout_sec = _timeout_sec(payload)
+    try:
+        proc = _run_with_tree_timeout(cmd, timeout_sec)
+    except subprocess.TimeoutExpired as exc:
+        _relay_streams(getattr(exc, "stdout", None), getattr(exc, "stderr", None))
+        result = _timeout_result(output_dir, timeout_sec, exc)
+        _emit(result, output_dir)
+        return 124
+
+    _relay_streams(proc.stdout, proc.stderr)
     result = _normalize_manifest(output_dir, proc.returncode)
     _emit(result, output_dir)
-    # Exit mirrors the forge-fusion subprocess: 0 when it ran (result carries the
-    # KEEP/REVERT verdict); non-zero only when the subprocess itself failed.
+    # Mirror the subprocess exit: non-zero only when the subprocess itself failed.
     return int(proc.returncode)
 
 

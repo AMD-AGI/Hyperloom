@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Canonical UTC ISO-8601 timestamp helpers (``_time``).
-
-Relocated from ``hyperloom.orchestrator._time`` (P2.1); that re-export shim
-was removed in P2.7 once all callers were updated to import directly from
-here. Replaces the ~14 ``_now_iso`` copies plus the ``_utc_now_compact`` /
-``_iso_z`` / ISO-parse variants. Stdlib-only.
-"""
+"""Canonical UTC ISO-8601 timestamp helpers (``_time``). Stdlib-only."""
 
 from __future__ import annotations
 
@@ -24,9 +18,6 @@ def now_iso(timespec: str = "microseconds", *, z_suffix: bool = False) -> str:
 
 def utc_now_compact() -> str:
     """Current UTC time as a compact ``YYYYMMDDTHHMMSSZ`` id timestamp.
-
-    Byte-identical to the legacy ``session/manifest._utc_now_compact`` used to
-    build session ids.
 
     Returns:
         The current UTC time formatted as ``%Y%m%dT%H%M%SZ``.
@@ -62,27 +53,4 @@ def iso_z(ts: Any) -> str:
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def parse_iso_unix(ts: Any, default: float | None = None) -> float | None:
-    """Parse an ISO-8601 timestamp to unix seconds.
-
-    Accepts a ``Z`` suffix (treated as UTC). Naive timestamps are interpreted
-    with the local :meth:`datetime.timestamp` convention (matching the legacy
-    ``datetime.fromisoformat(...).timestamp()`` call sites).
-
-    Args:
-        ts: An ISO-8601 timestamp string.
-        default: Returned when *ts* is not a parseable ISO-8601 string
-            (default ``None``).
-
-    Returns:
-        Unix seconds as ``float``, or *default*.
-    """
-    if not isinstance(ts, str):
-        return default
-    try:
-        return datetime.fromisoformat(ts.strip().replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return default
-
-
-__all__ = ["now_iso", "utc_now_compact", "iso_z", "parse_iso_unix"]
+__all__ = ["now_iso", "utc_now_compact", "iso_z"]

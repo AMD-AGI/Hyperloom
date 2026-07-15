@@ -39,8 +39,7 @@ from hyperloom.orchestrator.bus.storage import SqliteConnection
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    # Point HYPERLOOM_KERNEL_AGENT_ROOT at the repo's kernel-agent tree so
-    # ``integrate_handler`` can resolve ``apply_kernel_patch.py``.
+    # Point HYPERLOOM_KERNEL_AGENT_ROOT at the kernel-agent tree so the handler resolves apply_kernel_patch.py.
     kernel_agent_root = Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel"
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver so the unit test never spawns a real probe.
@@ -458,18 +457,16 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
 ):
     """A failed re-baseline must route through the fault retry budget.
 
-    Exercises the *real* handler envelope (not a hand-built dict): an invalid
-    re-baseline yields ``status=failed`` + ``decision=REVERT``. The handler now
-    stamps a top-level fault ``error_class``, and ``record_kernel_integrate_result``
-    must mark it retryable rather than discarding it as a genuine REVERT. This
-    is the regression that bare-envelope unit tests could not catch.
+    An invalid re-baseline yields ``status=failed`` + ``decision=REVERT`` with a
+    top-level fault ``error_class``; ``record_kernel_integrate_result`` must mark
+    it retryable rather than discarding it as a genuine REVERT.
     """
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     target, patch_file = _write_patch_pair(tmp_path)
 
     def _fake_run(cmd, *args, **kwargs):
-        # Produce a workspace with zero throughput -> is_valid_measurement False.
+        # Zero-throughput workspace -> is_valid_measurement False.
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=0.0)
@@ -494,11 +491,8 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
     ):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
-    # Real handler envelope: failed re-baseline, REVERT for backward-compat,
-    # now also carrying a top-level fault error_class propagated from the
-    # re-baseline (here ``invalid_measurement``, which is deliberately NOT in
-    # the static fault whitelist — proving the status-based check, not the
-    # whitelist, is what saves the patch).
+    # error_class here is deliberately NOT in the fault whitelist, proving the
+    # status-based check saves the patch.
     assert res["status"] == "failed"
     assert res["decision"] == "REVERT"
     assert res["error"] == "re-baseline did not succeed"
@@ -743,8 +737,7 @@ async def test_integrate_handler_injects_extra_server_args(
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "KEEP"
-    # extra_server_args is preserved verbatim and the watchdog timeout is
-    # auto-appended; assert both rather than exact equality.
+    # extra_server_args preserved verbatim; watchdog timeout auto-appended.
     sglang_args = seen["envs"]["EXTRA_SGLANG_ARGS"]
     assert "--cuda-graph-max-bs 8" in sglang_args
     assert "--watchdog-timeout" in sglang_args
@@ -877,11 +870,8 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
     tmp_path,
     monkeypatch,
 ):
-    # This test pins the LEGACY integrate dispatch cap (retire same kernel after N
-    # attempts). The honest-E2E umbrella now defaults ON, which changes the integrate
-    # path (paired same-config A/B + high-impact infra-retry) and widens the cap. Opt
-    # the whole cohort out so we exercise the legacy capping path this test was written
-    # for; honest-E2E integrate behavior is covered in test_honest_e2e_hardening_unit.
+    # Pin the legacy integrate dispatch cap (retire same kernel after N attempts)
+    # by opting out of the honest-E2E path, which widens the cap.
     monkeypatch.setenv("HL_HONEST_E2E", "0")
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -893,7 +883,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
         run_calls += 1
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
-        _fake_workspace(slot, tput=805.0)  # +0.625%, below KEEP threshold
+        _fake_workspace(slot, tput=805.0)  # below KEEP threshold
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=0,
@@ -938,8 +928,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
         )
         integrate_results = [r.payload["result"] for r in responses if r.payload.get("kind") == "integrate_done"]
         assert len(integrate_results) == 4
-        # Cap: first 3 attempts run the integrate path, the 4th is short-circuited.
-        # Assert proportionally since per-attempt subprocess count is an impl detail.
+        # First 3 attempts run the integrate path; the 4th is short-circuited.
         assert run_calls > 0, "first 3 attempts must spawn subprocess"
         assert run_calls % 3 == 0, (
             f"first 3 attempts should contribute equal subprocess counts; "

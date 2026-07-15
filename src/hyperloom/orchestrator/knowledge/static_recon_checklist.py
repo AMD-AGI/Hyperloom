@@ -1,34 +1,25 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Seed checklist for the static-recon specialist (explore-opt-5 capability A).
+"""Seed checklist for the static-recon specialist.
 
 The static-recon specialist is a read-only PRELUDE sub-agent that greps the
 framework source tree (vLLM / SGLang) for *un-bridged capability switches* —
 fast paths that *should* be enabled for the current ``(model_class, gpu_type,
 precision)`` but are silently disabled by a predicate (e.g. a CUDA-only
-``*_supported()`` helper returning ``False`` on ROCm). Rather than reading the
-source blind, the specialist is seeded with a curated list of known patterns to
-look for; this module is that seed.
+``*_supported()`` helper returning ``False`` on ROCm). This module seeds the
+specialist with a curated list of known patterns to look for.
 
 Each :class:`ChecklistEntry` describes one known "bridge opportunity":
 - ``id`` — stable slug, used to build the gap canonical id.
-- ``applies_when`` — coarse predicate over ``{gpu, precision}`` (substring /
-  family match, ``"*"`` = any) so we only hand a checklist entry to a run where
-  it could plausibly fire.
+- ``applies_when`` — coarse predicate over ``{gpu, precision}`` (``"*"`` = any)
+  so an entry is only handed to a run where it could plausibly fire.
 - ``detect`` — what to grep for and how to confirm the path is disabled.
-- ``consequence`` — what regression the disabled path causes (so the EXPLORE
-  specialist understands the upside of bridging it).
-- ``bridge`` — sketch of the fix (advisory; the EXPLORE specialist authors the
-  real patch and the Coordinator gates it on >=1% E2E + accuracy).
-- ``domain_hint`` — which EXPLORE specialist domain should pick up the seeded
-  gap (``freeform`` keeps the whole mandate; ``kernel_switch_specialist`` etc.
-  narrow it).
+- ``consequence`` — what regression the disabled path causes.
+- ``bridge`` — advisory sketch of the fix.
+- ``domain_hint`` — which EXPLORE specialist domain should pick up the gap.
 - ``evidence`` — provenance (PR / session) the pattern was distilled from.
 
-This is intentionally a small, hand-curated starter set keyed to validated
-findings (PR #45854 / the Qwen3-32B reconnaissance session). It is the
-PRELUDE-stage seed source for the (future) cross-model bridge-pattern library
-(explore-opt-5 capability B); until that lands these live in code.
+A small, hand-curated starter set keyed to validated findings.
 """
 
 from __future__ import annotations
@@ -64,7 +55,7 @@ class ChecklistEntry:
     evidence: tuple[str, ...] = ()
 
 
-# Curated starter set. Keep entries grounded in a validated finding (PR / session).
+# Curated starter set; keep entries grounded in a validated finding.
 _CHECKLIST: tuple[ChecklistEntry, ...] = (
     ChecklistEntry(
         id="rocm.fp8.cutlass_only_guard",

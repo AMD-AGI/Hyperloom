@@ -2,27 +2,17 @@
 
 """Coverage-gap unit tests for the external baseline comparison layer.
 
-Closes the residual uncovered branches in ``baseline_comparison`` that the
-main suite leaves out:
-
-* ``name_mapping.to_inferencex_name`` — whitespace-only input -> ``None``.
-* ``types.BaselineSummary.from_dict`` — full round-trip reconstruction.
-* ``target_analyzer._format_report_md`` — the optional-latency-field and
-  all-concurrencies rendering branches (only reached when ``best`` carries the
-  optional metrics).
-* ``target_analyzer._target_row_to_point`` — unparseable numeric field
-  (fail-soft to ``0.0``) and non-positive throughput (row dropped -> ``None``).
-
-These are report-only paths (no SharedState / scoring coupling), so they are
-pure-function tests with no fixtures.
+Covers uncovered branches in ``baseline_comparison``: whitespace-only input to
+``to_inferencex_name``, the optional-field/all-concurrencies rendering in
+``_format_report_md``, and the fail-soft branches in ``_target_row_to_point``.
 """
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.baseline_comparison.name_mapping import to_inferencex_name
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
     _format_report_md,
     _target_row_to_point,
+    to_inferencex_name,
 )
 from hyperloom.inference_optimizer.baseline_comparison.types import (
     BaselinePoint,
@@ -31,9 +21,6 @@ from hyperloom.inference_optimizer.baseline_comparison.types import (
 )
 
 
-# ---------------------------------------------------------------------------
-# name_mapping.to_inferencex_name
-# ---------------------------------------------------------------------------
 def test_to_inferencex_name_none_on_empty() -> None:
     assert to_inferencex_name("") is None
 
@@ -47,9 +34,6 @@ def test_to_inferencex_name_none_on_unknown_model() -> None:
     assert to_inferencex_name("some/unknown-model-xyz") is None
 
 
-# ---------------------------------------------------------------------------
-# types.BaselineSummary round-trip
-# ---------------------------------------------------------------------------
 def _full_summary() -> BaselineSummary:
     best = BaselinePoint(
         tput_per_gpu=123.4,
@@ -81,28 +65,8 @@ def _full_summary() -> BaselineSummary:
     )
 
 
-def test_baseline_summary_from_dict_roundtrip() -> None:
-    """``from_dict(to_dict(x))`` reconstructs an equal summary (nested points)."""
-    original = _full_summary()
-    restored = BaselineSummary.from_dict(original.to_dict())
-    assert restored == original
-
-
-def test_baseline_summary_from_dict_tolerates_partial() -> None:
-    """A partial / older artefact loads with defaults and no ``best``."""
-    restored = BaselineSummary.from_dict({"query": {"model": "m", "gpu": "g"}})
-    assert restored.best is None
-    assert restored.row_count == 0
-    assert restored.status == "ok"
-    assert restored.all_concurrencies == []
-
-
-# ---------------------------------------------------------------------------
-# target_analyzer._format_report_md optional-field branches
-# ---------------------------------------------------------------------------
 def test_format_report_md_renders_all_optional_fields() -> None:
-    """A best with every optional latency field + all_concurrencies exercises
-    the conditional render branches."""
+    """A best with every optional latency field + all_concurrencies exercises the conditional render branches."""
     md = _format_report_md(_full_summary())
     assert "Reference best" in md
     assert "Output Throughput/GPU" in md
@@ -113,9 +77,6 @@ def test_format_report_md_renders_all_optional_fields() -> None:
     assert "All matched concurrencies" in md
 
 
-# ---------------------------------------------------------------------------
-# target_analyzer._target_row_to_point fail-soft branches
-# ---------------------------------------------------------------------------
 def test_target_row_to_point_valid_row() -> None:
     point = _target_row_to_point({"tput_per_gpu": "10.5", "conc": "32", "tpot_ms": "1.5"})
     assert point is not None
@@ -124,8 +85,7 @@ def test_target_row_to_point_valid_row() -> None:
 
 
 def test_target_row_to_point_unparseable_numeric_is_zero() -> None:
-    """A non-numeric field fails soft to 0.0 (does not raise); with a valid
-    positive tput the point is still built."""
+    """A non-numeric field fails soft to 0.0; with a valid positive tput the point is still built."""
     point = _target_row_to_point({"tput_per_gpu": "7.0", "tpot_ms": "not-a-number"})
     assert point is not None
     assert point.mean_tpot_ms == 0.0

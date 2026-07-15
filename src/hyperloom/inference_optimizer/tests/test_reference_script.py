@@ -42,7 +42,6 @@ def _write(tmp_path: Path, text: str, name: str = "recipe.sh") -> str:
     return str(p)
 
 
-# ── parse ──────────────────────────────────────────────────────────────────
 def test_parse_lifts_static_flags(tmp_path):
     src = _write(tmp_path, _M3_RECIPE)
     r = parse_reference_script(src, framework="vllm")
@@ -56,7 +55,6 @@ def test_parse_lifts_static_flags(tmp_path):
 def test_parse_drops_var_tokens(tmp_path):
     src = _write(tmp_path, _M3_RECIPE)
     r = parse_reference_script(src, framework="vllm")
-    # $-valued flags and the positional model are dropped entirely.
     assert "$" not in r.server_args
     assert "--port" not in r.server_args
     assert "--tensor-parallel-size" not in r.server_args
@@ -128,7 +126,6 @@ def test_parse_sglang_entrypoint(tmp_path):
     assert r.envs.get("SGLANG_USE_AITER") == "1"
 
 
-# ── render / round-trip ──────────────────────────────────────────────────────
 def test_render_round_trip(tmp_path):
     src = _write(tmp_path, _M3_RECIPE)
     r = parse_reference_script(src, framework="vllm")
@@ -141,7 +138,6 @@ def test_render_round_trip(tmp_path):
     assert r2.envs == r.envs
 
 
-# ── discovery ────────────────────────────────────────────────────────────────
 def _mk_tree(tmp_path: Path, names: list[str]) -> Path:
     d = tmp_path / "InferenceX" / "benchmarks" / "single_node"
     d.mkdir(parents=True)
@@ -163,10 +159,9 @@ def test_discovery_exact(tmp_path):
 
 
 def test_discovery_exact_underscore_model(tmp_path):
-    """Model aliases that contain ``_`` (qwen3_moe, qwen2_5_vl) must parse:
+    """Model aliases containing ``_`` (qwen3_moe, qwen2_5_vl) must parse:
     the precision/gpu fields sit to the right of the GPU anchor, so they are
-    not mistaken for the model's own underscore segments. Regression for the
-    GPU-anchored filename parser."""
+    not mistaken for the model's own underscore segments."""
     root = _mk_tree(tmp_path, [
         "qwen3_moe_bf16_mi300x.sh",
         "qwen2_5_vl_fp8_mi300x.sh",
@@ -222,7 +217,7 @@ def test_discovery_precision_gpu_filter(tmp_path):
         str(root), model_path="dsr1", precision="fp8",
         gpu_type="mi300x", framework="vllm",
     )
-    assert tier == "none"  # fp8 only exists for b200, fp4 only for mi300x
+    assert tier == "none"
 
 
 def test_discovery_missing_path_failsoft():
@@ -234,10 +229,8 @@ def test_discovery_missing_path_failsoft():
     assert tier == "none"
 
 
-# ── model-gate (R2): shared by discovery + baseline executor ─────────────────
 def test_models_compatible_exact_and_fuzzy():
     assert models_compatible("dsr1", "/wekafs/models/dsr1") is True
-    # filename-style alias vs a real HF path (normalized substring → fuzzy)
     assert models_compatible(
         "minimaxm2.5", "/wekafs/models/MiniMaxAI-MiniMax-M2.5",
     ) is True
@@ -253,10 +246,9 @@ def test_models_compatible_empty_is_ungated():
     assert models_compatible("", "/wekafs/models/anything") is True
 
 
-# ── _resolve_reference_recipe gating (discovery only when flag is given) ──────
 from types import SimpleNamespace
 
-from hyperloom.inference_optimizer.cli import _resolve_reference_recipe
+from hyperloom.inference_optimizer.cli.bootstrap import _resolve_reference_recipe
 
 
 def test_resolve_no_flag_does_not_discover(tmp_path, monkeypatch):
@@ -269,7 +261,6 @@ def test_resolve_no_flag_does_not_discover(tmp_path, monkeypatch):
         precision="fp8", gpu_type="mi300x",
     )
     server_args, envs, model, source = _resolve_reference_recipe(args)
-    # Even though an EXACT recipe exists on disk, omitting the flag must NOT use it.
     assert (server_args, envs, model, source) == ("", {}, "", "")
 
 
@@ -295,7 +286,7 @@ def test_resolve_invalid_flag_falls_back_to_discovery(tmp_path, monkeypatch):
         precision="fp8", gpu_type="mi300x",
     )
     server_args, envs, model, source = _resolve_reference_recipe(args)
-    assert source.endswith("dsr1_fp8_mi300x.sh")  # discovered exact match
+    assert source.endswith("dsr1_fp8_mi300x.sh")
 
 
 def test_resolve_invalid_flag_no_inferencex_returns_empty(tmp_path, monkeypatch):

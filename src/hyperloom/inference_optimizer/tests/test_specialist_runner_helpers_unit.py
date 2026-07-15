@@ -2,8 +2,7 @@
 
 """Coverage for SpecialistRunner pure helpers + workspace file protocol:
 failure classification, empty-done synthesis, redaction, path resolution, and
-the prompt/transcript/heartbeat/done writers (including the no-workspace
-no-ops)."""
+the prompt/transcript/heartbeat/done writers."""
 
 from __future__ import annotations
 
@@ -25,7 +24,6 @@ def _runner(**over):
     return SpecialistRunner(**kwargs)
 
 
-# ---- _now_iso / _safe_redact ----------------------------------------------
 def test_now_iso():
     assert "T" in sr._now_iso()
 
@@ -35,11 +33,9 @@ def test_safe_redact():
     out = sr._safe_redact(line)
     assert "ANTHROPIC_API_KEY[REDACTED]" in out
     assert "GITHUB_TOKEN[REDACTED]" in out
-    # no secret -> unchanged
     assert sr._safe_redact("plain line") == "plain line"
 
 
-# ---- _extra_focus_tags ----------------------------------------------------
 def test_extra_focus_tags(monkeypatch):
     monkeypatch.setattr(sr, "normalize_dispatch_tags", lambda params: ["anchor", "extra1", "extra2", ""])
     domain = SimpleNamespace(kb_anchor="anchor")
@@ -48,7 +44,6 @@ def test_extra_focus_tags(monkeypatch):
     assert set(tags) == {"extra1", "extra2"}
 
 
-# ---- classify_specialist_failure ------------------------------------------
 def test_classify_succeeded():
     assert classify_specialist_failure("succeeded", "") == (SpecialistFailureType.NONE, False)
 
@@ -74,11 +69,10 @@ def test_classify_unknown():
     assert classify_specialist_failure("weird_status", "")[0] == SpecialistFailureType.UNKNOWN
 
 
-# ---- build_empty_specialist_done ------------------------------------------
 def test_build_empty_specialist_done():
     out = build_empty_specialist_done(
         gap_canonical_id="g1", domain="kernel_agent", reason="no idea", confidence=2.0
-    )  # clamped to 1.0
+    )
     assert out["empty"] is True
     assert out["proposal_set"] == []
     assert out["confidence"] == 1.0
@@ -90,7 +84,6 @@ def test_build_empty_specialist_done_default_reason():
     assert out["summary"] == "specialist exited empty"
 
 
-# ---- path helpers ---------------------------------------------------------
 def test_path_helpers_none_workspace():
     r = _runner()
     assert r._prompt_path(None) is None
@@ -105,12 +98,10 @@ def test_path_helpers_with_workspace(tmp_path):
     assert r._transcript_path(tmp_path).name == "transcript.jsonl"
     assert r._heartbeat_path(tmp_path).name == "heartbeat.json"
     assert r._done_path(tmp_path).name == "specialist_done.json"
-    # WS1: incremental checkpoint target is distinct from the final file.
     assert r._partial_done_path(tmp_path).name == "specialist_done.partial.json"
     assert r._partial_done_path(None) is None
 
 
-# ---- _resolve_workspace ---------------------------------------------------
 def test_resolve_workspace_from_extra(tmp_path):
     r = _runner()
     ws = tmp_path / "explicit"
@@ -133,10 +124,8 @@ def test_resolve_workspace_session_dir(tmp_path):
     assert "task-9" in str(out)
 
 
-# ---- write helpers (no-op + real) -----------------------------------------
 def test_write_helpers_noop_none_workspace():
     r = _runner()
-    # all must no-op without raising when workspace is None
     r._write_prompt(None, "sys", "user")
     r._append_transcript(None, 0, {"k": "v"})
     r._write_heartbeat(None, turn=0, max_turns=1, status="x")
@@ -173,10 +162,8 @@ def test_write_specialist_done(tmp_path):
     assert payload["empty"] is True and "ts" in payload
 
 
-# ---- WS1: atomic write + incremental partial ------------------------------
 def test_write_specialist_done_atomic_leaves_no_tmp(tmp_path):
-    # B6: the final write goes through temp + os.replace; no .tmp residue and
-    # the target is valid JSON (never a half-written file).
+    # Final write goes through temp + os.replace; no .tmp residue, valid JSON.
     r = _runner()
     r._write_specialist_done(tmp_path, {"empty": True})
     assert not list(tmp_path.glob("*.tmp"))
@@ -184,8 +171,7 @@ def test_write_specialist_done_atomic_leaves_no_tmp(tmp_path):
 
 
 def test_write_specialist_done_partial(tmp_path):
-    # WS1: partial lands at its own path, is flagged, and does NOT create the
-    # final file (so the reaper's exit signal is not tripped).
+    # Partial lands at its own path, is flagged, and does not create the final file.
     r = _runner()
     r._write_specialist_done_partial(tmp_path, {"proposal_set": [{"name": "x"}]})
     partial = tmp_path / "specialist_done.partial.json"
@@ -202,7 +188,6 @@ def test_write_specialist_done_partial_noop_none_workspace():
 
 
 def test_write_specialist_done_partial_rewrite_is_atomic(tmp_path):
-    # High-frequency rewrites never leave a .tmp behind and always parse.
     r = _runner()
     for i in range(5):
         r._write_specialist_done_partial(tmp_path, {"turns_used": i})
@@ -211,7 +196,6 @@ def test_write_specialist_done_partial_rewrite_is_atomic(tmp_path):
     assert payload["turns_used"] == 4
 
 
-# ---- _maybe_setup_worktree ------------------------------------------------
 def test_maybe_setup_worktree_in_process_mode(tmp_path):
     r = _runner()  # no subprocess_config
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={}))

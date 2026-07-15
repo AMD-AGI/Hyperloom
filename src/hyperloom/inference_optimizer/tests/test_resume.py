@@ -3,8 +3,8 @@
 """Coordinator resume tests.
 
 Covers resume detection, ``replay_for_resume`` rebuilding undecided
-pending_proposals (skipping approved/rejected), pruned_families preservation,
-and lazy replay on the first ``tick()``.
+pending_proposals, pruned_families preservation, and lazy replay on the first
+``tick()``.
 """
 
 from __future__ import annotations
@@ -14,12 +14,12 @@ import pytest
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockKernelBackend,
     MockRobustnessBackend,
     MockTurn,
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -32,13 +32,12 @@ def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "kernel_agent": MockKernelBackend(),
+        "kernel_agent": MockBackend(silent, name="kernel_agent"),
         "critic": MockCriticBackend(),
         "robustness": MockRobustnessBackend(),
     }
 
 
-# Resume detection
 @pytest.mark.asyncio
 async def test_fresh_session_is_not_resume(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
@@ -78,7 +77,6 @@ async def test_existing_events_triggers_resume(session_dir):
         await c2.stop()
 
 
-# Resume rebuild — pending_proposals
 @pytest.mark.asyncio
 async def test_replay_rebuilds_undecided_proposals(session_dir):
     """One propose, no verdict → resume restores it as pending."""
@@ -261,7 +259,6 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         await c2.stop()
 
 
-# Resume + SharedState combined
 @pytest.mark.asyncio
 async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
@@ -329,9 +326,6 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
         assert len(c2.state.pending_proposals) == 1
     finally:
         await c2.stop()
-
-
-# --resume is N17-layout-aware (formerly test_n23_resume_per_session.py)
 
 
 class TestN23ResumePerSession:
@@ -426,11 +420,10 @@ class TestN23ResumePerSession:
 
 
 # _load_kernel_agent_env_fallback hard-fails on bad state
-# (formerly test_n24_kernel_agent_env_hardfail.py)
 
 
 class TestN24KernelAgentEnvHardFail:
-    """N24: a missing/empty ``kernel-agent.env.sh`` aborts with sys.exit(2) instead of warning-and-continuing."""
+    """A missing/empty ``kernel-agent.env.sh`` aborts with sys.exit(2)."""
 
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):
@@ -442,30 +435,24 @@ class TestN24KernelAgentEnvHardFail:
             monkeypatch.delenv(var, raising=False)
 
     def test_noop_when_root_already_set(self, monkeypatch, capsys):
-        from hyperloom.inference_optimizer import cli
-
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
-        cli._load_kernel_agent_env_fallback()
+        cli_preflight._load_kernel_agent_env_fallback()
         out = capsys.readouterr()
         assert out.out == ""
         assert out.err == ""
 
     def test_aborts_when_no_user_data_path(self, monkeypatch, capsys):
-        from hyperloom.inference_optimizer import cli
-
         with pytest.raises(SystemExit) as excinfo:
-            cli._load_kernel_agent_env_fallback()
+            cli_preflight._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
         assert "USER_DATA_PATH" in err
         assert "install.sh" in err
 
     def test_aborts_when_env_file_missing(self, tmp_path, monkeypatch, capsys):
-        from hyperloom.inference_optimizer import cli
-
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         with pytest.raises(SystemExit) as excinfo:
-            cli._load_kernel_agent_env_fallback()
+            cli_preflight._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
         assert "kernel-agent.env.sh" in err
@@ -478,8 +465,6 @@ class TestN24KernelAgentEnvHardFail:
         monkeypatch,
         capsys,
     ):
-        from hyperloom.inference_optimizer import cli
-
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
@@ -488,15 +473,13 @@ class TestN24KernelAgentEnvHardFail:
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         with pytest.raises(SystemExit) as excinfo:
-            cli._load_kernel_agent_env_fallback()
+            cli_preflight._load_kernel_agent_env_fallback()
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
         assert "HYPERLOOM_KERNEL_AGENT_ROOT" in err
         assert "stale" in err or "malformed" in err
 
     def test_sources_vars_on_success(self, tmp_path, monkeypatch, capsys):
-        from hyperloom.inference_optimizer import cli
-
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
@@ -506,7 +489,7 @@ class TestN24KernelAgentEnvHardFail:
             encoding="utf-8",
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-        cli._load_kernel_agent_env_fallback()
+        cli_preflight._load_kernel_agent_env_fallback()
         import os as _os
 
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/opt/kernel-agent"
@@ -516,8 +499,6 @@ class TestN24KernelAgentEnvHardFail:
         assert "kernel-agent" in out
 
     def test_env_wins_over_file(self, tmp_path, monkeypatch, capsys):
-        from hyperloom.inference_optimizer import cli
-
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
@@ -526,7 +507,7 @@ class TestN24KernelAgentEnvHardFail:
         )
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("KERNEL_AGENT_LOG_LEVEL", "DEBUG")
-        cli._load_kernel_agent_env_fallback()
+        cli_preflight._load_kernel_agent_env_fallback()
         import os as _os
 
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/file"
@@ -537,8 +518,6 @@ class TestN24KernelAgentEnvHardFail:
         tmp_path,
         monkeypatch,
     ):
-        from hyperloom.inference_optimizer import cli
-
         custom = tmp_path / "custom-loc.sh"
         custom.write_text(
             "export HYPERLOOM_KERNEL_AGENT_ROOT=/from/custom\n",
@@ -546,16 +525,14 @@ class TestN24KernelAgentEnvHardFail:
         )
         monkeypatch.setenv("KERNEL_AGENT_ENV", str(custom))
         monkeypatch.setenv("USER_DATA_PATH", "/nonexistent/should-not-be-used")
-        cli._load_kernel_agent_env_fallback()
+        cli_preflight._load_kernel_agent_env_fallback()
         import os as _os
 
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/custom"
 
 
-# TraceLens root env-propagation regression: a stale/placeholder
-# TRACELENS_ROOT inherited by the coordinator must be corrected from the
-# installer-written env file, and unedited template placeholders must be
-# treated as unset, so trace_analyze never falls back to an empty pod-local dir.
+# A stale/placeholder TRACELENS_ROOT is corrected from the installer-written env
+# file; template placeholders are treated as unset.
 class TestTracelensRootEnvCorrection:
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):
@@ -581,8 +558,6 @@ class TestTracelensRootEnvCorrection:
         self, tmp_path, monkeypatch, capsys
     ):
         """Root set + inherited TRACELENS_ROOT points nowhere → corrected from file."""
-        from hyperloom.inference_optimizer import cli
-
         good = tmp_path / "deps" / "TraceLens"
         good.mkdir(parents=True)
         self._write_env_file(tmp_path, good)
@@ -590,7 +565,7 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost" / "TraceLens"))
 
-        cli._load_kernel_agent_env_fallback()
+        cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
@@ -599,8 +574,6 @@ class TestTracelensRootEnvCorrection:
 
     def test_keeps_valid_inherited_root(self, tmp_path, monkeypatch):
         """A valid inherited TRACELENS_ROOT wins over the env file (env-wins)."""
-        from hyperloom.inference_optimizer import cli
-
         file_dir = tmp_path / "file" / "TraceLens"
         file_dir.mkdir(parents=True)
         inherited = tmp_path / "inherited" / "TraceLens"
@@ -610,7 +583,7 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("TRACELENS_ROOT", str(inherited))
 
-        cli._load_kernel_agent_env_fallback()
+        cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
@@ -619,8 +592,6 @@ class TestTracelensRootEnvCorrection:
     def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch):
         """MAGPIE_PATH is out of scope: a merely-existing non-checkout dir in the
         env file must NOT be promoted to an explicit MAGPIE_PATH override."""
-        from hyperloom.inference_optimizer import cli
-
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         magpie_dir = tmp_path / "not-a-magpie-checkout"
@@ -633,33 +604,27 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
 
-        cli._load_kernel_agent_env_fallback()
+        cli_preflight._load_kernel_agent_env_fallback()
 
         import os as _os
 
         assert _os.environ.get("MAGPIE_PATH") is None
 
     def test_placeholder_path_to_your_is_unset(self):
-        from hyperloom.inference_optimizer import cli
-
-        assert cli._is_placeholder_tracelens_path("/path/to/your/TraceLens") is True
-        assert cli._is_placeholder_tracelens_path("<your-tracelens>") is True
-        assert cli._is_placeholder_tracelens_path("/tmp/hyperloom/TraceLens") is False
+        assert cli_preflight._is_placeholder_tracelens_path("/path/to/your/TraceLens") is True
+        assert cli_preflight._is_placeholder_tracelens_path("<your-tracelens>") is True
+        assert cli_preflight._is_placeholder_tracelens_path("/tmp/hyperloom/TraceLens") is False
 
     def test_check_root_exits_when_set_but_missing(self, tmp_path, monkeypatch):
-        from hyperloom.inference_optimizer import cli
-
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "ghost"))
         with pytest.raises(SystemExit) as excinfo:
-            cli._check_tracelens_root_exists()
+            cli_preflight._check_tracelens_root_exists()
         assert excinfo.value.code == 2
 
     def test_check_root_noop_when_valid_or_unset(self, tmp_path, monkeypatch):
-        from hyperloom.inference_optimizer import cli
-
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        cli._check_tracelens_root_exists()  # unset → no raise
+        cli_preflight._check_tracelens_root_exists()
         good = tmp_path / "TraceLens"
         good.mkdir()
         monkeypatch.setenv("TRACELENS_ROOT", str(good))
-        cli._check_tracelens_root_exists()  # valid → no raise
+        cli_preflight._check_tracelens_root_exists()

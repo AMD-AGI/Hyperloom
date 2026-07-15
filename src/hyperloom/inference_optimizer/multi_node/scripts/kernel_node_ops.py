@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Single-pod, Ray-free kernel ops for the Dynamo backend (SSH control plane).
 
-Ray-free counterpart to ``kernel_patch_multinode.py`` + ``kernel_bench_multinode.py``.
-The Dynamo backend has no Ray cluster, so ``hyperloom.inference_optimizer.multi_node``
-ships this script to each GPU pod over SSH and runs ONE subcommand per pod:
+The Dynamo backend has no Ray cluster, so this script is shipped to each
+GPU pod over SSH and runs ONE subcommand per pod:
 
   apply   — back up ``--target-path`` then atomically write ``--patch-b64``;
             py_compile-check .py targets (auto-revert on syntax error).
@@ -11,12 +10,8 @@ ships this script to each GPU pod over SSH and runs ONE subcommand per pod:
   bench   — stage ``--files-b64-json`` into ``--workspace``, run
             ``--bench-command``, read back ``--result-glob`` artifacts.
 
-Each subcommand emits a single JSON document on stdout (stderr is logs only),
-matching the per-pod shape the Ray scripts produce so the sandbox-side callers
-(apply_kernel_patch.py / kernel_optimization.py) parse it identically. The
-sandbox fans this out across pods; this script never enumerates nodes.
-
-Stdlib only — runs in the Dynamo pod, which has no kernel-agent / ray checkout.
+Each subcommand emits a single JSON document on stdout (stderr is logs
+only), matching the per-pod shape the Ray scripts produce. Stdlib only.
 """
 
 from __future__ import annotations
@@ -34,6 +29,15 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from patch_path_safety import (  # noqa: E402
+    assert_backup_dir_allowed,
+    assert_revert_paths_allowed,
+    assert_target_path_allowed,
+)
 
 _MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 _STREAM_TAIL_BYTES = 32 * 1024

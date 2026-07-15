@@ -2,7 +2,7 @@
 
 """Tests for framework_agent.enablement (failure classifier + request model).
 
-Pure-Python, GPU-free: every case is a canned log string in → structured
+Pure-Python, GPU-free: canned log string in → structured
 :class:`FailureSignature` out.
 """
 
@@ -146,7 +146,7 @@ def test_enablement_progress_unknown_to_different_unknown() -> None:
 def test_enablement_no_progress_same_unknown_text() -> None:
     """Q1: the same unknown failure re-appearing (even numeric operands vary) is NOT progress."""
     before = classify_failure("weird failure at offset 128 in module qux")
-    after = classify_failure("weird failure at offset 256 in module qux")  # only the number changed
+    after = classify_failure("weird failure at offset 256 in module qux")
     assert enablement_made_progress(before, after) is False
 
 
@@ -159,7 +159,7 @@ def test_enablement_no_progress_clean_boot_unknown_signature() -> None:
 def test_enablement_setup_guidance_in_mandate() -> None:
     """Q3: the authored mandate authorizes env setup and asks to record setup_commands."""
     from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_authoring import ENABLEMENT_SETUP_GUIDANCE, build_mandate
+    from hyperloom.agents.framework.enablement_ops import ENABLEMENT_SETUP_GUIDANCE, build_mandate
 
     req = EnablementRequest(
         framework="vllm",
@@ -171,7 +171,7 @@ def test_enablement_setup_guidance_in_mandate() -> None:
     m = build_mandate(req)
     assert "ENVIRONMENT SETUP" in m.task_description
     assert "setup_commands" in m.task_description
-    assert ENABLEMENT_SETUP_GUIDANCE  # non-empty guidance tuple
+    assert ENABLEMENT_SETUP_GUIDANCE
 
 
 def test_not_implemented() -> None:
@@ -262,7 +262,6 @@ def test_stacked_import_error_masking_hip_symbol() -> None:
     assert sig.kind == HIP_KERNEL_MISSING
     assert IMPORT_ERROR in sig.secondary_kinds
     assert HIP_KERNEL_MISSING not in sig.secondary_kinds
-    # Corroborating rules nudge confidence above the bare rule constant.
     assert sig.confidence > 0.85
 
 

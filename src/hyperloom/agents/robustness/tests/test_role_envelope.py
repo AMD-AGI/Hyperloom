@@ -10,7 +10,6 @@ import pytest
 
 from hyperloom.agents.robustness.role.envelope import (
     ALERT_SEVERITIES,
-    BackendTurnResult,
     IntentType,
     KILL_TASK_ALLOWED_SCOPES,
     PAYLOAD_REQUIRED,
@@ -30,9 +29,7 @@ from hyperloom.agents.robustness.role.envelope import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Builders — happy path
-# ---------------------------------------------------------------------------
 
 
 def test_heartbeat_builder_uses_known_topic_and_body():
@@ -123,9 +120,7 @@ def test_update_state_builder_only_allows_robustness_fields():
     assert intent.payload["changes"] == {"crash_count": 3, "current_action": "recover"}
 
 
-# ---------------------------------------------------------------------------
 # Builders — defensive errors
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -200,9 +195,7 @@ def test_update_state_rejects_empty_changes():
         build_update_state({})
 
 
-# ---------------------------------------------------------------------------
 # Envelope serialisation
-# ---------------------------------------------------------------------------
 
 
 def test_envelope_dict_is_json_serialisable():
@@ -229,16 +222,7 @@ def test_intent_to_envelope_item_makes_a_copy_of_payload():
     assert intent.payload["detail"]["k"] == 1
 
 
-def test_backend_turn_result_default_fields():
-    res = BackendTurnResult()
-    assert res.intents == []
-    assert res.raw_text == ""
-    assert res.metadata == {}
-
-
-# ---------------------------------------------------------------------------
 # Static tables — invariants
-# ---------------------------------------------------------------------------
 
 
 def test_payload_required_covers_every_intent_type():

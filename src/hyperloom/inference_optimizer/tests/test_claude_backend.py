@@ -28,7 +28,6 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 
 
-# Fakes — minimal stand-ins for SDK classes
 @dataclass
 class FakeToolUseBlock:
     name: str
@@ -39,7 +38,7 @@ class FakeToolUseBlock:
         super().__init_subclass__(**kwargs)
 
 
-# Subclass so type(block).__name__ == "ToolUseBlock" (matching ClaudeBackend)
+# Subclass so type(block).__name__ == "ToolUseBlock" (matching ClaudeBackend).
 class ToolUseBlock(FakeToolUseBlock):  # type: ignore[misc, valid-type]
     pass
 
@@ -80,7 +79,6 @@ def _make_query_factory(messages: list[Any]):
     return _q
 
 
-# validate_emit_intent_input
 @pytest.mark.parametrize(
     "payload",
     [
@@ -140,7 +138,6 @@ def test_validate_emit_intent_input_rejects_malformed(payload, error_match):
         validate_emit_intent_input(payload)
 
 
-# build_emit_intent_server
 def test_build_emit_intent_server_returns_none_without_factories():
     """Empty SDK shim with no `tool` or `create_sdk_mcp_server` → None."""
 
@@ -184,7 +181,6 @@ def test_build_emit_intent_server_uses_factories():
     assert len(captured["tools"]) == 1
 
 
-# ClaudeBackend construction
 def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
     """If neither real SDK nor test seams provided, BackendError fires."""
     import importlib
@@ -212,7 +208,6 @@ def test_claude_backend_with_seams_constructs(monkeypatch):
         sdk_options_cls=FakeOptions,
         enable_mcp_emit_intent=False,
     )
-    assert backend.has_emit_intent_tool is False
     assert backend.sdk_query_factory is not None
 
 
@@ -279,7 +274,6 @@ def test_real_sdk_options_accept_hyperloom_kwargs(monkeypatch):
     b._build_options(tools=[], max_turns=4, system_prompt="sp", resume_session_id="sess-1")
 
 
-# ClaudeBackend.run — intent extraction
 @pytest.mark.asyncio
 async def test_run_extracts_single_emit_intent_tool_use():
     msg = FakeAssistantMessage(
@@ -456,7 +450,6 @@ async def test_run_invalid_tool_use_input_drops_block_silently():
     assert len(res.intents) == 1
 
 
-# raw_completion mode (single-shot backend)
 @pytest.mark.asyncio
 async def test_raw_completion_returns_raw_text_without_intent():
     """raw_completion mode: a text-only reply yields raw_text and does NOT raise NoIntentEmitted."""
@@ -545,10 +538,10 @@ def test_raw_completion_disables_emit_intent_mcp():
         sdk_options_cls=FakeOptions,
         raw_completion=True,
     )
-    assert backend.has_emit_intent_tool is False
+    assert backend.mcp_server_config is None
+    assert backend.mcp_tool_name is None
 
 
-# Options propagation
 @pytest.mark.asyncio
 async def test_options_includes_system_prompt_and_max_turns():
     captured: dict[str, Any] = {}
@@ -599,7 +592,8 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
         mcp_server_factory=fake_server,
         enable_mcp_emit_intent=True,
     )
-    assert backend.has_emit_intent_tool
+    assert backend.mcp_server_config is not None
+    assert backend.mcp_tool_name == EMIT_INTENT_TOOL_QUALIFIED
     with pytest.raises(NoIntentEmitted):
         await backend.run("p", tools=["Read"])
     kw = captured["options_kwargs"]

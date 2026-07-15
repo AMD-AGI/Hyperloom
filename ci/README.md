@@ -1,123 +1,82 @@
-# Hyperloom Inference Optimization CI/CD
+# Hyperloom CI Helpers
 
-Automated inference optimization pipeline: fetch configuration and benchmark
-data from InferenceX, launch a Claw Agent to run the Hyperloom skill, and
-generate optimization reports.
+This directory contains the public, portable pieces of the Hyperloom CI
+tooling: configuration parsing, matrix generation, artifact normalization,
+report generation, and unit tests.
 
-## File Layout
-
-```
-ci/
-├── orchestrator.py          # Main orchestrator entry point
-├── claw_client.py           # Claw API wrapper (session/message/SSE/files)
-├── inferenceX_parser.py     # InferenceX config parsing + API data fetching
-├── report_generator.py      # Report generation (markdown + JSON + GitHub Summary)
-├── ci-config.yaml           # Model list + runtime configuration
-├── prompt_template.md       # Prompt template sent to the Claw Agent
-├── inferenceX_models.yaml   # InferenceX API model name mapping
-├── AB_TEST.md               # A/B test usage guide (for GEAK/TraceLens and related teams)
-├── requirements.txt         # Python dependencies
-└── README.md
-```
-
-> For A/B testing (comparing the optimization effect of two tool combinations),
-> see **[AB_TEST.md](AB_TEST.md)**.
+The live optimization submission path integrates with a private SaFE/Claw
+deployment. Public forks should treat that path as an adapter that requires
+their own service URL, workspace, storage volume, images, and credentials. The
+default public workflow should run the pure Python tests only.
 
 ## Quick Start
 
 ```bash
-pip install -r requirements.txt
-
-# Dry run: generate prompts only, do not execute
-HARBOR_PREFIX=harbor.crusoe.primus-safe.amd.com/proxy \
-KERNEL_OPT_WORKSPACE=core42-sandbox \
-  python orchestrator.py --dry-run
-
-# Actual execution (single model)
-HARBOR_PREFIX=harbor.crusoe.primus-safe.amd.com/proxy \
-KERNEL_OPT_WORKSPACE=core42-sandbox \
-CLAW_API_KEY=ak-xxx \
-  python orchestrator.py --models qwen3.5-bf16-mi355x-sglang --output-dir ./results
-
-# Run all models
-python orchestrator.py --trigger manual --output-dir ./results
+pip install -r ci/requirements.txt
+pytest ci
 ```
 
-## Environment Variables
+Generate a dry-run prompt without contacting SaFE/Claw:
 
-| Variable | Required | Description |
-|------|------|------|
-| `HARBOR_PREFIX` | Yes | Image registry prefix, for example `harbor.crusoe.primus-safe.amd.com/proxy` |
-| `KERNEL_OPT_WORKSPACE` | Yes | Workspace used for kernel optimization (shared by GEAK + OOB), for example `core42-sandbox` |
-| `CLAW_API_KEY` | Yes | SaFE API key (with `ak-` prefix) |
-| `WEBHOOK_URL` | No | Notification webhook (compatible with Slack / Teams Incoming Webhook) |
-
-## CLI Arguments
-
-```
-python orchestrator.py [OPTIONS]
-
---config PATH        Path to ci-config.yaml (defaults to the local ci/ directory)
---models KEYS        Comma-separated model keys; run only a subset
---trigger TYPE       Trigger type: manual / scheduled / inferenceX
---dry-run            Print prompts only; do not execute
---output-dir DIR     Output directory for reports (default: ci-output/)
+```bash
+SAFE_BASE_URL=https://safe.example.invalid \
+SAFE_OPTIMIZE_WORKSPACE=my-workspace \
+SAFE_OPTIMIZE_VOLUME=/mnt/shared \
+HARBOR_PREFIX=registry.example.invalid/my-images \
+python ci/orchestrator.py --dry-run --output-dir ./ci-output
 ```
 
-## Adding a Model
+Run a direct submit only after configuring a real compatible backend:
 
-1. Check `inferenceX_models.yaml` to confirm the API model name
-2. Check InferenceX `amd-master.yaml` to confirm the key
-3. Make sure the model is already downloaded to `/hyperloom/models/`
-4. Add a new entry under `models` in `ci-config.yaml`:
-
-```yaml
-- inferenceX_key: dsr1-fp8-mi355x-sglang       # Key in amd-master.yaml
-  inferenceX_api_name: DeepSeek-R1-0528        # InferenceX API model name
-  model_path_override: /hyperloom/models/xxx   # Local model path
-  optimization_depth: full                     # full / param-only / baseline-only
-  kernel_opt_backends: geak, claude            # Kernel optimization backends
-  target_gpu: b200                             # Competitor GPU used for comparison
+```bash
+SAFE_BASE_URL=https://safe.example.invalid \
+SAFE_API_KEY=... \
+SAFE_OPTIMIZE_REGISTER_WORKSPACE=my-register-workspace \
+SAFE_OPTIMIZE_SUBMIT_WORKSPACE=my-submit-workspace \
+SAFE_OPTIMIZE_VOLUME=/mnt/shared \
+python ci/optimize_submit.py --model Qwen/Qwen3-8B
 ```
 
-## GitHub Actions
-
-### Configure Secrets
-
-Settings → Secrets and variables → Actions → New repository secret:
-
-| Secret | Value |
-|--------|---|
-| `HARBOR_PREFIX` | `harbor.crusoe.primus-safe.amd.com/proxy` |
-| `KERNEL_OPT_WORKSPACE` | `core42-sandbox` |
-| `CLAW_API_KEY` | `ak-xxx` |
-| `WEBHOOK_URL` | Teams/Slack Incoming Webhook URL (optional) |
-
-### Trigger Methods
-
-- **Scheduled**: every Monday at 02:00 UTC
-- **Manual**: Actions → Run workflow → optionally enter a subset of models
-- **InferenceX update**: checked by the scheduled workflow against new commits on `main`
-
-### Execution Model
-
-Each model runs in an independent job (matrix strategy). One failed model does
-not affect the others.
-
-### Outputs
-
-- **GitHub Summary**: comparison table shown on each model job page
-- **Artifact `report-{model_key}`**: per-model `optimization_report.md` + summary
-- Reports are retained for 90 days
-
-## Webhook Notifications
-
-Slack and Teams Incoming Webhooks are supported. One notification is sent after
-each model finishes:
+## Layout
 
 ```
-Hyperloom CI [Qwen3.5-397B-A17B]: completed | Gain: +3.0% | Trigger: manual
+ci/
+├── optimize_submit.py       # SaFE/Claw submit facade; requires private backend config
+├── optimize_submit_lib/     # Submit, detect, artifact, and report helpers
+├── orchestrator.py          # Prompt and report orchestration
+├── inferenceX_parser.py     # InferenceX config parsing + public benchmark fetching
+├── report_generator.py      # Markdown, JSON, and GitHub summary generation
+├── ci-config.yaml           # Example model/runtime configuration
+├── inferenceX_models.yaml   # InferenceX API model name mapping
+├── requirements.txt         # Python dependencies
+└── test_*.py                # Portable unit tests
 ```
 
-Teams setup: Teams Channel → Connectors → Incoming Webhook → copy the URL →
-store it in the `WEBHOOK_URL` secret.
+## Configuration
+
+Important environment variables:
+
+| Variable | Required for live submit | Description |
+|---|---:|---|
+| `SAFE_BASE_URL` / `SAFE_API_URL` | Yes | Base URL of a compatible SaFE API deployment. |
+| `SAFE_API_KEY` / `CLAW_API_KEY` | Yes | Bearer token for the SaFE/Claw API. |
+| `SAFE_OPTIMIZE_REGISTER_WORKSPACE` | Yes | Workspace used to register or download models. |
+| `SAFE_OPTIMIZE_SUBMIT_WORKSPACE` | Yes | Workspace used to run optimization tasks. |
+| `SAFE_OPTIMIZE_VOLUME` | Yes | Shared storage volume mounted by the backend. |
+| `HARBOR_PREFIX` | No | Optional container registry prefix for configured images. |
+| `HYPERLOOM_RESULTS_SERVICE_URL` | No | Optional results service URL; publishing is skipped when unset. |
+
+## Public CI Scope
+
+Open-source CI should focus on deterministic checks that do not need internal
+infrastructure:
+
+```bash
+pytest ci
+python ci/generate_hf_matrix.py --help
+python ci/generate_matrix.py --help
+```
+
+The repository does not include a self-contained GPU performance reproduction
+harness. Performance runs require the caller to provide their own serving
+framework images, GPU environment, model storage, and API credentials.

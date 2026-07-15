@@ -29,7 +29,6 @@ def test_repo_slug_examples():
 
 def test_slug_builders(monkeypatch):
     monkeypatch.delenv("PR_KB_SLUG_PREFIX", raising=False)
-    assert pr_kb_slug.meta_slug("ROCm/vllm", 42) == "pr-kb-meta/rocm-vllm/pr/42"
     assert pr_kb_slug.files_slug("ROCm/vllm", 42) == "pr-kb-files/rocm-vllm/pr/42"
     assert pr_kb_slug.index_slug("ROCm/vllm") == "pr-kb-index/rocm-vllm"
 
@@ -126,20 +125,11 @@ def test_fetch_pr_kb_diff_missing_page():
     assert (text, src) == ("", "")
 
 
-# --- meta / index parse -----------------------------------------------------
-
-
-def test_parse_meta_title_and_frontmatter():
-    md = "---\npr_number: 5\nhead_sha: abc\nlabels: [perf, rocm]\n---\n# PR #5: speed up moe\n\n## Body\n"
-    page = {"markdown": md}
-    fm = pr_kb.parse_meta_frontmatter(page)
-    assert fm["head_sha"] == "abc"
-    assert fm["labels"] == ["perf", "rocm"]
-    assert pr_kb.parse_meta_title(page) == "speed up moe"
+# --- index parse ------------------------------------------------------------
 
 
 def test_parse_index_prs():
-    prs = [{"number": 9, "state": "open", "title": "x", "meta_slug": "pr-kb-meta/rocm-vllm/pr/9"}]
+    prs = [{"number": 9, "state": "open", "title": "x"}]
     md = "---\nrepo: ROCm/vllm\n---\n# index\n\n## PRs JSON\n\n```json\n" + json.dumps(prs) + "\n```\n"
     assert pr_kb.parse_index_prs({"markdown": md})[0]["number"] == 9
 
@@ -153,7 +143,7 @@ def test_build_client_from_env_none_when_unset(monkeypatch):
     assert build_gbrain_page_client_from_env() is None
 
 
-# --- P2: discovery source ---------------------------------------------------
+# --- discovery source ---------------------------------------------------
 
 from hyperloom.agents.framework import sources  # noqa: E402
 from hyperloom.agents.framework.models import Candidate, ExploreRequest  # noqa: E402
@@ -218,8 +208,7 @@ def test_enumerate_pr_kb_index_union_query(monkeypatch):
 
 
 def test_enumerate_pr_kb_list_pages_fallback(monkeypatch):
-    # No index page + query surfaces no pr-kb-meta hits -> list_pages fallback,
-    # client-side filtered to this repo's meta prefix.
+    # No index page + no meta hits -> list_pages fallback filtered to this repo's meta prefix.
     monkeypatch.setenv("PR_KB_ENABLE", "1")
     listed = [
         {"slug": "pr-kb-files/sgl-project-sglang/pr/29881"},

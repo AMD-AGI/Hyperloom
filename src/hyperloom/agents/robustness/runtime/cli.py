@@ -55,14 +55,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.subprocess_bridge import RuntimeAdapterError as RuntimeAdapterError
-from hyperloom.common.subprocess_bridge import emit_json as _emit_json
-from hyperloom.common.subprocess_bridge import read_json as _read_json
+from hyperloom.common.subprocess_bridge import RuntimeAdapterError, emit_json, read_json
 
 from ..config import Config
 from ..factory import build_reactor_components
-from ..finalize.postmortem import finalize_session
 from ..role.envelope import build_envelope_dict
+from ..role.postmortem import finalize_session
 from ..role.prompt_inputs import (
     ReactorContext,
     SharedStateSnapshot,
@@ -75,11 +73,6 @@ log = logging.getLogger("robustness_agent.runtime.cli")
 
 COORDINATOR_INBOX = "coordinator_inbox"
 REQUEST_KINDS: frozenset[str] = frozenset({COORDINATOR_INBOX})
-
-# RuntimeAdapterError / _read_json / _emit_json are re-exported from
-# hyperloom.common.subprocess_bridge above; kept as module-level bindings so
-# any `setattr(cli_module, "_read_json"/"_emit_json"/"RuntimeAdapterError",
-# fake)`-style monkeypatch still resolves through this module's own __dict__.
 
 
 def _coerce_request(raw: Any) -> dict[str, Any]:
@@ -174,28 +167,22 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             # Invalid --nodes value; keep the existing default.
             pass
-    # Opt out of the default inference-server health probe (heartbeat tests /
-    # sandboxes auditing health out-of-band) without reconfiguring targets.
+    # Opt out of the default inference-server health probe.
     if "auto_probe_inference_server" in options:
         config.auto_probe_inference_server = bool(options["auto_probe_inference_server"])
-    # Disable the per-tick ``ray status`` probe on hosts without a Ray head to
-    # avoid false-positive ``ray_head_dead`` alerts.
+    # Disable the per-tick ``ray status`` probe on hosts without a Ray head.
     if "ray_probe_enabled" in options:
         config.ray_probe_enabled = bool(options["ray_probe_enabled"])
-    # Disable the ``external_deps`` probe (TraceLens CLI / WekaFS mount) on inert
-    # CI hosts that would otherwise fire ``tracelens_cli_missing`` / ``wekafs_degraded``.
+    # Disable the ``external_deps`` probe (TraceLens CLI / WekaFS mount) on inert CI hosts.
     if "external_deps_enabled" in options:
         config.external_deps_enabled = bool(options["external_deps_enabled"])
-    # B3 ``no_levers_found`` floor knobs override the default 45 min / 8 tick window;
-    # multi-node setups inject 60.0 (single-node stays 45.0) since cold start +
-    # baseline + profile consume 35-50 min before any explore family runs.
+    # B3 ``no_levers_found`` floor knobs override the default window.
     if "progress_no_levers_min_minutes" in options:
         config.progress_no_levers_min_minutes = float(options["progress_no_levers_min_minutes"])
     if "progress_no_levers_min_ticks" in options:
         config.progress_no_levers_min_ticks = int(options["progress_no_levers_min_ticks"])
 
-    # L4 — advertise session_dir so co-deployed Critic ``prepare-review`` finds
-    # the findings jsonl; setdefault keeps an operator override intact.
+    # Advertise session_dir so co-deployed Critic ``prepare-review`` finds the findings jsonl.
     os.environ.setdefault(
         "ROBUSTNESS_AGENT_SESSION_DIR",
         str(config.session_dir),
@@ -231,8 +218,7 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     bundle = build_reactor_components(config, session_id=session_id)
     try:
         intents = await bundle.reactor.tick(reactor_ctx)
-        # Surface any RCA-LLM token spend this tick so the host can fold it
-        # into its trace ledger (None on the common no-LLM / Noop path).
+        # Surface any RCA-LLM token spend this tick for the host's trace ledger.
         llm_usage = None
         rca = getattr(bundle.components, "rca", None)
         drain = getattr(rca, "drain_usage", None)
@@ -265,9 +251,9 @@ def _cmd_tick(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI arguments with ``request``
             and ``out`` attributes.
     """
-    request = _coerce_request(_read_json(args.request))
+    request = _coerce_request(read_json(args.request))
     emit = asyncio.run(_run_tick(request))
-    _emit_json(emit, args.out)
+    emit_json(emit, args.out)
 
 
 def _cmd_finalize(args: argparse.Namespace) -> None:
@@ -305,7 +291,7 @@ def _cmd_finalize(args: argparse.Namespace) -> None:
         "wrote_new_files": bool(wrote),
         "reports_dir": str(session_dir / "reports"),
     }
-    _emit_json(payload, args.out)
+    emit_json(payload, args.out)
 
 
 def _build_parser() -> argparse.ArgumentParser:

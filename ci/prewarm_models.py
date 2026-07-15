@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""ci/prewarm_models.py — pre-populate /wekafs/models/ from HuggingFace,
+"""ci/prewarm_models.py — pre-populate a shared model cache from HuggingFace,
 bypassing the single-flight + slow SaFE playground download.
 
 Downloading directly to the mounted volume removes the SaFE-register
 bottleneck: a later register call dedups on the existing target files (or
 the hf-hub cache makes a re-fetch a near-no-op via ETag/sha256 matching).
 
-Layout (same convention as SaFE-registered models already in /wekafs/models):
-  /wekafs/models/<owner>-<repo>/         # final destination
-  /wekafs/models/.tmp/<slug>.part/       # in-flight, atomic rename on success
+Layout:
+  /mnt/shared/models/<owner>-<repo>/         # final destination
+  /mnt/shared/models/.tmp/<slug>.part/       # in-flight, atomic rename on success
 
 Inputs:
   --candidates ci/candidates/topN.json   (preferred, drives the same pool as
@@ -28,13 +28,13 @@ Usage examples:
   # Whole candidates pool, 16 concurrent repos:
   HF_TOKEN=hf_xxx python3 prewarm_models.py \\
       --candidates ci/candidates/top600_2026-05-12.json \\
-      --target-root /wekafs/models --concurrency 16
+      --target-root /mnt/shared/models --concurrency 16
 
   # Same slice as a single batch dispatch (matches optimize-batch.yml):
   HF_TOKEN=hf_xxx python3 prewarm_models.py \\
       --candidates ci/candidates/top600_2026-05-12.json \\
       --batch-index 0 --batch-size 10 \\
-      --target-root /wekafs/models
+      --target-root /mnt/shared/models
 
   # Smoke a single repo:
   HF_TOKEN=hf_xxx python3 prewarm_models.py --repos Qwen/Qwen3-14B-AWQ
@@ -69,16 +69,10 @@ log = logging.getLogger("prewarm")
 
 
 def slug(repo_id: str) -> str:
-    """HF repo_id → /wekafs/models/<slug>/ folder name.
+    """HF repo_id -> shared model-cache ``<slug>/`` folder name.
 
-    Matches the SaFE backend convention already used by the 47 models on
-    /wekafs/models: a single '/' separator becomes '-' and all other
-    characters are preserved verbatim (including pre-existing '-').
-
-      Qwen/Qwen2.5-7B-Instruct           → Qwen-Qwen2.5-7B-Instruct
-      meta-llama/Llama-3.1-8B            → meta-llama-Llama-3.1-8B
-      deepseek-ai/DeepSeek-R1            → deepseek-ai-DeepSeek-R1
-      dphn/dolphin-2.9.1-yi-1.5-34b      → dphn-dolphin-2.9.1-yi-1.5-34b
+    Matches the SaFE backend convention: a single '/' separator becomes '-' and
+    all other characters are preserved verbatim.
 
     Args:
         repo_id (str): The HuggingFace repo id (``owner/repo``).
@@ -190,9 +184,8 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
     tmp = tmp_dir(target_root, repo_id)
     hf_api = HfApi()
 
-    # Token pool: accept either a single token (str) or a list. Start on a
-    # token chosen by hashing the repo id so parallel prewarm jobs spread
-    # across the pool, then rotate on 429.
+    # Token pool: accept a single token or a list. Start on a token chosen by
+    # hashing the repo id so parallel jobs spread out, then rotate on 429.
     tokens = [t for t in (hf_token if isinstance(hf_token, (list, tuple)) else [hf_token]) if t]
     tok_idx = (hash(repo_id) % len(tokens)) if tokens else 0
 
@@ -203,7 +196,7 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
         n, gb = _dir_stats(dest)
         return {"status": "SKIP", "size_gb": gb, "n_files": n, "elapsed_s": 0, "reason": "already complete"}
 
-    # Clean stale .part if previous run aborted mid-flight
+    # Clean stale .part from an aborted prior run.
     if tmp.exists():
         log.info("[%s] cleaning stale .tmp dir %s", repo_id, tmp)
         shutil.rmtree(tmp, ignore_errors=True)
@@ -225,7 +218,7 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
                     "*.msgpack",
                     "*.onnx",
                     "*.tflite",
-                    "consolidated.*",  # legacy llama-cpp dumps
+                    "consolidated.*",
                 ],
                 tqdm_class=None,
             )
@@ -281,7 +274,7 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
     try:
         tmp.rename(dest)
     except OSError:
-        # Cross-device or other rename failure — fall back to copy+rmtree.
+        # Cross-device rename failure — fall back to copy+rmtree.
         log.warning("[%s] rename failed, fallback to copytree+rmtree", repo_id)
         shutil.copytree(tmp, dest)
         shutil.rmtree(tmp, ignore_errors=True)
@@ -349,7 +342,7 @@ def load_repos(args: argparse.Namespace) -> list[str]:
     if args.candidates:
         repos = _load_candidates(args.candidates)
         return _slice_repos(repos, args.batch_index, args.batch_size)
-    # stdin (one repo per line)
+    # stdin: one repo per line.
     if not sys.stdin.isatty():
         repos = [ln.strip() for ln in sys.stdin if ln.strip() and not ln.startswith("#")]
         if repos:
@@ -415,10 +408,9 @@ def main() -> int:
     p.add_argument(
         "--target-root",
         type=Path,
-        default=Path("/wekafs/models"),
+        default=Path(os.environ.get("CI_MODELS_DIR", "/mnt/shared/models")),
         help="root dir for <slug>/ subdirs "
-        "(default /wekafs/models; on c04u01 the real "
-        "underlying path is /mnt/weka/models via a symlink)",
+        "(default $CI_MODELS_DIR or /mnt/shared/models)",
     )
     p.add_argument(
         "--concurrency",

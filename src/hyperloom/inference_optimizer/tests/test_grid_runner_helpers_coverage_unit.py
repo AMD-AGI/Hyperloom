@@ -13,9 +13,8 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 
-# compatibility-filter helpers live in the ``_grid_variant_filter`` sibling;
-# patch them there (apply_compatibility_filter resolves them in that module's
-# namespace, not via the _grid_runner re-export).
+# Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling,
+# where apply_compatibility_filter resolves them (not via the re-export).
 from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 
 
@@ -147,8 +146,7 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
 
 # -- _resolve_probe_python / probe interpreter selection ------------------
 def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
-    # The harness interpreter (single-venv install) is used directly and no
-    # vllm-exe resolution is attempted.
+    # The harness interpreter is used directly; no vllm-exe resolution is tried.
     monkeypatch.setattr(gr, "_resolve_magpie_python", lambda: "/srv/venv/bin/python")
     monkeypatch.setattr(
         gr.shutil, "which", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("which() should not be called"))
@@ -157,8 +155,8 @@ def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
 
 
 def test_resolve_probe_python_falls_back_to_vllm_venv(monkeypatch) -> None:
-    # magpie_python fell through to the canonical default -> pin the venv that
-    # actually backs ``vllm serve``.
+    # magpie_python is the canonical default -> pin the venv that backs
+    # ``vllm serve``.
     monkeypatch.setattr(gr, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
     monkeypatch.setattr(gr.shutil, "which", lambda name: "/other/venv/bin/vllm" if name == "vllm" else None)
     monkeypatch.setattr(gr.os.path, "exists", lambda p: p == "/other/venv/bin/python")
@@ -344,3 +342,22 @@ def test_shell_safe_dedupe_normalizes_equals_form() -> None:
 def test_shell_safe_dedupe_simple_last_wins() -> None:
     out = gr._shell_safe_dedupe("--tp 1 --tp 8 --mem-fraction-static 0.9")
     assert out == "--tp 8 --mem-fraction-static 0.9"
+
+
+def test_compose_server_args_replace_still_applies_remove_args() -> None:
+    out = gr.compose_server_args(
+        inherited_args="--bad-base 1",
+        base_extra_args="--also-bad 2",
+        variant_extra_args="--bad-base 3 --keep 4",
+        remove_args=["--bad-base"],
+        args_mode="replace",
+    )
+    assert out == "--also-bad 2 --keep 4"
+
+
+def test_remove_server_args_accepts_multi_flag_string() -> None:
+    out = gr.remove_server_args(
+        "--flag-a --flag-b --flag-c 3 --keep 4",
+        "--flag-a --flag-b --flag-c",
+    )
+    assert out == "--keep 4"

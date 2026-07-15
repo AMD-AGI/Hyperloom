@@ -21,11 +21,9 @@ INFERENCEX_API = "https://inferencex.semianalysis.com/api/v1/benchmarks"
 
 
 def _unmangle_msys_path(v: str) -> str:
-    """Undo Git-Bash-on-Windows MSYS path conversion of /wekafs/* → C:/.../wekafs/*.
+    """Undo Git-Bash-on-Windows MSYS path conversion of shared POSIX roots.
 
-    Git Bash auto-converts POSIX paths starting with / into Windows-style paths
-    when passing them as env vars or CLI args. This function detects the
-    mangled form and reverses it. Safe no-op on Linux/macOS or unmangled paths.
+    Safe no-op on Linux/macOS or unmangled paths.
 
     Args:
         v (str): A path or arbitrary string that may have been MSYS-mangled.
@@ -33,17 +31,17 @@ def _unmangle_msys_path(v: str) -> str:
     Returns:
         str: The de-mangled POSIX path, or ``v`` unchanged if not mangled.
     """
-    if isinstance(v, str) and re.search(r"[A-Za-z]:[/\\].*[/\\]wekafs", v):
-        v = re.sub(r"[A-Za-z]:[/\\].*[/\\](wekafs.*)", r"/\1", v).replace("\\", "/")
+    if isinstance(v, str) and re.search(r"[A-Za-z]:[/\\].*[/\\](wekafs|mnt[/\\]shared)", v):
+        v = re.sub(r"[A-Za-z]:[/\\].*[/\\]((?:wekafs|mnt[/\\]shared).*)", r"/\1", v).replace("\\", "/")
     return v
 
 
-def get_nfs_root(default: str = "/wekafs") -> str:
+def get_nfs_root(default: str = "/mnt/shared") -> str:
     """Return $NFS_ROOT with Windows Git Bash path-mangling defense applied.
 
     All ci/* code MUST use this helper instead of os.environ.get("NFS_ROOT")
     directly, otherwise local dry-run on Windows produces malformed paths like
-    `C:/Program Files/Git/wekafs/...` that don't match anything on the runner.
+    `C:/Program Files/Git/mnt/shared/...` that don't match anything on the runner.
 
     Args:
         default (str): Fallback root used when ``NFS_ROOT`` is unset.
@@ -144,14 +142,13 @@ def get_latest_commit(repo_url: str, ref: str = "main") -> str:
 def synthesize_entry_from_ci_config(model_cfg: dict) -> dict:
     """Build an amd-master.yaml-style entry from a self-contained ci-config entry.
 
-    Used for Hyperloom-internal models that have no InferenceX baseline
-    (e.g., GLM-5 multi-node MI300X — InferenceX only publishes MI355X). The
+    Used for Hyperloom-internal models that have no InferenceX baseline. The
     returned dict matches the shape consumed by ``parse_model_entry()`` so the
-    existing ``merge_model_config()`` flow works unchanged.
+    ``merge_model_config()`` flow works unchanged.
 
     Required fields in ``model_cfg``:
-      - ``model_hf``           HF repo (e.g., ``zai-org/GLM-5``)
-      - ``image``              container image tag (e.g., ``primussafe/sglang:v0.5.11-rocm720-mi30x-profilerfix``)
+      - ``model_hf``           HF repo (e.g., ``Qwen/Qwen3-8B``)
+      - ``image``              container image tag (e.g., ``lmsysorg/sglang:latest``)
       - ``framework``          ``sglang`` or ``vllm``
       - ``precision``          ``fp8`` / ``fp4`` / ``bf16``
       - ``conc``               concurrency cap
@@ -213,7 +210,6 @@ def parse_model_entry(entry: dict) -> dict:
     Returns:
         A structured config dict (model name, seq-len pairs, search space).
     """
-    # Support both seq-len-configs (old) and scenarios.fixed-seq-len (new).
     seq_configs = entry.get("seq-len-configs") or (entry.get("scenarios") or {}).get("fixed-seq-len") or []
     first_seq = seq_configs[0] if seq_configs else {}
     first_search = (first_seq.get("search-space") or [{}])[0]
@@ -523,14 +519,9 @@ def merge_model_config(
         "inferenceX_api_name": model_cfg.get("inferenceX_api_name", ""),
         "inferenceX_key": model_cfg.get("inferenceX_key", ""),
         "rayjob_image": resolve_var(model_cfg.get("rayjob_image", "")),
-        # Per-entry Claw pluginId override; default 4 (legacy Hyperloom plugin).
-        # claw_plugin_id: null omits pluginId from the body; other ints switch
-        # plugin (same hook as the A/B Test --plugin-id override).
+        # Per-entry Claw pluginId override; null omits pluginId from the body.
         "claw_plugin_id": (model_cfg["claw_plugin_id"] if "claw_plugin_id" in model_cfg else 4),
-        # Hyperloom-skill knobs for prompt_template.md: nodes>1 triggers the
-        # multinode block; target_gain/max_hours become optimize CLI flags;
-        # random_range_ratio is benchmark prompt jitter (InferenceX default 0.8);
-        # kernel_agent_build_geak_rag_index defaults off to skip the slow rebuild.
+        # Hyperloom-skill knobs for prompt_template.md.
         "nodes": model_cfg.get("nodes", 1),
         "target_gain": model_cfg.get("target_gain", defaults.get("target_gain", 10)),
         "max_hours": model_cfg.get("max_hours", defaults.get("max_hours", 2)),

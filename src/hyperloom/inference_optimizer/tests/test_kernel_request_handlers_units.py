@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.env import is_truthy
+from hyperloom.orchestrator.kernel import _kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -25,7 +27,7 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         assert krh._resolve_gemm_tuning_backend({}) == "geak"
         assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "forge"}) == "forge"
-        # Unknown values fall back to the default instead of surfacing an invalid backend.
+        # Unknown values fall back to the default.
         assert krh._resolve_gemm_tuning_backend({"gemm_tuning_backend": "unknown"}) == "forge"
 
     def test_parse_forge_gemm_sentinel(self):
@@ -42,11 +44,11 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
     def test_truthy_env_value_true(self, value):
-        assert krh._truthy_env_value(value) is True
+        assert is_truthy(value) is True
 
     @pytest.mark.parametrize("value", ["", "0", "false", "off", None])
     def test_truthy_env_value_false(self, value):
-        assert krh._truthy_env_value(value) is False
+        assert is_truthy(value) is False
 
     def test_resolve_forge_server_log_priority(self, tmp_path):
         state = SharedState()
@@ -114,7 +116,7 @@ class TestForgeGemmHelperCoverage:
             {"text_config": {"quantization_config": {"weight_block_size": [128, 128]}}},
         )
         assert krh._resolve_fp8_quant_type(nested_block) == "blockscale"
-        # Unreadable / missing config -> auto (forge sniffs the runtime log).
+        # Unreadable / missing config -> auto.
         assert krh._resolve_fp8_quant_type(str(tmp_path / "missing")) == "auto"
         assert krh._resolve_fp8_quant_type("") == "auto"
 
@@ -134,8 +136,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "blockscale")
 
     def test_resolve_forge_precision_fp8_unreadable_config_keeps_auto(self):
-        # Matches the legacy contract: with no readable config, do not force a
-        # tuner from Hyperloom -- let forge sniff the kernel_signature_log.
+        # No readable config: do not force a tuner; let forge sniff the log.
         state = SharedState(precision="bf16", model_path="/models/does-not-exist")
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
@@ -180,7 +181,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._forge_gemm_tune_available() is False
 
     def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
-        # Empty session precision + no fp8/fp4 quantization → bf16/auto default.
+        # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
         state = SharedState(precision="")
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
         import hyperloom.orchestrator.kernel.roofline_ceiling as rc
@@ -230,7 +231,6 @@ class TestForgeGemmHelperCoverage:
         return path
 
     def test_resolve_forge_untuned_csv_fp8_blockscale(self, tmp_path):
-        # fp8 auto -> blockscale CSV recorded by the specialist phase.
         expected = self._write_aiter_csv(
             tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
         )
@@ -244,7 +244,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "per_token") == str(expected)
 
     def test_resolve_forge_untuned_csv_skips_header_only(self, tmp_path):
-        # Header-only / empty files must not be passed as a real shape source.
+        # Header-only / empty files are not a valid shape source.
         self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n")
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
 
@@ -278,9 +278,8 @@ class TestForgeGemmHelperCoverage:
         return str(model_dir)
 
     def test_resolve_forge_untuned_csv_rejects_model_mismatch(self, tmp_path):
-        # Repro: specialist CSV carries the AITER default DeepSeek shapes
-        # (K=7168) while the model under test has hidden_size=2048. The CSV must
-        # be rejected so forge derives correct per-model shapes from config.json.
+        # CSV carries K=7168 shapes but the model has hidden_size=2048: reject it
+        # so forge derives per-model shapes from config.json.
         self._write_aiter_csv(
             tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
         )
@@ -290,8 +289,7 @@ class TestForgeGemmHelperCoverage:
         )
 
     def test_resolve_forge_untuned_csv_accepts_model_match(self, tmp_path):
-        # A CSV whose K column includes the model hidden_size is the real
-        # per-model shape set and must be accepted.
+        # A CSV whose K column includes the model hidden_size is accepted.
         expected = self._write_aiter_csv(
             tmp_path,
             "abc",
@@ -304,16 +302,14 @@ class TestForgeGemmHelperCoverage:
         ) == str(expected)
 
     def test_resolve_forge_untuned_csv_no_model_path_keeps_legacy(self, tmp_path):
-        # Backward compatible: without a model_path the resolver cannot validate
-        # and keeps the legacy behaviour of returning the newest non-empty CSV.
+        # Without a model_path the resolver cannot validate; returns newest non-empty CSV.
         expected = self._write_aiter_csv(
             tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
         )
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
 
     def test_resolve_forge_untuned_csv_unreadable_config_keeps_csv(self, tmp_path):
-        # When config.json is missing/unreadable we cannot validate; preserve the
-        # legacy behaviour rather than dropping a possibly-valid CSV.
+        # Missing/unreadable config.json: cannot validate, so keep the CSV.
         expected = self._write_aiter_csv(
             tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
         )
@@ -357,7 +353,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._derive_gemm_skip_reason([]) == ""
 
     def test_path_is_existing_file_handles_too_long(self):
-        # The production crash: an inline JSON list handed in as a "path".
+        # An inline JSON list handed in as a "path".
         inline = "[{'M': 64, 'N': 16384, 'K': 3072, 'dtype': 'bf16'}]" * 6
         assert len(inline) > 255
         assert krh._path_is_existing_file(inline) is False  # must not raise OSError(36)
@@ -373,7 +369,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._normalize_forge_shapes_json(str(f), tmp_path) == str(f)
 
     def test_normalize_forge_shapes_json_inline_string(self, tmp_path):
-        # The exact production payload shape: a Python-repr list (single quotes).
+        # A Python-repr list (single quotes).
         inline = "[{'M': 64, 'N': 16384, 'K': 3072, 'dtype': 'bf16'}]"
         out = krh._normalize_forge_shapes_json(inline, tmp_path)
         assert out == str(tmp_path / "forge_shapes.json")
@@ -392,7 +388,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._normalize_forge_shapes_json("not_a_real_file.json", tmp_path) == ""
 
     def test_normalize_tokens_list_and_bracketed_string(self):
-        # The production bug: tokens passed as a list or its string form.
+        # Tokens passed as a list or its string form.
         assert krh._normalize_tokens([4, 8, 64]) == "4,8,64"
         assert krh._normalize_tokens("[4, 8, 64]") == "4,8,64"
         assert krh._normalize_tokens("[64]") == "64"
@@ -623,7 +619,7 @@ class TestForgeGemmHelperCoverage:
         assert result["backend"] == "forge"
         assert result["engine"] == "forge_fusion"
         assert result["workspace"] == str(tmp_path / "runs" / "fusion" / "fusion_task")
-        assert calls[0][1] == 123
+        assert calls[0][1] == krh._forge_fusion_wrapper_timeout_sec(123)
         input_payload = json.loads(
             (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json")
             .read_text(encoding="utf-8")
@@ -631,6 +627,59 @@ class TestForgeGemmHelperCoverage:
         assert input_payload["trace_path"] == str(trace_file)
         assert input_payload["model_path"] == "/models/zaya"
         assert input_payload["max_turns"] == 7
+        assert input_payload["timeout"] == 123
+
+    def test_forge_fusion_timeout_invalid_env_falls_back(self, monkeypatch):
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
+
+        assert krh._forge_fusion_timeout_sec({}) == 7200
+
+    def test_forge_fusion_timeout_infinite_env_falls_back(self, monkeypatch):
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")
+
+        assert krh._forge_fusion_timeout_sec({}) == 7200
+
+    def test_forge_fusion_wrapper_timeout_adds_reap_grace(self):
+        assert krh._forge_fusion_wrapper_timeout_sec(123) == 153
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_invalid_timeout_env_uses_default(
+        self, tmp_path, monkeypatch
+    ):
+        trace = tmp_path / "decode.trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace),
+        ).save(tmp_path)
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
+        calls: list[int] = []
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            calls.append(timeout_sec)
+            result = {"status": "complete", "decision": "REVERT", "kept": False}
+            return (
+                0,
+                "FORGE_FUSION_RESULT_BEGIN\n"
+                + json.dumps(result)
+                + "\nFORGE_FUSION_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+
+        assert result["status"] == "complete"
+        assert calls == [krh._forge_fusion_wrapper_timeout_sec(7200)]
+        input_payload = json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json")
+            .read_text(encoding="utf-8")
+        )
+        assert input_payload["timeout"] == 7200
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_failure_branches(self, tmp_path, monkeypatch):
@@ -720,8 +769,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_tags_engine_forge(self, tmp_path, monkeypatch):
-        """Forge runs must carry ``engine='forge'`` so the breakdown attributes
-        them to the forge source instead of the ``geak`` default."""
+        """Forge runs must carry ``engine='forge'`` so the breakdown attributes them correctly."""
         state = SharedState(
             precision="bf16",
             framework="sglang",
@@ -760,7 +808,6 @@ def _ensure_torch_module(monkeypatch):
     return torch
 
 
-# _coerce_runtime_value
 class TestCoerceRuntimeValue:
     @pytest.mark.parametrize(
         "value, expected",
@@ -779,7 +826,6 @@ class TestCoerceRuntimeValue:
         assert krh._coerce_runtime_value(value) == expected
 
 
-# _backend_order
 class TestBackendOrder:
     def test_documented_kernel_opt_backends_env_is_honored(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
@@ -796,14 +842,12 @@ class TestBackendOrder:
         assert krh._backend_order({}) == ["forge"]
 
 
-# _candidate_env_allowed
 class TestCandidateEnvAllowed:
     @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])
     def test_sensitive_env_blocked(self, name):
         assert krh._candidate_env_allowed(name) is False
 
     def test_known_prefix_allowed(self):
-        # Probe one prefix without depending on the product-internal allowlist.
         prefixes = krh._CANDIDATE_ENV_PREFIXES
         assert prefixes  # registry not empty
         sample = next(iter(prefixes))
@@ -817,7 +861,6 @@ class TestCandidateEnvAllowed:
         assert krh._candidate_env_allowed(sample) is True
 
 
-# _is_runtime_generated_kernel
 class TestRuntimeGeneratedKernel:
     def test_runtime_generated_path_treats_as_generated(self):
         markers = krh._RUNTIME_GENERATED_SOURCE_MARKERS
@@ -833,11 +876,10 @@ class TestRuntimeGeneratedKernel:
             pytest.skip("required tables empty in build")
         marker = next(iter(markers))
         reusable_root = next(iter(roots))
-        # Name matches but source lives under a reusable root → False.
+        # Name matches but source lives under a reusable root -> False.
         assert krh._is_runtime_generated_kernel(marker, f"{reusable_root}/foo.py") is False
 
 
-# _split_server_args
 class TestSplitServerArgs:
     def test_empty_returns_empty(self):
         assert krh._split_server_args("") == []
@@ -852,7 +894,6 @@ class TestSplitServerArgs:
         assert argv == []
 
 
-# _load_candidate_metadata
 class TestLoadCandidateMetadata:
     def test_uses_inline_candidate(self):
         out = krh._load_candidate_metadata({"candidate": {"kernel_id": "x"}})
@@ -909,7 +950,6 @@ class TestLoadCandidateMetadata:
         )
 
 
-# _load_materialized_workload_metadata
 class TestLoadMaterializedWorkloadMetadata:
     def test_empty_when_no_path(self):
         assert krh._load_materialized_workload_metadata("") == {}
@@ -956,7 +996,7 @@ class TestLoadMaterializedWorkloadMetadata:
         env_name,
         expected_args,
     ):
-        """The handler reads the per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot, not always ``EXTRA_SGLANG_ARGS``."""
+        """The handler reads the per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot."""
         cfg = tmp_path / f"magpie_{framework}.yaml"
         cfg.write_text(
             "benchmark:\n"
@@ -977,7 +1017,7 @@ class TestLoadMaterializedWorkloadMetadata:
             f"framework={framework!r} expected server_args={expected_args!r}; got {runtime['server_args']!r}."
         )
 
-    def test_atom_server_args_not_read_from_extra_sglang_args(self, tmp_path):
+    def test_atom_server_args_ignore_stray_sglang_env(self, tmp_path):
         """When an atom YAML carries both EXTRA_ATOM_ARGS and a stray EXTRA_SGLANG_ARGS, the atom slot wins."""
         cfg = tmp_path / "magpie_atom_mixed.yaml"
         cfg.write_text(
@@ -1000,7 +1040,6 @@ class TestLoadMaterializedWorkloadMetadata:
         assert "--should-be-ignored" not in runtime["server_args"]
 
 
-# enrichment helpers
 class TestEnrichCandidate:
     def test_enrich_candidate_runtime_metadata_setdefault_semantics(self):
         candidates = [{"kernel_id": "k", "env_vars": {"TP": "8"}}]
@@ -1023,14 +1062,13 @@ class TestEnrichCandidate:
         krh._enrich_candidates_artifact("", {"env_vars": {}}, trace_report_path="")
 
 
-# atom-aware reusable kernel detection
 class TestReusableSourceRootsAtom:
     """atom layout prefixes participate in cross-task kernel reuse
     alongside aiter/sglang/vllm."""
 
     def test_includes_atom_editable_path(self):
         # The matcher lowercases its source-file input, so the stored prefix is
-        # lowercase ``/app/atom/atom/`` even though the real path is ``/app/ATOM/atom/``.
+        # lowercase ``/app/atom/atom/``.
         assert any("/app/atom/atom/" in r.lower() for r in krh._reusable_source_roots())
 
     def test_includes_atom_site_packages_python_3_10(self):
@@ -1040,7 +1078,7 @@ class TestReusableSourceRootsAtom:
         assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in krh._reusable_source_roots())
 
     def test_atom_path_classified_as_reusable(self):
-        """An atom-owned kernel source under /app/ATOM/atom/ is NOT runtime-generated even if its name matches a compile marker."""
+        """An atom-owned kernel source under /app/ATOM/atom/ is NOT runtime-generated."""
         markers = krh._COMPILE_GENERATED_NAME_MARKERS
         if not markers:
             pytest.skip("compile markers empty in build")
@@ -1057,7 +1095,7 @@ class TestReusableSourceRootsAtom:
         if not markers:
             pytest.skip("compile markers empty in build")
         marker = next(iter(markers))
-        # Under /app/ but not /app/ATOM/atom/ → runtime-generated (not reusable).
+        # Under /app/ but not /app/ATOM/atom/ -> runtime-generated (not reusable).
         result = krh._is_runtime_generated_kernel(
             marker,
             "/app/session_dir/runs/baseline/foo.py",
@@ -1065,7 +1103,6 @@ class TestReusableSourceRootsAtom:
         assert result is True
 
 
-# run_gemm_tuning_handler
 class TestRunGemmTuningHandler:
     def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
@@ -1192,6 +1229,47 @@ class TestRunGemmTuningHandler:
 
         assert result["status"] == "ok"
 
+    def test_geak_without_config_falls_back_to_forge(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("GEAK_CONFIG", raising=False)
+        root = tmp_path / "kernel-agent"
+        root.mkdir()
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path="/models/qwen-fp8",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            baseline_tput=4479.0,
+        )
+        state.save(tmp_path)
+        called: dict[str, object] = {}
+
+        async def fake_forge(payload: dict, *, session_dir: Path):
+            called["payload"] = payload
+            called["session_dir"] = session_dir
+            return {"status": "complete", "backend": "forge", "engine": "forge"}
+
+        async def fail_geak_subprocess(cmd, *, timeout_sec):
+            raise AssertionError("legacy GEAK subprocess should not run without config")
+
+        monkeypatch.setattr(krh, "_run_forge_gemm_tuning", fake_forge)
+        monkeypatch.setattr(krh, "_run_subprocess", fail_geak_subprocess)
+
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler({"task_id": "legacy-geak"}, session_dir=tmp_path)
+        )
+
+        assert called["session_dir"] == tmp_path
+        assert result["backend"] == "forge"
+        assert result["requested_backend"] == "geak"
+        assert result["fallback_backend"] == "forge"
+        assert result["fallback_reason"] == "legacy_geak_config_missing"
+
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
         state = SharedState(
@@ -1237,16 +1315,13 @@ class TestRunGemmTuningHandler:
         input_path = cmd[cmd.index("--input-json") + 1]
         data = json.loads(Path(input_path).read_text())
         assert data["precision"] == "fp8"
-        # Do not force blockscale from Hyperloom. Forge should inspect
-        # kernel_signature_log when available; without a log it defaults to
-        # blockscale internally.
+        # Do not force blockscale from Hyperloom; forge decides (auto).
         assert data["quant_type"] == "auto"
         assert data["conc"] == 256
         assert result["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
 
     def test_handler_writes_gemm_tuning_audit_row(self, tmp_path, monkeypatch):
-        """run_gemm_tuning_handler appends a source-attribution audit row that
-        the Langfuse emitter backfills as a ``gemm_tuning:<engine>`` span."""
+        """run_gemm_tuning_handler appends a source-attribution audit row backfilled as a ``gemm_tuning:<engine>`` span."""
         from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
 
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
@@ -1396,14 +1471,11 @@ class TestRunGemmTuningHandler:
         assert krh._resolve_forge_shapes(state, session_dir) == str(shapes)
 
 
-# _default_geak_budget_minutes / _geak_budget_minutes — orchestrator-side mirror
-# _default_kernel_batch_parallel — adaptive batch fanout; the legacy 8
-# over-admitted on smaller pods (4-GPU labs, partial-node CI shards).
+# _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs.
 class TestDefaultKernelBatchParallel:
     @pytest.fixture
     def patch_torch(self, monkeypatch):
-        """Returns a setter that overrides ``torch.cuda.device_count`` and
-        ``$KERNEL_AGENT_NUM_GPUS`` for the helper under test."""
+        """Returns a setter that overrides ``torch.cuda.device_count`` and ``$KERNEL_AGENT_NUM_GPUS``."""
         torch = _ensure_torch_module(monkeypatch)
 
         def _set(n_gpus, per_task=None):
@@ -1418,18 +1490,17 @@ class TestDefaultKernelBatchParallel:
     @pytest.mark.parametrize(
         "n_gpus, per_task, expected",
         [
-            # Exact full-node match (8 GPU, 1 GPU/task) -> cap kicks in at 8.
+            # Full-node match: cap kicks in at 8.
             (8, 1, 8),
             # Partial node -> floor at the visible-GPU count.
             (4, 1, 4),
-            # 8-GPU node with 4-GPU GEAK reservations -> 2 concurrent.
+            # 8-GPU node with 4-GPU reservations -> 2 concurrent.
             (8, 4, 2),
             # 4-GPU pod with 2-GPU per task -> 2 concurrent.
             (4, 2, 2),
             # Larger-than-cap node -> cap still kicks in.
             (16, 1, 8),
-            # Per-task larger than visible -> floor at 1 (don't stall the
-            # batch with semaphore=0).
+            # Per-task larger than visible -> floor at 1.
             (1, 4, 1),
         ],
     )
@@ -1466,21 +1537,14 @@ class TestDefaultKernelBatchParallel:
         assert krh._default_kernel_batch_parallel() == krh._DEFAULT_KERNEL_BATCH_PARALLEL
 
 
-# ---------------------------------------------------------------------------
-# _should_parallelize_backends
-#
-# With the ladder converged to forge-only there is no second (legacy backend) ladder
-# to race, so backends never auto-parallelize regardless of GPU count. The flag
-# is False unless explicitly forced via payload ``parallel_backends`` or env
-# ``KERNEL_OPT_PARALLEL_BACKENDS``.
-# ---------------------------------------------------------------------------
+# _should_parallelize_backends — backends never auto-parallelize; False unless
+# forced via payload ``parallel_backends`` or env ``KERNEL_OPT_PARALLEL_BACKENDS``.
 
 
 class TestShouldParallelizeBackends:
     @pytest.fixture
     def patch_torch(self, monkeypatch):
-        """Override ``torch.cuda.device_count`` + ``$KERNEL_AGENT_NUM_GPUS``
-        and clear the env override so the GPU-aware math is exercised."""
+        """Override ``torch.cuda.device_count`` + ``$KERNEL_AGENT_NUM_GPUS`` and clear the env override."""
         torch = _ensure_torch_module(monkeypatch)
 
         def _set(n_gpus, per_task=None):
@@ -1496,9 +1560,8 @@ class TestShouldParallelizeBackends:
     @pytest.mark.parametrize(
         "n_gpus, per_task, num_candidates",
         [
-            # No auto-parallelize regardless of GPU count: the removed backend ladder that
-            # used to be raced against GEAK has been removed, so without an
-            # explicit override the decision is always sequential (False).
+            # No auto-parallelize regardless of GPU count: without an explicit
+            # override the decision is always sequential (False).
             (8, 1, 3),
             (8, 1, 100),
             (2, 1, 1),
@@ -1577,8 +1640,6 @@ class TestShouldParallelizeBackends:
         assert krh._should_parallelize_backends({}, 1) is False
 
 
-# ---------------------------------------------------------------------------
-# _reconcile_kernel_id
 class TestReconcileKernelId:
     CANDS = [
         {"kernel_id": "k001", "name": "aten::mm"},
@@ -1589,8 +1650,7 @@ class TestReconcileKernelId:
         assert krh._reconcile_kernel_id("k010", self.CANDS) == "k010"
 
     def test_name_match_kept(self):
-        # An exact operator-name match is canonicalized to the candidate id so
-        # downstream lifecycle/results are keyed by the stable k00x id.
+        # An exact operator-name match is canonicalized to the stable k00x id.
         assert krh._reconcile_kernel_id("aten::mm", self.CANDS) == "k001"
 
     def test_normalized_prefix_resolves_to_real_id(self):
@@ -1602,9 +1662,7 @@ class TestReconcileKernelId:
         assert krh._reconcile_kernel_id(None, self.CANDS) == "k001"
 
     def test_hallucinated_id_is_left_for_guard_or_cli_skip(self):
-        # Non-empty ids are never guessed. A pure hallucination should flow to
-        # the reusable-native guard / CLI skip path rather than being mapped to
-        # an unrelated candidate.
+        # Non-empty ids are never guessed; a pure hallucination is left untouched.
         assert krh._reconcile_kernel_id("aiter.silu_and_mul", self.CANDS) == "aiter.silu_and_mul"
         assert (
             krh._reconcile_kernel_id("framework_sglang_silu_and_mul_m64", self.CANDS)
@@ -1613,8 +1671,7 @@ class TestReconcileKernelId:
 
 
 # _resolve_candidate_id / _all_kernel_candidates — canonicalizes an aliased id
-# against the full hot ∪ skipped set (no fallback) so the reusable-native guard
-# rejects the real k00x rather than the raw hallucinated alias.
+# against the full hot ∪ skipped set (no fallback).
 class TestResolveCandidateId:
     SKIPPED = [
         {"kernel_id": "k001", "name": "aten::mm", "reusable_native_kernel": False, "source_file": ""},
@@ -1630,8 +1687,7 @@ class TestResolveCandidateId:
         assert krh._resolve_candidate_id("rn010", self.SKIPPED) == "k010"
 
     def test_non_unique_or_nonroutable_name_not_resolved(self):
-        # ``aten::mm`` is non-unique and non-routable -> cannot disambiguate,
-        # so leave it untouched (returns "") rather than guess a k00x.
+        # ``aten::mm`` is non-unique and non-routable -> leave untouched ("").
         assert krh._resolve_candidate_id("aten::mm", self.SKIPPED) == ""
 
     def test_pure_hallucination_returns_empty(self):
@@ -1661,11 +1717,8 @@ class TestAllKernelCandidates:
         assert krh._all_kernel_candidates({}) == []
 
     def test_dedups_skipped_subset_of_hot(self, tmp_path):
-        # P0 contract: ``hot_kernels`` is the FULL ranked set and
-        # ``skipped_kernels`` is its non-routable subset, so the two lists
-        # OVERLAP on-disk. ``_all_kernel_candidates`` must count each kernel
-        # once (else ``kernels_considered`` double-counts every non-routable
-        # hotspot). Regression for the routable-only -> full contract change.
+        # ``hot_kernels`` is the full ranked set and ``skipped_kernels`` its
+        # non-routable subset (they overlap); each kernel must be counted once.
         cp = tmp_path / "kc.json"
         hot = [
             {"kernel_id": "k001", "name": "moe", "reusable_native_kernel": True},
@@ -1675,13 +1728,13 @@ class TestAllKernelCandidates:
         skipped = [dict(c) for c in hot if not c["reusable_native_kernel"]]  # subset of hot
         cp.write_text(json.dumps({"hot_kernels": hot, "skipped_kernels": skipped}), encoding="utf-8")
         out = krh._all_kernel_candidates({"candidates_path": str(cp)})
-        # Each kernel exactly once, hot order preserved (not 3 hot + 2 skipped = 5).
+        # Each kernel exactly once, hot order preserved.
         assert [c["kernel_id"] for c in out] == ["k001", "k002", "k003"]
         assert len(out) == 3
 
     def test_dedups_by_name_when_kernel_id_missing(self, tmp_path):
-        # Fall back to ``name`` when ``kernel_id`` is absent so the overlap is
-        # still collapsed; a row with neither id nor name is never dropped.
+        # Fall back to ``name`` when ``kernel_id`` is absent; a row with neither
+        # id nor name is never dropped.
         cp = tmp_path / "kc.json"
         cp.write_text(
             json.dumps(
@@ -1801,8 +1854,7 @@ class TestBatchKernelCandidatesRetryBudget:
 
 
 class TestTracelensRootResolution:
-    """TraceLens root is resolved/validated independently of inherited env so
-    trace analysis does not silently fail when TRACELENS_ROOT is missing."""
+    """TraceLens root is resolved/validated independently of inherited env."""
 
     def test_resolve_uses_explicit_env_override(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "tl"))
@@ -1816,7 +1868,7 @@ class TestTracelensRootResolution:
 
     def test_root_error_none_when_present(self, tmp_path):
         tl = tmp_path / "tl"
-        (tl / ".git").mkdir(parents=True)  # a usable git checkout
+        (tl / ".git").mkdir(parents=True)  # usable git checkout
         assert krh._tracelens_root_error(tl) is None
 
     def test_root_error_message_when_missing(self, tmp_path):
@@ -1835,9 +1887,8 @@ class TestTracelensRootResolution:
     def test_trace_analyze_handler_selfheals_default_root_then_fails_if_unrecovered(
         self, tmp_path, monkeypatch
     ):
-        # Default (non-override) root missing: handler must ATTEMPT self-heal
-        #  before the fail-fast. We stub the heal to a no-op so the root
-        # stays missing and the handler still returns the structured error.
+        # Default root missing: handler attempts self-heal before failing.
+        # Stub the heal to a no-op so the handler returns the structured error.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "no-tracelens-here"))
@@ -1855,13 +1906,12 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
- # a default checkout that EXISTS but is incomplete (dir
-        # present, no .git) must still trigger self-heal — gating on is_dir()
-        # alone would skip it.
+ # an incomplete default checkout (dir present, no .git) must still
+        # trigger self-heal.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
-        # Create an incomplete default checkout: the dir exists but has no .git.
+        # Incomplete default checkout: dir exists but has no .git.
         incomplete = tmp_path / "podlocal" / "TraceLens"
         incomplete.mkdir(parents=True)
         (incomplete / "partial").write_text("half", encoding="utf-8")
@@ -1869,8 +1919,7 @@ class TestTracelensRootResolution:
 
         def _fake_heal(root, *, log=None):
             called["n"] += 1
-            # Simulate an unrecoverable heal so the handler fail-fasts here
-            # instead of proceeding to launch the real tool subprocess.
+            # Simulate an unrecoverable heal so the handler fail-fasts here.
             shutil.rmtree(root, ignore_errors=True)
 
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
@@ -1882,9 +1931,8 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
- # a NON-default operator override that exists but is
-        # incomplete (dir present, no .git) must fail fast — never adopted as
-        # usable, never auto-cloned.
+ # an incomplete non-default operator override (dir present, no .git)
+        # must fail fast — never adopted, never auto-cloned.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
         override = tmp_path / "operator-tl"
@@ -1903,9 +1951,8 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_selfheal_skips_non_default_override(self, tmp_path, monkeypatch):
-        # An operator override at a NON-default path is never auto-cloned, even
-        # though TRACELENS_ROOT is set in env. Inject a counting fake module so a
-        # regression that reaches _ensure_tracelens_checkout would trip the assert.
+        # An operator override at a non-default path is never auto-cloned, even
+        # with TRACELENS_ROOT set. A counting fake trips if _ensure_tracelens_checkout runs.
         monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
         override = tmp_path / "operator-tl"
         monkeypatch.setenv("TRACELENS_ROOT", str(override))
@@ -1930,9 +1977,8 @@ class TestTracelensRootResolution:
         assert called["n"] == 0
 
     def test_selfheal_runs_on_default_path_even_when_env_set(self, tmp_path, monkeypatch):
- # the default path is persisted as TRACELENS_ROOT in
-        # kernel-agent.env.sh, so "env set" must NOT be treated as an override.
-        # A missing default path must still attempt self-heal.
+ # the default path is persisted as TRACELENS_ROOT, so "env set" is not
+        # an override; a missing default path must still attempt self-heal.
         monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
         default_root = tmp_path / "podlocal" / "TraceLens"
         monkeypatch.setenv("TRACELENS_ROOT", str(default_root))
@@ -1943,7 +1989,7 @@ class TestTracelensRootResolution:
             called["root"] = Path(root)
 
         # Route _kernel_agent_tool_path to a fake module exposing
-        # _ensure_tracelens_checkout so the handler's dynamic import hits it.
+        # _ensure_tracelens_checkout.
         import sys as _sys
         import types as _types
 
@@ -1973,8 +2019,7 @@ class TestKernelOptArtifactBundleRecording:
              "commit", "-qm", "base"],
             check=True,
         )
-        # forge-fusion exports after authoring, so the live tree is already dirty
-        # with final bytes. Snapshot materialization must still start from HEAD.
+        # The live tree is already dirty; snapshot materialization must start from HEAD.
         (repo / "model.py").write_text("new = 2\n", encoding="utf-8")
         (repo / "model_fused.py").write_text("fused = True\n", encoding="utf-8")
         patch = tmp_path / "fusion.patch"
@@ -2022,7 +2067,7 @@ class TestKernelOptArtifactBundleRecording:
             "write_paths": ["aiter/ops/moe.py", "benchmarks/bench_moe.py"],
             "delete_paths": [],
         }
-        krh.record_kernel_opt(
+        kd.record_kernel_opt(
             state,
             {
                 "status": "completed",

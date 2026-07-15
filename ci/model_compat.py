@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
 """Shared model-compatibility rules for the AMD/ROCm serving stack.
 
-Single source of truth used by both the offline pool filter
-(``filter_candidates.py``) and the online per-model pre-flight in
-``optimize_submit.py``. ``unrunnable_reason`` is a pure predicate over a HF
-``config.json`` dict (plus an optional local model directory for file checks);
-``hf_gated`` is the network-based gated/404 probe and ``hf_missing_tokenizer``
-the network-based weights-but-no-tokenizer probe, both used by the offline
-filter (the latter mirrors the local ``missing_tokenizer`` rule for repos that
-are not cached on disk yet).
+Used by both the offline pool filter (``filter_candidates.py``) and the online
+per-model pre-flight in ``optimize_submit.py``. ``unrunnable_reason`` is a pure
+predicate over a HF ``config.json`` dict (plus an optional local model directory
+for file checks); ``hf_gated`` is the network gated/404 probe and
+``hf_missing_tokenizer`` the network weights-but-no-tokenizer probe.
 
 All rules are config-deterministic except ``missing_tokenizer`` (needs the local
-model dir) and gated/404 (network); the config rules are therefore safe to run
-both offline (pool build) and online (after prewarm, before submit).
+model dir) and gated/404 (network).
 """
 import functools
 import json
@@ -25,9 +25,7 @@ import urllib.request
 # Context window at or below this is too small to be worth a sandbox slot.
 SHORT_CTX_MAX = 2048
 
-# Curated daily-fixed pool: every repo listed there is hand-picked and may
-# intentionally include otherwise-filtered models (e.g. multimodal MoE run in
-# text mode). Such repos are exempt from ALL compatibility filtering.
+# Curated daily-fixed pool: repos exempt from all compatibility filtering.
 DAILY_FIXED_DEFAULT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "candidates", "inferencex_daily_fixed.json")
@@ -45,12 +43,10 @@ def load_whitelist(path=None):
     except Exception:
         return frozenset()
 
-# Explicit vision / multimodal architecture markers. NOTE: we deliberately do
-# NOT match the bare ``*ForConditionalGeneration`` suffix — several text-only
-# MoE models (e.g. Qwen3_5Moe / KimiK25) use that suffix without being vision
-# models. Genuine multimodal models are caught here by an explicit vision
-# token, by a vision ``model_type``, or by a ``vision_config`` block (see
-# ``unrunnable_reason``).
+# Explicit vision / multimodal architecture markers. The bare
+# ``*ForConditionalGeneration`` suffix is not matched (text-only MoE models use
+# it too); multimodal is caught by a vision token, vision model_type, or
+# vision_config block.
 VISION_ARCH = re.compile(
     r"(Llava|InternVL|Idefics\d?|PaliGemma|Florence|Mllama|Qwen\w*VL|VLForCausalLM|"
     r"VLMoe|Gemma3ForConditional|Gemma4ForConditional|Llama4ForConditional|"
@@ -67,16 +63,15 @@ _TOKENIZER_FILES = {"tokenizer.json", "tokenizer.model", "vocab.json",
 # Weight shard extensions used to tell "has model weights" from a file listing.
 _WEIGHT_EXTS = (".safetensors", ".bin", ".pt")
 
-# Native FP4 quant tags. gfx942 (MI300X / MI325X) has NO native FP4 datapath,
-# so these models cannot serve there; gfx950 (MI355X) is fine.
+# Native FP4 quant tags. gfx942 (MI300X / MI325X) has no native FP4 datapath;
+# gfx950 (MI355X) is fine.
 _FP4_QUANT_TAGS = ("mxfp4", "nvfp4")
 
 
 def _quant_tag(config):
     """Return the lowercased quantization tag from a HF config.json dict.
 
-    Mirrors optimize_submit._quant_type field priority (vendors disagree on the
-    field name): quant_algo > quant_type > quantization_type > quant_method >
+    Field priority: quant_algo > quant_type > quantization_type > quant_method >
     method. Returns "" when the model is not quantized.
     """
     quant = config.get("quantization_config") or {}
@@ -101,19 +96,14 @@ def is_mi300x(gpu_type):
     return compact == "mi300x" or compact.endswith("mi300x")
 
 
-# Models that must NOT run on MI300X regardless of config: the full DeepSeek-V4
-# (too large for single-node gfx942) and the GLM-5 series (multi-node only). The
-# ``(?![0-9])`` guards stop GLM-4.7 / GLM-50 / DeepSeek-V40 false hits. The
-# allow-regex carves out DeepSeek-V4-Flash, which IS supported on MI300X.
+# Models never run on MI300X regardless of config: full DeepSeek-V4 and GLM-5
+# series. The (?![0-9]) guards stop GLM-4.7 / GLM-50 / DeepSeek-V40 false hits;
+# the allow-regex carves out DeepSeek-V4-Flash.
 _MI300X_BLOCK_RE = re.compile(r"deepseek[-_]?v4(?![0-9])|glm[-_]?5(?![0-9])", re.I)
 _MI300X_ALLOW_RE = re.compile(r"deepseek[-_]?v4[-_]?flash", re.I)
 
-# Non-LLM model families that can appear in broad HF pools but cannot be served
-# by Hyperloom's text-generation benchmark path. Some of these repos (for
-# example FLUX.1-dev) do not have a HF ``config.json`` at the repo root, so keep
-# this repo-name gate outside the config-only rules. Keep the patterns
-# family/token-scoped: a broad ``diffusion`` substring would also match possible
-# text-generation research repos whose config is otherwise runnable.
+# Non-LLM model families that cannot be served by the text-generation benchmark
+# path. Patterns are family/token-scoped to avoid over-matching.
 _NON_LLM_RE = re.compile(
     r"(^|[/_-])flux(\.|[/_-]|$)"
     r"|(^|[/_-])stable[-_]?diffusion([/_-]|$)"
@@ -124,9 +114,8 @@ _NON_LLM_RE = re.compile(
 
 
 def mi300x_blocked_model(repo):
-    """Return the matched model token when ``repo`` is one we never run on
-    MI300X (full DeepSeek-V4 or GLM-5 series), else "". DeepSeek-V4-Flash is
-    explicitly exempt.
+    """Return the matched model token when ``repo`` is one never run on MI300X
+    (full DeepSeek-V4 or GLM-5 series), else "". DeepSeek-V4-Flash is exempt.
     """
     name = str(repo or "")
     if _MI300X_ALLOW_RE.search(name):
@@ -144,19 +133,13 @@ def non_llm_repo(repo):
 
 
 # Serving registries with no working AMD/ROCm path: config-deterministic and
-# GPU-independent (they fail to load on MI300X and MI355X alike). Keyed by
-# model_type with an architecture fallback. NOTE: NVIDIA ModelOpt FP8 is handled
-# by the modelopt_fp8 rule, and full DeepSeek-V4 by the MI300X repo-name rule
-# (its DeepseekV4ForCausalLM registry is shared with the supported V4-Flash, so
-# it cannot be filtered by arch without dropping V4-Flash too).
+# GPU-independent. Keyed by model_type with an architecture fallback.
 _UNSUPPORTED_REGISTRY_BY_MT = {
     "glm_moe_dsa":  "GLM glm_moe_dsa registry not supported on AMD/ROCm",
     "deepseek_v32": "DeepSeek V3.2 (deepseek_v32) missing AMD runtime path",
     "gemma4":       "Gemma4 is not recognized by the current vLLM/Transformers runtime",
     "rwkv6qwen2":   "RWKV6/Qwen2 hybrid architecture is not supported by sglang/vLLM",
-    # Qwen3.6 MoE: this model_type appears as text_config.model_type; the new
-    # arch is not in the vLLM/Transformers registry, so the baseline server
-    # fails to start.
+    # Qwen3.6 MoE: carried as text_config.model_type; arch not in the registry.
     "qwen3_5_moe_text": "Qwen3.6 MoE (qwen3_5_moe_text) not in vLLM/Transformers registry",
 }
 _UNSUPPORTED_REGISTRY_BY_ARCH = {
@@ -190,7 +173,7 @@ def has_tokenizer(model_dir):
     """True if the local dir contains a usable tokenizer file (or is unknown)."""
     files = _listdir(model_dir)
     if files is None:
-        return True  # cannot tell -> assume present (do not skip)
+        return True  # cannot tell -> assume present
     return bool(files & _TOKENIZER_FILES)
 
 
@@ -215,7 +198,7 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=
     mi300x_unsupported_model (MI300X only), missing_tokenizer.
     """
     if whitelist and repo and repo in whitelist:
-        return None  # curated/whitelisted repo -> never filtered
+        return None
     blocked_non_llm = non_llm_repo(repo)
     if blocked_non_llm:
         return (
@@ -231,9 +214,7 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=
     rope = config.get("rope_scaling") or {}
     blob = json.dumps(config).lower()
 
-    # 1) multimodal / VL — explicit vision arch token, vision model_type, or a
-    #    vision_config/vision_tower block. Bare *ForConditionalGeneration is NOT
-    #    treated as multimodal on its own (text-only MoE use it too).
+    # 1) multimodal / VL — vision arch token, model_type, or config block.
     if (VISION_ARCH.search(arch) or mt in VISION_MT
             or isinstance(config.get("vision_config"), dict)
             or "vision_tower" in blob):
@@ -248,7 +229,6 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=
         if mpe is not None and int(mpe) <= SHORT_CTX_MAX:
             return ("short_ctx", f"max_position_embeddings={mpe}<={SHORT_CTX_MAX}")
     except (TypeError, ValueError):
-        # Missing/invalid field; fall through to the next heuristic.
         pass
 
     # 3) Phi3 longrope
@@ -279,9 +259,7 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=
     if attn == "flashinfer" or "flashinfer" in blob:
         return ("attn_backend", "requires flashinfer (not on ROCm)")
 
-    # 8) Unsupported serving registry / missing AMD runtime path (config-based,
-    #    GPU-independent): e.g. GLM glm_moe_dsa, DeepSeek V3.2 (deepseek_v32),
-    #    Qwen3.6 MoE (qwen3_5_moe_text, carried as text_config.model_type).
+    # 8) Unsupported serving registry / missing AMD runtime path (config-based).
     tc = config.get("text_config")
     tc_mt = (tc.get("model_type") or "").lower() if isinstance(tc, dict) else ""
     detail = (_UNSUPPORTED_REGISTRY_BY_MT.get(mt)
@@ -290,14 +268,13 @@ def unrunnable_reason(config, repo="", model_dir=None, whitelist=None, gpu_type=
     if detail:
         return ("unsupported_arch", detail)
 
-    # 9) GPU-specific: native FP4 cannot run on MI300X (gfx942 has no FP4
-    #    datapath). Only applied when the caller passes gpu_type=MI300X.
+    # 9) GPU-specific: native FP4 cannot run on MI300X (gfx942 has no datapath).
     if is_mi300x(gpu_type) and is_fp4_native(config):
         return ("fp4_unsupported",
                 f"native FP4 ({_quant_tag(config)}) not supported on MI300X (gfx942)")
 
     # 10) GPU-specific: model never run on MI300X (full DeepSeek-V4 / GLM-5
-    #     series; DeepSeek-V4-Flash exempt). Matched by repo id, MI300X only.
+    #     series; DeepSeek-V4-Flash exempt). Matched by repo id.
     if is_mi300x(gpu_type):
         blocked = mi300x_blocked_model(repo)
         if blocked:
@@ -374,12 +351,9 @@ def hf_missing_tokenizer(repo, tokens):
     """Return 'missing_tokenizer' when the HF repo ships weights but no tokenizer.
 
     Network mirror of the local ``missing_tokenizer`` rule in
-    ``unrunnable_reason`` (which needs a downloaded model dir). Lets the offline
-    pool filter drop weights-only repos (merged / sharded / finetune dumps that
-    omit tokenizer.* files) BEFORE a sandbox slot is wasted downloading them and
-    the server fails to start. Fail-open: returns None on any fetch error or
-    when the file list cannot be read, so a model we cannot inspect is never
-    dropped on a network hiccup.
+    ``unrunnable_reason``, letting the offline pool filter drop weights-only
+    repos before a sandbox slot is wasted. Fail-open: returns None on any fetch
+    error or unreadable file list.
 
     Args:
         repo: HF repo id.
@@ -403,7 +377,7 @@ def hf_missing_tokenizer(repo, tokens):
             return "missing_tokenizer" if (has_w and not has_t) else None
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
-                return None  # gated/forbidden -> let hf_gated handle it
+                return None  # gated -> let hf_gated handle it
             if e.code == 404:
                 return None
             if e.code == 429:

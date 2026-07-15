@@ -18,12 +18,10 @@ class _CP:
         self.stderr = stderr
 
 
-# ---- _now_iso -------------------------------------------------------------
 def test_now_iso():
     assert "T" in ip._now_iso()
 
 
-# ---- _resolve_framework_root ----------------------------------------------
 def test_resolve_framework_root_explicit_dir(tmp_path):
     assert ip._resolve_framework_root(str(tmp_path)) == tmp_path
 
@@ -32,7 +30,6 @@ def test_resolve_framework_root_explicit_missing_then_git(tmp_path, monkeypatch)
     gitroot = tmp_path / "fw"
     (gitroot / ".git").mkdir(parents=True)
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(gitroot)])
-    # explicit doesn't exist -> warn + fall back to git allowlist entry
     assert ip._resolve_framework_root("/no/such/dir") == gitroot
 
 
@@ -48,7 +45,6 @@ def test_resolve_framework_root_none(monkeypatch):
     assert ip._resolve_framework_root(None) is None
 
 
-# ---- _run_git_apply spawn failure -----------------------------------------
 def test_run_git_apply_spawn_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
     ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, three_way=False, check_only=True)
@@ -62,7 +58,6 @@ def test_run_git_apply_success(tmp_path, monkeypatch):
     assert ok is True
 
 
-# ---- _preflight_missing_targets read error --------------------------------
 def test_preflight_missing_targets_read_error(tmp_path):
     # A directory path -> read_text raises OSError -> skipped
     records = ip._preflight_missing_targets(tmp_path, [tmp_path])
@@ -77,7 +72,6 @@ def test_preflight_missing_targets_records(tmp_path, monkeypatch):
     assert records[0]["missing_targets"] == ["a/ghost.py"]
 
 
-# ---- _git_apply check_only after detect -----------------------------------
 def test_git_apply_check_only_after_detect(tmp_path, monkeypatch):
     monkeypatch.setattr(ip, "_detect_p_level", lambda *a, **k: 2)
     ok, err = ip._git_apply(tmp_path, tmp_path / "p.patch", check_only=True)
@@ -98,7 +92,6 @@ def test_git_apply_real_apply(tmp_path, monkeypatch):
     assert ok is True
 
 
-# ---- _git_apply_reverse ---------------------------------------------------
 def test_git_apply_reverse_success(tmp_path, monkeypatch):
     # check passes at level 1, then real reverse-apply succeeds
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(0, ""))
@@ -145,12 +138,11 @@ def test_git_apply_reverse_no_level(tmp_path, monkeypatch):
     assert ok is False and "no matching -p level" in err
 
 
-# ---- _patch_touched_paths / commit scoping --------------------------------
 _DIFF = "--- a/pkg/mod.py\n+++ b/pkg/mod.py\n@@ -1 +1 @@\n-old\n+new\n"
 
 
 def test_patch_touched_paths_returns_only_patched_file(tmp_path):
-    # Source file the patch targets exists; an unrelated dirty file does NOT.
+    # Patch-targeted file exists; an unrelated dirty file does not.
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "mod.py").write_text("new\n", encoding="utf-8")
     (tmp_path / "unrelated.py").write_text("dirty\n", encoding="utf-8")
@@ -171,14 +163,12 @@ def test_patch_touched_paths_skips_unresolvable_and_creations(tmp_path):
     assert ip._patch_touched_paths(tmp_path, [patch]) == ["new.py"]
 
 
-# ---- Deletion-only KEEP patches are staged for commit ----------------------
 def test_patch_touched_paths_emits_deleted_path(tmp_path):
     """A pure-deletion patch emits the OLD path so git add -A stages the removal.
 
     Post-apply the file is gone (new == /dev/null); the old path must still be
     returned, else the KEEP commits nothing and a later REVERT resurrects it.
     """
-    # File was already deleted by the (already-applied) patch — gone from disk.
     delete = (
         "--- a/pkg/gone.py\n"
         "+++ /dev/null\n"
@@ -239,7 +229,6 @@ def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
     assert add_cmd[-3:] == ["-A", "--", "pkg/mod.py"]
 
 
-# ---- _git_checkout_clean spawn failure ------------------------------------
 def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
     """git checkout spawn failure is reported directly."""
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
@@ -247,7 +236,6 @@ def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
     assert ok is False and "checkout spawn failed" in err
 
 
-# ---- _git_stash_if_dirty three-state tests --------------------------------
 def test_stash_if_dirty_clean_tree(tmp_path, monkeypatch):
     """Clean working tree → returns 'clean'."""
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})())
@@ -318,7 +306,6 @@ def test_with_stash_restore_adds_error_on_failure(tmp_path, monkeypatch):
     assert out["stash_restore_error"] == "boom"
 
 
-# ---- _resolve_patch_paths -------------------------------------------------
 def test_resolve_patch_paths_scan(tmp_path):
     base = tmp_path / "patches"
     base.mkdir()
@@ -345,7 +332,6 @@ def test_resolve_patch_paths_from_done_payload(tmp_path):
     assert out[0].name == "x.patch"
 
 
-# ---- Path containment ------------------------------------------------------
 def test_resolve_patch_paths_drops_outside_workspace(tmp_path):
     """An absolute patch path outside the specialist workspace is dropped."""
     workspace = tmp_path / "ws"
@@ -388,7 +374,6 @@ def test_resolve_patch_paths_containment_survives_symlinked_workspace(tmp_path):
     assert [p.name for p in out] == ["ok.patch"]
 
 
-# ---- _read_done_payload ---------------------------------------------------
 def test_read_done_payload(tmp_path):
     assert ip._read_done_payload(tmp_path) is None
     (tmp_path / "specialist_done.json").write_text("{bad", encoding="utf-8")
@@ -397,7 +382,6 @@ def test_read_done_payload(tmp_path):
     assert ip._read_done_payload(tmp_path) == {"ok": 1}
 
 
-# ---- _revert_patches fallback chain ---------------------------------------
 def _executor():
     return ip.IntegratePatchExecutor(session_dir=None)
 

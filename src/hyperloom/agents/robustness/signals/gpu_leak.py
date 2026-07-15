@@ -5,8 +5,7 @@
 Fires when every visible GPU is near-full AND no known inference-server owner process
 is live — the classic ROCm KFD leak fingerprint after a crashed EngineCore. Stateful
 (requires ``min_consecutive_ticks`` to skip the baseline cold-start VRAM ramp) and
-cross-correlates ``local_gpu`` + ``local_processes``, so it lives in its own detector
-class rather than M1 :mod:`local_health`.
+cross-correlates ``local_gpu`` + ``local_processes``.
 """
 
 from __future__ import annotations
@@ -21,9 +20,7 @@ if TYPE_CHECKING:
 from .symptom import Symptom, SymptomSeverity
 
 
-# Inference-server / benchmark owners whose presence proves VRAM use is legitimate,
-# not leaked. Mirrors ``_DEFAULT_PROCESS_PATTERNS`` in sources.local_probe; the vLLM v1
-# entries close the gap where ``EngineCore-`` child PIDs hold VRAM without ``vllm.entrypoints``.
+# Inference-server / benchmark owners whose presence proves VRAM use is legitimate.
 _DEFAULT_OWNER_PATTERNS: tuple[str, ...] = (
     "sglang.launch_server",
     "sglang.srt",
@@ -76,7 +73,7 @@ class GpuLeakDetector:
         """
         self._config = config or GpuLeakConfig()
         self._state_view = state_view
-        # Disk-backed counter so the multi-tick threshold survives the subprocess-per-tick transport.
+        # Disk-backed counter so the multi-tick threshold survives ticks.
         loaded = state_view.load() if state_view is not None else {}
         raw_hits = loaded.get("consecutive_hits", 0)
         try:
@@ -118,7 +115,7 @@ class GpuLeakDetector:
         """
         gpus = self._extract_gpu_snapshots(data)
         if not gpus:
-            # No GPU data → reset so the next tick doesn't accumulate stale state.
+            # No GPU data → reset.
             self._consecutive_hits = 0
             self._persist()
             return []
@@ -269,27 +266,7 @@ class GpuLeakDetector:
             ),
         )
 
-
-def evaluate_gpu_leak_signals(
-    detector: GpuLeakDetector,
-    ctx: ReactorContext,
-    data: SourceData,
-) -> list[Symptom]:
-    """Adapt the stateful detector to the ``(ctx, data)`` entry point.
-
-    Args:
-        detector: The stateful GPU-leak detector instance.
-        ctx: Reactor context for the current tick.
-        data: Collected source data.
-
-    Returns:
-        The symptoms produced by the detector.
-    """
-    return detector.evaluate(ctx, data)
-
-
 __all__ = [
     "GpuLeakConfig",
     "GpuLeakDetector",
-    "evaluate_gpu_leak_signals",
 ]

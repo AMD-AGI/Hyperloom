@@ -1,19 +1,11 @@
 """Canonical kernel-category display vocabulary shared across trace routes.
 
-The two trace-analysis backends carry route-native category taxonomies:
-  - bypass (``_bypass_classify``): ``GEMM / SDPA / Elementwise / Normalization /
-    Convolution / Quantization / KVCacheStore / MoE / MemCpy / Others``.
-  - TraceLens deterministic (GEAK labels via ``normalize_upstream_category``):
-    ``GEMM / SDPA / Elementwise / Reduction / LayerNorm / Convolution / MoE /
-    Communication / Triton / FlyDSL / Other``.
+The two trace-analysis backends (bypass and TraceLens deterministic) carry
+route-native category taxonomies that overlap on common kernels but diverge at
+the margins and in casing. This module maps BOTH vocabularies onto ONE canonical
+display label so ``analysis.md`` shows a consistent category regardless of route.
 
-They overlap on the common kernels (GEMM/SDPA/Elementwise/Convolution/MoE) but
-diverge at the margins (``Others`` vs ``Other``; ``Normalization`` vs
-``LayerNorm``) and in casing when a raw upstream value leaks through. This module
-maps BOTH vocabularies onto ONE canonical display label so the human-facing
-``analysis.md`` shows a consistent category regardless of which route produced it.
-
-Display-only: this deliberately does NOT rewrite the ``kernel_category`` /
+Display-only: this does NOT rewrite the ``kernel_category`` /
 ``tracelens_category`` fields in ``kernel_candidates.json`` / ``kernel_roofline.json``,
 which downstream GEAK skill-routing consumes with its own taxonomy.
 
@@ -46,7 +38,7 @@ _CANONICAL: dict[str, str] = {
     "moe_aux": "MoE",
     # Elementwise.
     "elementwise": "Elementwise",
-    # Normalization (unify bypass "Normalization" + GEAK "LayerNorm").
+    # Normalization.
     "normalization": "Normalization",
     "norm": "Normalization",
     "norm_fwd": "Normalization",
@@ -72,7 +64,7 @@ _CANONICAL: dict[str, str] = {
     "triton": "Triton",
     "flydsl": "FlyDSL",
     "memcpy": "MemCpy",
-    # Catch-all (unify bypass "Others" + GEAK "Other").
+    # Catch-all.
     "other": "Other",
     "others": "Other",
     "cpu_idle": "Other",

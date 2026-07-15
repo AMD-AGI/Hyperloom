@@ -6,13 +6,12 @@ from __future__ import annotations
 
 from hyperloom.agents.framework.keywords import (
     extract_keywords,
-    score_title_against_keywords,
     score_title_with_anti_signal,
 )
 
 
 def test_extract_whitelist_hits_are_lowercase_and_sorted() -> None:
-    """Whitelist hits returned sorted+lowercase; ``mi300x`` asserted to guard the GPU-codename extension (else primus search drops the hardware constraint)."""
+    """Whitelist hits returned sorted+lowercase."""
     out = extract_keywords("improve vLLM fp8 MoE attention on ROCm AMD MI300X")
     assert out == sorted(out)
     assert "vllm" in out
@@ -23,11 +22,7 @@ def test_extract_whitelist_hits_are_lowercase_and_sorted() -> None:
     assert "mi300x" in out
 
 
-# ---------------------------------------------------------------------------
-# GPU hardware codename coverage (regression guard for the relevance bug
-# where ``mi300x`` / ``gfx942`` / ``sm90`` etc. fell through the whitelist
-# and Primus search lost the hardware dimension).
-# ---------------------------------------------------------------------------
+# GPU hardware codename coverage
 
 
 def test_extract_amd_cdna_codenames() -> None:
@@ -36,7 +31,6 @@ def test_extract_amd_cdna_codenames() -> None:
     assert "mi300x" in out
     assert "gfx942" in out
     assert "cdna3" in out
-    # baseline sanity: existing whitelist terms still recognised
     assert "sglang" in out
     assert "bf16" in out
 
@@ -50,12 +44,10 @@ def test_extract_nvidia_codenames() -> None:
     assert "ampere" in out
     assert "h100" in out
     assert "a100" in out
-    assert "moe" in out  # existing whitelist term preserved
+    assert "moe" in out
 
 
-# ---------------------------------------------------------------------------
 # atom framework keyword coverage
-# ---------------------------------------------------------------------------
 
 
 def test_extract_atom_framework_token() -> None:
@@ -68,7 +60,7 @@ def test_extract_atom_framework_token() -> None:
 
 
 def test_extract_atom_specific_terms() -> None:
-    """Pin atom-flavoured terms (MTP / DP attention / kv_cache_dtype / torch_profiler_dir) so search relevance stays on the atom axis."""
+    """Pin atom-flavoured terms (MTP / DP attention / kv_cache_dtype / torch_profiler_dir)."""
     out = extract_keywords("atom mtp dp_attention kv_cache_dtype fp8 torch_profiler_dir on mi355x")
     assert "atom" in out
     assert "mtp" in out
@@ -79,7 +71,7 @@ def test_extract_atom_specific_terms() -> None:
 
 
 def test_extract_realistic_io_framework_gap() -> None:
-    """End-to-end check on the IO ``--framework-gap`` template; before the codename extension ``mi300x`` was dropped and NVIDIA SM90 PRs wrongly won."""
+    """End-to-end check on the IO ``--framework-gap`` template."""
     out = extract_keywords("improve sglang bf16 dense throughput on mi300x")
     assert "sglang" in out, "framework token must be kept"
     assert "bf16" in out, "precision token must be kept"
@@ -87,7 +79,7 @@ def test_extract_realistic_io_framework_gap() -> None:
 
 
 def test_extract_keeps_camelcase_identifiers() -> None:
-    """Strict PascalCase identifiers survive (lowercased); runs of multiple caps (e.g. AsyncLLMEngine) are deliberately filtered to avoid acronym noise."""
+    """Strict PascalCase identifiers survive (lowercased); runs of multiple caps are filtered."""
     out = extract_keywords("RadixCache and KvCache interact at AsyncEngine boundary")
     assert "radixcache" in out
     assert "kvcache" in out
@@ -114,42 +106,7 @@ def test_extract_dedupes_and_orders_stably() -> None:
     assert out_a == out_b
 
 
-# ---------------------------------------------------------------------------
-# score_title_against_keywords (B2 rerank helper)
-# ---------------------------------------------------------------------------
-
-
-def test_score_title_counts_overlap() -> None:
-    """Returns the number of distinct keyword tokens present in the title."""
-    assert score_title_against_keywords("fp8 MoE perf", ["fp8", "moe"]) == 2
-
-
-def test_score_title_case_insensitive() -> None:
-    """Matching is lowercase-insensitive on both the title and the keywords."""
-    assert score_title_against_keywords("FP8 MoE perf", ["FP8", "MOE"]) == 2
-
-
-def test_score_title_zero_when_no_overlap() -> None:
-    """No overlapping tokens -> 0 (used by the rank function to tail-sort)."""
-    assert score_title_against_keywords("doc update", ["fp8", "moe"]) == 0
-
-
-def test_score_title_handles_empty_inputs() -> None:
-    """Empty title or empty keyword list never crashes; returns 0."""
-    assert score_title_against_keywords("", ["fp8"]) == 0
-    assert score_title_against_keywords("fp8 stuff", []) == 0
-
-
-def test_score_title_snake_case_token() -> None:
-    """snake_case tokens count as a single token by the regex token split."""
-    assert score_title_against_keywords("tensor_parallel optimisation", ["tensor_parallel"]) == 1
-
-
-# ---------------------------------------------------------------------------
-# score_title_with_anti_signal (B3 anti-correlation reranker).
-# Anti pairs are gated on the gap keyword being present, so scoring is strictly
-# additive (no trigger -> same ordering as score_title_against_keywords).
-# ---------------------------------------------------------------------------
+# score_title_with_anti_signal (anti-correlation reranker); anti pairs are gated on the gap keyword.
 
 
 def test_score_anti_dense_vs_moe_pr_demoted() -> None:
@@ -185,21 +142,17 @@ def test_score_anti_bf16_vs_low_bit_pr_demoted() -> None:
 
 
 def test_score_anti_inactive_when_trigger_absent() -> None:
-    """Anti is gated on the gap keyword: gap=['throughput'] lacks the ``dense`` trigger, so a MoE title scores the same as the legacy positive-only scorer."""
+    """Anti is gated on the gap keyword: gap=['throughput'] lacks the ``dense`` trigger."""
     gap = ["throughput"]
     moe_title = "MegaMoE throughput optimization"
     score = score_title_with_anti_signal(moe_title, gap)
-    legacy = score_title_against_keywords(moe_title, gap)
-    assert score == float(legacy), (
-        f"anti must not activate without a trigger keyword in the gap (got new={score} vs legacy={legacy})"
-    )
+    assert score == 1.0
 
 
 def test_score_anti_clamps_at_zero_never_negative() -> None:
     """When anti penalty exceeds positive overlap, score is clamped to 0.0."""
     gap = ["dense", "mi300x", "bf16"]
-    # Title overlaps once on dense-anti (moe), once on mi300x-anti (h100),
-    # once on bf16-anti (fp8) but matches no gap keyword positively.
+    # Title overlaps on anti terms but matches no gap keyword positively.
     title = "fp8 moe on h100"
     score = score_title_with_anti_signal(title, gap)
     assert score == 0.0, f"score must clamp to 0.0, not go negative (got {score})"
@@ -237,7 +190,7 @@ def test_score_anti_penalty_coefficient_tunable() -> None:
 
 
 def test_score_anti_pr25769_regression_session_f219629b() -> None:
-    """Bug-driven (session f219629b, dense/bf16/mi300x): positive-only overlap wrongly picked PR:25769 MegaMoE; anti-signal must rank it below a dense/mi300x PR."""
+    """Anti-signal must rank a MegaMoE PR below a dense/mi300x PR under a dense/bf16/mi300x gap."""
     gap = ["sglang", "bf16", "dense", "mi300x", "throughput"]
     pr25769 = "Enable MegaMoE for NextN with TP attn A2A scatter padding"
     relevant = "optimize sglang bf16 attention prefill on mi300x"

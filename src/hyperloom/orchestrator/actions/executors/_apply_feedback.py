@@ -2,14 +2,8 @@
 
 """Structured apply-failure feedback for patch reauthoring.
 
-Defines :class:`ApplyFeedback` (the structured payload attached to every
-``apply_failed`` result so downstream retry loops can feed rich context back
-to the patch-authoring model) and :func:`read_patch_source_context` (the
-shared "resolve file → extract window" helper used by both this module and
-:meth:`framework.FrameworkPhase._read_enablement_source_context`).
+Public surface:
 
-Public surface
---------------
 * :class:`ApplyFeedback`            — structured patch-apply failure record.
 * :func:`read_patch_source_context` — resolve a file path + extract a
   line window; used by both apply feedback and enablement source context.
@@ -45,7 +39,7 @@ class ApplyFeedback:
     """
 
     patch: str
-    channel: str  # "git" | "nogit"
+    channel: str
     tried_levels: list[int] = field(default_factory=list)
     stderr: str = ""
     rejected_hunks: str = ""
@@ -132,8 +126,7 @@ def _read_source_context_impl(
 
     lines = patch_text.splitlines()
 
-    # Find the first --- target file (post-image preferred but pre-image is fine
-    # for context). We take the +++ line first (new file / modification target).
+    # Find the first target file, preferring the +++ (new) side.
     target_raw: str | None = None
     hunk_start: int = 0
 
@@ -145,14 +138,14 @@ def _read_source_context_impl(
             if plus and plus != "/dev/null":
                 target_raw = plus
             else:
-                # Deletion patch — use the --- side
+                # Deletion patch: use the --- side.
                 minus = ln[4:].strip().split("\t")[0]
                 if minus and minus != "/dev/null":
                     target_raw = minus
             i += 2
             continue
         if target_raw and ln.startswith("@@ "):
-            # Parse @@ -L,N +L2,N2 @@ — we want the *new* side start line.
+            # Parse the new-side start line from @@ -L,N +L2,N2 @@.
             m = re.search(r"\+(\d+)", ln)
             if m:
                 hunk_start = max(0, int(m.group(1)) - 1)  # 0-indexed
@@ -194,13 +187,12 @@ def _resolve_patch_target(target_raw: str, framework_root: Path) -> Path | None:
     candidates: list[Path] = []
     raw = Path(target_raw)
 
-    # Direct absolute path
     if raw.is_absolute():
         candidates.append(raw)
 
-    # Try stripping leading path components: -p0, -p1, -p2
+    # Try stripping leading path components: -p0, -p1, -p2.
     parts = raw.parts
-    # Remove leading "a/" or "b/" git prefixes (common in unified diffs)
+    # Remove leading git "a/"/"b/" prefixes.
     if parts and parts[0] in ("a", "b"):
         parts = parts[1:]
     for strip in range(min(3, len(parts))):
@@ -264,7 +256,7 @@ def _source_context_for_file_impl(
         if search_roots:
             for root in search_roots:
                 candidates.append(Path(str(root)) / offending_file)
-        # Always try as-is relative to cwd as a last resort
+        # As-is relative to cwd, last resort.
         candidates.append(p)
 
     target: Path | None = next((c for c in candidates if c.is_file()), None)

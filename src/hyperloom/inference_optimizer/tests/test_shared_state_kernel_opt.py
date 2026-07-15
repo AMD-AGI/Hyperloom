@@ -483,7 +483,7 @@ def test_untried_hot_kernels_returns_only_reusable_above_threshold(state: Shared
 
 
 def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState):
-    """Real numbers from session 20260522T164910Z: 3 reusable hot kernels report untried."""
+    """3 reusable hot kernels report untried."""
     _set_trace(
         state,
         hot_kernels=[
@@ -689,13 +689,8 @@ def test_integrate_genuine_revert_rejects_immediately(state: SharedState):
 def test_integrate_bare_apply_fault_is_retryable_without_error_class(
     state: SharedState,
 ):
-    """A status=failed/decision=REVERT envelope with NO top-level error_class.
-
-    This is the exact shape ``integrate_handler`` emits on the apply-failed and
-    "re-baseline did not succeed" paths. Keying fault detection on ``decision``
-    would misread it as a genuine REVERT and discard the patch on the first
-    environment hiccup; it must instead be a retryable fault.
-    """
+    """A status=failed/decision=REVERT envelope with NO top-level error_class
+    must be treated as a retryable fault, not a genuine REVERT."""
     entry = state.record_kernel_integrate_result(
         # NOTE: no error_class — mirrors the bare handler envelope.
         _integrate_result("k001", decision="REVERT", status="failed"),

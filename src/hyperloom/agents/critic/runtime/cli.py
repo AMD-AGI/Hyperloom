@@ -10,7 +10,7 @@ python -m hyperloom.agents.critic.runtime.cli prepare-review   --request request
 python -m hyperloom.agents.critic.runtime.cli commit-review    --request request.json --review review.json [--out emit.json]
 python -m hyperloom.agents.critic.runtime.cli close-session    --request request.json [--kb-draft draft.json]
 
-# Low-level KB ops (kept for backward compat / tooling).
+# Low-level KB ops.
 python -m hyperloom.agents.critic.runtime.cli list-priors      --packet packet.json [--kind ...] [--topic ...]
 python -m hyperloom.agents.critic.runtime.cli write-verdict    --packet packet.json --verdict verdict.json --ctx ctx.json
 python -m hyperloom.agents.critic.runtime.cli write-kb-drafts  --packet packet.json --kb-draft kb_draft.json --ctx ctx.json
@@ -31,10 +31,8 @@ import os
 import sys
 from typing import Any
 
-from hyperloom.common.subprocess_bridge import emit_json as _emit_json
-from hyperloom.common.subprocess_bridge import read_json as _read_json
+from hyperloom.common.subprocess_bridge import emit_json, read_json
 
-from .cortex_kb_client import CortexKBClient
 from .dead_letter import DeadLetter
 from .decision_reviewer import DecisionReviewer
 from .errors import RuntimeAdapterError
@@ -45,20 +43,10 @@ from .scope_builder import build_scope, scope_cache_key
 from .session_memory import SessionMemory
 
 
-# ---------------------------------------------------------------------------
-# _read_json / _emit_json are re-exported from hyperloom.common.subprocess_bridge
-# above; kept as module-level bindings so monkeypatches on this module still
-# resolve through its own __dict__.
-
-
 def _resolve_kb_client() -> KBClient:
     """Build the KB client selected by ``CRITIC_KB_CLIENT_MODE``.
 
     Modes:
-        ``cortex`` — read-only :class:`CortexKBClient` against the cortex
-            ``kb-service`` ``/v1`` graph API. Reuses the existing
-            ``CORTEX_KB_URL`` env (already injected into the runtime by the
-            Critic backend); no separate ``KB_BASE_URL`` is needed.
         ``live`` — :class:`HTTPKBClient` against the legacy ``/api/kb/*``
             scoped-article contract (``KB_BASE_URL`` required).
         anything else — :class:`InMemoryKBClient` (tests / dry-runs).
@@ -67,22 +55,13 @@ def _resolve_kb_client() -> KBClient:
         KBClient: The resolved KB client.
 
     Raises:
-        RuntimeAdapterError: If ``cortex`` is selected but ``CORTEX_KB_URL`` is
-            unset, or ``live`` is selected but ``KB_BASE_URL`` is unset.
+        RuntimeAdapterError: If ``live`` is selected but ``KB_BASE_URL`` is
+            unset.
     """
     mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
     timeout_ms = int(os.environ.get("KB_TIMEOUT_MS", "10000"))
     retry_max = int(os.environ.get("KB_RETRY_MAX", "3"))
     token = os.environ.get("KB_SERVICE_TOKEN")
-    if mode == "cortex":
-        base_url = os.environ.get("CORTEX_KB_URL")
-        if not base_url:
-            raise RuntimeAdapterError(
-                "CRITIC_KB_CLIENT_MODE=cortex but CORTEX_KB_URL is not set"
-            )
-        return CortexKBClient(
-            base_url=base_url, timeout_ms=timeout_ms, retry_max=retry_max, token=token
-        )
     if mode == "live":
         base_url = os.environ.get("KB_BASE_URL")
         if not base_url:
@@ -106,17 +85,16 @@ def _resolve_reviewer() -> DecisionReviewer:
     return DecisionReviewer(session_memory=sm, kb_client=client, kb_writer=writer)
 
 
-# ---------------------------------------------------------------------------
 def _cmd_init_session(args: argparse.Namespace) -> None:
     """Handle ``init-session``: merge a request's context and emit it.
 
     Args:
         args (argparse.Namespace): Parsed CLI args (``request``, ``out``).
     """
-    request = _read_json(args.request)
+    request = read_json(args.request)
     reviewer = _resolve_reviewer()
     out = reviewer.init_session(request)
-    _emit_json(out, args.out)
+    emit_json(out, args.out)
 
 
 def _cmd_prepare_review(args: argparse.Namespace) -> None:
@@ -125,10 +103,10 @@ def _cmd_prepare_review(args: argparse.Namespace) -> None:
     Args:
         args (argparse.Namespace): Parsed CLI args (``request``, ``out``).
     """
-    request = _read_json(args.request)
+    request = read_json(args.request)
     reviewer = _resolve_reviewer()
     bundle = reviewer.prepare_review(request)
-    _emit_json(bundle.to_dict(), args.out)
+    emit_json(bundle.to_dict(), args.out)
 
 
 def _cmd_commit_review(args: argparse.Namespace) -> None:
@@ -141,13 +119,13 @@ def _cmd_commit_review(args: argparse.Namespace) -> None:
     Raises:
         RuntimeAdapterError: If ``--review`` is not a JSON object.
     """
-    request = _read_json(args.request)
-    review = _read_json(args.review)
+    request = read_json(args.request)
+    review = read_json(args.review)
     if not isinstance(review, dict):
         raise RuntimeAdapterError("--review must be a JSON object")
     reviewer = _resolve_reviewer()
     outcome = reviewer.commit_review(request, review)
-    _emit_json(outcome.to_dict(), args.out)
+    emit_json(outcome.to_dict(), args.out)
 
 
 def _cmd_close_session(args: argparse.Namespace) -> None:
@@ -157,14 +135,13 @@ def _cmd_close_session(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (``request``, ``kb_draft``,
             ``out``).
     """
-    request = _read_json(args.request)
-    kb_draft = _read_json(args.kb_draft) if args.kb_draft else None
+    request = read_json(args.request)
+    kb_draft = read_json(args.kb_draft) if args.kb_draft else None
     reviewer = _resolve_reviewer()
     outcome = reviewer.close_session(request, kb_draft)
-    _emit_json(outcome.to_dict(), args.out)
+    emit_json(outcome.to_dict(), args.out)
 
 
-# ---------------------------------------------------------------------------
 def _cmd_list_priors(args: argparse.Namespace) -> None:
     """Handle ``list-priors``: look up KB priors for a packet's scope.
 
@@ -172,8 +149,8 @@ def _cmd_list_priors(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (``packet``, ``kind``,
             ``topic``, ``limit``, ``session``, ``out``).
     """
-    packet = _read_json(args.packet) or {}
-    context = packet.get("context") or packet.get("environment") or {}
+    packet = read_json(args.packet) or {}
+    context = packet.get("context") or {}
     scope = build_scope(context, require_critical=False)
     scope_filter = {k: v for k, v in scope.items() if v != "unknown"}
     client = _resolve_kb_client()
@@ -186,7 +163,7 @@ def _cmd_list_priors(args: argparse.Namespace) -> None:
         ctx=WriteContext(session_id=args.session or "cli", review_id="cli"),
     )
     priors["scope_cache_key"] = scope_cache_key(scope_filter, topic=args.topic)
-    _emit_json(priors, args.out)
+    emit_json(priors, args.out)
 
 
 def _cmd_write_verdict(args: argparse.Namespace) -> None:
@@ -196,9 +173,9 @@ def _cmd_write_verdict(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (``packet``, ``verdict``,
             ``ctx``, ``out``).
     """
-    packet = _read_json(args.packet) or {}
-    verdict = _read_json(args.verdict) or {}
-    ctx_raw = _read_json(args.ctx) or {}
+    packet = read_json(args.packet) or {}
+    verdict = read_json(args.verdict) or {}
+    ctx_raw = read_json(args.ctx) or {}
     client = _resolve_kb_client()
     writer = KBWriter(client)
     ctx = WriteContext(
@@ -211,11 +188,11 @@ def _cmd_write_verdict(args: argparse.Namespace) -> None:
     )
     res = writer.write_verdict(
         verdict=verdict,
-        packet_context=packet.get("context") or packet.get("environment") or {},
+        packet_context=packet.get("context") or {},
         session_context=ctx_raw.get("session_context") or {},
         ctx=ctx,
     )
-    _emit_json(res.to_dict(), args.out)
+    emit_json(res.to_dict(), args.out)
 
 
 def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
@@ -225,9 +202,9 @@ def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (``packet``, ``kb_draft``,
             ``ctx``, ``out``).
     """
-    packet = _read_json(args.packet) or {}
-    kb_draft = _read_json(args.kb_draft) or {}
-    ctx_raw = _read_json(args.ctx) or {}
+    packet = read_json(args.packet) or {}
+    kb_draft = read_json(args.kb_draft) or {}
+    ctx_raw = read_json(args.ctx) or {}
     client = _resolve_kb_client()
     writer = KBWriter(client)
     ctx = WriteContext(
@@ -239,11 +216,11 @@ def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
     )
     res = writer.write_kb_drafts(
         kb_drafts=kb_draft.get("kb_drafts") or [],
-        packet_context=packet.get("context") or packet.get("environment") or {},
+        packet_context=packet.get("context") or {},
         session_context=ctx_raw.get("session_context") or {},
         ctx=ctx,
     )
-    _emit_json(res.to_dict(), args.out)
+    emit_json(res.to_dict(), args.out)
 
 
 def _cmd_add_contradiction(args: argparse.Namespace) -> None:
@@ -253,7 +230,7 @@ def _cmd_add_contradiction(args: argparse.Namespace) -> None:
         args (argparse.Namespace): Parsed CLI args (``new_id``, ``old_ids``
             comma-separated, ``ctx``, ``out``).
     """
-    ctx_raw = _read_json(args.ctx) or {}
+    ctx_raw = read_json(args.ctx) or {}
     client = _resolve_kb_client()
     writer = KBWriter(client)
     ctx = WriteContext(
@@ -263,7 +240,7 @@ def _cmd_add_contradiction(args: argparse.Namespace) -> None:
     )
     old_ids = [oid.strip() for oid in args.old_ids.split(",") if oid.strip()]
     res = writer.add_contradiction(new_id=args.new_id, old_ids=old_ids, ctx=ctx)
-    _emit_json(res.to_dict(), args.out)
+    emit_json(res.to_dict(), args.out)
 
 
 def _cmd_replay_dead_letter(args: argparse.Namespace) -> None:
@@ -279,7 +256,7 @@ def _cmd_replay_dead_letter(args: argparse.Namespace) -> None:
         lambda endpoint, payload: _replay_dispatch(client, endpoint, payload),
         delete_on_success=not args.keep_on_success,
     )
-    _emit_json(summary.to_dict(), args.out)
+    emit_json(summary.to_dict(), args.out)
 
 
 def _replay_dispatch(client: KBClient, endpoint: str, payload: dict[str, Any]) -> None:
@@ -306,7 +283,6 @@ def _replay_dispatch(client: KBClient, endpoint: str, payload: dict[str, Any]) -
         raise RuntimeAdapterError(f"replay-dead-letter: unknown endpoint {endpoint!r}")
 
 
-# ---------------------------------------------------------------------------
 def _make_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with all Critic CLI subcommands.
 
@@ -317,7 +293,6 @@ def _make_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hyperloom.agents.critic.runtime.cli", description="Critic runtime CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # Session bootstrap commands
     init = sub.add_parser("init-session")
     init.add_argument("--request", required=True)
     init.add_argument("--out", default="-")
@@ -329,7 +304,6 @@ def _make_parser() -> argparse.ArgumentParser:
     close.add_argument("--out", default="-")
     close.set_defaults(func=_cmd_close_session)
 
-    # Review preparation and commit commands
     prep = sub.add_parser("prepare-review")
     prep.add_argument("--request", required=True)
     prep.add_argument("--out", default="-")
@@ -341,7 +315,6 @@ def _make_parser() -> argparse.ArgumentParser:
     commit.add_argument("--out", default="-")
     commit.set_defaults(func=_cmd_commit_review)
 
-    # Low-level
     listp = sub.add_parser("list-priors")
     listp.add_argument("--packet", required=True)
     listp.add_argument("--kind", default=None)

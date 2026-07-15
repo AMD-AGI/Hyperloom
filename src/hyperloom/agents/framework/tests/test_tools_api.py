@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for framework_agent.runtime.tools_api. Hermetic - patches sources.primus_cortex / sources.github helpers so no real HTTP traffic is involved."""
+"""Tests for framework_agent.runtime.tools_api. Hermetic - no real HTTP."""
 
 from __future__ import annotations
 
@@ -11,9 +11,6 @@ import pytest
 
 from hyperloom.agents.framework.runtime import tools_api
 from hyperloom.agents.framework.sources._shared import GitHubPr
-
-
-# find_relevant_prs_smart ------------------------------------------------
 
 
 def test_find_relevant_prs_smart_empty_repos_returns_empty() -> None:
@@ -103,9 +100,6 @@ def test_find_relevant_prs_smart_github_only_when_primus_url_missing(
     assert [c.ref for c in out] == ["PR:9"]
 
 
-# fetch_pr_audit_material -----------------------------------------------
-
-
 def test_fetch_pr_audit_material_writes_two_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """fetch_pr_audit_material writes pr.patches + pr_files.json."""
 
@@ -133,9 +127,6 @@ def test_fetch_pr_audit_material_writes_two_files(tmp_path: Path, monkeypatch: p
     assert payload["files"] == [{"file_path": "x"}]
     assert paths["patches_path"].endswith("pr.patches")
     assert paths["files_json_path"].endswith("pr_files.json")
-
-
-# evaluate_candidate_outcome -------------------------------------------
 
 
 def test_evaluate_candidate_outcome_winner_pass() -> None:

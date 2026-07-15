@@ -18,7 +18,6 @@ from hyperloom.orchestrator.prompts import (
 )
 
 
-# 1. tag + domain wiring
 def test_research_scout_tag_and_domain_registered():
     assert "research_scout" in sd.KNOWLEDGE_DOMAIN_TAGS
     assert "research_scout_specialist" in sd.SPECIALIST_DOMAIN_KEYS
@@ -28,7 +27,6 @@ def test_research_scout_has_focus_template():
     assert "research_scout_specialist" in spb._DOMAIN_FOCUS_TEMPLATES
 
 
-# 2. research_hints artifacts
 def test_skeleton_always_present(tmp_path: Path):
     research_hints.write_hints_skeleton(tmp_path)
     assert session_paths.research_hints_md(tmp_path).exists()
@@ -73,7 +71,6 @@ def test_skeleton_does_not_clobber_existing(tmp_path: Path):
     assert len(research_hints.load_hints(tmp_path)) == 1
 
 
-# 3. competitor_target source contract
 def test_competitor_target_requires_per_conc_source(tmp_path: Path):
     ok = research_hints.write_competitor_target(
         tmp_path,
@@ -102,18 +99,17 @@ def test_competitor_target_all_sourceless_writes_nothing(tmp_path: Path):
     assert not session_paths.competitor_target_json(tmp_path).exists()
 
 
-# 4. SharedState bookkeeping
 def test_scout_counters_and_seen_pr_roundtrip():
     s = SharedState()
     assert s.research_scout_enabled is True
     assert s.research_scout_runs == 0
     assert s.bump_research_scout_runs() == 1
     assert s.register_seen_pr_ids(["a", "b", "a", ""]) == 2
-    assert s.has_seen_pr_id("a") is True
-    assert s.has_seen_pr_id("zzz") is False
+    assert "a" in s.research_scout_seen_pr_ids
+    assert "zzz" not in s.research_scout_seen_pr_ids
     restored = SharedState.from_dict(s.to_dict())
     assert restored.research_scout_runs == 1
-    assert restored.has_seen_pr_id("b") is True
+    assert "b" in restored.research_scout_seen_pr_ids
 
 
 @pytest.mark.asyncio

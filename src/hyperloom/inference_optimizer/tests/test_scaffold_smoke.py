@@ -20,12 +20,10 @@ from hyperloom.orchestrator.bus.storage import (
 )
 
 
-# package metadata
 def test_package_version_is_v06():
     assert hyperloom.inference_optimizer.__version__ == "0.6.0"
 
 
-# paths
 def test_make_session_dir_creates_all_subdirs(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
@@ -52,16 +50,6 @@ def test_asset_root_override_missing_raises(tmp_path, monkeypatch):
         paths.asset_root()
 
 
-def test_agent_session_dir_returns_path(tmp_path, monkeypatch):
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    sd = paths.make_session_dir()
-    ad = paths.agent_session_dir(sd, "orchestration")
-    assert ad == sd / "agents" / "orchestration"
-    # make_session_dir() pre-creates the lower-cased role subdirs.
-    assert ad.is_dir()
-
-
-# storage / schema
 def _new_db(tmp_path) -> Path:
     return tmp_path / "test.db"
 
@@ -70,16 +58,13 @@ def test_open_connection_applies_wal_and_schema(tmp_path):
     db = _new_db(tmp_path)
     conn = open_connection(db)
     try:
-        # WAL pragma actually applied
         cur = conn.execute("PRAGMA journal_mode")
         (mode,) = cur.fetchone()
         assert mode.lower() == "wal"
-        # core tables + schema_version exist
         cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = {row["name"] for row in cur.fetchall()}
         for required in ("leases", "events", "cursors", "tasks", "schema_version"):
             assert required in tables, f"missing table: {required}"
-        # schema_version row exists
         (version,) = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
         assert version == SCHEMA_VERSION
     finally:
@@ -136,7 +121,7 @@ def test_sqlite_connection_sync_round_trip(tmp_path):
 
 @pytest.mark.asyncio
 async def test_sqlite_connection_async_transaction_atomic(tmp_path):
-    """ADR-42: one BEGIN IMMEDIATE txn covers events + cursors atomically."""
+    """One BEGIN IMMEDIATE txn covers events + cursors atomically."""
     db = _new_db(tmp_path)
     sc = SqliteConnection(db)
     try:

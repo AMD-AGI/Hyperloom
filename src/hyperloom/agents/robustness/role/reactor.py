@@ -14,17 +14,16 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
 
-from ..decision.action_ladder import ActionLadder, Finding
-from ..decision.policy_aware import PolicyAware, PolicyViolation
+from ..decision.action_ladder import ActionLadder
+from ..decision.policy_aware import PolicyAware
 from ..decision.rca_engine import NoopRcaEngine, RcaEngine
-from ..finalize.postmortem import PostmortemFinalizer
-from ..findings.sink import FindingSink
-from ..signals import Classifier, Symptom
+from ..signals import Classifier
 from ..sources.base import DegradeRouter
 from ..state_store import DetectorStateStore
-from .envelope import Intent
+from .envelope import Intent, PolicyViolation
+from .findings import FindingSink
+from .postmortem import PostmortemFinalizer
 from .prompt_inputs import ReactorContext
 
 
@@ -44,11 +43,9 @@ class ReactorComponents:
     policy: PolicyAware
     sink: FindingSink | None = None
     rca: RcaEngine | None = None
-    # Session-end finalizer: invoked once on ``stop_reason`` empty→non-empty
-    # via the ``_finalize_fired`` latch; disk-level idempotency via marker file.
+    # Session-end finalizer: invoked once on ``stop_reason`` empty→non-empty.
     finalizer: PostmortemFinalizer | None = None
-    # Cross-tick state persistence (subprocess-per-tick transport loses memory
-    # otherwise, so consecutive-tick rules can't fire). ``None`` disables (tests).
+    # Cross-tick state persistence; ``None`` disables (tests).
     state_store: DetectorStateStore | None = None
 
 
@@ -77,10 +74,7 @@ class Reactor:
         self._finalizer = components.finalizer
         self._state_store = components.state_store
         self._tick_index = 0
-        self._last_symptoms: list[Symptom] = []
-        self._last_data_summary: dict[str, Any] = {}
-        # In-memory latch: ``finalizer.finalize`` runs at most once per instance,
-        # complementing the finalizer's disk marker for cross-process resume.
+        # In-memory latch: ``finalizer.finalize`` runs at most once per instance.
         self._finalize_fired: bool = False
 
     @property
@@ -91,15 +85,6 @@ class Reactor:
             int: Number of ``tick`` calls served by this instance.
         """
         return self._tick_index
-
-    @property
-    def last_symptoms(self) -> list[Symptom]:
-        """Symptoms classified on the most recent tick.
-
-        Returns:
-            list[Symptom]: A copy of the last tick's symptom list.
-        """
-        return list(self._last_symptoms)
 
     async def tick(self, ctx: ReactorContext) -> list[Intent]:
         """Run one pipeline tick and return the validated intents.
@@ -121,8 +106,8 @@ class Reactor:
 
         data = await self._router.collect(ctx)
         symptoms = self._classifier.classify(data, ctx)
-        # Prefer the Coordinator's session-wide ``ctx.shared_state.tick`` so ladder
-        # cooldowns and finding stamps survive subprocess restarts.
+        # Prefer the session-wide tick so ladder cooldowns and finding stamps
+        # survive subprocess restarts.
         authoritative_tick = self._resolve_authoritative_tick(ctx)
         result = await self._ladder.decide(
             symptoms,
@@ -158,12 +143,9 @@ class Reactor:
         # Run after the sink write so this tick's findings are in the corpus.
         await self._maybe_finalize(ctx)
 
-        # Flush mutated detector/ladder/throttle state last; off the event loop
-        # because fsync blocks.
+        # Flush mutated detector/ladder/throttle state last, off the event loop.
         await self._flush_state_store()
 
-        self._last_symptoms = symptoms
-        self._last_data_summary = _summarise(data, symptoms, result.findings)
         return validated_intents
 
     def _resolve_authoritative_tick(self, ctx: ReactorContext) -> int:
@@ -179,7 +161,7 @@ class Reactor:
         Returns:
             The resolved authoritative tick index.
         """
-        shared_tick = getattr(ctx.shared_state, "tick", 0) or 0
+        shared_tick = ctx.shared_state.tick or 0
         if shared_tick > 0:
             return int(shared_tick)
         return self._tick_index
@@ -228,30 +210,5 @@ class Reactor:
                 "reactor tick=%d postmortem finalizer raised",
                 self._tick_index,
             )
-
-
-def _summarise(
-    data: Any,
-    symptoms: list[Symptom],
-    findings: list[Finding],
-) -> dict[str, Any]:
-    """Build a compact debug summary of a tick's pipeline outputs.
-
-    Args:
-        data (Any): The source snapshot produced by the router.
-        symptoms (list[Symptom]): Symptoms classified this tick.
-        findings (list[Finding]): Findings produced by the action ladder.
-
-    Returns:
-        dict[str, Any]: Summary with sources used, degraded reason, and
-        symptom / finding counts.
-    """
-    return {
-        "sources_used": list(getattr(data, "sources_used", []) or []),
-        "degraded_reason": getattr(data, "degraded_reason", None),
-        "symptom_count": len(symptoms),
-        "finding_count": len(findings),
-    }
-
 
 __all__ = ["Reactor", "ReactorComponents"]

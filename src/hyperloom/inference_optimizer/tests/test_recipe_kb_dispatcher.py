@@ -3,10 +3,8 @@
 """Tests for :class:`RecipeKB` — the local-write / remote-read dispatcher.
 
 Covers: writes never touch the remote; reads are remote-first with local
-fallback (empty/raise all fall through to authoritative local writes);
-``remote=None`` and ``remote.enabled=False`` are local-only. The remote is
-duck-typed (gbrain is the only backend); these tests drive a fake remote so
-the dispatcher's routing/translation/audit logic is exercised without network.
+fallback; ``remote=None`` and ``remote.enabled=False`` are local-only. A fake
+remote drives the dispatcher's routing/translation/audit logic without network.
 """
 
 from __future__ import annotations
@@ -26,9 +24,8 @@ from hyperloom.orchestrator.knowledge.recipe_kb.dispatcher import _v2_to_arbor
 
 
 def test_v2_to_arbor_reads_legacy_framework_label() -> None:
-    """v2 rows whose ``labels`` predate the framework->framework_name rename
-    store the serving framework under the legacy ``framework`` key. The arbor
-    projection must still surface it as ``framework_name``."""
+    """A v2 row storing the framework under the legacy ``framework`` label is
+    still surfaced as ``framework_name`` by the arbor projection."""
     v2 = {
         "canonical_id": "inference:m:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8",
         "labels": {"model": "m", "hardware": "mi300x", "framework": "sglang"},
@@ -49,7 +46,6 @@ def _cid(model: str = "m") -> str:
     )
 
 
-# Fixtures
 @pytest.fixture
 def local_store(tmp_path: Path) -> LocalRecipeStore:
     return LocalRecipeStore(root=tmp_path / "kb")
@@ -60,7 +56,7 @@ class GbrainRemoteRecipeClient:
     """Duck-typed read remote that returns canned rows / raises on demand.
 
     ``get_row`` drives the exact-cid fast path; ``search_rows`` drives the
-    label-match search. ``raise_exc`` makes every read raise (transport error).
+    label-match search; ``raise_exc`` makes every read raise.
     """
 
     enabled = True
@@ -111,7 +107,6 @@ class GbrainRemoteRecipeClient:
         self.closed = True
 
 
-# Writes — local-only
 class _ReadOnlyRemoteSpy:
     """A remote-shaped sentinel that raises if any read method is invoked."""
 
@@ -122,14 +117,8 @@ class _ReadOnlyRemoteSpy:
             "remote read method invoked during a write — writes must be local-only",
         )
 
-    health = _boom
     get_recipe = _boom
-    get_history = _boom
-    list_recent = _boom
     search = _boom
-    list_attempts = _boom
-    list_session_attempts = _boom
-    session_summary = _boom
 
     def close(self) -> None:
         pass
@@ -150,14 +139,6 @@ def test_append_attempt_never_touches_remote(local_store: LocalRecipeStore) -> N
     assert out["id"] == 1
 
 
-def test_delete_recipe_never_touches_remote(local_store: LocalRecipeStore) -> None:
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    cid = _cid()
-    local_store.put_recipe(canonical_id=cid)
-    assert kb.delete_recipe(canonical_id=cid) is True
-
-
-# Reads — remote-first, local fallback (fake remote)
 def test_get_recipe_returns_remote_when_remote_hits(local_store: LocalRecipeStore) -> None:
     """A remote hit is returned, translated from the nested v2 envelope to arbor."""
     cid = _cid()
@@ -259,7 +240,7 @@ def test_get_recipe_returns_none_when_neither_has_it(local_store: LocalRecipeSto
 def test_get_recipe_remote_sends_5tuple_label_match(local_store: LocalRecipeStore) -> None:
     """The label-match search receives the full 7-tuple decoded from the cid."""
     cid = _cid()
-    remote = GbrainRemoteRecipeClient(search_rows=[])  # fast path miss -> search
+    remote = GbrainRemoteRecipeClient(search_rows=[])  # fast-path miss -> search
     kb = RecipeKB(local=local_store, remote=remote)
     kb.get_recipe(canonical_id=cid)
     label_match = remote.search_calls[0]["label_match"] if remote.search_calls else {}
@@ -360,17 +341,6 @@ def test_get_recipe_remote_exact_search_hit_skips_version_fallback(
     assert len(remote.search_calls) == 1
 
 
-def test_get_history_is_local_only(local_store: LocalRecipeStore) -> None:
-    """get_history is LOCAL only; the dispatcher must not touch the remote."""
-    cid = _cid()
-    local_store.put_recipe(canonical_id=cid)
-    local_store.put_recipe(canonical_id=cid)
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    rows = kb.get_history(canonical_id=cid)
-    assert len(rows) == 1
-    assert rows[0]["version"] == 1
-
-
 def test_search_falls_through_to_local_on_remote_failure(local_store: LocalRecipeStore) -> None:
     cid = _cid()
     local_store.put_recipe(
@@ -385,36 +355,6 @@ def test_search_falls_through_to_local_on_remote_failure(local_store: LocalRecip
     assert rows[0]["canonical_id"] == cid
 
 
-def test_list_recent_is_local_only(local_store: LocalRecipeStore) -> None:
-    """list_recent is LOCAL only."""
-    cid_local = _cid(model="local-only")
-    local_store.put_recipe(canonical_id=cid_local)
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    rows = kb.list_recent()
-    assert [r["canonical_id"] for r in rows] == [cid_local]
-
-
-def test_list_attempts_is_local_only(local_store: LocalRecipeStore) -> None:
-    """list_attempts is LOCAL only."""
-    cid = _cid()
-    local_store.append_attempt(canonical_id=cid, session_id="s", outcome="kept")
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    rows = kb.list_attempts(canonical_id=cid)
-    assert len(rows) == 1
-    assert rows[0]["outcome"] == "kept"
-
-
-def test_list_session_attempts_is_local_only(local_store: LocalRecipeStore) -> None:
-    """list_session_attempts is LOCAL only."""
-    cid = _cid()
-    local_store.append_attempt(canonical_id=cid, session_id="sess-7", outcome="kept")
-    kb = RecipeKB(local=local_store, remote=_ReadOnlyRemoteSpy())  # type: ignore[arg-type]
-    rows = kb.list_session_attempts(session_id="sess-7")
-    assert len(rows) == 1
-    assert rows[0]["session_id"] == "sess-7"
-
-
-# remote=None / remote disabled — local-only mode
 def test_no_remote_means_local_only_for_reads(local_store: LocalRecipeStore) -> None:
     """``remote=None`` reads only from the local store and never makes a network call."""
     kb = RecipeKB(local=local_store, remote=None)
@@ -437,7 +377,6 @@ def test_disabled_remote_treated_as_no_remote(local_store: LocalRecipeStore) -> 
     assert out["model"] == "local-marker"
 
 
-# Audit hook — recipe-snapshot read trace
 def test_audit_hook_emitted_on_remote_hit(local_store: LocalRecipeStore) -> None:
     cid = _cid()
     events: list[dict[str, Any]] = []
@@ -501,7 +440,6 @@ def test_audit_hook_never_raises_into_caller(local_store: LocalRecipeStore) -> N
     assert kb.get_recipe(canonical_id=cid) is None
 
 
-# Lifecycle
 def test_close_releases_remote_transport(local_store: LocalRecipeStore) -> None:
     """``RecipeKB.close`` must call ``remote.close``."""
     remote = GbrainRemoteRecipeClient()

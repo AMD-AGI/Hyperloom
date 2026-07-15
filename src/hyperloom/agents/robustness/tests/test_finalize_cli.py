@@ -70,7 +70,7 @@ def test_finalize_is_idempotent(tmp_path: Path, capsys):
     )
     assert rc1 == 0
     capsys.readouterr()  # drain
-    # Second call must not overwrite; ``wrote_new_files=False``.
+    # Second call must not overwrite.
     rc2 = main(
         [
             "finalize",
@@ -96,8 +96,7 @@ def test_finalize_rejects_missing_session_dir(tmp_path: Path, capsys):
         ]
     )
     assert rc == 2
-    # Error message goes to stderr (RuntimeAdapterError); session_dir
-    # check is reported as a clean exit-2.
+    # Error message goes to stderr; session_dir check is a clean exit-2.
     captured = capsys.readouterr()
     assert "does not point to a directory" in captured.err
 

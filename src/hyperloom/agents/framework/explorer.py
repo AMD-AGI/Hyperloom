@@ -574,7 +574,7 @@ def _evaluate_candidate(req: ExploreRequest, variables: dict[str, str]) -> tuple
     accuracy_template = req.outputs.get("accuracy_json", "{candidate_dir}/accuracy.json")
     benchmark = read_json(_resolve_output_path(benchmark_template, variables), default={}, require_dict=True)
     accuracy = read_json(_resolve_output_path(accuracy_template, variables), default={}, require_dict=True)
-    throughput = _metric_float(benchmark, ("throughput", "output_throughput", "tput"))
+    throughput = _metric_float(benchmark, ("throughput", "output_throughput"))
     acc = _metric_float(accuracy, ("accuracy", "gsm8k", "exact_match", "score"))
     completed = str(benchmark.get("completed") or benchmark.get("Completed") or "")
     return throughput, acc, completed

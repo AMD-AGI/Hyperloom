@@ -2,8 +2,7 @@
 
 """Unit tests for :mod:`hyperloom.orchestrator.bus.storage.schema`.
 
-Focus on the migration / capacity / error-rollback branches that the
-end-to-end resource-lane tests do not exercise: the legacy leases PK
+Covers the migration / capacity / error-rollback branches: legacy leases PK
 migration variants, ``set_lane_capacity`` / ``get_lane_capacity`` error paths,
 and the ``ensure_schema`` rollback-on-failure guard.
 """
@@ -25,7 +24,7 @@ def test_ensure_schema_creates_and_reports_version():
     conn = _conn()
     version = schema.ensure_schema(conn)
     assert version == schema.SCHEMA_VERSION
-    # idempotent second call.
+    # idempotent second call
     assert schema.ensure_schema(conn) == schema.SCHEMA_VERSION
     conn.close()
 
@@ -33,7 +32,7 @@ def test_ensure_schema_creates_and_reports_version():
 def test_migrate_leases_no_table_returns_false():
     conn = _conn()
     cur = conn.cursor()
-    # PRAGMA table_info on a missing table returns [] -> not migrated.
+    # missing table -> not migrated
     assert schema._migrate_leases_v1_to_v2(cur) is False
     conn.close()
 
@@ -41,7 +40,7 @@ def test_migrate_leases_no_table_returns_false():
 def test_migrate_leases_from_v1_pk():
     conn = _conn()
     cur = conn.cursor()
-    # Legacy v1 leases table: PK is just (lane).
+    # Legacy v1 leases table: PK is just (lane)
     cur.execute(
         """
         CREATE TABLE leases (
@@ -55,7 +54,7 @@ def test_migrate_leases_from_v1_pk():
         "INSERT INTO leases VALUES ('benchmark_lane','h1','t1','baseline',1,'a','e','hb')"
     )
     assert schema._migrate_leases_v1_to_v2(cur) is True
-    # Composite PK now allows two holders on the same lane.
+    # Composite PK allows two holders on the same lane
     cur.execute("PRAGMA table_info(leases)")
     pk_cols = sorted(row[1] for row in cur.fetchall() if int(row[5] or 0) > 0)
     assert pk_cols == ["holder_id", "lane"]
@@ -64,7 +63,7 @@ def test_migrate_leases_from_v1_pk():
 
 def test_migrate_leases_already_migrated_is_noop():
     conn = _conn()
-    schema.ensure_schema(conn)  # creates composite-PK leases.
+    schema.ensure_schema(conn)  # creates composite-PK leases
     cur = conn.cursor()
     assert schema._migrate_leases_v1_to_v2(cur) is False
     conn.close()
@@ -73,7 +72,7 @@ def test_migrate_leases_already_migrated_is_noop():
 def test_migrate_leases_unknown_shape_left_alone():
     conn = _conn()
     cur = conn.cursor()
-    # A leases table whose PK is neither (lane) nor (lane, holder_id).
+    # PK is neither (lane) nor (lane, holder_id)
     cur.execute("CREATE TABLE leases (task_id TEXT PRIMARY KEY, lane TEXT)")
     assert schema._migrate_leases_v1_to_v2(cur) is False
     conn.close()
@@ -91,13 +90,13 @@ def test_get_lane_capacity_known_and_default():
     conn = _conn()
     schema.ensure_schema(conn)
     assert schema.get_lane_capacity(conn, "benchmark_lane") == 1
-    # An unknown lane with no row and no default -> defensive 1.
+    # unknown lane with no row and no default -> defensive 1
     assert schema.get_lane_capacity(conn, "no_such_lane") == 1
     conn.close()
 
 
 def test_get_lane_capacity_missing_table_falls_back_to_default():
-    conn = _conn()  # no ensure_schema -> lane_capacity table absent.
+    conn = _conn()  # no ensure_schema -> lane_capacity table absent
     assert schema.get_lane_capacity(conn, "research_lane") == 1
     conn.close()
 

@@ -76,20 +76,16 @@ what changed. Match length to substance.
 """.strip()
 
 
-# Conversational-mode floors: a persistent ReAct turn pulls
-# context tools before emitting, so it needs more turns + wall-clock budget.
+# Conversational-mode floors: a persistent ReAct turn pulls context tools before
+# emitting, so it needs more turns + wall-clock budget.
 _CONVERSATIONAL_MIN_MAX_TURNS: int = 12
 _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC: float = 300.0
 # Raw-completion floor: Claude Code counts the single text message as a turn, so
-# a literal max_turns=1 trips before any output. Give headroom (tools disallowed).
+# a literal max_turns=1 trips before any output.
 _RAW_COMPLETION_MIN_MAX_TURNS: int = 8
 
-# Retry budget amplification (issue #679): the per-attempt idle timeout is a
-# *silence* budget (max gap between streamed SDK messages), not a total
-# wall-clock. A heavy reasoning model (e.g. Kimi-K2.6) that keeps producing
-# output never trips it, but a first attempt that does time out is retried with
-# a progressively larger idle budget (base * multiplier**(attempt-1)) so a
-# genuinely slow gateway is not re-killed at the exact same wall.
+# Retried timeouts get a progressively larger idle budget so a genuinely slow
+# gateway is not re-killed at the same wall.
 _RETRY_IDLE_TIMEOUT_MULTIPLIER: float = 2.0
 
 
@@ -113,10 +109,8 @@ _RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
     "SlashCommand",
 )
 
-# Env-driven reasoning effort / extended thinking (P0.2). Role is inferred from
-# ``conversational`` (True => orchestration). A per-role override wins over the
-# shared override; kernel defaults to ``low`` and orchestration to ``medium``.
-# Thinking defaults to adaptive; set the thinking env to ``off`` to omit it.
+# Env-driven reasoning effort / extended thinking. A per-role override wins over
+# the shared override; kernel defaults to ``low`` and orchestration to ``medium``.
 _EFFORT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_EFFORT"
 _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
 _EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
@@ -126,8 +120,6 @@ _VALID_EFFORT: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "ma
 
 def _import_sdk() -> tuple[Any, Any, Any]:
     """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise.
-
-    Only ``claude_agent_sdk`` is supported (``claude_code_sdk`` deprecated).
 
     Returns:
         A tuple of the SDK ``query`` callable, the ``ClaudeAgentOptions``
@@ -163,33 +155,26 @@ class ClaudeBackend:
 
     model: str | None = None
     api_key_env: str = "ANTHROPIC_API_KEY"
-    # Default 4 covers tool_use → tool_result → final text; conversational
-    # mode raises this floor (more context-pull headroom per turn).
+    # Covers tool_use → tool_result → final text; conversational mode raises it.
     max_turns_default: int = 4
-    # Persistent-conversation mode: resume the SAME SDK session
-    # across ticks (``resume=<session_id>``) feeding only a per-tick delta,
-    # instead of a fresh stateless conversation. kernel / critic / robustness
-    # stay stateless.
+    # Persistent-conversation mode: resume the SAME SDK session across ticks,
+    # feeding only a per-tick delta. kernel / critic / robustness stay stateless.
     conversational: bool = False
     enable_mcp_emit_intent: bool = True
     # Raw single-shot completion mode: skips the emit_intent server + suffix,
-    # disallows all tools, and returns ``raw_text`` without requiring an
-    # emitted intent.
+    # disallows all tools, and returns ``raw_text`` without an emitted intent.
     raw_completion: bool = False
-    # Idle (inactivity) timeout for one ``run()`` call: the max wall-clock gap
-    # allowed BETWEEN streamed SDK messages before the turn is aborted. This
-    # bounds a hung ``claude`` CLI / unreachable gateway WITHOUT killing a slow
-    # heavy-reasoning model that is still producing output (issue #679). Env
-    # override: ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC``.
+    # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN
+    # streamed SDK messages before the turn is aborted. Env override:
+    # ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC``.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC",
             default=120.0,
         )
     )
-    # Bounded transient-failure retry/backoff (R6): a multi-day run must absorb
-    # gateway stalls / 5xx / connection blips instead of failing the turn.
-    # Env override via INFERENCE_OPTIMIZER_LLM_RETRY_* (ATTEMPTS=1 disables).
+    # Bounded transient-failure retry/backoff. Env override via
+    # INFERENCE_OPTIMIZER_LLM_RETRY_* (ATTEMPTS=1 disables).
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
 
     # Test seams — set these to bypass SDK import / network calls.
@@ -206,9 +191,6 @@ class ClaudeBackend:
     # SDK session token captured last turn; replayed via ``resume`` in
     # conversational mode. ``reset_conversation()`` clears it.
     _session_id: str | None = field(default=None, init=False)
-    # Always False now (resume is supported by the pinned SDK floor); retained
-    # as a stable llm_calls.jsonl key for cache diagnostics / consumers.
-    _resume_downgraded: bool = field(default=False, init=False)
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
@@ -241,11 +223,8 @@ class ClaudeBackend:
         if not os.environ.get(self.api_key_env):
             self.calls.append({"warn": f"{self.api_key_env} not set in env"})
         if self.conversational:
-            # A persistent ReAct turn may call several read-only context
-            # tools before emitting an intent, so give the
-            # in-tick agentic loop more turns and a longer wall-clock
-            # budget than the stateless default. Operators can still
-            # override the timeout via the env var below.
+            # Persistent ReAct turns need more turns + a longer idle budget than
+            # the stateless default; operator env override still wins.
             if self.max_turns_default < _CONVERSATIONAL_MIN_MAX_TURNS:
                 self.max_turns_default = _CONVERSATIONAL_MIN_MAX_TURNS
             if (
@@ -255,9 +234,7 @@ class ClaudeBackend:
                 ).strip()
                 == ""
             ):
-                # No explicit operator override -> raise the idle-timeout floor
-                # so a quiet gap between the extra tool round-trips doesn't trip
-                # the default silence budget.
+                # No operator override -> raise the idle-timeout floor.
                 self.call_timeout_s = max(
                     self.call_timeout_s,
                     _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC,
@@ -277,16 +254,6 @@ class ClaudeBackend:
             if cfg is not None:
                 self.mcp_server_config = cfg
                 self.mcp_tool_name = EMIT_INTENT_TOOL_QUALIFIED
-
-    @property
-    def has_emit_intent_tool(self) -> bool:
-        """Whether the ``emit_intent`` MCP tool is wired up and usable.
-
-        Returns:
-            bool: ``True`` when both the MCP server config and qualified tool
-            name are present.
-        """
-        return self.mcp_server_config is not None and self.mcp_tool_name is not None
 
     # ------------------------------------------------------------------
     # Backend protocol
@@ -314,8 +281,6 @@ class ClaudeBackend:
         Returns:
             The parsed :class:`BackendTurnResult` for the turn.
         """
-        # ``allow_no_intent``: a summary/checkpoint turn asks
-        # for plain-text instead of emit_intent, so relax the no-intent guard.
         full_prompt = self._compose_prompt(prompt)
         max_turns_use = max_turns or self.max_turns_default
         if self.raw_completion:
@@ -328,13 +293,8 @@ class ClaudeBackend:
             resume_session_id=resume_session,
         )
 
-        # Idle-timeout guard (issue #679): an upstream proxy stall must not park
-        # the reactor, but a slow heavy-reasoning model that is still streaming
-        # output must NOT be killed mid-thought. So each attempt bounds the gap
-        # BETWEEN streamed SDK messages (silence budget), not the total turn.
-        # Bounded retry/backoff (R6) absorbs transient stalls / blips across a
-        # multi-day run; each retry amplifies the idle budget so a genuinely
-        # slow gateway is not re-killed at the exact same wall.
+        # Each attempt bounds the gap BETWEEN streamed SDK messages (silence
+        # budget), not the total turn; each retry amplifies the idle budget.
         attempt_state = {"n": 0}
 
         async def _one_attempt() -> tuple[Any, ...]:
@@ -402,10 +362,8 @@ class ClaudeBackend:
                 "(likely upstream proxy stall)"
             ) from exc
         # Capture the SDK session token for the next conversational resume;
-        # only overwrite on a non-empty id so a stream without a terminal
-        # ResultMessage doesn't drop the conversation thread.
+        # only overwrite on a non-empty id.
         if self.conversational:
-            # Observability: surface resume continuity + tool usage per turn.
             log.info(
                 "claude[conv] turn: resumed=%s prev_session=%s "
                 "new_session=%s tool_blocks=%d intents=%d prompt_chars=%d",
@@ -449,7 +407,6 @@ class ClaudeBackend:
                 "cache_read_input_tokens": cache_read,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "resume_downgraded": self._resume_downgraded,
                 # Full conversation text so the caller (which holds the
                 # session_dir / component / tick context the stateless
                 # backend lacks) can persist it to conversations.jsonl.
@@ -517,31 +474,12 @@ class ClaudeBackend:
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
 
-    @property
-    def has_context_tools(self) -> bool:
-        """Whether the context-tools MCP server is configured.
-
-        Returns:
-            ``True`` if a context-server config was set up successfully.
-        """
-        return self._context_server_config is not None
-
     def reset_conversation(self) -> None:
         """Drop the captured session so the next ``run`` starts fresh.
 
         Used after a checkpoint/compaction or resume rebuild.
         """
         self._session_id = None
-
-    @property
-    def conversation_session_id(self) -> str | None:
-        """Current SDK session token (conversational mode), or None.
-
-        Returns:
-            The captured SDK session id in conversational mode, otherwise
-            ``None``.
-        """
-        return self._session_id if self.conversational else None
 
     def _build_options(
         self,
@@ -572,7 +510,6 @@ class ClaudeBackend:
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
         if resume_session_id:
-            # Resume an existing session by id (claude-agent-sdk >= 0.2).
             kwargs["resume"] = resume_session_id
         self._apply_sdk_env_options(kwargs)
         self._apply_effort_options(kwargs)
@@ -582,13 +519,12 @@ class ClaudeBackend:
             kwargs["disallowed_tools"] = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
             kwargs["stderr"] = self._stderr_sink
             return self._instantiate_options(kwargs)
-        # Drop the bare "emit_intent" name (CLI rejects unregistered names);
-        # the MCP-qualified form is what wires into the SDK tool registry.
+        # Drop the bare "emit_intent" name; the MCP-qualified form wires into the
+        # SDK tool registry.
         allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
         if self.mcp_tool_name and self.mcp_tool_name not in allowed:
             allowed.append(self.mcp_tool_name)
-        # Allow-list the context-pull tools' qualified names;
-        # the SDK needs the qualified form even though bare names are gated.
+        # Allow-list the context-pull tools' qualified names.
         if self._context_server_config is not None:
             for qname in CONTEXT_TOOL_QUALIFIED_NAMES:
                 if qname not in allowed:
@@ -609,19 +545,16 @@ class ClaudeBackend:
     def _apply_sdk_env_options(self, kwargs: dict[str, Any]) -> None:
         """Pin Claude Code subprocess auth to the current Hyperloom env.
 
-        Claude Code also reads ``~/.claude`` settings/config by default. That is
-        fine for a local interactive login, but it can override a run's
-        gateway headers and API URL. When a Hyperloom process has explicit
-        Anthropic/gateway env, pass that env to the SDK subprocess and disable
-        settings sources so the run is hermetic.
+        When a Hyperloom process has explicit Anthropic/gateway env, pass that
+        env to the SDK subprocess and disable settings sources so the run is
+        hermetic (Claude Code otherwise reads ``~/.claude`` config).
         """
         kwargs.update(claude_sdk_env_options(model=self.model))
 
     def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
         """Add env-driven reasoning effort + adaptive thinking to the options.
 
-        Role is inferred from ``conversational`` (True => orchestration). Unknown
-        SDK builds that reject these kwargs degrade via ``_instantiate_options``.
+        Role is inferred from ``conversational`` (True => orchestration).
         """
         role_env = _EFFORT_ENV_ORCH if self.conversational else _EFFORT_ENV_KERNEL
         default = "medium" if self.conversational else "low"
@@ -634,10 +567,6 @@ class ClaudeBackend:
 
     def _instantiate_options(self, kwargs: dict[str, Any]) -> Any:
         """Build the SDK options.
-
-        The ``resume`` / ``effort`` / ``thinking`` kwargs are all supported by
-        the pinned ``claude-agent-sdk >= 0.2.110`` floor, so no compatibility
-        fallback is needed.
 
         Args:
             kwargs: Keyword arguments to pass to the SDK options constructor.
@@ -663,9 +592,6 @@ class ClaudeBackend:
         """Stream SDK messages, collecting intents, raw text, tool counts,
         the latest `ResultMessage.usage` dict, and the SDK ``session_id``.
 
-        `usage` (cache_creation/read_input_tokens) measures prompt-cache
-        effectiveness against the SECTION-A/B stable-prefix design.
-
         Args:
             prompt: The composed prompt to stream to the SDK.
             options: The SDK options object configuring this turn.
@@ -689,8 +615,7 @@ class ClaudeBackend:
         try:
             stream_iter = stream.__aiter__()
             while True:
-                # Idle timeout: bound only the wait for the NEXT message so a
-                # model that keeps streaming (even slowly) is never killed; a
+                # Idle timeout: bound only the wait for the NEXT message; a
                 # fully silent gateway trips ``asyncio.TimeoutError``.
                 try:
                     if idle_timeout_s is not None:
@@ -715,20 +640,19 @@ class ClaudeBackend:
                         txt = self._extract_text(block)
                         if txt:
                             text_chunks.append(txt)
-                # ResultMessage.result duplicates the streamed TextBlocks;
-                # keep it separate to avoid double-counting (would break
-                # raw_completion JSON parsing).
+                # ResultMessage.result duplicates the streamed TextBlocks; keep
+                # it separate to avoid double-counting.
                 result_text = getattr(message, "result", None)
                 if isinstance(result_text, str) and result_text:
                     result_chunks.append(result_text)
-                # Overwrite (not accumulate) usage: the terminal message
-                # reports cumulative session usage.
+                # Overwrite (not accumulate): the terminal message reports
+                # cumulative session usage.
                 msg_usage = getattr(message, "usage", None)
                 if isinstance(msg_usage, dict) and msg_usage:
                     last_usage = dict(msg_usage)
         except Exception as exc:
-            # SDK ≥ 0.2.82 / CLI ≥ 2.1.123 may raise "error result: success"
-            # on max-turns exit; keep any intents already collected.
+            # SDK may raise "error result: success" on max-turns exit; keep any
+            # intents already collected.
             err_str = str(exc)
             if "error result: success" in err_str:
                 if intents:
@@ -773,8 +697,7 @@ class ClaudeBackend:
     def _is_tool_use_for_emit_intent(self, block: Any) -> bool:
         """Whether a content block is an ``emit_intent`` tool-use call.
 
-        Matches by class name (``ToolUseBlock`` / ``ServerToolUseBlock``) to
-        avoid depending on SDK internals, then checks the tool name.
+        Matches by class name, then checks the tool name.
 
         Args:
             block (Any): A single SDK content block.
@@ -783,7 +706,6 @@ class ClaudeBackend:
             bool: ``True`` if the block is a tool-use for the (qualified or
             bare) ``emit_intent`` tool.
         """
-        # Match by class name so we don't depend on SDK internals.
         cls_name = type(block).__name__
         if cls_name not in ("ToolUseBlock", "ServerToolUseBlock"):
             return False

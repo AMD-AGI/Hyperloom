@@ -52,7 +52,6 @@ def _shared_state_module():
 
 
 class _ExploreStateMixin:
-    # specialist round bookkeeping
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
         """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites).
 
@@ -99,7 +98,7 @@ class _ExploreStateMixin:
         *,
         empty: bool,
     ) -> int:
-        """Increment/reset the per-domain empty-proposal streak; returns new value (escalation threshold is configured elsewhere, not here).
+        """Increment/reset the per-domain empty-proposal streak; returns new value.
 
         Args:
             domain (str): The specialist domain; blank normalizes to
@@ -117,7 +116,6 @@ class _ExploreStateMixin:
             self.specialist_domain_empty_streak[d] = 0
         return self.specialist_domain_empty_streak[d]
 
-    # per-anchor coverage counters (point 1)
     def bump_domain_round_counters(self) -> None:
         """Increment both per-anchor round counters for every knowledge-domain
         anchor. Called once per EXPLORE round so a long-idle domain's counters
@@ -182,8 +180,7 @@ class _ExploreStateMixin:
     ) -> list[str]:
         """Return anchors whose ``rounds_since_last_specialist`` ≥
         ``specialist_threshold`` OR ``rounds_since_last_keep`` ≥
-        ``keep_threshold`` (point 1 lower-bound; point 2 hard-trigger reads
-        this). Deterministically ordered by widest gap first.
+        ``keep_threshold``. Deterministically ordered by widest gap first.
 
         Args:
             specialist_threshold (int): Rounds-since-last-specialist value at
@@ -208,8 +205,7 @@ class _ExploreStateMixin:
     def best_gap_for_anchor(self, anchor: str) -> str:
         """Return the canonical_id of the most actionable open gap whose
         ``domain_hint`` resolves to ``anchor`` (or ``""`` when none). Selection:
-        highest severity, then least-attempted, then oldest (point 2 reads this
-        to force-dispatch a stalled domain that still has pending work).
+        highest severity, then least-attempted, then oldest.
 
         Args:
             anchor (str): The domain / anchor to match gaps against.
@@ -240,7 +236,6 @@ class _ExploreStateMixin:
         matches.sort(key=lambda m: m[0])
         return matches[0][1]
 
-    # gaps ledger helpers
     def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
         """Return the gap entry matching ``canonical_id`` (or ``None``).
 
@@ -286,7 +281,7 @@ class _ExploreStateMixin:
                 "severity": str(entry.get("severity") or "medium"),
                 "domain_hint": str(entry.get("domain_hint") or ""),
                 "source": str(entry.get("source") or ""),
-                # Optional origin reference (PR/blog URL) sedimented into the recipe with KEEP/REVERT provenance.
+                # Optional origin reference (PR/blog URL).
                 "provenance": str(entry.get("provenance") or ""),
                 "first_seen_ts": str(entry.get("first_seen_ts") or now),
                 "last_updated_ts": now,
@@ -296,7 +291,7 @@ class _ExploreStateMixin:
                 merged["attempts"] = merged["attempts"][-ss._GAPS_ATTEMPTS_HISTORY:]
             self.gaps.append(merged)
         else:
-            # Field-wise merge: incoming non-empty values win except ``first_seen_ts`` (preserve oldest).
+            # Field-wise merge: incoming non-empty values win except ``first_seen_ts``.
             for key in ("symptom", "layer", "severity", "domain_hint", "source", "provenance"):
                 incoming = entry.get(key)
                 if incoming:
@@ -338,7 +333,7 @@ class _ExploreStateMixin:
         canonical_id: str,
         attempt: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Append one attempt row to an existing gap; returns the gap or ``None`` when unknown (caller may ``upsert_gap`` instead).
+        """Append one attempt row to an existing gap; returns the gap or ``None`` when unknown.
 
         Args:
             canonical_id (str): The gap's canonical identifier.
@@ -361,42 +356,6 @@ class _ExploreStateMixin:
         gap["last_updated_ts"] = ss._now_iso()
         return gap
 
-    def replace_gaps(self, entries: list[dict[str, Any]]) -> None:
-        """Bulk-replace ``gaps`` with a fresh dedup'd list (discards stale rows wholesale); idempotent.
-
-        Args:
-            entries (list[dict[str, Any]]): The replacement gap rows; deduped
-                by ``canonical_id``, per-gap attempts and the list are capped.
-                A non-list value is a no-op.
-        """
-        if not isinstance(entries, list):
-            return
-        dedup: dict[str, dict[str, Any]] = {}
-        order: list[str] = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            cid = str(entry.get("canonical_id") or "").strip()
-            if not cid:
-                continue
-            if cid not in dedup:
-                order.append(cid)
-            dedup[cid] = dict(entry)
-        # Apply the per-entry cap on attempts.
-        new_list: list[dict[str, Any]] = []
-        for cid in order:
-            row = dedup[cid]
-            attempts = list(row.get("attempts") or [])
-            ss = _shared_state_module()
-            if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-                attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY:]
-            row["attempts"] = attempts
-            new_list.append(row)
-        ss = _shared_state_module()
-        if len(new_list) > ss._GAPS_MAX_ENTRIES:
-            new_list = new_list[-ss._GAPS_MAX_ENTRIES:]
-        self.gaps = new_list
-
     def record_intervention(
         self,
         *,
@@ -405,7 +364,7 @@ class _ExploreStateMixin:
         task_id: str = "",
         delta_pct: float | None = None,
     ) -> None:
-        """Append one intervention entry and update config-only counters. consecutive-config counter advances on ``"config"``, resets on ``"code_patch"``; ``"code_patch_attempt"`` is telemetry-only.
+        """Append one intervention entry and update config-only counters; the consecutive-config counter advances on ``"config"`` and resets on ``"code_patch"``.
 
         Args:
             change_type (str): The intervention kind (e.g. ``config`` /
@@ -431,58 +390,6 @@ class _ExploreStateMixin:
             self.consecutive_config_only_rounds = int(self.consecutive_config_only_rounds or 0) + 1
         elif ct == "code_patch":
             self.consecutive_config_only_rounds = 0
-
-    def get_intervention_mix(self, *, recent_window: int = 5) -> dict[str, Any]:
-        """Summarise the intervention-mix ledger as derived counts (config vs code_patch totals, recent window, consecutive_config_only, config_heavy). Read-only; unknown change_types ignored in tallies but break the trailing config-only run.
-
-        Args:
-            recent_window (int): Size of the trailing window for the
-                ``recent_*`` tallies; non-positive uses the full ledger.
-
-        Returns:
-            dict[str, Any]: Derived totals (total/recent config and
-                code_patch counts, ``consecutive_config_only``,
-                ``config_heavy``).
-        """
-        ledger = [e for e in (self.intervention_mix or []) if isinstance(e, dict)]
-
-        def _ct(entry: dict[str, Any]) -> str:
-            """Return an entry's normalized ``change_type`` string.
-
-            Args:
-                entry: A single intervention-mix ledger entry.
-
-            Returns:
-                The lowercased, stripped change type (empty if absent).
-            """
-            return str(entry.get("change_type") or "").strip().lower()
-
-        total_config = sum(1 for e in ledger if _ct(e) == "config")
-        total_code_patch = sum(1 for e in ledger if _ct(e) == "code_patch")
-        total_code_patch_attempt = sum(1 for e in ledger if _ct(e) in ("code_patch", "code_patch_attempt"))
-        window = ledger[-recent_window:] if recent_window > 0 else ledger
-        recent_config = sum(1 for e in window if _ct(e) == "config")
-        recent_code_patch = sum(1 for e in window if _ct(e) == "code_patch")
-        recent_code_patch_attempt = sum(1 for e in window if _ct(e) in ("code_patch", "code_patch_attempt"))
-
-        consecutive_config_only = 0
-        for e in reversed(ledger):
-            ct = _ct(e)
-            if ct == "config":
-                consecutive_config_only += 1
-            else:
-                break
-
-        return {
-            "total_config": total_config,
-            "total_code_patch": total_code_patch,
-            "total_code_patch_attempt": total_code_patch_attempt,
-            "recent_config": recent_config,
-            "recent_code_patch": recent_code_patch,
-            "recent_code_patch_attempt": recent_code_patch_attempt,
-            "consecutive_config_only": consecutive_config_only,
-            "config_heavy": total_config >= recent_window and total_code_patch == 0,
-        }
 
     def bump_specialist_dispatched(self, n: int = 1) -> int:
         """Increment the per-EXPLORE specialist dispatch counter; returns post-increment value.
@@ -533,29 +440,16 @@ class _ExploreStateMixin:
             added += 1
         cap = _shared_state_module()._SEEN_PR_IDS_CAP
         if len(self.research_scout_seen_pr_ids) > cap:
-            # FIFO eviction of oldest-seen ids; re-surfacing a very old PR is low-harm.
+            # FIFO eviction of oldest-seen ids.
             self.research_scout_seen_pr_ids = self.research_scout_seen_pr_ids[-cap:]
         return added
 
-    def has_seen_pr_id(self, pr_id: Any) -> bool:
-        """True iff ``pr_id`` was already surfaced by scout / FRAMEWORK.
-
-        Args:
-            pr_id (Any): The PR id to check.
-
-        Returns:
-            bool: ``True`` when the id is non-blank and already seen.
-        """
-        pid = str(pr_id or "").strip()
-        return bool(pid) and pid in set(self.research_scout_seen_pr_ids or [])
-
-    # Explore plateau proxy
     def reset_explore_plateau_proxy(self) -> None:
-        """Reset the legacy explore plateau proxy counter."""
+        """Reset the explore plateau proxy counter."""
         self.params_no_promote_streak = 0
 
     def note_explore_outcome(self, *, promoted: bool) -> None:
-        """Update the legacy plateau proxy after one explore task (KEEP resets, no-promote increments).
+        """Update the plateau proxy after one explore task (KEEP resets, no-promote increments).
 
         Args:
             promoted (bool): ``True`` when the explore task produced a KEEP
@@ -618,7 +512,7 @@ class _ExploreStateMixin:
             self.last_specialist = dict(snapshot)
 
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
-        """Merge an ExploreExecutor search update into persistent state; executor never writes ``accepted`` directly — :meth:`record_explore_accepted` is the single writer for that bucket.
+        """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket.
 
         Args:
             update (dict[str, Any]): The executor's explore-search update
@@ -672,12 +566,12 @@ class _ExploreStateMixin:
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
-        # Drop merged_from_legacy_sig so a later load re-runs the legacy union.
+        # Drop so a later load re-runs the legacy union.
         merged.pop("merged_from_legacy_sig", None)
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:
-        """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry so a variant isn't in both buckets.
+        """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry.
 
         Args:
             variant (dict[str, Any]): The promoted variant to record; an
@@ -689,12 +583,38 @@ class _ExploreStateMixin:
 
         args = str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or "")
         envs = dict(variant.get("extra_envs") or {})
-        fp = str(variant.get("fingerprint") or canonical_fingerprint(args, envs))
+        def _list_field(key: str) -> list[str]:
+            raw = variant.get(key)
+            if isinstance(raw, str):
+                return [raw.strip()] if raw.strip() else []
+            if isinstance(raw, (list, tuple, set)):
+                return [str(v).strip() for v in raw if str(v).strip()]
+            return []
+
+        remove_args = _list_field("remove_args")
+        unset_envs = _list_field("unset_envs")
+        args_mode = str(variant.get("args_mode") or "append").strip().lower()
+        control_fields: dict[str, Any] = {}
+        if remove_args:
+            control_fields["remove_args"] = remove_args
+        if unset_envs:
+            control_fields["unset_envs"] = unset_envs
+        if args_mode == "replace":
+            control_fields["args_mode"] = "replace"
+        fp = str(
+            variant.get("fingerprint")
+            or canonical_fingerprint(
+                args,
+                envs,
+                **control_fields,
+            )
+        )
         entry = {
             "fingerprint": fp,
             "name": str(variant.get("name") or ""),
             "extra_server_args": args,
             "extra_envs": envs,
+            **control_fields,
             "note": str(variant.get("note") or ""),
             "tput": variant.get("output_throughput") or variant.get("tput"),
             "gain_pct": variant.get("gain_pct"),
@@ -702,7 +622,7 @@ class _ExploreStateMixin:
             "accepted_at_round": str(variant.get("accepted_at_round") or ""),
             "ts": str(variant.get("ts") or _shared_state_module()._now_iso()),
             "provenance": str(variant.get("provenance") or "llm_direct"),
-            # R3: attribute the win to the macro-cycle it landed in.
+            # Attribute the win to the macro-cycle it landed in.
             "cycle": int(getattr(self, "macro_cycle", 0) or 0),
         }
         search = dict(self.explore_search or {})
@@ -729,6 +649,7 @@ class _ExploreStateMixin:
                 "gain_pct": entry["gain_pct"],
                 "extra_args": args,
                 "extra_envs": envs,
+                **control_fields,
                 "provenance": entry["provenance"],
                 "ts": entry["ts"],
                 "cycle": entry["cycle"],
@@ -737,7 +658,6 @@ class _ExploreStateMixin:
         search["winners_history"] = wh[-_shared_state_module()._WINNERS_HISTORY_CAP:]
         self.explore_search = search
 
-    # search-space expansion bookkeeping
     def record_discovered_flags(
         self,
         *,
@@ -746,7 +666,7 @@ class _ExploreStateMixin:
         param_flags: list[str] | None = None,
         source_path: str = "",
     ) -> None:
-        """Persist the AST-discovered flag list for a framework; the prompt surfaces the union so the LLM synthesizes new GridVariants beyond DEFAULT_*_GRID. Idempotent per-framework.
+        """Persist the AST-discovered flag list for a framework so the prompt can surface the union. Idempotent per-framework.
 
         Args:
             framework (str): The framework key; blank normalizes to

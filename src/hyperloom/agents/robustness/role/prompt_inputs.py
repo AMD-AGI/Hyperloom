@@ -33,6 +33,7 @@ import ast
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,8 +43,8 @@ from hyperloom.common.coerce import to_float, to_int
 log = logging.getLogger(__name__)
 
 
-# Anchored to the two-space row prefix the Coordinator emits; ``\S+`` topic
-# guards against payloads whose dict repr contains a literal ``topic=``.
+# Anchored to the two-space row prefix; ``\S+`` topic guards against payloads
+# whose dict repr contains a literal ``topic=``.
 _INBOX_LINE_RE = re.compile(
     r"^\s+seq=(?P<seq>\d+)\s+msg_id=(?P<msg_id>\S+)\s+from=(?P<from_agent>\S+)\s+"
     r"topic=(?P<topic>\S+)\s+payload=(?P<payload>.+)$"
@@ -65,7 +66,7 @@ _SCALAR_KEYS = {
     "tick",
     "stop_reason",
     "optimization_stack",
-    # In-flight kernel-opt visibility lets ``_no_levers_symptom`` short-circuit when in-flight work explains stack_size=0.
+    # In-flight kernel-opt visibility lets ``_no_levers_symptom`` short-circuit.
     "kernel_opt_attempts_count",
     "has_keep_pending_integrate",
     # Aggregated into ``SharedStateSnapshot.explore_started``; ``(none)`` is the never-yet sentinel.
@@ -102,7 +103,6 @@ class InboxItem:
         topic (str): Message topic string.
         payload (dict[str, Any]): Decoded payload dict; empty when the
             payload was absent or could not be decoded.
-        raw_payload (str): The raw, undecoded payload text as rendered.
     """
 
     seq: int
@@ -110,7 +110,6 @@ class InboxItem:
     from_agent: str
     topic: str
     payload: dict[str, Any] = field(default_factory=dict)
-    raw_payload: str = ""
 
 
 @dataclass
@@ -160,19 +159,14 @@ class SharedStateSnapshot:
     cumulative_gain_validated: float = 0.0
     crash_count: int = 0
     current_action: str = ""
-    # ``tick`` is the Coordinator's monotonic per-pass counter; non-empty ``stop_reason`` means winding down so stagnation signals skip.
     tick: int = 0
     stop_reason: str = ""
-    # Validated-entry count from ``optimization_stack=``; 0 + many ticks is the ``no_levers_found`` signature.
     optimization_stack_size: int = 0
-    # True once any explore family (explore / sweep) emitted a non-``(none)`` record; defers ``no_levers_found`` past cold-start.
     explore_started: bool = False
-    # Populated from the ``=== Time budget ===`` section; absent section leaves defaults so deadline signals short-circuit safely.
     elapsed_minutes: float = 0.0
     remaining_minutes: float = 0.0
     budget_minutes: float = 0.0
     closing_phase: bool = False
-    # Non-zero ``kernel_opt_attempts_count`` or a pending integrate means do NOT claim ``no_levers_found``.
     kernel_opt_attempts_count: int = 0
     has_keep_pending_integrate: bool = False
 
@@ -321,34 +315,12 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
         if key not in _SCALAR_KEYS:
             continue
         head = _split_double_space(value)
-        if key == "session_id":
-            snapshot.session_id = "" if head == "(unset)" else head
-        elif key == "baseline_tput":
-            snapshot.baseline_tput = to_float(head, default=0.0)
-        elif key == "cumulative_gain":
-            snapshot.cumulative_gain = to_float(head.rstrip("%"), default=0.0)
-        elif key == "cumulative_gain_validated":
-            # Rendered as ``20.5%`` or ``20.5% (stack_len_at_validation=2, ts=...)``; take the leading number.
-            head_clean = head.rstrip("%")
-            for sep in (" ", "%"):
-                head_clean = head_clean.split(sep, 1)[0]
-            snapshot.cumulative_gain_validated = to_float(head_clean, default=0.0)
-        elif key == "crash_count":
-            snapshot.crash_count = to_int(head, default=0)
-        elif key == "current_action":
-            snapshot.current_action = "" if head == "(idle)" else head
-        elif key == "tick":
-            snapshot.tick = to_int(head, default=0)
-        elif key == "stop_reason":
-            snapshot.stop_reason = "" if head == "(none)" else head
-        elif key == "optimization_stack":
-            snapshot.optimization_stack_size = _count_optimization_stack(head)
-        elif key == "kernel_opt_attempts_count":
-            snapshot.kernel_opt_attempts_count = to_int(head, default=0)
-        elif key == "has_keep_pending_integrate":
-            snapshot.has_keep_pending_integrate = head.lower() == "true"
+        spec = _SCALAR_FIELD_TABLE.get(key)
+        if spec is not None:
+            attr, coerce = spec
+            setattr(snapshot, attr, coerce(head))
         elif key in _EXPLORE_FAMILY_KEYS:
-            # Any non-``(none)`` value flips ``explore_started`` True; idempotent so a later ``(none)`` must not clear it.
+            # Any non-``(none)`` value flips ``explore_started`` True; never cleared once set.
             if head and head != "(none)":
                 snapshot.explore_started = True
     return snapshot
@@ -371,13 +343,51 @@ def _count_optimization_stack(head: str) -> int:
     try:
         value = ast.literal_eval(head)
     except (SyntaxError, ValueError):
-        # Fallback: comma-joined string, defensive against format drift.
+        # Fallback: comma-joined string.
         return len([part for part in head.split(",") if part.strip()])
     if isinstance(value, (list, tuple)):
         return len(value)
     if isinstance(value, str):
         return 0 if value == "(none)" else 1
     return 0
+
+
+def _coerce_cumulative_gain_validated(head: str) -> float:
+    """Decode a ``cumulative_gain_validated`` head into a float percentage.
+
+    Rendered as ``20.5%`` or ``20.5% (stack_len_at_validation=2, ts=...)``;
+    take the leading number only.
+
+    Args:
+        head: The rendered ``cumulative_gain_validated`` head value.
+
+    Returns:
+        The leading percentage as a float (``0.0`` when unparseable).
+    """
+    head_clean = head.rstrip("%")
+    for sep in (" ", "%"):
+        head_clean = head_clean.split(sep, 1)[0]
+    return to_float(head_clean, default=0.0)
+
+
+#: ``rendered key -> (SharedStateSnapshot attr, head-string coercion)`` table
+#: driving :func:`_parse_shared_state`. Replaces the per-key ``if/elif`` ladder
+#: with a single ``setattr`` loop; ``optimization_stack`` is the one key whose
+#: attr name differs from its rendered key. Explore-family keys are handled
+#: separately because they set a shared flag idempotently rather than a 1:1 attr.
+_SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
+    "session_id": ("session_id", lambda head: "" if head == "(unset)" else head),
+    "baseline_tput": ("baseline_tput", lambda head: to_float(head, default=0.0)),
+    "cumulative_gain": ("cumulative_gain", lambda head: to_float(head.rstrip("%"), default=0.0)),
+    "cumulative_gain_validated": ("cumulative_gain_validated", _coerce_cumulative_gain_validated),
+    "crash_count": ("crash_count", lambda head: to_int(head, default=0)),
+    "current_action": ("current_action", lambda head: "" if head == "(idle)" else head),
+    "tick": ("tick", lambda head: to_int(head, default=0)),
+    "stop_reason": ("stop_reason", lambda head: "" if head == "(none)" else head),
+    "optimization_stack": ("optimization_stack_size", _count_optimization_stack),
+    "kernel_opt_attempts_count": ("kernel_opt_attempts_count", lambda head: to_int(head, default=0)),
+    "has_keep_pending_integrate": ("has_keep_pending_integrate", lambda head: head.lower() == "true"),
+}
 
 
 def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:
@@ -487,7 +497,6 @@ def _parse_inbox(body: str) -> tuple[list[InboxItem], list[str]]:
                 from_agent=match.group("from_agent"),
                 topic=match.group("topic"),
                 payload=payload,
-                raw_payload=payload_text,
             )
         )
     return items, warnings

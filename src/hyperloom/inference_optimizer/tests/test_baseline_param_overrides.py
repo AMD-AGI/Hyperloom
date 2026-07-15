@@ -35,7 +35,7 @@ _CLI_STUB = SimpleNamespace(
 
 @pytest.fixture(autouse=True)
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
-    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so the artifact harvest does not scrape the host's real ``/workspace``."""
+    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so the artifact harvest does not scrape the host's ``/workspace``."""
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
 
@@ -148,7 +148,7 @@ def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
         benchmark_script="sglang_mi300x.sh",
     )
     cfg = yaml.safe_load(materialized.read_text())
-    # Override re-pins benchmark_script after the gpu_type pop so the operator wins.
+    # Override re-pins benchmark_script after the gpu_type pop.
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
     assert cfg["benchmark"]["runner_type"] == "mi300x"
 
@@ -166,7 +166,7 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
         gpu_type="mi300x",
     )
     cfg = yaml.safe_load(materialized.read_text())
-    # framework in _write_yaml fixture is "sglang".
+    # framework in the _write_yaml fixture is "sglang".
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
 
 
@@ -176,7 +176,7 @@ def test_kimi_materialize_enables_remote_client_trust(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli": _CLI_STUB}):
+    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli.model_gate": _CLI_STUB}):
         materialized = materialize_config_with_envs(
             base,
             out,
@@ -208,7 +208,7 @@ def test_custom_tokenizer_auto_map_enables_client_and_server_trust(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli": _CLI_STUB}):
+    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli.model_gate": _CLI_STUB}):
         materialized = materialize_config_with_envs(
             base,
             out,
@@ -233,7 +233,7 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli": _CLI_STUB}):
+    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli.model_gate": _CLI_STUB}):
         materialized = materialize_config_with_envs(
             base,
             out,
@@ -281,9 +281,7 @@ def _write_yaml_with_server_args(
 
 
 def test_materialize_dedups_duplicate_vllm_attention_backend(tmp_path):
-    """A YAML EXTRA_VLLM_ARGS base + a variant's
-    extra_server_args must not yield a duplicate --attention-backend in the
-    materialized config (vLLM v0.21.0 crashes EngineCoreProc on a duplicate)."""
+    """A YAML EXTRA_VLLM_ARGS base + a variant's extra_server_args must not yield a duplicate --attention-backend in the materialized config (vLLM crashes EngineCoreProc on a duplicate)."""
     base = tmp_path / "base.yaml"
     _write_yaml_with_server_args(
         base,
@@ -310,8 +308,7 @@ def test_materialize_dedups_duplicate_vllm_attention_backend(tmp_path):
 
 
 def test_materialize_keeps_sglang_repeated_attention_backend(tmp_path):
-    """SGLang tolerates a repeated flag (last-wins at the
-    server), so materialize must NOT dedup it."""
+    """SGLang tolerates a repeated flag (last-wins at the server), so materialize must NOT dedup it."""
     base = tmp_path / "base.yaml"
     _write_yaml_with_server_args(
         base,
@@ -334,7 +331,7 @@ def test_materialize_keeps_sglang_repeated_attention_backend(tmp_path):
     assert sglang_args.count("--attention-backend") == 2, sglang_args
 
 
-# TP auto-clamp against visible GPU count (real Qwen3-8B failure regression)
+# TP auto-clamp against visible GPU count
 def _write_yaml_with_tp(path: Path, tp: int) -> None:
     """Like ``_write_yaml`` but lets the test pin the YAML's default TP."""
     cfg: dict = {
@@ -362,7 +359,7 @@ def test_materialize_config_with_envs_clamps_tp_to_visible_gpus(
     monkeypatch,
     caplog,
 ):
-    """A 4-GPU pod must not launch sglang/vllm with ``TP=8``; regression: the materializer is now the single source of truth and clamps TP to the visible GPU count."""
+    """A 4-GPU pod must not launch sglang/vllm with ``TP=8``; the materializer clamps TP to the visible GPU count."""
     base = tmp_path / "base.yaml"
     _write_yaml_with_tp(base, tp=8)
     out = tmp_path / "out"
@@ -402,7 +399,7 @@ def test_materialize_config_with_envs_clamp_respects_env_override(
         materialized = materialize_config_with_envs(base, out)
 
     cfg = yaml.safe_load(materialized.read_text())
-    # Bypass keeps the operator-requested TP=8 even though it will fail.
+    # Bypass keeps the operator-requested TP=8.
     assert cfg["benchmark"]["envs"]["TP"] == 8
     assert cfg["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
 
@@ -428,12 +425,13 @@ def test_materialize_config_with_envs_no_clamp_when_visible_zero(
 
     cfg = yaml.safe_load(materialized.read_text())
     assert cfg["benchmark"]["envs"]["TP"] == 2
-    # ROCR was unset upstream → derived from TP (no clamp interference).
+    # ROCR was unset upstream, so it is derived from TP.
     assert cfg["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"] == "0,1"
 
 
 # BaselineExecutor.__call__ end-to-end (subprocess mocked)
 def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
+
     import json
 
     ws = slot / "benchmark_sglang_20260513_010101"
@@ -519,8 +517,7 @@ def test_baseline_executor_falls_back_to_shared_state_model_path(
     tmp_path, monkeypatch
 ):
     # params has no model_path and MODEL_PATH is unset: without the SharedState
-    # fallback the bare YAML model name leaks into --model-path (sglang then
-    # treats it as an HF repo id and fails "is not a local folder").
+    # fallback the bare YAML model name leaks into --model-path.
     monkeypatch.delenv("MODEL_PATH", raising=False)
     base = tmp_path / "base.yaml"
     _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
@@ -560,9 +557,8 @@ def test_baseline_executor_falls_back_to_shared_state_model_path(
 def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(
     tmp_path, monkeypatch
 ):
-    # Production form: the executor is a module-level singleton
-    # (self.shared_state is None) and live state arrives via ctx.extra.
-    # Without reading ctx.extra the bare YAML model name would leak.
+    # Production form: the executor is a module-level singleton and live state
+    # arrives via ctx.extra; without reading it the bare YAML model name leaks.
     monkeypatch.delenv("MODEL_PATH", raising=False)
     base = tmp_path / "base.yaml"
     _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
@@ -634,23 +630,17 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    # Always-on default = the per-task workspace. This fixture omits
-    # ``benchmark_script``, so the empty script name is not a Magpie
-    # built-in and the cold-start double-run is *not* eligible; the
-    # single-round path runs directly in ``output_dir`` and defaults
-    # ``$RESULT_DIR`` to that per-task workspace.
+    # Default RESULT_DIR is the per-task workspace: this fixture omits
+    # benchmark_script so the cold-start double-run is not eligible and the
+    # single-round path runs directly in output_dir.
     assert captured["env"]["RESULT_DIR"] == str(output_dir)
 
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     """The baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout.
 
-    By default the executor mirrors a network-mount
-    InferenceX checkout to local disk and pins MAGPIE_INFERENCEX_PATH at that
-    mirror. That mirror behaviour has its own coverage
-    (test_baseline_warmup_double_run.py). Here we isolate the env-inheritance
-    contract by disabling the mirror, so the asserted path is exactly the
-    configured ``$INFERENCEX_PATH`` rather than a hash-named local mirror dir.
+    The mirror is disabled here so the asserted path is exactly the configured
+    ``$INFERENCEX_PATH`` rather than a hash-named local mirror dir.
     """
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
     monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/hyperloom/InferenceX")
@@ -749,7 +739,7 @@ def test_baseline_executor_rejects_bad_result_dir(tmp_path):
     assert "result_dir" in result["error"]
 
 
-# ── reference-script base layer (precedence + 0-degrade) ───────────────────
+# reference-script base layer (precedence + 0-degrade)
 def _fw_args(materialized: Path, env_name: str = "EXTRA_VLLM_ARGS") -> str:
     cfg = yaml.safe_load(materialized.read_text())
     return str(cfg["benchmark"]["envs"].get(env_name, ""))
@@ -789,7 +779,7 @@ def test_reference_base_extra_args_override_wins(tmp_path):
     # reference-only flag survives
     assert args.count("--block-size") == 1
     assert "--block-size 128" in args
-    # override flag wins and is not doubled (vllm dedup last-wins)
+    # override flag wins and is not doubled
     assert args.count("--attention-backend") == 1
     assert "ROCM_FLASH" in args
     assert "TRITON_ATTN" not in args
@@ -809,7 +799,7 @@ def test_reference_envs_do_not_clobber_existing(tmp_path):
         reference_envs={"VLLM_ROCM_USE_AITER": "0", "VLLM_FP8_PADDING": "1"},
     )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
-    # extra_envs (CLI) wins over reference; new reference key still lands.
+    # extra_envs (CLI) wins over reference; the new reference key still lands.
     assert envs["VLLM_ROCM_USE_AITER"] == "1"
     assert envs["VLLM_FP8_PADDING"] == "1"
 

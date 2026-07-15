@@ -1,17 +1,30 @@
 # ROCm Hyperloom
 
-Hyperloom is an agentic system for optimizing LLM inference on AMD GPUs. Given
-a workload, it profiles the runtime, explores candidate changes, benchmarks each
-change against the real workload, and promotes only validated improvements. Its
-search strategy is based on **[Arbor](https://arxiv.org/abs/2606.12563)** \[1\].
+ROCm™ Hyperloom is an autonomous agentic system designed to optimize end-to-end inference workloads
+(targeting both host code and GPU kernels) on AMD GPUs. Using advanced AI agents and profiling tools,
+Hyperloom analyzes your workload, identifies performance bottlenecks, implements targeted optimizations,
+and validates the performance and correctness of the optimizations without requiring manual intervention.
+ 
+The system operates through a sophisticated multi-stage pipeline. First, an agent profiles your workload,
+leveraging tools like IntelliKit for low-level GPU profiling, Magpie for trace collection, and TraceLens
+for trace analysis to identify top bottlenecked kernels and create a bridge plan.
 
-<p align="center"><img width="600" alt="Hyperloom Architecture" src="slides/hyperloom_loop.png" /></p>
+Next, Hyperloom employs a self-evolving code optimization engine following an iterative agentic loop (Think
+→ Decide → Implement → Benchmark), alongside a Dynamic Specialist Agent and Knowledge Base to intelligently
+search the optimization space. GEAK, a multi-agent GPU performance optimizer, optimizes hot kernels in
+parallel. Once optimizations are identified and validated, Hyperloom prepares the optimized code and
+generates a report with all proposed changes and expected performance improvements. This end-to-end
+automation enables developers to achieve significant performance improvements while maintaining code
+quality and reducing the manual effort traditionally required for GPU optimization.
+
+<p align="center"><img width="600" alt="Hyperloom Architecture" src="docs/images/Hyperloom_architecture.png" /></p>
 
 Hyperloom combines:
 
 - Trace analysis through [TraceLens](https://github.com/AMD-AGI/TraceLens) and
   [Magpie](https://github.com/AMD-AGI/Magpie).
-- Kernel optimization through KernelForge and GEAK backends.
+- Kernel optimization through KernelForge and
+  [GEAK](https://github.com/AMD-AGI/GEAK) backends.
 - A validated optimization loop that writes reproducible artifacts and
   `session_breakdown.json` for downstream consumers.
 
@@ -19,8 +32,8 @@ Hyperloom combines:
 
 | Goal | Guide |
 |------|-------|
-| Start through the hosted UI | [Hosted UI quickstart](docs/install/quickstart.md) |
-| Run directly on a ROCm host | [Bare-metal quickstart](docs/install/bare-metal.md) |
+| Run using a Docker container | [Docker quickstart](docs/install/local-mode.md) |
+| Run directly on a ROCm host | [Bare-metal quickstart](docs/install/setup.md) |
 | Launch and monitor an optimization | [Run an optimization](docs/how-to/optimize.md) |
 | Understand the algorithm | [Optimization loop](docs/conceptual/optimization-loop.md) |
 
@@ -38,50 +51,6 @@ Hyperloom combines:
 
 ---
 
-## Key Results
-
-### Inference Optimization — InferenceX Challenge
-
-Hyperloom optimized 5 flagship models for the [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) benchmark on AMD Instinct MI355X, matching or beating NVIDIA B200 on all reported workloads.
-
-| Model | Best tok/s/GPU | vs MI355X Baseline | vs NVIDIA B200 |
-|-------|---------------:|:------------------:|:--------------:|
-| DeepSeek-R1-0528 (671B MoE) | **1,476** | — | **+97% ahead** |
-| GLM-5-FP8 (756B MoE+NSA) | **509** | **+193%** | **+27% ahead** |
-| Qwen3.5-397B (397B MoE) | **350** | **+40%** | **+2.5% ahead** |
-| MiniMax-M2.5 (MoE 256E) | **2,276** | **+6.5%** | **+5.7% ahead** |
-| gpt-oss-120b (120B MoE, mxfp4) | **11,643** | — | **+34% ahead** |
-
-All benchmarks: ISL=1024, OSL=1024 on MI355X (gfx950). "vs B200" shows best concurrency point. Full concurrency/ISL/OSL sweeps, patches, configs, and reproduction scripts: **[Agentic-InferenceX](https://github.com/AMD-AGI/Agentic-InferenceX)**.
-
-## Hosted Tier — Limits & Pricing
-
-The hosted [Hyperloom UI / PrimusClaw](https://crusoe.primus-safe.amd.com/hyperloom/)
-is operated by AMD on shared infrastructure. Defaults for the public
-PrimusClaw tier:
-
-| Resource                          | Hosted default                                                                 |
-|-----------------------------------|---------------------------------------------------------------------------------|
-| Per-session GPU budget            | 1–8 × MI300X / MI308X / MI325X / MI355X for single-node runs (matches TP); 16+ GPUs via RayJob for multi-node (nodes ≥ 2) |
-| Concurrent sessions per account   | 2                                                                               |
-| Session wall-clock                | 24 hours (extensible on request)                                                |
-| `USER_DATA_PATH` quota            | 200 GB per session, with daily snapshots                                        |
-| LLM-gateway request rate          | Bound to your `SAFE_API_KEY` quota (see [LLM Gateway](https://llm.amd.com/))     |
-| Outbound network                  | Allowlisted (model registries, HuggingFace, GitHub)                             |
-
-Pricing for the hosted tier is currently **free for AMD-internal users
-and approved AMD partners** via Primus-SaFE. Public / enterprise
-pricing is under active definition by the BRAIN team; reach out via
-the [Hyperloom support form](https://crusoe.primus-safe.amd.com/hyperloom/)
-or open an issue if your organization needs a quote.
-
-For higher limits, dedicated capacity, or air-gapped deployment, self-host
-Hyperloom in your own cluster following [`docs/reference/operations.md`](docs/reference/operations.md).
-Self-hosted Hyperloom is MIT licensed (see
-[Licensing](#licensing)); there is no per-seat or per-session fee.
-
----
-
 ## Developer Entry Points
 
 - Runtime package: `src/hyperloom/`
@@ -92,12 +61,6 @@ Self-hosted Hyperloom is MIT licensed (see
 
 For contribution workflow, testing, and linting, see
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
----
-
-## References
-
-\[1\] Prakriya, N., Hou, C., Gong, Z., Zhao, H., Zhao, X., Li, M., Gu, Z., & Barsoum, E. (2026). **Arbor: Tree Search as a Cognition Layer for Autonomous Agents**. arXiv:2606.12563. https://arxiv.org/abs/2606.12563
 
 ---
 

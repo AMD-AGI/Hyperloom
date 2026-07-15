@@ -10,7 +10,6 @@ from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_ingest import (
     _best_config_split,
     _recipe_slug_prefix,
     _scalar,
-    ingest_local_to_gbrain,
     recipe_to_page,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client import _page_to_recipe
@@ -90,8 +89,8 @@ def test_recipe_to_page_roundtrips_via_reader() -> None:
         "confidence": 0.85,
     }
     r = _page_to_recipe(fm)
-    # Reader now emits the unified nested KB-interface envelope: champion
-    # under ``body.best_config``, throughput under ``metrics``/``body``.
+    # Reader emits the unified nested KB-interface envelope: champion under
+    # ``body.best_config``, throughput under ``metrics``/``body``.
     assert r["canonical_id"] == "inference:qwen3-32b:mi300x:sglang:unknown_model_type:unknown_arch:0_5_11:fp8"
     assert r["body"]["best_config"] == {
         "extra_server_args": "--cuda-graph-max-bs 256",
@@ -224,32 +223,6 @@ class _FakeMcp:
         if tool == "put_page":
             self.puts.append(args["slug"])
         return {}
-
-
-def test_ingest_counts_and_gates(monkeypatch) -> None:
-    monkeypatch.delenv("RECIPE_KB_MIRROR_REQUIRE_SIGNAL", raising=False)
-    monkeypatch.setenv("GBRAIN_RECIPE_SLUG_PREFIX", "hyperloom-session-kb")
-    recipes = [
-        _recipe(),
-        _recipe(canonical_id="inference:a:b:c:d:e", best_config={}),  # anchor -> mirror
-        _recipe(canonical_id="", best_config={}),  # no cid -> skip
-        _recipe(canonical_id="inference:m2:mi355x:vllm:v1:fp16", model="m2", hardware="mi355x", framework_name="vllm"),
-    ]
-    mcp = _FakeMcp()
-    stats = ingest_local_to_gbrain(recipes=recipes, mcp=mcp, dry_run=False)
-    assert stats["total"] == 4
-    assert stats["ingested"] == 3
-    assert stats["skipped_unmirrorable"] == 1
-    assert stats["skipped_no_config"] == 1  # legacy alias
-    assert stats["errors"] == 0
-    assert len(mcp.puts) == 3
-    assert all(slug.startswith("hyperloom-session-kb/") for slug in mcp.puts)
-
-
-def test_ingest_dry_run_writes_nothing() -> None:
-    mcp = _FakeMcp()
-    stats = ingest_local_to_gbrain(recipes=[_recipe()], mcp=mcp, dry_run=True)
-    assert stats["ingested"] == 1 and mcp.puts == []
 
 
 def test_mirror_recipe_gates_and_writes(monkeypatch) -> None:

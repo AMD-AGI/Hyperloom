@@ -10,7 +10,7 @@ orchestrator's MCP-coupled backend), so this exposes
 (deterministic-only) when config is missing.
 
 The underlying HTTP protocol skeleton (one POST, parse the response) is
-shared with the rest of the codebase via ``hyperloom.common.llm.http_client``
+shared with the rest of the codebase via ``hyperloom.common.llm``
 (tree-reform.MD §4/§7); this module keeps the report-specific surface
 (``model``/``max_output_tokens`` field defaults, the
 ``HYPERLOOM_REPORT_LLM_BACKEND``-driven env wiring) local.
@@ -23,7 +23,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.llm.http_client import (
+from hyperloom.common.llm import (
     LLMClientError,
     call_anthropic_messages,
     call_openai_chat_completions,
@@ -85,7 +85,6 @@ class OpenAIHttpClient:
             user=user,
             max_output_tokens=self.max_output_tokens,
             timeout_sec=self.timeout_sec,
-            # narrative pass — keep prose stable but not robotic
             temperature=0.2,
         )
 

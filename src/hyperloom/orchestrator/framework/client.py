@@ -21,9 +21,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-# framework-agent is importable alongside orchestrator under the installed
-# ``hyperloom`` distribution, so the former IO-only ``except ImportError``
-# fallback copy of ``_FRAMEWORK_TO_REPO_URL`` is no longer needed.
 from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
 
@@ -166,8 +163,8 @@ async def phase_discover(
     """FRAMEWORK-phase batch discovery shim.
 
     Non-empty ``keywords`` is used verbatim for the primus-cortex AND-search
-    (fa skips its own ``extract_keywords``); empty/``None`` keeps the legacy
-    behaviour. Returns the ``fa phase-discover`` payload
+    (fa skips its own ``extract_keywords``); empty/``None`` keeps the default
+    keyword extraction. Returns the ``fa phase-discover`` payload
     ``{batch_id, framework, repo_url, candidates: [...]}``.
 
     Args:
@@ -179,7 +176,7 @@ async def phase_discover(
         repo_url: Optional explicit repo URL; resolved from ``framework`` when
             empty.
         keywords: Optional verbatim AND-search keywords; ``None``/empty keeps
-            the legacy keyword extraction.
+            the default keyword extraction.
         max_candidates: Maximum number of candidate PRs to request.
         batch_id: Optional batch identifier.
         pr_states: Optional PR-state filter (open / merged / closed).
@@ -208,16 +205,15 @@ async def phase_discover(
     }
     excluded = [str(x).strip() for x in (excluded_candidate_ids or []) if str(x).strip()]
     if excluded:
-        # Dedup preserving order for a deterministic request.
+        # Dedup preserving order.
         seen_ex: set[str] = set()
         request["excluded_candidate_ids"] = [x for x in excluded if not (x in seen_ex or seen_ex.add(x))]
     failed_ctx = [f for f in (failed_candidate_context or []) if isinstance(f, dict)]
     if failed_ctx:
         request["failed_candidate_context"] = failed_ctx[-10:]
     # Plumb the primus_cortex (PR-Monitor) base URL so the fa subprocess can
-    # query internal primus PRs; without it phase-discover falls back to
-    # GitHub-only. The PR-Monitor REST service IS the primus_cortex backend.
-    primus_url = (os.environ.get("PRIMUS_CORTEX_PR_API") or os.environ.get("PR_MONITOR_URL") or "").strip()
+    # query internal primus PRs; without it phase-discover falls back to GitHub.
+    primus_url = (os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
     if primus_url:
         request["primus_cortex_url"] = primus_url
     ps = [str(s).strip().lower() for s in (pr_states or []) if str(s).strip()]
@@ -225,7 +221,7 @@ async def phase_discover(
         request["pr_states"] = ps
     kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()]
     if kw:
-        # Dedup preserving order for a deterministic request.
+        # Dedup preserving order.
         seen: set[str] = set()
         request["keywords"] = [k for k in kw if not (k in seen or seen.add(k))]
     return await _invoke_fa_phase(
@@ -271,12 +267,12 @@ async def phase_audit(
         primus_cortex_url: Optional Primus Cortex base URL for patch fetch.
         target_framework: Optional cross-framework porting target; when it
             differs from the candidate's source framework, the audit runs in
-            cross-framework mode (design #5).
-        target_framework_source_roots: explicit source
-            roots for ``target_framework`` (the porting destination). Cross-
-            framework audits prefer this over the ``framework_source_roots``
-            fallback so ``metrics.roots_source=="explicit"`` and the R6 risk
-            (source tree mistaken for target tree) is never raised.
+            cross-framework mode.
+        target_framework_source_roots: explicit source roots for
+            ``target_framework`` (the porting destination). Cross-framework
+            audits prefer this over the ``framework_source_roots`` fallback so
+            ``metrics.roots_source=="explicit"`` and the R6 risk (source tree
+            mistaken for target tree) is never raised.
         use_llm: Opt-in single chat-completion refine (default off).
         model: Optional LLM model slug for the refine layer.
         timeout_sec: Subprocess wall-clock timeout in seconds.
@@ -310,10 +306,6 @@ async def phase_audit(
         session_dir=session_dir,
         timeout_sec=timeout_sec,
     )
-
-
-# NOTE: ``phase_fetch`` / ``phase_emit_proposal`` shims were removed as dead
-# API (zero callers); re-add only when the Coordinator wires a new caller.
 
 
 __all__ = [

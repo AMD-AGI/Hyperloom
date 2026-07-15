@@ -1,37 +1,21 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Bundle a session's *consumer-facing* artifacts into a single zip under
-``/workspace`` so the Claw sandbox sync picks it up (and ships it to S3 /
-the wekafs persist base).
+"""Bundle a session's consumer-facing artifacts into a single zip under
+``/workspace`` so the Claw sandbox sync picks it up.
 
-Why this exists
----------------
-Hyperloom writes all products under ``session_dir`` (``$USER_DATA_PATH``),
-which production launchers frequently point at a wekafs path *outside*
-``/workspace``. Claw only syncs ``/workspace``, so those products never
-reach Claw storage and the ``/v1/sessions/<sid>/files`` endpoint can't
-serve them. Rather than move the whole (multi-hundred-MB) session tree,
-this module copies just the small set of result/report/analysis files
-(KB–MB total) into one zip placed *inside* ``/workspace``, where Claw's
-sync is guaranteed to see it. By default it ALSO drops the same files
-*loose* (uncompressed, original relative tree) directly under the dest
-root itself (e.g. ``/workspace/session_breakdown.json``,
-``/workspace/reports/final.json``), so a consumer can fetch a single
-file without unzipping (disable via ``HYPERLOOM_SESSION_PACKAGE_LOOSE=0``).
+Products live under ``session_dir`` (``$USER_DATA_PATH``), often outside
+``/workspace`` which is the only path Claw syncs. This copies the small set
+of result/report/analysis files into one zip inside ``/workspace``, and by
+default also drops them loose (uncompressed, original tree) under the dest
+root so a consumer can fetch a single file without unzipping (disable via
+``HYPERLOOM_SESSION_PACKAGE_LOOSE=0``). A ``PACKAGE_MANIFEST.{json,txt}``
+recording which files were included / missing is written into the zip.
 
-A processing log (``PACKAGE_MANIFEST.json`` + ``PACKAGE_MANIFEST.txt``)
-recording exactly which files were included / missing is written into
-the zip itself, so a consumer can audit the bundle without the source
-session dir.
-
-Contract
---------
+Contract:
 * Best-effort: never raises. On any failure returns ``None`` and logs;
-  the caller MUST treat the canonical per-file writes as the source of
-  truth and never let a packaging failure mask the real ``stop_reason``.
+  the caller treats the canonical per-file writes as the source of truth.
 * Selection is a glob spec (:data:`PACKAGE_GLOBS`) resolved against the
-  session dir. ``runs/`` trace blobs and per-turn agent dumps are never
-  matched — only the curated result/report set.
+  session dir; only the curated result/report set is matched.
 """
 
 from __future__ import annotations
@@ -49,19 +33,15 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Default destination root. Claw mounts the synced workspace at
-# ``/workspace`` REGARDLESS of where ``$USER_DATA_PATH`` points, so the
-# bundle must be anchored here (not at ``workspace_root()`` which follows
-# ``$USER_DATA_PATH`` to wekafs). Overridable via env for non-Claw envs
-# and tests.
+# Default destination root. Claw mounts the synced workspace at ``/workspace``
+# regardless of where ``$USER_DATA_PATH`` points, so anchor the bundle here.
+# Overridable via env for non-Claw envs and tests.
 ENV_PACKAGE_DEST_ROOT = "HYPERLOOM_SESSION_PACKAGE_DEST"
 DEFAULT_DEST_ROOT = Path("/workspace")
 
-# In addition to the zip, also lay the same curated files down *loose*
-# (uncompressed, keeping their relative tree) directly under the dest
-# root, so a consumer can fetch a single file (e.g.
-# /v1/sessions/<sid>/files/<rel>) without unzipping. Set to
-# "0"/"false"/"no" to write only the zip.
+# Also lay the curated files down loose (uncompressed, relative tree) under the
+# dest root so a consumer can fetch one file without unzipping.
+# Set "0"/"false"/"no" to write only the zip.
 ENV_PACKAGE_LOOSE = "HYPERLOOM_SESSION_PACKAGE_LOOSE"
 
 #: Subdir under the dest root where bundles land.
@@ -71,11 +51,9 @@ MANIFEST_JSON_NAME = "PACKAGE_MANIFEST.json"
 MANIFEST_TXT_NAME = "PACKAGE_MANIFEST.txt"
 PACKAGE_SCHEMA_VERSION = 1
 
-# Curated artifact selection, relative to session_dir. Glob patterns are
-# matched against POSIX-style relative paths. ``**`` spans directories.
-# Keep this list in sync with the "necessary products" audit; the goal is
-# results / reports / analysis only — never the bulky ``runs/`` traces,
-# profile blobs, or per-turn agent ``request.json`` dumps.
+# Curated artifact selection, relative to session_dir. Glob patterns match
+# POSIX-style relative paths; ``**`` spans directories. Results / reports /
+# analysis only — never the bulky ``runs/`` traces or per-turn agent dumps.
 PACKAGE_GLOBS: tuple[str, ...] = (
     # ── top-level core ────────────────────────────────────────────────
     "session_breakdown.json",
@@ -147,13 +125,8 @@ def _copy_loose_tree(
 ) -> int:
     """Copy each included file into ``loose_dir`` preserving its relative
     tree, plus the two manifest files. Best-effort, per-file isolated:
-    one unreadable file never aborts the rest. Returns the count copied.
-
-    Files are overwritten in place (no wholesale wipe of ``loose_dir``):
-    the dest is the shared ``/workspace`` root, so deleting it is never
-    safe. A stale file from a previous, larger selection is left as-is;
-    the per-run ``PACKAGE_MANIFEST`` is the source of truth for what this
-    run actually included.
+    one unreadable file never aborts the rest. Files are overwritten in
+    place (no wholesale wipe of the shared dest root).
 
     Args:
         included: Tuples of ``(source path, relative path, size)`` to copy.
@@ -302,8 +275,7 @@ def _build_manifest(
         "included_files": [{"path": rel, "bytes": sz} for rel, sz in included],
         "unmatched_globs": missing_globs,
         "selection_globs": list(PACKAGE_GLOBS),
-        # True when a size/count cap stopped the bundle short -- a consumer
-        # MUST treat the package as incomplete and consult dropped_files.
+        # True when a size/count cap stopped the bundle short (consult dropped_files).
         "truncated": truncated,
         "dropped_files": list(dropped_files or []),
     }
@@ -379,10 +351,8 @@ def package_session_artifacts(
             log.warning("session package skipped: no artifacts matched in %s", sd)
             return None
 
-        # Apply safety caps. If we hit a cap, record what got dropped and
-        # flag the manifest as truncated so a consumer never mistakes a
-        # partial bundle for a complete one (a long session can hit the cap
-        # before, say, conversations.jsonl is reached).
+        # Apply safety caps. On hitting a cap, record what got dropped and
+        # flag the manifest as truncated.
         included: list[tuple[Path, str, int]] = []
         total = 0
         truncated = False
@@ -448,9 +418,7 @@ def package_session_artifacts(
         )
 
         # Also lay the same files down loose (uncompressed, original tree)
-        # directly under the dest root (e.g. ``/workspace/``) so a consumer
-        # can grab one file without unzip. NOT under the package subdir —
-        # straight at the root, preserving each file's relative path.
+        # straight under the dest root so a consumer can grab one file without unzip.
         if _loose_enabled():
             try:
                 copied = _copy_loose_tree(included, manifest, root)

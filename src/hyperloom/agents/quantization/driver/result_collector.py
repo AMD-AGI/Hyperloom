@@ -24,13 +24,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from hyperloom.common.jsonio import read_json
+
 
 STRICT_VALIDATION_ENV = "HYPERLOOM_QUANT_STRICT_VALIDATION"
 
 # MUST-have file globs for the quantized model directory.
-# (Multi-shard models also require ``model.safetensors.index.json``, but its
-# absence on single-file models is not a failure — the weights-glob covers
-# both cases.)
 _WEIGHT_GLOBS = ("*.safetensors", "*.bin")
 _TOKENIZER_FILES = (
     "tokenizer.json",
@@ -94,12 +93,9 @@ class CollectedArtifacts:
     fix_hypothesis_attempts: tuple[int, ...] = field(default_factory=tuple)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # parsing helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Matches a line like ``**MD5 spot-check**: ok``.
-# The validator emits one of ``ok`` / ``FAIL`` / ``skipped`` exactly.
+# Matches a step line; the validator emits one of ok / FAIL / skipped.
 _STEP_LINE_RE = re.compile(
     r"^\*\*Step\s+(?P<num>[1-4])\b[^*]*\*\*\s*:\s*(?P<status>ok|FAIL|skipped)\b",
     re.MULTILINE | re.IGNORECASE,
@@ -118,7 +114,7 @@ def _parse_validation_report(text: str) -> ValidationSteps:
     """
     by_num: dict[str, str] = {}
     for m in _STEP_LINE_RE.finditer(text):
-        # Normalize to lower-case "ok"/"fail"/"skipped" for downstream compares.
+        # Normalize to lower-case for downstream compares.
         status = m.group("status").lower()
         if status == "fail":
             status = "FAIL"  # keep FAIL upper-case to match the spec text
@@ -142,8 +138,6 @@ def _read_text(path: Path) -> str | None:
     """
     try:
         return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
     except OSError:
         return None
 
@@ -160,13 +154,15 @@ def _read_json(path: Path) -> tuple[dict | None, str | None]:
         ``error`` is a human-readable message. A missing file yields
         ``(None, None)``.
     """
-    raw = _read_text(path)
-    if raw is None:
-        return None, None
-    try:
-        return json.loads(raw), None
-    except json.JSONDecodeError as exc:
-        return None, f"json_decode_error: {exc.msg} at line {exc.lineno}"
+    error: str | None = None
+
+    def _record_decode_error(exc: BaseException) -> None:
+        nonlocal error
+        if isinstance(exc, json.JSONDecodeError):
+            error = f"json_decode_error: {exc.msg} at line {exc.lineno}"
+
+    data = read_json(path, default=None, on_error=_record_decode_error)
+    return data, error
 
 
 def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | None]:
@@ -209,7 +205,7 @@ def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | No
 
     path = Path(str(raw_path))
     if not path.is_absolute():
-        # Manifest paths are conventionally relative to workspace.
+        # Manifest paths are relative to workspace.
         path = (workspace / path).resolve()
     return path, True, None
 
@@ -286,9 +282,7 @@ def _strict_validation_enabled(env: dict[str, str] | None = None) -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # public entry
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def collect_artifacts(
