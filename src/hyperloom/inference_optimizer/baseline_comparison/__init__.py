@@ -29,7 +29,6 @@ from .inferencex_client import (
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_TIMEOUT_SEC,
     InferenceXFetchError,
-    fetch_rows,
 )
 from .target_analyzer import KNOWN_INFERENCEX_MODELS, analyze, to_inferencex_name
 from .types import BaselinePoint, BaselineQuery, BaselineSummary
@@ -45,6 +44,5 @@ __all__ = [
     "InferenceXFetchError",
     "KNOWN_INFERENCEX_MODELS",
     "analyze",
-    "fetch_rows",
     "to_inferencex_name",
 ]
