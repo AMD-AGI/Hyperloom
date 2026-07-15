@@ -1,20 +1,15 @@
 """Structured quantization config -> natural-language ``--quantize`` prompt.
 
-The frontend / backend builds a structured quantization request (global scheme
-+ optional per-layer overrides, kv_cache, calibration, eval gap); this module
-turns it into the natural-language prompt the quantization-agent expects.
-Free-text ``--quantize`` stays available for power users — this is the
-structured path, so the config -> prompt translation lives in exactly one
-place and is reused by the UI's editable "Preview" prompt.
+Turns a structured quantization request (global scheme + optional per-layer
+overrides, kv_cache, calibration, eval gap) into the natural-language prompt
+the quantization-agent expects. Free-text ``--quantize`` stays available for
+power users; this is the structured path.
 
 Two invariants:
 
 * **No hard-coded defaults.** :func:`build_quantization_prompt` only emits a
   sentence for a field the caller set explicitly. Anything left unset is
-  *omitted* so Quark's intake + plan skill fills it from its own defaults
-  (``exclude_layers`` / ``pileval`` / ``num_calib_data`` / ``seq_len`` / ...).
-  The UI is responsible for surfacing Quark's defaults if it wants them
-  visible in the preview — it passes them in via the config.
+  omitted so Quark's intake + plan skill fills it from its own defaults.
 * **GPU-constrained schemes.** ``fp8`` / ``ptpc_fp8`` work on any DCGPU;
   ``mxfp4`` / ``mxfp4_fp8`` are MI355X-only. :func:`validate_scheme` enforces
   this so an mxfp4 request on an mi300x target fails loudly instead of
@@ -169,8 +164,7 @@ def _calibration_paragraph(cfg: QuantizationConfig) -> str | None:
     """
     if cfg.calib_dataset is None and cfg.num_calib_data is None and cfg.seq_len is None:
         return None
-    # Compose only the parts that were set, e.g. "Calibrate with the pileval
-    # dataset using 512 samples at a sequence length of 2048."
+    # Compose only the parts that were set.
     head = "Calibrate"
     if cfg.calib_dataset is not None:
         head += f" with the {cfg.calib_dataset} dataset"
@@ -243,13 +237,11 @@ def resolve_scheme_prompt(scheme: str | None) -> str | None:
     """Map a global scheme enum to its ``--quantize`` prompt.
 
     Returns ``None`` when ``scheme`` is falsy or ``"none"`` (= no
-    quantization). Raises ``ValueError`` for an unknown scheme so a typo'd enum
-    fails loudly instead of silently skipping quantization. The prompt carries
-    the global scheme only — no hard-coded kv_cache / exclude_layers defaults;
-    Quark's intake + plan skill supplies those. Per-layer overrides and the
-    other :class:`QuantizationConfig` fields travel through
-    :func:`build_quantization_prompt` with a fully populated
-    :class:`QuantizationConfig` (the structured UI path).
+    quantization). Raises ``ValueError`` for an unknown scheme. The prompt
+    carries the global scheme only; Quark's intake + plan skill supplies
+    kv_cache / exclude_layers defaults. Per-layer overrides and the other
+    :class:`QuantizationConfig` fields travel through
+    :func:`build_quantization_prompt` (the structured UI path).
 
     Args:
         scheme: The global scheme enum, or the ``none`` sentinel.

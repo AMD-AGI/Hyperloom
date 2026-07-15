@@ -55,9 +55,9 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
             "options": {
                 "session_dir": str(tmp_path),
                 "auto_probe_inference_server": False,
-                # Inert CI hosts have no Ray head: the A6 probe would fire ``ray_head_dead`` and mask the heartbeat envelope.
+                # Inert CI hosts have no Ray head; disable the probe so it doesn't mask the heartbeat.
                 "ray_probe_enabled": False,
-                # CI lacks the TraceLens CLI / WekaFS mounts the J external_deps probe expects.
+                # CI lacks the TraceLens CLI / WekaFS mounts the external_deps probe expects.
                 "external_deps_enabled": False,
             },
         }
@@ -75,7 +75,7 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
-    """Strategic HIGH symptoms (crash_count_high) emit alert(high) only (escalate/prune auto-emit retired)."""
+    """Strategic HIGH symptoms (crash_count_high) emit alert(high) only."""
     from hyperloom.agents.robustness.runtime.cli import _coerce_request, _run_tick
 
     request = _coerce_request({**_REQUEST_HIGH_SEVERITY, "options": {"session_dir": str(tmp_path)}})
@@ -173,9 +173,9 @@ def test_subprocess_tick_emits_heartbeat(tmp_path: Path):
         "options": {
             "session_dir": str(tmp_path / "sess"),
             "auto_probe_inference_server": False,
-            # CI/dev hosts have no Ray head: ``ray status`` hangs and the A6 probe would fire alert/prune alongside the heartbeat.
+            # CI/dev hosts have no Ray head; disable the probe so it doesn't fire alongside the heartbeat.
             "ray_probe_enabled": False,
-            # CI lacks the TraceLens CLI / WekaFS mounts the J external_deps probe expects.
+            # CI lacks the TraceLens CLI / WekaFS mounts the external_deps probe expects.
             "external_deps_enabled": False,
         },
     }

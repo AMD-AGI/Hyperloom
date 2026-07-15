@@ -202,7 +202,7 @@ def test_build_model_result_with_ifx_reference(tmp_path: Path):
 
 
 def test_build_model_result_total_throughput_correction(tmp_path: Path):
-    # optimized is >3x ifx -> treated as total throughput, divided by TP.
+    # optimized >3x ifx -> treated as total throughput, divided by TP.
     (tmp_path / "ci_metrics.json").write_text(
         json.dumps({"tok_per_gpu_baseline": 800, "tok_per_gpu_optimized": 1000}), encoding="utf-8"
     )
@@ -238,7 +238,7 @@ def test_generate_markdown_report():
     md = rg.generate_markdown_report(_results(), "manual", "abcdef1234", "run42")
     assert "# Inference Optimization CI Report" in md
     assert "run42" in md
-    assert "abcdef1" in md  # 7-char commit
+    assert "abcdef1" in md
 
 
 def test_generate_json_summary():

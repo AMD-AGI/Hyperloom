@@ -162,7 +162,7 @@ def test_t0_anchor_writes_warm_start_snapshot_to_disk(
     import json
 
     payload = json.loads(warm_path.read_text())
-    # Bare T0 anchor row (identity but no best_config) is present after put_recipe but NOT actionable: classified seed_only/conf 0.0 so warm-replay won't apply an empty config.
+    # Bare T0 anchor row is classified seed_only/conf 0.0 (not actionable).
     assert payload["tier"] == "seed_only"
     assert payload["confidence"] == 0.0
     assert state.warm_start_context.get("status") == "seed_only"

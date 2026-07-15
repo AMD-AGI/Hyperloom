@@ -52,7 +52,6 @@ def _shared_state_module():
 
 
 class _ExploreStateMixin:
-    # specialist round bookkeeping
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
         """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites).
 
@@ -99,7 +98,7 @@ class _ExploreStateMixin:
         *,
         empty: bool,
     ) -> int:
-        """Increment/reset the per-domain empty-proposal streak; returns new value (escalation threshold is configured elsewhere, not here).
+        """Increment/reset the per-domain empty-proposal streak; returns new value.
 
         Args:
             domain (str): The specialist domain; blank normalizes to
@@ -117,7 +116,6 @@ class _ExploreStateMixin:
             self.specialist_domain_empty_streak[d] = 0
         return self.specialist_domain_empty_streak[d]
 
-    # per-anchor coverage counters (point 1)
     def bump_domain_round_counters(self) -> None:
         """Increment both per-anchor round counters for every knowledge-domain
         anchor. Called once per EXPLORE round so a long-idle domain's counters
@@ -182,8 +180,7 @@ class _ExploreStateMixin:
     ) -> list[str]:
         """Return anchors whose ``rounds_since_last_specialist`` ≥
         ``specialist_threshold`` OR ``rounds_since_last_keep`` ≥
-        ``keep_threshold`` (point 1 lower-bound; point 2 hard-trigger reads
-        this). Deterministically ordered by widest gap first.
+        ``keep_threshold``. Deterministically ordered by widest gap first.
 
         Args:
             specialist_threshold (int): Rounds-since-last-specialist value at
@@ -208,8 +205,7 @@ class _ExploreStateMixin:
     def best_gap_for_anchor(self, anchor: str) -> str:
         """Return the canonical_id of the most actionable open gap whose
         ``domain_hint`` resolves to ``anchor`` (or ``""`` when none). Selection:
-        highest severity, then least-attempted, then oldest (point 2 reads this
-        to force-dispatch a stalled domain that still has pending work).
+        highest severity, then least-attempted, then oldest.
 
         Args:
             anchor (str): The domain / anchor to match gaps against.
@@ -240,7 +236,6 @@ class _ExploreStateMixin:
         matches.sort(key=lambda m: m[0])
         return matches[0][1]
 
-    # gaps ledger helpers
     def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
         """Return the gap entry matching ``canonical_id`` (or ``None``).
 
@@ -286,7 +281,7 @@ class _ExploreStateMixin:
                 "severity": str(entry.get("severity") or "medium"),
                 "domain_hint": str(entry.get("domain_hint") or ""),
                 "source": str(entry.get("source") or ""),
-                # Optional origin reference (PR/blog URL) sedimented into the recipe with KEEP/REVERT provenance.
+                # Optional origin reference (PR/blog URL).
                 "provenance": str(entry.get("provenance") or ""),
                 "first_seen_ts": str(entry.get("first_seen_ts") or now),
                 "last_updated_ts": now,
@@ -296,7 +291,7 @@ class _ExploreStateMixin:
                 merged["attempts"] = merged["attempts"][-ss._GAPS_ATTEMPTS_HISTORY:]
             self.gaps.append(merged)
         else:
-            # Field-wise merge: incoming non-empty values win except ``first_seen_ts`` (preserve oldest).
+            # Field-wise merge: incoming non-empty values win except ``first_seen_ts``.
             for key in ("symptom", "layer", "severity", "domain_hint", "source", "provenance"):
                 incoming = entry.get(key)
                 if incoming:
@@ -338,7 +333,7 @@ class _ExploreStateMixin:
         canonical_id: str,
         attempt: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Append one attempt row to an existing gap; returns the gap or ``None`` when unknown (caller may ``upsert_gap`` instead).
+        """Append one attempt row to an existing gap; returns the gap or ``None`` when unknown.
 
         Args:
             canonical_id (str): The gap's canonical identifier.
@@ -369,7 +364,7 @@ class _ExploreStateMixin:
         task_id: str = "",
         delta_pct: float | None = None,
     ) -> None:
-        """Append one intervention entry and update config-only counters. consecutive-config counter advances on ``"config"``, resets on ``"code_patch"``; ``"code_patch_attempt"`` is telemetry-only.
+        """Append one intervention entry and update config-only counters; the consecutive-config counter advances on ``"config"`` and resets on ``"code_patch"``.
 
         Args:
             change_type (str): The intervention kind (e.g. ``config`` /
@@ -445,17 +440,16 @@ class _ExploreStateMixin:
             added += 1
         cap = _shared_state_module()._SEEN_PR_IDS_CAP
         if len(self.research_scout_seen_pr_ids) > cap:
-            # FIFO eviction of oldest-seen ids; re-surfacing a very old PR is low-harm.
+            # FIFO eviction of oldest-seen ids.
             self.research_scout_seen_pr_ids = self.research_scout_seen_pr_ids[-cap:]
         return added
 
-    # Explore plateau proxy
     def reset_explore_plateau_proxy(self) -> None:
-        """Reset the legacy explore plateau proxy counter."""
+        """Reset the explore plateau proxy counter."""
         self.params_no_promote_streak = 0
 
     def note_explore_outcome(self, *, promoted: bool) -> None:
-        """Update the legacy plateau proxy after one explore task (KEEP resets, no-promote increments).
+        """Update the plateau proxy after one explore task (KEEP resets, no-promote increments).
 
         Args:
             promoted (bool): ``True`` when the explore task produced a KEEP
@@ -518,7 +512,7 @@ class _ExploreStateMixin:
             self.last_specialist = dict(snapshot)
 
     def apply_explore_search_update(self, update: dict[str, Any]) -> None:
-        """Merge an ExploreExecutor search update into persistent state; executor never writes ``accepted`` directly — :meth:`record_explore_accepted` is the single writer for that bucket.
+        """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket.
 
         Args:
             update (dict[str, Any]): The executor's explore-search update
@@ -572,12 +566,12 @@ class _ExploreStateMixin:
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
-        # Drop merged_from_legacy_sig so a later load re-runs the legacy union.
+        # Drop so a later load re-runs the legacy union.
         merged.pop("merged_from_legacy_sig", None)
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:
-        """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry so a variant isn't in both buckets.
+        """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry.
 
         Args:
             variant (dict[str, Any]): The promoted variant to record; an
@@ -628,7 +622,7 @@ class _ExploreStateMixin:
             "accepted_at_round": str(variant.get("accepted_at_round") or ""),
             "ts": str(variant.get("ts") or _shared_state_module()._now_iso()),
             "provenance": str(variant.get("provenance") or "llm_direct"),
-            # R3: attribute the win to the macro-cycle it landed in.
+            # Attribute the win to the macro-cycle it landed in.
             "cycle": int(getattr(self, "macro_cycle", 0) or 0),
         }
         search = dict(self.explore_search or {})
@@ -664,7 +658,6 @@ class _ExploreStateMixin:
         search["winners_history"] = wh[-_shared_state_module()._WINNERS_HISTORY_CAP:]
         self.explore_search = search
 
-    # search-space expansion bookkeeping
     def record_discovered_flags(
         self,
         *,
@@ -673,7 +666,7 @@ class _ExploreStateMixin:
         param_flags: list[str] | None = None,
         source_path: str = "",
     ) -> None:
-        """Persist the AST-discovered flag list for a framework; the prompt surfaces the union so the LLM synthesizes new GridVariants beyond DEFAULT_*_GRID. Idempotent per-framework.
+        """Persist the AST-discovered flag list for a framework so the prompt can surface the union. Idempotent per-framework.
 
         Args:
             framework (str): The framework key; blank normalizes to

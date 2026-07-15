@@ -116,9 +116,7 @@ def test_build_grid_two_arms_per_conc():
     )
     assert len(grid) == 6
     names = [v.name for v in grid]
-    # CONC-major with arms interleaved: each conc emits an adjacent
-    # baseline/optimized pair, so a budget-truncated run leaves complete A/B
-    # pairs. With no anchor the ladder order is preserved.
+    # CONC-major with arms interleaved; no anchor preserves ladder order.
     assert names == [
         "baseline_conc1",
         "optimized_conc1",
@@ -134,7 +132,7 @@ def test_build_grid_two_arms_per_conc():
         "ISL": "1024",
         "OSL": "1024",
         "NUM_PROMPTS": "20",
-        # Accuracy eval is off by default for conc_sweep (concurrency-invariant).
+        # Accuracy eval off by default for conc_sweep.
         "RUN_EVAL": "false",
     }
     optimized = next(v for v in grid if v.name == "optimized_conc16")
@@ -162,7 +160,7 @@ def test_build_grid_anchor_conc_runs_first():
     )
     names = [v.name for v in grid]
     assert names[:2] == ["baseline_conc64", "optimized_conc64"]
-    # Remaining concs keep their requested order, arms still interleaved.
+    # Remaining concs keep requested order, arms interleaved.
     assert names[2:] == [
         "baseline_conc1",
         "optimized_conc1",
@@ -347,7 +345,7 @@ def test_run_conc_sweep_skip_empty_conc_list(
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[]))
     assert payload["status"] == "skipped"
     assert payload["skip_reason"] == "no_optimization_to_compare" or payload["skip_reason"] == "empty_conc_list"
-    # has_opt passes (non-empty fixture), so empty list is the reason.
+    # has_opt passes, so empty list is the reason.
     assert payload["skip_reason"] == "empty_conc_list"
     mock_run_grid.assert_not_called()
 
@@ -456,7 +454,6 @@ def test_run_conc_sweep_happy_path_writes_reports(
     assert payload["concs_requested"] == [1, 4, 16]
     assert len(payload["baseline"]["points"]) == 3
     assert len(payload["optimized"]["points"]) == 3
-    # All three pairs should produce a 1.30x speedup.
     speedups = [r["speedup"] for r in payload["comparison"]]
     for s in speedups:
         assert s == pytest.approx(1.30)
@@ -472,8 +469,7 @@ def test_run_conc_sweep_happy_path_writes_reports(
     disk = json.loads(summary_path.read_text())
     assert disk["status"] == "succeeded"
     assert disk["summary"]["successful_pairs"] == 3
-    # Regression for a payload-mutation-after-write bug: self-referential
-    # paths must land in the on-disk JSON.
+    # Self-referential paths must land in the on-disk JSON.
     assert disk["report_json_path"] == summary_path.as_posix()
     assert disk["report_csv_path"] == csv_path.as_posix()
 
@@ -481,7 +477,7 @@ def test_run_conc_sweep_happy_path_writes_reports(
     assert len(rows) == 6  # 3 baseline + 3 optimized
     assert {r["arm"] for r in rows} == {"baseline", "optimized"}
 
-    # final.json pointer is owned by report.py at CLOSE; conc_sweep must not touch it.
+    # final.json is owned by report.py at CLOSE; conc_sweep must not touch it.
     final_json_path = session_dir / "reports" / "final.json"
     assert not final_json_path.exists()
 
@@ -492,8 +488,7 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
     monkeypatch,
 ):
     """On MI325X/MI308X conc-sweep must select the mi300x runner script, like
-    every other executor — not state.gpu_type's real type (issue: sglang_mi325x.sh
-    is not shipped by Magpie, so the real type would fail every variant)."""
+    every other executor — not state.gpu_type's real type."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.gpu_type = "mi325x"
     monkeypatch.setenv("GPU_TYPE", "mi300x")

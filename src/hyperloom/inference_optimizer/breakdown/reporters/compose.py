@@ -17,7 +17,6 @@ from .cross_section import GlobalFacts, build_global_facts
 from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
 # Import every renderer module for its @register_renderer side effect.
-# REGISTRY order is decoupled from layout; :data:`SECTION_GROUPS` drives it.
 from ._renderers import (  # noqa: F401  (side-effect imports)
     session as _r_session,
     workload as _r_workload,
@@ -40,9 +39,7 @@ from ._renderers import (  # noqa: F401  (side-effect imports)
 )
 
 
-# Final report layout ``(group_title, [section_id, ...])``, mirroring the
-# orchestration phases. ``telemetry`` is dropped (GPU monitor data is
-# consistently broken on real wekafs sessions).
+# Final report layout ``(group_title, [section_id, ...])``. ``telemetry`` is dropped.
 SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ("Session & Workload", ["session", "workload"]),
     ("Performance Results", ["baseline", "final", "roofline", "attribution"]),
@@ -59,7 +56,6 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
         ],
     ),
     ("Run Trace", ["phase_timeline"]),
-    # source_files lists synthesis inputs; data_provenance explains per-section coverage.
     ("Source Artifacts", ["source_files", "data_provenance"]),
 ]
 
@@ -67,9 +63,7 @@ __all__ = [
     "LLMClient",
     "ComposeResult",
     "render_session_report",
-    # Renderer submodules imported above only for their @register_renderer
-    # side effect; listed as deliberate re-exports so static analysis does
-    # not flag them as unused imports.
+    # Renderer submodules re-exported so static analysis does not flag them as unused.
     "_r_session",
     "_r_workload",
     "_r_baseline",

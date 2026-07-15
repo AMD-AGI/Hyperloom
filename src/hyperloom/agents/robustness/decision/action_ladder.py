@@ -10,8 +10,7 @@ Three tiers by severity:
    only, ``kill_task`` (stale_lease), ``delegate(recover)`` (gpu_memory_leaked),
    ``delegate(report)`` (wall-clock deadline backstops).
 
-Strategic suggestions ride the alert ``detail.suggestion`` field; the ladder no
-longer auto-emits ``escalate_strategy_change`` / ``prune_branch``. A per-key
+Strategic suggestions ride the alert ``detail.suggestion`` field. A per-key
 cooldown (``Symptom.dedup_key`` × ``cooldown_ticks``) prevents inbox flooding.
 Findings — one record per intent batch — go to :class:`FindingSink`.
 """
@@ -79,9 +78,8 @@ class _LadderResult:
 class ActionLadder:
     """Stateful ladder that maps symptoms onto intents and findings.
 
-    The ladder is deliberately conservative in M1: it emits intents
-    only for symptoms whose dedup key is outside the cooldown window
-    and falls back to a heartbeat when the symptom set is empty.
+    Emits intents only for symptoms whose dedup key is outside the cooldown
+    window and falls back to a heartbeat when the symptom set is empty.
     """
 
     def __init__(
@@ -100,13 +98,11 @@ class ActionLadder:
         """
         self._config = config or ActionLadderConfig()
         self._state_view = state_view
-        # Cooldown bookkeeping persisted across subprocess restarts; without
-        # it the in-memory dict resets each tick and re-emits every intent.
+        # Cooldown bookkeeping persisted across subprocess restarts.
         loaded = state_view.load() if state_view is not None else {}
         self._last_emitted_tick: dict[tuple[str, ...], int] = _decode_last_emitted(loaded.get("last_emitted"))
-        # Stamped at the top of decide() so branches (e.g. gpu_memory_leaked)
-        # can build a stable tick-indexed idempotency_key without threading
-        # the tick through every helper.
+        # Stamped at the top of decide() so branches can build a stable
+        # tick-indexed idempotency_key without threading the tick around.
         self._last_tick_index: int = 0
 
     def _persist_cooldown(self) -> None:
@@ -256,16 +252,14 @@ class ActionLadder:
             list[Intent]: The alert plus any symptom-specific policing intents.
         """
         intents: list[Intent] = [build_alert("high", sym.summary, detail=_detail(sym))]
-        # Resource-safety: stale lease holds a lane on a dead PID. Robustness
-        # owns ``kill_task(scope='task')`` exclusively here; else stays advisory.
+        # Resource-safety: stale lease holds a lane on a dead PID -> kill_task.
         if sym.name == "stale_lease":
             evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
             task_id = str(evidence.get("task_id") or "").strip()
             if task_id and task_id != "unknown":
                 intents.append(build_kill_task(task_id=task_id, reason="stale_lease"))
             return intents
-        # Resource-safety: GPU leak -> ``delegate(recover, force_gpu_cleanup=True)``,
-        # the in-loop recovery action Robustness is explicitly allowlisted for.
+        # Resource-safety: GPU leak -> ``delegate(recover, force_gpu_cleanup=True)``.
         if sym.name == "gpu_memory_leaked":
             evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
             intents.append(
@@ -280,10 +274,9 @@ class ActionLadder:
                 )
             )
             return intents
-        # Wall-clock wind-down: the deadline supervisor SIGTERMs work past the
-        # wall, so ``delegate(report)`` is the only way to land a deterministic
-        # report in the remaining budget. ``recover_unsuccessful`` is the
-        # finalization path after an in-loop recover returned ``needs_review``.
+        # Wall-clock wind-down: ``delegate(report)`` lands a deterministic
+        # report in the remaining budget before the deadline supervisor
+        # SIGTERMs work; ``recover_unsuccessful`` is the finalization path.
         if sym.name in {
             "deadline_warning",
             "deadline_imminent",
@@ -301,8 +294,7 @@ class ActionLadder:
             )
             return intents
         # Every other HIGH symptom is strategic: the alert above carries
-        # evidence + suggestion via _detail(); Orchestration decides whether
-        # to emit escalate_strategy_change / prune_branch itself.
+        # evidence + suggestion; Orchestration decides how to act.
         return intents
 
 
@@ -383,12 +375,9 @@ async def _safe_rca(provider: Any | None, sym: Symptom) -> str:
         return ""
 
 
-# ---------------------------------------------------------------------------
 # State-store (de)serialisation helpers
-# ---------------------------------------------------------------------------
 
-# Packs ``tuple[str, ...]`` dedup keys into a single JSON-safe object key;
-# unlikely to collide with symptom names / subject IDs.
+# Packs ``tuple[str, ...]`` dedup keys into a single JSON-safe object key.
 _LADDER_KEY_SEP: str = "\x1f"  # ASCII unit separator — safe inside JSON strings
 
 

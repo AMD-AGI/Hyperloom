@@ -62,7 +62,7 @@ def _decision_trace_fixture():
     (task_id=spec-1); the other two (orchestration + kernel) are unattributed.
     """
     session_total = _bucket(100, 200, 10, 20, 3)
-    unattributed = _bucket(90, 50, 6, 8, 2)  # orchestration + kernel
+    unattributed = _bucket(90, 50, 6, 8, 2)
     return {
         "decision_trace": [
             {
@@ -76,7 +76,6 @@ def _decision_trace_fixture():
                     "gain_pct": None,
                     "task_id": "spec-1",
                 },
-                # per-decision view: cache pre-summed into total_cache
                 "tokens": {
                     "by_component": {"specialist": _bucket(10, 150, 4, 12, 1)},
                     "total_in": 10,
@@ -198,11 +197,10 @@ class TestCollectTokenUsage:
         assert rows["baseline"]["tokens"] is None
 
     def test_attribution_splits_overhead_from_unattributed(self):
-        # Add an overhead bucket (e.g. orchestration/critic) and shrink the
-        # plain unattributed so the three-way split reconciles to session_total.
+        # Add an overhead bucket so the three-way split reconciles to session_total.
         dt = _decision_trace_fixture()
-        dt["overhead_tokens"] = _bucket(80, 40, 4, 6, 1)   # orchestration turn
-        dt["unattributed_tokens"] = _bucket(10, 10, 2, 2, 1)  # leftover
+        dt["overhead_tokens"] = _bucket(80, 40, 4, 6, 1)
+        dt["unattributed_tokens"] = _bucket(10, 10, 2, 2, 1)
         out = col.collect_token_usage(dt, _timeline_fixture(), [])
         attr = out["attribution"]
         # attributed = session_total - unattributed - overhead
@@ -221,8 +219,7 @@ class TestCollectTokenUsage:
         assert out["timeline"] == []
 
     def test_zero_call_decision_not_in_timeline_tokens(self):
-        # The noop-1 decision has calls=0, so even if a timeline row referenced
-        # it, it must stay tokens=null (no zero-bucket injection).
+        # A calls=0 decision must stay tokens=null (no zero-bucket injection).
         tl = [
             {"action": "noop", "change": "noop", "decision": "KEEP", "phase": "EXPLORE", "task_id": "noop-1", "ts": "x"}
         ]

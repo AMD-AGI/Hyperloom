@@ -61,7 +61,7 @@ def _extra_focus_tags(
     params: dict[str, Any],
     domain: "SpecialistDomain",
 ) -> tuple[str, ...]:
-    """Knowledge-domain tags beyond the primary domain's anchor (anchor dropped to avoid double-rendering).
+    """Knowledge-domain tags beyond the primary domain's anchor.
 
     Args:
         params: The dispatch params carrying the tag list.
@@ -75,7 +75,7 @@ def _extra_focus_tags(
     return tuple(t for t in tags if t and t != primary_anchor)
 
 
-# Re-export the external tool registries defined in :mod:`policy` for backward-compatible imports.
+# Re-export the external tool registries defined in :mod:`policy`.
 from ..policy.gate import (
     CORTEX_KB_READ_TOOL_NAMES as _CORTEX_KB_READ,
     KB_WRITE_TOOL_NAMES as _KB_WRITE,
@@ -83,10 +83,10 @@ from ..policy.gate import (
     WEB_TOOL_NAMES as _WEB,
 )
 
-#: Back-compat tuple alias for the PR Monitor MCP readonly tools (tuple-typed for positional iteration).
+#: Tuple alias for the PR Monitor MCP readonly tools.
 PR_MONITOR_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_PR_MONITOR))
 
-#: Back-compat tuple alias for the Cortex KB readonly MCP tools.
+#: Tuple alias for the Cortex KB readonly MCP tools.
 CORTEX_KB_READONLY_MCP_TOOLS: tuple[str, ...] = tuple(sorted(_CORTEX_KB_READ))
 
 
@@ -103,21 +103,16 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
         "Edit",
         "Write",
         "MultiEdit",
-        # Restricted Bash — runners may further filter via a callback. The
-        # runner's per-call hook (TODO) will block destructive invocations.
+        # Restricted Bash — runners may further filter via a callback.
         "Bash",
-        # Scratch planning surface (no side effects); aligns the specialist tool
-        # face with the broader CLI agent toolset.
+        # Scratch planning surface (no side effects).
         "TodoWrite",
-        # Single-layer fan-out of leaf sub-agents. Leaves inherit the parent's
-        # VISIBLE_DEVICES, so they share the parent's GPU lease and cannot
-        # oversubscribe; the leaf agent type itself omits Task (no recursion).
+        # Single-layer fan-out of leaf sub-agents; leaves inherit the parent's GPU lease.
         "Task",
     )
     + tuple(sorted(_WEB))
     + PR_MONITOR_MCP_TOOLS
-    # Read-only KB-graph query tools (mcp__cortex_kb__*). Stripped at resolve
-    # time when the cortex_kb MCP server is not wired (KnowledgePlane.cortex_enabled).
+    # Read-only KB-graph query tools; stripped at resolve time when cortex_kb is not wired.
     + CORTEX_KB_READONLY_MCP_TOOLS
 )
 
@@ -126,7 +121,6 @@ DEFAULT_SPECIALIST_TOOLS: tuple[str, ...] = (
 SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = now_iso
 
 
@@ -166,8 +160,7 @@ class _PreparedRun:
     user_prompt: str = ""
     notes: list[str] = field(default_factory=list)
     resolved_tools: tuple[str, ...] = ()
-    # When set, the caller returns this verbatim and skips execute
-    # (e.g. unknown domain / missing workspace).
+    # When set, the caller returns this verbatim and skips execute.
     early_return: "SpecialistRunResult | None" = None
 
 
@@ -195,12 +188,9 @@ class SpecialistRunResult:
 class SpecialistFailureType(str, enum.Enum):
     """Coarse failure taxonomy for a finished specialist run.
 
-    Only the *transient infrastructure* members (``TIMEOUT`` /
-    ``STALE_HEARTBEAT`` / ``CRASH``) are retry-eligible — a fresh re-dispatch
-    can plausibly fix a subprocess that never produced a clean result.
-    Semantic outcomes (``NO_OUTPUT`` empty findings, ``TOOL_VIOLATION``,
-    ``CONFIG`` bad domain / missing workspace) are left for the orchestrator to
-    act on; re-running them verbatim would just burn budget.
+    Only the transient infrastructure members (``TIMEOUT`` /
+    ``STALE_HEARTBEAT`` / ``CRASH``) are retry-eligible; semantic outcomes are
+    left for the orchestrator to act on.
     """
 
     NONE = "none"  # succeeded
@@ -230,12 +220,9 @@ def classify_specialist_failure(
     """Map a :class:`SpecialistRunResult` ``(status, error)`` to a failure
     type + retry-eligibility flag.
 
-    Pure helper (no I/O) so PolicyGate, the Coordinator auto-retry hook, and
-    tests share one taxonomy. ``status == 'stale'`` is the runner's marker for
-    a subprocess that died with a ``backend_error`` (timeout / stale-heartbeat
-    / crash); ``empty_synthesised`` means it exited cleanly without a usable
-    ``specialist_done`` (genuine empty, max-turns, or a config error encoded in
-    ``error``).
+    ``status == 'stale'`` marks a subprocess that died with a ``backend_error``
+    (timeout / stale-heartbeat / crash); ``empty_synthesised`` means it exited
+    cleanly without a usable ``specialist_done``.
 
     Args:
         runner_status: The :class:`SpecialistRunResult` status string.
@@ -255,7 +242,7 @@ def classify_specialist_failure(
             ftype = SpecialistFailureType.TIMEOUT
         elif "stale_heartbeat" in err:
             ftype = SpecialistFailureType.STALE_HEARTBEAT
-        else:  # subprocess_error / subprocess_exit_code / backend_error
+        else:
             ftype = SpecialistFailureType.CRASH
         return ftype, True
     if status == "empty_synthesised":
@@ -432,30 +419,21 @@ class SpecialistRunner:
         """
         params = ctx.task.params or {}
         domain_key = str(params.get("domain") or "").strip()
-        # A tag-only dispatch ("just give it a topic/domain", e.g.
-        # ``tags=['systems']`` with no explicit ``domain``) must still resolve.
-        # ``normalize_dispatch_tags`` reads ``params.tags`` (falling back to the
-        # ``domain`` alias), so back-fill ``domain_key`` from the first resolved
-        # tag before the catalogue lookup instead of dying as ``unknown_domain``.
+        # Back-fill domain_key from the first resolved tag for tag-only dispatch.
         if not domain_key:
             resolved_tags = normalize_dispatch_tags(params)
             if resolved_tags:
                 domain_key = resolved_tags[0]
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         max_turns = int(params.get("max_turns") or self.default_max_turns)
-        # Resolve by anchor first then key (``domain_for_tag``) so a dispatch
-        # whose ``domain`` carries the KB anchor (e.g. ``communication``) matches
-        # its catalogue entry (``comm_specialist``) instead of silently failing
-        # the key-only ``get_domain`` lookup and dying as ``unknown_domain``.
+        # Resolve by anchor first then key so a domain carrying the KB anchor matches its entry.
         domain = domain_for_tag(domain_key)
         profile = resolve_specialist_profile(params)
         task_description = str(params.get("task_description") or "").strip()
 
         workspace = self._resolve_workspace(ctx)
 
-        # scope='freeform' (absorbed dynamic_specialist) is not bound to the
-        # domain catalogue: use the synthetic freeform domain so dispatch can
-        # proceed on the task_description mandate alone.
+        # scope='freeform' is not bound to the domain catalogue; use the synthetic freeform domain.
         if domain is None and profile.is_freeform:
             domain = FREEFORM_DOMAIN
 
@@ -488,8 +466,7 @@ class SpecialistRunner:
                 f"{domain.available_in!r}); using generic prompt template"
             )
 
-        # Worktree — created only under subprocess dispatch; surfaced via
-        # ``workspace_path`` so the agent knows where to write patches.
+        # Worktree — created only under subprocess dispatch; surfaced via ``workspace_path``.
         worktree, worktree_base, worktree_err = self._maybe_setup_worktree(
             ctx,
             workspace=workspace,
@@ -534,15 +511,13 @@ class SpecialistRunner:
                 target_gap_notes=str(params.get("target_gap_notes") or ""),
                 already_proven=[p for p in (params.get("already_proven") or []) if isinstance(p, dict)],
                 research_hints=str(params.get("research_hints") or ""),
-                # Workload context warmed from SharedState; zero/empty
-                # renders as "(none)" rather than a fabricated default.
+                # Workload context warmed from SharedState.
                 precision=str(params.get("precision") or ""),
                 conc=int(params.get("conc") or 0),
                 isl=int(params.get("isl") or 0),
                 osl=int(params.get("osl") or 0),
                 max_model_len=int(params.get("max_model_len") or 0),
-                # runtime fingerprint for ``_format_version_note`` to flag
-                # version-mismatched lessons; empty when not warmed.
+                # Runtime fingerprint to flag version-mismatched lessons.
                 framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(str(workspace_for_prompt) if workspace_for_prompt else ""),
                 notes=str(params.get("notes") or ""),
@@ -551,16 +526,12 @@ class SpecialistRunner:
                 bench=profile.bench,
                 lane=profile.lane,
                 task_description=task_description,
-                # Coordinator-injected note when this is a bounded auto-retry
-                # of a prior transient (timeout / crash / stale) attempt.
+                # Coordinator-injected note when this is a bounded auto-retry.
                 auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
-                # WS1 wall-clock budget (Coordinator-computed, on ctx.extra) +
-                # dispatch start, so the specialist can self-throttle instead of
-                # only finding the deadline when the reaper kills it.
+                # WS1 wall-clock budget so the specialist can self-throttle.
                 wall_budget_sec=float((ctx.extra or {}).get("wall_budget_sec") or 0.0),
                 started_at_iso=datetime.now(timezone.utc).isoformat(),
-                # proposal_set self-curation target (policy.py is the
-                # source of truth); shapes the prompt, not a hard cap.
+                # proposal_set self-curation target; shapes the prompt, not a hard cap.
                 max_proposals=max(1, int(params.get("max_proposals") or DEFAULT_SPECIALIST_MAX_PROPOSALS)),
             )
 
@@ -593,10 +564,7 @@ class SpecialistRunner:
     def _ctx_tick_phase(ctx: "RunnerContext | None") -> tuple[int | None, str | None]:
         """Best-effort (tick, phase) from the live SharedState on ``ctx.extra``.
 
-        SubAgentRunner threads the live ``shared_state`` into every executor's
-        ``ctx.extra``; reading ``tick`` / ``phase`` here lets the specialist
-        trace rows carry the real phase/tick instead of leaving the collector
-        to ts-window backfill. Returns ``(None, None)`` when unavailable.
+        Returns ``(None, None)`` when unavailable.
         """
         try:
             extra = getattr(ctx, "extra", None) or {}
@@ -624,11 +592,9 @@ class SpecialistRunner:
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for an in-process specialist turn.
 
-        No-op when ``self.session_dir`` is unset (some test harnesses run
-        the runner without a session dir) or the backend reported no token
-        counters. ``latency_ms`` is the measured wall-clock of the turn (the
-        in-process backend call) or the whole subprocess session. Wrapped
-        broadly so a trace failure never aborts the run.
+        No-op when ``self.session_dir`` is unset or the backend reported no
+        token counters. ``latency_ms`` is the measured wall-clock of the turn or
+        the whole subprocess session.
 
         Args:
             task_id: The specialist task id.
@@ -682,10 +648,8 @@ class SpecialistRunner:
         """Append the specialist's intel/tool calls to ``specialist_intel.jsonl``.
 
         One row per recovered ``tool_use`` (``{"tool", "query"}``), stamped with
-        ``task_id`` / ``turn`` / ``ts`` so the emitter can backfill each as an
-        ``intel:<tool>`` span under the ``specialist`` agent. No-op without a
-        session dir or when no tool calls were recovered. Best-effort: a trace
-        write must never break the run.
+        ``task_id`` / ``turn`` / ``ts``. No-op without a session dir or when no
+        tool calls were recovered.
         """
         if self.session_dir is None or not tool_calls:
             return
@@ -723,8 +687,8 @@ class SpecialistRunner:
         phase: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for an in-process specialist
-        turn. Persists the full (redacted) prompt + completion the backend put
-        on ``metadata``. No-op without a session dir; best-effort otherwise.
+        turn. Persists the full (redacted) prompt + completion. No-op without a
+        session dir.
 
         Args:
             task_id: The specialist task id.
@@ -759,7 +723,6 @@ class SpecialistRunner:
                 exc_info=True,
             )
 
-    # ------------------------------------------------------------------
     # In-process Backend path (test path)
     async def _run_via_backend(
         self,
@@ -804,8 +767,7 @@ class SpecialistRunner:
                 notes=notes + ["backend_init_failed"],
             )
 
-        # Combined prompt so backends that ignore the separate
-        # ``system_prompt`` field still see the system content inline.
+        # Combined prompt so backends ignoring ``system_prompt`` still see it inline.
         combined_prompt = prep.system_prompt + "\n---\n" + prep.user_prompt
 
         specialist_done_intent: Intent | None = None
@@ -863,10 +825,7 @@ class SpecialistRunner:
                     "metadata": dict(turn_result.metadata),
                 },
             )
-            # In-process specialist path: the token spend is already in the
-            # transcript's turn metadata; mirror it onto the unified LLM-call
-            # ledger keyed by task_id + turn so the collector can join it to
-            # the EXPLORE decision.
+            # Mirror the turn's token spend onto the unified LLM-call ledger.
             _tick, _phase = self._ctx_tick_phase(ctx)
             self._trace_specialist_llm_call(
                 task_id=ctx.task.task_id,
@@ -896,10 +855,8 @@ class SpecialistRunner:
                 else:
                     tool_violations.append(intent.type.value)
 
-            # WS1 incremental checkpoint: rewrite the partial after every turn
-            # so a budget kill (or any abnormal exit) leaves the best-so-far
-            # result on disk. When the agent has emitted its specialist_done
-            # this round, snapshot that payload; otherwise record progress.
+            # WS1 incremental checkpoint: rewrite the partial after every turn so
+            # a budget kill leaves the best-so-far result on disk.
             if specialist_done_intent is not None:
                 self._write_specialist_done_partial(
                     workspace,
@@ -988,9 +945,8 @@ class SpecialistRunner:
             max_turns=prep.max_turns,
             status="subprocess_starting",
         )
-        # WS1: explicit wall-clock budget injected by the Coordinator at
-        # dispatch (lane-tiered × macro_cycle, capped 4h). When present it
-        # overrides the legacy ``max_turns × per_turn`` ceiling in the reaper.
+        # WS1: explicit wall-clock budget injected by the Coordinator; when
+        # present it overrides the legacy ``max_turns × per_turn`` ceiling.
         wall_budget_raw = (ctx.extra or {}).get("wall_budget_sec")
         wall_budget_sec = float(wall_budget_raw) if wall_budget_raw else None
         sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
@@ -1020,12 +976,7 @@ class SpecialistRunner:
                 "error": sub_result.error,
             },
         )
-        # Fold the production specialist's token spend
-        # (recovered from the Claude CLI stream-json log by the dispatcher)
-        # into the unified ledger. The subprocess runs one logical agent
-        # session, so we record turn=1. ``usage`` already uses the four
-        # canonical counter names, so the metadata-shaped helper consumes
-        # it directly.
+        # Fold the production specialist's token spend into the unified ledger.
         _sub_latency_ms = None
         if sub_result.elapsed_seconds is not None:
             try:
@@ -1033,10 +984,8 @@ class SpecialistRunner:
             except (TypeError, ValueError):
                 _sub_latency_ms = None
         _tick, _phase = self._ctx_tick_phase(ctx)
-        # Prefer per-turn token rows (one ledger row per model turn) when the
-        # stream-json log carried per-message usage; the whole-session latency
-        # lands on the final turn so the per-turn sums still reconcile without
-        # over-counting wall-clock. Fall back to a single cumulative turn=1 row.
+        # Prefer per-turn token rows when available; whole-session latency lands
+        # on the final turn. Fall back to a single cumulative turn=1 row.
         turn_usages = list(sub_result.turn_usages or [])
         if len(turn_usages) > 1:
             last_idx = len(turn_usages) - 1
@@ -1061,18 +1010,15 @@ class SpecialistRunner:
                 tick=_tick,
                 phase=_phase,
             )
-        # Full-trace intel: persist the tool/intel calls the specialist made so
-        # the trace shows what it read (web/PR/KB/grep), backfilled as spans.
+        # Persist the tool/intel calls the specialist made, backfilled as spans.
         self._record_specialist_intel(
             task_id=ctx.task.task_id,
             turn=1,
             tool_calls=sub_result.tool_calls,
         )
-        # Pair the parent-held prompt (the CLI
-        # never echoes it into the stream-json log) with the assistant reply
-        # the dispatcher recovered from process.log, so the production
-        # specialist turn lands in conversations.jsonl alongside the
-        # in-process path. No-op when no reply text was recovered.
+        # Pair the parent-held prompt with the recovered assistant reply so the
+        # production specialist turn lands in conversations.jsonl. No-op when no
+        # reply text was recovered.
         if sub_result.response:
             self._record_specialist_conversation(
                 task_id=ctx.task.task_id,
@@ -1091,8 +1037,7 @@ class SpecialistRunner:
             status="finished",
         )
 
-        # Decode subprocess error: backend_error → 'stale', clean miss →
-        # empty_synthesised.
+        # Decode subprocess error: backend_error → 'stale', clean miss → empty_synthesised.
         backend_error = ""
         if sub_result.timed_out:
             backend_error = "subprocess_timeout"
@@ -1179,13 +1124,10 @@ class SpecialistRunner:
 
         # Have a specialist_done payload — sanitise and persist.
         done_payload = dict(specialist_done_payload)
-        # Re-stamp gap_canonical_id/domain so the on-disk artifact is
-        # authoritative.
+        # Re-stamp gap_canonical_id/domain so the on-disk artifact is authoritative.
         done_payload["gap_canonical_id"] = gap or done_payload.get("gap_canonical_id", "")
         done_payload["domain"] = domain.key
-        # Re-stamp cross-framework provenance from task params so the KB
-        # ledger records source/target framework deterministically, regardless
-        # of whether the specialist echoed them in its proposal.
+        # Re-stamp cross-framework provenance from task params for the KB ledger.
         _cf_params = ctx.task.params or {}
         if _cf_params.get("cross_framework"):
             done_payload["source_framework"] = str(_cf_params.get("source_framework") or "")
@@ -1194,15 +1136,13 @@ class SpecialistRunner:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
-        # ``max_proposals`` is a prompt-side target, not a hard cap: the
-        # full proposal_set is carried back unmodified.
+        # ``max_proposals`` is a prompt-side target, not a hard cap.
         if "empty" not in done_payload:
             done_payload["empty"] = not bool(done_payload["proposal_set"])
         if "summary" not in done_payload:
             done_payload["summary"] = "specialist emitted done without summary"[:480]
         # Reconcile self-reported ``patches_written`` against the filesystem:
-        # keep only claimed paths that exist on disk (so a dangling claim
-        # can't make integrate_patch a silent no-op), then union with the scan.
+        # keep only claimed paths that exist on disk, then union with the scan.
         claimed = done_payload.get("patches_written") or []
         if not isinstance(claimed, list):
             claimed = []
@@ -1250,18 +1190,13 @@ class SpecialistRunner:
             # Record dangling patch claims for the session_breakdown audit.
             notes.append("patches_claimed_but_missing:" + ",".join(missing[:8]))
 
-        # Stamp the dispatch scope onto every proposal so the cross-domain
-        # Critic enrichment fires deterministically for scope=domains (not
-        # dependent on the sub-agent self-reporting it).
+        # Stamp the dispatch scope onto every proposal for cross-domain Critic enrichment.
         for _proposal in done_payload.get("proposal_set") or []:
             if isinstance(_proposal, dict):
                 _proposal.setdefault("scope", prep.profile.scope)
 
-        # Universal patch-safety gate (applies to every scope): drop patches
-        # that are not real unified diffs / escape the tree, git-ground the
-        # rest against the clean base checkout, and scan for smuggled
-        # quantitative claims. Stale-but-valid patches are kept (integrate_patch
-        # + Critic adjudicate) with a grounding note.
+        # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
+        # the rest against the clean base checkout, and scan for smuggled claims.
         base_checkout = prep.worktree_base or prep.worktree
         kept, dropped, grounding = _patch_safety.vet_patches(
             deduped,
@@ -1413,10 +1348,8 @@ class SpecialistRunner:
     def _partial_done_path(self, workspace: Path | None) -> Path | None:
         """Return the ``specialist_done.partial.json`` path in the workspace.
 
-        Incremental checkpoint target, rewritten atomically as findings
-        accumulate. Distinct from the final ``specialist_done.json`` so the
-        subprocess reaper (which treats the final file's appearance as the exit
-        signal) is never tripped early.
+        Incremental checkpoint target, distinct from the final
+        ``specialist_done.json`` so the subprocess reaper is never tripped early.
 
         Args:
             workspace (Path | None): The per-task workspace directory.

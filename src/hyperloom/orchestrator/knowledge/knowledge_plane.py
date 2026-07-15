@@ -4,10 +4,8 @@
 
 Coordinator-side glue exposing the PR Monitor MCP URL for specialist tool
 whitelisting and the Cortex KB MCP for optional graph-query tools. Stateless.
-
-KB_design §3.6 §4.3: specialists use direct MCP access (mcp__pr_monitor__*)
-to query the PR Monitor; this facade only gates whether that MCP server is
-advertised in the specialist tool whitelist.
+This facade only gates whether those MCP servers are advertised in the
+specialist tool whitelist.
 """
 
 from __future__ import annotations
@@ -24,7 +22,6 @@ from .pr_monitor import (
 log = logging.getLogger(__name__)
 
 
-# Facade
 @dataclass
 class KnowledgePlane:
     """Single facade for the knowledge sources.
@@ -36,9 +33,8 @@ class KnowledgePlane:
 
     pr_monitor: PRMonitorClient | None = None
     pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL
-    # Read-only KB-graph (gbrain) MCP advertised to specialists as the
-    # ``cortex_kb`` server; empty disables it (the mcp__cortex_kb__* tools are
-    # then stripped from the specialist whitelist).
+    # Read-only KB-graph (gbrain) MCP advertised as the ``cortex_kb`` server;
+    # empty strips the mcp__cortex_kb__* tools from the specialist whitelist.
     cortex_kb_mcp_url: str = ""
     cortex_kb_mcp_headers: dict[str, str] = field(default_factory=dict)
 
@@ -73,9 +69,8 @@ class KnowledgePlane:
         )
 
     def reset_round_caches(self) -> None:
-        """No-op at EXPLORE round boundaries (pre-warm channel removed)."""
+        """No-op at EXPLORE round boundaries."""
 
-    # Read surface
     @property
     def pr_monitor_enabled(self) -> bool:
         """Whether the PR Monitor client is wired and enabled.
