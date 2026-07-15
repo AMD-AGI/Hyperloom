@@ -148,16 +148,6 @@ setup still happens through `install.sh`.
 
 ---
 
-## Optional Quickstart — Primus-SaFE platform
-
-AMD-internal users can run Local Mode on the **Primus-SaFE Authoring** platform instead of their own machine:
-
-1. Create an Authoring Pod on Primus-SaFE Authoring and select an SGLang or vLLM image. On this platform, use the Harbor mirror prefix `harbor.<datacenter_name>.example-internal-host.invalid/proxy/primussafe/<image>:<tag>` (the internal mirror of the Docker Hub images above) — for example `.../proxy/primussafe/sglang:<tag>` or `.../proxy/primussafe/vllm-openai-rocm:<tag>`.
-2. When the Pod is ready, connect to it with Cursor Remote SSH (follow the connection instructions shown in the Primus-SaFE Authoring UI).
-3. Inside the Pod, follow [Step 3](#3-clone-hyperloom-and-configure-credentials) and [Step 4](#4-install-runtime-dependencies) above to clone Hyperloom and install the runtime.
-
----
-
 ## Next Step
 
 After setup, open the Hyperloom checkout in Cursor. Then follow
