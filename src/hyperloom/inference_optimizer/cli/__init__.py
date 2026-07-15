@@ -70,6 +70,7 @@ from .credentials import (
 )
 from .multi_node import (
     _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
+    _dump_mn_input_params as _dump_mn_input_params,
 )
 from .quantization import (
     _run_quantization_prelude as _run_quantization_prelude,
@@ -1219,7 +1220,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
     ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
     # Resolve gpus_per_node from the explicit CLI flag or the policy default.
-    gpn_attr = getattr(args, "rayjob_gpus_per_node", None)
+    gpn_attr = getattr(args, "gpus_per_node", None)
     if gpn_attr is not None:
         gpus_per_node_resolved = int(gpn_attr)
     else:
@@ -1234,7 +1235,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 f"ERROR: TP={tp_resolved} exceeds total GPU count "
                 f"({nodes_resolved} nodes * {gpus_per_node_resolved} "
                 f"gpus_per_node = {total_gpus}). Either lower --tp, raise "
-                "--nodes, or use a larger --rayjob-gpus-per-node pod "
+                "--nodes, or use a larger --gpus-per-node pod "
                 "template.",
                 file=sys.stderr,
             )
@@ -1283,6 +1284,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             ("pd_decode_nodes", "PD_DECODE_NODES"),
             ("pd_prefill_tp", "PD_PREFILL_TP"),
             ("pd_decode_tp", "PD_DECODE_TP"),
+            ("pd_prefill_ep", "PD_PREFILL_EP"),
+            ("pd_decode_ep", "PD_DECODE_EP"),
         ):
             v = int(getattr(args, cli_attr, 0) or 0)
             if v > 0:
@@ -1290,10 +1293,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         for cli_attr, env_key in (
             ("pd_transfer_backend", "PD_TRANSFER_BACKEND"),
             ("pd_ib_device", "PD_IB_DEVICE"),
+            ("pd_prefill_extra_args", "PD_PREFILL_EXTRA_ARGS"),
+            ("pd_decode_extra_args", "PD_DECODE_EXTRA_ARGS"),
         ):
             v = (getattr(args, cli_attr, "") or "").strip()
             if v:
                 os.environ[env_key] = v
+
+    # Multi-node: dump resolved input params (CLI + env) for env->CLI tracing.
+    if nodes_resolved >= 2:
+        _dump_mn_input_params(args, nodes_resolved)
 
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = clean_stale_aiter_locks()

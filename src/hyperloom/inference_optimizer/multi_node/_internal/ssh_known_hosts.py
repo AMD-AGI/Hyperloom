@@ -1,4 +1,4 @@
-"""Session-scoped SSH known_hosts management for the Dynamo control plane."""
+"""Session-scoped SSH known_hosts management for the Infera control plane."""
 
 from __future__ import annotations
 

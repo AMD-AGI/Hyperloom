@@ -312,3 +312,185 @@ def test_extract_rescue_skips_no_throughput(tmp_path, monkeypatch):
         {"throughput": {}}, workspace=ws, subprocess_started_unix=leak.stat().st_mtime - 100
     )
     assert m["valid_measurement"] is False
+
+
+# ---- _row_to_gpu_sample ----------------------------------------------------
+def test_row_to_gpu_sample_picks_metrics():
+    header = [
+        "timestamp",
+        "Temperature (Junction) (C)",
+        "Average Socket Power (W)",
+        "sclk clock (MHz)",
+        "GPU use (%)",
+        "VRAM% ",
+    ]
+    row = ["1000", "55", "310.5", "1400", "88", "42"]
+    s = br._row_to_gpu_sample(header, row)
+    assert s["temperature_c"] == 55
+    assert s["power_w"] == 310.5
+    assert s["clock_mhz"] == 1400
+    assert s["gpu_util_pct"] == 88
+    assert s["vram_pct"] == 42
+
+
+def test_row_to_gpu_sample_empty_when_no_numeric():
+    assert br._row_to_gpu_sample(["timestamp", "note"], ["1000", "n/a"]) == {}
+
+
+# ---- _aggregate_gpu_samples_by_role ---------------------------------------
+def test_aggregate_gpu_samples_by_role():
+    samples = [
+        {"role": "prefill", "power_w": 100.0, "temperature_c": 50.0, "gpu_util_pct": 80.0, "vram_pct": 40.0},
+        {"role": "prefill", "power_w": 200.0, "temperature_c": 60.0, "gpu_util_pct": 90.0, "vram_pct": 50.0},
+        {"role": "decode", "power_w": 150.0},
+    ]
+    out = br._aggregate_gpu_samples_by_role(samples)
+    assert out["prefill"]["samples"] == 2
+    assert out["prefill"]["avg_power_w"] == 150.0
+    assert out["prefill"]["max_power_w"] == 200.0
+    assert out["prefill"]["max_temp_c"] == 60.0
+    assert out["decode"]["samples"] == 1
+    # No temperature samples for decode -> 0.0 fallback.
+    assert out["decode"]["avg_temp_c"] == 0.0
+
+
+def test_aggregate_gpu_samples_by_role_empty_without_role():
+    assert br._aggregate_gpu_samples_by_role([{"power_w": 100.0}]) == {}
+
+
+# ---- harvest_mn_gpu_metrics -----------------------------------------------
+def test_harvest_mn_gpu_metrics_single_node_noop(monkeypatch, tmp_path):
+    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
+    monkeypatch.setattr(mn, "is_multi_node", lambda: False)
+    assert br.harvest_mn_gpu_metrics(tmp_path) == {}
+
+
+def test_harvest_mn_gpu_metrics_folds_pod_csvs(monkeypatch, tmp_path):
+    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
+
+    monkeypatch.setattr(mn, "is_multi_node", lambda: True)
+    monkeypatch.setattr(
+        mn, "pd_topology_from_state",
+        lambda: {"prefill_pod_ips": ["10.0.0.1"], "decode_pod_ips": ["10.0.0.2"]},
+    )
+
+    shared = tmp_path / "server_logs"
+    shared.mkdir()
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
+
+    header = "timestamp,Temperature (Junction) (C),Average Socket Power (W)"
+    (shared / "gpu_metrics_10.0.0.1.csv").write_text(
+        f"{header}\n1000,55,300\n1001,56,310\n", encoding="utf-8"
+    )
+    (shared / "gpu_metrics_10.0.0.2.csv").write_text(
+        f"{header}\n1000,50,280\n", encoding="utf-8"
+    )
+
+    dest = tmp_path / "ws"
+    dest.mkdir()
+    (dest / "benchmark_report.json").write_text("{}", encoding="utf-8")
+
+    out = br.harvest_mn_gpu_metrics(dest, subprocess_started_unix=900.0)
+    assert out["rows"] == 3
+    assert (dest / "gpu_metrics.csv").is_file()
+    report = json.loads((dest / "benchmark_report.json").read_text(encoding="utf-8"))
+    assert "gpu_monitor" in report
+    assert report["pd"]["prefill_pod_ips"] == ["10.0.0.1"]
+    assert "prefill" in report["gpu_monitor_by_role"]
+    assert "decode" in report["gpu_monitor_by_role"]
+
+
+def test_harvest_mn_gpu_metrics_no_csvs(monkeypatch, tmp_path):
+    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
+
+    monkeypatch.setattr(mn, "is_multi_node", lambda: True)
+    shared = tmp_path / "server_logs"
+    shared.mkdir()
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
+    assert br.harvest_mn_gpu_metrics(tmp_path / "ws") == {}
+
+
+# ---- _is_scriptable_measurement / is_valid_measurement --------------------
+def test_is_scriptable_via_quality_gate():
+    # A quality_gate marker classifies the measurement as scriptable.
+    assert br._is_scriptable_measurement({"quality_gate": {"passed": True}}) is True
+
+
+def test_is_valid_measurement_scriptable_gate(monkeypatch):
+    # Scriptable run: valid on positive throughput when the quality gate passes.
+    assert br.is_valid_measurement(
+        {"quality_gate": {"passed": True}, "output_throughput": 5.0}
+    ) is True
+    # Scriptable run whose quality gate fails is not selectable.
+    monkeypatch.setattr(br, "quality_gate_passed", lambda qg, require=False: False, raising=False)
+    import hyperloom.orchestrator.actions.executors._accuracy_gate as ag
+    monkeypatch.setattr(ag, "quality_gate_passed", lambda qg, require=False: False)
+    assert br.is_valid_measurement(
+        {"quality_gate": {"passed": False}, "output_throughput": 5.0}
+    ) is False
+
+
+def test_is_valid_measurement_serving_and_bad_input():
+    # Serving measurement: needs positive throughput AND completed requests.
+    assert br.is_valid_measurement({"output_throughput": 10.0, "completed_requests": 3}) is True
+    assert br.is_valid_measurement({"output_throughput": 10.0, "completed_requests": 0}) is False
+    assert br.is_valid_measurement({"output_throughput": 0.0}) is False
+    assert br.is_valid_measurement(None) is False
+
+
+def test_harvest_mn_gpu_metrics_non_absolute_dir(monkeypatch, tmp_path):
+    # Unresolved / relative shared dir is treated as absent.
+    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
+
+    monkeypatch.setattr(mn, "is_multi_node", lambda: True)
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", "relative/path")
+    assert br.harvest_mn_gpu_metrics(tmp_path / "ws") == {}
+
+
+def test_harvest_mn_gpu_metrics_window_and_malformed_rows(monkeypatch, tmp_path):
+    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
+
+    monkeypatch.setattr(mn, "is_multi_node", lambda: True)
+    monkeypatch.setattr(mn, "pd_topology_from_state", lambda: {})
+
+    shared = tmp_path / "server_logs"
+    shared.mkdir()
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
+
+    header = "timestamp,Temperature (Junction) (C),Average Socket Power (W)"
+    # Rows: one in-window, one out-of-window (dropped), one blank, one bad ts.
+    (shared / "gpu_metrics_hostA.csv").write_text(
+        f"{header}\n1000,55,300\n5,50,280\n\n,51,290\n", encoding="utf-8"
+    )
+    # A too-short file (header only) is skipped.
+    (shared / "gpu_metrics_hostB.csv").write_text(f"{header}\n", encoding="utf-8")
+
+    dest = tmp_path / "ws"
+    dest.mkdir()
+    # No benchmark_report.json → sample-inject branch is skipped, csv still written.
+    out = br.harvest_mn_gpu_metrics(dest, subprocess_started_unix=900.0)
+    assert out["rows"] == 1
+    assert (dest / "gpu_metrics.csv").is_file()
+
+
+def test_harvest_mn_gpu_metrics_report_not_dict(monkeypatch, tmp_path):
+    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
+
+    monkeypatch.setattr(mn, "is_multi_node", lambda: True)
+    monkeypatch.setattr(mn, "pd_topology_from_state", lambda: {})
+
+    shared = tmp_path / "server_logs"
+    shared.mkdir()
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
+    header = "timestamp,Temperature (Junction) (C),Average Socket Power (W)"
+    (shared / "gpu_metrics_hostA.csv").write_text(
+        f"{header}\n1000,55,300\n", encoding="utf-8"
+    )
+
+    dest = tmp_path / "ws"
+    dest.mkdir()
+    # Non-dict report JSON → inject branch bails without raising.
+    (dest / "benchmark_report.json").write_text("[]", encoding="utf-8")
+    out = br.harvest_mn_gpu_metrics(dest, subprocess_started_unix=900.0)
+    assert out["rows"] == 1
+    assert "gpu_monitor_samples" not in out
