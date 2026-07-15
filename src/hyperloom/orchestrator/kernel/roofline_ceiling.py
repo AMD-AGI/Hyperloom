@@ -801,7 +801,19 @@ def load_model_meta(
         return None
     p = Path(model_path).expanduser()
     if not p.is_dir():
-        return None
+        # ``model_path`` may be an HF repo id (the CLI ``--model`` is persisted
+        # verbatim); resolve it to the engine's local HF cache dir via the shared
+        # resolver so the decode ceiling isn't null for repo-id launches. Lazy
+        # import avoids an import-time orchestrator -> inference_optimizer cycle;
+        # ``None`` preserves the prior "unreadable -> None" behavior.
+        from hyperloom.inference_optimizer.model_config_utils import (
+            resolve_local_model_dir,
+        )
+
+        resolved = resolve_local_model_dir(model_path)
+        if resolved is None:
+            return None
+        p = resolved
     cfg = _read_hf_config(p)
     if cfg is None:
         return None
@@ -1319,11 +1331,20 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     # DiT geometry drives both the compute FLOP model and per-step memory IO.
     # Read the runtime resolution so sample_size-less configs can size their grid.
     height, width = _read_diffusion_resolution(state)
-    dit = _read_diffusion_dit_meta(runtime.model_path, height=height, width=width)
+    # ``model_path`` may be an HF repo id; resolve to the local diffusers dir so
+    # the DiT/VAE config reads work (load_model_meta re-resolves internally, so
+    # passing the resolved dir is harmless).
+    from hyperloom.inference_optimizer.model_config_utils import (
+        resolve_local_model_dir,
+    )
+
+    _resolved = resolve_local_model_dir(runtime.model_path)
+    model_dir = str(_resolved) if _resolved is not None else runtime.model_path
+    dit = _read_diffusion_dit_meta(model_dir, height=height, width=width)
 
     # Need at least one weight source: DiT geometry OR the full-checkpoint size;
     # bail only when both are missing.
-    meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
+    meta = load_model_meta(model_dir, precision_hint=runtime.precision)
     meta_bytes = int(meta.weight_bytes) if (meta is not None and meta.weight_bytes > 0) else 0
     if dit is None and meta_bytes <= 0:
         return _EMPTY_BREAKDOWN

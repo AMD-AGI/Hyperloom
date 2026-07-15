@@ -226,9 +226,10 @@ brief:
   `--gpu-specialist-capacity` defaults to the visible GPU count on the launch
   host (`_default_gpu_specialist_capacity()`), so Orchestration may dispatch
   `delegate{action_name='specialist', params={needs_gpu: true, gpu_count: ...}}`
-  without any extra flag. Pass `--gpu-specialist-capacity N` (or
-  `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) to clamp the pool, and `0`
-  (either form) to disable GPU specialists entirely. When enabled, GPU
+  without any extra flag. Pass `--gpu-specialist-capacity N` to clamp the pool,
+  and `--gpu-specialist-capacity 0` to disable GPU specialists entirely. The
+  legacy `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY` env is ignored by the CLI
+  default resolver; use the explicit flag for operator control. When enabled, GPU
   specialists serialize against serving through `gpu_research_lane` and
   exclusively own their leased cards: they may start/stop their own servers
   (any port that is not the production serving port 8888), profile, autotune,
@@ -694,6 +695,16 @@ profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
 Use `--conc-sweep-concs` for the explicit sweep ladder.
+
+Operator server flags are the workload baseline, but they are not sacred. When
+EXPLORE has evidence or an operator hint that a pinned flag may be harmful, it
+may test an ablation variant with `remove_args` (or `unset_envs` for inherited
+environment variables). Do not simulate deletion by adding an unrelated
+counter-flag: emit an explicit explore grid entry such as
+`{"name": "remove_cuda_graph_max_bs", "remove_args": ["--cuda-graph-max-bs"]}`.
+The executor removes those inherited args before appending the variant's
+`extra_args`, then records the removal fields in `explore_search` for dedup and
+audit.
 
 ### Workload-contract reuse (baseline → explore/sweep)
 

@@ -385,6 +385,7 @@ async def restart_server_for_round(
     *,
     extra_server_args: str = "",
     extra_env: dict[str, str] | None = None,
+    unset_env: list[str] | tuple[str, ...] | set[str] | None = None,
     torch_profiler_dir: str = "",
     framework: str | None = None,
     model_path: str | None = None,
@@ -414,6 +415,9 @@ async def restart_server_for_round(
 
     Args:
         extra_server_args: Extra framework server args for this round.
+        extra_env: Per-round env overrides forwarded to the remote server.
+        unset_env: Per-round env names removed from the forwarded remote
+            server environment.
         torch_profiler_dir: Per-round profiler trace dir; exported via
             ``HYPERLOOM_MN_PROFILE_TRACE_DIR`` and restored afterward.
         framework: Inference framework override.
@@ -520,11 +524,17 @@ async def restart_server_for_round(
         # scoped to this single restart so a later arg-only round doesn't
         # inherit this round's envs. Restored in the ``finally`` below.
         saved_fwd_env = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV")
+        saved_unset_fwd_env = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV")
+        unset_keys = [str(k).strip() for k in (unset_env or []) if str(k).strip()]
         if extra_env:
             safe_env = filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True)
             os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = json.dumps(safe_env)
         else:
             os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
+        if unset_keys:
+            os.environ["HYPERLOOM_MN_UNSET_FWD_ENV"] = json.dumps(unset_keys)
+        else:
+            os.environ.pop("HYPERLOOM_MN_UNSET_FWD_ENV", None)
 
         # Multi-node TraceLens SGLang patch fan-out (fail-soft). The controller
         # can't ``import sglang`` (it lives in the pods), so the local patcher
@@ -787,6 +797,10 @@ async def restart_server_for_round(
                 os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
             else:
                 os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = saved_fwd_env
+            if saved_unset_fwd_env is None:
+                os.environ.pop("HYPERLOOM_MN_UNSET_FWD_ENV", None)
+            else:
+                os.environ["HYPERLOOM_MN_UNSET_FWD_ENV"] = saved_unset_fwd_env
 
 
 # Infera frontend profiling API (infera.server --enable-profiling). The
