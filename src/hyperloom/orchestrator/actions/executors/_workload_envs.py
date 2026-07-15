@@ -748,26 +748,20 @@ def materialize_config_with_envs(
 
         framework_env = server_args_env_name(bench.get("framework"))
         existing = str(envs.get(framework_env, "")).strip()
-        if framework_env == "EXTRA_SGLANG_ARGS" and "--moe-runner-backend" in str(server_args):
+        if replace_args:
+            envs[framework_env] = server_args
+        elif framework_env == "EXTRA_SGLANG_ARGS" and "--moe-runner-backend" in str(server_args):
             # For MoE backend exploration/tuning, the candidate value must
             # replace the baseline's injected default (usually triton) rather
             # than relying on duplicate last-wins flags.
             existing = _remove_moe_runner_backend_arg(existing)
-        if existing:
+        if not replace_args and existing:
             envs[framework_env] = merge_server_args(existing, server_args)
-        else:
+        elif not replace_args:
             envs[framework_env] = server_args
-    framework_env = server_args_env_name(bench.get("framework"))
-    if replace_args and server_args:
-        envs[framework_env] = server_args
-    remove_list = _coerce_str_list(remove_args)
-    unset_list = _coerce_str_list(unset_envs)
-    if remove_list:
-        envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
-    for key in unset_list:
-        envs.pop(str(key), None)
     for key, value in (extra_envs or {}).items():
         envs[str(key)] = str(value)
+    framework_env = server_args_env_name(bench.get("framework"))
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
     # Magpie forwards ONLY ``benchmark.envs`` to the wrapper subprocess, so an
     # operator's ``XDIT_QUALITY_REF`` set in the process env never reaches it:
@@ -1104,6 +1098,15 @@ def materialize_config_with_envs(
         and _fp8_is_per_channel_per_token(_model_for_quant)
     ):
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
+    remove_list = _coerce_str_list(remove_args)
+    unset_list = _coerce_str_list(unset_envs)
+    if remove_list:
+        envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
+    for key in unset_list:
+        envs.pop(str(key), None)
+    for key in unset_list:
+        if isinstance(extra_envs, dict) and key in extra_envs:
+            envs[str(key)] = str(extra_envs[key])
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:
