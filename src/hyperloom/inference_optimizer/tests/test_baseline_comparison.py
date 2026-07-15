@@ -99,30 +99,15 @@ def _make_rows() -> list[dict[str, Any]]:
     return out
 
 
-def _write_competitor_target(session_dir: Path, per_conc: list[dict[str, Any]]) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints
+def _patch_fetch_rows(monkeypatch, rows: list[dict[str, Any]] | None) -> None:
+    """Patch the module-level ``fetch_rows`` used by ``analyze`` with a stub."""
+    import hyperloom.inference_optimizer.baseline_comparison.target_analyzer as ta
 
-    research_hints.write_competitor_target(
-        session_dir,
-        {
-            "gpu": "b300",
-            "model": "MiniMax-M2.5",
-            "framework": "vllm",
-            "precision": "fp8",
-            "per_conc": per_conc,
-            "notes": "scout-authored",
-        },
-    )
+    monkeypatch.setattr(ta, "fetch_rows", lambda _name: rows)
 
 
-def test_analyze_happy_path_writes_files(tmp_path: Path):
-    _write_competitor_target(
-        tmp_path,
-        [
-            {"conc": 4, "tput_per_gpu": 412.5, "tpot_ms": 18.0, "source": "https://pr/1"},
-            {"conc": 256, "tput_per_gpu": 6624.1, "tpot_ms": 30.0, "source": "https://blog/x"},
-        ],
-    )
+def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
+    _patch_fetch_rows(monkeypatch, _make_rows())
 
     from hyperloom.inference_optimizer.baseline_comparison import analyze
 
@@ -136,13 +121,19 @@ def test_analyze_happy_path_writes_files(tmp_path: Path):
         osl=1024,
     )
 
+    # Only fp8 / b300 / 1024-1024 rows match (mi300x + fp4 rows filtered out).
     assert summary.status == "ok"
     assert summary.reason == "ok"
-    assert summary.row_count == 2
+    assert summary.row_count == 4
     assert summary.best is not None
     assert summary.best.tput_per_gpu == 6624.1
     assert summary.best.conc == 256
-    assert summary.source == "llm_authored"
+    assert summary.best.decode_tp == 2
+    # Latencies converted from seconds to ms.
+    assert round(summary.best.mean_tpot_ms, 1) == 22.0
+    # Provenance is the live API URL, never the old ``llm_authored`` marker.
+    assert "llm_authored" not in summary.source
+    assert summary.source.startswith("http")
 
     json_path = tmp_path / "target_analysis" / "target_baseline.json"
     md_path = tmp_path / "target_analysis" / "target_analysis_report.md"
@@ -151,24 +142,49 @@ def test_analyze_happy_path_writes_files(tmp_path: Path):
 
     on_disk = json.loads(json_path.read_text())
     assert on_disk["status"] == "ok"
-    assert on_disk["reason"] == "ok"
     assert on_disk["query"]["model"] == "MiniMax-M2.5"
     assert on_disk["query"]["gpu"] == "b300"
     assert on_disk["best"]["tput_per_gpu"] == 6624.1
-    assert on_disk["source"] == "llm_authored"
+    assert on_disk["source"].startswith("http")
 
     md_text = md_path.read_text()
     assert "## Reference best" in md_text
     assert "6624.1" in md_text
 
 
-def test_analyze_mapping_miss_writes_skipped_summary(tmp_path):
-    _write_competitor_target(
-        tmp_path,
-        [
-            {"conc": 64, "tput_per_gpu": 2781.5, "source": "https://pr/1"},
-        ],
+def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
+    """On success, a measured ``competitor_target.json`` (source = API URL) is
+    written so the EXPLORE advisory gap is driven by real InferenceX data."""
+    _patch_fetch_rows(monkeypatch, _make_rows())
+
+    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.orchestrator.knowledge import research_hints
+
+    summary = analyze(
+        session_dir=tmp_path,
+        model_path="MiniMax-M2.5",
+        compare_against_gpu="b300",
+        framework="vllm",
+        precision="fp8",
+        isl=1024,
+        osl=1024,
     )
+    assert summary.status == "ok"
+
+    ct = research_hints.load_competitor_target(tmp_path)
+    assert ct is not None
+    assert ct["per_conc"]
+    assert all(row["source"] == summary.source for row in ct["per_conc"])
+
+    gap = research_hints.gap_analysis(
+        ct, our_tput_per_gpu=100.0, our_tpot_ms=50.0, conc=64,
+    )
+    assert gap is not None
+    assert gap["source"] == summary.source
+
+
+def test_analyze_mapping_miss_writes_skipped_summary(tmp_path, monkeypatch):
+    _patch_fetch_rows(monkeypatch, _make_rows())
 
     from hyperloom.inference_optimizer.baseline_comparison import analyze
 
@@ -210,8 +226,51 @@ def test_analyze_no_target_gpu_writes_marker(tmp_path):
     assert on_disk["reason"] == "no_target_gpu_configured"
 
 
-def test_analyze_no_competitor_target(tmp_path):
-    """No ``competitor_target.json`` on disk → ``no_match`` (fail-soft)."""
+def test_analyze_unsupported_target_gpu(tmp_path, monkeypatch):
+    """A GPU InferenceX has no data for → ``no_match`` / ``unsupported_target_gpu``.
+    Crucially, unknown GPUs are NOT back-filled by any LLM estimate."""
+    _patch_fetch_rows(monkeypatch, _make_rows())
+
+    from hyperloom.inference_optimizer.baseline_comparison import analyze
+
+    summary = analyze(
+        session_dir=tmp_path,
+        model_path="MiniMax-M2.5",
+        compare_against_gpu="mi999x",
+        framework="vllm",
+        precision="fp8",
+        isl=1024,
+        osl=1024,
+    )
+    assert summary.status == "no_match"
+    assert summary.reason == "unsupported_target_gpu"
+    assert summary.best is None
+
+
+def test_analyze_dimension_mismatch(tmp_path, monkeypatch):
+    """GPU present but no row matches the run's isl/osl → ``dimension_mismatch``."""
+    _patch_fetch_rows(monkeypatch, _make_rows())
+
+    from hyperloom.inference_optimizer.baseline_comparison import analyze
+
+    summary = analyze(
+        session_dir=tmp_path,
+        model_path="MiniMax-M2.5",
+        compare_against_gpu="b300",
+        framework="vllm",
+        precision="fp8",
+        isl=2048,
+        osl=2048,
+    )
+    assert summary.status == "no_match"
+    assert summary.reason == "dimension_mismatch"
+    assert summary.best is None
+
+
+def test_analyze_fetch_error(tmp_path, monkeypatch):
+    """API fetch failure (``fetch_rows`` returns ``None``) → ``fetch_error``."""
+    _patch_fetch_rows(monkeypatch, None)
+
     from hyperloom.inference_optimizer.baseline_comparison import analyze
 
     summary = analyze(
@@ -224,31 +283,13 @@ def test_analyze_no_competitor_target(tmp_path):
         osl=1024,
     )
     assert summary.status == "no_match"
-    assert summary.reason == "no_competitor_target"
+    assert summary.reason == "fetch_error"
     assert summary.best is None
-    assert (tmp_path / "target_analysis" / "target_baseline.json").exists()
 
 
-def test_analyze_sourceless_target_dropped(tmp_path):
-    """Per-conc rows without a source are discarded; all-sourceless degrades to no_match."""
-    from hyperloom.orchestrator.knowledge import research_hints
-
-    # Hand-edited file with a sourceless row to exercise the load-time filter.
-    from hyperloom.inference_optimizer.session import session_paths
-
-    path = session_paths.competitor_target_json(tmp_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "gpu": "b300",
-                "model": "MiniMax-M2.5",
-                "per_conc": [{"conc": 64, "tput_per_gpu": 2781.5}],
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert research_hints.load_competitor_target(tmp_path) is None
+def test_analyze_no_inferencex_data(tmp_path, monkeypatch):
+    """Empty API result (``fetch_rows`` returns ``[]``) → ``no_inferencex_data``."""
+    _patch_fetch_rows(monkeypatch, [])
 
     from hyperloom.inference_optimizer.baseline_comparison import analyze
 
@@ -256,9 +297,14 @@ def test_analyze_sourceless_target_dropped(tmp_path):
         session_dir=tmp_path,
         model_path="MiniMax-M2.5",
         compare_against_gpu="b300",
+        framework="vllm",
+        precision="fp8",
+        isl=1024,
+        osl=1024,
     )
     assert summary.status == "no_match"
-    assert summary.reason == "no_competitor_target"
+    assert summary.reason == "no_inferencex_data"
+    assert summary.best is None
 
 
 # report.py renderer — _format_external_baseline_section branches on reason
