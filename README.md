@@ -16,6 +16,11 @@ Hyperloom combines:
 - A validated optimization loop that writes reproducible artifacts and
   `session_breakdown.json` for downstream consumers.
 
+> **Note:** The `forge` kernel backend depends on KernelForge, which will be
+> open-sourced separately. Until it is public, the kernel-optimization stage is
+> not reproducible outside AMD. The default backend (`geak`) and the rest of the
+> optimization loop run without KernelForge.
+
 ## Get Started
 
 | Goal | Guide |

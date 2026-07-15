@@ -15,6 +15,6 @@ is described in [Hyperloom optimization loop](../conceptual/optimization-loop.md
 | [IntelliKit](intellikit.md) | Low-level GPU profiling primitives | [AMDResearch/intellikit](https://github.com/AMDResearch/intellikit) |
 | [Magpie](magpie.md) | Benchmark engine with trace-collection support | [AMD-AGI/Magpie](https://github.com/AMD-AGI/Magpie) |
 | [TraceLens](tracelens.md) | Agentic trace analysis and roofline targets | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) |
-| KernelForge | Deterministic forge backend | [AMD-AGI/KernelForge](https://github.com/AMD-AGI/KernelForge) |
+| KernelForge | Deterministic forge backend | AMD-AGI/KernelForge *(to be open-sourced separately)* |
 | [GEAK](geak.md) | GPU kernel generation and optimization (Triton / HIP / FlyDSL) | [AMD-AGI/GEAK](https://github.com/AMD-AGI/GEAK) |
 | [AgentKernelArena](agentkernelarena.md) | Optional standardized evaluation arena for agent benchmarking | [AMD-AGI/AgentKernelArena](https://github.com/AMD-AGI/AgentKernelArena) |
