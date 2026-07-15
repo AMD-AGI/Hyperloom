@@ -28,6 +28,17 @@ def test_name_mapping_case_insensitive():
     assert to_inferencex_name("/wekafs/x/minimaxai-minimax-m2.5") == "MiniMax-M2.5"
 
 
+def test_name_mapping_canonical_names_starting_with_vendor_token():
+    """Canonical names beginning with a vendor-like token must not be mangled
+    by the prefix strip (regression: DeepSeek / Qwen mapped to None)."""
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
+
+    assert to_inferencex_name("DeepSeek-R1-0528") == "DeepSeek-R1-0528"
+    assert to_inferencex_name("Qwen-3.5-397B-A17B") == "Qwen-3.5-397B-A17B"
+    # HF-style paths for the same models still resolve via basename + strip.
+    assert to_inferencex_name("/wekafs/models/deepseek-ai/DeepSeek-R1-0528") == "DeepSeek-R1-0528"
+
+
 def test_name_mapping_unknown_returns_none():
     from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
@@ -150,6 +161,33 @@ def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
     md_text = md_path.read_text()
     assert "## Reference best" in md_text
     assert "6624.1" in md_text
+
+
+def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeypatch):
+    """A disaggregated / multinode row with inflated per-GPU throughput must not
+    be promoted to ``best`` — only single-node colocated rows are comparable."""
+    rows = _make_rows()
+    disagg = json.loads(json.dumps(_SAMPLE_ROW))
+    disagg["disagg"] = True
+    disagg["conc"] = 512
+    disagg["metrics"]["tput_per_gpu"] = 999999.0
+    rows.append(disagg)
+    _patch_fetch_rows(monkeypatch, rows)
+
+    from hyperloom.inference_optimizer.baseline_comparison import analyze
+
+    summary = analyze(
+        session_dir=tmp_path,
+        model_path="MiniMax-M2.5",
+        compare_against_gpu="b300",
+        framework="vllm",
+        precision="fp8",
+        isl=1024,
+        osl=1024,
+    )
+    assert summary.status == "ok"
+    assert summary.best is not None
+    assert summary.best.tput_per_gpu == 6624.1  # not the 999999 disagg row
 
 
 def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
