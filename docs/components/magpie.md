@@ -38,7 +38,7 @@ cmd = [
 Each run produces a `benchmark_report.json` that Hyperloom parses to extract
 throughput/measurements and pick winners. To make concurrent benchmark runs
 robust, `src/hyperloom/orchestrator/actions/executors/_magpie_patcher.py`
-applies an idempotent, atomic-write patch to Magpie's cloned `benchmarker.py`
+applies an idempotent, atomic-write patch to Magpie's installed `benchmarker.py`
 (`_prepare_benchmark_scripts`) so a concurrent reader never sees a half-copied
 script. See [Hyperloom optimization loop](../conceptual/optimization-loop.md) for more information.
 
