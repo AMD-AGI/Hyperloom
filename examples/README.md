@@ -94,10 +94,6 @@ The backend runs `install_baremetal.sh` in five phases:
 5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
 
-The setup backend does **not** install Magpie, InferenceX, TraceLens, or GEAK.
-Those runtime dependencies are installed later by the workload/demo skill through
-`install.sh`, just before launching an optimization.
-
 ### Scenario B: Bare Metal + Docker
 
 Use this when the agent starts from a bare host or login node, but the workload
@@ -112,10 +108,8 @@ Requirements:
 - A ROCm container image that already ships the serving framework, such as
   SGLang or vLLM.
 
-In this scenario, `/hyperloom-setup` writes `.env` only and skips host setup. It
-does **not** start a container. The selected demo skill later starts the
-container, runs setup inside it with `--install-framework none --yes`, installs
-runtime dependencies with `install.sh`, and launches the optimization.
+In this scenario, `/hyperloom-setup` writes `.env` only and does **not** start a
+container. The selected demo skill owns the container lifecycle.
 
 If Slurm is available, setup also checks for allocated nodes. The user chooses
 whether Docker should run on:
@@ -130,8 +124,7 @@ The chosen host is written to `.env`:
 HYPERLOOM_DOCKER_TARGET_HOST=<hostname>
 ```
 
-The demo skill reads this value. If it is not the current host, the demo skill
-SSHes to that host before running `docker run` and `docker exec`.
+The demo skill reads this value to target the chosen host.
 
 ## Environment Written by Setup
 
@@ -155,9 +148,7 @@ Bare-metal setup may also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the workload
 skill's `install.sh`.
 
-`.env` is the single source of truth: no combined script is generated and nothing
-extra needs sourcing. `PATH` and `LD_LIBRARY_PATH` are derived at launch from
-`ROCM_PATH`, `VIRTUAL_ENV`, and `VLLM_VENV_ROOT`.
+`.env` is the single source of truth; no extra script needs sourcing.
 
 ## Run a Demo
 
@@ -199,75 +190,78 @@ git clone https://github.com/AMD-AGI/Hyperloom.git
 cd Hyperloom
 ```
 
-In source mode, the agent workspace is the repository root. You must create
-`.env` yourself or use the setup skill from the packaged install. A minimal
-manual `.env` for Anthropic looks like:
+In source mode, the agent workspace is the repository root. Create `.env`
+yourself with placeholders and fill in the real values before launching. Never
+paste API keys into chat.
 
 ```bash
 cat > .env <<'EOF'
 ANTHROPIC_API_KEY=<PLEASE_FILL_IN>
 ANTHROPIC_BASE_URL=https://api.anthropic.com
 CLAUDE_MODEL=claude-opus-4-8
-USER_DATA_PATH=/workspace/hyperloom
+# Writable artifact root for runtime files, dependency checkouts, logs,
+# optimizer runs, and generated env files. Set an absolute path you own.
+USER_DATA_PATH=<PLEASE_FILL_IN>
 HYPERLOOM_RUN_MODE=baremetal
 EOF
 ```
 
-For bare-metal source debugging, run the setup backend manually:
+### Bare metal (source)
 
-```bash
-PYTHONPATH="$PWD/src" python3 -m hyperloom.inference_optimizer.setup \
-  -- --install-framework none
+Make sure the host already provides the required base environment:
+
+- ROCm runtime and a ROCm-built torch.
+- A serving framework (SGLang or vLLM) importable in the active Python.
+- `git` for the dependency checkouts the optimization skill performs.
+
+With that in place, open the repository root in the agent and paste a launch
+prompt, filling in your workload:
+
+```text
+@src/hyperloom/inference_optimizer/SKILL.md
+
+Optimize inference for this workload:
+- Model: /path/to/your/model
+- Framework: sglang
+- GPU: MI300X
+- TP: 8
+- CONC: 64
+- ISL: 1024
+- OSL: 1024
+- Goal: improve throughput by at least 10%
+- Budget: 24 hours
+
+Requirements:
+1. Report the session ID, log path, PID, and initial health check result.
+2. Monitor the process every 300s until the optimization is complete or failed.
 ```
 
-For Docker source debugging, write `.env` on the host, start the container from
-the matching demo skill, then run the backend inside the container:
+### Docker (source)
+
+Use a ROCm image that already ships the serving framework, so nothing is
+installed inside the container beyond Hyperloom's runtime deps:
+
+- `vllm`: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
+- `sglang` MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
+- `sglang` MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
+
+Start a long-running container from the repo root, mounting it at the same path
+so `.env`, logs, and session artifacts stay valid:
 
 ```bash
-docker exec -w "$PWD" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
-  'PYTHONPATH="$PWD/src" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
+export HYPERLOOM_IMAGE=docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix
+docker run -d \
+  --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
+  --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
+  --device /dev/kfd \
+  --device /dev/dri \
+  --group-add video \
+  -v "$PWD:$PWD" \
+  "$HYPERLOOM_IMAGE" \
+  tail -f /dev/null
 ```
 
-Runtime dependencies are still installed later by `install.sh`:
-
-```bash
-bash src/hyperloom/inference_optimizer/assets/install.sh
-```
-
-## Manual Dry Run
-
-To test the backend without running the agent skill:
-
-```bash
-cd ~/hyperloom
-
-cat > .env <<'EOF'
-ANTHROPIC_API_KEY=<PLEASE_FILL_IN>
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-CLAUDE_MODEL=claude-opus-4-8
-USER_DATA_PATH=/root/hyperloom
-EOF
-
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup \
-  --dry-run -- --skip-base-check --install-framework none
-```
-
-The dry run should print the five bare-metal phases without mutating the system.
-
-## Manual Setup Options
-
-The setup skill passes options to the packaged backend. Useful options include:
-
-| Option / environment variable | Description |
-|-------------------------------|-------------|
-| `--install-framework none` | Use an already-installed SGLang/vLLM stack. |
-| `--install-framework sglang` | Install SGLang ROCm framework components. |
-| `--install-framework vllm` | Install vLLM ROCm framework components. |
-| `--framework-env isolated` | Install vLLM into an isolated venv. |
-| `--dry-run` | Print planned actions without changing the system. |
-| `--check-only` | Verify only; do not clone or install. |
-| `--skip-base-check` | Skip ROCm/framework preflight. Useful only for setup-chain debugging. |
-| `ROCM_PATH` / `HIP_PATH` | Point source builds at matching ROCm compiler and headers. |
-| `LD_LIBRARY_PATH` | Make matching ROCm user-space libraries visible. |
-| `SGLANG_ROCM_EXTRA` | Select AMD SGLang ROCm extra, for example `rocm720`. |
-| `AITER_REF` | Override AITER source tag; otherwise setup auto-selects a compatible tag. |
+Then run all Hyperloom commands inside that container with
+`docker exec -w "$PWD" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" ...`,
+using `PYTHONPATH="$PWD/src"` so the source checkout is importable. Use the same
+launch prompt as bare metal above.
