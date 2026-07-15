@@ -226,9 +226,10 @@ brief:
   `--gpu-specialist-capacity` defaults to the visible GPU count on the launch
   host (`_default_gpu_specialist_capacity()`), so Orchestration may dispatch
   `delegate{action_name='specialist', params={needs_gpu: true, gpu_count: ...}}`
-  without any extra flag. Pass `--gpu-specialist-capacity N` (or
-  `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY=N`) to clamp the pool, and `0`
-  (either form) to disable GPU specialists entirely. When enabled, GPU
+  without any extra flag. Pass `--gpu-specialist-capacity N` to clamp the pool,
+  and `--gpu-specialist-capacity 0` to disable GPU specialists entirely. The
+  legacy `INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY` env is ignored by the CLI
+  default resolver; use the explicit flag for operator control. When enabled, GPU
   specialists serialize against serving through `gpu_research_lane` and
   exclusively own their leased cards: they may start/stop their own servers
   (any port that is not the production serving port 8888), profile, autotune,
