@@ -49,7 +49,7 @@ class ProposalsCollaborator:
         """
         ss = self.shared_state
         workload = ss.model_name or "unknown_model"
-        hw = ss.gpu_type or "unknown_gpu"
+        hw = self._kb_hardware_slug()
         framework = str(getattr(ss, "framework", "") or "")
         framework_version = str(getattr(ss, "framework_version", "") or "")
         if not framework_version and framework:
@@ -250,7 +250,7 @@ class ProposalsCollaborator:
         put_kwargs: dict[str, Any] = {
             "canonical_id": cid,
             "model": ss.model_name or "unknown_model",
-            "hardware": ss.gpu_type or "unknown_gpu",
+            "hardware": self._kb_hardware_slug(),
             "framework_name": framework,
             "framework_version": framework_version,
             "precision": precision,

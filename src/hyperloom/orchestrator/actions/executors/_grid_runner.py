@@ -1276,6 +1276,39 @@ async def run_grid(
                 break
             continue
 
+        # Multi-node client warmup: one discarded benchmark pass against the
+        # just-restarted, persistent remote server to warm JIT / steady-state
+        # before the measured pass. No lifecycle / no restart between; best-
+        # effort (a warmup failure never fails the variant). Default ON
+        # (INFERENCE_OPTIMIZER_MN_BENCH_WARMUP=0 disables).
+        from ._multi_node_env import (
+            is_multi_node as _mn_imn,
+            mn_bench_warmup_enabled as _mn_warm,
+        )
+        if _mn_imn() and _mn_warm():
+            _mn_warm_slot = slot / "mn_warmup"
+            try:
+                await asyncio.to_thread(
+                    _run_magpie,
+                    magpie_python=magpie_python,
+                    config_path=cfg_path,
+                    output_dir=_mn_warm_slot,
+                    timeout_sec=variant_timeout_sec,
+                    cwd=cwd,
+                    result_dir=None,
+                    soft_deadline_sec=None,
+                    preclean=False,
+                )
+                log.info(
+                    "grid_runner: MN warmup pass done (discarded) %d/%d name=%s",
+                    i + 1, len(grid), variant.name,
+                )
+            except Exception as exc:  # noqa: BLE001 - warmup is best-effort
+                log.warning(
+                    "grid_runner: MN warmup pass failed (ignored) name=%s: %r",
+                    variant.name, exc,
+                )
+
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
         # leak destinations per-variant (else a stale prior-run artifact
         # masquerades as this variant's result).

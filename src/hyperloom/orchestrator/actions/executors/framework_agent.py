@@ -464,6 +464,35 @@ class FrameworkAgentExecutor:
         batch_id = str(params.get("batch_id") or "")
         slug = _candidate_slug(candidate)
 
+        # Multi-node guard (mirrors integrate_patch). This executor git-applies
+        # the candidate PR ONLY to the sandbox framework_source_root; in
+        # multi-node mode the live sglang/vllm runs on RayJob/Infera pods, not
+        # the sandbox, so a sandbox-only apply would NOT reach pod-side serving
+        # and the bench would measure the unpatched pod (meaningless KEEP/REVERT
+        # verdict). Until a git-diff pod fan-out exists, return a NEUTRAL
+        # "skipped" result (no patch touched, no error) so no failure tally is
+        # rolled and every other action keeps running. is_multi_node() is False
+        # single-node, so the normal path below is reached unchanged.
+        from ._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return {
+                "status": "skipped",
+                "skipped_reason": "multi_node_unsupported",
+                "candidate": candidate,
+                "batch_id": batch_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "reason": (
+                    "framework-agent candidate integration is not supported "
+                    "in multi-node mode (no git-diff pod fan-out); skipped "
+                    "without applying any patch. Other actions "
+                    "(baseline/profile/explore/sweep/roofline) continue "
+                    "normally. Use the kernel-agent integrate path (which "
+                    "fans out via `multi_node apply-patch`) or run single-node."
+                ),
+            }
+
         # Per-task workspace under runs/framework/<task_id>/.
         output_root = Path(
             params.get("output_dir")

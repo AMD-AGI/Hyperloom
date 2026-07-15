@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for Dynamo SSH known_hosts management."""
+"""Unit tests for Infera SSH known_hosts management."""
 
 from __future__ import annotations
 
