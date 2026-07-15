@@ -2,19 +2,12 @@
 
 """Optional gate-comparable rebench helper for GPU specialists.
 
-This is a CONVENIENCE, not a mandate. A GPU specialist that wants throughput
-numbers directly comparable to the Coordinator's ``integrate_patch`` E2E gate
-can call this helper to reuse the real Magpie serving + benchmark path
-(``run_grid``) on its own leased cards and a non-production port — in one call,
-instead of hand-rolling a bench harness. The specialist is equally free to
-write its own autotune / profiling / bench scripts (broad ``Bash`` autonomy);
-throughput does NOT have to come from this helper, and the ``integrate_patch``
+Reuses the real Magpie serving + benchmark path (``run_grid``) on the
+specialist's leased cards and a non-production port. The ``integrate_patch``
 gate stays the single authoritative measure of truth.
 
-Physics boundary (mirrors the specialist iron rules): the helper runs the
-server on the cards the subprocess already has pinned via
-``ROCR_VISIBLE_DEVICES`` (its serving-disjoint lease) and REFUSES the
-production serving port 8888, so it can never collide with production serving.
+The helper runs the server on the cards the subprocess already has pinned via
+``ROCR_VISIBLE_DEVICES`` and refuses the production serving port 8888.
 
 CLI usage (from inside a specialist subprocess)::
 
@@ -43,12 +36,10 @@ from ..actions.executors._workload_envs import (
 )
 
 
-# The production serving process owns this port; a specialist rebench must
-# never bind it (co-residing would corrupt both measurements).
+# The production serving process owns this port; a specialist rebench must never bind it.
 PRODUCTION_SERVING_PORT = 8888
 
-# Default per-variant timeout (s) for a one-off specialist rebench. Generous
-# enough for a cold server start + one benchmark round on a large model.
+# Default per-variant timeout (s) for a one-off specialist rebench.
 DEFAULT_REBENCH_TIMEOUT_SEC = 7800
 
 
@@ -64,7 +55,7 @@ def _pick_free_port() -> int:
             port = int(sock.getsockname()[1])
         if port != PRODUCTION_SERVING_PORT:
             return port
-    # Astronomically unlikely fallthrough; pick a fixed non-8888 high port.
+    # Fallthrough: pick a fixed non-8888 high port.
     return 18888
 
 
@@ -160,17 +151,13 @@ async def run_specialist_rebench(
 
     variant = GridVariant(
         name="specialist-rebench",
-        # ``run_grid`` merges base_extra_args ahead of each variant's args.
-        # Keep the identity variant empty so helper-provided server flags are
-        # injected exactly once.
+        # Identity variant kept empty so helper-provided server flags are injected exactly once.
         extra_server_args="",
         extra_envs=dict(extra_envs or {}),
         note="specialist_rebench",
     )
 
-    # Process-group cleanup is handled by run_grid's server lifecycle: cleanup
-    # tears down the server it started (by its own pid in pid_dir) on exit, so
-    # an aborted rebench does not orphan a server pinning the leased cards.
+    # run_grid's server lifecycle tears down the server it started on exit.
     server_lifecycle = {
         "cleanup": True,
         "pid_dir": str(out_root / "server"),

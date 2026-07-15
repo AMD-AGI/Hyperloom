@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""WS2: ``--gpu-specialist-capacity`` defaults to the whole machine.
-
-The default is the visible GPU count on the launch host; operators disable
-or resize the pool with the explicit CLI flag.
-"""
+"""``--gpu-specialist-capacity`` defaults to the visible GPU count."""
 
 from __future__ import annotations
 

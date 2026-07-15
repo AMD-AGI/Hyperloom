@@ -2,10 +2,9 @@
 
 """Champion-level coverage for the gbrain recipe-KB backend on the 5-tuple.
 
-gbrain is the sole remote backend behind the ``RecipeKB`` dispatcher. These
-tests lock that a champion survives the dispatcher's ``_v2_to_arbor``
-projection, stays warm-replay consumable, and degrades to the local store on a
-gbrain failure. No network: gbrain gets a fake MCP.
+Locks that a champion survives the dispatcher's ``_v2_to_arbor`` projection,
+stays warm-replay consumable, and degrades to the local store on a gbrain
+failure. No network: gbrain gets a fake MCP.
 """
 
 from __future__ import annotations

@@ -59,7 +59,7 @@ def test_parse_forge_usage_extracts_last_marker():
         '"total_cost_usd": 3.2, "calls": 4}\n'
     )
     out = pu.parse_forge_usage(stdout)
-    # Last marker wins (authoritative run total); extra keys (cost/calls) dropped.
+    # Last marker wins; extra keys (cost/calls) dropped.
     assert out == {
         "input_tokens": 100, "output_tokens": 40,
         "cache_creation_input_tokens": 5, "cache_read_input_tokens": 9,
@@ -116,7 +116,7 @@ def test_parse_turn_usages_per_message_in_order(tmp_path):
         '{"type": "assistant", "message": {"usage": {"input_tokens": 10, "output_tokens": 3}}}\n'
         "garbled\n"
         '{"type": "assistant", "message": {"usage": {"input_tokens": 20, "output_tokens": 7}}}\n'
-        # The terminal cumulative result row is intentionally ignored here.
+        # The terminal cumulative result row is ignored here.
         '{"type": "result", "usage": {"input_tokens": 30, "output_tokens": 10}}\n',
         encoding="utf-8",
     )

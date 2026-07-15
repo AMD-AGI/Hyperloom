@@ -12,7 +12,6 @@ import pytest
 from hyperloom.orchestrator.phases import machine_state as ps
 
 
-# -- escalate hints --------------------------------------------------------
 def test_is_pause_specialist_hint() -> None:
     prefix = ps.ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX
     assert ps.is_pause_specialist_hint(prefix + "serving_specialist") is True
@@ -29,7 +28,6 @@ def test_is_valid_escalate_hint() -> None:
     assert ps.is_valid_escalate_hint(some_vocab) is True
 
 
-# -- budget normalization + bump ------------------------------------------
 def test_normalize_budget_pct_defaults_and_filters() -> None:
     assert ps.normalize_budget_pct(None) == dict(ps.DEFAULT_PHASE_BUDGET_PCT)
     out = ps.normalize_budget_pct(
@@ -45,10 +43,8 @@ def test_normalize_budget_pct_defaults_and_filters() -> None:
 
 
 def test_apply_escalate_budget_bump() -> None:
-    # unknown phase -> returned unchanged (copy)
     base = {"EXPLORE": 0.3}
     assert ps.apply_escalate_budget_bump(base, phase="nope") == base
-    # valid phase -> bumped and capped
     out = ps.apply_escalate_budget_bump(
         {"EXPLORE": 0.3},
         phase="explore",
@@ -65,7 +61,6 @@ def test_apply_escalate_budget_bump() -> None:
     assert capped["EXPLORE"] == 0.8
 
 
-# -- time/budget helpers ---------------------------------------------------
 def test_now_unix_injected() -> None:
     state = SimpleNamespace(_now_unix=lambda: 1234.0)
     assert ps._now_unix(state) == 1234.0
@@ -92,7 +87,7 @@ def test_max_minutes_coercion() -> None:
 def test_phase_elapsed_seconds() -> None:
     # not started -> 0
     assert ps.phase_elapsed_seconds(SimpleNamespace(phase_started_unix=0.0)) == 0.0
-    # started -> now - started, clamped non-negative
+    # started -> now - started, clamped non-negative.
     state = SimpleNamespace(phase_started_unix=100.0)
     assert ps.phase_elapsed_seconds(state, now_unix=160.0) == 60.0
     assert ps.phase_elapsed_seconds(state, now_unix=50.0) == 0.0
@@ -101,7 +96,7 @@ def test_phase_elapsed_seconds() -> None:
 def test_phase_budget_remaining_seconds() -> None:
     # unlimited -> None
     assert ps.phase_budget_remaining_seconds(SimpleNamespace(max_minutes=0)) is None
-    # phase not present in the budget map -> pct 0 -> None
+    # phase not in the budget map -> None
     state = SimpleNamespace(
         max_minutes=60,
         phase="UNKNOWN_PHASE",
@@ -109,7 +104,7 @@ def test_phase_budget_remaining_seconds() -> None:
         phase_budget_pct={"EXPLORE": 0.5},
     )
     assert ps.phase_budget_remaining_seconds(state) is None
-    # normal: 60min * 0.5 = 1800s budget, minus elapsed
+    # 60min * 0.5 = 1800s budget, minus elapsed.
     state2 = SimpleNamespace(
         max_minutes=60,
         phase="EXPLORE",
@@ -146,7 +141,6 @@ def test_session_remaining_seconds() -> None:
     assert rem is not None and 0.0 < rem <= 3600.0
 
 
-# -- interleave proposable set + --no-explore grey-channel strip ----------
 def test_interleave_kernel_strips_explore_when_disabled() -> None:
     # interleave ON, explore_enabled default True: KERNEL gets the explore triple.
     full = ps.llm_proposable_actions_for_with_interleave(
@@ -196,7 +190,6 @@ def test_interleave_kernel_strips_explore_when_disabled() -> None:
     )
 
 
-# -- post-prelude target + history row ------------------------------------
 def test_post_prelude_target() -> None:
     assert ps._post_prelude_target(explore_enabled=True, kernel_enabled=True) == ps.PHASE_EXPLORE
     assert ps._post_prelude_target(explore_enabled=False, kernel_enabled=True) == ps.PHASE_KERNEL_AGENT

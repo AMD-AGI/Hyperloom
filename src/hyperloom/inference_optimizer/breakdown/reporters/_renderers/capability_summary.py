@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Capability summary renderer — status/attempts/keeps table + per-capability decisions.
-
-This renderer is the canonical design reference for the others — keep it
-terse and deterministic.
-"""
+"""Capability summary renderer — status/attempts/keeps table + per-capability decisions."""
 
 from __future__ import annotations
 
@@ -13,7 +9,7 @@ from typing import Any
 from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer
 
 _CAPABILITY_ORDER = (
-    # ``explore`` is primary; legacy rows remain for archived sessions.
+    # ``explore`` is primary; other rows are for archived sessions.
     "explore",
     "backends",
     "params",
@@ -44,7 +40,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     decisions: list[Decision] = []
     warnings: list[str] = []
 
-    # Stable ordering: known capabilities first, then any unknown extras.
+    # Known capabilities first, then unknown extras.
     keys = list(_CAPABILITY_ORDER) + [k for k in cap if k not in _CAPABILITY_ORDER]
     for name in keys:
         v = cap.get(name)
@@ -53,8 +49,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         status = str(v.get("status") or "not_attempted")
         attempts = int(v.get("attempts") or 0)
         keeps = int(v.get("keeps") or 0)
-        # validate_stack "not_attempted" but with a prior validated gain ->
-        # ``stale_validated`` so the row isn't self-contradicting.
+        # Mark validate_stack with a prior validated gain as ``stale_validated``.
         if name == "validate_stack" and status == "not_attempted" and v.get("last_validated_gain_pct") is not None:
             status = "stale_validated"
         extras: list[str] = []

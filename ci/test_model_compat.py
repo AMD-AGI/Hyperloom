@@ -182,8 +182,8 @@ def test_diffusion_substring_text_repo_is_kept():
 
 
 def test_bare_for_conditional_generation_without_vision_is_kept():
-    # Text-only MoE that merely use the *ForConditionalGeneration suffix
-    # (no vision_config) must NOT be filtered as multimodal.
+    # Text-only MoE with the *ForConditionalGeneration suffix (no
+    # vision_config) must NOT be filtered as multimodal.
     assert _reason({"architectures": ["Qwen3_5MoeForConditionalGeneration"],
                     "model_type": "qwen3_5_moe",
                     "max_position_embeddings": 262144}) is None
@@ -271,8 +271,7 @@ def test_empty_quant_method_filtered():
 
 
 def test_unsupported_arch_qwen3_5_moe_text_via_text_config():
-    # Qwen3.6 MoE carries qwen3_5_moe_text as text_config.model_type; top-level
-    # model_type is qwen3_5_moe. The rule must catch it via text_config.
+    # The rule must catch qwen3_5_moe_text via text_config.model_type.
     assert _reason({"architectures": ["Qwen3_5MoeForCausalLM"],
                     "model_type": "qwen3_5_moe",
                     "text_config": {"model_type": "qwen3_5_moe_text"},
@@ -280,15 +279,14 @@ def test_unsupported_arch_qwen3_5_moe_text_via_text_config():
 
 
 def test_qwen3_5_moe_without_text_subtype_is_kept():
-    # Bare qwen3_5_moe (no qwen3_5_moe_text text_config) must NOT be filtered by
-    # the registry rule.
+    # Bare qwen3_5_moe must NOT be filtered by the registry rule.
     assert _reason({"architectures": ["Qwen3_5MoeForConditionalGeneration"],
                     "model_type": "qwen3_5_moe",
                     "max_position_embeddings": 262144}) is None
 
 
 def test_unsupported_arch_matched_by_architecture_fallback():
-    # No/blank model_type -> architecture fallback still catches it.
+    # No/blank model_type -> architecture fallback catches it.
     assert _reason({"architectures": ["GlmMoeDsaForCausalLM"],
                     "max_position_embeddings": 131072}) == "unsupported_arch"
 
@@ -311,7 +309,7 @@ def test_unsupported_arch_qrwkv6_hybrid_matched_by_text_config_model_type():
 
 
 def test_unsupported_arch_is_gpu_independent():
-    # Registry rules are config-based: hit on any gpu_type and with none.
+    # Registry rules are config-based: hit on any gpu_type or none.
     cfg = {"architectures": ["DeepseekV32ForCausalLM"], "model_type": "deepseek_v32",
            "max_position_embeddings": 163840}
     assert _reason(cfg, gpu_type="MI300X") == "unsupported_arch"
@@ -320,8 +318,7 @@ def test_unsupported_arch_is_gpu_independent():
 
 
 def test_supported_glm4_moe_and_deepseek_v3_are_kept():
-    # GLM-4.7 (glm4_moe) and DeepSeek-V3 (deepseek_v3) must NOT match the
-    # unsupported-registry rule.
+    # GLM-4.7 and DeepSeek-V3 must NOT match the unsupported-registry rule.
     assert _reason({"architectures": ["Glm4MoeForCausalLM"], "model_type": "glm4_moe",
                     "max_position_embeddings": 131072}) is None
     assert _reason({"architectures": ["DeepseekV3ForCausalLM"], "model_type": "deepseek_v3",
@@ -329,9 +326,7 @@ def test_supported_glm4_moe_and_deepseek_v3_are_kept():
 
 
 def test_deepseek_v4_flash_registry_is_kept():
-    # V4-Flash shares DeepseekV4ForCausalLM with the full V4 but is supported;
-    # the registry rule must not list deepseek_v4 (full V4 is name-filtered on
-    # MI300X instead).
+    # V4-Flash is supported and must not be listed by the registry rule.
     assert _reason({"architectures": ["DeepseekV4ForCausalLM"], "model_type": "deepseek_v4",
                     "max_position_embeddings": 163840,
                     "quantization_config": {"quant_method": "fp8"}}) is None
@@ -360,7 +355,7 @@ def test_fp4_kept_on_non_mi300x(gpu):
 
 
 def test_fp4_kept_without_gpu_type():
-    # Backward-compatible default: no gpu_type -> gpu rules disabled.
+    # No gpu_type -> gpu rules disabled.
     assert _reason(_fp4_cfg("mxfp4")) is None
 
 
@@ -381,11 +376,11 @@ def test_unsupported_model_on_mi300x(repo):
 
 
 @pytest.mark.parametrize("repo", [
-    "deepseek-ai/DeepSeek-V4-Flash",   # explicitly exempt
+    "deepseek-ai/DeepSeek-V4-Flash",   # exempt
     "deepseek-ai/DeepSeek-V3.2",
     "deepseek-ai/DeepSeek-Prover-V2-671B",
-    "zai-org/GLM-4.7-FP8",             # GLM-4.7 must not match GLM-5
-    "zai-org/GLM-512B",                # digit-guard: GLM-51x is not GLM-5
+    "zai-org/GLM-4.7-FP8",             # must not match GLM-5
+    "zai-org/GLM-512B",                # GLM-51x is not GLM-5
     "meta-llama/Llama-3.1-8B-Instruct",
 ])
 def test_model_kept_on_mi300x(repo):
@@ -393,7 +388,7 @@ def test_model_kept_on_mi300x(repo):
 
 
 def test_unsupported_model_kept_on_non_mi300x():
-    # DeepSeek-V4 / GLM-5 run fine on MI355X; rule is MI300X-only.
+    # Rule is MI300X-only.
     assert _reason(_BASE_CFG, repo="deepseek-ai/DeepSeek-V4", gpu_type="mi355x") is None
     assert _reason(_BASE_CFG, repo="zai-org/GLM-5", gpu_type="mi355x") is None
 
@@ -403,7 +398,7 @@ def test_unsupported_model_kept_without_gpu_type():
 
 
 def test_v4_flash_exempt_even_without_whitelist():
-    # The allow-regex protects V4-Flash on any path, not just the whitelist.
+    # The allow-regex protects V4-Flash on any path.
     assert model_compat.mi300x_blocked_model("deepseek-ai/DeepSeek-V4-Flash") == ""
     assert model_compat.mi300x_blocked_model("deepseek-ai/DeepSeek-V4") == "DeepSeek-V4"
 
@@ -422,7 +417,7 @@ def test_whitelist_exempts_otherwise_filtered_model():
     cfg = {"architectures": ["Qwen2_5_VLForConditionalGeneration"],
            "vision_config": {"x": 1}, "max_position_embeddings": 128000}
     wl = {"org/keep-me"}
-    # Without whitelist -> filtered; whitelisted repo -> exempt (None).
+    # Whitelisted repo -> exempt.
     assert model_compat.unrunnable_reason(cfg, repo="org/keep-me") == ("multimodal", "arch=Qwen2_5_VLForConditionalGeneration")
     assert model_compat.unrunnable_reason(cfg, repo="org/keep-me", whitelist=wl) is None
     assert model_compat.unrunnable_reason(cfg, repo="org/other", whitelist=wl) is not None
@@ -467,7 +462,7 @@ def test_llama_sentencepiece_with_tokenizer_config_kept(tmp_path):
 
 
 def test_no_weights_does_not_flag_missing_tokenizer(tmp_path):
-    # Partial cache (no weights yet) must not be flagged as missing_tokenizer.
+    # Partial cache (no weights) must not be flagged missing_tokenizer.
     mdir = _mk_dir(tmp_path, ["config.json"])
     assert _reason({"architectures": ["Qwen2ForCausalLM"],
                     "max_position_embeddings": 32768}, model_dir=mdir) is None
@@ -529,7 +524,7 @@ def test_hf_missing_tokenizer_no_tokens_returns_none():
 
 
 def test_hf_missing_tokenizer_weights_without_tokenizer(monkeypatch):
-    # Weights present, no tokenizer.* -> missing_tokenizer.
+    # Weights present, no tokenizer -> missing_tokenizer.
     _patch_urlopen(monkeypatch, payload=_siblings(
         "config.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"))
     assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) == "missing_tokenizer"
@@ -542,13 +537,13 @@ def test_hf_missing_tokenizer_weights_with_tokenizer_kept(monkeypatch):
 
 
 def test_hf_missing_tokenizer_bin_weights_detected(monkeypatch):
-    # .bin shards also count as weights.
+    # .bin shards count as weights.
     _patch_urlopen(monkeypatch, payload=_siblings("config.json", "pytorch_model.bin"))
     assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) == "missing_tokenizer"
 
 
 def test_hf_missing_tokenizer_no_weights_kept(monkeypatch):
-    # No weight shards at all -> cannot judge -> keep (None).
+    # No weight shards -> cannot judge -> keep.
     _patch_urlopen(monkeypatch, payload=_siblings("config.json", "README.md"))
     assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
 
@@ -559,22 +554,21 @@ def test_hf_missing_tokenizer_empty_siblings_kept(monkeypatch):
 
 
 def test_hf_missing_tokenizer_alt_tokenizer_file_kept(monkeypatch):
-    # tokenizer.model (sentencepiece) counts as a tokenizer too.
+    # tokenizer.model counts as a tokenizer.
     _patch_urlopen(monkeypatch, payload=_siblings("model.safetensors", "tokenizer.model"))
     assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
 
 
 @pytest.mark.parametrize("code", [401, 403, 404])
 def test_hf_missing_tokenizer_gated_or_notfound_defers(monkeypatch, code):
-    # 401/403 (gated) and 404 -> fail-open None (let hf_gated own that signal).
+    # 401/403 (gated) and 404 -> fail-open None.
     err = urllib.error.HTTPError("u", code, "x", {}, None)
     _patch_urlopen(monkeypatch, error=err)
     assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None
 
 
 def test_hf_missing_tokenizer_fail_open_on_error(monkeypatch):
-    # Any non-HTTP fetch error -> fail-open None (never drop on a network hiccup).
-    # Patch sleep so the retry loop does not actually wait.
+    # Any non-HTTP fetch error -> fail-open None. Patch sleep to skip the retry wait.
     monkeypatch.setattr(model_compat.time, "sleep", lambda *_a, **_k: None)
     _patch_urlopen(monkeypatch, error=urllib.error.URLError("boom"))
     assert model_compat.hf_missing_tokenizer("org/model", ["hf_x"]) is None

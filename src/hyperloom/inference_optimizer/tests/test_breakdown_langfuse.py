@@ -4,8 +4,7 @@
 
 Pins the receipt-vs-live two-tier source in
 :func:`collectors.collect_langfuse`, the redaction contract, and the
-``patch_breakdown_langfuse`` post-flush splice -- without importing the CLI
-(which drags in fcntl-only modules on non-POSIX dev machines).
+``patch_breakdown_langfuse`` post-flush splice.
 """
 
 from __future__ import annotations
@@ -46,9 +45,7 @@ def _clear_registry():
     lfe._REGISTRY.clear()
 
 
-# ---------------------------------------------------------------------------
 # collect_langfuse: two-tier source
-# ---------------------------------------------------------------------------
 def test_collect_prefers_receipt_file(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
     sd = _seed_session(tmp_path)
@@ -86,7 +83,6 @@ def test_collect_live_emitter_when_no_receipt(tmp_path, monkeypatch):
     sd = _seed_session(tmp_path)
     warnings: list[str] = []
     section = collectors.collect_langfuse(sd, {"claw_session_id": "claw-abc-123"}, warnings)
-    # No receipt on disk -> live emitter read (disabled here).
     assert section["receipt_source"] == "live_emitter"
     assert section["enabled"] is False
     assert section["disabled_reason"] == "disabled"
@@ -109,9 +105,7 @@ def test_collect_redacts_credentials(tmp_path, monkeypatch):
     assert section["config"]["public_key_set"] is True
 
 
-# ---------------------------------------------------------------------------
 # build() integration + patch splice
-# ---------------------------------------------------------------------------
 def test_build_includes_langfuse_section(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
     sd = _seed_session(tmp_path)
@@ -123,12 +117,12 @@ def test_build_includes_langfuse_section(tmp_path, monkeypatch):
 def test_patch_splices_post_flush_receipt(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_LANGFUSE_ENABLE", raising=False)
     sd = _seed_session(tmp_path)
-    # Breakdown written first (pre-flush): live_emitter source, counts not final.
+    # Pre-flush breakdown: live_emitter source, counts not final.
     write_breakdown_json(sd)
     before = json.loads((sd / BREAKDOWN_FILENAME).read_text(encoding="utf-8"))
     assert before["langfuse"]["counts_final"] is False
 
-    # Now a receipt lands (as flush_session would write it) with final counts.
+    # A receipt lands (as flush_session would write it) with final counts.
     receipt = {
         "enabled": True,
         "disabled_reason": None,
@@ -155,7 +149,6 @@ def test_patch_splices_post_flush_receipt(tmp_path, monkeypatch):
     assert after["langfuse"]["counts_final"] is True
     assert after["langfuse"]["counts"]["generations_sent"] == 5
     assert after["langfuse"]["receipt_source"] == "receipt_file"
-    # Other sections untouched by the splice.
     assert after["session"] == before["session"]
 
 

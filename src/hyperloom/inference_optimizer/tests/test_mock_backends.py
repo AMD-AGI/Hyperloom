@@ -110,7 +110,7 @@ async def test_mock_robustness_alert_after_n_ticks():
     assert types_per[2] == (IntentType.SEND_MESSAGE,)
 
 
-# E2E with Coordinator — real Critic-loop closes itself (no manual verdict)
+# E2E with Coordinator — Critic-loop closes itself
 @pytest.mark.asyncio
 async def test_e2e_mock_critic_closes_proposal_loop(session_dir):
     """Orchestration proposes baseline; mock Critic auto-approves; task gets created."""

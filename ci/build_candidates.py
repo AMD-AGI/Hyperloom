@@ -14,21 +14,17 @@ Filter rules (default, tweakable via CLI flags):
   - HF API ``filter=text-generation`` listing + per-repo verify of
     ``pipeline_tag`` and ``architectures[0]`` generative-ness.
   - >= ``--min-params`` B parameters (default 7).
-  - Weight footprint <= ``--max-weight-gb`` (default 600 GB) — skip
-    1-TB DeepSeek-V4 / GLM-5 class. Per-precision bytes-per-param uses
-    the same heuristic as ``optimize_submit.detect_tp``.
-  - Skip repos listed in ``ci/candidates/already_done.json`` (20 done
-    or permanent-failed in the 5/8-5/11 runs).
+  - Weight footprint <= ``--max-weight-gb`` (default 600 GB).
+  - Skip repos listed in ``ci/candidates/already_done.json``.
   - Skip NVFP4 (NVIDIA modelopt; ROCm has no kernels for this).
-  - Skip non-vLLM-non-sglang quant formats: GGUF, MLX, GPTQ-Int8,
-    Q4_K_M, w8a8 — these will fail at server start.
+  - Skip non-vLLM-non-sglang quant formats (GGUF, MLX, GPTQ-Int8,
+    Q4_K_M, w8a8) — these fail at server start.
 
 Usage:
   python3 build_candidates.py --top 200 --min-params 7 \\
       --output ci/candidates/top200_2026-05-12.json
 
-The script is idempotent: re-running with the same args reproduces the
-same JSON modulo per-repo HF API drift (download counts shift daily).
+Idempotent modulo per-repo HF API drift (download counts shift daily).
 """
 
 from __future__ import annotations
@@ -48,44 +44,42 @@ log = logging.getLogger("build-candidates")
 
 HF_BASE = "https://huggingface.co"
 
-# Drop repos matching these non-standard quant formats our toolchain
-# (vllm/sglang on ROCm) does not support, even if HF reports text-generation.
+# Drop repos with quant formats vllm/sglang on ROCm does not support.
 QUANT_FORMAT_BLOCKLIST = re.compile(
-    r"(?i)(NVFP4|"  # NVIDIA modelopt FP4 — ROCm has no kernels
-    r"GGUF|"  # llama.cpp format
+    r"(?i)(NVFP4|"  # NVIDIA modelopt FP4
+    r"GGUF|"  # llama.cpp
     r"MLX|"  # Apple Silicon
     r"-MLX-|"
-    r"-Q[0-9]_K|"  # GGUF Q4_K_M / Q8_0 etc.
+    r"-Q[0-9]_K|"  # GGUF Q4_K_M / Q8_0
     r"-Q[0-9]_[0-9]|"
-    r"\.w[0-9]a[0-9]|"  # RedHatAI quantized.w8a8 / w4a16
+    r"\.w[0-9]a[0-9]|"  # quantized.w8a8 / w4a16
     r"quantized\.w"
     r")"
 )
 
-# Tasks/heads our pipeline can't optimize (vision-only, embedding, etc.) that
-# can show pipeline_tag=text-generation via tag pollution but aren't causal LMs.
+# Tasks/heads the pipeline can't optimize that may still show
+# pipeline_tag=text-generation but aren't causal LMs.
 NON_LM_BLOCKLIST = re.compile(
     r"(?i)(embedding|reranker|rerank|"
-    r"-VL-|"  # Qwen3-VL, vision-language
+    r"-VL-|"  # vision-language
     r"-Vision-|"
     r"vision-instruct|"
     r"-TTS-|tts-|"
     r"-Speech-|"
     r"paraphraser|"
-    r"-Guard-|"  # Qwen3Guard moderation
+    r"-Guard-|"  # moderation
     r"-Reward-|"
     r"diffusion"
     r")"
 )
 
-# Family-level blocklist — fit under max_weight_gb but de-prioritized (extreme
-# MoE families costing disproportionate sandbox time/storage, or archs sglang/vllm
-# don't support yet on ROCm). Matches inside repo_id, case-insensitive.
+# Family-level blocklist — fit under max_weight_gb but de-prioritized.
+# Matches inside repo_id, case-insensitive.
 FAMILY_BLOCKLIST = re.compile(
     r"(?i)("
-    r"DeepSeek-V4|"  # all V4 variants (Pro/Flash/Base/FP8-test)
+    r"DeepSeek-V4|"  # all V4 variants
     r"GLM-5|"  # 1+ TB MoE
-    r"DeepSeek-V3$"  # DSV3 base only (V3.2 / V3.0324 stay eligible)
+    r"DeepSeek-V3$"  # DSV3 base only
     r")"
 )
 
@@ -105,7 +99,7 @@ def precision_bytes_per_param(precision: str) -> float:
         return 0.5
     if p == "FP8":
         return 1.0
-    return 2.0  # BF16 / FP16 default
+    return 2.0  # BF16 / FP16
 
 
 def detect_precision_from_config(config: dict) -> str:
@@ -142,7 +136,7 @@ def detect_precision_from_config(config: dict) -> str:
         return "INT4"
     if "awq" in raw:
         return "INT4"
-    return "BF16"  # most full-precision HF repos default here
+    return "BF16"
 
 
 def is_generative_arch(arch: str) -> bool:
@@ -343,7 +337,7 @@ def classify_candidate(
 
     total = (info.get("safetensors") or {}).get("total", 0)
     if not total:
-        # No safetensors index — can't size-check; skip rather than guess.
+        # No safetensors index — can't size-check; skip.
         log.info("skip %s: no safetensors.total (likely pt/bin only)", repo_id)
         return None
 

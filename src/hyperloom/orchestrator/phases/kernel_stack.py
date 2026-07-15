@@ -17,7 +17,6 @@ log = _logging.getLogger(__name__)
 class KernelStackPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
-    # SWEEP phase auto-dispatch
     async def _drain_pending_keep_integrates(self) -> None:
         """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; failures → rejected_kernel_ids."""
         from ..kernel.request_handlers import integrate_handler
@@ -344,7 +343,7 @@ class KernelStackPhase(PhaseHandler):
         entries = self._positive_needs_review_integrates()
         if len(entries) < 2:
             return
-        # Avoid applying two whole-file patches to the same target file.
+        # Avoid two whole-file patches on the same target file.
         seen_targets: set[str] = set()
         stack: list[dict[str, Any]] = []
         for entry in entries:
@@ -384,8 +383,7 @@ class KernelStackPhase(PhaseHandler):
             incremental gain, apply/revert sub-results and stack metadata.
         """
         from ..actions.executors.baseline import BaselineExecutor
-        # Lazy (re-)import so tests can monkeypatch it on the source module even
-        # though it is also imported at module top.
+        # Lazy (re-)import so tests can monkeypatch it on the source module.
         from ..actions.executors.benchmark_result import is_valid_measurement  # noqa: F811
         from ..kernel.request_handlers import (
             KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
@@ -433,9 +431,7 @@ class KernelStackPhase(PhaseHandler):
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )
-            # Inject the live SharedState via ctx.extra (not the constructor) so
-            # the eager-fallback one-shot is consumed in memory and the test
-            # baseline replica's constructor signature stays unchanged.
+            # Inject the live SharedState via ctx.extra (not the constructor).
             bench_result = await BaselineExecutor(session_dir=self.session_dir)(
                 RunnerContext(
                     task=fake_task,
@@ -450,12 +446,9 @@ class KernelStackPhase(PhaseHandler):
                 incremental_gain_pct = -100.0
             else:
                 base_tput = float(self.shared_state.baseline_tput or 0.0)
-                # The stack is applied on top of the current_best filesystem
-                # state (its KEEP patches are still applied), so the KEEP
-                # decision must use the *incremental* gain over current_best,
-                # not the total gain over the original baseline. Otherwise the
-                # already-banked current_best gain would carry a zero- or
-                # negative-contribution stack past the 1% threshold.
+                # The stack is applied on top of current_best, so the KEEP
+                # decision uses the incremental gain over current_best, not the
+                # total gain over the original baseline.
                 current_best = self.shared_state.current_best or {}
                 current_best_tput = float(current_best.get("tput") or 0.0)
                 decision_base = current_best_tput if current_best_tput > 0 else base_tput
@@ -508,22 +501,12 @@ class KernelStackPhase(PhaseHandler):
     async def _auto_enqueue_pending_integrations(self) -> None:
         """Auto-dispatch integrate for KEEP'd kernels awaiting integration.
 
-        The candidate set is :meth:`SharedState.pending_keep_kernel_ids` — the
-        single source of truth for KEEP'd kernels not yet integrated/rejected,
-        which **includes** kernels whose only prior integrate attempts were
-        un-exhausted integration *faults* (retryable). This lets an integration
-        fault be retried inside the KERNEL_AGENT phase rather than waiting for the
-        SWEEP-entry drain.
-
-        Duplicate dispatch is guarded per kernel_id by the recorded
-        integrate-attempt count at the time of the last dispatch
-        (``_auto_integrate_attempt_marks``): a kernel is re-dispatched only once
-        its previously-dispatched integrate has been recorded (count advanced),
-        never while one is still in flight. A persistently-faulting kernel is
-        retried until it KEEPs, REVERTs, or exhausts its fault budget — at which
-        point it drops out of ``pending_keep_kernel_ids`` and is no longer
-        dispatched. Idempotent: safe to call after every kernel_opt and after
-        every integrate completion.
+        The candidate set is :meth:`SharedState.pending_keep_kernel_ids`, which
+        includes kernels whose only prior integrate attempts were un-exhausted
+        (retryable) faults. Duplicate dispatch is guarded per kernel_id by the
+        recorded integrate-attempt count (``_auto_integrate_attempt_marks``): a
+        kernel is re-dispatched only once its prior integrate has been recorded,
+        never while one is in flight. Idempotent.
         """
         state = self.shared_state
         pending_kids = state.pending_keep_kernel_ids()
@@ -538,8 +521,7 @@ class KernelStackPhase(PhaseHandler):
             recorded = state.integrate_attempt_count_for_kernel(kid)
             mark = self._auto_integrate_attempt_marks.get(kid)
             if mark is not None and recorded <= mark:
-                # A previously-dispatched integrate for this kernel is still in
-                # flight (no newly-recorded outcome) — don't pile on a duplicate.
+                # A prior integrate for this kernel is still in flight.
                 continue
             log.info(
                 "auto-integrate: dispatching integrate for KEEP'd kernel %s "

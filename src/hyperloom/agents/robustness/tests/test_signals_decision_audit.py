@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the G1-G7 decision-audit signals."""
+"""Unit tests for the decision-audit signals."""
 
 from __future__ import annotations
 
@@ -49,9 +49,7 @@ def _integrate_entry(
     }
 
 
-# ---------------------------------------------------------------------------
 # empty_patch_kept
-# ---------------------------------------------------------------------------
 
 
 def test_empty_patch_kept_fires_on_zero_patch_with_keep():
@@ -88,9 +86,7 @@ def test_empty_patch_kept_silent_when_patch_size_unknown():
     assert all(s.name != "empty_patch_kept" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # decision_threshold_violated
-# ---------------------------------------------------------------------------
 
 
 def test_decision_threshold_violated_fires_on_sub_threshold_keep():
@@ -122,9 +118,7 @@ def test_decision_threshold_violated_silent_above_threshold():
     assert all(s.name != "decision_threshold_violated" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # kernel_dispatch_bypassed
-# ---------------------------------------------------------------------------
 
 
 def test_dispatch_bypassed_fires_when_dispatched_count_zero():
@@ -143,7 +137,7 @@ def test_dispatch_bypassed_fires_when_dispatched_count_zero():
 
 
 def test_dispatch_bypassed_fires_on_near_zero_gain_with_missing_evidence():
-    """K5 case — Dolphin-34B KEEP +0.07% gain, no dispatch evidence."""
+    """Near-zero gain KEEP with no dispatch evidence fires the signal."""
     audit = {
         "recent_integrate": [
             _integrate_entry(
@@ -189,13 +183,11 @@ def test_dispatch_bypassed_silent_on_meaningful_gain_without_evidence():
     assert all(s.name != "kernel_dispatch_bypassed" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # kernel_negative_delta_kept
-# ---------------------------------------------------------------------------
 
 
 def test_negative_delta_kept_fires():
-    """Qwen2.5-32B-AWQ case: ``kernels_optimized=6, delta=-0.169``."""
+    """Negative optimized-kernel delta with kernels_optimized > 0 fires the signal."""
     audit = {
         "ci_metrics": {
             "kernels_optimized": 6,
@@ -242,9 +234,7 @@ def test_negative_delta_silent_when_no_kernels_optimized():
     assert all(s.name != "kernel_negative_delta_kept" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # ci_metrics_baseline_zero
-# ---------------------------------------------------------------------------
 
 
 def test_baseline_zero_fires_when_no_status_marker():
@@ -309,16 +299,13 @@ def test_baseline_zero_silent_when_baseline_present():
     assert all(s.name != "ci_metrics_baseline_zero" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # ci_metrics_schema_drift
-# ---------------------------------------------------------------------------
 
 
 def test_schema_drift_fires_on_legacy_field_names():
     audit = {
         "ci_metrics": {
-            # Legacy variant: uses ``baseline_throughput`` instead of
-            # ``baseline_tok_per_gpu``.
+            # Uses baseline_throughput instead of baseline_tok_per_gpu.
             "model": "X",
             "framework": "sglang",
             "gpu": "MI300X",
@@ -376,9 +363,7 @@ def test_schema_drift_silent_on_canonical_schema():
     assert all(s.name != "ci_metrics_schema_drift" for s in out)
 
 
-# ---------------------------------------------------------------------------
 # Probe-disabled / no-data short-circuit
-# ---------------------------------------------------------------------------
 
 
 def test_silent_when_local_decision_audit_empty():
@@ -393,9 +378,7 @@ def test_silent_when_audit_is_not_a_dict():
     assert out == []
 
 
-# ---------------------------------------------------------------------------
 # Custom config
-# ---------------------------------------------------------------------------
 
 
 def test_custom_min_keep_gain_pct_applies():

@@ -279,7 +279,7 @@ class ModelGpuFitDetector:
             activation_buf_gib=self._config.activation_buf_gib,
         )
         if breakdown is None:
-            # Insufficient data — record the fingerprint to avoid retrying until manifest changes.
+            # Insufficient data — record fingerprint to avoid retrying until manifest changes.
             self._fired_fingerprint = fingerprint
             self._persist()
             return []

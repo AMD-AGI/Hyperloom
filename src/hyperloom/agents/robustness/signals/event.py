@@ -29,7 +29,7 @@ class EventConfig:
     # Lookback over inbox + coordinator_events for the most recent recover result.
     recover_lookback_events: int = 50
     # B4 ``idempotency_replay``: fire when >= threshold distinct idempotency_keys
-    # share the same action+payload hash within one tick (LLM bypassing Coordinator dedup).
+    # share the same action+payload hash within one tick.
     idempotency_replay_threshold: int = 2
 
 
@@ -199,7 +199,7 @@ def _idempotency_replay_symptoms(
     """
     if not ctx.inbox:
         return []
-    import hashlib  # local — avoid module-level cost for runs without delegates
+    import hashlib  # local import
     import json
 
     grouped: dict[tuple[str, str], set[str]] = {}
@@ -215,7 +215,7 @@ def _idempotency_replay_symptoms(
             continue
         key = str(payload.get("idempotency_key") or "").strip()
         if not key:
-            # No key — Coordinator's payload-hash dedup already covers this; skip to avoid false positives.
+            # No key — Coordinator's payload-hash dedup already covers this.
             continue
         params = payload.get("params") or {}
         try:
@@ -289,14 +289,14 @@ def _recover_unsuccessful_symptoms(
             continue
         if not _is_recover_payload(payload):
             continue
-        latest = payload  # last-write-wins → newest because events list is in order
+        latest = payload  # last-write-wins → newest
     if latest is None:
         return []
     state = str(latest.get("state") or "").strip()
     if state != "needs_review":
         return []
     error_class = str(latest.get("error_class") or "")
-    # Any needs_review from recover is terminal; error_class only feeds evidence.
+    # Any needs_review from recover is terminal.
     return [
         Symptom(
             name="recover_unsuccessful",
@@ -316,7 +316,7 @@ def _recover_unsuccessful_symptoms(
                 "gpureset_attempted": latest.get("gpureset_attempted"),
                 "post_free_mb_per_gpu": latest.get("post_free_mb_per_gpu"),
             },
-            subject={},  # session-wide; cooldown collapses across ticks
+            subject={},  # session-wide
             source="coordinator_events",
             suggestion=("delegate(report) to finalize at the last validated gain"),
         )
@@ -341,7 +341,7 @@ def _is_recover_payload(payload: dict[str, Any]) -> bool:
         return True
     if str(payload.get("family") or "").strip() == "recover":
         return True
-    # Executor signature — recover-only fields forwarded from result.json.
+    # Executor signature — recover-only fields.
     if "force_gpu_cleanup" in payload and "gpureset_attempted" in payload:
         return True
     return False

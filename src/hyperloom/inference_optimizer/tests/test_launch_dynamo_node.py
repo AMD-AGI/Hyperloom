@@ -2,11 +2,10 @@
 
 """Unit tests for ``multi_node/scripts/launch_dynamo_node.py``.
 
-The pod-side Dynamo (idle-pod SSH) launcher is Ray-free / stdlib-only, so it is
-imported directly via importlib. These guard the command construction (notably
-the single-node distributed-flag omission that fixed the 0-output-token decode
-regression), the pid1 env recovery (incl. the KUBERNETES_* discovery fix), and
-the routable-pod-IP resolution used for cross-pod PD KV handshakes.
+The pod-side Dynamo launcher is Ray-free / stdlib-only, so it is imported
+directly via importlib. These guard command construction (single-node
+distributed-flag omission), pid1 env recovery (incl. KUBERNETES_* discovery),
+and routable-pod-IP resolution used for cross-pod PD KV handshakes.
 """
 
 from __future__ import annotations
@@ -47,9 +46,8 @@ def _ns(**overrides):
 
 
 def test_sglang_cmd_single_node_omits_distributed_flags():
-    # REGRESSION GUARD: nnodes==1 (single-pod PD role) must NOT pass
-    # --nnodes/--node-rank/--dist-init-addr. Passing them made decode emit 0
-    # output tokens (finish_reason=stop); the SaFE native launch omits them.
+    # nnodes==1 (single-pod PD role) must NOT pass
+    # --nnodes/--node-rank/--dist-init-addr.
     lm = _load("ldn_sglang_single")
     cmd = lm._build_sglang_cmd(_ns(nnodes=1), node_rank=0, leader="10.0.0.1")
     assert "python3" in cmd and "dynamo.sglang" in cmd
@@ -100,8 +98,8 @@ def test_vllm_cmd_enables_expert_parallel_only_when_ep_gt_1():
 
 
 def test_recover_container_env_overlays_pid1_and_prepends_venv(monkeypatch):
-    # sshd sessions start with a bare env; the launcher overlays the LWS/NATS/
-    # KUBERNETES_ keys from pid1 and guarantees /opt/venv/bin leads PATH.
+    # The launcher overlays the LWS/NATS/KUBERNETES_ keys from pid1 and
+    # guarantees /opt/venv/bin leads PATH.
     lm = _load("ldn_env")
     pid1 = (
         b"LWS_WORKER_INDEX=1\0LWS_LEADER_ADDRESS=10.0.0.1\0"
@@ -113,15 +111,15 @@ def test_recover_container_env_overlays_pid1_and_prepends_venv(monkeypatch):
     env = lm._recover_container_env()
     assert env["LWS_WORKER_INDEX"] == "1"
     assert env["LWS_LEADER_ADDRESS"] == "10.0.0.1"
-    assert env["KUBERNETES_SERVICE_HOST"] == "10.96.0.1"  # k8s discovery fix
+    assert env["KUBERNETES_SERVICE_HOST"] == "10.96.0.1"
     assert env["NATS_SERVER"] == "nats://x:4222"
     assert "IGNORED_VAR" not in env  # not in recover prefixes/names
     assert env["PATH"].startswith("/opt/venv/bin:")
 
 
 def test_recover_container_env_survives_unreadable_proc(monkeypatch):
-    # When /proc/1/environ is unreadable the launcher must not crash; it falls
-    # back to the (bare) sshd session env rather than raising.
+    # When /proc/1/environ is unreadable the launcher falls back to the session
+    # env rather than raising.
     lm = _load("ldn_env2")
 
     def _boom(self):
@@ -131,8 +129,7 @@ def test_recover_container_env_survives_unreadable_proc(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("MN_PROBE_KEY", "present")
     env = lm._recover_container_env()
-    # Returns the session env (the early OSError return path predates the PATH
-    # venv-prepend, so PATH is left as-is on this fallback).
+    # Returns the session env; PATH is left as-is on this fallback.
     assert env["MN_PROBE_KEY"] == "present"
     assert env["PATH"] == "/usr/bin"
 
@@ -143,8 +140,8 @@ def test_resolve_pod_ip_prefers_pod_ip_downward_api():
 
 
 def test_resolve_pod_ip_rejects_loopback_and_uses_egress_probe(monkeypatch):
-    # A 127.* POD_IP must be rejected (cross-pod KV handshake would otherwise
-    # dial its own localhost); the egress-route probe supplies the routable IP.
+    # A 127.* POD_IP must be rejected; the egress-route probe supplies the
+    # routable IP.
     lm = _load("ldn_ip2")
     import socket as _socket
 

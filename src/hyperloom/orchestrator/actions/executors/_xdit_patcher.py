@@ -2,28 +2,21 @@
 
 """Verifier for xDiT's baked diffusion-profiling adaptations.
 
-Historically this module *mutated* xfuser's ``base_model.py`` in place at runtime
-to add two diffusion-profiling adaptations. Both now live as source in the
-``hyperloom-xdit-adaptation`` overlay repo and are baked into the sandbox image
-(``pytorch-xdit:v26.6-hyperloom15`` and newer) at build time, alongside the
-fp8/fp4 GEMM ``or []`` robustness guards. Runtime source mutation of ``/app`` was
-fragile (string-anchor drift, ``/app`` writability + cross-process ``flock``,
-implicit provenance), so this module no longer edits any file — it only VERIFIES
-that the running xfuser carries the baked adaptations.
+The two adaptations live as source in the ``hyperloom-xdit-adaptation`` overlay
+repo and are baked into the sandbox image at build time; this module only
+VERIFIES that the running xfuser carries them (it no longer mutates any file).
 
 The two adaptations (their sentinels are asserted here):
 
 * ``repeat=1`` in ``torch.profiler.schedule`` — retains the ACTIVE profiler window
-  (upstream default ``repeat=0`` discards it, exporting an empty trace with
-  ``Op count == 0`` so TraceLens/roofline get nothing). Sentinel:
+  (upstream default ``repeat=0`` discards it, exporting an empty trace). Sentinel:
   ``# hyperloom: retain active window``.
 * per-denoise-step ``record_function("denoise_step_<i>")`` markers around the
   diffusers ``scheduler.step`` — deterministic per-step roofline split anchors.
   Sentinel: ``# hyperloom: per-denoise-step annotation``.
 
-Verification is fail-soft: a missing/stale bake logs a loud remediation warning
-and returns ``False`` (callers proceed; the roofline just degrades) rather than
-aborting the run.
+Verification is fail-soft: a missing/stale bake logs a remediation warning and
+returns ``False`` (callers proceed; the roofline just degrades).
 """
 
 from __future__ import annotations
@@ -40,10 +33,9 @@ log = logging.getLogger(__name__)
 # xfuser package-relative path to the profiled ``base_model.py``.
 _XFUSER_REL = ("model_executor", "models", "runner_models", "base_model.py")
 
-# Sentinels the overlay bakes into base_model.py (kept in sync with
-# hyperloom-xdit-adaptation/runner_models/base_model.py).
-_PROFILER_SENTINEL = "# hyperloom: retain active window"      # Patch 1: repeat=1
-_ANNOT_SENTINEL = "# hyperloom: per-denoise-step annotation"  # Patch 2: per-step
+# Sentinels the overlay bakes into base_model.py.
+_PROFILER_SENTINEL = "# hyperloom: retain active window"      # repeat=1
+_ANNOT_SENTINEL = "# hyperloom: per-denoise-step annotation"  # per-step
 
 # First image tag that bakes the adaptations (for the remediation message).
 _REQUIRED_IMAGE = "pytorch-xdit:v26.6-hyperloom15"
@@ -136,8 +128,7 @@ def verify_xdit_profiler_baked() -> bool:
     return False
 
 
-# Backward-compatible name: callers (profile.py) still import
-# ``ensure_xdit_profiler_patched``. It now verifies instead of mutating.
+# Backward-compatible alias for callers importing ``ensure_xdit_profiler_patched``.
 ensure_xdit_profiler_patched = verify_xdit_profiler_baked
 
 __all__ = ["ensure_xdit_profiler_patched", "verify_xdit_profiler_baked"]

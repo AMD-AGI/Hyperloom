@@ -4,7 +4,7 @@
 
 Per-framework patchers that are fail-soft, idempotent, concurrency-safe, and
 atomic. Fixtures synthesize fake vLLM/SGLang installs + a fake TraceLens patch
-tree inside ``tmp_path`` so no real ``$TRACELENS_ROOT`` or site-packages is touched.
+tree inside ``tmp_path`` so no real install is touched.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from hyperloom.orchestrator.actions.executors._server_patcher import (
 )
 
 
-# Fixtures: fake TraceLens patch tree + fake vLLM / SGLang installs
 _FAKE_VLLM_VERSION = "0.99.0-fake"
 _FAKE_SGLANG_VERSION = "0.5.9"  # must match one of _SGLANG_SUPPORTED_VERSIONS
 
@@ -125,7 +124,7 @@ def fake_vllm_world(tmp_path: Path, monkeypatch):
 def _make_fake_sglang_install(tmp_path: Path) -> Path:
     """Build the editable ``python/sglang/...`` layout; returns the apply root (parent of ``python/``).
 
-    Includes stub files for the extra_sentinels annotation markers so that
+    Includes stub files for the extra_sentinels annotation markers so
     post-apply sentinel verification passes after fake patches are applied.
     """
     apply_root = tmp_path / "sgl_repo"
@@ -137,8 +136,7 @@ def _make_fake_sglang_install(tmp_path: Path) -> Path:
     )
     (apply_root / "python" / "sglang" / "srt" / "__init__.py").write_text("")
     (apply_root / "python" / "sglang" / "srt" / "utils" / "__init__.py").write_text("")
-    # Pre-populate extra_sentinels targets with annotation marker text so
-    # post-apply sentinel checks pass in test fixtures.
+    # Pre-populate extra_sentinels targets so post-apply sentinel checks pass.
     managers = apply_root / "python" / "sglang" / "srt" / "managers"
     managers.mkdir(parents=True, exist_ok=True)
     (managers / "scheduler.py").write_text(
@@ -239,7 +237,6 @@ _REQUIRES_GIT = pytest.mark.skipif(
 )
 
 
-# vLLM happy path + idempotency
 @_REQUIRES_GIT
 def test_vllm_first_call_applies_patch(fake_vllm_world):
     _, install_root, _ = fake_vllm_world
@@ -261,7 +258,6 @@ def test_vllm_second_call_is_noop(fake_vllm_world):
     assert sentinel_path.read_text() == after_first
 
 
-# vLLM fail-soft paths
 def test_vllm_returns_false_without_tracelens_root(monkeypatch):
     """No TRACELENS_ROOT, no explicit arg → fail-soft False."""
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
@@ -320,7 +316,6 @@ def test_vllm_returns_false_when_install_layout_unexpected(
     assert ensure_vllm_patched_for_tracelens() is False
 
 
-# SGLang happy path + version gating + atomic application
 @_REQUIRES_GIT
 def test_sglang_first_call_applies_all_patches(fake_sglang_world):
     _, apply_root, _ = fake_sglang_world
@@ -417,7 +412,6 @@ def test_sglang_precheck_failure_skips_all(tmp_path, monkeypatch):
     assert not sentinel.exists(), "patcher partial-applied even though --check predicted failure"
 
 
-# Concurrency: threads racing the same fake install converge.
 @_REQUIRES_GIT
 def test_vllm_concurrent_patchers_converge(fake_vllm_world):
     _, install_root, _ = fake_vllm_world
@@ -442,7 +436,6 @@ def test_vllm_concurrent_patchers_converge(fake_vllm_world):
     assert text.count("capture_torch_profiler_dir") == 1
 
 
-# Misc: missing git binary
 def test_returns_false_when_git_missing(fake_vllm_world, monkeypatch):
     """No `git` on PATH → fail-soft so git-less containers still run benchmarks."""
     monkeypatch.setattr(_server_patcher.shutil, "which", lambda _name: None)
@@ -450,8 +443,6 @@ def test_returns_false_when_git_missing(fake_vllm_world, monkeypatch):
     assert ensure_vllm_patched_for_tracelens() is False
 
 
-# patch -p1 --fuzz=2 fallback when git apply --check rejects. fuzz=2
-# tolerates single-line drift but rejects multi-line drift.
 _REQUIRES_PATCH = pytest.mark.skipif(
     shutil.which("patch") is None,
     reason="`patch` binary not available in test environment",
@@ -463,7 +454,7 @@ _REQUIRES_PATCH = pytest.mark.skipif(
 def test_apply_atomic_fuzzy_fallback_when_git_strict_check_fails(fake_vllm_world):
     """When strict ``git apply --check`` rejects but ``patch --fuzz=2`` accepts, the patcher uses the fuzzy fallback."""
     _, install_root, _ = fake_vllm_world
-    # One drift line is within fuzz=2 tolerance, so the fuzzy fallback applies.
+    # One drift line is within fuzz=2 tolerance.
     target = install_root / "vllm" / "config" / "profiler.py"
     target.write_text(
         textwrap.dedent(
@@ -522,8 +513,6 @@ def test_patch_dry_run_returns_false_when_patch_binary_missing(tmp_path):
     assert rc is False
 
 
-# Safety guarantee: the ``_FUZZ`` constant must stay at GNU patch's
-# default (2); bumping it back to 10 re-opens the silent mis-apply risk.
 def test_fuzz_value_is_default_two_not_maximum_ten():
     """``_FUZZ`` MUST be 2; ``--fuzz=10`` would silently mis-apply on multi-line drift."""
     assert _server_patcher._FUZZ == 2, (
@@ -599,7 +588,6 @@ def test_fuzz_fallback_tolerates_offset_slippage(fake_vllm_world):
     assert "detailed_trace_annotation" in text
 
 
-# SGLang minor-version allowlist (was: exact-version pin)
 @pytest.mark.parametrize(
     "env, version, expected",
     [
@@ -655,7 +643,6 @@ def test_sglang_version_accepted(monkeypatch, env, version, expected):
     assert _server_patcher._sglang_version_accepted(version) is expected
 
 
-# Wheel-install SGLang patching via -p3 strip.
 def _make_fake_wheel_sglang_install(tmp_path: Path) -> Path:
     """Synthesise a pip-wheel SGLang layout (``site-packages/sglang/...``, no ``python/`` parent)."""
     site_packages = tmp_path / "site-packages"
@@ -767,7 +754,6 @@ def test_resolve_sglang_apply_root_rejects_unexpected_layout(tmp_path):
     assert _server_patcher._resolve_sglang_apply_root(sglang_module) is None
 
 
-# Tuple-of-substrings sentinel for vLLM (false-positive guard).
 def test_is_patched_requires_all_substrings_in_tuple(tmp_path):
     """``_is_patched`` requires EVERY substring in ``plan.sentinel_text``; one marker alone is rejected."""
     sentinel = tmp_path / "fake_sentinel.py"
@@ -842,8 +828,6 @@ def test_sglang_plan_keeps_single_marker_sentinel(fake_sglang_world):
     assert plan.sentinel_text == ("kernel_shape_profiler",), plan.sentinel_text
 
 
-# A TraceLens-shipped SUPPORTED_VERSIONS manifest takes precedence
-# over the hardcoded minor allowlist (auto-adapts without a code change).
 def _write_sglang_versions_manifest(
     tracelens_root: Path,
     body: str,
@@ -1080,8 +1064,6 @@ def test_sglang_e2e_manifest_admits_version_outside_default_allowlist(
     )
 
 
-# TraceLens v0.3.1: per-version patch subdirs (sglang_0_5_9/, ...) are the only
-# supported layout; the flat v0.3 layout has been retired.
 def _write_versioned_sglang_patches(
     tracelens_root: Path,
     subdir: str,
@@ -1209,12 +1191,8 @@ def test_discover_sglang_plan_marks_versioned_layout(tmp_path, monkeypatch):
         assert "sglang_0_5_11" in p.parts, f"versioned layout should be selected, got patch path {p}"
 
 
-# A "new file" member patch whose target is ALREADY pre-baked into
-# the sglang 0.5.11 image (byte-identical post-image) must be reverse-check
-# detected and SKIPPED from the atomic set — so the remaining annotation
-# patches still apply — instead of the whole set fail-soft skipping (which
-# silently disabled per-step kernel-shape annotations -> empty kernel shape ->
-# kernel-opt/GEAK never dispatched for the whole run).
+# An already-pre-baked "new file" member must be reverse-check detected and
+# SKIPPED from the atomic set so the remaining annotation patches still apply.
 @_REQUIRES_GIT
 def test_sglang_0511_already_applied_member_is_skipped_not_failsoft(
     tmp_path,
@@ -1230,9 +1208,8 @@ def test_sglang_0511_already_applied_member_is_skipped_not_failsoft(
     # misc_1 (extra_1.py) and misc_2 (extra_2.py) annotation new-files.
     _write_versioned_sglang_patches(tracelens_root, "sglang_0_5_11", count=3)
 
-    # Force the fuzzy `patch` fallback OFF (git stays on PATH) so an
-    # already-applied new-file member deterministically routes through the
-    # reverse `git apply -R --check` skip branch rather than `patch --dry-run`.
+    # Force the fuzzy `patch` fallback OFF so an already-applied new-file member
+    # routes through the reverse `git apply -R --check` skip branch.
     real_which = shutil.which
     monkeypatch.setattr(
         _server_patcher.shutil,
@@ -1241,10 +1218,9 @@ def test_sglang_0511_already_applied_member_is_skipped_not_failsoft(
     )
 
     utils_dir = apply_root / "python" / "sglang" / "srt" / "utils"
-    # Pre-bake ONE non-sentinel member byte-identically (== already applied in
-    # the image). We deliberately do NOT pre-bake the sentinel
-    # kernel_shape_profiler.py, so the idempotency sentinel check does not
-    # short-circuit before _apply_atomic runs.
+    # Pre-bake ONE non-sentinel member byte-identically. The sentinel
+    # kernel_shape_profiler.py is deliberately left unbaked so the idempotency
+    # check does not short-circuit before _apply_atomic runs.
     prebaked = utils_dir / "extra_1.py"
     prebaked.write_text("# extra_1 stub\n", encoding="utf-8")
 
@@ -1263,7 +1239,7 @@ def test_sglang_0511_already_applied_member_is_skipped_not_failsoft(
     # The sentinel + the other annotation patch landed despite the skip.
     assert (utils_dir / "kernel_shape_profiler.py").exists()
     assert (utils_dir / "extra_2.py").exists()
-    # The pre-baked member is untouched (skipped — not rewritten or rolled back).
+    # The pre-baked member is untouched.
     assert prebaked.read_text(encoding="utf-8") == "# extra_1 stub\n"
 
 
@@ -1280,7 +1256,7 @@ def test_apply_atomic_skips_already_applied_member(tmp_path, monkeypatch):
     )
     apply_root = tmp_path / "tree"
     apply_root.mkdir()
-    # already.py is pre-baked identical to its patch's post-image.
+    # Pre-baked identical to its patch's post-image.
     (apply_root / "already.py").write_text("# already applied\n", encoding="utf-8")
 
     patches_dir = tmp_path / "patches"
@@ -1376,25 +1352,19 @@ def test_apply_atomic_rolls_back_when_post_apply_sentinel_fails(
     )
 
     assert _server_patcher._apply_atomic(plan) is False
-    # The patch was applied to disk then must be reverted; the file must not
-    # linger (disk state must match the reported failure).
+    # The applied patch must be reverted; the file must not linger.
     assert not (apply_root / "created.py").exists(), (
         "post-apply sentinel failure must roll back already-applied patches"
     )
 
 
-# PR2: KernelForge-owned fp8 block-scale CK-routing patch
-# (ensure_sglang_patched_for_ck_blockscale). Reuses the same fail-soft /
-# idempotent / version-gated machinery as the TraceLens SGLang patcher, but
-# resolves the KernelForge root from FORGE_PATH / KERNEL_FORGE_ROOT /
-# KERNEL_FORGE_PATH and applies the patch shipped under
-# ``<root>/serving_patches/sglang/sglang_<ver>/``.
-# Self-contained synthetic CK-routing patch. The patcher tests never actually
-# git-apply this (they exercise the idempotency short-circuit and the fail-soft
-# branches), so the fixture only needs to EXIST at the PR2 layout path — it must
-# not depend on a real file in /tmp or the KernelForge worktree (that made CI
-# fail with FileNotFoundError). It is nonetheless a coherent unified diff that
-# would apply to the unpatched ``fp8_utils.py`` stub and add the three CK markers.
+# KernelForge-owned fp8 block-scale CK-routing patch
+# (ensure_sglang_patched_for_ck_blockscale). Resolves the KernelForge root from
+# FORGE_PATH / KERNEL_FORGE_ROOT / KERNEL_FORGE_PATH and applies the patch
+# shipped under ``<root>/serving_patches/sglang/sglang_<ver>/``.
+# Self-contained synthetic CK-routing patch; the fixture only needs to exist at
+# the layout path. It is a coherent unified diff that would apply to the
+# unpatched ``fp8_utils.py`` stub and add the three CK markers.
 _CK_FIXTURE_PATCH_TEXT = """\
 diff --git a/python/sglang/srt/layers/quantization/fp8_utils.py b/python/sglang/srt/layers/quantization/fp8_utils.py
 --- a/python/sglang/srt/layers/quantization/fp8_utils.py
@@ -1426,12 +1396,11 @@ def _make_fake_kernelforge(
     version: str = _CK_SGLANG_VERSION,
     manifest_body: str = "0.5.12\n",
 ) -> Path:
-    """Build a fake KernelForge root honoring the PR2 layout contract.
+    """Build a fake KernelForge root honoring the layout contract.
 
     Writes a self-contained synthetic patch into
     ``serving_patches/sglang/sglang_<ver>/fp8_blockscale_ck_routing.patch`` and
-    the root-level ``serving_patches/sglang/SUPPORTED_VERSIONS.txt`` so tests
-    never depend on the real KernelForge worktree or any file in /tmp.
+    the root-level ``serving_patches/sglang/SUPPORTED_VERSIONS.txt``.
     """
     root = tmp_path / "KernelForge"
     sglang_patches = root / "serving_patches" / "sglang"
@@ -1459,8 +1428,8 @@ def _make_fake_sglang_for_ck(
     """Build an editable ``python/sglang/...`` tree with ``fp8_utils.py``.
 
     When ``patched`` the sentinel file is pre-baked with all three CK markers
-    so ``_ensure_patched`` short-circuits on the idempotency check (no real
-    ``git apply`` against the synthetic tree). Returns the apply root.
+    so ``_ensure_patched`` short-circuits on the idempotency check. Returns the
+    apply root.
     """
     apply_root = tmp_path / "sgl_repo"
     quant = apply_root / "python" / "sglang" / "srt" / "layers" / "quantization"
@@ -1554,7 +1523,7 @@ def test_ck_blockscale_rejects_unsupported_version(monkeypatch, tmp_path):
     """A version excluded by the root-level SUPPORTED_VERSIONS manifest fails
     soft and must NOT touch the install tree."""
     _clear_ck_env(monkeypatch)
-    # Subdir exists for 0.5.12 but the manifest only admits 0.6.0.
+    # Manifest only admits 0.6.0.
     root = _make_fake_kernelforge(tmp_path, manifest_body="0.6.0\n")
     apply_root = _make_fake_sglang_for_ck(tmp_path, patched=False)
     _register_fake_sglang(monkeypatch, apply_root, _CK_SGLANG_VERSION)
@@ -1613,7 +1582,7 @@ def test_discover_sglang_ck_plan_shape(monkeypatch, tmp_path):
         "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
         "ck_gemm_a8w8_blockscale",
     }
-    # Editable layout → -p1 strip, apply root at the repo root.
+    # Editable layout -> -p1 strip.
     assert plan.apply_strip == 1
     assert plan.apply_root == apply_root
 
