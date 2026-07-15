@@ -95,7 +95,6 @@ class GridVariant:
         extra_envs: dict[str, str] | None = None,
         note: str = "",
         *,
-        extra_sglang_args: str | None = None,
         remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
         unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
         args_mode: str = "append",
@@ -107,28 +106,12 @@ class GridVariant:
             extra_server_args: Extra server CLI args for this variant.
             extra_envs: Extra environment variables for this variant.
             note: Optional reason/category note.
-            extra_sglang_args: Deprecated alias for ``extra_server_args``;
-                routed into the canonical attribute with a warning.
             remove_args: Base/server args to remove before appending this
                 variant's args.
             unset_envs: Inherited env names to remove before applying
                 ``extra_envs``.
             args_mode: ``"append"`` or ``"replace"``.
         """
-        # Back-compat alias for the historical ``extra_sglang_args`` kwarg;
-        # routed into the canonical attribute with a DeprecationWarning.
-        if extra_sglang_args is not None:
-            import warnings as _warnings
-
-            _warnings.warn(
-                "GridVariant(extra_sglang_args=...) is a deprecation "
-                "alias for GridVariant(extra_server_args=...) and will "
-                "be removed in the next Hyperloom release.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if not extra_server_args:
-                extra_server_args = extra_sglang_args
         self.name = name
         self.extra_server_args = extra_server_args
         self.extra_envs = dict(extra_envs) if extra_envs is not None else {}

@@ -1850,7 +1850,7 @@ class WritebackCollaborator:
             candidate_args = str(bv.get("candidate_extra_server_args") or bv.get("extra_server_args") or "").strip()
         full_args = ""
         if isinstance(bv, dict):
-            full_args = str(bv.get("extra_server_args") or bv.get("extra_sglang_args") or "").strip()
+            full_args = str(bv.get("extra_server_args") or "").strip()
         controls_effective = bool(
             isinstance(bv, dict)
             and (
@@ -1866,7 +1866,7 @@ class WritebackCollaborator:
             # reintroduce flags the variant deliberately removed.
             full_args = _dedupe_extra_server_args(full_args)
         else:
-            full_args = _merge_cumulative_extra_sglang_args(
+            full_args = _merge_cumulative_extra_server_args(
                 base_args,
                 candidate_args,
                 full_args,
@@ -2313,7 +2313,10 @@ class WritebackCollaborator:
             # ``resume_pending_revalidation`` flag from the measured tput — but
             # ONLY when the rebench actually produced a valid measurement, so a
             # failed/empty rebench leaves the flag set and reports keep warning.
-            if task is not None and str((task.params or {}).get("source") or "") == "resume_stack_revalidate":
+            if task is not None and str((task.params or {}).get("source") or "") in {
+                "resume_stack_revalidate",
+                "resume_reverify_best",
+            }:
                 measured = result.get("output_throughput")
                 measured_ok = isinstance(measured, (int, float)) and measured > 0
                 # A GEAK revalidation (2b) must not blindly stamp validated
