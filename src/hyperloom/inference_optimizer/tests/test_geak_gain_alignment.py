@@ -105,18 +105,6 @@ def test_revalidation_fallback_on_bad_measurement(measured, baseline) -> None:
 # ── Shared Coordinator fixture ───────────────────────────────────────────────
 
 
-def test_geak_legacy_promote_honors_env_gate(monkeypatch) -> None:
-    from hyperloom.orchestrator.phases.kernel import KernelPhase
-
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_GEAK_LEGACY_PROMOTE", raising=False)
-    coord = Coordinator.__new__(Coordinator)
-    coord.shared_state = SharedState()
-    phase = KernelPhase(coord)
-    assert phase._geak_legacy_promote() is False
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_GEAK_LEGACY_PROMOTE", "yes")
-    assert phase._geak_legacy_promote() is True
-
-
 def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path

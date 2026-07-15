@@ -770,20 +770,6 @@ class KernelPhase(PhaseHandler):
             for item in (self.shared_state.optimization_stack or [])
         )
 
-    def _geak_legacy_promote(self) -> bool:
-        """Whether to keep the LEGACY "promote self-reported value, revalidate
-        later" GEAK flow (escape hatch).
-
-        Default OFF: GEAK now aligns with explore/forge - the main-flow
-        rebench measures first and only a validated measurement writes the
-        headline (current_best / optimization_stack / cumulative_gain*). Set
-        ``INFERENCE_OPTIMIZER_GEAK_LEGACY_PROMOTE=1`` to restore the old
-        provisional-first behaviour.
-        """
-        return str(
-            os.environ.get("INFERENCE_OPTIMIZER_GEAK_LEGACY_PROMOTE", "").strip()
-        ).lower() in ("1", "true", "yes", "on")
-
     @staticmethod
     def _parse_geak_accepted_config(
         result: dict[str, Any],

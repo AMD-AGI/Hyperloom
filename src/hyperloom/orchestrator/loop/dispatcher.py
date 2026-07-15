@@ -881,21 +881,18 @@ class DispatcherCollaborator:
         if reg is None:
             return frozenset()
         executors = getattr(self.sub, "executor_registry", {}) or {}
-        all_fn = getattr(reg, "all", None)
+        names_fn = getattr(reg, "names", None)
         try:
-            metadata = list(all_fn()) if callable(all_fn) else []
+            names = list(names_fn()) if callable(names_fn) else []
         except Exception:  # noqa: BLE001 — defensive
-            metadata = []
+            names = []
         allowed: set[str] = set()
-        for meta in metadata:
-            name = str(getattr(meta, "name", "") or "")
-            if not name:
-                continue
+        for name in names:
             if name in self._INLINE_ACTION_DENY:
                 continue
             if name not in executors:
                 continue
-            lanes = list(getattr(meta, "requires_lanes", ()) or ())
+            lanes, _ttl = self._registry_lanes_ttl(name)
             if lanes:
                 continue
             allowed.add(name)
