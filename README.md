@@ -32,7 +32,6 @@ Hyperloom combines:
 
 | Goal | Guide |
 |------|-------|
-| Run using a Docker container | [Docker quickstart](docs/install/local-mode.md) |
 | Set up Hyperloom and run a demo | [Setup and examples](examples/README.md) |
 | Launch and monitor an optimization | [Run an optimization](docs/how-to/optimize.md) |
 | Understand the algorithm | [Optimization loop](docs/conceptual/optimization-loop.md) |
