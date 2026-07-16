@@ -6,7 +6,7 @@ name: Inference Optimization PR-CI
 # Triggered ONLY when a maintainer approves a PR that also carries the
 # `run-pr-ci` label. Clones PR head into the SaFE sandbox and runs the
 # inference_optimizer skill from PR head (NOT from the wekafs deployed
-# snapshot under /wekafs/HyperloomV2), so reviewer-visible InferenceX
+# deployed snapshot), so reviewer-visible InferenceX
 # numbers reflect the *proposed* code change.
 #
 # Why a dedicated file (separate from inference-optimization-ci.yml)?

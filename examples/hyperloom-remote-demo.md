@@ -48,7 +48,7 @@ ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B/   # --model
 ${NFS_SHARED_ROOT}/InferenceX/             # INFERENCEX_PATH
 ${NFS_SHARED_ROOT}/Magpie/                 # MAGPIE_PATH
 ${NFS_SHARED_ROOT}/TraceLens/              # TRACELENS_ROOT
-${NFS_SHARED_ROOT}/TraceLens-internal/     # TRACELENS_INTERNAL_ROOT (optional)
+${NFS_SHARED_ROOT}/tracelens-private-extension/  # TRACELENS_INTERNAL_ROOT (optional)
 ```
 
 ## What the agent produces
