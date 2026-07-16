@@ -186,7 +186,7 @@ def _try_parse_payload(raw: str) -> dict[str, Any] | None:
     # ``str(dict)`` form (Python repr, single quotes) — most common.
     try:
         value = ast.literal_eval(raw)
-    except (ValueError, SyntaxError):
+    except (ValueError, SyntaxError, TypeError):  # SWSPLAT-33484: literal_eval can raise TypeError on hostile payloads
         value = None
     if isinstance(value, dict):
         return value

@@ -638,6 +638,13 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "last_kernel_opt",
         "last_kernel_opt_dispatch_skip",
         "kernel_opt_attempts",
+        # SWSPLAT-33402 / SWSPLAT-33398: closing-phase wind-down flag and the
+        # baseline launch-config path are Coordinator-only. Locked so an LLM
+        # UPDATE_STATE cannot force a global wind-down denial of every later
+        # intent, nor inject a config_path that flows into a launch after
+        # PolicyGate path-containment already ran.
+        "closing_phase",
+        "baseline_config_path",
     }
 )
 
