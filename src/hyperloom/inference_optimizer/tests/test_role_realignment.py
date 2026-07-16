@@ -229,7 +229,7 @@ def test_shared_state_warm_start_summary_empty_when_no_recipe():
 def test_shared_state_warm_start_summary_renders_recipe_and_pitfalls():
     s = SharedState()
     s.warm_start_recipe = {
-        "workload": "deepseek-v4-pro",
+        "workload": "deepseek-r1",
         "hw": "mi300x",
         "raw": "recipe_id=42 stack=sglang/0.4.10\nbest_config={'foo':'bar'}\nwhat_worked=[A, B]",
     }
@@ -238,7 +238,7 @@ def test_shared_state_warm_start_summary_renders_recipe_and_pitfalls():
         {"raw": "TP=8 + ISL>=8k causes nccl hang"},
     ]
     out = s.to_warm_start_summary()
-    assert "workload=deepseek-v4-pro" in out
+    assert "workload=deepseek-r1" in out
     assert "hw=mi300x" in out
     assert "recipe_id=42" in out
     assert "pitfalls (2):" in out
