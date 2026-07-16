@@ -819,11 +819,9 @@ def _run_magpie(
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
-    # InferenceX ``run_lm_eval`` reads ``$EVAL_RESULT_DIR`` for lm-eval's
-    # ``--output_path``; unset it defaults to ``/tmp/eval_out-*`` and the
-    # ``results*.json`` never reach the task slot, so the accuracy gate finds no
-    # eval output. Mirror it to ``$RESULT_DIR`` so eval artifacts land in the slot.
-    env["EVAL_RESULT_DIR"] = env["RESULT_DIR"]
+    # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
+    # lm-eval output. Keep it under the task slot but separate from Magpie traces.
+    env["EVAL_RESULT_DIR"] = str(Path(env["RESULT_DIR"]) / "eval_output")
     # Pin SERVER_LOG / GPU_METRICS_CSV per-task so logs land alongside
     # ``benchmark_report.json``. Always overwrite so a stale parent value can't
     # redirect into a prior run's slot.

@@ -26,6 +26,7 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..state.task_registry import Task
+from .coordinator_helpers import coerce_needs_gpu
 
 from .coordinator import (
     _format_inbox_event,
@@ -259,12 +260,7 @@ class DispatcherCollaborator:
             extra_context: dict[str, Any] = {}
             if task.kind == "specialist":
                 params = task.params or {}
-                needs_gpu_raw = params.get("needs_gpu", False)
-                needs_gpu = (
-                    needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
-                    if isinstance(needs_gpu_raw, str)
-                    else bool(needs_gpu_raw)
-                )
+                needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
                 # Explicit wall-clock budget (lane-tiered base × macro_cycle,
                 # capped at 4h).
                 extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(

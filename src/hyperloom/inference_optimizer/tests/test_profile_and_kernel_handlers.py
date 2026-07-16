@@ -3244,13 +3244,21 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     completion_log: list[str] = []
     recorded: list[dict] = []
 
+    # Deterministic completion order kB -> kC -> kA via an explicit gate chain
+    # instead of real sleeps, so the assertion never depends on wall-clock
+    # timing (which is flaky under a loaded parallel test run).
+    _gates = {kid: asyncio.Event() for kid in ("kA", "kB", "kC")}
+    _release_after = {"kB": "kC", "kC": "kA"}  # kB done -> release kC -> release kA
+
     async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
         kid = str(candidate.get("kernel_id"))
-        # Stagger completion times so kA finishes last; the streaming
-        # callback should still see kB and kC's results before kA.
-        delay = {"kA": 0.05, "kB": 0.01, "kC": 0.02}[kid]
-        await asyncio.sleep(delay)
+        if kid != "kB":
+            # kC and kA wait until their predecessor signals completion.
+            await _gates[kid].wait()
         completion_log.append(kid)
+        nxt = _release_after.get(kid)
+        if nxt:
+            _gates[nxt].set()
         return {
             "status": "ok",
             "kernel_id": kid,

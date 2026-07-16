@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import requests
+
 # Public forks should opt in with their own results service URL.
 DEFAULT_SERVICE_URL = ""
 
@@ -107,12 +109,18 @@ def publish(
         The decoded JSON response from the import endpoint.
     """
     import time
-    import requests
 
     endpoint = url.rstrip("/") + "/api/import"
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+        if endpoint.lower().startswith("http://"):
+            print(
+                "WARNING: publishing results with a bearer token over HTTP; "
+                "prefer HTTPS for production endpoints.",
+                file=sys.stderr,
+                flush=True,
+            )
     body = {"results": _normalize_submitted_at(results)}
 
     backoff = initial_backoff_s

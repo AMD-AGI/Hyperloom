@@ -406,6 +406,13 @@ def _fake_variant(
     )
 
 
+def _fake_materialize(src, out_dir, **_kw):
+    """Copy the base YAML into the run dir (mock for materialize_config_with_envs)."""
+    out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+    out.write_text(Path(src).read_text())
+    return out
+
+
 def test_run_conc_sweep_happy_path_writes_reports(
     session_dir: Path,
     baseline_yaml: Path,
@@ -427,11 +434,6 @@ def test_run_conc_sweep_happy_path_writes_reports(
                     envs=v.extra_envs,
                 )
             )
-        return out
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
         return out
 
     with (
@@ -568,11 +570,6 @@ def test_run_conc_sweep_optimized_oom_yields_failed_pair(
                     )
         return out
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch(
             "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
@@ -616,11 +613,6 @@ def test_run_conc_sweep_args_only_optimization_triggers_run(
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch(
             "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
@@ -661,11 +653,6 @@ def test_run_conc_sweep_envs_only_optimization_triggers_run(
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch(
             "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
@@ -699,11 +686,6 @@ def test_run_conc_sweep_does_not_touch_final_json(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch(
@@ -754,11 +736,6 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
         calls["n"] += 1
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch(
             "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
@@ -803,11 +780,6 @@ def test_run_conc_sweep_zero_budget_disables_gate(
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch(
             "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
@@ -841,11 +813,6 @@ def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch(
@@ -1286,11 +1253,6 @@ def test_run_conc_sweep_single_server_arm_major_order(
             call_log.append(v.name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1319,11 +1281,6 @@ def test_run_conc_sweep_single_server_concs_descending(
         for v in grid:
             call_log.append(v.name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1354,11 +1311,6 @@ def test_run_conc_sweep_legacy_path_with_env_off(
         for v in grid:
             call_log.append(v.name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1397,11 +1349,6 @@ def test_run_conc_sweep_partial_sweep_writes_incremental_checkpoint(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1519,11 +1466,6 @@ def test_run_conc_sweep_stops_on_closing_phase(
         state.closing_phase = True
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1554,11 +1496,6 @@ def test_run_conc_sweep_session_deadline_via_remaining_minutes(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1723,11 +1660,6 @@ def test_single_server_option_a_boot_and_reuse(
         )
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1782,11 +1714,6 @@ def test_single_server_boot_retry_descend(
                 return [_fake_variant(name, throughput=None, status="failed", envs=grid[0].extra_envs, error="boot fail")]
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1823,11 +1750,6 @@ def test_single_server_all_boot_fail_falls_back_option_b(
             option_b_calls.append(name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1861,11 +1783,6 @@ def test_single_server_not_eligible_uses_option_b(
         calls.append({"name": grid[0].name, "server_lifecycle": kw.get("server_lifecycle")})
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1894,11 +1811,6 @@ def test_single_server_reuse_loop_stops_on_closing_phase(
         if kw.get("server_already_ready") is False:
             state.closing_phase = True
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1929,11 +1841,6 @@ def test_single_server_reuse_exception_recorded_as_failed(
         if kw.get("server_already_ready") is True:
             raise RuntimeError("reuse boom")
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1967,11 +1874,6 @@ def test_single_server_reuse_loop_budget_exhausted(
         if kw.get("server_already_ready") is False:
             _t.sleep(1.2)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -2012,11 +1914,6 @@ def test_single_server_boot_exception_falls_back(
             raise RuntimeError("boot boom")
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -2047,11 +1944,6 @@ def test_single_server_pre_arm_skip_on_closing_phase(
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         ran.append(grid[0].name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
