@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,7 +121,7 @@ def _executor(
     baseline_double_run: bool = True,
 ) -> BaselineExecutor:
     return BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
+        magpie_python=sys.executable,
         default_config_path=base,
         session_dir=tmp_path,
         shared_state=SimpleNamespace(baseline_double_run=baseline_double_run),
@@ -239,7 +240,7 @@ def test_baseline_double_run_loads_persisted_session_opt_out(tmp_path):
     state.save(session_dir)
 
     executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
+        magpie_python=sys.executable,
         session_dir=session_dir,
         shared_state=None,
     )
@@ -267,7 +268,7 @@ def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
                 base_extra_args="",
                 grid=[GridVariant(name="candidate")],
                 output_root=output_dir,
-                magpie_python="/opt/venv/bin/python",
+                magpie_python=sys.executable,
                 variant_timeout_sec=10,
                 gpu_type="mi300x",
             )
@@ -308,7 +309,7 @@ def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
                 base_extra_args="",
                 grid=[GridVariant(name="candidate")],
                 output_root=output_dir,
-                magpie_python="/opt/venv/bin/python",
+                magpie_python=sys.executable,
                 variant_timeout_sec=10,
                 gpu_type="mi300x",
             )

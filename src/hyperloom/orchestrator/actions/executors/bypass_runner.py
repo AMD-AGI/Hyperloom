@@ -33,6 +33,8 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.env_safety import scrub_child_process_env
+
 from . import bypass_analysis
 from . import bypass_engine
 from . import bypass_report
@@ -573,7 +575,7 @@ def _server_env(
     profile: bool, profile_dir: str | None, bench_envs: dict | None = None,
 ) -> dict[str, str]:
     """Build the server subprocess env (parent + profiler dirs + GPU pin)."""
-    env = os.environ.copy()
+    env = scrub_child_process_env(os.environ.copy())
     # GPU pin: the materializer writes ROCR_VISIBLE_DEVICES into benchmark.envs
     # (reconciled against TP). Inject it so the server binds the same cards
     # Magpie would; missing on single-GPU pods (harmless).

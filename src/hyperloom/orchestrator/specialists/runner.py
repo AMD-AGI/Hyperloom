@@ -15,6 +15,7 @@ from __future__ import annotations
 import enum
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -124,6 +125,37 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 _now_iso = now_iso
 
 
+_SECRET_ENV_NAMES: tuple[str, ...] = (
+    "ANTHROPIC_API_KEY",
+    "CLAW_API_KEY",
+    "GITHUB_TOKEN",
+    "HF_TOKEN",
+    "HF_TOKEN_2",
+    "HYPERLOOM_GIT_TOKEN",
+    "HYPERLOOM_PR_CI_GH_TOKEN",
+    "LLM_API_KEY",
+    "OPENAI_API_KEY",
+    "SAFE_API_KEY",
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?P<key>\b(?:"
+    + "|".join(re.escape(name) for name in _SECRET_ENV_NAMES)
+    + r")\b)(?P<sep>\s*(?:=|:)\s*)(?P<quote>['\"]?)(?P<value>[^\s,'\"\]}]+)(?P=quote)",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_RE = re.compile(
+    r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)"
+)
+_BEARER_RE = re.compile(r"(?i)\b(?P<prefix>bearer\s+)(?P<value>[A-Za-z0-9._~+/=-]+)")
+_TOKEN_VALUE_RES = (
+    re.compile(r"\bsk-[A-Za-z0-9_-]{3,}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{3,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{10,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
+)
+
+
 def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
     """True when ``path`` resolves inside one of the specialist sandbox bases.
 
@@ -155,21 +187,38 @@ def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
 def _safe_redact(s: str) -> str:
     """Redact obvious secrets from a transcript line before writing to disk.
 
-    Scans for known environment-variable secret names and masks their values
-    in place using a conservative, regex-less substitution.
+    Scans for known environment-variable secret names, Authorization/Bearer
+    headers, and common token shapes, then masks the secret value while leaving
+    enough surrounding context for debugging.
 
     Args:
         s (str): The raw transcript line that may contain secret material.
 
     Returns:
-        str: The line with any recognised secret names suffixed by
+        str: The line with recognised secret values replaced by
             ``[REDACTED]``.
     """
-    out = s
-    for needle in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"):
-        if needle in out:
-            out = out.replace(needle, f"{needle}[REDACTED]")
+    out = _SECRET_ASSIGNMENT_RE.sub(
+        lambda m: f"{m.group('key')}{m.group('sep')}{m.group('quote')}[REDACTED]{m.group('quote')}",
+        s,
+    )
+    out = _AUTHORIZATION_RE.sub(lambda m: f"{m.group('prefix')}[REDACTED]", out)
+    out = _BEARER_RE.sub(lambda m: f"{m.group('prefix')}[REDACTED]", out)
+    for token_re in _TOKEN_VALUE_RES:
+        out = token_re.sub("[REDACTED]", out)
     return out
+
+
+def _redact_transcript_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _safe_redact(value)
+    if isinstance(value, dict):
+        return {str(k): _redact_transcript_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_transcript_value(v) for v in value]
+    if isinstance(value, tuple):
+        return [_redact_transcript_value(v) for v in value]
+    return value
 
 
 @dataclass
@@ -330,6 +379,7 @@ class SpecialistRunner:
         default_tools: tuple[str, ...] = DEFAULT_SPECIALIST_TOOLS,
         default_max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS,
         knowledge_plane: Any = None,
+        forced_mcp_servers: tuple[str, ...] | None = None,
     ):
         """Create a runner.
 
@@ -344,6 +394,9 @@ class SpecialistRunner:
             default_tools: Default tool whitelist for specialists.
             default_max_turns: Default per-task max turn budget.
             knowledge_plane: KnowledgePlane gating ``mcp__pr_monitor__*`` tools.
+            forced_mcp_servers: MCP server names from an operator-supplied
+                config. ``None`` means use KnowledgePlane gating; a tuple means
+                the explicit config is authoritative for MCP tool availability.
 
         Raises:
             ValueError: If neither or both of ``backend_factory`` and
@@ -364,6 +417,9 @@ class SpecialistRunner:
         self.default_tools = tuple(default_tools)
         self.default_max_turns = int(default_max_turns)
         self.knowledge_plane = knowledge_plane
+        self.forced_mcp_servers = (
+            None if forced_mcp_servers is None else frozenset(str(name) for name in forced_mcp_servers)
+        )
 
     def _resolve_tools(
         self,
@@ -387,7 +443,13 @@ class SpecialistRunner:
         """
         tools = list(task_allowed_tools) if task_allowed_tools else list(self.default_tools)
         plane = self.knowledge_plane
-        if plane is not None:
+        forced = self.forced_mcp_servers
+        if forced is not None:
+            if "pr_monitor" not in forced:
+                tools = [t for t in tools if not t.startswith("mcp__pr_monitor__")]
+            if "cortex_kb" not in forced:
+                tools = [t for t in tools if not t.startswith("mcp__cortex_kb__")]
+        elif plane is not None:
             if not bool(plane.pr_monitor_enabled):
                 tools = [t for t in tools if not t.startswith("mcp__pr_monitor__")]
             if not bool(plane.cortex_enabled):
@@ -1437,11 +1499,12 @@ class SpecialistRunner:
         path = self._transcript_path(workspace)
         if path is None:
             return
+        safe_entry = _redact_transcript_value(entry)
         line = json.dumps(
             {
                 "turn": turn,
                 "ts": _now_iso(),
-                **entry,
+                **safe_entry,
             },
             sort_keys=True,
             separators=(",", ":"),
