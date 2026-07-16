@@ -178,7 +178,7 @@ def _kernel_agent_root_from_env() -> Path | None:
 HandlerResult = dict[str, Any]
 HandlerFn = Callable[..., Awaitable[HandlerResult]]
 
-_RUNTIME_GENERATED_SOURCE_MARKERS = (
+_RUNTIME_GENERATED_SOURCE_MARKERS = (  # nosec B108 - marker strings, not filesystem writes.
     "/tmp/torchinductor",
     "/torchinductor_",
     "/.cache/torch/inductor",

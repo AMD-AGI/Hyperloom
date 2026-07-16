@@ -25,6 +25,7 @@ from __future__ import annotations
 import gzip
 import logging
 import os
+import tempfile
 import shlex
 from pathlib import Path
 from typing import Any
@@ -545,7 +546,7 @@ class ProfileExecutor(BaselineExecutor):
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
         default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
-        cwd: Path | str = "/tmp",
+        cwd: Path | str | None = None,
     ):
         """Initialize the profile executor with profile-specific defaults.
 
@@ -565,7 +566,7 @@ class ProfileExecutor(BaselineExecutor):
             default_config_path=default_config_path,
             session_dir=session_dir,
             default_timeout_sec=default_timeout_sec,
-            cwd=cwd,
+            cwd=cwd if cwd is not None else tempfile.gettempdir(),
         )
 
     def _resolve_default_config(self) -> Path:

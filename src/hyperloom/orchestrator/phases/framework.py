@@ -10,6 +10,7 @@ import logging as _logging
 import os
 import subprocess
 import time
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1184,7 +1185,7 @@ class FrameworkPhase(PhaseHandler):
                     {
                         "framework": getattr(req, "framework", "") or "sglang",
                         "repo_url": repo,
-                        "work_dir": str(getattr(req, "work_dir", "/tmp/framework-agent")),
+                        "work_dir": str(getattr(req, "work_dir", None) or (Path(tempfile.gettempdir()) / "framework-agent")),
                         "baseline": {"throughput": 1.0},
                         "search_perf_prs": True,
                         "search_modes": search_modes,
