@@ -227,7 +227,6 @@ RayJob pod reads them. Forwarding them pollutes the pod env and risks
 shadowing real values.
 
 - `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX`, `KERNEL_OPT_*`
-- `NODE_TLS_REJECT_UNAUTHORIZED`
 - `RANDOM_RANGE_RATIO`, `RUN_EVAL`
 - `MODEL_PATH`, `FRAMEWORK`, `TP`, `EP`, `ISL`, `OSL`, `CONC`, `PRECISION`,
   `TARGET_GAIN`, `MAX_HOURS`, `GPU_TYPE`, `NODES` (already passed as

@@ -36,7 +36,7 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # Enablement stall cap: consecutive enablement rounds that neither made the combo
 # runnable nor advanced to a NEW failure signature; reaching it stops the loop
 # with ``enablement_stalled``. A progressing round resets the streak.
-_ENABLEMENT_MAX_STALL: int = 3
+_ENABLEMENT_MAX_STALL: int = 5
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
 # Floor on the per-repo framework-PR discover timeout.
@@ -1090,6 +1090,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "cortex_finalize_recipe_and_journal": "writeback",
         "_lift_to_current_best": "writeback",
         "_promote_to_shared_state": "writeback",
+        "_should_run_prelude_bootstrap": "writeback",
         "_detect_resume_state": "writeback",
         "replay_for_resume": "writeback",
         "_materialize_stack_config_for_resume": "writeback",

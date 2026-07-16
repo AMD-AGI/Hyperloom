@@ -57,8 +57,42 @@ done
 # $HYPERLOOM_RUNTIME_DIR.
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
+
+resolve_repo_root() {
+  if [ -n "${REPO_ROOT:-}" ]; then
+    printf '%s\n' "$REPO_ROOT"
+    return 0
+  fi
+  local source_root packaged_root
+  source_root="$(cd "${_script_dir}/../../../.." && pwd)"
+  packaged_root="$(cd "${_script_dir}/../../.." && pwd)"
+  if [ -f "${source_root}/pyproject.toml" ]; then
+    printf '%s\n' "$source_root"
+  else
+    printf '%s\n' "$packaged_root"
+  fi
+}
+
+REPO_ROOT="$(resolve_repo_root)"
 DOTENV_LOADED_COUNT=0
+
+setup_dotenv_is_authoritative() {
+  [ -f "$REPO_ROOT/.env" ] || return 1
+  grep -q '^HYPERLOOM_RUN_MODE=' "$REPO_ROOT/.env" 2>/dev/null
+}
+
+scrub_stale_workspace_env_for_setup_dotenv() {
+  setup_dotenv_is_authoritative || return 0
+  unset USER_DATA_PATH
+  unset HYPERLOOM_RUNTIME_DIR
+  unset KERNEL_AGENT_ENV
+  unset HYPERLOOM_ROOT
+  unset HYPERLOOM_KERNEL_AGENT_ROOT
+  unset KERNEL_AGENT_ROOT
+  unset FRAMEWORK_AGENT_ROOT
+  unset HYPERLOOM_SKILL_PATH
+  unset PYTHONPATH
+}
 
 load_dotenv_no_clobber() {
   DOTENV_LOADED_COUNT=0
@@ -94,6 +128,7 @@ load_dotenv_no_clobber() {
 # Load .env before deriving USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR so a
 # freshly-copied .env.template can be the single configuration entrypoint.
 # The loader is no-clobber: explicit shell exports always win.
+scrub_stale_workspace_env_for_setup_dotenv
 load_dotenv_no_clobber
 # Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
@@ -288,8 +323,8 @@ acquire_install_lock() {
 }
 
 # Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
-# a usable setup needs at least one LLM base URL and at least one key. This
-# accepts either the AMD single-gateway pair or native split OpenAI/Anthropic.
+# a usable setup needs Anthropic or DeepSeek credentials. The installer gate
+# intentionally does not default or require OpenAI.
 #
 # Loader (env wins; never overwrites a key that is already set):
 #   env > $REPO_ROOT/.env
@@ -307,11 +342,10 @@ preflight_validate_credentials() {
   preflight_load_dotenv
   local missing=()
   local has_url=0 has_key=0
-  { [ -n "${OPENAI_BASE_URL:-}" ] || [ -n "${ANTHROPIC_BASE_URL:-}" ]; } && has_url=1
-  { [ -n "${SAFE_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] \
-    || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && has_key=1
-  [ "$has_url" -eq 0 ] && missing+=("OPENAI_BASE_URL or ANTHROPIC_BASE_URL")
-  [ "$has_key" -eq 0 ] && missing+=("SAFE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN")
+  { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_url=1
+  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_key=1
+  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL)")
+  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or DEEPSEEK_API_KEY")
   if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
     log "credentials preflight: usable LLM base URL + key present"
     return 0
@@ -337,15 +371,12 @@ Tried loading from:
   - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
 
 Fix one of:
-  1. Single gateway:
-       export SAFE_API_KEY=ak-your-safe-apikey
-       export OPENAI_BASE_URL=https://gateway.example.com/v1
-  2. Split OpenAI or Anthropic:
-       export OPENAI_BASE_URL=https://api.openai.com/v1
-       export OPENAI_API_KEY=sk-...
-       # or
+  1. Anthropic:
        export ANTHROPIC_BASE_URL=https://api.anthropic.com
        export ANTHROPIC_API_KEY=sk-ant-...
+  2. DeepSeek:
+       export DEEPSEEK_API_KEY=sk-...
+       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
   3. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
@@ -776,7 +807,7 @@ PY
 # --- 3. InferenceX checkout: fresh clone from upstream ---
 #
 # Previously this function scanned a list of shared-filesystem candidates
-# (`/wekafs/hyperloom/InferenceX`, `/wekafs/fully-local/.../InferenceX`,
+# (`/path/hyperloom/InferenceX`, `/path/fully-local/.../InferenceX`,
 # etc.) and pointed every install at whichever it found first. That
 # multi-install / shared-checkout layout is the upstream source of the
 # concurrent-write races in bugs.md §C #1 — every fresh Magpie

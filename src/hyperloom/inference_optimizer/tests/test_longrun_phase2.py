@@ -26,8 +26,8 @@ def _plateaued_explore_state(
     started_hours_ago: float = 0.5,
     top_bottleneck: str = "MoE_fused",
 ) -> SharedState:
-    """EXPLORE state satisfying compute_plateau_explore (no winners + 3 trailing
-    empty specialist rounds) with budget remaining."""
+    """EXPLORE state satisfying compute_plateau_explore (no winners + enough
+    trailing empty specialist rounds) with budget remaining."""
     now = datetime.now(timezone.utc)
     st = SharedState(
         session_id="t",
@@ -39,8 +39,11 @@ def _plateaued_explore_state(
     )
     # No winners → recent_keep_gain 0 < threshold.
     st.explore_search = {"schema_version": 1, "winners_history": []}
-    # Three trailing empty specialist rounds → empty_streak >= 3.
-    st.specialist_rounds = [{"proposals_total": 0, "proposals_kept": 0} for _ in range(3)]
+    # Enough trailing empty specialist rounds → empty_streak >= threshold.
+    st.specialist_rounds = [
+        {"proposals_total": 0, "proposals_kept": 0}
+        for _ in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
+    ]
     if top_bottleneck:
         st.roofline_snapshots = [{"snapshot_id": 1, "top_bottleneck": top_bottleneck}]
     return st

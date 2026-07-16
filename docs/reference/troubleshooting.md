@@ -42,7 +42,7 @@ configured upstream gateway.
    bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
-   upstream gateway (for example, `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`).
+   upstream gateway (for example, `https://<your-gateway-host>/api/v1/llm-proxy/v1`).
 
 See [Hyperloom authentication and credentials](authentication.md) for credential setup and gateway configuration.
 
@@ -74,11 +74,6 @@ internal CA, or on self-hosted gateways with private certificates.
    export SSL_CERT_FILE=/path/to/ca-bundle.pem
    ```
 3. Re-run preflight or the installer after updating certificates.
-
-For one-off diagnosis only, you can set
-`INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1` to skip TLS verification for the
-model-catalog probe. Do not leave this enabled in normal runs because the probe
-sends gateway credentials.
 
 ---
 

@@ -30,7 +30,7 @@ def _write_yaml(path: Path) -> None:
     cfg = {
         "benchmark": {
             "framework": "sglang",
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
@@ -55,7 +55,7 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
             {
                 "success": True,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": tput / 256,
                     "output_throughput": tput,
@@ -171,7 +171,7 @@ def test_disable_run_eval_param_forces_run_eval_false(tmp_path):
         {
             "output_dir": str(tmp_path / "ws"),
             "timeout_sec": 10,
-            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "model_path": "/path/models/Qwen-Qwen3-8B",
             "gpu_type": "mi300x",
             "disable_run_eval": True,
         }
@@ -217,7 +217,7 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
         {
             "output_dir": str(tmp_path / "ws"),
             "timeout_sec": 10,
-            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "model_path": "/path/models/Qwen-Qwen3-8B",
             "gpu_type": "mi300x",
         }
     )
@@ -254,7 +254,7 @@ def test_non_eval_failure_does_not_retry(tmp_path):
         {
             "output_dir": str(tmp_path / "ws"),
             "timeout_sec": 10,
-            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "model_path": "/path/models/Qwen-Qwen3-8B",
             "gpu_type": "mi300x",
         }
     )
@@ -267,6 +267,235 @@ def test_non_eval_failure_does_not_retry(tmp_path):
     assert len(calls) == 1  # no fallback retry
     assert result["status"] == "failed"
     assert result.get("accuracy_source") != "eval_unavailable"
+
+
+def _make_baseline_ctx(params: dict, shared_state) -> SimpleNamespace:
+    """A genuine ``baseline`` ctx carrying a live SharedState for stop wiring."""
+    task = SimpleNamespace(task_id="t-bl-acc", kind="baseline", params=params)
+    return SimpleNamespace(task=task, extra={"shared_state": shared_state})
+
+
+# --- baseline accuracy missing -> stop the whole run -----------------------
+def test_baseline_missing_accuracy_stops_run(tmp_path):
+    """Serving baseline with eval expected but no accuracy result -> the run
+    halts with ``stop_reason=baseline_accuracy_failed`` (broken setup)."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]))  # throughput only, no GSM8K
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    state = SharedState()
+    ctx = _make_baseline_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "gpu_type": "mi300x",
+        },
+        state,
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert result.get("accuracy") is None
+    assert state.stop_reason == "baseline_accuracy_failed"
+
+
+def test_baseline_operator_disabled_eval_does_not_stop(tmp_path):
+    """When the operator explicitly disables the serving eval, accuracy is
+    intentionally off: a missing accuracy result must NOT stop the run."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    state = SharedState()
+    ctx = _make_baseline_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "gpu_type": "mi300x",
+            "disable_run_eval": True,
+        },
+        state,
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state.stop_reason == ""
+
+
+def test_baseline_eval_failure_fallback_stops_run(tmp_path):
+    """The eval-failure fallback still salvages the throughput baseline, but a
+    genuine baseline with no accuracy result now halts the run."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+
+    def fake_run(cmd, *args, **kwargs):
+        cfg_idx = cmd.index("--benchmark-config")
+        out_idx = cmd.index("--output-dir")
+        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        slot = Path(cmd[out_idx + 1])
+        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
+        if run_eval != "false":
+            return subprocess.CompletedProcess(
+                cmd, 1, "", "ERROR: run_eval failed with exit code 1\n"
+            )
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    state = SharedState()
+    ctx = _make_baseline_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "gpu_type": "mi300x",
+        },
+        state,
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert result.get("accuracy_source") == "eval_unavailable"
+    assert state.stop_reason == "baseline_accuracy_failed"
+
+
+class _StopRecorder:
+    """Minimal SharedState stub capturing ``set_stop_reason`` calls."""
+
+    def __init__(self) -> None:
+        self.stop_reason = ""
+
+    def set_stop_reason(self, value, **_kwargs):
+        self.stop_reason = value
+        return value
+
+
+def _stop_ctx(framework: str, recorder) -> SimpleNamespace:
+    task = SimpleNamespace(task_id="t-bl", kind="baseline", params={"framework": framework})
+    return SimpleNamespace(task=task, extra={"shared_state": recorder})
+
+
+def _stopped(framework: str, result: dict) -> str:
+    """Run ``_maybe_stop_on_missing_baseline_accuracy`` and return the reason."""
+    executor = BaselineExecutor()
+    rec = _StopRecorder()
+    executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx(framework, rec), result)
+    return rec.stop_reason
+
+
+# --- accuracy-stop decision matrix -----------------------------------------
+def test_stop_scriptable_missing_gate_zero_accuracy():
+    # Finding: scriptable fail-closed records accuracy=0.0 -> must still stop.
+    reason = _stopped(
+        "xdit",
+        {"status": "succeeded", "accuracy": 0.0, "run_eval_disabled": True},
+    )
+    assert reason == "baseline_accuracy_failed"
+
+
+def test_stop_serving_no_accuracy_eval_on():
+    reason = _stopped(
+        "sglang",
+        {"status": "succeeded", "run_eval_disabled": False},
+    )
+    assert reason == "baseline_accuracy_failed"
+
+
+def test_stop_serving_zero_accuracy():
+    reason = _stopped(
+        "sglang",
+        {"status": "succeeded", "accuracy": 0.0, "run_eval_disabled": False},
+    )
+    assert reason == "baseline_accuracy_failed"
+
+
+def test_no_stop_serving_operator_disabled_via_config():
+    # Finding: YAML/reference-env RUN_EVAL=false folds into run_eval_disabled;
+    # operator opt-out must NOT stop even without disable_run_eval param.
+    reason = _stopped(
+        "sglang",
+        {"status": "succeeded", "run_eval_disabled": True},
+    )
+    assert reason == ""
+
+
+def test_stop_serving_eval_failure_fallback():
+    # Fallback forces RUN_EVAL=false but eval was expected and broke -> stop.
+    reason = _stopped(
+        "sglang",
+        {
+            "status": "succeeded",
+            "run_eval_disabled": True,
+            "accuracy_source": "eval_unavailable",
+        },
+    )
+    assert reason == "baseline_accuracy_failed"
+
+
+def test_no_stop_valid_accuracy():
+    reason = _stopped(
+        "sglang",
+        {"status": "succeeded", "accuracy": 0.85, "run_eval_disabled": False},
+    )
+    assert reason == ""
+
+
+def test_no_stop_when_not_genuine_baseline():
+    executor = BaselineExecutor()
+    rec = _StopRecorder()
+    task = SimpleNamespace(task_id="t", kind="replay_warm_recipe", params={"framework": "sglang"})
+    ctx = SimpleNamespace(task=task, extra={"shared_state": rec})
+    executor._maybe_stop_on_missing_baseline_accuracy(
+        ctx, {"status": "succeeded", "run_eval_disabled": False}
+    )
+    assert rec.stop_reason == ""
+
+
+def test_no_stop_when_baseline_failed():
+    reason = _stopped("sglang", {"status": "failed", "error": "boom"})
+    assert reason == ""
 
 
 def test_eval_already_off_does_not_retry(tmp_path):
@@ -291,7 +520,7 @@ def test_eval_already_off_does_not_retry(tmp_path):
         {
             "output_dir": str(tmp_path / "ws"),
             "timeout_sec": 10,
-            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "model_path": "/path/models/Qwen-Qwen3-8B",
             "gpu_type": "mi300x",
             "disable_run_eval": True,
         }

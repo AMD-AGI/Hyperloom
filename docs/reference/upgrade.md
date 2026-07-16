@@ -43,8 +43,8 @@ your override.
 
 ```diff
 # .env, run launchers, k8s ConfigMaps
-- INFERENCE_OPTIMIZER_SESSION_DIR=/wekafs/hyperloom/sessions/me
-+ USER_DATA_PATH=/wekafs/hyperloom/sessions/me
+- INFERENCE_OPTIMIZER_SESSION_DIR=/path/hyperloom/sessions/me
++ USER_DATA_PATH=/path/hyperloom/sessions/me
 ```
 
 Same for `WORKSPACE_PATH` — it is legacy-only and still used in narrow

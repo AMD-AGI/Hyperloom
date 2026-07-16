@@ -399,6 +399,12 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # Enablement loop stall: >= _ENABLEMENT_MAX_STALL consecutive rounds made
         # no forward progress. A progressing round resets the streak.
         "enablement_stalled",
+        # The baseline could not produce an accuracy result even though the
+        # accuracy test was expected to run (broken eval / missing quality
+        # gate). Optimizing against an unvalidated baseline is unsafe, so the
+        # run halts. Post-baseline accuracy failures REVERT the offending
+        # change instead of stopping.
+        "baseline_accuracy_failed",
     }
 )
 
@@ -456,7 +462,7 @@ PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
 
 # Plateau judgment defaults (CLI --plateau-* flags); kept here for pure callers + tests.
 DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT: float = 0.5
-DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK: int = 3
+DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK: int = 5
 DEFAULT_PLATEAU_EXPLORE_LOOKBACK: int = 5
 DEFAULT_PLATEAU_KERNEL_REVERT_STREAK: int = 3
 DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT: float = 0.5
@@ -502,7 +508,7 @@ def _default_framework_force_exit_ratio() -> float:
 DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = _default_framework_force_exit_ratio()
 # FRAMEWORK per-candidate plateau: after this many consecutive benchmarked
 # candidate tests without a KEEP, the phase exits to EXPLORE. A KEEP resets it.
-DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 3
+DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 
 
 # R1 cyclic phase machine: when enabled, SWEEP loops back to EXPLORE (a new
@@ -827,6 +833,61 @@ def normalize_budget_pct(
     return out
 
 
+def redistribute_budget_pct(
+    base: dict[str, float],
+    *,
+    explore_enabled: bool = True,
+    kernel_enabled: bool = True,
+    framework_enabled: bool = False,
+) -> dict[str, float]:
+    """Reallocate disabled phases' budget shares to the enabled work phases.
+
+    When a work phase is turned off (``--no-explore`` → EXPLORE, ``--no-kernel``
+    → KERNEL_AGENT, framework phase off → FRAMEWORK_AGENT), its ``pct`` is zeroed
+    and its freed share is spread across the still-enabled work phases
+    (FRAMEWORK/EXPLORE/KERNEL/SWEEP), weighted by their base ``pct``. PRELUDE and
+    CLOSE are fixed overhead and never absorb. Idempotent: once a phase is 0 its
+    freed share is 0, so re-running per tick is a no-op.
+
+    Args:
+        base (dict[str, float]): A ``phase -> pct`` map, already sanitized by
+            :func:`normalize_budget_pct`.
+        explore_enabled (bool): Whether the EXPLORE phase runs.
+        kernel_enabled (bool): Whether the KERNEL_AGENT phase runs.
+        framework_enabled (bool): Whether the FRAMEWORK_AGENT phase runs.
+
+    Returns:
+        dict[str, float]: A new map with disabled phases at 0 and their share
+        redistributed to the enabled work phases.
+    """
+    out = dict(base)
+    disabled: list[str] = []
+    if not explore_enabled:
+        disabled.append(PHASE_EXPLORE)
+    if not kernel_enabled:
+        disabled.append(PHASE_KERNEL_AGENT)
+    if not framework_enabled:
+        disabled.append(PHASE_FRAMEWORK_AGENT)
+    freed = sum(float(out.get(p, 0.0)) for p in disabled)
+    for p in disabled:
+        out[p] = 0.0
+    if freed <= 0.0:
+        return out
+    absorbers = [
+        p
+        for p in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP)
+        if p not in disabled
+    ]
+    weight = sum(float(out.get(p, 0.0)) for p in absorbers)
+    if weight > 0.0:
+        for p in absorbers:
+            out[p] = float(out.get(p, 0.0)) + freed * float(out.get(p, 0.0)) / weight
+    else:
+        # No weighted absorber left → park the freed share on SWEEP (always on).
+        out[PHASE_SWEEP] = float(out.get(PHASE_SWEEP, 0.0)) + freed
+    return out
+
+
 # Pure judgment helpers (used by Coordinator at each tick end)
 def _now_unix(state: Any) -> float:
     """Resolve the "now" timestamp; tests can inject ``state._now_unix``.
@@ -945,6 +1006,65 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     return max(0.0, now - started)
 
 
+def _phase_budget_total_seconds(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+) -> float | None:
+    """Effective TOTAL budget (seconds) allotted to the current phase.
+
+    Short bounded runs (``max_minutes>0`` and not :func:`is_long_run`) use
+    "charge-back": the phase gets its share of the time still remaining in the
+    session, renormalized over the current phase and the phases yet to come. This
+    makes an earlier phase's overrun (e.g. a slow PRELUDE) transparently reduce
+    every later phase's budget instead of the fixed ``max_minutes*pct`` allotment.
+
+    Long/cyclic and unbounded runs keep the legacy per-window allotment
+    (``_budget_minutes*60*pct``) so per-cycle budgeting is untouched.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
+            to ``state.phase_budget_pct`` when None.
+        now_unix (float | None): Override for the current time (shared with
+            ``session_remaining_seconds`` / ``phase_elapsed_seconds``).
+
+    Returns:
+        float | None: Effective total budget in seconds, or ``None`` when no
+        finite budget applies (unbounded window or the phase has no fraction).
+    """
+    budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
+    phase = (getattr(state, "phase", "") or "").strip().upper()
+    pct = float(budget.get(phase, 0.0))
+    if pct <= 0.0:
+        return None
+    session_remaining = session_remaining_seconds(state, now_unix=now_unix)
+    if session_remaining is not None and not is_long_run(state):
+        # Charge-back (short bounded run). remaining_at_entry reconstructs the
+        # session time left when this phase started (session_remaining shrinks as
+        # phase_elapsed grows, so their sum is constant across the phase).
+        remaining_at_entry = max(
+            0.0, session_remaining + phase_elapsed_seconds(state, now_unix=now_unix)
+        )
+        # Normalize ONLY over the current phase and the phases still to come:
+        # already-elapsed phases (notably PRELUDE) are excluded — their spend is
+        # already reflected in session_remaining — while CLOSE stays in so it
+        # keeps its reserved share. Do NOT normalize over all six phases.
+        denom = sum(
+            float(budget.get(p, 0.0))
+            for p in PHASE_NAMES[phase_index(phase):]
+            if float(budget.get(p, 0.0)) > 0.0
+        )
+        if denom <= 0.0:
+            return None
+        return remaining_at_entry * pct / denom
+    mm = _budget_minutes(state)
+    if mm <= 0:
+        return None
+    return mm * 60.0 * pct
+
+
 def phase_budget_remaining_seconds(
     state: Any,
     *,
@@ -964,15 +1084,10 @@ def phase_budget_remaining_seconds(
         or ``None`` when the budget window is unlimited or the phase has no
         allocated fraction.
     """
-    mm = _budget_minutes(state)
-    if mm <= 0:
+    total = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
+    if total is None:
         return None
-    budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
-    pct = budget.get((getattr(state, "phase", "") or "").upper(), 0.0)
-    if pct <= 0:
-        return None
-    budget_seconds = mm * 60.0 * pct
-    return max(0.0, budget_seconds - phase_elapsed_seconds(state, now_unix=now_unix))
+    return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
 
 
 def effective_max_minutes(state: Any) -> float:
@@ -1069,7 +1184,12 @@ def session_remaining_seconds(
         start = datetime.fromisoformat(start_ts)
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
-        now_dt = datetime.now(timezone.utc)
+        # Honor an injected now_unix so this stays in the same time source as
+        # phase_elapsed_seconds(now_unix=...) for pure/testable budget math.
+        if now_unix is not None:
+            now_dt = datetime.fromtimestamp(float(now_unix), tz=timezone.utc)
+        else:
+            now_dt = datetime.now(timezone.utc)
         elapsed_sec = max(0.0, (now_dt - start).total_seconds())
     except (ValueError, TypeError):
         return None
@@ -1140,14 +1260,14 @@ def should_force_exit_explore(
         now_unix=now_unix,
     )
     if phase_remaining is not None:
-        # Express remaining as a fraction of the phase's total budget (per-cycle
-        # window in cyclic mode, else the whole run).
-        mm = _budget_minutes(state)
-        budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
-        pct_alloc = budget.get((getattr(state, "phase", "") or "").upper(), 0.0)
-        if mm > 0 and pct_alloc > 0:
-            phase_total_sec = mm * 60.0 * pct_alloc
-            remaining_pct = phase_remaining / phase_total_sec if phase_total_sec > 0 else 0.0
+        # Fraction of the phase's EFFECTIVE total budget — same helper that
+        # produced phase_remaining, so numerator and denominator stay in the same
+        # units (charge-back for short bounded runs, legacy window otherwise).
+        phase_total_sec = _phase_budget_total_seconds(
+            state, budget_pct=budget_pct, now_unix=now_unix
+        )
+        if phase_total_sec and phase_total_sec > 0:
+            remaining_pct = phase_remaining / phase_total_sec
             evidence["phase_remaining_pct"] = round(remaining_pct, 4)
             evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
             if pct_threshold_enabled and remaining_pct <= float(budget_pct_threshold):

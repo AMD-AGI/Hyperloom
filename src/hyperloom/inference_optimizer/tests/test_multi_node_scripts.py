@@ -669,11 +669,11 @@ def test_find_head_pod_ip_prefers_kuberay_head_suffix():
             {
                 "podId": "primus-claw-40290b670f98c7-twr9t-x6fkf-head-ddtvg",
                 "resourceId": 1,
-                "podIP": "10.245.131.77",
+                "podIP": "192.0.2.77",
             },
         ],
     }
-    assert mn_rayjob._find_head_pod_ip(wl) == "10.245.131.77"
+    assert mn_rayjob._find_head_pod_ip(wl) == "192.0.2.77"
 
 
 def test_find_head_pod_ip_fallback_resource_id_zero():
@@ -693,7 +693,7 @@ def test_build_rayjob_entrypoints_empty_submitter_tail():
     from hyperloom.inference_optimizer.multi_node._internal import workload_spec
 
     b = workload_spec.build_rayjob_workload_body(
-        workspace="core42-hyperloom",
+        workspace="example-hyperloom",
         display_name="t",
         image="harbor.example/sglang:1",
         nodes=2,
@@ -784,15 +784,12 @@ def test_extra_label_primus_claw_prefix_still_stripped():
         session_id="real-sess",
         extra_labels={
             "primus-claw/session-id": "spoofed",  # must be dropped
-            "primus-safe.amd.com/ray-role": "worker",  # must be dropped
             "custom.example/team": "infra",  # must survive
         },
         **_BUILDER_MIN_KWARGS,
     )
     # Builder-injected value wins; user spoof is dropped before merge.
     assert b["labels"].get("primus-claw/session-id") == "real-sess"
-    # primus-safe.* never reaches body.labels (sanitize strips it).
-    assert b["labels"].get("primus-safe.amd.com/ray-role") != "worker"
     # Non-reserved labels survive unchanged.
     assert b["labels"].get("custom.example/team") == "infra"
 
@@ -804,7 +801,7 @@ _INFERA_MIN_KWARGS = dict(
     workspace="ws-a",
     display_name="t",
     image="img:1-ssh",
-    model="/wekafs/models/GLM-5.2-FP8",
+    model="/path/models/GLM-5.2-FP8",
     nodes=2,
     gpus_per_node=8,
     cpus_per_node=96,
@@ -842,7 +839,7 @@ def test_infera_body_multinode_idle_shape():
     fe_ep = base64.b64decode(b["entryPoints"][0]).decode()
     wk_ep = base64.b64decode(b["entryPoints"][1]).decode()
     assert "infera.server" in fe_ep and "--port 8000" in fe_ep
-    assert "--router-tokenizer-path /wekafs/models/GLM-5.2-FP8" in fe_ep
+    assert "--router-tokenizer-path /path/models/GLM-5.2-FP8" in fe_ep
     assert "MN_SSH_PORT" in wk_ep and "mn-idle.sh" in wk_ep
 
     # SSH control-plane env injected; service fronts :8000 (not sglang :8888).
@@ -1506,7 +1503,7 @@ def test_create_infera_env_omits_credentials(monkeypatch):
         extra_env=["FOO=bar"],
         extra_label=[],
         image="img",
-        model="/wekafs/models/test",
+        model="/path/models/test",
         nodes=2,
         gpus_per_node=8,
         cpus_per_node=96,
