@@ -6,7 +6,7 @@ Tests here cover: common.env, common.io, common.gain_math, common.llm_config,
 inference_optimizer credentials, breakdown reporters, orchestrator kb_writeback,
 orchestrator retry/backoff, orchestrator actions, orchestrator dispatcher,
 orchestrator state/objective, multi-node state paths, framework agent helpers,
-model_compat, gpu_types, and CLI multi-node utilities.
+gpu_types, and CLI multi-node utilities.
 
 These tests were consolidated from several coverage-padding files:
   test_coverage_boost_unit.py, test_coverage_boost2_unit.py,
@@ -21,7 +21,6 @@ import json
 import os
 import subprocess
 import sys
-import urllib.error
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
@@ -2149,92 +2148,6 @@ def test_multi_node_state_paths_warn_on_permission_failures(monkeypatch: pytest.
     state_paths._ensure_runtime_dir(runtime_dir)
     assert runtime_dir.is_dir()
     assert "could not chmod runtime dir" in messages[-1]
-
-
-# ---------------------------------------------------------------------------
-# model_compat
-# ---------------------------------------------------------------------------
-
-def test_model_compat_whitelist_and_local_file_edges(tmp_path: Path) -> None:
-    import model_compat
-
-    model_compat.load_whitelist.cache_clear()
-    whitelist = tmp_path / "whitelist.json"
-    whitelist.write_text(
-        json.dumps({"candidates": [{"repo_id": "org/a"}, {"repo_id": ""}, {"no_repo": "ignored"}]}),
-        encoding="utf-8",
-    )
-    assert model_compat.load_whitelist(str(whitelist)) == frozenset({"org/a"})
-    assert model_compat.load_whitelist(str(tmp_path / "missing.json")) == frozenset()
-
-    missing_dir = tmp_path / "missing-model"
-    assert model_compat.has_weights(missing_dir) is False
-    assert model_compat.has_tokenizer(missing_dir) is True
-
-
-def test_hf_gated_rotates_auth_failures_to_gated(monkeypatch: pytest.MonkeyPatch) -> None:
-    import model_compat
-
-    model_compat._tok_idx[0] = 0
-    calls = {"n": 0}
-
-    def _urlopen(_req, timeout):
-        assert timeout == 20
-        calls["n"] += 1
-        raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
-
-    monkeypatch.setattr(model_compat.urllib.request, "urlopen", _urlopen)
-    assert model_compat.hf_gated("org/model", ["tok-a", "tok-b"]) == "gated"
-    assert calls["n"] == 3
-
-
-def test_hf_gated_retries_rate_limit_and_generic_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    import model_compat
-
-    model_compat._tok_idx[0] = 0
-    sleeps: list[int] = []
-    monkeypatch.setattr(model_compat.time, "sleep", lambda delay: sleeps.append(delay))
-
-    calls = {"n": 0}
-
-    def _rate_limit_then_open(_req, timeout):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise urllib.error.HTTPError("u", 429, "rate", {}, None)
-        return _JsonResponse({"gated": False})
-
-    monkeypatch.setattr(model_compat.urllib.request, "urlopen", _rate_limit_then_open)
-    assert model_compat.hf_gated("org/model", ["tok"]) is None
-    assert sleeps == [5]
-
-    def _always_boom(_req, timeout):
-        raise RuntimeError("network")
-
-    monkeypatch.setattr(model_compat.urllib.request, "urlopen", _always_boom)
-    assert model_compat.hf_gated("org/model", ["tok"]) is None
-
-
-def test_hf_missing_tokenizer_rate_limit_and_http_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
-    import model_compat
-
-    model_compat._tok_idx[0] = 0
-    monkeypatch.setattr(model_compat.time, "sleep", lambda *_args: None)
-    calls = {"n": 0}
-
-    def _rate_limit_then_missing(_req, timeout):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise urllib.error.HTTPError("u", 429, "rate", {}, None)
-        return _JsonResponse({"siblings": [{"rfilename": "model.safetensors"}]})
-
-    monkeypatch.setattr(model_compat.urllib.request, "urlopen", _rate_limit_then_missing)
-    assert model_compat.hf_missing_tokenizer("org/model", ["tok"]) == "missing_tokenizer"
-
-    def _server_error(_req, timeout):
-        raise urllib.error.HTTPError("u", 500, "server", {}, None)
-
-    monkeypatch.setattr(model_compat.urllib.request, "urlopen", _server_error)
-    assert model_compat.hf_missing_tokenizer("org/model", ["tok"]) is None
 
 
 # ---------------------------------------------------------------------------

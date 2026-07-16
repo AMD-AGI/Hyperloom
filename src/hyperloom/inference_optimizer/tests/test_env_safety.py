@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.inference_optimizer.multi_node._internal import env_safety
+from hyperloom.common import env_safety as common_env_safety
 
 
 def test_valid_mori_and_sglang_keys_allowed():
@@ -58,3 +59,38 @@ def test_filter_forward_env_drops_bad_keys():
 def test_assert_forward_env_keys_raises():
     with pytest.raises(ValueError, match="disallowed SSH forward env keys"):
         env_safety.assert_forward_env_keys({"LD_PRELOAD": "/tmp/x.so"})
+
+
+def test_common_env_safety_filters_workload_dotenv_and_kernel_agent_keys():
+    assert common_env_safety.is_allowed_workload_env_key("SGLANG_USE_AITER_FP8_PER_TOKEN")
+    assert common_env_safety.is_allowed_workload_env_key("EXTRA_SGLANG_ARGS")
+    assert not common_env_safety.is_allowed_workload_env_key("OPENAI_API_KEY")
+    assert not common_env_safety.is_allowed_workload_env_key("LD_PRELOAD")
+
+    assert common_env_safety.is_allowed_dotenv_key("OPENAI_API_KEY")
+    assert common_env_safety.is_allowed_dotenv_key("HYPERLOOM_RUNTIME_DIR")
+    assert not common_env_safety.is_allowed_dotenv_key("PYTHONPATH")
+    assert not common_env_safety.is_allowed_dotenv_key("BAD-NAME")
+
+    assert common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_ROOT")
+    assert not common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_TOKEN")
+
+    allowed, dropped = common_env_safety.filter_untrusted_env_mapping(
+        {
+            "bench_foo": 1,
+            "OPENAI_API_KEY": "secret",
+            "bad key": "nope",
+            "": "empty",
+        },
+        allow_predicate=common_env_safety.is_allowed_workload_env_key,
+    )
+    assert allowed == {"BENCH_FOO": "1"}
+    assert dropped == {
+        "OPENAI_API_KEY": "not_allowed",
+        "bad key": "invalid_env_key",
+        "<empty>": "invalid_env_key",
+    }
+
+    env = {"LD_PRELOAD": "evil.so", "PATH": "/bin", "SAFE": "1"}
+    assert common_env_safety.scrub_child_process_env(env) is env
+    assert env == {"PATH": "/bin", "SAFE": "1"}

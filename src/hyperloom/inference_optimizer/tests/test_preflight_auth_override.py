@@ -127,6 +127,31 @@ def test_dotenv_fallback_filters_explicit_repo_env(tmp_path, monkeypatch):
     assert os.environ["OPENAI_BASE_URL"] == "https://gateway.example/v1"
 
 
+def test_dotenv_fallback_parses_safe_lines_and_preserves_env_wins(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://operator.example/v1")
+    monkeypatch.delenv("HYPERLOOM_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    (tmp_path / ".env").write_text(
+        "\n"
+        "# comment\n"
+        "export HYPERLOOM_RUNTIME_DIR='/runtime from env'\n"
+        "OPENAI_BASE_URL=https://from-file.example/v1\n"
+        "TRACELENS_ROOT=/path/to/your/TraceLens\n"
+        "NO_EQUALS_LINE\n"
+        "BAD-NAME=drop\n",
+        encoding="utf-8",
+    )
+
+    cli_preflight._load_dotenv_fallback()
+
+    assert os.environ["HYPERLOOM_RUNTIME_DIR"] == "/runtime from env"
+    assert os.environ["OPENAI_BASE_URL"] == "https://operator.example/v1"
+    assert "TRACELENS_ROOT" not in os.environ
+    err = capsys.readouterr().err
+    assert "BAD-NAME" in err
+
+
 def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     monkeypatch,
     tmp_path,

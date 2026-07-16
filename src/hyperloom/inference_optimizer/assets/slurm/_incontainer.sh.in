@@ -48,25 +48,29 @@ bash src/hyperloom/inference_optimizer/assets/install.sh
 RUN_DIR="$USER_DATA_PATH/optimizer_runs"; mkdir -p "$RUN_DIR"
 LAUNCH_INFO_FILE="$RUN_DIR/launch_${CLAW_SESSION_ID}.json"
 
-# Build the carrier prompt from ci/prompt_template.md (shared by claude / codex).
-# The carrier loads SKILL.md and issues `python -m hyperloom.inference_optimizer.cli optimize` itself.
+# Build the carrier prompt inline. The carrier loads SKILL.md and issues
+# `python -m hyperloom.inference_optimizer.cli optimize` itself.
 hl_build_prompt() {
   export TP  # ensure TP is visible to the child python
-  python3 - <<'PY'
-import os
-tpl = open("ci/prompt_template.md").read()
-vals = dict(
-    model_hf=os.environ["REPO_ID"], model_path=os.environ.get("MODEL_PATH", os.environ["REPO_ID"]),
-    gpu_type=os.environ["GPU_TYPE"], gpu_type_lc=os.environ["GPU_TYPE"].lower(),
-    framework=os.environ["FRAMEWORK"], precision=os.environ["PREC"],
-    tp=os.environ["TP"], ep="1", conc=os.environ["CONC"],
-    isl=os.environ["ISL"], osl=os.environ["OSL"], nodes="1",
-    random_range_ratio="1.0", target_gain=os.environ["TARGET_GAIN"],
-    max_hours=os.environ["MAX_HOURS"], kernel_agent_build_geak_rag_index="1",
-    oob_path="", tracelens_root="", multinode_section="", inferenceX_data="(none)",
-)
-print(tpl.format(**vals))
-PY
+  cat <<PROMPT_EOF
+You are running the Hyperloom inference optimizer from ${REPO_ROOT}.
+
+Target:
+- model: ${REPO_ID}
+- model path: ${MODEL_PATH:-$REPO_ID}
+- framework: ${FRAMEWORK}
+- precision: ${PREC}
+- gpu type: ${GPU_TYPE}
+- tensor parallel: ${TP}
+- concurrency: ${CONC}
+- isl/osl: ${ISL}/${OSL}
+- target gain: ${TARGET_GAIN}
+- max hours: ${MAX_HOURS}
+
+Load the repository skill instructions and run the optimizer CLI for this
+workload. Keep changes scoped to the optimization workspace and report the
+final throughput, gain, and any files changed.
+PROMPT_EOF
 }
 
 case "$BACKEND" in

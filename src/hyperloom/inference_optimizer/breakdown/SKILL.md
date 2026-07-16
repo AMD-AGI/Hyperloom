@@ -49,7 +49,7 @@ The JSON has 14 top-level sections plus envelope:
   MAE-synthesized `raw_report` / `fact_sheet`. Recommended read order:
   prefer `session_breakdown.json` if present, fall back to legacy MAE
   output otherwise.
-- **`hyperloom-results-service`** — `ci/publish_artifacts.py` POSTs this
+- **`hyperloom-results-service`** — downstream automation may POST this
   JSON when `HYPERLOOM_RESULTS_SERVICE_URL` is set.
 - **Offline / notebook analysis** — single file, easy to load, no DB
   needed.
@@ -150,8 +150,8 @@ another (each becomes a `warnings[]` entry instead).
   features on it, comparing the **major** version (`vN`) rather than the
   exact string: the producer emits both `…v2` and `…v3.0` today (see
   Versioning policy) and they are wire-compatible.
-- **Cross-session aggregation** — one file per session. Use
-  `ci/build_summary.py` (or a Jupyter notebook) for fleet views.
+- **Cross-session aggregation** — one file per session. Use a Jupyter
+  notebook or downstream analytics job for fleet views.
 
 ## Failure modes
 
