@@ -127,10 +127,10 @@ Never inline `.trace.json.gz` blobs.
 Fixtures assert schema shape, collector output, Coordinator wiring, report registration.
 Pass = expected keys and counts on **synthetic** session trees.
 
-### wekafs replay (integration)
+### Shared-filesystem replay (integration)
 
-Pass = for a archived session under
-`/wekafs/users/<hash>/.claw/workspaces/<claw_sid>/current/hyperloom/`:
+Pass = for an archived session under
+`/shared/hyperloom-sessions/<user>/<sid>/`:
 
 - `dump_session_breakdown` exits 0, writes v1.1 JSON
 - `decision_journal` variant **names** match `state.*_search` ledgers

@@ -219,7 +219,7 @@ class PrFilter:
     """Server-side and client-side filter applied to enumerated PR candidates.
 
     Path filters require Stage 2 enrichment (changed_files populated).
-    Labels are case-insensitive. Dates flow through to primus-cortex's
+    Labels are case-insensitive. Dates flow through to the PR Monitor
     REST query when supported.
     """
 
