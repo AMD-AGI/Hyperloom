@@ -28,14 +28,33 @@ def test_ray_exec_enabled_true(monkeypatch: pytest.MonkeyPatch, val: str):
     assert rb.ray_exec_enabled() is True
 
 
-@pytest.mark.parametrize("val", ["0", "false", "no", "off", ""])
-def test_ray_exec_enabled_false(monkeypatch: pytest.MonkeyPatch, val: str):
+@pytest.mark.parametrize("val", ["0", "false", "no", "off"])
+def test_ray_exec_enabled_explicit_off(monkeypatch: pytest.MonkeyPatch, val: str):
+    """Explicit off wins even on single-node (emergency escape valve)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", val)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     assert rb.ray_exec_enabled() is False
 
 
-def test_ray_exec_disabled_by_default(monkeypatch: pytest.MonkeyPatch):
+def test_ray_exec_forced_on_single_node_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """Decision 2+4: unset env -> ON for single-node."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    assert rb.ray_exec_enabled() is True
+
+
+def test_ray_exec_off_on_multi_node_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """Decision 4: unset env -> OFF for multi-node (out of scope this round)."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
     assert rb.ray_exec_enabled() is False
 
 
@@ -190,3 +209,34 @@ def test_get_ray_backend_singleton():
     a = rb.get_ray_backend()
     b = rb.get_ray_backend()
     assert a is b
+
+
+# ── _should_use_ray_backend (execution-route gate) ───────────────────────────
+def test_should_use_ray_backend_pytest_default_off(monkeypatch: pytest.MonkeyPatch):
+    """Under pytest with env unset, the route defaults OFF (hermetic tests)."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
+    # PYTEST_CURRENT_TEST is set by pytest during the test.
+    assert rb._should_use_ray_backend() is False
+
+
+def test_should_use_ray_backend_explicit_on(monkeypatch: pytest.MonkeyPatch):
+    """Explicit RAY_EXEC=1 opts a test into the Ray route even under pytest."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    assert rb._should_use_ray_backend() is True
+
+
+# ── _run_magpie routing (P1/T1) ──────────────────────────────────────────────
+def test_num_gpus_for_config_reads_tp(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("benchmark:\n  envs:\n    TP: 4\n", encoding="utf-8")
+    assert gr._num_gpus_for_config(cfg) == 4.0
+
+
+def test_num_gpus_for_config_defaults_to_one(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("benchmark:\n  envs: {}\n", encoding="utf-8")
+    assert gr._num_gpus_for_config(cfg) == 1.0

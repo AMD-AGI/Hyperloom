@@ -814,6 +814,14 @@ def _run_magpie(
     )
     # run_with_session_kill launches Magpie in its own POSIX session and tears
     # down the whole descendant tree on every exit path.
+    #
+    # NOTE (Ray-managed GPU execution, P1): routing this per-call through a Ray
+    # task is only correct for true one-shot benchmarks. Any server_lifecycle /
+    # auto_warmup run boots a *detached* server that must survive between
+    # separate run_grid calls; a per-call Ray task would free its GPU lease while
+    # that server still holds the cards (invariant violation, §4.2). The correct
+    # cut holds one Ray lease across all rounds sharing a server via ServingActor
+    # (plan §12 T1). Kept local until then.
     proc = run_with_session_kill(
         cmd,
         env=env,
@@ -824,6 +832,27 @@ def _run_magpie(
         server_already_ready=server_already_ready,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def _num_gpus_for_config(config_path: Path) -> float:
+    """Read the tensor-parallel size (``TP``) from a materialized benchmark YAML.
+
+    Used as the Ray ``num_gpus`` for a benchmark lease so Ray leases exactly the
+    cards the server needs. Falls back to 1 on any read/parse error.
+
+    Args:
+        config_path: Path to the materialized benchmark config YAML.
+
+    Returns:
+        The GPU count (``TP``) as a float for Ray's ``num_gpus``.
+    """
+    try:
+        with Path(config_path).open(encoding="utf-8") as fp:
+            cfg = yaml.safe_load(fp) or {}
+        envs = (cfg.get("benchmark") or {}).get("envs") or {}
+        return float(int(envs.get("TP", 1) or 1))
+    except Exception:  # noqa: BLE001 — best-effort; default to 1 GPU
+        return 1.0
 
 
 async def run_grid(

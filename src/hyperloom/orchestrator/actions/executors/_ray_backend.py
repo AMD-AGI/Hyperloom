@@ -36,16 +36,50 @@ _RAY_OWNED_VISIBLE_DEVICE_VARS = (
 
 
 def ray_exec_enabled() -> bool:
-    """Return True when ``INFERENCE_OPTIMIZER_RAY_EXEC`` selects the Ray backend.
+    """Return whether GPU/serving work should run through the Ray backend.
 
-    Default off (grayscale) so every executor can be switched/rolled back
-    independently.
+    Owner decision (ray_modify.plan.md §10.1): **single-node forced**. When
+    ``INFERENCE_OPTIMIZER_RAY_EXEC`` is unset, the backend is ON for single-node
+    and OFF for multi-node (multi-node is out of scope this round — its
+    maintainer mirrors the single-node changes separately). The env var remains
+    an explicit override / emergency escape valve.
 
     Returns:
-        ``True`` when the Ray execution backend is enabled.
+        ``True`` when the Ray execution backend should be used.
     """
-    val = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "0").strip().lower()
-    return val in {"1", "true", "yes", "on"}
+    val = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower()
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    # Unset: single-node forced ON, multi-node OFF (decisions 2 + 4).
+    from ._multi_node_env import is_multi_node
+
+    return not is_multi_node()
+
+
+def _should_use_ray_backend() -> bool:
+    """Like :func:`ray_exec_enabled` but stays OFF under pytest when unset.
+
+    The whole test suite runs the local subprocess path by default (no Ray
+    cluster needed); an explicit ``INFERENCE_OPTIMIZER_RAY_EXEC=1`` still opts a
+    specific test into the Ray path. Execution/materialization call sites use
+    this (not the bare flag) so production single-node is forced onto Ray while
+    tests stay hermetic.
+
+    Returns:
+        ``True`` when GPU/serving work should route through the Ray backend.
+    """
+    val = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower()
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    from ._multi_node_env import is_multi_node
+
+    return not is_multi_node()
 
 
 @dataclass
@@ -201,14 +235,86 @@ class RayExecutionBackend:
         Returns:
             The subprocess :class:`SubprocessResult`.
         """
+        import ray
+
+        ref = self._submit(
+            cmd,
+            env=env,
+            cwd=cwd,
+            num_gpus=num_gpus,
+            resources=resources,
+            timeout_s=timeout_s,
+            soft_deadline_sec=soft_deadline_sec,
+            server_log_path=server_log_path,
+            server_already_ready=server_already_ready,
+        )
+        rc, out, err = await asyncio.to_thread(ray.get, ref)
+        return SubprocessResult(returncode=rc, stdout=out, stderr=err)
+
+    def run_subprocess_sync(
+        self,
+        cmd: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        num_gpus: float = 0,
+        resources: dict[str, float] | None = None,
+        timeout_s: int | float | None = None,
+        result_dir: str | None = None,  # noqa: ARG002 — reserved for §4.6
+        soft_deadline_sec: float | None = None,
+        server_log_path: str | None = None,
+        server_already_ready: bool = False,
+    ) -> SubprocessResult:
+        """Blocking variant of :meth:`run_subprocess` for sync call sites.
+
+        Used by ``_run_magpie`` (already invoked via ``asyncio.to_thread``), so a
+        blocking ``ray.get`` here does not stall the event loop.
+
+        Returns:
+            The subprocess :class:`SubprocessResult`.
+        """
+        import ray
+
+        ref = self._submit(
+            cmd,
+            env=env,
+            cwd=cwd,
+            num_gpus=num_gpus,
+            resources=resources,
+            timeout_s=timeout_s,
+            soft_deadline_sec=soft_deadline_sec,
+            server_log_path=server_log_path,
+            server_already_ready=server_already_ready,
+        )
+        rc, out, err = ray.get(ref)
+        return SubprocessResult(returncode=rc, stdout=out, stderr=err)
+
+    def _submit(
+        self,
+        cmd: list[str],
+        *,
+        env: dict[str, str] | None,
+        cwd: str | None,
+        num_gpus: float,
+        resources: dict[str, float] | None,
+        timeout_s: int | float | None,
+        soft_deadline_sec: float | None,
+        server_log_path: str | None,
+        server_already_ready: bool,
+    ) -> Any:
+        """Ensure the cluster and submit the worker task; return its ObjectRef.
+
+        Returns:
+            The Ray ``ObjectRef`` for the submitted worker task.
+        """
         self.ensure()
         import ray
 
         # Ray's decorated remote function is dynamically typed; treat as Any so
-        # mypy does not try to check the .remote(**kwargs) call shape.
+        # mypy does not check the .remote(**kwargs) call shape.
         decorator: Any = ray.remote(num_gpus=num_gpus, resources=resources or {})
         worker: Any = decorator(_run_subprocess_worker)
-        ref = worker.remote(
+        return worker.remote(
             cmd=cmd,
             env=env,
             cwd=cwd,
@@ -217,8 +323,6 @@ class RayExecutionBackend:
             server_log_path=server_log_path,
             server_already_ready=server_already_ready,
         )
-        rc, out, err = await asyncio.to_thread(ray.get, ref)
-        return SubprocessResult(returncode=rc, stdout=out, stderr=err)
 
 
 def resolve_shared_artifact_root(session_dir: Path | str) -> Path:
@@ -263,6 +367,7 @@ def get_ray_backend() -> RayExecutionBackend:
 __all__ = [
     "RayExecutionBackend",
     "SubprocessResult",
+    "_should_use_ray_backend",
     "get_ray_backend",
     "ray_exec_enabled",
     "resolve_shared_artifact_root",
