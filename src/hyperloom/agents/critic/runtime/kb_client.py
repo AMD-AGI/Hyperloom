@@ -21,8 +21,10 @@ import os
 import random
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Protocol
+
 
 from .errors import (
     KBConflictError,
@@ -35,6 +37,12 @@ from .metrics import (
     CRITIC_KB_WRITE_TOTAL,
     get_registry,
 )
+
+
+def _require_http_url(url: str) -> None:
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported URL scheme: {scheme!r}")
 
 
 DEFAULT_TIMEOUT_MS = 10_000
@@ -267,9 +275,10 @@ class HTTPKBClient:
         start = time.time()
         while attempt <= self.retry_max:
             attempt += 1
+            _require_http_url(url)
             req = urllib.request.Request(url, data=data, headers=headers, method="POST")
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:  # nosec B310 - URL scheme checked above.
                     payload = resp.read().decode("utf-8") or "{}"
                     body_obj = json.loads(payload)
                     registry.counter(CRITIC_KB_WRITE_TOTAL).inc(

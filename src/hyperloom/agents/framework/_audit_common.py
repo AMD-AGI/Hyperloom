@@ -175,7 +175,7 @@ def _fetch_diff_url(diff_url: str, work_dir: Path) -> str:
             p = Path(diff_url[len("file://") :])
             return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
         if diff_url.startswith(("http://", "https://")):
-            with urlopen(diff_url, timeout=30) as resp:  # noqa: S310 — public PR diff
+            with urlopen(diff_url, timeout=30) as resp:  # noqa: S310  # nosec B310 - diff_url is restricted to http(s) above.
                 return resp.read().decode("utf-8", "replace")
     except Exception as exc:  # noqa: BLE001 — best-effort fetch
         log.warning("phase-audit: diff_url fetch failed (%s): %r", diff_url, exc)

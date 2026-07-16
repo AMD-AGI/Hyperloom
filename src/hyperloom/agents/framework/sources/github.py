@@ -117,7 +117,7 @@ def search_perf_prs(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS API URL.
             data = json.loads(resp.read().decode("utf-8"))
     except Exception:  # noqa: BLE001 - best-effort policy
         return []
