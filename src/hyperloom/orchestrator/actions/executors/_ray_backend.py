@@ -348,6 +348,55 @@ def resolve_shared_artifact_root(session_dir: Path | str) -> Path:
     return session_dir
 
 
+def strip_visible_devices_from_config(config_path: Path | str) -> Path:
+    """Drop ``benchmark.envs.*_VISIBLE_DEVICES`` from a benchmark YAML (§12 T2).
+
+    In the Ray execution branch the worker already has ``*_VISIBLE_DEVICES`` set
+    by Ray's ``num_gpus`` lease. Leaving the device list in the YAML would let
+    Magpie re-export it and override Ray's assignment (the server would target
+    the wrong physical cards), so it is stripped **at execution time** — only on
+    the branch that actually runs through Ray. The local fallback path keeps the
+    YAML untouched (its server relies on the YAML's device list).
+
+    Best-effort: on any read/parse error the original path is returned unchanged
+    (the run then behaves exactly as before, keeping the device list). A no-op
+    (returns the input path) when no device var is present, so byte-identical
+    configs are not needlessly rewritten.
+
+    Args:
+        config_path: Path to the materialized benchmark YAML.
+
+    Returns:
+        The path to a sibling ``<name>.ray.yaml`` with the device vars removed,
+        or the original path when nothing changed / on error.
+    """
+    import yaml
+
+    src = Path(config_path)
+    try:
+        with src.open(encoding="utf-8") as fp:
+            cfg = yaml.safe_load(fp) or {}
+    except (OSError, yaml.YAMLError):
+        return src
+    envs = (cfg.get("benchmark") or {}).get("envs")
+    if not isinstance(envs, dict):
+        return src
+    changed = False
+    for key in _RAY_OWNED_VISIBLE_DEVICE_VARS:
+        if key in envs:
+            envs.pop(key, None)
+            changed = True
+    if not changed:
+        return src
+    out = src.with_name(f"{src.stem}.ray{src.suffix or '.yaml'}")
+    try:
+        with out.open("w", encoding="utf-8") as fp:
+            yaml.safe_dump(cfg, fp, sort_keys=False)
+    except OSError:
+        return src
+    return out
+
+
 # Process-wide singleton (lazy cluster ensure on first use).
 _BACKEND: RayExecutionBackend | None = None
 
@@ -371,4 +420,5 @@ __all__ = [
     "get_ray_backend",
     "ray_exec_enabled",
     "resolve_shared_artifact_root",
+    "strip_visible_devices_from_config",
 ]

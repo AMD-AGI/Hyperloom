@@ -761,6 +761,7 @@ def _run_magpie(
     soft_deadline_sec: float | None = None,
     preclean: bool = True,
     server_already_ready: bool = False,
+    serving_lease: Any = None,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
@@ -786,6 +787,10 @@ def _run_magpie(
         preclean (bool): Whether to pre-clean stale servers before launch.
         server_already_ready (bool): Pass ``True`` for warm reuse rounds so the
             soft-deadline clock runs from process spawn, not the ready marker.
+        serving_lease: When set (Ray-managed GPU execution, §12 T1), the round
+            runs inside the lease's actor — which holds ``num_gpus`` across every
+            round sharing this server — instead of a local subprocess. ``None``
+            keeps the existing local ``run_with_session_kill`` path unchanged.
 
     Returns:
         tuple[int, str, str]: ``(returncode, stdout, stderr)``.
@@ -824,6 +829,33 @@ def _run_magpie(
     # redirect into a prior run's slot.
     env["SERVER_LOG"] = str(output_dir / "server.log")
     env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
+
+    # Ray-managed GPU execution (§12 T1): route the round through the serving
+    # lease's actor, which holds ``num_gpus`` across every round sharing this
+    # server. The lease is owned by the caller (conc_sweep arm / baseline /
+    # sweep / explore), so one lease spans boot + all reuse rounds — no detached
+    # GPU process outlives its Ray lease (§4.2). Ray sets ``*_VISIBLE_DEVICES``
+    # in the worker, so the YAML's device list is stripped first (T2) to stop
+    # Magpie re-exporting it and overriding Ray's card assignment.
+    if serving_lease is not None:
+        from ._ray_backend import strip_visible_devices_from_config
+
+        ray_config_path = strip_visible_devices_from_config(config_path)
+        cmd = build_benchmark_command(
+            python_exe=magpie_python,
+            config_path=ray_config_path,
+            output_dir=output_dir,
+        )
+        return serving_lease.run_session_kill(
+            cmd,
+            env=env,
+            cwd=cwd,
+            timeout=timeout_sec,
+            soft_deadline_sec=soft_deadline_sec,
+            server_log_path=str(output_dir / "server.log"),
+            server_already_ready=server_already_ready,
+        )
+
     cmd = build_benchmark_command(
         python_exe=magpie_python,
         config_path=config_path,
@@ -831,14 +863,6 @@ def _run_magpie(
     )
     # run_with_session_kill launches Magpie in its own POSIX session and tears
     # down the whole descendant tree on every exit path.
-    #
-    # NOTE (Ray-managed GPU execution, P1): routing this per-call through a Ray
-    # task is only correct for true one-shot benchmarks. Any server_lifecycle /
-    # auto_warmup run boots a *detached* server that must survive between
-    # separate run_grid calls; a per-call Ray task would free its GPU lease while
-    # that server still holds the cards (invariant violation, §4.2). The correct
-    # cut holds one Ray lease across all rounds sharing a server via ServingActor
-    # (plan §12 T1). Kept local until then.
     proc = run_with_session_kill(
         cmd,
         env=env,
@@ -892,8 +916,18 @@ async def run_grid(
     warmup_before_measure: bool | None = None,
     preclean_before_run: bool = True,
     server_already_ready: bool = False,
+    serving_lease: Any = None,
 ) -> list[VariantResult]:
-    """Execute each grid variant and return all per-variant results."""
+    """Execute each grid variant and return all per-variant results.
+
+    ``serving_lease`` (Ray-managed GPU execution, §12 T1) is a caller-owned
+    :class:`~._ray_serving.ServingLease` that every round in this grid runs
+    through, so one Ray GPU lease spans the variant's warmup + measure rounds.
+    ``None`` keeps the local-subprocess path. The lease's lifecycle (create /
+    close) is owned by the caller so it can also span multiple ``run_grid``
+    calls that reuse one persistent server (conc_sweep arm, explore warmup +
+    decision).
+    """
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
         from .benchmark_backend import resolve_benchmark_interpreter
@@ -1131,6 +1165,7 @@ async def run_grid(
                     result_dir=result_dir,
                     soft_deadline_sec=None,
                     preclean=True,
+                    serving_lease=serving_lease,
                 )
             except subprocess.TimeoutExpired as exc:
                 from ._server_lifecycle import teardown_lifecycle_server
@@ -1337,6 +1372,7 @@ async def run_grid(
                     result_dir=None,
                     soft_deadline_sec=None,
                     preclean=False,
+                    serving_lease=serving_lease,
                 )
                 log.info(
                     "grid_runner: MN warmup pass done (discarded) %d/%d name=%s",
@@ -1363,6 +1399,7 @@ async def run_grid(
                 soft_deadline_sec=soft_deadline_sec,
                 preclean=(False if auto_warmup else preclean_before_run),
                 server_already_ready=(server_already_ready or auto_warmup),
+                serving_lease=serving_lease,
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks.

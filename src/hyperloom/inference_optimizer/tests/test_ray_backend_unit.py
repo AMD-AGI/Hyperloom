@@ -11,14 +11,21 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.orchestrator.actions.executors import _ray_backend as rb
-from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
+from hyperloom.orchestrator.actions.executors import _ray_serving as rs
+from hyperloom.orchestrator.actions.executors._ray_serving import (
+    ManagedServerProcess,
+    ServingLease,
+    maybe_serving_lease,
+)
 
 
 # ── flag gate ────────────────────────────────────────────────────────────────
@@ -240,3 +247,249 @@ def test_num_gpus_for_config_defaults_to_one(tmp_path: Path):
     cfg = tmp_path / "c.yaml"
     cfg.write_text("benchmark:\n  envs: {}\n", encoding="utf-8")
     assert gr._num_gpus_for_config(cfg) == 1.0
+
+
+# ── T2: strip *_VISIBLE_DEVICES from the benchmark config ────────────────────
+def test_strip_visible_devices_from_config(tmp_path: Path):
+    """Ray sets visible devices in the worker; the YAML list must be dropped."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "benchmark:\n"
+        "  framework: sglang\n"
+        "  envs:\n"
+        "    TP: 2\n"
+        "    ROCR_VISIBLE_DEVICES: '0,1'\n"
+        "    HIP_VISIBLE_DEVICES: '0,1'\n"
+        "    CUDA_VISIBLE_DEVICES: '0,1'\n"
+        "    FOO: bar\n",
+        encoding="utf-8",
+    )
+    out = rb.strip_visible_devices_from_config(cfg)
+    assert out != cfg
+    assert out.name.endswith(".ray.yaml")
+    envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
+    assert "ROCR_VISIBLE_DEVICES" not in envs
+    assert "HIP_VISIBLE_DEVICES" not in envs
+    assert "CUDA_VISIBLE_DEVICES" not in envs
+    # Non-device envs are preserved verbatim.
+    assert envs["TP"] == 2
+    assert envs["FOO"] == "bar"
+
+
+def test_strip_visible_devices_noop_when_absent(tmp_path: Path):
+    """No device vars => the original path is returned unchanged (no rewrite)."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("benchmark:\n  envs:\n    TP: 1\n", encoding="utf-8")
+    assert rb.strip_visible_devices_from_config(cfg) == cfg
+
+
+# ── ServingLease + maybe_serving_lease (fake ray, no cluster) ─────────────────
+class _FakeMethod:
+    def __init__(self, ret):
+        self._ret = ret
+
+    def remote(self, *_a, **_k):
+        return self._ret
+
+
+class _FakeActor:
+    def __init__(self, ret):
+        self.run_blocking = _FakeMethod(ret)
+
+
+class _LeaseFakeRay:
+    """Minimal fake ``ray`` for ServingLease: get() unwraps refs, kill() records."""
+
+    class exceptions:  # noqa: N801 — mirror ray.exceptions namespace
+        class RayTaskError(Exception):
+            pass
+
+    def __init__(self):
+        self.killed: list = []
+
+    def get(self, ref):
+        if isinstance(ref, _LeaseFakeRay.exceptions.RayTaskError):
+            raise ref
+        return ref
+
+    def kill(self, actor):
+        self.killed.append(actor)
+
+
+def test_serving_lease_run_session_kill_success(monkeypatch: pytest.MonkeyPatch):
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor((0, "hi", ""))  # pre-set so ensure() is a no-op
+    rc, out, err = lease.run_session_kill(["echo", "hi"], timeout=5)
+    assert (rc, out, err) == (0, "hi", "")
+
+
+def test_serving_lease_run_session_kill_timeout_reraises(monkeypatch: pytest.MonkeyPatch):
+    """A hard-timeout sentinel from the actor is re-raised as TimeoutExpired."""
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor((rs._ACTOR_TIMEOUT_RC, "", "TimeoutExpired: 5s"))
+    with pytest.raises(subprocess.TimeoutExpired):
+        lease.run_session_kill(["sleep", "99"], timeout=5)
+
+
+def test_serving_lease_run_session_kill_ray_error_degrades(monkeypatch: pytest.MonkeyPatch):
+    """A worker-side Ray failure becomes a benchmark failure, not a crash."""
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor(fake.exceptions.RayTaskError("boom"))
+    rc, out, err = lease.run_session_kill(["x"], timeout=5)
+    assert rc == 1
+    assert "ray_worker_error" in err
+
+
+def test_serving_lease_close_idempotent(monkeypatch: pytest.MonkeyPatch):
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    lease = ServingLease(num_gpus=1)
+    actor = _FakeActor((0, "", ""))
+    lease._actor = actor
+    lease.close()
+    assert actor in fake.killed
+    assert lease._actor is None
+    lease.close()  # must not raise
+
+
+def test_maybe_serving_lease_pytest_default_none(monkeypatch: pytest.MonkeyPatch):
+    """Under pytest with env unset the seam returns None (hermetic local path)."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
+    assert maybe_serving_lease(num_gpus=1) is None
+
+
+def test_maybe_serving_lease_explicit_on_single_node(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    lease = maybe_serving_lease(num_gpus=2)
+    assert isinstance(lease, ServingLease)
+    assert lease._num_gpus == 2.0
+
+
+def test_maybe_serving_lease_multi_node_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Multi-node is out of scope this round: no lease even with RAY_EXEC=1."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    assert maybe_serving_lease(num_gpus=2) is None
+
+
+# ── _run_magpie routing (P1/T1 + T2) ─────────────────────────────────────────
+class _RecordingLease:
+    """Stand-in ServingLease that records the round it was asked to run."""
+
+    def __init__(self, result=(0, "ok", "")):
+        self.result = result
+        self.calls: list[dict] = []
+
+    def run_session_kill(self, cmd, **kw):
+        self.calls.append({"cmd": cmd, **kw})
+        return self.result
+
+
+def test_run_magpie_routes_through_lease_and_strips_devices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """With a lease, _run_magpie runs in its actor on a device-stripped config."""
+    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "benchmark:\n"
+        "  framework: sglang\n"
+        "  envs:\n"
+        "    TP: 1\n"
+        "    ROCR_VISIBLE_DEVICES: '0'\n"
+        "    FOO: bar\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    seen: dict = {}
+
+    def _fake_build(*, python_exe, config_path, output_dir):
+        seen["config_path"] = Path(config_path)
+        return ["magpie", "-m", "Magpie", "benchmark", str(config_path)]
+
+    monkeypatch.setattr(gr, "build_benchmark_command", _fake_build)
+
+    lease = _RecordingLease()
+    rc, out, err = gr._run_magpie(
+        magpie_python="python3",
+        config_path=cfg,
+        output_dir=out_dir,
+        timeout_sec=10,
+        cwd=str(tmp_path),
+        serving_lease=lease,
+    )
+    assert (rc, out, err) == (0, "ok", "")
+    assert lease.calls, "the round must run inside the lease's actor"
+    # T2: the config handed to Magpie has the device list stripped.
+    used_cfg = seen["config_path"]
+    assert used_cfg.name.endswith(".ray.yaml")
+    envs = yaml.safe_load(used_cfg.read_text(encoding="utf-8"))["benchmark"]["envs"]
+    assert "ROCR_VISIBLE_DEVICES" not in envs
+    assert envs["TP"] == 1 and envs["FOO"] == "bar"
+    # server.log is pinned into the task slot for the watchdogs.
+    assert lease.calls[0]["server_log_path"] == str(out_dir / "server.log")
+    assert lease.calls[0]["timeout"] == 10
+
+
+def test_run_magpie_local_path_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """serving_lease=None keeps the local run_with_session_kill path + config."""
+    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n"
+        "    ROCR_VISIBLE_DEVICES: '0'\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    seen: dict = {}
+
+    def _fake_build(*, python_exe, config_path, output_dir):
+        seen["config_path"] = Path(config_path)
+        return ["magpie", str(config_path)]
+
+    class _Proc:
+        returncode = 0
+        stdout = "local"
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        seen["ran_local"] = True
+        return _Proc()
+
+    monkeypatch.setattr(gr, "build_benchmark_command", _fake_build)
+    monkeypatch.setattr(gr, "run_with_session_kill", _fake_run)
+
+    rc, out, err = gr._run_magpie(
+        magpie_python="python3",
+        config_path=cfg,
+        output_dir=out_dir,
+        timeout_sec=10,
+        cwd=str(tmp_path),
+        serving_lease=None,
+    )
+    assert (rc, out) == (0, "local")
+    assert seen.get("ran_local") is True
+    # The local path uses the ORIGINAL config (no .ray.yaml rewrite).
+    assert seen["config_path"] == cfg
+    assert not (tmp_path / "config.ray.yaml").exists()

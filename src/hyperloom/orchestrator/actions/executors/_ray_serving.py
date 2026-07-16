@@ -30,6 +30,15 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+# Sentinel returncode a serving actor returns when the benchmark subprocess hit
+# its hard timeout. Ray cannot re-raise ``subprocess.TimeoutExpired`` across the
+# worker boundary reliably (its constructor needs args), so the actor reports
+# the timeout as this returncode and :meth:`ServingLease.run_session_kill`
+# re-raises the real ``TimeoutExpired`` for callers that already handle it.
+# Distinct from the -909/-910/-911 watchdog sentinels in ``_subprocess_kill``.
+_ACTOR_TIMEOUT_RC: int = -912
+
+
 def _pdeathsig_preexec() -> None:
     """Best-effort: ask the OS to SIGKILL this child if its parent dies.
 
@@ -173,6 +182,50 @@ def _serving_actor_body() -> Any:
                 merged[key] = value
             return self._mgr.start(cmd, env=merged, cwd=cwd, log_path=log_path)
 
+        def run_blocking(
+            self,
+            cmd,
+            *,
+            env=None,
+            cwd=None,
+            timeout=None,
+            soft_deadline_sec=None,
+            server_log_path=None,
+            server_already_ready=False,
+        ):
+            """Run one benchmark round to completion inside this actor's lease.
+
+            The actor holds ``num_gpus`` for its whole lifetime, so every round
+            submitted here (boot, warmup, reuse, measure) runs on the same
+            worker under the same GPU lease — a detached server booted by an
+            earlier round is still covered by the lease when a later round
+            re-attaches (plan §4.2 / §12 T1). Ray has already set
+            ``*_VISIBLE_DEVICES`` on this worker; the subprocess inherits them
+            (the caller env's device vars are dropped by
+            :func:`_run_subprocess_worker`).
+
+            Returns:
+                ``(returncode, stdout, stderr)``. A hard-timeout is surfaced as
+                the :data:`_ACTOR_TIMEOUT_RC` returncode (never a raised
+                exception, which Ray cannot faithfully reconstruct).
+            """
+            import subprocess as _sp  # noqa: PLC0415
+
+            from ._ray_backend import _run_subprocess_worker  # noqa: PLC0415
+
+            try:
+                return _run_subprocess_worker(
+                    cmd=cmd,
+                    env=env,
+                    cwd=cwd,
+                    timeout_s=timeout,
+                    soft_deadline_sec=soft_deadline_sec,
+                    server_log_path=server_log_path,
+                    server_already_ready=server_already_ready,
+                )
+            except _sp.TimeoutExpired as exc:
+                return _ACTOR_TIMEOUT_RC, "", f"TimeoutExpired: {exc}"
+
         def is_alive(self) -> bool:
             """Return whether the serving process is still up.
 
@@ -234,8 +287,187 @@ def make_gpu_specialist_actor(num_gpus: float):
     return actor_cls.options(num_gpus=num_gpus).remote()
 
 
+class ServingLease:
+    """A held Ray GPU lease spanning every round that shares one server (§12 T1).
+
+    Wraps a long-lived :class:`ServingActor` holding ``num_gpus``. The actor is
+    created on first use and stays alive — keeping the GPU lease — until
+    :meth:`close`, so Ray never reassigns those cards while the shared server is
+    up. All rounds that reuse one persistent server (conc_sweep arm boot+reuse,
+    baseline/explore warmup+measure, ``run_grid`` auto-warmup) run through the
+    same lease, satisfying the hard invariant that a GPU process must live
+    inside a Ray lease that covers its whole lifetime.
+
+    Single-node only (the caller gates on ``not is_multi_node()``). For P1 the
+    lease holds ``num_gpus`` alone; the ``serving_slot`` custom resource is
+    introduced in P3 (once ``ray start --resources`` declares it), so requesting
+    it now would leave the actor PENDING forever.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_gpus: float,
+        serving_slot: bool = False,
+        ensure_log_path: Any = None,
+    ) -> None:
+        """Configure the lease (the actor is created lazily on first use).
+
+        Args:
+            num_gpus: GPUs the lease holds (typically the serving ``TP``).
+            serving_slot: Whether to also hold the ``serving_slot`` custom
+                resource. Defaults to ``False`` for P1 (see class docstring).
+            ensure_log_path: Optional path forwarded to the cluster ensure.
+        """
+        self._num_gpus = float(num_gpus)
+        self._serving_slot = bool(serving_slot)
+        self._ensure_log_path = ensure_log_path
+        self._actor: Any = None
+
+    def ensure(self) -> None:
+        """Ensure the Ray cluster is up and the serving actor is created.
+
+        Idempotent — a second call is a no-op once the actor exists.
+        """
+        if self._actor is not None:
+            return
+        from ._ray_backend import get_ray_backend  # noqa: PLC0415
+
+        get_ray_backend().ensure(log_path=self._ensure_log_path)
+        self._actor = make_serving_actor(self._num_gpus, serving_slot=self._serving_slot)
+
+    def run_session_kill(
+        self,
+        cmd: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout: int | float | None = None,
+        soft_deadline_sec: float | None = None,
+        server_log_path: str | None = None,
+        server_already_ready: bool = False,
+    ) -> tuple[int, str, str]:
+        """Run one benchmark round inside the lease's actor; return the triple.
+
+        Drop-in for a local ``run_with_session_kill(...)`` call: returns
+        ``(returncode, stdout, stderr)`` and re-raises ``subprocess.TimeoutExpired``
+        on a hard timeout so existing caller-side timeout handling is unchanged.
+        A worker-side Ray failure degrades to a benchmark failure (non-zero rc)
+        rather than crashing the session.
+
+        Args:
+            cmd: Benchmark command to run.
+            env: Caller env (device vars are dropped inside the worker).
+            cwd: Working directory.
+            timeout: Hard timeout in seconds.
+            soft_deadline_sec: Overtime soft deadline.
+            server_log_path: Server log path for the watchdogs.
+            server_already_ready: Warm-reuse soft-clock semantics.
+
+        Returns:
+            ``(returncode, stdout, stderr)``.
+
+        Raises:
+            subprocess.TimeoutExpired: When the round hit its hard timeout.
+        """
+        import subprocess as _sp  # noqa: PLC0415
+
+        import ray  # noqa: PLC0415
+
+        self.ensure()
+        ref = self._actor.run_blocking.remote(
+            cmd,
+            env=env,
+            cwd=cwd,
+            timeout=timeout,
+            soft_deadline_sec=soft_deadline_sec,
+            server_log_path=server_log_path,
+            server_already_ready=server_already_ready,
+        )
+        try:
+            rc, out, err = ray.get(ref)
+        except ray.exceptions.RayTaskError as exc:
+            # Worker crash / unexpected error: surface as a benchmark failure so
+            # the caller's existing rc!=0 handling runs, not a session crash.
+            log.warning("ServingLease.run_session_kill: ray worker error: %r", exc)
+            return 1, "", f"ray_worker_error: {exc}"[:2000]
+        if rc == _ACTOR_TIMEOUT_RC:
+            raise _sp.TimeoutExpired(cmd, timeout or 0, output=out or None, stderr=err or None)
+        return rc, out, err
+
+    def close(self) -> None:
+        """Kill the actor, releasing the GPU lease. Idempotent, never raises."""
+        if self._actor is None:
+            return
+        try:
+            import ray  # noqa: PLC0415
+
+            ray.kill(self._actor)
+        except Exception:  # noqa: BLE001 — teardown must not raise
+            pass
+        self._actor = None
+
+    def __enter__(self) -> ServingLease:
+        """Ensure the lease on context entry.
+
+        Returns:
+            This lease.
+        """
+        self.ensure()
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        """Release the lease on context exit.
+
+        Returns:
+            ``False`` so exceptions propagate.
+        """
+        self.close()
+        return False
+
+
+def maybe_serving_lease(
+    *,
+    num_gpus: float,
+    serving_slot: bool = False,
+    ensure_log_path: Any = None,
+) -> ServingLease | None:
+    """Return a :class:`ServingLease` when single-node Ray execution is active.
+
+    The single seam executors use to opt a benchmark unit onto Ray: it returns
+    a (not-yet-ensured) lease when the Ray backend should run this work and the
+    run is single-node, else ``None`` (multi-node, ``INFERENCE_OPTIMIZER_RAY_EXEC``
+    off, or the pytest default). Callers pass the result straight into
+    ``run_grid(..., serving_lease=lease)`` / ``run_session_kill`` — ``None``
+    transparently keeps the existing local-subprocess path — and MUST
+    :meth:`ServingLease.close` a non-``None`` lease (typically in a ``finally``)
+    to release the GPU lease.
+
+    Args:
+        num_gpus: GPUs the lease holds (typically the serving ``TP``).
+        serving_slot: Whether to also hold the ``serving_slot`` resource
+            (P3; defaults ``False`` for P1).
+        ensure_log_path: Optional path forwarded to the cluster ensure.
+
+    Returns:
+        A lease to route benchmark rounds through, or ``None`` to run locally.
+    """
+    from ._multi_node_env import is_multi_node  # noqa: PLC0415
+    from ._ray_backend import _should_use_ray_backend  # noqa: PLC0415
+
+    if not _should_use_ray_backend() or is_multi_node():
+        return None
+    return ServingLease(
+        num_gpus=num_gpus,
+        serving_slot=serving_slot,
+        ensure_log_path=ensure_log_path,
+    )
+
+
 __all__ = [
     "ManagedServerProcess",
+    "ServingLease",
     "make_gpu_specialist_actor",
     "make_serving_actor",
+    "maybe_serving_lease",
 ]
