@@ -15,7 +15,7 @@ name: Inference Optimization Daily (fixed models)
 #     (ci/optimize_submit.py) AND the "pull latest code every run" behaviour:
 #     the sandbox git-clones Hyperloom @ ${GITHUB_SHA} via the CI SOURCE PIN
 #     prepended to ci/prompt_prefix.txt, so each daily run validates the
-#     freshest main commit (NOT the lagging /wekafs/HyperloomV2 snapshot).
+#     freshest main commit (not a lagging deployment snapshot).
 #
 # Independent of both files above — no shared state / cache.
 #
@@ -67,12 +67,6 @@ on:
         description: 'Kernel optimization backends forwarded to SaFE.'
         required: false
         default: 'geak,claude,codex'
-      target_gpu:
-        description: 'Reference GPU for InferenceX comparison in the summary table.'
-        required: false
-        default: 'mi300x'
-        type: choice
-        options: [mi300x, b200, h100, mi355x, mi325x]
       dry_run:
         description: 'Dry run (auto-detect + print plan only, do not submit).'
         type: boolean
@@ -87,6 +81,7 @@ jobs:
   # ── Stage 1: build the fixed matrix ──────────────────────────────────────────
   prepare:
     name: Build fixed matrix
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true'
     runs-on: hyperloom-mh826
     timeout-minutes: 5
     outputs:
@@ -145,7 +140,7 @@ jobs:
   optimize:
     name: optimize-${{ matrix.key }}
     needs: prepare
-    if: needs.prepare.outputs.count != '0'
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true' && needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
     # GitHub counts this from JOB START, while the optimize_submit.py wait loop
     # (up to task_timeout_min=2920) only begins AFTER prewarm + submit-jitter +
@@ -181,8 +176,8 @@ jobs:
         working-directory: ci
         run: pip install --quiet requests PyYAML 'huggingface_hub>=0.24'
 
-      - name: Prewarm /wekafs/models for this repo
-        # Pre-pull the HF repo into /wekafs/models/<owner>-<repo>/ so SaFE
+      - name: Prewarm shared model cache for this repo
+        # Pre-pull the HF repo into a shared model cache so SaFE
         # register can use local_path mode (skips its slow K8s download job).
         # continue-on-error: a missing mount / gated repo / not-yet-published
         # repo just falls back to SaFE handling the download itself.
@@ -192,16 +187,17 @@ jobs:
           HF_TOKEN:   ${{ secrets.HF_TOKEN }}
           HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
           MODEL_REPO: ${{ matrix.model }}
+          SHARED_MODEL_CACHE: ${{ vars.HYPERLOOM_SHARED_MODEL_CACHE || '/shared/models' }}
         run: |
           set -euo pipefail
-          if [ ! -d /wekafs/models ] || [ ! -w /wekafs/models ]; then
-            echo "WARN: /wekafs/models not writable on this runner — skipping prewarm"
+          if [ ! -d "${SHARED_MODEL_CACHE}" ] || [ ! -w "${SHARED_MODEL_CACHE}" ]; then
+            echo "WARN: shared model cache not writable on this runner — skipping prewarm: ${SHARED_MODEL_CACHE}"
             echo "      (SaFE register will handle the download on its own)"
             exit 0
           fi
           python3 ci/prewarm_models.py \
             --repos        "${MODEL_REPO}" \
-            --target-root  /wekafs/models \
+            --target-root  "${SHARED_MODEL_CACHE}" \
             --concurrency  1 \
             --inner-workers 8 \
             --log          "${{ github.workspace }}/prewarm.log"
@@ -225,7 +221,7 @@ jobs:
           INPUT_GPU_TYPE:         ${{ github.event.inputs.gpu_type }}
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends || 'geak,claude,codex' }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: 'core42-top8'
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: 'example-top8'
           INPUT_TASK_TIMEOUT_MIN: ${{ github.event.inputs.task_timeout_min || '2920' }}
           INPUT_MAX_HOURS:        ${{ github.event.inputs.max_hours || '48' }}
           INPUT_DRY_RUN:          ${{ github.event.inputs.dry_run }}
@@ -289,8 +285,8 @@ jobs:
           # The hard contract: SaFE promptPrefix MUST be non-empty. The base
           # prefix is ci/prompt_prefix.txt (single source of truth); on top of
           # it we prepend a CI SOURCE PIN block that makes the sandbox clone
-          # Hyperloom @ this run's commit (GITHUB_SHA) instead of the deployed
-          # /wekafs/HyperloomV2 snapshot.
+          # Hyperloom @ this run's commit (GITHUB_SHA) instead of any deployed
+          # snapshot.
           PROMPT_PREFIX_VALUE=""
           if [ -f "prompt_prefix.txt" ]; then
             PROMPT_PREFIX_VALUE="$(cat prompt_prefix.txt)"
@@ -371,7 +367,7 @@ jobs:
     # Both: optimize for ordering, prepare so needs.prepare.outputs.count is
     # actually resolvable in the `if` below.
     needs: [prepare, optimize]
-    if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true' && always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
     runs-on: hyperloom-4hhzn
     timeout-minutes: 20
     env:
@@ -399,14 +395,12 @@ jobs:
       - name: Build summary table
         working-directory: ci
         env:
-          INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
           INPUT_ISL:        ${{ github.event.inputs.isl || '1024' }}
           INPUT_OSL:        ${{ github.event.inputs.osl || '1024' }}
         run: |
           python3 build_summary.py \
             --artifacts-dir "${{ github.workspace }}/task-artifacts-merged" \
             --manifests-dir "${{ github.workspace }}/manifests" \
-            --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
             --isl           "${INPUT_ISL:-1024}" \
             --osl           "${INPUT_OSL:-1024}" \
             --out-dir       "${{ github.workspace }}/summary-out"

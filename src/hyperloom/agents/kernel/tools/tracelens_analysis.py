@@ -322,7 +322,7 @@ def _is_editable_source(path: str | None, kernel_kind: str | None) -> bool:
     if low.endswith(".py"):
         if kernel_kind == "triton_inductor_generated":
             return False
-        if "torchinductor" in path or path.startswith("/tmp/"):
+        if "torchinductor" in path or path.startswith("/tmp/"):  # nosec B108 - marker for generated compiler artifacts.
             return False
         return True
     return False
@@ -666,7 +666,17 @@ def _is_safe_litellm_gateway() -> bool:
         os.environ.get("ANTHROPIC_BASE_URL", "")
         or os.environ.get("OPENAI_BASE_URL", "")
     ).lower()
-    markers = ("primus-safe", "core42", "litellm", "llm-proxy")
+    # Generic protocol markers by default (no operator/brand strings shipped);
+    # a specific deployment can add its own gateway host substrings via
+    # HYPERLOOM_STRICT_GATEWAY_MARKERS (comma-separated). SAFE_API_KEY is the
+    # strong signal and is checked regardless.
+    markers = tuple(
+        m.strip().lower()
+        for m in os.environ.get(
+            "HYPERLOOM_STRICT_GATEWAY_MARKERS", "litellm,llm-proxy"
+        ).split(",")
+        if m.strip()
+    )
     return bool(os.environ.get("SAFE_API_KEY")) or any(m in base_url for m in markers)
 
 
@@ -1419,7 +1429,7 @@ def source_type_for(name: str, source_file: str) -> str:
     return "unknown"
 
 
-_RUNTIME_GENERATED_SOURCE_MARKERS = (
+_RUNTIME_GENERATED_SOURCE_MARKERS = (  # nosec B108 - marker strings, not filesystem writes.
     "/tmp/torchinductor",
     "/torchinductor_",
     "/.cache/torch/inductor",
@@ -1494,7 +1504,7 @@ def _flydsl_reusable_roots() -> tuple[str, ...]:
         val = (os.environ.get(env_key, "") or "").strip()
         if val:
             out.append((val.rstrip("/") + "/").lower())
-    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+    for default in ("/opt/flydsl/", "/sgl-workspace/flydsl/"):
         if default not in out:
             out.append(default)
     return tuple(out)
@@ -4951,7 +4961,7 @@ def _resolve_flydsl_source_fallback() -> str:
     roots = [
         os.environ.get("DSL2_ROOT", "").strip(),
         os.environ.get("FLYDSL_ROOT", "").strip(),
-        "/wekafs/yunkai/FlyDSL",
+        "/opt/FlyDSL",
         "/sgl-workspace/flydsl",
     ]
     for root in roots:
@@ -5728,8 +5738,7 @@ def main() -> int:
         default=(os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip() or "mixed"),
         help=(
             "Which of TraceLens splitter's three steady-state chunks to "
-            "consume for the perf report (see docs/Inference_analysis.md "
-            "in TraceLens-internal). The splitter always produces all "
+            "consume for the perf report. The splitter always produces all "
             "three (mixed / decode_only / prefilldecode); this flag picks "
             "ONE per TraceLens's design that the chunks are parallel "
             "view-of-the-same-trace, not a fallback ladder. "

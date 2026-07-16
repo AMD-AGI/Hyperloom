@@ -46,9 +46,9 @@ jobs:
     runs-on: hyperloom-mh826
     timeout-minutes: 10
     env:
-      # Off-repo pool on /wekafs (the /wekafs root lives in the WEKAFS_CHENYI_DIR
+      # Off-repo pool on /path (the /path root lives in the WEKAFS_CHENYI_DIR
       # secret; generate_hf_matrix reads the absolute path as-is, and the
-      # hyperloom runners RO-mount /wekafs).
+      # hyperloom runners RO-mount /path).
       CANDIDATES_FILE: ${{ format('{0}/ci-candidates/hf_sub100_part1.20260630.json', secrets.WEKAFS_CHENYI_DIR) }}
       CANDIDATES_PATH: ${{ format('{0}/ci-candidates/hf_sub100_part1.20260630.json', secrets.WEKAFS_CHENYI_DIR) }}
       # One batch = 240 models, all run concurrently. BATCH_SIZE doubles as the
@@ -58,7 +58,7 @@ jobs:
       # 6h: 0/6/12/18 UTC), same invariant as the other pools. Also the per-task
       # optimizer budget forwarded below.
       MAX_HOURS: '6'
-      SUBMIT_WORKSPACES: 'core42-hyperloom'
+      SUBMIT_WORKSPACES: 'example-hyperloom'
     steps:
       - uses: actions/checkout@v7
 

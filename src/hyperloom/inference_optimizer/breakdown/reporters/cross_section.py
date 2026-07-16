@@ -27,7 +27,7 @@ class GlobalFacts:
     elapsed_minutes: float | None
     objective: dict[str, Any]
     workload_summary: str  # "DeepSeek-R1 vllm fp8 tp=8 conc=64 isl=osl=1024"
-    gain_attribution_lines: list[str]  # "100% via 1 backends KEEP (flag_x)"
+    gain_attribution_lines: list[str]  # "explore: 5.00% of total (=100% share of 5.00%)"
     capabilities_not_attempted: list[str]
     capabilities_kept: list[str]
     kernel_pipeline_funnel: dict[str, int]  # detected/recommended/optimized/adopted/...

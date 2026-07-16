@@ -22,6 +22,42 @@ log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
 
+# stop_reason recorded when the baseline could not produce an accuracy result
+# even though the accuracy test was expected to run. A broken baseline accuracy
+# means the environment/config is fundamentally wrong, so the whole run halts
+# rather than optimizing against an unvalidated baseline.
+BASELINE_ACCURACY_STOP_REASON = "baseline_accuracy_failed"
+
+
+def request_baseline_accuracy_stop(shared_state: Any, *, context: str) -> bool:
+    """Halt the run when the baseline accuracy test produced no result.
+
+    Only the baseline stops the run on a missing accuracy verdict: a baseline
+    with no accuracy signal (eval failed or the scriptable quality gate is
+    missing) indicates a fundamentally broken setup. Post-baseline variants that
+    fail the accuracy gate are reverted instead (the offending change is
+    dropped, the run continues).
+
+    Args:
+        shared_state: The live SharedState (``None`` in some unit contexts).
+        context: Short audit tag identifying the call site.
+
+    Returns:
+        bool: ``True`` if a stop reason was recorded.
+    """
+    if shared_state is None:
+        return False
+    setter = getattr(shared_state, "set_stop_reason", None)
+    if not callable(setter):
+        return False
+    log.warning(
+        "baseline accuracy test produced no result (%s); stopping run "
+        "(broken baseline setup)",
+        context,
+    )
+    setter(BASELINE_ACCURACY_STOP_REASON)
+    return True
+
 
 def require_framework_accuracy_default() -> bool:
     """Default for the framework source-patch accuracy-KEEP gate.
@@ -351,9 +387,11 @@ def accuracy_passed(
 
 __all__ = [
     "ACCURACY_THRESHOLD",
+    "BASELINE_ACCURACY_STOP_REASON",
     "accuracy_keep_block",
     "accuracy_passed",
     "is_high_accuracy_risk",
     "parse_eval_results",
+    "request_baseline_accuracy_stop",
     "require_framework_accuracy_default",
 ]

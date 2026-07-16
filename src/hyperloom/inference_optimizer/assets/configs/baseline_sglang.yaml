@@ -20,7 +20,7 @@
 benchmark:
   framework: sglang
   # benchmark_script: sglang_mi300x.sh  # uncomment to force a specific Magpie script
-  model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
+  model: /models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
   precision: bf16
   run_mode: local
 

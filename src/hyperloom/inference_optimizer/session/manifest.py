@@ -187,7 +187,7 @@ def _path_is_relative_to(path: Path, root: Path) -> bool:
 
 # Pod-local, non-persistent roots: a dependency checkout under one of these is
 # erased on pod recycle. A shared checkout elsewhere is legitimate.
-_POD_LOCAL_PREFIXES = ("/workspace", "/tmp", "/root")
+_POD_LOCAL_PREFIXES = ("/workspace", "/tmp", "/root")  # nosec B108 - path-prefix heuristic only.
 
 
 def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:

@@ -132,6 +132,20 @@ def _validate_action(action: str) -> str:
     return a
 
 
+def _validate_id_component(value: str, *, field: str) -> str:
+    """Reject path-traversal in an LLM-controlled single-segment id.
+
+    Legitimate ids (uuid hex, ``k001``) never contain a separator or ``..``;
+    anything that does could relocate a per-task sandbox and is refused here.
+    """
+    v = str(value or "").strip() or "unknown"
+    if v == "unknown":
+        return v
+    if v == "." or "/" in v or "\\" in v or ".." in Path(v).parts or Path(v).is_absolute():
+        raise ValueError(f"{field}: unsafe path component {value!r}")
+    return v
+
+
 def runs_root(session_dir: Path) -> Path:
     """Compute ``<sd>/runs/``, the parent of all per-action subtrees.
 
@@ -166,7 +180,7 @@ def runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
         ValueError: If ``action`` is not a recognised runs-workspace action.
     """
     a = _validate_action(action)
-    tid = str(task_id or "").strip() or "unknown"
+    tid = _validate_id_component(task_id, field="runs_dir.task_id")
     return runs_root(session_dir) / a / tid
 
 
@@ -196,7 +210,7 @@ def kernel_agent_runs_dir(session_dir: Path, session_id: str) -> Path:
     Returns:
         ``<session_dir>/kernel-agent/runs/<session_id>``.
     """
-    sid = str(session_id or "").strip() or "unknown"
+    sid = _validate_id_component(session_id, field="kernel_agent_runs_dir.session_id")
     return kernel_agent_runs_root(session_dir) / sid
 
 
@@ -212,7 +226,7 @@ def patches_dir(session_dir: Path, kernel_id: str) -> Path:
     Returns:
         ``<session_dir>/patches/<kernel_id>``.
     """
-    kid = str(kernel_id or "").strip() or "unknown"
+    kid = _validate_id_component(kernel_id, field="patches_dir.kernel_id")
     return Path(session_dir) / "patches" / kid
 
 

@@ -138,9 +138,9 @@ where = ["src"]
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".cursor/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
-".agents/skills/hyperloom-qwen3-30b-a3b-8h" = ["examples/hyperloom-qwen3-30b-a3b-8h/SKILL.md"]
-".claude/skills/hyperloom-qwen3-30b-a3b-8h" = ["examples/hyperloom-qwen3-30b-a3b-8h/SKILL.md"]
-".cursor/skills/hyperloom-qwen3-30b-a3b-8h" = ["examples/hyperloom-qwen3-30b-a3b-8h/SKILL.md"]
+".agents/skills/hyperloom-qwen3-14b-fp8-8h" = ["examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md"]
+".claude/skills/hyperloom-qwen3-14b-fp8-8h" = ["examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-14b-fp8-8h" = ["examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md"]
 ".agents/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
 ".claude/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
 ".cursor/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
@@ -536,15 +536,21 @@ ignore = ["E501", "E741"]
 # _build_parser cluster after the module docstring + logging setup it closes
 # over (cycle-safe ordering), so the import sits below the top import block.
 "src/hyperloom/inference_optimizer/cli/__init__.py" = ["E402"]
-# tree-reform.MD P2.2: multi_node/cli.py re-exports commands/{rayjob,dynamo}.py
+# tree-reform.MD P2.2: multi_node/cli.py re-exports commands/{rayjob,infera}.py
 # after the base helpers/constants they import back are already defined
 # (cycle-safe ordering), so the import sits below the top import block.
 "src/hyperloom/inference_optimizer/multi_node/cli.py" = ["E402"]
 "src/hyperloom/inference_optimizer/multi_node/commands/rayjob.py" = ["E402"]
-"src/hyperloom/inference_optimizer/multi_node/commands/dynamo.py" = ["E402"]
+"src/hyperloom/inference_optimizer/multi_node/commands/infera.py" = ["E402"]
 # tree-reform.MD P2.3 stage B: paths updated for the specialists/, kernel/,
 # and prompts/ subpackage moves.
 "src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]
 "src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
+# optimize_submit keeps a dynamic facade for legacy tests and monkeypatch-based
+# CI adapters. The imported helper modules intentionally re-export symbols via
+# globals().update(), which Ruff cannot statically resolve without a larger
+# compatibility-breaking refactor.
+"ci/optimize_submit.py" = ["F821"]
+"ci/optimize_submit_lib/*.py" = ["F401", "F811", "F821", "E402"]

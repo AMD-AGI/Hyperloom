@@ -2617,9 +2617,9 @@ def test_classify_patchability_rejects_missing_source_file():
 def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
     """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling
     .cuh/.cpp.jinja) must be skipped, not edited."""
-    src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
+    src = "/path/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
     # Make the reusable-root gate pass deterministically regardless of host env.
-    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/wekafs/aiter/",))
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/path/aiter/",))
     reusable, reason = tla.classify_patchability(
         {"name": "paged_attention_ragged", "source_file": src, "source_type": "python"},
     )
@@ -2666,8 +2666,8 @@ def test_classify_patchability_still_rejects_aiter_py_dispatcher(monkeypatch):
 
 def test_classify_patchability_keeps_cpp_itfs_device_source(monkeypatch):
     """The real device source (.cuh) under cpp_itfs stays reusable."""
-    src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_kernels.cuh"
-    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/wekafs/aiter/",))
+    src = "/path/aiter/csrc/cpp_itfs/pa/pa_kernels.cuh"
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/path/aiter/",))
     reusable, reason = tla.classify_patchability(
         {"name": "paged_attention", "source_file": src, "source_type": "hip_cpp"},
     )

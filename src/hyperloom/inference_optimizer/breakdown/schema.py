@@ -1457,7 +1457,7 @@ class SpecialistRound(TypedDict, total=False):
     proposals_kept: int
     proposals_rejected: int
     proposals_skipped: int
-    # Retired field, kept (always empty) for claw-stats-service readers.
+    # Retired field, kept (always empty) for backward compatibility with existing readers.
     kb_edge_ids: list[str]
     confidence_avg: float | None
     domain_breakdown: dict[str, SpecialistDomainBreakdown]

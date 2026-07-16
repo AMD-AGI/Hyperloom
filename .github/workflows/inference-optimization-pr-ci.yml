@@ -6,7 +6,7 @@ name: Inference Optimization PR-CI
 # Triggered ONLY when a maintainer approves a PR that also carries the
 # `run-pr-ci` label. Clones PR head into the SaFE sandbox and runs the
 # inference_optimizer skill from PR head (NOT from the wekafs deployed
-# snapshot under /wekafs/HyperloomV2), so reviewer-visible InferenceX
+# snapshot), so reviewer-visible InferenceX
 # numbers reflect the *proposed* code change.
 #
 # Why a dedicated file (separate from inference-optimization-ci.yml)?
@@ -67,6 +67,7 @@ jobs:
     # pull_request_review (no schedule / workflow_dispatch alongside).
     # Create the label once via: gh label create run-pr-ci.
     if: >-
+      vars.HYPERLOOM_INTERNAL_CI == 'true' &&
       github.event.review.state == 'approved' &&
       contains(github.event.pull_request.labels.*.name, 'run-pr-ci')
     strategy:

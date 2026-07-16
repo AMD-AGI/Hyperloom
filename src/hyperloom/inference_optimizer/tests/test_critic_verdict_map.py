@@ -352,6 +352,33 @@ async def test_verdict_map_collapses_to_summary_single_verdict(coord):
 
 
 @pytest.mark.asyncio
+async def test_verdict_map_mixed_collapse_logs_audit(coord, caplog):
+    # Defensive audit (log-only): a verdict_map that collapses to approve must
+    # STILL materialise the whole proposal (behaviour unchanged) AND emit a
+    # log-only audit record for traceability.
+    import logging
+
+    pending = _seed_explore_proposal(coord)
+    intent = Intent(
+        type=IntentType.REVIEW_VERDICT,
+        payload={
+            "target_proposal_msg_id": pending.proposal_msg_id,
+            "verdict_map": {
+                "v_a": {"verdict": "approve"},
+                "v_b": {"verdict": "reject"},
+            },
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
+        await coord._handle_review_verdict("critic", intent)
+    # behaviour unchanged: any approve -> summary approve -> whole proposal materialised
+    assert pending.verdict == "approve"
+    assert len(coord._materialise_calls) == 1
+    # log-only audit fired
+    assert any("review_verdict collapse" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_verdict_map_all_rejected_collapses_to_reject(coord):
     pending = _seed_explore_proposal(coord)
     intent = Intent(

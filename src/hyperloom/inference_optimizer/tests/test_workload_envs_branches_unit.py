@@ -257,7 +257,7 @@ def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = _write(tmp_path / "cfg.yaml")
-    bench = _materialize(src, tmp_path / "out", model_path="/wekafs/models/MiMo-V2-7B")
+    bench = _materialize(src, tmp_path / "out", model_path="/path/models/MiMo-V2-7B")
     assert "attention-backend triton" in bench["envs"]["EXTRA_SGLANG_ARGS"]
 
 

@@ -277,3 +277,29 @@ def test_interleave_respects_explicit_override(monkeypatch):
     assert fired is True  # 2.5h remaining < 3.0001h explicit threshold
     assert evidence["hours_remaining_threshold"] == 3.0001
     assert evidence["interleave_aware_ir6"] is False
+
+
+def test_force_exit_phase_remaining_pct_uses_chargeback_denominator():
+    """phase_remaining_pct numerator/denominator come from the same helper.
+
+    On a short bounded run the EXPLORE budget is charge-back based (share of the
+    session time still remaining), so the fraction must divide the charge-back
+    remaining by the charge-back total — not by the legacy ``max_minutes*pct``.
+    A freshly entered phase has remaining == total, i.e. a full 1.0 fraction.
+    """
+    now = time.time()
+    state = _make_explore_state(
+        max_minutes=600,
+        started_hours_ago=2.0,        # 8h remain of a 10h session
+        phase_started_hours_ago=0.0,  # EXPLORE just entered → 0 elapsed
+    )
+    total = phase_state._phase_budget_total_seconds(state, now_unix=now)
+    remaining = phase_state.phase_budget_remaining_seconds(state, now_unix=now)
+    assert total is not None and total > 0
+    # Charge-back engaged (not the legacy whole-session*pct allotment).
+    legacy = 600 * 60.0 * phase_state.DEFAULT_PHASE_BUDGET_PCT["EXPLORE"]
+    assert total != pytest.approx(legacy)
+    assert remaining == pytest.approx(total)
+
+    _, evidence = phase_state.should_force_exit_explore(state, now_unix=now)
+    assert evidence["phase_remaining_pct"] == pytest.approx(1.0)
