@@ -102,7 +102,7 @@ unit.
 
 For the full schema — useful if you are building a dashboard, reporting
 pipeline, or downstream integration on top of this file — see
-[`session_breakdown.json` integration in Hyperloom](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/session-breakdown.md).
+[`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).
 
 ## Troubleshooting
 
