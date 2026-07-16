@@ -12,24 +12,19 @@
 # Phase 3  ROCm hotfix     — install ROCclr HIP runtime + roctracer profiler fix
 # Phase 4  credentials     — resolve LLM gateway creds (single-gateway SAFE_API_KEY
 #                            or split Anthropic/OpenAI keys) into .env
-# Phase 5  dependencies + runtime install
-#                          — install.sh installs open-source deps/runtime:
-#                            io pkg, Magpie, InferenceX deps,
-#                            chained kernel-agent Ray/GEAK/TraceLens, and fa
-# Phase 6  combined env  — write runtime/hyperloom.env.sh
-# Phase 7  verify + print launch prompt
+# Phase 5  runtime env     — persist bare-metal runtime vars into .env
 #
-# Scope: core (native optimizer). The GEAK e2e optimizer, live Langfuse, Quark,
-# and gbrain KB are NOT installed here. It STOPS before launching.
+# Scope: bare-metal base setup only. Open-source deps and the optimizer runtime
+# (io pkg, Magpie, InferenceX, kernel-agent Ray/GEAK/TraceLens, fa) are installed
+# by the inference_optimizer skill, not here. It STOPS before launching.
 
 set -euo pipefail
 
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../../../.." && pwd)}"
 
-INSTALL_SH="${_script_dir}/install.sh"
 ENV_TEMPLATE="${REPO_ROOT}/.env.template"
-DOTENV="${HYPERLOOM_ENV_FILE:-${REPO_ROOT}/.env}"
+DOTENV="${REPO_ROOT}/.env"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
@@ -42,6 +37,10 @@ SAFE_API_KEY_PLACEHOLDER="ak-your-api-key-here"
 
 FRAMEWORKS="sglang,vllm"
 INSTALL_FRAMEWORK="none"
+# Track whether the operator explicitly picked a framework env (via $FRAMEWORK_ENV
+# or --framework-env). When unset, vLLM defaults to isolated (its wheel pins a
+# torch that would clash with the host stack); others default to shared.
+_FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # Framework versions track docs/compatibility.md (SGLang v0.5.12,
@@ -81,9 +80,9 @@ usage() {
   cat <<'EOF'
 Usage: src/hyperloom/inference_optimizer/assets/install_baremetal.sh [options]
 
-Install Hyperloom dependencies on a bare-metal host with ROCm + ROCm torch. Verifies
-the base, optionally installs SGLang/vLLM, resolves credentials, then chains
- install.sh. Stops BEFORE launching.
+Set up a bare-metal host with ROCm + ROCm torch for Hyperloom. Verifies the base,
+optionally installs SGLang/vLLM, resolves credentials, and writes the combined
+runtime env. Stops BEFORE launching.
 
 Options:
   --safe-api-key KEY     LLM gateway key (ak-...); overrides env / .env
@@ -115,8 +114,7 @@ PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON, TRACELENS_INTERNAL_ROOT,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
-VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG,
-HYPERLOOM_ENV_FILE.
+VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
 EOF
 }
 
@@ -140,6 +138,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --framework-env requires a value" >&2; exit 2; }
       shift
       FRAMEWORK_ENV="${1:-}"
+      _FRAMEWORK_ENV_WAS_SET="x"
       case "$FRAMEWORK_ENV" in
         shared|isolated) ;;
         *) echo "[install-baremetal] ERROR: --framework-env must be one of: shared, isolated" >&2; exit 2 ;;
@@ -833,7 +832,7 @@ rocm_profiler_hotfix_applied() {
 }
 
 rocm_profiler_hotfix_compatible() {
-  local py hip framework_versions
+  local py hip
   py="$(resolve_python 2>/dev/null)" || { warn "cannot resolve Python; skipping ROCm profiler hotfix"; return 1; }
   hip="$("$py" - <<'PY' 2>/dev/null || true
 try:
@@ -849,21 +848,17 @@ PY
     *) warn "torch.version.hip=${hip}; ROCm profiler hotfix is validated for ROCm 7.2 stacks, skipping" ; return 1 ;;
   esac
 
-  framework_versions="$("$py" - <<'PY' 2>/dev/null || true
-import importlib
-
-found = []
-for name in ("sglang", "vllm"):
-    try:
-        module = importlib.import_module(name)
-    except Exception:
-        continue
-    found.append(f"{name}={getattr(module, '__version__', 'unknown')}")
-print(" ".join(found))
-PY
-)"
-  [ -n "$framework_versions" ] || { warn "neither sglang nor vllm is importable; skipping ROCm profiler hotfix"; return 1; }
-  log "framework imports: ${framework_versions}"
+  # Probe vLLM in the isolated venv when FRAMEWORK_ENV=isolated, mirroring
+  # resolve_installed_framework, so an isolated vLLM install still qualifies.
+  local vllm_py="$py"
+  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
+    vllm_py="${VLLM_VENV_ROOT}/bin/python"
+  fi
+  local found=""
+  _py_has "$py" sglang && found="sglang"
+  _py_has "$vllm_py" vllm && found="${found:+${found} }vllm"
+  [ -n "$found" ] || { warn "neither sglang nor vllm is importable; skipping ROCm profiler hotfix"; return 1; }
+  log "framework imports: ${found}"
 }
 
 download_rocm_profiler_hotfix_libs() {
@@ -1027,7 +1022,9 @@ apply_rocm_profiler_hotfix() {
 read_dotenv_var() {
   local name="$1"
   [ -f "$DOTENV" ] || return 0
-  grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$DOTENV" 2>/dev/null | tail -n 1 \
+  # `|| true` keeps a no-match grep from tripping pipefail/set -e when this is
+  # used inside a ${VAR:-$(read_dotenv_var ...)} default expansion.
+  { grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$DOTENV" 2>/dev/null || true; } | tail -n 1 \
     | sed -E "s/^[[:space:]]*(export[[:space:]]+)?${name}=//; s/^[\"']//; s/[\"']$//"
 }
 
@@ -1121,7 +1118,7 @@ resolve_credentials() {
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
 
   # In the interactive setup flow, .env is the source of truth the user just
-  # confirmed. Do not let stale OpenAI/SaFE values leak into the chained
+  # confirmed. Do not let stale OpenAI/SaFE values leak into the downstream
   # installers, because those scripts source env with "env wins" and may persist
   # or propagate the wrong provider back into runtime env files.
   if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
@@ -1165,7 +1162,8 @@ resolve_credentials() {
     fi
   fi
 
-  # Export resolved credentials for the chained install.sh.
+  # Export resolved credentials and persist them to .env for the downstream
+  # inference_optimizer skill install and CLI preflight.
   [ -n "$safe_key" ] && export SAFE_API_KEY="$safe_key"
   [ -n "$openai_key" ] && export OPENAI_API_KEY="$openai_key"
   [ -n "$anthropic_key" ] && export ANTHROPIC_API_KEY="$anthropic_key"
@@ -1221,10 +1219,11 @@ resolve_credentials() {
   fi
 }
 
-write_combined_env() {
-  local combined="$1" ka_env="$2"
-  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then log "would write combined env: ${combined}"; return 0; fi
-  mkdir -p "$(dirname "$combined")"
+# Persist bare-metal runtime env to .env (single source of truth). PATH-class
+# values are NOT written here; preflight derives them from ROCM_PATH /
+# VIRTUAL_ENV / VLLM_VENV_ROOT at launch (_derive_runtime_paths).
+write_runtime_dotenv() {
+  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then log "would update runtime env: ${DOTENV}"; return 0; fi
   # FRAMEWORK for downstream demo skills; empty when none is importable.
   local detected_framework; detected_framework="$(resolve_installed_framework)"
   if [ -n "$detected_framework" ]; then
@@ -1232,43 +1231,6 @@ write_combined_env() {
   else
     warn "no serving framework detected; leaving FRAMEWORK unset in ${DOTENV}"
   fi
-  {
-    echo '#!/bin/sh'
-    echo '# Generated by src/hyperloom/inference_optimizer/assets/install_baremetal.sh'
-    echo '# Source this single file before launching inference_optimizer.'
-    printf 'export USER_DATA_PATH=%q\n' "$USER_DATA_PATH"
-    [ -n "${PYTHON:-}" ] && printf 'export PYTHON=%q\n' "$PYTHON"
-    [ -n "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-}" ] && printf 'export INFERENCE_OPTIMIZER_FORCE_PYTHON=%q\n' "$INFERENCE_OPTIMIZER_FORCE_PYTHON"
-    [ -n "${VIRTUAL_ENV:-}" ] && printf 'export VIRTUAL_ENV=%q\n' "$VIRTUAL_ENV"
-    [ -n "${ROCM_PATH:-}" ] && printf 'export ROCM_PATH=%q\n' "$ROCM_PATH"
-    [ -n "${HIP_PATH:-}" ] && printf 'export HIP_PATH=%q\n' "$HIP_PATH"
-    [ -n "${SGLANG_ROCM_EXTRA:-}" ] && printf 'export SGLANG_ROCM_EXTRA=%q\n' "$SGLANG_ROCM_EXTRA"
-    [ -n "${SGLANG_ROCM_PYPI_VERSION:-}" ] && printf 'export SGLANG_ROCM_PYPI_VERSION=%q\n' "$SGLANG_ROCM_PYPI_VERSION"
-    [ -n "${AITER_REF:-}" ] && printf 'export AITER_REF=%q\n' "$AITER_REF"
-    [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && printf 'export KERNEL_OPT_BACKEND_ORDER=%q\n' "$KERNEL_OPT_BACKEND_ORDER"
-    [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && printf 'export HYPERLOOM_WHEEL_REPO=%q\n' "$HYPERLOOM_WHEEL_REPO"
-    [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && printf 'export HYPERLOOM_WHEEL_TAG=%q\n' "$HYPERLOOM_WHEEL_TAG"
-    [ -n "${HYPERLOOM_ENV_FILE:-}" ] && printf 'export HYPERLOOM_ENV_FILE=%q\n' "$HYPERLOOM_ENV_FILE"
-    [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && printf 'export HYPERLOOM_SKILL_PATH=%q\n' "$HYPERLOOM_SKILL_PATH"
-    printf '[ -f %q ] && . %q\n' "$ka_env" "$ka_env"
-    if [ -n "${VIRTUAL_ENV:-}" ]; then
-      printf 'export PATH=%q:"$PATH"\n' "${VIRTUAL_ENV}/bin"
-    fi
-    if [ -n "${ROCM_PATH:-}" ]; then
-      printf 'export PATH=%q:"$PATH"\n' "${ROCM_PATH}/bin"
-      printf 'export LD_LIBRARY_PATH=%q:"${LD_LIBRARY_PATH:-}"\n' "${ROCM_PATH}/lib"
-    fi
-    [ -n "${SGLANG_USE_AITER:-}" ] && printf 'export SGLANG_USE_AITER=%q\n' "$SGLANG_USE_AITER"
-    [ -n "${detected_framework}" ] && printf 'export FRAMEWORK=%q\n' "$detected_framework"
-    printf 'export HYPERLOOM_FRAMEWORK_ENV=%q\n' "$FRAMEWORK_ENV"
-    if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
-      printf 'export VLLM_VENV_ROOT=%q\n' "$VLLM_VENV_ROOT"
-      printf 'export VLLM_PYTHON=%q\n' "${VLLM_VENV_ROOT}/bin/python"
-      printf 'export PATH=%q:"$PATH"\n' "${VLLM_VENV_ROOT}/bin"
-    fi
-  } > "$combined"
-  chmod 600 "$combined"
-  log "wrote ${combined}"
 
   upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
   [ -n "${PYTHON:-}" ] && upsert_dotenv_var PYTHON "$PYTHON"
@@ -1282,7 +1244,6 @@ write_combined_env() {
   [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && upsert_dotenv_var KERNEL_OPT_BACKEND_ORDER "$KERNEL_OPT_BACKEND_ORDER"
   [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_REPO "$HYPERLOOM_WHEEL_REPO"
   [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_TAG "$HYPERLOOM_WHEEL_TAG"
-  [ -n "${HYPERLOOM_ENV_FILE:-}" ] && upsert_dotenv_var HYPERLOOM_ENV_FILE "$HYPERLOOM_ENV_FILE"
   [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && upsert_dotenv_var HYPERLOOM_SKILL_PATH "$HYPERLOOM_SKILL_PATH"
   [ -n "${SGLANG_USE_AITER:-}" ] && upsert_dotenv_var SGLANG_USE_AITER "$SGLANG_USE_AITER"
   [ -n "${detected_framework}" ] && upsert_dotenv_var FRAMEWORK "$detected_framework"
@@ -1327,7 +1288,13 @@ EOF
 }
 
 main() {
-  [ -f "$INSTALL_SH" ] || die "install.sh not found at ${INSTALL_SH}"
+  # vLLM defaults to an isolated venv (its ROCm wheel pins a torch that would
+  # clash with the shared host stack). Operators can still force shared with an
+  # explicit $FRAMEWORK_ENV / --framework-env.
+  if [ "$INSTALL_FRAMEWORK" = "vllm" ] && [ -z "$_FRAMEWORK_ENV_WAS_SET" ]; then
+    FRAMEWORK_ENV="isolated"
+    log "vLLM selected; defaulting to isolated framework env"
+  fi
   case "$FRAMEWORK_ENV" in
     shared|isolated) ;;
     *) die "FRAMEWORK_ENV must be one of: shared, isolated" ;;
@@ -1336,15 +1303,13 @@ main() {
     die "--framework-env isolated is currently supported for vLLM only"
   fi
 
-  local user_data runtime_dir ka_env combined_env
-  user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-/workspace/hyperloom}}"
+  local user_data
+  # Precedence: --user-data-path > process env > .env > default. The .env value
+  # is honored so the setup skill's written USER_DATA_PATH is not silently lost.
+  user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$(read_dotenv_var USER_DATA_PATH)}}"
+  user_data="${user_data:-/workspace/hyperloom}"
   export USER_DATA_PATH="$user_data"
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
-  # Honor the same override chain install.sh uses so the
-  # generated env files are located where those scripts actually write them.
-  runtime_dir="${HYPERLOOM_RUNTIME_DIR:-${user_data}/runtime}"
-  ka_env="${KERNEL_AGENT_ENV:-${runtime_dir}/kernel-agent.env.sh}"
-  combined_env="${runtime_dir}/hyperloom.env.sh"
 
   if [ -n "$DEPS_ROOT_ARG" ]; then
     export HYPERLOOM_DEPS_ROOT="$DEPS_ROOT_ARG"
@@ -1376,34 +1341,7 @@ main() {
 
   resolve_credentials
 
-  # Runtime install. The GEAK e2e optimizer is always installed (whether it runs
-  # is chosen per-session via KERNEL_OPT_BACKEND_ORDER); Langfuse stays off
-  # unless HYPERLOOM_LANGFUSE_ENABLE is already set in the environment/.env.
-  local in_args=()
-  [ "$DRY_RUN" -eq 1 ] && in_args+=(--dry-run)
-  [ "$CHECK_ONLY" -eq 1 ] && in_args+=(--check-only)
-  log "Phase 5: install.sh ${in_args[*]}"
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    bash "$INSTALL_SH" "${in_args[@]}" || warn "install.sh (preview) reported issues"
-  else
-    bash "$INSTALL_SH" "${in_args[@]}"
-  fi
-  if [ -f "$ka_env" ]; then
-    log "sourcing ${ka_env}"
-    # shellcheck disable=SC1090
-    . "$ka_env"
-  elif [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    warn "expected ${ka_env} after install.sh but it is missing"
-  fi
-
-  # Phase 6: combined env.
-  write_combined_env "$combined_env" "$ka_env"
-
-  # Phase 7: verification pass.
-  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    log "Phase 7: verifying (--check-only)"
-    bash "$INSTALL_SH" --check-only || warn "install.sh --check-only reported issues"
-  fi
+  write_runtime_dotenv
 
   if [ "$DRY_RUN" -eq 1 ]; then log "done (dry-run: no changes made)"; return 0; fi
   if [ "$CHECK_ONLY" -eq 1 ]; then log "done (check-only: verification pass complete)"; return 0; fi

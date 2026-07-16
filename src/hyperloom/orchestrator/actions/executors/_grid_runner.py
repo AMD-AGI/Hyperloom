@@ -141,10 +141,22 @@ def _resolve_magpie_python() -> str:
         # Probe Magpie AND ``yaml`` so an interpreter that resolves Magpie via a
         # .pth but lacks PyYAML is skipped in favour of the canonical /opt/venv.
         try:
-            # run_with_session_kill captures output internally and rejects
-            # capture_output.
+            # Probe with ``importlib.util.find_spec`` rather than a bare
+            # ``import`` so a missing module returns a non-zero exit code
+            # WITHOUT the child emitting a ``ModuleNotFoundError`` traceback.
+            # ``run_with_session_kill`` mirrors child stderr to the parent
+            # stream, so a bare ``import Magpie`` on a candidate that lacks it
+            # would leak an alarming traceback into the run log even though the
+            # probe failing is an expected, benign step of interpreter
+            # resolution. ``find_spec`` still checks both Magpie and its
+            # top-level runtime dep ``yaml`` (see the note above).
             proc = run_with_session_kill(
-                [py, "-c", "import Magpie, yaml"],
+                [
+                    py,
+                    "-c",
+                    "import importlib.util as u, sys; "
+                    "sys.exit(0 if u.find_spec('Magpie') and u.find_spec('yaml') else 1)",
+                ],
                 timeout=10,
             )
             return getattr(proc, "returncode", 1) == 0
@@ -1273,6 +1285,39 @@ async def run_grid(
             if not keep_going_on_failure:
                 break
             continue
+
+        # Multi-node client warmup: one discarded benchmark pass against the
+        # just-restarted, persistent remote server to warm JIT / steady-state
+        # before the measured pass. No lifecycle / no restart between; best-
+        # effort (a warmup failure never fails the variant). Default ON
+        # (INFERENCE_OPTIMIZER_MN_BENCH_WARMUP=0 disables).
+        from ._multi_node_env import (
+            is_multi_node as _mn_imn,
+            mn_bench_warmup_enabled as _mn_warm,
+        )
+        if _mn_imn() and _mn_warm():
+            _mn_warm_slot = slot / "mn_warmup"
+            try:
+                await asyncio.to_thread(
+                    _run_magpie,
+                    magpie_python=magpie_python,
+                    config_path=cfg_path,
+                    output_dir=_mn_warm_slot,
+                    timeout_sec=variant_timeout_sec,
+                    cwd=cwd,
+                    result_dir=None,
+                    soft_deadline_sec=None,
+                    preclean=False,
+                )
+                log.info(
+                    "grid_runner: MN warmup pass done (discarded) %d/%d name=%s",
+                    i + 1, len(grid), variant.name,
+                )
+            except Exception as exc:  # noqa: BLE001 - warmup is best-effort
+                log.warning(
+                    "grid_runner: MN warmup pass failed (ignored) name=%s: %r",
+                    variant.name, exc,
+                )
 
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
         # leak destinations per-variant.

@@ -2,7 +2,7 @@ Use the inference_optimizer skill from the configured Hyperloom checkout to opti
 
 The skill is the Python `inference_optimizer` package in this repository. Read `src/hyperloom/inference_optimizer/SKILL.md` first, then follow Step 1 ("Install") and Step 2 ("Launch a New Optimization"). Do NOT use any marketplace skill download or `download_skill` tool.
 
-Run config — pass as CLI flags to `inference_optimizer optimize`:
+Run config — pass as CLI flags to `python -m hyperloom.inference_optimizer.cli optimize`:
   --model {model_path}
   --framework {framework}
   --gpu-type {gpu_type_lc}

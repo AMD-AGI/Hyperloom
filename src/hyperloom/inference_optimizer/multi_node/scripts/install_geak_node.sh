@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# One-time GEAK install on a Dynamo GPU pod (idempotent), driven over SSH by
+# One-time GEAK install on a Infera GPU pod (idempotent), driven over SSH by
 # `hyperloom.inference_optimizer.multi_node install-geak`.
 #
 # The GEAK source tree is already cloned by the sandbox's install.sh onto the
-# shared $USER_DATA_PATH mount (which the Dynamo pod also mounts), so we do NOT
+# shared $USER_DATA_PATH mount (which the Infera pod also mounts), so we do NOT
 # bake GEAK into the image — we just pip-install that shared checkout into the
 # pod's framework venv so the `geak` CLI lands on PATH. The pod's on-disk ROCm
 # torch is pinned first so GEAK's transitive deps can't swap it for PyPI CUDA

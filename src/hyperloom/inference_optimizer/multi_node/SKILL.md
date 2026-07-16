@@ -25,29 +25,32 @@ Dashboard and rewrites the file), maintained by the CLI.
 | Create RayJob   | `create-rayjob`                           | `curl POST /workloads`, `kubectl create -f rayjob.yaml`   |
 | Check phase     | `create-rayjob` (idempotent — resumes)    | `curl /workloads/{id}`, `kubectl get rayjob`              |
 | Restart server  | `restart-server`                          | `kubectl exec ... sglang.launch_server`                   |
-| Stop            | `stop-rayjob`                             | `curl POST .../stop`                                      |
+| Stop            | `stop-multi-job`                             | `curl POST .../stop`                                      |
 
 Bypassing loses: idempotency, `ownerId` cascade cleanup, exit-2 +
 `MULTI_NODE_FAILURE_SNAPSHOT={...}` failure detection, cross-subcommand
 state, and `BENCHMARK_BASE_URL` plumbing for Magpie.
 
-## Dynamo backend (`--mn-backend dynamo`)
+## Infera backend (`--mn-backend infera`)
 
 Alternative multi-node backend: same "long-lived idle pod + external server
-restart" loop as RayJob, but on a SaFE **DynamoDeployment** with **SSH** as the
+restart" loop as RayJob, but on a SaFE **InferaDeployment** with **SSH** as the
 control plane instead of the Ray Dashboard. Only active when `--nodes >= 2`;
-single-node runs are unaffected. Select via `optimize --mn-backend dynamo`
-(or `$INFERENCE_OPTIMIZER_MN_BACKEND=dynamo`).
+single-node runs are unaffected. Select via `optimize --mn-backend infera`
+(or `$INFERENCE_OPTIMIZER_MN_BACKEND=infera`).
 
 Worker pods deploy **idle** (`mn-idle.sh` → sshd + block); `restart-server`
-SSHes in to (re)launch `dynamo.sglang`/`dynamo.vllm`, so the aiter JIT cache
-survives across restarts. Benchmarks always target the **Dynamo frontend
+SSHes in to (re)launch `infera.engine.sglang`/`infera.engine.vllm`, so the aiter JIT cache
+survives across restarts. Benchmarks always target the **Infera frontend
 :8000** (`state.service_url` → `BENCHMARK_BASE_URL`), never sglang rank-0 :8888.
 
 Requirements & behaviour:
 
-* **Image** must carry the sshd layer (`docker/dynamo/Dockerfile.sshd`); sshd
-  runs on `$MN_SSH_PORT` (default 2222, not 22).
+* **Image** must carry the sshd layer (`docker/infera/Dockerfile.sshd`); sshd
+  runs on `$MN_SSH_PORT` (default base 2222, not 22). Under hostNetwork, each
+  GPU **role** binds a distinct port (prefill/worker `2222+N`, decode
+  `2232+N` via `LWS_WORKER_INDEX`) so co-located roles on one node do not
+  collide.
 * **Aggregated** (default): `serviceRoles=[frontend, worker]`,
   `multinodeRoles=[worker]`, `worker.replica = nodes`.
 * **PD disaggregation**: pass `optimize --pd-mode disaggregated
@@ -58,41 +61,117 @@ Requirements & behaviour:
   single-node instances.
 
 Subcommands (`restart-server` / `kill-inference` auto-route by `state.backend`;
-no `bootstrap` / `verify` step):
+no `init-env` / `verify` step):
 
 ```bash
-python3 -m hyperloom.inference_optimizer.multi_node create-dynamo --image <img-with-sshd> --nodes <N> \
+python3 -m hyperloom.inference_optimizer.multi_node create-infera --image <img-with-sshd> --model <path-or-hf-id> --nodes <N> \
   [--pd-mode disaggregated --pd-prefill-nodes N --pd-decode-nodes M] [--kv-transfer-backend mooncake]
 python3 -m hyperloom.inference_optimizer.multi_node restart-server --framework sglang --model <path> --tp <N> [--ep <N>] [--extra-args "..."]
 python3 -m hyperloom.inference_optimizer.multi_node kill-inference
-python3 -m hyperloom.inference_optimizer.multi_node stop-rayjob [--clear-state]
+python3 -m hyperloom.inference_optimizer.multi_node stop-multi-job [--clear-state]
 ```
 
 Native params via `restart-server --extra-args` (standard sglang knobs:
 `--ep-size`, `--enable-dp-attention`, `--attention-backend aiter`,
-`--mem-fraction-static`) and `dynamo.frontend --router-mode {round-robin,kv}`.
+`--mem-fraction-static`) and `infera.server --router-mode {round-robin,kv}`.
 `--kv-transfer-backend {nixl,mori,mooncake}` selects the PD KV plane.
 Prefer `mooncake` for sglang on this RoCE/bnxt fabric: `nixl` completes
 requests with HTTP 200 but produces 0 output tokens (prefill OK, decode emits
 nothing — KV handoff via UCX/nixl fails to register/transfer). `mooncake`
 auto-detects the RDMA device and is the sglang framework default.
 
-Kernel-agent on the Dynamo backend (no Ray): GEAK
-runs on a GPU pod over SSH (`KERNEL_AGENT_GPU_PLACEMENT=ssh`, injected only when
-`backend==dynamo`); `apply-patch` / `revert-patch` / `kernel-bench` fan out over
-SSH (routed by `state.backend`). The provisioner installs the toolchain on
-the pods once (`install-geak`, from the shared `$HYPERLOOM_ROOT/geak`
-checkout) — skipped under `--no-kernel`. vLLM multi-node
-bootstraps Ray across the pods pod-side.
+Kernel-agent on the Infera backend (no Ray): GEAK runs on a GPU pod over SSH
+(`KERNEL_AGENT_GPU_PLACEMENT=ssh`, injected only when `backend==infera`);
+`apply-patch` / `revert-patch` / `kernel-bench` fan out over SSH (routed by
+`state.backend`). The provisioner installs GEAK on the pods once
+(`install-geak`, from the shared `$HYPERLOOM_ROOT/geak` checkout) — skipped
+under `--no-kernel`. vLLM multi-node bootstraps Ray across the pods pod-side.
+
+## External mode (SaFE-less: env-provided cluster)
+
+When SaFE is **unavailable** (`SAFE_API_URL` / `SAFE_API_KEY` not both set) and
+`HYPERLOOM_MN_EXT_SERVICE_URL` is set, the optimizer **skips all SaFE
+create/init** and synthesizes the multi-node state from env vars, then
+benchmarks (and, when SSH/head is supplied, restarts + GPU-samples) an
+already-provisioned cluster. When both `SAFE_API_*` are present these external
+vars are ignored (normal SaFE flow).
+
+**Common (both backends):**
+
+| Env var | Req? | Purpose |
+| --- | --- | --- |
+| `HYPERLOOM_MN_EXT_SERVICE_URL` | **yes** | HTTP(S) frontend for benchmarks (-> `BENCHMARK_BASE_URL`); presence triggers external mode |
+
+**Infera backend (`--mn-backend infera`):**
+
+| Env var | Req? | Purpose |
+| --- | --- | --- |
+| `HYPERLOOM_MN_EXT_SSH_KEY` | **yes** | private key that can SSH into the pods (you supply it; no SaFE to inject one) |
+| `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` / `_WORKER_IPS` | **yes** (at least one) | comma-separated GPU pod IPs (topology / PD / GPU sampling). PD-disaggregated uses `_PREFILL_IPS` + `_DECODE_IPS`; aggregated uses `_WORKER_IPS` |
+| `HYPERLOOM_MN_EXT_SSH_PORT` | no | SSH base port (default 2233; decode is role-offset +10) |
+| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | no | known_hosts path (else lax host-key check) |
+
+**RayJob backend (`--mn-backend rayjob`):**
+
+| Env var | Req? | Purpose |
+| --- | --- | --- |
+| `HYPERLOOM_MN_EXT_HEAD_IP` | recommended | Ray head pod IP -> Dashboard `:8265` (job submit) + GCS `:6379` (derived `ray_address`). Enables per-round `restart-server` via Ray. Omit for **benchmark-only** (no restarts) |
+| `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | no | Ray Dashboard auth token (only if the dashboard is authenticated) |
+
+RayJob external does **not** use SSH; the infera `_SSH_*` / `*_IPS` vars are
+ignored for `--mn-backend rayjob`.
+
+**Companion vars (reused as-is, normally set by `optimize` from CLI flags):**
+`INFERENCE_OPTIMIZER_NODES`, `INFERENCE_OPTIMIZER_GPUS_PER_NODE`, `PD_MODE`,
+`PD_PREFILL_NODES` / `PD_DECODE_NODES` (inferred from IP-list length when unset),
+`INFERENCE_OPTIMIZER_MN_BACKEND`, `SAFE_WORKSPACE` (passthrough).
+
+Behavior:
+
+* **infera external REQUIRES SSH** (`_SSH_KEY` + at least one `*_IPS`); if missing
+  the run **fails fast** (`sys.exit(2)`) rather than degrading. With SSH: full
+  SSH restart + on-pod GPU sampling + pd/by-role telemetry, exactly like a
+  SaFE-created infera deployment. The SSH keypair is normally hyperloom-generated
+  and its **public** key is injected into the pods by SaFE at create time; with
+  SaFE absent you pre-authorize your own key on the pods and pass its private path
+  via `_SSH_KEY`.
+* **rayjob external** uses Ray via `_HEAD_IP` (not SSH); Dashboard on `:8265`,
+  GCS on `:6379`. With `_HEAD_IP`: per-round `restart-server` via Ray job submit.
+  Without `_HEAD_IP`: **benchmark-only** (per-round restart no-ops). The infera
+  SSH rule does not apply.
+
+Example (SaFE assumed absent, infera PD-disaggregated):
+
+```bash
+unset SAFE_API_URL SAFE_API_KEY
+export HYPERLOOM_MN_EXT_SERVICE_URL=http://<frontend-host>:8000
+export HYPERLOOM_MN_EXT_PREFILL_IPS=<prefill-ip>  HYPERLOOM_MN_EXT_DECODE_IPS=<decode-ip>
+export HYPERLOOM_MN_EXT_SSH_KEY=/path/to/id_ed25519
+export INFERENCE_OPTIMIZER_NODES=2 PD_MODE=disaggregated
+inference_optimizer optimize --model <path> --nodes 2 \
+  --mn-backend infera --pd-mode disaggregated --tp 8 --ep 8 ...
+```
+
+Example (SaFE assumed absent, rayjob with per-round restart):
+
+```bash
+unset SAFE_API_URL SAFE_API_KEY
+export HYPERLOOM_MN_EXT_SERVICE_URL=http://<ray-serve-or-head-url>:<port>
+export HYPERLOOM_MN_EXT_HEAD_IP=<ray-head-ip>
+# optional: export HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN=<token>
+export INFERENCE_OPTIMIZER_NODES=2
+inference_optimizer optimize --model <path> --nodes 2 \
+  --mn-backend rayjob --tp 8 --ep 8 ...
+```
 
 ## The Five Subcommands
 
 ```bash
 python3 -m hyperloom.inference_optimizer.multi_node create-rayjob   --image <rayjob-image> --nodes <N>
-python3 -m hyperloom.inference_optimizer.multi_node bootstrap       [--print-logs]
+python3 -m hyperloom.inference_optimizer.multi_node init-env       [--print-logs]
 python3 -m hyperloom.inference_optimizer.multi_node verify
 python3 -m hyperloom.inference_optimizer.multi_node restart-server  --framework <sglang|vllm> --model <path-or-id> --tp <N>  [--extra-args "..."]
-python3 -m hyperloom.inference_optimizer.multi_node stop-rayjob     [--clear-state]
+python3 -m hyperloom.inference_optimizer.multi_node stop-multi-job     [--clear-state]
 ```
 
 Run `<subcommand> --help` for the full flag set. **Do not invent flags.**
@@ -121,18 +200,18 @@ Typical prompt fields and where they land:
 | User prompt | Launcher action |
 |---|---|
 | `Nodes=N` / `N nodes` | `create-rayjob --nodes N`; `optimize --nodes N` |
-| `RayJob image: …` / `Dynamo image: …` | `create-rayjob`/`create-dynamo --image …`; `optimize --rayjob-image …` |
+| `RayJob image: …` / `Infera image: …` | `create-rayjob`/`create-infera --image …`; `optimize --mn-image …` |
 | `TP=N`, `EP=…` | `restart-server --tp N`; `optimize --tp` / `--ep`. **Always set `--tp`** (default is 1); for PD set it to the per-role TP. |
-| `MN_BACKEND=dynamo` | `optimize --mn-backend dynamo` (selects the idle DynamoDeployment + SSH backend; default `rayjob`). |
+| `MN_BACKEND=infera` | `optimize --mn-backend infera` (selects the idle InferaDeployment + SSH backend; default `rayjob`). |
 | `PD_MODE=disaggregated` | `optimize --pd-mode disaggregated` — **must be passed as a flag**; `$PD_MODE` env is deliberately ignored (stale-env guard). Omit ⇒ aggregated. |
-| `PD_PREFILL_NODES` / `PD_DECODE_NODES` | `optimize --pd-prefill-nodes N --pd-decode-nodes M`. |
-| `PD_PREFILL_TP` / `PD_DECODE_TP` | `optimize --pd-prefill-tp N --pd-decode-tp M` (default = `--tp`). A PD role spans nodes (LWS) only when its TP > GPUs-per-pod. |
-| `PD_PREFILL_EP` / `PD_DECODE_EP` | **Dynamo PD only.** export `$PD_PREFILL_EP` / `$PD_DECODE_EP` (read by `restart-server` as defaults). Per-role expert-parallel size; `0` (default) ⇒ fall back to the shared `--ep`. Lets prefill run EP1 while decode runs EP8 (InferenceX disagg recipe). Ignored by RayJob/aggregated/single-node. |
-| `PD_PREFILL_EXTRA_ARGS` / `PD_DECODE_EXTRA_ARGS` | **Dynamo PD only.** export these; appended to the **per-role** sglang launch AFTER the shared `--extra-args` base (role-specific wins on duplicate keys). Used to give prefill vs decode different server flags (e.g. decode `--enable-dp-attention --moe-a2a-backend deepep --deepep-mode normal --moe-dense-tp-size 1 --enable-dp-lm-head`; prefill `--mem-fraction-static 0.8 --disable-radix-cache`). Empty (default) ⇒ both roles use only the shared `--extra-args`. **Sandbox-only** (do NOT `--rayjob-extra-env`). |
-| `PD_TRANSFER_BACKEND` | `optimize --pd-transfer-backend mooncake`; `nixl|mori|mooncake`. **Use `mooncake` for sglang** — `nixl` returns 200 OK but 0 output tokens on this RoCE/bnxt fabric (decode KV handoff fails). |
-| `ISL` / `OSL` / `CONC` / `PRECISION` | `optimize --isl` / `--osl` / `--conc` / `--precision` |
+| `PD_PREFILL_NODES` / `PD_DECODE_NODES` | `optimize --pd-prefill-nodes N --pd-decode-nodes M` (or export `$PD_PREFILL_NODES`/`$PD_DECODE_NODES` — read as flag defaults). |
+| `PD_PREFILL_TP` / `PD_DECODE_TP` | `optimize --pd-prefill-tp N --pd-decode-tp M` (or export; default = `--tp`). A PD role spans nodes (LWS) only when its TP > GPUs-per-pod. |
+| `PD_PREFILL_EP` / `PD_DECODE_EP` | **Infera PD only.** export `$PD_PREFILL_EP` / `$PD_DECODE_EP` (read by `restart-server` as defaults). Per-role expert-parallel size; `0` (default) ⇒ fall back to the shared `--ep`. Lets prefill run EP1 while decode runs EP8 (InferenceX disagg recipe). Ignored by RayJob/aggregated/single-node. |
+| `PD_PREFILL_EXTRA_ARGS` / `PD_DECODE_EXTRA_ARGS` | **Infera PD only.** export these; appended to the **per-role** sglang launch AFTER the shared `--extra-args` base (role-specific wins on duplicate keys). Used to give prefill vs decode different server flags (e.g. decode `--enable-dp-attention --moe-a2a-backend deepep --deepep-mode normal --moe-dense-tp-size 1 --enable-dp-lm-head`; prefill `--mem-fraction-static 0.8 --disable-radix-cache`). Empty (default) ⇒ both roles use only the shared `--extra-args`. **Sandbox-only** (do NOT `--rayjob-extra-env`). |
+| `PD_TRANSFER_BACKEND` | `optimize --pd-transfer-backend mooncake` (or export `$PD_TRANSFER_BACKEND`); `nixl|mori|mooncake`. **Use `mooncake` for sglang** — `nixl` returns 200 OK but 0 output tokens on this RoCE/bnxt fabric (decode KV handoff fails). |
+| `ISL` / `OSL` / `CONC` / `PRECISION` | `export` + `optimize --isl` / `--osl` / `--conc` / `--precision` |
 | `KERNEL_OPT_*` / `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX` | `export` before `install.sh` / `optimize` |
-| prompt `env:` block lines (e.g. `PATH_TO_AINIC_TAR_PACKAGE=…`, `PATH_TO_BNXT_TAR_PACKAGE=…`, `NCCL_DEBUG=INFO`) | `create-rayjob --extra-env K=V` (one per line, repeatable); `optimize --rayjob-extra-env K=V` (same shape). Skip `*_API_KEY` / `*_BASE_URL` (credential fanout auto-injects) and `RAY_JOB_ENTRYPOINT` (reserved). CLI owns no defaults — values come verbatim from the prompt. **Do NOT forward sandbox-side tool source fields** (`INFERENCEX_PATH` / `TRACELENS_ROOT`) here — they are sandbox-only; see `src/hyperloom/inference_optimizer/SKILL.md` "Tool source fields". |
+| prompt `env:` block lines (e.g. `PATH_TO_AINIC_TAR_PACKAGE=…`, `PATH_TO_BNXT_TAR_PACKAGE=…`, `NCCL_DEBUG=INFO`) | `create-rayjob --extra-env K=V` (one per line, repeatable); `optimize --rayjob-extra-env K=V` (same shape). Skip `*_API_KEY` / `*_BASE_URL` (credential fanout auto-injects) and `RAY_JOB_ENTRYPOINT` (reserved). CLI owns no defaults — values come verbatim from the prompt. **Do NOT forward sandbox-side tool source fields** (`OOB_SRC` / `INFERENCEX_PATH` / `TRACELENS_ROOT`) here — they are sandbox-only; see `inference_optimizer/SKILL.md` "Tool source fields". |
 | MoE JIT cold-start (often omitted in prompt) | `export HYPERLOOM_MN_POLL_TIMEOUT_S=1800` and `HYPERLOOM_MN_HEALTH_WAIT_S=1800` — see below |
 
 If the prompt already contains the first rows, **do not** claim the
@@ -142,12 +221,12 @@ and `multi_node` subcommands. Only add exports the prompt did not cover
 
 **DO NOT `--rayjob-extra-env` these (sandbox-only):**
 
-These are consumed by `install.sh` / `inference_optimizer optimize` /
+These are consumed by `install.sh` / `python -m hyperloom.inference_optimizer.cli optimize` /
 `_workload_envs.py` running inside the **sandbox**; nothing inside the
 RayJob pod reads them. Forwarding them pollutes the pod env and risks
 shadowing real values.
 
-- `KERNEL_OPT_*`
+- `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX`, `KERNEL_OPT_*`
 - `NODE_TLS_REJECT_UNAUTHORIZED`
 - `RANDOM_RANGE_RATIO`, `RUN_EVAL`
 - `MODEL_PATH`, `FRAMEWORK`, `TP`, `EP`, `ISL`, `OSL`, `CONC`, `PRECISION`,
@@ -156,14 +235,14 @@ shadowing real values.
 - `MN_BACKEND`, `PD_MODE`, `PD_PREFILL_NODES`, `PD_DECODE_NODES`,
   `PD_PREFILL_TP`, `PD_DECODE_TP`, `PD_PREFILL_EP`, `PD_DECODE_EP`,
   `PD_PREFILL_EXTRA_ARGS`, `PD_DECODE_EXTRA_ARGS`, `PD_TRANSFER_BACKEND`
-  (sandbox-side `optimize` flags / env; the Dynamo deployment is created by
-  `create-dynamo` from these / consumed by `restart-server`, NOT injected
+  (sandbox-side `optimize` flags / env; the Infera deployment is created by
+  `create-infera` from these / consumed by `restart-server`, NOT injected
   into pods)
 - `HYPERLOOM_MN_POLL_TIMEOUT_S`, `HYPERLOOM_MN_HEALTH_WAIT_S` (sandbox
   CLI poll budget, not a pod env)
 
 Forward to `--rayjob-extra-env` **only** the prompt `env:` block lines
-(`NCCL_DEBUG`, `PATH_TO_*` etc.). `INFERENCEX_PATH` /
+(`NCCL_DEBUG`, `PATH_TO_*` etc.). `OOB_SRC` / `INFERENCEX_PATH` /
 `TRACELENS_ROOT` are sandbox-only and **must NOT** be forwarded (the
 RayJob pod does not consume them — kernel-bench is NodeAffinity-pinned
 to the head pod).
@@ -176,14 +255,15 @@ Environment block / `setup_env.sh`; do not treat literals below as defaults):
 export HYPERLOOM_MN_POLL_TIMEOUT_S=1800
 export HYPERLOOM_MN_HEALTH_WAIT_S=1800
 # Optional kernel exports — only when the prompt specifies them
-export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-forge}"
+export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-claude}"
+export KERNEL_AGENT_BUILD_GEAK_RAG_INDEX="${KERNEL_AGENT_BUILD_GEAK_RAG_INDEX:-0}"
 
-setsid nohup inference_optimizer --verbose optimize \
+setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --gpu-type "${GPU_TYPE:?set from prompt}" \
   --nodes "${NODES:?set from prompt Nodes=N}" \
-  --rayjob-image "${INFERENCE_OPTIMIZER_RAYJOB_IMAGE:?set from prompt RayJob image}" \
+  --mn-image "${INFERENCE_OPTIMIZER_MN_IMAGE:?set from prompt multi-node image}" \
   --tp "${TP:?set from prompt TP=N}" \
   ${EP:+--ep "$EP"} \
   --conc "${CONC:?set from prompt}" \
@@ -192,6 +272,7 @@ setsid nohup inference_optimizer --verbose optimize \
   --precision "${PRECISION:?set from prompt}" \
   --target-gain "${TARGET_GAIN:?set from prompt}" \
   --max-hours "${MAX_HOURS:?set from prompt}" \
+  ${KERNEL_CLAUDE:+--kernel-claude} \
   ${CLAUDE_MODEL:+--claude-model "$CLAUDE_MODEL"} \
   $(for kv in "${RAYJOB_EXTRA_ENV[@]:-}"; do [ -n "$kv" ] && printf -- '--rayjob-extra-env %q ' "$kv"; done) \
   > "$RUN_LOG" 2>&1 < /dev/null &
@@ -211,7 +292,7 @@ Only `create-rayjob` sets the SaFE workload name. Resolution order:
 
 `create-rayjob` polls **SaFE GetWorkload `phase`** until it is **`Running`**.
 Do **not** treat individual pod `phase=Running` as a substitute while the
-workload is still `Pending` — bootstrap / `head_pod_ip` / benchmarks must
+workload is still `Pending` — init-env / `head_pod_ip` / benchmarks must
 wait for the workload object to flip. If poll times out with `phase=Pending`,
 re-run the **same** `create-rayjob` (idempotent resume) with a longer
 `HYPERLOOM_MN_POLL_TIMEOUT_S` or `--poll-timeout`; inspect
@@ -237,19 +318,20 @@ resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
 1. **`create-rayjob`** — once. Persists `rayjob_id` before polling
    (overlapping retries never spawn a second RayJob), then fills
    `head_pod_ip` / `service_url` once phase is `Running`.
-2. **`bootstrap`** — once. Submits `bootstrap.sh` via Ray Dashboard REST
-   to install geak / tracelens on the head pod.
+2. **`init-env`** — once. Submits `init_rayjob_env.sh` via Ray Dashboard REST
+   to verify `/opt/venv` and write `hyperloom-env.sh` (PATH only) on the
+   head pod.
 3. **`verify`** — once. Checks `ray` on PATH on the head pod.
-   On `MISSING:`, re-run `bootstrap --print-logs`.
+   On `MISSING:`, re-run `init-env --print-logs`.
 4. **`restart-server`** — every framework / model / TP / flag change.
    Kills the previous server via PID file (never `pkill -f`), relaunches
    under `nohup` so Ray pods do NOT restart and the aiter JIT cache
    survives. Issue ONE invocation per change; the CLI fans out across
    all pods on multi-node runs. Never issue per-pod invocations.
-5. **`stop-rayjob`** — at session end. Always call explicitly for an
+5. **`stop-multi-job`** — at session end. Always call explicitly for an
    auditable release. `ownerId` cascade is a safety net (sandbox
    deletion removes the SaFE workload and tears the RayJob down via
-   owner-ref), not a substitute. `inference_optimizer optimize
+   owner-ref), not a substitute. `python -m hyperloom.inference_optimizer.cli optimize
    --nodes N>=2` does **not** call it on exit; nor does sandbox idle /
    hard-TTL GC distinguish "session in progress" from "session
    abandoned" — when the sandbox dies the RayJob is collateral, so an
@@ -259,7 +341,7 @@ resume an in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
 After step 4 route all benchmark / Magpie traffic to
 `state.service_url` (head pod ClusterIP `:8888`). Re-read
 `/tmp/multi_node_state.json` every turn; never cache `head_pod_ip` /
-`service_url` across actions — RayJob recreate (or `stop-rayjob` then
+`service_url` across actions — RayJob recreate (or `stop-multi-job` then
 `create-rayjob` again) reassigns the head pod and rewrites both keys.
 
 ## Hard Rules
@@ -272,8 +354,8 @@ After step 4 route all benchmark / Magpie traffic to
   **same** subcommand (resume uses `last_restart_submission_id`). Never
   wrap in `sleep` / `while true ...; sleep 60; done`.
 * **ADDENDUM-13** (credentials): `SAFE_API_URL` / `SAFE_API_KEY` must be
-  in sandbox env at CLI start (Brain injects). CLI fans them out (plus
-  provider-specific runtime credentials) to RayJob env at `create-rayjob`.
+  in sandbox env at CLI start (Brain injects). LLM keys are consumed in the
+  sandbox only — not via `create-rayjob` workload env or `init_rayjob_env.sh`.
   **Never pass keys on the command line.**
 * **ADDENDUM-02** (no Ray Python client in orchestration layer):
   `multi_node/cli.py` and `multi_node/_internal/` MUST use Ray Dashboard
@@ -326,7 +408,7 @@ After step 4 route all benchmark / Magpie traffic to
 
 ## Robustness limitation in multi-node mode
 
-`hyperloom.inference_optimizer.cli._resolve_robustness_choice` enforces the
+`inference_optimizer.cli._resolve_robustness_choice` enforces the
 contract above:
 
 ```python
@@ -376,18 +458,15 @@ default `--robustness-agent` was selected via
 
 * `create-rayjob` times out → rerun; state already has `rayjob_id`,
   rerun resumes polling.
-* `bootstrap` fails → `bootstrap --print-logs` once for the trace.
-  The script (`multi_node/scripts/bootstrap.sh`) is repo-owned and
+* `init-env` fails → `init-env --print-logs` once for the trace.
+  The script (`multi_node/scripts/init_rayjob_env.sh`) is repo-owned and
   should not be edited from the agent — failures usually point at one
-  of: missing credentials in the RayJob env (verify the ADDENDUM-13
-  fan-out so `SAFE_API_KEY` and provider runtime credentials actually
-  reached the head pod), the BYOI image lacking a toolchain package,
-  or the head pod failing to reach an upstream package / model
-  registry. Fix the root cause (env / image / network), then rerun;
-  RayJob stays alive across the retry.
+  of: the RayJob image lacking `/opt/venv`, or the head pod failing to
+  reach an upstream package / model registry. Fix the root cause (image /
+  network), then rerun; RayJob stays alive across the retry.
 * `restart-server` hangs in health probe → rerun with `--no-wait-health`
   to detach, then `verify` / `curl state.service_url/health` to debug.
-* Cluster-side cleanup → `stop-rayjob --delete --clear-state` (hard
+* Cluster-side cleanup → `stop-multi-job --delete --clear-state` (hard
   delete = SaFE `DELETE /workloads/{id}`).
 * `ModuleNotFoundError: No module named 'sglang'` + stderr shows
   `setsid python3 -m sglang.launch_server` on the sandbox →
@@ -425,11 +504,11 @@ default `--robustness-agent` was selected via
   current RayJob image will fail at argparse regardless of model /
   TP. Image rebuilds happen out-of-band; do not carry a hard-coded
   skip list across sessions. On each fresh sandbox boot, after
-  `bootstrap` succeeds, probe the framework launcher from the RayJob
+  `init-env` succeeds, probe the framework launcher from the RayJob
   head pod (the sandbox does not have the inference framework
   installed) and cross-reference its flag set against the grid for
   that framework in
-  `src/hyperloom/orchestrator/actions/executors/backends.py`:
+  `inference_optimizer/orchestrator/action_executors/backends.py`:
   * **sglang** — probe via `python3 -m sglang.launch_server --help`;
     grid = `DEFAULT_BACKENDS_GRID` plus the multi-node tier
     additions.
@@ -439,7 +518,7 @@ default `--robustness-agent` was selected via
 
   For each variant in the active framework's grid whose flag the
   probe reports missing, add the variant name to `--skip-variants`
-  on `inference_optimizer optimize` (or `SKIP_VARIANTS=...` in the
+  on `python -m hyperloom.inference_optimizer.cli optimize` (or `SKIP_VARIANTS=...` in the
   prompt). Drop entries the moment a probe shows the flag accepted
   again. The other framework's grid is irrelevant to this run and
   MUST NOT be probed against the wrong launcher.
@@ -456,3 +535,46 @@ default `--robustness-agent` was selected via
   runner writes), then state that decision in the prompt with the
   model name spelled out — never propagate the skip silently into the
   next session.
+
+## Interpreting a low-gain result
+
+* A small validated gain with `kernel_opt_outcome="skip"` / `totals.attempted=0`
+  (`reports/kernel_optimization_summary.json`) means the profiled step was
+  host-bound. Kernel candidates come only from the TraceLens `analysis.md`, and
+  `tracelens_analysis._evaluate_high_idle_gate` suppresses them when the step is
+  mostly GPU-idle; only structural levers (GPU-graph capture + batching) apply.
+* Under PD-disaggregation + DP-attention the per-rank steady-state batch can be
+  bs1 even at high client concurrency, so TraceLens splits into
+  `*_steady_state_..._bs1_conc1` windows. If every file in
+  `tracelens/trace_split/` is `bs1_conc1`, the trace is host-bound and kernel_opt
+  skips by design.
+* Kernel candidates require a compute-bound profile (steady-state bsN, N>1). The
+  lever is the per-rank step batch (DP/PD topology), not client concurrency. On
+  multi-node this is automatic: a host-bound profile (high GPU idle + 0
+  candidates) triggers one compute-bound re-profile with DP-attention/dp-size
+  stripped (single DP rank, full per-step batch); candidates found are still
+  validated on the served config. Disable with
+  `HYPERLOOM_PROFILE_AUTO_COMPUTE_BOUND=0`.
+
+## Disaggregated + DP-attention prerequisites
+
+* `--enable-dp-attention` / `--enable-dp-lm-head` are no-ops without `--dp-size N`
+  (N>1); sglang force-disables them at `dp_size==1`.
+  `launch_infera_node._build_sglang_cmd` auto-injects `--dp-size = tp` when a
+  dp-attention flag is present and `--dp-size` is absent (explicit value wins).
+* With `dp_size>1` sglang binds one kv-events ZMQ socket per DP rank at
+  `base+rank`; the image must ship `infera.common.net.free_tcp_port_block`. An
+  image without it allocates a single port and decode crash-loops with
+  `zmq.error.ZMQError: Address already in use` — rebuild the image from current
+  Optimus.
+* KV transfer backend default is `mori`.
+
+## Readiness gate
+
+`_wait_for_server_health_async` requires, in order: `/health` 200 ->
+`/v1/models` non-empty -> `/v1/completions` (`max_tokens>=2`, `ignore_eos`)
+returning `completion_tokens>=2`, twice. It fast-fails when `/v1/models` stays
+empty for `HYPERLOOM_MN_MODELS_EMPTY_GRACE_S` (default 600s) after `/health` is
+up (workers crashed on launch). Tunables:
+`HYPERLOOM_MN_COMPLETION_PROBE_{COUNT,TOKENS,MIN_TOKENS}`,
+`HYPERLOOM_MN_MODELS_EMPTY_GRACE_S`.

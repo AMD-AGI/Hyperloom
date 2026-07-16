@@ -1217,6 +1217,24 @@ class Coordinator(metaclass=_CoordinatorMeta):
         from .maintenance import MaintenanceCollaborator
         return self._collaborator("_maintenance", MaintenanceCollaborator)
 
+    def _kb_hardware_slug(self) -> str:
+        """Topology-aware hardware dimension for the recipe ``canonical_id``.
+
+        Single-node: bare ``gpu_type`` (existing keys/data unchanged).
+        Multi-node: ``gpu_type`` + ``_ws{world_size}`` so multi-node runs never
+        share a recipe key with — and overwrite the ``best_config`` of — the
+        single-node recipe. MUST match ``cortex_t0.run_t0_anchor``'s derivation
+        so warm-start reads and KEEP/REVERT/CLOSE writes target the same row.
+
+        Returns:
+            The topology-aware hardware slug for the current run.
+        """
+        from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
+        from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+
+        ss = self.shared_state
+        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
+
 
 
 
