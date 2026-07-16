@@ -1299,13 +1299,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     operator_server_args = str(getattr(args, "server_args", "") or "").strip()
     if operator_server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
-    # Re-export $TP/$CONC/$EP when explicitly supplied (always for multi-node); skip defaults in single-node.
-    _export_workload_envs_for_optimize(
-        args,
-        nodes_resolved=nodes_resolved,
-        tp_resolved=tp_resolved,
-        ep_resolved=ep_resolved,
-    )
+    # Project resolved workload knobs into env for the fresh-launch path only.
+    # A resume must NOT export here: ``args.tp``/etc. are still unresolved
+    # (``None`` -> 1) because the persisted SharedState is loaded later; the
+    # resume branch re-exports the real values after ``_resolve_workload_knobs``
+    # so downstream (incl. preflight) never sees the placeholder default.
+    if not args.resume and not args.resume_from:
+        _export_workload_envs_for_optimize(
+            args,
+            nodes_resolved=nodes_resolved,
+            tp_resolved=tp_resolved,
+            ep_resolved=ep_resolved,
+        )
     # User-declared grid skip list; re-export so subprocess executors inherit it (empty clears stale values).
     skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
     os.environ["SKIP_VARIANTS"] = skip_variants_resolved

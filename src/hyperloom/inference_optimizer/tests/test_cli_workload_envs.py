@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -13,6 +14,7 @@ import yaml
 from hyperloom.inference_optimizer.cli import (
     _export_workload_envs_for_optimize,
     _resolve_run_max_model_len,
+    _resolve_workload_knobs,
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
@@ -21,7 +23,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 
 
 def _ns(**kwargs) -> argparse.Namespace:
-    defaults = {"conc": 8}
+    defaults = {"conc": 64}
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
 
@@ -36,6 +38,43 @@ def _write_yaml(path, framework, benchmark_script=None):
 def _write_yaml_with_envs(path, framework, envs):
     bench = {"framework": framework, "model": "/m", "envs": dict(envs)}
     path.write_text(yaml.safe_dump({"benchmark": bench}), encoding="utf-8")
+
+
+def _knob_ns(**kwargs) -> argparse.Namespace:
+    base = {"isl": None, "osl": None, "conc": None, "tp": None, "ep": None, "precision": None}
+    base.update(kwargs)
+    return argparse.Namespace(**base)
+
+
+def test_resolve_workload_knobs_fresh_defaults():
+    """Fresh launch, no flags: unset knobs fall back to the shared defaults."""
+    a = _knob_ns()
+    _resolve_workload_knobs(a)
+    assert (a.isl, a.osl, a.conc, a.tp, a.ep, a.precision) == (1024, 1024, 64, 1, 1, "bf16")
+
+
+def test_resolve_workload_knobs_explicit_flags_win():
+    """Explicit flags are preserved verbatim over defaults."""
+    a = _knob_ns(isl=512, osl=512, conc=32, tp=2, ep=2, precision="fp8")
+    _resolve_workload_knobs(a)
+    assert (a.isl, a.osl, a.conc, a.tp, a.ep, a.precision) == (512, 512, 32, 2, 2, "fp8")
+
+
+def test_resolve_workload_knobs_resume_restores_state():
+    """Resume without workload flags: persisted SharedState values win over defaults."""
+    a = _knob_ns()
+    state = SimpleNamespace(isl=4096, osl=2048, conc=128, tp=8, ep=8, precision="fp8")
+    _resolve_workload_knobs(a, state)
+    assert (a.isl, a.osl, a.conc, a.tp, a.ep, a.precision) == (4096, 2048, 128, 8, 8, "fp8")
+
+
+def test_resolve_workload_knobs_resume_explicit_flag_overrides_state():
+    """Resume WITH an explicit flag: the flag wins over the persisted state."""
+    a = _knob_ns(tp=1)
+    state = SimpleNamespace(isl=4096, osl=2048, conc=128, tp=8, ep=8, precision="fp8")
+    _resolve_workload_knobs(a, state)
+    assert a.tp == 1  # explicit --tp 1 wins
+    assert a.isl == 4096  # unset -> restored from state
 
 
 def test_framework_script_mismatch_fails_fast(tmp_path):

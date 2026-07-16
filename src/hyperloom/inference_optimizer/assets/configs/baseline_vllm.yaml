@@ -11,7 +11,9 @@ benchmark:
   run_mode: local
 
   envs:
-    TP: 8
+    # Last-resort fallbacks only; the CLI always projects the resolved
+    # workload (flag > resume-state > default) into these envs before launch.
+    TP: 1
     CONC: 64
     ISL: 1024
     OSL: 1024
