@@ -22,7 +22,7 @@ benchmark:
   framework: xdit
   workload_kind: scriptable        # drives server-less branching in the loop
   # benchmark_script: xdit_mi355x.sh  # uncomment to force a specific Magpie script
-  model: /wekafs/models/FLUX.1-dev     # OVERRIDDEN at runtime; see header.
+  model: /path/models/FLUX.1-dev     # OVERRIDDEN at runtime; see header.
   precision: bf16                  # LOCKED for xdit sessions
   run_mode: local
 
