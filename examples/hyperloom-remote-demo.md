@@ -48,7 +48,7 @@ ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B/   # --model
 ${NFS_SHARED_ROOT}/InferenceX/             # INFERENCEX_PATH
 ${NFS_SHARED_ROOT}/Magpie/                 # MAGPIE_PATH
 ${NFS_SHARED_ROOT}/TraceLens/              # TRACELENS_ROOT
-${NFS_SHARED_ROOT}/tracelens-private-extension/  # TRACELENS_INTERNAL_ROOT (optional)
+${NFS_SHARED_ROOT}/TraceLens-internal/     # TRACELENS_INTERNAL_ROOT (optional)
 ```
 
 ## What the agent produces
@@ -99,7 +99,7 @@ PID, and monitors `state.json` until a terminal `stop_reason`.
 | `GPU_TYPE` / `PRECISION` | Target GPU (e.g. `mi325x`) and dtype (`bf16`) |
 | `ISL` / `OSL` / `CONC` / `RANDOM_RANGE_RATIO` | Benchmark input/output length, concurrency, length jitter |
 | `INFERENCEX_PATH` / `MAGPIE_PATH` / `TRACELENS_ROOT` | Tool checkouts under `${NFS_SHARED_ROOT}` |
-| `TRACELENS_INTERNAL_ROOT` | Optional internal TraceLens extension |
+| `TRACELENS_INTERNAL_ROOT` | Optional `TraceLens-internal` checkout |
 | `SGLANG_USE_AITER` / `SGLANG_AITER_MLA_PERSIST` | Enable + persist the aiter kernel path |
 | `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap / wait timeouts (infera PD only) |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | TLS check toggle for internal endpoints |

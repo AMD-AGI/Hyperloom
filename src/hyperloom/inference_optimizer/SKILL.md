@@ -52,7 +52,7 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 ├── runtime/                              # workspace-shared (install.sh, Magpie, kernel-agent.env.sh)
 │   ├── kernel-agent.env.sh
 │   ├── Magpie/
-│   └── source-mirrors/{InferenceX,TraceLens[,tracelens-private-extension]}/
+│   └── source-mirrors/{InferenceX,TraceLens[,TraceLens-internal]}/
 │       # Open-source deps are installed by install.sh.
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
@@ -351,7 +351,7 @@ of `src/hyperloom/inference_optimizer/assets/install.sh`):
 |---|---|
 | `ray==2.44.1` + `click<8.3.0` | pip |
 | TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
-| Private TraceLens extension (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/tracelens-private-extension`; rehydration module). Unset => open-source-only. |
+| TraceLens-internal (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module). Unset => open-source-only. |
 | GEAKv4 Claude Code workflow checkout + SDK deps | `ensure_geak` |
 
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}` is
@@ -539,8 +539,8 @@ export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # pre-existing checkout you maintain; this skips both the clone and the
 # SHA pin.
 # export TRACELENS_ROOT=/path/to/your/TraceLens
-# Optional private extension; export only to enable it (open-source-only if unset):
-# export TRACELENS_INTERNAL_ROOT=/workspace/tracelens-private-extension
+# Optional TraceLens-internal checkout; export only to enable it (open-source-only if unset):
+# export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"

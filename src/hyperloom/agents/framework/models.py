@@ -4,8 +4,8 @@
 
 ``ExploreRequest.gap_description`` feeds :mod:`framework_agent.keywords` for
 perf keyword extraction; ``search_modes`` is an ordered tuple of enabled
-candidate sources (e.g. ``("primus_cortex", "github")`` unions both, with the
-PR Monitor-compatible source hard-failing and GitHub best-effort).
+candidate sources (e.g. ``("primus_cortex", "github")`` unions both, with
+primus_cortex hard-failing and GitHub best-effort).
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ class Thresholds:
 
 @dataclass(frozen=True)
 class PrimusCortexConfig:
-    """Configuration for a PR Monitor-compatible service.
+    """Configuration for the primus_cortex service.
 
     When present on :class:`ExploreRequest`, the agent routes PR candidate
     enumeration through this service. Errors are hard-failed by callers
@@ -153,7 +153,7 @@ class CommandSpec:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A single PR or git ref candidate (explicit, PR Monitor, or GitHub).
+    """A single PR or git ref candidate (explicit, primus_cortex, or GitHub).
 
     ``score`` is the gap-relevance score; 0.0 when no gap-driven ranking happened.
     """
@@ -220,7 +220,7 @@ class PrFilter:
     """Server-side and client-side filter applied to enumerated PR candidates.
 
     Path filters require Stage 2 enrichment (changed_files populated).
-    Labels are case-insensitive. Dates flow through to the PR Monitor
+    Labels are case-insensitive. Dates flow through to primus_cortex's
     REST query when supported.
     """
 

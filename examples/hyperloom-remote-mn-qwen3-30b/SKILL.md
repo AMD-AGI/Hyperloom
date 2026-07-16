@@ -36,7 +36,7 @@ ${NFS_SHARED_ROOT}/Magpie/                 # MAGPIE_PATH
 ${NFS_SHARED_ROOT}/TraceLens/              # TRACELENS_ROOT
 ```
 
-If your deployment has a private TraceLens extension, set
+If your deployment has the `TraceLens-internal` checkout, set
 `TRACELENS_INTERNAL_ROOT` separately. Leave it unset for the public open-source
 path.
 

@@ -5581,7 +5581,7 @@ def main() -> int:
     parser.add_argument(
         "--tracelens-internal-root",
         default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
-        help="Optional private TraceLens extension checkout (TRACELENS_INTERNAL_ROOT). "
+        help="Optional TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
         "Rehydration module; plumbed to run_tracelens_skill. "
         "Leave empty for the open-source-only report.",
     )
@@ -5856,7 +5856,7 @@ def main() -> int:
             if tl_internal_root is not None and not tl_internal_root.exists():
                 append_log(
                     log_path,
-                    f"TraceLens extension root not found: {tl_internal_root}; "
+                    f"TraceLens-internal root not found: {tl_internal_root}; "
                     "falling back to open-source-only "
                     "(provide an existing internal checkout to enable)",
                 )
@@ -5864,7 +5864,7 @@ def main() -> int:
             if tl_internal_root is None:
                 append_log(
                     log_path,
-                    "TraceLens extension: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)",
+                    "TraceLens-internal: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)",
                 )
                 os.environ.pop("TL_EXTENSION", None)
             run_command(

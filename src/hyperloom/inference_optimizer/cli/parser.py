@@ -948,7 +948,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip() or None,
         help="PR Monitor REST URL for this run (flag wins). Default: "
         "$PRIMUS_CORTEX_PR_API, else unset. Set this flag or env var to a "
-        "reachable PR Monitor-compatible HTTPS endpoint. Pair with "
+        "reachable primus_cortex HTTPS endpoint. Pair with "
         "--pr-monitor-mcp-url when exposing the corresponding MCP server.",
     )
     opt.add_argument(

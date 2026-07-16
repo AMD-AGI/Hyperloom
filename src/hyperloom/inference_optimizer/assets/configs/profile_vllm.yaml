@@ -17,7 +17,7 @@
 # Issue #194 §4: `capture_torch_profiler_dir` and
 # `detailed_trace_annotation` are *not* in upstream vLLM 0.19 — they
 # come from the TraceLens patch set at
-# a private TraceLens extension patch set.
+# TraceLens-internal/examples/custom_workflows/inference_analysis/vllm_patches/.
 # Hyperloom's runtime patcher (HYPERLOOM_ENABLE_PATCH=1, default) tries
 # to apply the matching `config_vllm_v<version>.patch` against the
 # in-container vLLM install at the start of every profile. If patching
