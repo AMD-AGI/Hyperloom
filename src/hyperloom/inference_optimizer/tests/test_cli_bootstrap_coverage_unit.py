@@ -124,6 +124,78 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
 
+def _stub_seed_deps(monkeypatch, tmp_path):
+    """Common monkeypatches so ``_seed_shared_state`` runs without real I/O."""
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
+    monkeypatch.setattr(
+        cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""),
+    )
+    from hyperloom.orchestrator.policy import gate as policy
+
+    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
+
+
+def test_seed_uses_explicit_workload_flags_over_defaults(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Regression for #903: explicit workload flags must reach SharedState.
+
+    When the operator passes ``--isl/--osl/--conc``, those values (not the
+    fallback defaults) must seed SharedState, regardless of any inherited env.
+    """
+    _stub_seed_deps(monkeypatch, tmp_path)
+    monkeypatch.setenv("ISL", "256")
+    monkeypatch.setenv("OSL", "256")
+    monkeypatch.setenv("CONC", "8")
+
+    state = cb._seed_shared_state(
+        tmp_path,
+        _args(model="/models/Qwen2.5-7B", isl=512, osl=512, conc=64, tp=1, ep=1),
+        session_id="s-explicit",
+    )
+
+    assert state.isl == 512
+    assert state.osl == 512
+    assert state.conc == 64
+    assert state.tp == 1
+    assert state.ep == 1
+
+
+def test_seed_applies_new_workload_defaults_when_unset(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Regression for #903: when workload flags are unset (argparse default
+    ``None``) and no inherited env is present, SharedState must seed the new
+    fallback defaults (ISL/OSL=1024, CONC=64, TP/EP=1)."""
+    _stub_seed_deps(monkeypatch, tmp_path)
+    for key in ("ISL", "OSL", "CONC", "TP", "EP"):
+        monkeypatch.delenv(key, raising=False)
+
+    state = cb._seed_shared_state(
+        tmp_path,
+        _args(
+            model="/models/Qwen2.5-7B",
+            isl=None,
+            osl=None,
+            conc=None,
+            tp=None,
+            ep=None,
+        ),
+        session_id="s-default",
+    )
+
+    assert state.isl == 1024
+    assert state.osl == 1024
+    assert state.conc == 64
+    assert state.tp == 1
+    assert state.ep == 1
+
+
 def test_seed_shared_state_preserves_quantized_model_identity(
     tmp_path: Path,
     monkeypatch,

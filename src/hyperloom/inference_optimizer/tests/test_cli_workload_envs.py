@@ -81,19 +81,24 @@ def test_single_node_explicit_tp_overrides_stale_env(monkeypatch):
     assert os.environ["TP"] == "4"
 
 
-def test_single_node_default_does_not_clobber_yaml_defaults(monkeypatch):
-    """No explicit flag: keep single-node YAML/env resolution unchanged."""
-    monkeypatch.delenv("TP", raising=False)
+def test_single_node_exports_resolved_workload_envs(monkeypatch):
+    """Resolved workload knobs project into env unconditionally so SharedState,
+    manifest, and the materialized YAML agree (issue #903). The resolver has
+    already folded flag > resume-state > default into ``args``/``*_resolved``."""
+    for key in ("TP", "CONC", "EP"):
+        monkeypatch.delenv(key, raising=False)
 
     _export_workload_envs_for_optimize(
-        _ns(conc=8),
+        _ns(conc=64),
         nodes_resolved=1,
         tp_resolved=1,
         ep_resolved=1,
         argv=["optimize", "--model", "/m"],
     )
 
-    assert "TP" not in os.environ
+    assert os.environ["TP"] == "1"
+    assert os.environ["CONC"] == "64"
+    assert os.environ["EP"] == "1"
 
 
 def test_multi_node_always_exports_workload_envs(monkeypatch):

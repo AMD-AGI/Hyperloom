@@ -13,8 +13,8 @@ benchmark:
   envs:
     TP: 8
     CONC: 64
-    ISL: 256
-    OSL: 256
+    ISL: 1024
+    OSL: 1024
     RANDOM_RANGE_RATIO: 1
     MAX_MODEL_LEN: 8192
     # ROCR_VISIBLE_DEVICES injected at runtime by baseline.py

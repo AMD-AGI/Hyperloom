@@ -438,9 +438,12 @@ def materialize_config_with_envs(
             )
         envs["ROCR_VISIBLE_DEVICES"] = derived
 
-    isl_val = int(envs.get("ISL") or 256)
-    osl_val = int(envs.get("OSL") or 256)
-    conc_val = int(envs.get("CONC") or 8)
+    # Last-resort fallbacks kept in sync with the CLI workload defaults
+    # (parser.DEFAULT_ISL/OSL/CONC); normally the CLI has already projected the
+    # resolved values into these envs before materialization.
+    isl_val = int(envs.get("ISL") or 1024)
+    osl_val = int(envs.get("OSL") or 1024)
+    conc_val = int(envs.get("CONC") or 64)
 
     # Steady-state window for profiling configs (detected by PROFILE env or
     # ``profiler.torch_profiler.enabled``). The captured-step count is capped at
