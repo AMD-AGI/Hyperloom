@@ -104,6 +104,12 @@ log = logging.getLogger("hyperloom.inference_optimizer.cli")
 from .parser import (
     _build_parser as _build_parser,
     _positive_int_arg as _positive_int_arg,
+    DEFAULT_ISL,
+    DEFAULT_OSL,
+    DEFAULT_CONC,
+    DEFAULT_TP,
+    DEFAULT_EP,
+    DEFAULT_PRECISION,
 )
 from .preflight import (
     _preflight as _preflight,
@@ -1206,6 +1212,43 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     return phase_budget_pct
 
 
+def _resolve_workload_knobs(
+    args: argparse.Namespace,
+    state: Any | None = None,
+) -> None:
+    """Fill unset workload knobs on ``args`` from a fixed priority ladder.
+
+    Priority: explicit CLI flag (non-``None``) > resumed ``SharedState`` value >
+    fallback default. Writes the resolved values back onto ``args`` so every
+    downstream consumer (SharedState seed, manifest, env projection) reads one
+    authoritative source instead of racing argparse defaults against env
+    (issue #903). Inherited process env is deliberately NOT a config source.
+
+    Args:
+        args: Parsed CLI namespace; mutated in place.
+        state: Resumed ``SharedState`` whose persisted knobs win over defaults
+            when the flag is unset; ``None`` on a fresh launch.
+    """
+    int_knobs = (
+        ("isl", DEFAULT_ISL),
+        ("osl", DEFAULT_OSL),
+        ("conc", DEFAULT_CONC),
+        ("tp", DEFAULT_TP),
+        ("ep", DEFAULT_EP),
+    )
+    for name, default in int_knobs:
+        val = getattr(args, name, None)
+        if val is None:
+            persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
+            val = persisted if persisted > 0 else default
+        setattr(args, name, int(val))
+    precision = getattr(args, "precision", None)
+    if not precision:
+        persisted = (getattr(state, "precision", "") or "").strip() if state is not None else ""
+        precision = persisted or DEFAULT_PRECISION
+    args.precision = precision
+
+
 def _export_workload_envs_for_optimize(
     args: argparse.Namespace,
     *,
@@ -1214,24 +1257,26 @@ def _export_workload_envs_for_optimize(
     ep_resolved: int,
     argv: list[str] | None = None,
 ) -> None:
-    """Mirror explicit workload CLI flags (--tp/--conc/--ep) into env so executors' Magpie YAMLs honor them.
+    """Project resolved workload knobs (TP/CONC/EP) into env for downstream Magpie YAMLs.
+
+    After ``_resolve_workload_knobs`` the values on ``args`` are already the
+    authoritative resolution (flag > resume-state > default), so export them
+    unconditionally. This keeps SharedState, the manifest, and the materialized
+    YAML in agreement instead of the old gated export that only fired for
+    explicit flags / multi-node and left SharedState and the served value split
+    (issue #903).
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads ``conc``).
-        nodes_resolved (int): The resolved node count; ``>= 2`` forces export
-            of all three knobs regardless of whether they were passed.
+        nodes_resolved (int): The resolved node count (unused; retained for the
+            call-site contract).
         tp_resolved (int): The resolved tensor-parallel size to export as ``TP``.
         ep_resolved (int): The resolved expert-parallel size to export as ``EP``.
-        argv (list[str] | None): The argument vector to inspect for explicit
-            flags; defaults to ``sys.argv[1:]`` when ``None``.
+        argv (list[str] | None): Unused; retained for the call-site contract.
     """
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if nodes_resolved >= 2 or _argv_has_option(argv, "--tp"):
-        os.environ["TP"] = str(tp_resolved)
-    if nodes_resolved >= 2 or _argv_has_option(argv, "--conc"):
-        os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
-    if nodes_resolved >= 2 or _argv_has_option(argv, "--ep"):
-        os.environ["EP"] = str(ep_resolved)
+    os.environ["TP"] = str(max(1, int(tp_resolved or 1)))
+    os.environ["CONC"] = str(max(1, int(getattr(args, "conc", DEFAULT_CONC) or DEFAULT_CONC)))
+    os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
 
 
 async def _run_optimize(args: argparse.Namespace) -> int:
@@ -1285,13 +1330,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     operator_server_args = str(getattr(args, "server_args", "") or "").strip()
     if operator_server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
-    # Re-export $TP/$CONC/$EP when explicitly supplied (always for multi-node); skip defaults in single-node.
-    _export_workload_envs_for_optimize(
-        args,
-        nodes_resolved=nodes_resolved,
-        tp_resolved=tp_resolved,
-        ep_resolved=ep_resolved,
-    )
+    # Project resolved workload knobs into env for the fresh-launch path only.
+    # A resume must NOT export here: ``args.tp``/etc. are still unresolved
+    # (``None`` -> 1) because the persisted SharedState is loaded later; the
+    # resume branch re-exports the real values after ``_resolve_workload_knobs``
+    # so downstream (incl. preflight) never sees the placeholder default.
+    if not args.resume and not args.resume_from:
+        _export_workload_envs_for_optimize(
+            args,
+            nodes_resolved=nodes_resolved,
+            tp_resolved=tp_resolved,
+            ep_resolved=ep_resolved,
+        )
     # User-declared grid skip list; re-export so subprocess executors inherit it (empty clears stale values).
     skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
     os.environ["SKIP_VARIANTS"] = skip_variants_resolved
@@ -1479,20 +1529,24 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
             if runner_gpu_type != state.gpu_type:
                 print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
-        # Re-export workload metadata from SharedState so resume sees the same workload contract (not YAML defaults).
-        for state_attr, env_name in (
-            ("tp", "TP"),
-            # ``ep`` mirrors EP so single-node vLLM MoE resume still injects --enable-expert-parallel.
-            ("ep", "EP"),
-            ("conc", "CONC"),
-            ("isl", "ISL"),
-            ("osl", "OSL"),
-            ("max_model_len", "MAX_MODEL_LEN"),
+        # Resolve workload knobs with the resumed state as the fallback source
+        # (explicit --isl/--conc/... on this resume still win), then project the
+        # resolved values into env so resume sees the same workload contract
+        # (not YAML defaults). ``ep`` mirrors EP so single-node vLLM MoE resume
+        # still injects --enable-expert-parallel.
+        _resolve_workload_knobs(args, state)
+        _resume_max_model_len = getattr(args, "max_model_len", None) or getattr(state, "max_model_len", 0) or 0
+        for env_name, val in (
+            ("TP", args.tp),
+            ("EP", args.ep),
+            ("CONC", args.conc),
+            ("ISL", args.isl),
+            ("OSL", args.osl),
+            ("MAX_MODEL_LEN", _resume_max_model_len),
         ):
-            val = getattr(state, state_attr, 0) or 0
             if val:
-                os.environ[env_name] = str(val)
-                print(f"  re-exported {env_name:<14s}: {val}")
+                os.environ[env_name] = str(int(val))
+                print(f"  re-exported {env_name:<14s}: {int(val)}")
         # Profile-scoped OSL: an explicit --profile-osl on this resume wins;
         # otherwise re-export the value persisted from the original run.
         _resume_profile_osl = getattr(args, "profile_osl", None) or getattr(state, "profile_osl", 0)
@@ -1500,9 +1554,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             os.environ["PROFILE_OSL"] = str(int(_resume_profile_osl))
             state.profile_osl = int(_resume_profile_osl)
             print(f"  re-exported PROFILE_OSL   : {int(_resume_profile_osl)}")
-        if state.precision:
-            os.environ["PRECISION"] = state.precision
-            print(f"  re-exported PRECISION     : {state.precision}")
+        if args.precision:
+            os.environ["PRECISION"] = args.precision
+            print(f"  re-exported PRECISION     : {args.precision}")
         if getattr(state, "framework_version", ""):
             os.environ["FRAMEWORK_VERSION"] = state.framework_version
             print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
@@ -1685,6 +1739,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.gpu_type = None
             print("GPU type        : <unset> (Magpie will auto-detect)")
 
+        # Resolve workload knobs (flag > default; no resume state on a fresh
+        # launch) so ISL/OSL/CONC/TP/EP are authoritative reals before
+        # MAX_MODEL_LEN auto-derivation and env projection (issue #903).
+        _resolve_workload_knobs(args)
         # MAX_MODEL_LEN is operator-overridable. Auto resolution only runs when
         # neither --max-model-len nor $MAX_MODEL_LEN was supplied.
         max_model_len, max_model_len_source = _resolve_run_max_model_len(args)

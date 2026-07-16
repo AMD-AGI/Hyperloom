@@ -16,7 +16,7 @@ import re
 import shlex
 from typing import Any
 
-from hyperloom.common.coerce import optional_positive_int
+from hyperloom.common.coerce import optional_positive_int, to_str_list
 
 
 log = logging.getLogger(__name__)
@@ -63,18 +63,6 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
-def _coerce_str_list(value: Any) -> list[str]:
-    """Normalize optional string/list controls to non-empty strings."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, (list, tuple, set)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    text = str(value).strip()
-    return [text] if text else []
-
-
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     """Remove flag specs from a server-arg string.
 
@@ -84,7 +72,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     unparseable inputs are left untouched rather than guessed.
     """
     args = str(server_args or "").strip()
-    removes = _coerce_str_list(remove_args)
+    removes = to_str_list(remove_args)
     if not args or not removes:
         return args
     try:

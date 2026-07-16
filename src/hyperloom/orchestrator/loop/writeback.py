@@ -23,23 +23,16 @@ from ..state.optimization_journal import (
 from ..state.shared_state import SharedState
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
-from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
-    _BASELINE_FINGERPRINT_KEYS,
+from .coordinator_helpers import (
     _MIN_KERNEL_ENGAGED_GAIN_PCT,
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
-    _infer_model_class_from_config,
     _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
-    _parse_iso_unix,
     _geak_revalidation_decision,
     _geak_sweep_measured_tput,
-    _resolve_roofline_watermark_ratio,
     _scrape_resolved_launch_flags,
     _split_env_and_flags,
-    effective_closing_grace_sec,
-    format_exc_brief,
-    serialize_verdict_advisory,
 )
 from ..policy.gate import (
     PolicyDenied,

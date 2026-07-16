@@ -1,44 +1,43 @@
+---
+myst:
+    html_meta:
+        "description": "Run Hyperloom inside a Docker container or on bare-metal on an AMD GPU machine. Covers installing Hyperloom, configuring credentials, and running a demo."
+        "keywords": "Hyperloom, Docker, container, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Cursor, Dev Containers, quickstart, ROCm"
+---
 # Hyperloom Quickstart
 
-This README is the main entry point for setting up Hyperloom and launching the
-model demo skills. The recommended customer path is a packaged install with
-`pip install --target`; the source-clone path is kept at the end for developers
-and manual debugging.
+These instructions allow you to setup and run Hyperloom inside a Docker container
+or on bare-metal on an AMD GPU machine. The recommended path is to install the
+packaged with `pip install --target`; the source-clone path is kept at the end
+for developers and manual debugging.
 
-## Recommended Path: Install the Wheel
+## Recommended Path: Install using wheel
 
-Use this path for customer demos and clean validation. It installs Hyperloom into
-one target directory, and that directory is also the agent workspace you open in
-Cursor, Claude Code, or Codex.
+This is the recommended path to install and get started with Hyperloom. It
+installs Hyperloom into one target directory, which also serves as the agent
+workspace you open in Cursor, Claude Code, or Codex.
 
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
 - Access to one LLM provider: Anthropic or DeepSeek.
-- For private Hyperloom releases, `gh` access to the GitHub release asset.
 
-Download the release wheel, then install it into a clean target directory:
+### Install Hyperloom
+
+pip install Hyperloom using the following command:
 
 ```bash
-gh auth login
-gh release download v0.8 \
-  -R AMD-AGI/Hyperloom \
-  -p 'hyperloom_inference_optimizer-0.8.0-py3-none-any.whl'
-
-rm -rf ~/hyperloom
-
 python3 -m pip install \
   ./hyperloom_inference_optimizer-0.8.0-py3-none-any.whl \
   --target ~/hyperloom
 ```
 
 `pip install --target` creates the target directory automatically. It is normal
-for `~/hyperloom` to contain many Python package directories after install; users
-do not need to inspect them.
+for `~/hyperloom` to contain many Python package directories after install.
 
-## Run `/hyperloom-setup`
+### Setup Hyperloom
 
-Open `~/hyperloom` in the user's agent and run:
+Open the `~/hyperloom` folder in your agent and run:
 
 ```text
 /hyperloom-setup
@@ -47,13 +46,13 @@ Open `~/hyperloom` in the user's agent and run:
 In Cursor and Claude Code, use `/hyperloom-setup`; in Codex, use
 `$hyperloom-setup`.
 
-That command runs the setup skill installed from
+This command runs the setup skill installed from
 [`src/hyperloom/skills/hyperloom-setup/SKILL.md`](../src/hyperloom/skills/hyperloom-setup/SKILL.md).
 
-The setup skill is interactive. It creates `.env`, records the selected run
-scenario, and stops before launching an optimization.
+The setup skill is interactive. It creates the `.env` file, records
+the selected run scenario, and stops before launching an optimization.
 
-It asks for:
+It will ask you for the following information during setup:
 
 - LLM mode: Anthropic or DeepSeek.
 - Non-secret LLM settings: base URL and model.
@@ -61,14 +60,16 @@ It asks for:
   paste API keys into chat.
 - `USER_DATA_PATH` (defaults to `<workspace>/session`).
 - Setup scenario: `baremetal` or `baremetal + Docker` (recorded in `.env` as
-  `HYPERLOOM_RUN_MODE=baremetal` or `HYPERLOOM_RUN_MODE=docker`).
+  `HYPERLOOM_RUN_MODE=baremetal` or `HYPERLOOM_RUN_MODE=docker`) - if you are
+  installing Hyperloom inside of a Docker container, select the `baremetal`
+  option.
 
-## Setup Scenarios
+## Setup scenarios
 
-Hyperloom supports two local setup scenarios. Pick the one matching where the
+Hyperloom supports two local setup scenarios. Pick the one that matches where your 
 serving framework will run.
 
-### Scenario A: Bare Metal
+### Scenario A: Bare metal
 
 Use this when the current host is the AMD GPU host where Hyperloom will run
 directly.
@@ -95,7 +96,7 @@ The backend runs `install_baremetal.sh` in five phases:
 5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
 
-### Scenario B: Bare Metal + Docker
+### Scenario B: Bare metal + Docker
 
 Use this when the agent starts from a bare host or login node, but the workload
 will run inside a ROCm container. This is the recommended path when the host
@@ -127,7 +128,7 @@ HYPERLOOM_DOCKER_TARGET_HOST=<hostname>
 
 The demo skill reads this value to target the chosen host.
 
-## Environment Written by Setup
+### Environment written by setup
 
 LLM defaults:
 
@@ -151,11 +152,12 @@ skill's `install.sh`.
 
 `.env` is the single source of truth; no extra script needs sourcing.
 
-## Run a Demo
+## Run a demo
 
-When setup finishes in `baremetal` mode (and `FRAMEWORK` is set), or when `.env`
-is written in `docker` mode, the setup skill offers a model demo run
-and hands off to the matching demo skill. Pick a length:
+Once setup is finished in `baremetal` mode (and `FRAMEWORK` is set), or when `.env`
+has been written in `docker` mode, the setup skill offers a model demo run
+and hands off to the matching demo skill. Different options are available depending
+on the length you would like the demo to run for:
 
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
@@ -163,12 +165,12 @@ and hands off to the matching demo skill. Pick a length:
 - [`24h`](hyperloom-gpt-oss-120b-24h/SKILL.md) — gpt-oss-120b, long-horizon cyclic
   run.
 
-The demo reuses the values already in `.env`, so nothing is re-entered.
+The demo reuses the values already in `.env`, so nothing needs to be re-entered.
 
 ## Troubleshooting
 
-- If the target directory contains many package folders after `pip install
-  --target`, that is expected.
+- The target directory contains many package folders after `pip install
+  --target` - this is the expected behavior.
 - If `/hyperloom-setup` is not visible, confirm the setup skill exists under
   the target directory. It is installed to `.claude/skills/hyperloom-setup/`
   (Claude Code), `.cursor/skills/hyperloom-setup/` (Cursor) and
@@ -179,10 +181,11 @@ The demo reuses the values already in `.env`, so nothing is re-entered.
 - `hipDeviceAttributePciChipId` missing during AITER build means `hipcc` is
   using older ROCm headers; put the matching ROCm `bin` first on `PATH`.
 
-## Source Checkout / Manual Path
+## Source checkout / manual installation
 
-Use this path only when developing Hyperloom, testing local source changes, or
-debugging setup internals. Customers should prefer the wheel install above.
+These instructions are for advanced users and developer. Use this path only
+when developing Hyperloom, testing local source changes, or debugging setup
+internals.
 
 Clone the repository:
 
@@ -216,7 +219,7 @@ Make sure the host already provides the required base environment:
 - `git` for the dependency checkouts the optimization skill performs.
 
 With that in place, open the repository root in the agent and paste a launch
-prompt, filling in your workload:
+prompt, filling in your workload and configuration:
 
 ```text
 @src/hyperloom/inference_optimizer/SKILL.md
@@ -225,7 +228,7 @@ Optimize inference for this workload:
 - Model: /path/to/your/model
 - Framework: sglang
 - GPU: MI300X
-- TP: 1
+- TP: 8
 - CONC: 64
 - ISL: 1024
 - OSL: 1024
@@ -239,8 +242,9 @@ Requirements:
 
 ### Docker (source)
 
-Use a ROCm image that already ships the serving framework, so nothing is
-installed inside the container beyond Hyperloom's runtime deps:
+It is recommended that you use a ROCm image that already ships the serving
+framework, so nothing needs to be installed inside the container beyond
+Hyperloom's runtime deps. The following images are recommended:
 
 - `vllm`: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
 - `sglang` MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
