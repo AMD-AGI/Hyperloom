@@ -525,6 +525,38 @@ def test_policy_gate_denies_kernel_request_in_explore():
     assert excinfo.value.rule == "phase_incompatible"
 
 
+def test_policy_gate_gates_apply_patch_alias_like_integrate():
+    # SWSPLAT-33424: apply_patch is a REQUEST-kind alias of integrate. It must be
+    # phase-gated identically, so it cannot bypass PolicyGate's phase-action gate.
+    # In EXPLORE, a kernel-owned integrate REQUEST is denied by R1; the alias must
+    # be denied with the same rule.
+    state = SharedState()
+    state.record_phase_transition(
+        to_phase="EXPLORE",
+        reason="prelude_done",
+        evidence={},
+        ts="2026-05-19T00:00:00+00:00",
+        ts_unix=1.0,
+    )
+    gate = PolicyGate(
+        role_registry=_make_role_registry(),
+        shared_state=state,
+        strict_phase=True,
+    )
+
+    def _rule_for(kind):
+        intent = Intent(
+            type=IntentType.REQUEST,
+            payload={"target_agent": "kernel_agent", "kind": kind, "params": {}},
+        )
+        with pytest.raises(PolicyDenied) as excinfo:
+            gate.validate_intent("orchestration", intent)
+        return excinfo.value.rule
+
+    assert _rule_for("integrate") == "phase_incompatible"
+    assert _rule_for("apply_patch") == "phase_incompatible"
+
+
 def test_policy_gate_does_not_widen_explore_for_kernel_request():
     """EXPLORE no longer widens to kernel_agent-owned kinds."""
     state = SharedState()
