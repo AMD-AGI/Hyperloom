@@ -28,6 +28,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -300,7 +301,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
         repo_url = repo_url_for_framework(framework)
     if not repo_url:
         raise RuntimeAdapterError(f"phase-discover: no repo_url for framework={framework!r}")
-    work_dir = str(request.get("work_dir") or "/tmp/framework-agent")
+    work_dir = str(request.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent"))
     max_candidates = int(request.get("max_search_candidates") or 5)
     batch_id = str(request.get("batch_id") or f"batch-{_uuid.uuid4().hex[:8]}")
     gaps = request.get("gaps") or []

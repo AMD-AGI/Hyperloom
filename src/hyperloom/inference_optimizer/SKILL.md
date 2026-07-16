@@ -131,7 +131,7 @@ URL/path). The per-version
 TraceLens is required by `_server_patcher`),
 `/sgl-workspace/{aiter,sglang,vllm}/`,
 `~/.cache/amd-ai-devtool/semantic-index/`
-(GEAK RAG embedding cache), `/path/hyperloom/geak-memory/memory.db`
+(GEAK RAG embedding cache), `/shared/hyperloom/geak-memory/memory.db`
 (GEAK cross-session memory). Each is overridable via its own env if
 you want a fully self-contained session.
 
@@ -539,7 +539,7 @@ export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # pre-existing checkout you maintain; this skips both the clone and the
 # SHA pin.
 # export TRACELENS_ROOT=/path/to/your/TraceLens
-# Optional internal extension; export only to enable it (open-source-only if unset):
+# Optional TraceLens-internal checkout; export only to enable it (open-source-only if unset):
 # export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
@@ -604,7 +604,7 @@ In sandboxes where `/workspace/hyperloom` is unwritable, override the
 **workspace root** with `USER_DATA_PATH` (not the per-session subdir):
 
 ```bash
-export USER_DATA_PATH="/shared/user1/sessions"   # workspace root
+export USER_DATA_PATH="/shared/hyperloom-sessions"   # workspace root
 mkdir -p "$USER_DATA_PATH"
 ```
 
