@@ -10,7 +10,7 @@ idempotent), ``kill-inference``, ``stop-multi-job``.
 
 State lives in ``$MULTI_NODE_STATE_FILE`` (default:
 ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/runtime/multi_node_state.json``
-when the session is pinned, else legacy ``/tmp/multi_node_state.json``).
+when the session is pinned, else a file under :func:`tempfile.gettempdir`).
 HTTP polls under the sandbox's 120s ceiling and surface progress on stderr.
 Credentials must already be in sandbox env; this module never invents URLs or
 keys.
@@ -24,6 +24,7 @@ import json
 import os
 import shlex
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -307,7 +308,7 @@ def _infera_ssh_run_script(
     *,
     timeout: int,
     env: dict[str, str] | None = None,
-    remote_path: str = "/tmp/mn_infera_launch",
+    remote_path: str | None = None,
     port: int | None = None,
 ):
     """Run a script on an Infera pod over SSH with host-key retry.
@@ -320,7 +321,7 @@ def _infera_ssh_run_script(
         script_args: Arguments appended after the script path.
         timeout: SSH timeout in seconds.
         env: Optional env assignments prepended before the interpreter.
-        remote_path: Remote path for the decoded script.
+        remote_path: Remote path for the decoded script; defaults under the remote temp dir.
         port: Per-pod sshd port; defaults to ``state['ssh_port']``.
 
     Returns:
@@ -329,6 +330,7 @@ def _infera_ssh_run_script(
     key_path = state["ssh_key_path"]
     ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
     known_hosts = _infera_known_hosts_path(state)
+    remote_path = remote_path or str(Path(tempfile.gettempdir()) / "mn_infera_launch")
 
     def _run(kh: Path):
         return ssh_client.ssh_run_script(
@@ -1600,8 +1602,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
     if nnodes >= 2:
         # Multi-node: dir-based PID/log layout (one file per rank).
-        pid_dir = args.pid_file or state.get("last_server_pid_dir") or "/tmp/multi_node_pids"
-        log_dir = args.log_file or state.get("last_server_log_dir") or "/tmp/multi_node_logs"
+        pid_dir = args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
+        log_dir = args.log_file or state.get("last_server_log_dir") or str(Path(tempfile.gettempdir()) / "multi_node_logs")
         info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
 
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
@@ -1815,8 +1817,9 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             "asking for PD."
         )
         return 2
-    pid_file = args.pid_file or state.get("last_server_pid_file") or "/tmp/multi_node_server.pid"
-    log_file = args.log_file or "/tmp/multi_node_server.log"
+    temp_root = tempfile.gettempdir()
+    pid_file = args.pid_file or state.get("last_server_pid_file") or str(Path(temp_root) / "multi_node_server.pid")
+    log_file = args.log_file or str(Path(temp_root) / "multi_node_server.log")
     entrypoint = _build_restart_entrypoint(args, pid_file, log_file)
 
     with _ray_dashboard_client(state) as ray:
@@ -1876,7 +1879,7 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
     nnodes = int(state.get("nodes") or 1)
 
     if nnodes >= 2:
-        pid_dir = args.pid_file or state.get("last_server_pid_dir") or "/tmp/multi_node_pids"
+        pid_dir = args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
         info(f"kill-inference (multi-node): pid_dir={pid_dir}")
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
         kill_sub = _exec_kill_submission(
@@ -1889,7 +1892,7 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
         _save_state(state)
         return 0
 
-    pid_file = args.pid_file or state.get("last_server_pid_file") or "/tmp/multi_node_server.pid"
+    pid_file = args.pid_file or state.get("last_server_pid_file") or str(Path(tempfile.gettempdir()) / "multi_node_server.pid")
     info(f"kill-inference (single-node): pid_file={pid_file}")
     entrypoint = _build_kill_single_entrypoint(pid_file)
     kill_sub = _exec_kill_submission(
