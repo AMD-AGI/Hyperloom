@@ -53,6 +53,16 @@ subtrees:
     title: Environment variables
   - file: reference/authentication.md
     title: Authentication and credentials
+  - file: reference/operations.md
+    title: Operations and self-hosting
+  - file: reference/upgrade.md
+    title: Upgrade guide
+  - file: reference/session-breakdown.md
+    title: Session output schema
+  - file: reference/integrate-kb.md
+    title: Knowledge base integration
+  - file: reference/operator-scripts.md
+    title: Operator scripts
   - file: reference/troubleshooting.md
     title: Troubleshooting
 

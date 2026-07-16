@@ -200,6 +200,7 @@ jobs:
   # ── Stage 1: build matrix ────────────────────────────────────────────────────
   prepare:
     name: Build matrix
+    if: github.event.inputs.dry_run == 'true' || vars.HYPERLOOM_ENABLE_LIVE_SUBMIT == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

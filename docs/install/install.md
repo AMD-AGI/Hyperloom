@@ -6,9 +6,9 @@ myst:
 ---
 # Hyperloom Quickstart
 
-These instructions allow you to setup and run Hyperloom inside a Docker container
+These instructions allow you to set up and run Hyperloom inside a Docker container
 or on bare-metal on an AMD GPU machine. The recommended path is to install the
-packaged with `pip install --target`; the source-clone path is kept at the end
+package with `pip install --target`; the source-clone path is kept at the end
 for developers and manual debugging.
 
 ## Recommended Path: Install using wheel
@@ -24,9 +24,14 @@ workspace you open in Cursor, Claude Code, or Codex.
 
 ### Install Hyperloom
 
-pip install Hyperloom using the following command:
+Download the release wheel from GitHub Releases, then install it into a clean
+target directory:
 
 ```bash
+gh release download <release-tag> \
+  -R AMD-AGI/Hyperloom \
+  -p 'hyperloom_inference_optimizer-0.8.0-py3-none-any.whl'
+
 python3 -m pip install \
   ./hyperloom_inference_optimizer-0.8.0-py3-none-any.whl \
   --target ~/hyperloom
@@ -47,7 +52,7 @@ In Cursor and Claude Code, use `/hyperloom-setup`; in Codex, use
 `$hyperloom-setup`.
 
 This command runs the setup skill installed from
-[`src/hyperloom/skills/hyperloom-setup/SKILL.md`](../src/hyperloom/skills/hyperloom-setup/SKILL.md).
+[`src/hyperloom/skills/hyperloom-setup/SKILL.md`](../../src/hyperloom/skills/hyperloom-setup/SKILL.md).
 
 The setup skill is interactive. It creates the `.env` file, records
 the selected run scenario, and stops before launching an optimization.
@@ -159,10 +164,10 @@ has been written in `docker` mode, the setup skill offers a model demo run
 and hands off to the matching demo skill. Different options are available depending
 on the length you would like the demo to run for:
 
-- [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
+- [`3h`](../../examples/hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
-- [`8h`](hyperloom-qwen3-30b-a3b-8h/SKILL.md) — Qwen3-30B-A3B, medium-length run.
-- [`24h`](hyperloom-gpt-oss-120b-24h/SKILL.md) — gpt-oss-120b, long-horizon cyclic
+- [`8h`](../../examples/hyperloom-qwen3-30b-a3b-8h/SKILL.md) — Qwen3-30B-A3B, medium-length run.
+- [`24h`](../../examples/hyperloom-gpt-oss-120b-24h/SKILL.md) — gpt-oss-120b, long-horizon cyclic
   run.
 
 The demo reuses the values already in `.env`, so nothing needs to be re-entered.

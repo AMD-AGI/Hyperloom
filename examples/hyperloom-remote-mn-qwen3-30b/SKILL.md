@@ -34,8 +34,11 @@ ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B/   # --model
 ${NFS_SHARED_ROOT}/InferenceX/             # INFERENCEX_PATH
 ${NFS_SHARED_ROOT}/Magpie/                 # MAGPIE_PATH
 ${NFS_SHARED_ROOT}/TraceLens/              # TRACELENS_ROOT
-${NFS_SHARED_ROOT}/TraceLens-internal/     # TRACELENS_INTERNAL_ROOT (optional)
 ```
+
+If your deployment has a private TraceLens extension, set
+`TRACELENS_INTERNAL_ROOT` separately. Leave it unset for the public open-source
+path.
 
 ---
 
@@ -83,9 +86,7 @@ SGLANG_USE_AITER=1
 SGLANG_AITER_MLA_PERSIST=1
 INFERENCEX_PATH=${NFS_SHARED_ROOT}/InferenceX
 TRACELENS_ROOT=${NFS_SHARED_ROOT}/TraceLens
-TRACELENS_INTERNAL_ROOT=${NFS_SHARED_ROOT}/TraceLens-internal
 MAGPIE_PATH=${NFS_SHARED_ROOT}/Magpie
-NODE_TLS_REJECT_UNAUTHORIZED=0
 ```
 
 Large-model MoE cold start may need a longer poll budget:
@@ -135,9 +136,7 @@ SGLANG_USE_AITER=1
 SGLANG_AITER_MLA_PERSIST=1
 INFERENCEX_PATH=${NFS_SHARED_ROOT}/InferenceX
 TRACELENS_ROOT=${NFS_SHARED_ROOT}/TraceLens
-TRACELENS_INTERNAL_ROOT=${NFS_SHARED_ROOT}/TraceLens-internal
 MAGPIE_PATH=${NFS_SHARED_ROOT}/Magpie
-NODE_TLS_REJECT_UNAUTHORIZED=0
 ```
 
 ---

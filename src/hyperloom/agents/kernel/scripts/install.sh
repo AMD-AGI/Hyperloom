@@ -67,7 +67,7 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
 # /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
 _open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
-HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/hyperloom}"
+HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-}"
 # MAGPIE_PATH is the single override shared with the Python runtime; a standalone
 # run never clones upstream Magpie when MAGPIE_PATH is set.
 MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
@@ -127,7 +127,7 @@ PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "${MAGPIE_PATH:-}" "${PYTHONP
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
-#   2. AMD-AGI/TraceLens-internal -> $TRACELENS_INTERNAL_ROOT (internal: rehydration module)
+#   2. Private TraceLens extension -> $TRACELENS_INTERNAL_ROOT (optional rehydration module)
 # Default base clones the public repo into the workspace runtime tree,
 # matching Magpie / InferenceX rather than persisting pod-local mirrors.
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
@@ -136,7 +136,7 @@ TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # TraceLens v0.9.0 integration (#474): head of
 # release/hyperloom_integration_v0.9.0. The optional internal extension tracks
 # the matching release/hyperloom_integration_v0.9.0 branch of
-# AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
+# the matching private extension, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
 TRACELENS_REF="4d6e0d9f03bab0541f04a68952dcf13988475708"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
@@ -163,7 +163,7 @@ fi
 TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 # Writable mirror when the optional internal extension is on a read-only mount.
-TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"
+TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/tracelens-private-extension}"
 
 # Credentials fallback: env always wins. If any supported LLM credential is
 # missing from env, source $REPO_ROOT/.env but protect already-set values.
@@ -814,7 +814,7 @@ ensure_tracelens() {
   }
 
   if ! _tracelens_internal_enabled; then
-    log "TraceLens-internal: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)"
+    log "TraceLens extension: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)"
     TRACELENS_INTERNAL_ROOT=""
     export TRACELENS_ROOT
     return 0
@@ -832,20 +832,20 @@ ensure_tracelens() {
   # tree, and at runtime tools/tracelens_analysis.py re-runs the same
   # editable install in a subprocess on every trace_analyze request,
   # producing a tight failure loop. Detecting unwritable source up front
-  # and mirroring to ${HYPERLOOM_ROOT}/TraceLens-internal lets both
+  # and mirroring to ${HYPERLOOM_ROOT}/tracelens-private-extension lets both
   # the install-time and the runtime pip install land on a writable
   # filesystem. write_env_file() emits the resulting TRACELENS_INTERNAL_ROOT into
   # the pod-local kernel-agent env so subsequent CLI subprocesses inherit
   # the mirror.
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     if ! ( : > "$TRACELENS_INTERNAL_ROOT/.hl_write_test" ) 2>/dev/null; then
-      log "TraceLens-internal root not writable ($TRACELENS_INTERNAL_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
+      log "TraceLens extension root not writable ($TRACELENS_INTERNAL_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
       mkdir -p "$(dirname "$TRACELENS_MIRROR_DIR")"
       if [ ! -d "$TRACELENS_MIRROR_DIR" ]; then
-        log "mirroring TraceLens-internal to writable dir (large tree; may take minutes): $TRACELENS_INTERNAL_ROOT -> $TRACELENS_MIRROR_DIR"
+        log "mirroring TraceLens extension to writable dir (large tree; may take minutes): $TRACELENS_INTERNAL_ROOT -> $TRACELENS_MIRROR_DIR"
         run cp -r "$TRACELENS_INTERNAL_ROOT" "$TRACELENS_MIRROR_DIR"
       else
-        log "TraceLens-internal mirror already present: $TRACELENS_MIRROR_DIR"
+        log "TraceLens extension mirror already present: $TRACELENS_MIRROR_DIR"
       fi
       TRACELENS_INTERNAL_ROOT="$TRACELENS_MIRROR_DIR"
       export TRACELENS_INTERNAL_ROOT
@@ -853,7 +853,7 @@ ensure_tracelens() {
       rm -f "$TRACELENS_INTERNAL_ROOT/.hl_write_test"
     fi
   fi
-  _pip_install_editable "$TRACELENS_INTERNAL_ROOT" "TraceLens-internal"
+  _pip_install_editable "$TRACELENS_INTERNAL_ROOT" "TraceLens extension"
   export TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
   if [ "$DRY_RUN" -eq 0 ]; then
     # TraceLens #124: only the inference variant is accepted (the correct
@@ -864,7 +864,7 @@ ensure_tracelens() {
       TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
       log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
     else
-      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; reinstall TraceLens, plus TraceLens-internal if TRACELENS_INTERNAL_ROOT is set)"
+      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; reinstall TraceLens, plus the optional extension if TRACELENS_INTERNAL_ROOT is set)"
     fi
   fi
 }

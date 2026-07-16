@@ -535,9 +535,16 @@ ignore = ["E501", "E741"]
 "src/hyperloom/inference_optimizer/multi_node/cli.py" = ["E402"]
 "src/hyperloom/inference_optimizer/multi_node/commands/rayjob.py" = ["E402"]
 "src/hyperloom/inference_optimizer/multi_node/commands/dynamo.py" = ["E402"]
+"src/hyperloom/inference_optimizer/multi_node/commands/infera.py" = ["E402"]
 # tree-reform.MD P2.3 stage B: paths updated for the specialists/, kernel/,
 # and prompts/ subpackage moves.
 "src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]
 "src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
+# optimize_submit keeps a dynamic facade for legacy tests and monkeypatch-based
+# CI adapters. The imported helper modules intentionally re-export symbols via
+# globals().update(), which Ruff cannot statically resolve without a larger
+# compatibility-breaking refactor.
+"ci/optimize_submit.py" = ["F821"]
+"ci/optimize_submit_lib/*.py" = ["F401", "F811", "F821", "E402"]

@@ -20,7 +20,6 @@ semantics so any pre-existing ``PYTHONPATH`` and ``MAGPIE_PATH`` survive.
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import tempfile

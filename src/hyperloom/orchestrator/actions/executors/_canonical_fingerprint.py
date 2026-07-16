@@ -92,7 +92,7 @@ def canonical_fingerprint(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def workload_signature(
@@ -128,4 +128,4 @@ def workload_signature(
         "tp": str(tp if tp is not None else os.environ.get("TP", "")).strip(),
     }
     payload = json.dumps(fields, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]

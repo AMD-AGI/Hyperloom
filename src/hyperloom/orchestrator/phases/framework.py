@@ -1326,7 +1326,7 @@ class FrameworkPhase(PhaseHandler):
         signature = classify_failure(text)
         if signature.is_actionable:
             return
-        digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()
+        digest = hashlib.sha1(text.encode("utf-8", errors="replace"), usedforsecurity=False).hexdigest()
         state = self.shared_state
         seen = getattr(state, "enablement_human_review_logged", None)
         if not isinstance(seen, list):

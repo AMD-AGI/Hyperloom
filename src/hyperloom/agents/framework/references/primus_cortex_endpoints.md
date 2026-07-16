@@ -1,16 +1,13 @@
-# Primus Cortex PR Monitor - endpoints used by framework-agent
+# PR Monitor-compatible endpoints used by framework-agent
 
-> Technical reference for the four primus-cortex-pr-monitor REST
+> Technical reference for the four PR Monitor-compatible REST
 > endpoints that `hyperloom.agents.framework.sources.primus_cortex` talks to.
-> Distilled from the upstream `primus-cortex-pr-monitor-access.md`
-> service doc + the live `hyperloom.agents.framework.sources.primus_cortex`
-> implementation; this file is the authoritative contract from
-> framework-agent's point of view.
+> This file is the authoritative contract from framework-agent's point of view.
 
 ## Base URL
 
 ```
-http://primus-cortex-pr-api.primus-cortex.svc.cluster.local
+https://your-pr-monitor.example
 ```
 
 The base URL is wired into `ExploreRequest.primus_cortex.base_url`
@@ -30,7 +27,7 @@ Query params:
 |---|---|---|
 | `state` | `"open"` / `"closed"` / `"all"` | Default `"open"` in framework-agent. |
 | `limit` | int | Capped by `ExploreRequest.max_search_candidates`. |
-| `label` | str | Optional; passes through to primus's label filter. |
+| `label` | str | Optional; passes through to the server's label filter. |
 
 Response (200): either a flat list or a dict wrapping a list under one
 of `items` / `prs` / `data` / `results`. framework-agent tolerates
@@ -46,7 +43,7 @@ Errors: HTTP 4xx/5xx, transport, or non-JSON body all surface as
 
 Returns the PR detail object. Two wire shapes are supported:
 
-* primus_cortex canonical: `{"summary": {...}, "body": "...",
+* PR Monitor canonical: `{"summary": {...}, "body": "...",
   "files": [...]}`. `summary.head_sha` / `summary.author_login` /
   `summary.labels` carry the metadata framework-agent enriches with.
 * GitHub-like flat: `{"number": ..., "head": {"sha": ...}, ...}`. The
@@ -128,7 +125,6 @@ the operator must see the original error.
 
 * HTTP requests are made via stdlib `urllib.request` (no `requests`
   dependency). The User-Agent is `framework-agent-primus-cortex/0.1`.
-* All requests are GET; framework-agent never POSTs to primus.
-* The service is an AMD-internal cluster service; offline / external
-  CI must omit `primus_cortex` from `search_modes` and rely on the
-  github backend.
+* All requests are GET; framework-agent never POSTs to the PR Monitor service.
+* If no PR Monitor-compatible service is available, omit `primus_cortex` from
+  `search_modes` and rely on the GitHub backend.

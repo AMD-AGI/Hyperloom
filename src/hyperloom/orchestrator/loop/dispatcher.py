@@ -999,7 +999,10 @@ class DispatcherCollaborator:
             )
             return f"(run_action_now: {action_name!r} denied: {str(getattr(seq_denied, 'hint', seq_denied))[:200]})"
         lanes, ttl = self._registry_lanes_ttl(action_name)
-        content_fp = hashlib.sha1(json.dumps(params or {}, sort_keys=True, default=str).encode()).hexdigest()[:10]
+        content_fp = hashlib.sha1(
+            json.dumps(params or {}, sort_keys=True, default=str).encode(),
+            usedforsecurity=False,
+        ).hexdigest()[:10]
         key = f"inline:orchestration:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=action_name,

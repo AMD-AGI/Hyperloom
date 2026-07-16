@@ -39,7 +39,7 @@ def run_command(
             ``timed_out`` is True.
     """
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # nosec B602 - framework commands are explicit operator/test configuration.
             command,
             cwd=str(cwd),
             shell=True,

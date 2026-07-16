@@ -34,7 +34,7 @@ from ._internal import safe_client, ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts
 from ._internal.log import info, warn, err
 from ._internal.server_args_safety import ServerArgsRejected, validate_server_args
-from .state_paths import resolve_state_file, state_file_safe_to_read
+from .state_paths import resolve_state_file
 from ._internal.external_state import load_multi_node_state
 
 # Default poll budget sized under the sandbox 120s ceiling.

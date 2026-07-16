@@ -87,6 +87,7 @@ jobs:
   # ── Stage 1: build the fixed matrix ──────────────────────────────────────────
   prepare:
     name: Build fixed matrix
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true'
     runs-on: hyperloom-mh826
     timeout-minutes: 5
     outputs:
@@ -145,7 +146,7 @@ jobs:
   optimize:
     name: optimize-${{ matrix.key }}
     needs: prepare
-    if: needs.prepare.outputs.count != '0'
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true' && needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
     # GitHub counts this from JOB START, while the optimize_submit.py wait loop
     # (up to task_timeout_min=2920) only begins AFTER prewarm + submit-jitter +
@@ -371,7 +372,7 @@ jobs:
     # Both: optimize for ordering, prepare so needs.prepare.outputs.count is
     # actually resolvable in the `if` below.
     needs: [prepare, optimize]
-    if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true' && always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
     runs-on: hyperloom-4hhzn
     timeout-minutes: 20
     env:

@@ -936,12 +936,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip() or None,
         help="PR Monitor REST URL for this run (flag wins). Default: "
-        "$PRIMUS_CORTEX_PR_API (the canonical internal PR API env), else "
-        "the in-cluster "
-        "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local. "
-        "Set this flag / $PRIMUS_CORTEX_PR_API to a reachable HTTPS "
-        "endpoint when running outside the primus-cortex namespace. Pair "
-        "with --pr-monitor-mcp-url when port-forwarding for local debug.",
+        "$PRIMUS_CORTEX_PR_API, else unset. Set this flag or env var to a "
+        "reachable PR Monitor-compatible HTTPS endpoint. Pair with "
+        "--pr-monitor-mcp-url when exposing the corresponding MCP server.",
     )
     opt.add_argument(
         "--pr-monitor-mcp-url",
@@ -949,8 +946,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="PR Monitor MCP URL handed to specialist LLM backends (flag "
-        "wins). Default: the in-cluster MCP endpoint. The trailing slash "
-        "is mandatory.",
+        "wins). Default: unset, which disables PR Monitor MCP tools. The "
+        "trailing slash is mandatory when configured.",
     )
     opt.add_argument(
         "--degraded-pr",

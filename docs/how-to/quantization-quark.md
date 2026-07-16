@@ -50,21 +50,17 @@ also published on PyPI (`pip install amd-quark`). The
 the `release/0.12` branch (and later), so clone that branch when you need the
 agent-driven prelude.
 
-When you run `python -m hyperloom.inference_optimizer.cli optimize`, the quantization prelude resolves
-the Quark root in this order:
+When you run `python -m hyperloom.inference_optimizer.cli optimize`, set the
+Quark checkout explicitly with `QUARK_ROOT`:
 
-1. `QUARK_ROOT`
-2. The canonical default `/primus/hyperloom/Quark`
-
-`python -m hyperloom.inference_optimizer.cli optimize` has no `--quark-root` flag; that argument only
-exists on the standalone `quantization-agent` CLI. For the `optimize` path,
-set `QUARK_ROOT` explicitly wherever the canonical default is not mounted. The
-path must contain
+`python -m hyperloom.inference_optimizer.cli optimize` has no `--quark-root`
+flag; that argument only exists on the standalone `quantization-agent` CLI. For
+the `optimize` path, set `QUARK_ROOT` explicitly. The path must contain
 `.claude/skills/quark-torch-ptq/SKILL.md` plus the validator and eval skills. If
 the resolved checkout is missing after quantization is enabled, the run fails
 fast instead of silently optimizing the unquantized source model.
 
 ```text
 HYPERLOOM_QUANTIZE_ENABLED=1
-QUARK_ROOT=/primus/hyperloom/Quark
+QUARK_ROOT=/opt/amd/Quark
 ```

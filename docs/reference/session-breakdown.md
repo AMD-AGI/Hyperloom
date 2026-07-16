@@ -361,7 +361,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "framework_name": "sglang",
     "framework_version": "0.5.11",
     "model_name": "GLM-5-FP8",
-    "model_path": "/wekafs/models/GLM-5-FP8",
+    "model_path": "/models/GLM-5-FP8",
     "model_class": "moe_mla_nsa",
     "gpu_type": "mi355x",
     "tp": 4,
@@ -392,7 +392,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     }],
     "failure_streak": 0,
     "invocation": {
-      "framework_args": "python -m sglang.launch_server --model /wekafs/models/GLM-5-FP8 --tp 4",
+      "framework_args": "python -m sglang.launch_server --model /models/GLM-5-FP8 --tp 4",
       "framework_args_source": "log_non_default_args",
       "extra_envs": { "GPU_TYPE": "mi355x", "TP": "4", "ISL": "1024", "OSL": "1024" },
       "config_path": "runs/baseline/baseline_config.with_envs.yaml",

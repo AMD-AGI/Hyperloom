@@ -67,6 +67,7 @@ jobs:
     # pull_request_review (no schedule / workflow_dispatch alongside).
     # Create the label once via: gh label create run-pr-ci.
     if: >-
+      vars.HYPERLOOM_INTERNAL_CI == 'true' &&
       github.event.review.state == 'approved' &&
       contains(github.event.pull_request.labels.*.name, 'run-pr-ci')
     strategy:

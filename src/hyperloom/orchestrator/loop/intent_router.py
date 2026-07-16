@@ -370,7 +370,8 @@ class IntentRouter:
         raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
         if not raw_key:
             content_fp = hashlib.sha1(
-                json.dumps(params, sort_keys=True, default=str).encode()
+                json.dumps(params, sort_keys=True, default=str).encode(),
+                usedforsecurity=False,
             ).hexdigest()[:10]
             raw_key = (
                 f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:"

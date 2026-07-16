@@ -15,7 +15,8 @@ Cursor, Claude Code, or Codex.
 
 - Python 3.10+ and `pip`.
 - Access to one LLM provider: Anthropic or DeepSeek.
-- For private Hyperloom releases, `gh` access to the GitHub release asset.
+- `gh` access to the published GitHub release asset, or a locally downloaded
+  Hyperloom wheel.
 
 Download the release wheel, then install it into a clean target directory:
 

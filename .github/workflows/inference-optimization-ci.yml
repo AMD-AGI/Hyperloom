@@ -32,6 +32,7 @@ env:
 jobs:
   prepare:
     name: Prepare Model Matrix
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -50,6 +51,7 @@ jobs:
   optimize:
     name: "${{ matrix.key }}"
     needs: prepare
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true'
     runs-on: hyperloom-mh826
     # InferenceX-comparable models are the small fixed corpus in
     # ci/ci-config.yaml. They are allowed to run much longer than the

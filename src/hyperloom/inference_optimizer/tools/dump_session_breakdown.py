@@ -8,7 +8,7 @@ builder is used by:
 
 * Coordinator action ``session_breakdown`` (live, agent-driven)
 * ``cli.py`` finally block (live, end-of-session safety net)
-* This script (offline / batch / WekaFS sessions)
+* This script (offline / batch / shared-filesystem sessions)
 
 Examples
 --------
@@ -18,16 +18,16 @@ Examples
     # Live session in this sandbox (USER_DATA_PATH or /workspace/hyperloom)
     python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
 
-    # Historical session on WekaFS
+    # Historical session on a shared filesystem
     python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
-        --session-dir /wekafs/users/zgong/inference_optimizer-sessions/<sid>
+        --session-dir /shared/hyperloom-sessions/<user>/<sid>
 
     # Override output path (don't touch session_dir)
     python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
         --session-dir <SD> --output /tmp/breakdown-<sid>.json
 
     # Bulk historical
-    for d in /wekafs/users/*/inference_optimizer-sessions/*; do
+    for d in /shared/hyperloom-sessions/*/*; do
         [ -d "$d" ] || continue
         python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
             --session-dir "$d" > /dev/null

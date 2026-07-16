@@ -755,13 +755,13 @@ def materialize_config_with_envs(
             os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
         )
         # ── Global model root for xDiT local-snapshot resolution ──────────
-        # The baked hyperloom_local_aliases map each registered name to a local
-        # snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>; pinning it here makes
-        # the runner load the pre-provisioned /primus copy offline instead of
-        # re-downloading weights from HF. Forwarded via benchmark.envs.
-        envs["XDIT_MODEL_ROOT"] = (
-            os.environ.get("XDIT_MODEL_ROOT", "").strip() or "/primus/models"
-        )
+        # If set, the baked hyperloom_local_aliases map each registered name to
+        # a local snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>. Leave unset in
+        # public/default deployments so the operator chooses the model cache
+        # location explicitly.
+        _xdit_model_root = os.environ.get("XDIT_MODEL_ROOT", "").strip()
+        if _xdit_model_root:
+            envs["XDIT_MODEL_ROOT"] = _xdit_model_root
         # ── Baseline attention-backend guard (scriptable xDiT) ────────────
         # For the baseline only, force the operator-pinned backend (default
         # 'aiter', the MI300X-verified path) so an invalid agent override cannot

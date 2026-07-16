@@ -1494,7 +1494,7 @@ def _flydsl_reusable_roots() -> tuple[str, ...]:
         val = (os.environ.get(env_key, "") or "").strip()
         if val:
             out.append((val.rstrip("/") + "/").lower())
-    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+    for default in ("/opt/flydsl/", "/sgl-workspace/flydsl/"):
         if default not in out:
             out.append(default)
     return tuple(out)
@@ -4950,7 +4950,7 @@ def _resolve_flydsl_source_fallback() -> str:
     roots = [
         os.environ.get("DSL2_ROOT", "").strip(),
         os.environ.get("FLYDSL_ROOT", "").strip(),
-        "/wekafs/yunkai/FlyDSL",
+        "/opt/FlyDSL",
         "/sgl-workspace/flydsl",
     ]
     for root in roots:
@@ -5570,7 +5570,7 @@ def main() -> int:
     parser.add_argument(
         "--tracelens-internal-root",
         default=os.environ.get("TRACELENS_INTERNAL_ROOT", DEFAULT_TRACELENS_INTERNAL_ROOT),
-        help="Optional TraceLens-internal checkout (TRACELENS_INTERNAL_ROOT). "
+        help="Optional private TraceLens extension checkout (TRACELENS_INTERNAL_ROOT). "
         "Rehydration module; plumbed to run_tracelens_skill. "
         "Leave empty for the open-source-only report.",
     )
@@ -5727,8 +5727,7 @@ def main() -> int:
         default=(os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip() or "mixed"),
         help=(
             "Which of TraceLens splitter's three steady-state chunks to "
-            "consume for the perf report (see docs/Inference_analysis.md "
-            "in TraceLens-internal). The splitter always produces all "
+            "consume for the perf report. The splitter always produces all "
             "three (mixed / decode_only / prefilldecode); this flag picks "
             "ONE per TraceLens's design that the chunks are parallel "
             "view-of-the-same-trace, not a fallback ladder. "
@@ -5846,7 +5845,7 @@ def main() -> int:
             if tl_internal_root is not None and not tl_internal_root.exists():
                 append_log(
                     log_path,
-                    f"TraceLens-internal root not found: {tl_internal_root}; "
+                    f"TraceLens extension root not found: {tl_internal_root}; "
                     "falling back to open-source-only "
                     "(provide an existing internal checkout to enable)",
                 )
@@ -5854,7 +5853,7 @@ def main() -> int:
             if tl_internal_root is None:
                 append_log(
                     log_path,
-                    "TraceLens-internal: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)",
+                    "TraceLens extension: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)",
                 )
                 os.environ.pop("TL_EXTENSION", None)
             run_command(

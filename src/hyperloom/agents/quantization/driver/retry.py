@@ -32,9 +32,6 @@ from .runner import RunOneAttemptFn, run_one_attempt
 
 _COUNTER_FILE = "requantize_attempts.txt"
 
-# Canonical Quark checkout used when neither the kwarg nor $QUARK_ROOT is set.
-DEFAULT_QUARK_ROOT = "/primus/hyperloom/Quark"
-
 # Upstream git URL for the Quark repo; installers clone it when default absent.
 DEFAULT_QUARK_GIT_URL = "https://github.com/amd/Quark.git"
 
@@ -252,10 +249,10 @@ async def quantize_via_prompt(
 ) -> QuantSkillRunResult:
     """Run the quantization-agent against ``prompt`` and return a result.
 
-    ``quark_root`` falls back to ``$QUARK_ROOT`` then to a hard error
-    (mapped to ``quark_root_missing`` at the assessment level). The
-    threshold resolves per ``_eval.resolve_threshold``; the interactive
-    flag per ``_resolve_interactive``.
+    ``quark_root`` falls back to ``$QUARK_ROOT`` then to a hard error (mapped
+    to ``quark_root_missing`` at the assessment level). The threshold resolves
+    per ``_eval.resolve_threshold``; the interactive flag per
+    ``_resolve_interactive``.
 
     Args:
         prompt: The quantization instruction prompt.
@@ -276,16 +273,21 @@ async def quantize_via_prompt(
     workspace_path.mkdir(parents=True, exist_ok=True)
 
     if quark_root is None:
-        # Resolution order: $QUARK_ROOT env -> DEFAULT_QUARK_ROOT.
-        quark_root = os.environ.get("QUARK_ROOT") or DEFAULT_QUARK_ROOT
+        quark_root = os.environ.get("QUARK_ROOT")
+    if not quark_root:
+        return _build_failed_bootstrap_result(
+            workspace_path,
+            OutcomeId.quark_root_missing,
+            "quark_root is not configured; set $QUARK_ROOT or pass quark_root= "
+            f"(clone from {DEFAULT_QUARK_GIT_URL})",
+        )
     quark_root_path = Path(quark_root).expanduser()
     if not quark_root_path.is_dir():
         return _build_failed_bootstrap_result(
             workspace_path,
             OutcomeId.quark_root_missing,
             f"quark_root path does not exist or is not a directory: {quark_root_path} "
-            f"(set $QUARK_ROOT or pass quark_root=; default is {DEFAULT_QUARK_ROOT}"
-            f", clone from {DEFAULT_QUARK_GIT_URL})",
+            f"(set $QUARK_ROOT or pass quark_root=; clone from {DEFAULT_QUARK_GIT_URL})",
         )
 
     interactive_resolved = _resolve_interactive(interactive)

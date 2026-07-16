@@ -198,7 +198,7 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
             continue
         log.info("integrate_patch: enablement setup replay: %s", cmd)
         try:
-            proc = subprocess.run(  # noqa: S602 — allowlisted install-only shell command
+            proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
                 cmd,
                 shell=True,
                 cwd=str(cwd),

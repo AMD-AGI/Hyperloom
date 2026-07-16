@@ -490,8 +490,8 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
             "inferencex_local",
         )
     )
-    src_hash = hashlib.sha1(real_src.encode("utf-8")).hexdigest()[:16]
-    key_hash = hashlib.sha1(str(mirror_key or "").encode("utf-8")).hexdigest()[:16]
+    src_hash = hashlib.sha1(real_src.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+    key_hash = hashlib.sha1(str(mirror_key or "").encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     dest_name = src_hash if not mirror_key else f"{src_hash}-{key_hash}"
     dest = local_root / dest_name
     try:
@@ -785,7 +785,7 @@ class BaselineExecutor:
             default_timeout_sec (int): Default (warm-start) subprocess timeout.
             cwd (Path | str): Working directory for the Magpie subprocess.
         """
-        from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
+        from ._grid_runner import _resolve_session_dir
 
         # Backend-aware interpreter: bypass uses a plain python3, magpie
         # uses the Magpie-importable venv.

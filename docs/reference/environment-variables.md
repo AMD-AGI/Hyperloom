@@ -124,7 +124,7 @@ as a public configuration API.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_QUANTIZE_ENABLED` | Unset | Primary switch (`1` to enable) for the AMD Quark PTQ quantization prelude driven by `--quantize` / `--quantize-scheme`. |
-| `QUARK_ROOT` | `/primus/hyperloom/Quark` | AMD Quark checkout used by the quantization-agent. |
+| `QUARK_ROOT` | Unset | AMD Quark checkout used by the quantization-agent. Set this explicitly when quantization is enabled. |
 
 ---
 
