@@ -127,9 +127,9 @@ _now_iso = now_iso
 def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
     """True when ``path`` resolves inside one of the specialist sandbox bases.
 
-    SWSPLAT-33372: a claimed patch path (possibly absolute or ``..``-relative)
-    must stay under the specialist worktree/workspace before it is read back;
-    only sandbox-internal paths are legitimate.
+    A claimed patch path (possibly absolute or ``..``-relative) must stay under
+    the specialist worktree/workspace before it is read back; only
+    sandbox-internal paths are legitimate.
     """
     try:
         rp = path.resolve()
