@@ -210,7 +210,7 @@ def test_maybe_setup_worktree_readonly(tmp_path):
 
 
 def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):
-    # SWSPLAT-33372: legitimate patch paths inside the worktree/workspace.
+    # Legitimate patch paths stay inside the worktree/workspace.
     from pathlib import Path
 
     worktree = tmp_path / "worktree"
@@ -227,7 +227,7 @@ def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):
 
 
 def test_patch_path_within_bases_rejects_outside_paths(tmp_path):
-    # SWSPLAT-33372: absolute / traversal paths outside the sandbox are refused.
+    # Absolute / traversal paths outside the sandbox are refused.
     from pathlib import Path
 
     worktree = tmp_path / "worktree"
