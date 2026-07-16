@@ -442,6 +442,44 @@ Ray 执行"在**执行期一致**(在 Ray 执行分支内改写 config,而非物
   conc_sweep/sweep/explore/roofline/recover/specialist 相关套件(共 ~900 项)全绿。
   本地无 `ruff`/`mypy`,交由 CI(T9)。
 
+### ✅ P2 —— GPU specialist actor 化(T4+T5 完成)
+
+复用 P1 的"executor 持 lease"范式:`needs_gpu` specialist 的**整个 subprocess**(agent
+运行时 + 它 spawn 的任意 Bash/GPU 命令)进入 Ray `GpuSpecialistActor(num_gpus)`,Ray 设
+可见设备,specialist 再也够不到 lease 外的卡(§4.2/§8)。specialist 子进程本就把 stdout 写
+**文件**(`process.log`),reaper 靠 done.json/heartbeat/log mtime + 进程存活轮询(非 live
+pipe),因此天然适配 P0 的 `ServingActor.start/is_alive/stop` 模型。
+
+- **T4 机制**(commit `feat(ray-exec): P2 GpuSpecialistLease …`):
+  - `_ray_serving.py`:新增 `GpuSpecialistLease`(封装 `make_gpu_specialist_actor`,暴露
+    `start`/`pid`/`is_alive`/`exit_code`/`stop`/`close` 这套"长活+被轮询"接口,区别于
+    `ServingLease` 的单次阻塞轮);`maybe_gpu_specialist_lease()`——dispatcher 唯一入口,
+    单节点 Ray 执行且 `num_gpus>0` 才返回 lease,否则 `None`(本地路径)。
+    `ManagedServerProcess` + actor 新增 `exit_code()`。
+- **T4 接线**(commit `feat(ray-exec): route needs_gpu specialists through a Ray lease …`):
+  - `dispatcher._spawn_fitting_queued`:SQLite `try_acquire`(现降级为容量/TTL 门)之后,
+    Ray 路径再取 `GpuSpecialistLease(num_gpus=gpu_count)`,把 specialist 见到的**逻辑**
+    `gpu_ids=range(N)`(Ray mask 下的 0..N-1)与 lease 一并放进 `extra_context`;lease 在
+    `_run_dispatched_with_gpu_release` 的 `finally` 里 `close()`(绑定 task 生命周期,完成/
+    异常/取消都释放)。`gpu_count` 解析(whole-machine vs serving-disjoint、bench TP floor)
+    不变。
+  - `subprocess_.run`:有 `gpu_lease` 时剥离 env 的 `*_VISIBLE_DEVICES`(Ray 在 worker 设)
+    并经 `actor.start` 启动;reaper 轮询 Popen 形态的 `_RayLeaseProcess`(`poll` 走 actor
+    `is_alive`/`exit_code`),`_kill` 经 actor reap 进程树。done.json/heartbeat/log 信号仍
+    文件驱动、本地可读(单节点)。本地路径不变;`runner` 透传 `ctx.extra['gpu_specialist_lease']`。
+- **T5 记账降级**:`gpu_pool.py` 文档化 `SpecialistGpuPool` 的新角色——Ray 下仅容量/TTL
+  记账;`try_acquire`/`release` 保留(并发门 + wall-budget/TTL 视图 + 现有 dispatch 测试仍
+  工作),但其 `gpu_ids` 不再是物理 pin(dispatcher 用逻辑 `range(N)` 覆盖)。
+- **不退化**:Ray 路径外(多节点 / `RAY_EXEC` off / pytest)`gpu_lease=None` → SQLite
+  gpu-id 设备路径逐字不变;`try_acquire` 仍被调用(`test_specialist_concurrent_dispatch`
+  的 spy 断言、并发限流、`gpu_research_lane` 互斥均保留)。
+- **测试**:`test_ray_backend_unit.py` +8(`exit_code` 锁存、`GpuSpecialistLease` 生命周期/
+  未启动、`maybe_gpu_specialist_lease` 四门);`test_specialist_subprocess.py` +2(`run`
+  经 lease 启动 + 剥离设备 env、`_kill` 对 `_RayLeaseProcess` 走 actor reap)。本地跑通
+  specialist/dispatch/pool/coordinator 相关套件(concurrent_dispatch、gpu_research_lane、
+  dispatch_params、auto_retry、resource_lanes、gpu_pool、framework_whole_machine、
+  longrun_phase0、rebench 等,共 ~350 项)全绿;9796 项 collect 无 import 错。ruff/mypy 交 CI。
+
 ### ⏭ 进行中 / 待办 —— 见 §12
 
 ---
@@ -462,11 +500,17 @@ Ray 执行"在**执行期一致**(在 Ray 执行分支内改写 config,而非物
   产物路径与关路径 byte 级一致(或差异可解释),且 `ray status` 显示 server 存活期 GPU
   被占、结束后释放,无 orphan server 进程。复用 `scripts/test_conc_sweep_flow.py` 加
   `RAY_EXEC=1` 对照。**代码已就绪**;需在有 GPU 的机器上执行(本轮无 GPU,未跑)。
-- [ ] **T4 (P2)** `needs_gpu` specialist 整体进 `GpuSpecialistActor(num_gpus=...)`:
-  `dispatcher._spawn_fitting_queued` 的 `needs_gpu` 分支不再 `gpu_pool.try_acquire`
-  分物理 id,改提交 actor;`extra_context["gpu_ids"]` 注入路径收敛。
-- [ ] **T5 (P2)** `SpecialistGpuPool` 降级为 SQLite 记账(容量/TTL 视图),`try_acquire`/
-  `release` 保留桩以过测试;物理分配交给 Ray。
+- [x] **T4 (P2, 已完成)** `needs_gpu` specialist 整体进 `GpuSpecialistActor(num_gpus=...)`:
+  `dispatcher._spawn_fitting_queued` 的 `needs_gpu` 分支在 Ray 路径提交 `GpuSpecialistLease`
+  (整个 subprocess 经 `actor.start` 跑在 lease 内,Ray 设可见设备),`try_acquire` 保留为
+  容量/TTL 门(不再是物理分配真相);`extra_context["gpu_ids"]` 收敛为 specialist 在 Ray
+  mask 下实际所见的逻辑 `range(N)`;lease 在 task `finally` 里 `close()`。仅单节点 Ray。
+  真机验证(specialist 的 Bash GPU 命令落在 Ray 卡内、TTL/cancel kill 子进程)并入 T3 类
+  真机跑。
+- [x] **T5 (P2, 已完成)** `SpecialistGpuPool` 降级为 SQLite 记账(容量/TTL 视图 + 并发门 +
+  prompt 展示),`try_acquire`/`release` 保留(现有 dispatch 测试仍绿);物理分配交给 Ray
+  `num_gpus`,其返回的 `gpu_ids` 不再是设备 pin(Ray 路径由 dispatcher 用逻辑 `range(N)`
+  覆盖)。彻底删除留待 P5。
 - [ ] **T6 (P3, 决策 1)** 注册 `serving_slot` 自定义资源(单节点 `ray start --resources`
   / ensure 时声明);serving/benchmark/profile 类任务 `resources={"serving_slot":1}`
   独占;GPU specialist 用 `num_gpus` 不占 slot。
