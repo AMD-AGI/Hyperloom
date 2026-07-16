@@ -269,23 +269,19 @@ def build_model_result(
     status: str,
     timestamp: str,
     result_dir: str,
-    ifx_reference: dict | None = None,
 ) -> dict:
     """Build a complete result dict for one model.
 
-    Extracts optimization metrics and, when an InferenceX reference is given,
-    computes the per-GPU comparison (correcting total-vs-per-GPU mismatches).
+    Extracts optimization metrics from the result directory.
 
     Args:
         model_name (str): Display name of the model.
-        ifx_key (str): InferenceX key identifying the baseline row.
+        ifx_key (str): Config key identifying the model's baseline row.
         image (str): Container image used for the run.
         precision (str): Model precision label.
         status (str): Run status (e.g. ``completed``, ``failed``, ``timeout``).
         timestamp (str): Run timestamp string.
         result_dir (str): Path to the optimization result directory.
-        ifx_reference (dict | None): Optional InferenceX reference metrics for
-            computing the ``vs_inferenceX_pct`` comparison.
 
     Returns:
         dict: The assembled per-model result record.
@@ -306,37 +302,6 @@ def build_model_result(
         "report_exists": opt_data.get("report_exists", False),
         "report_content": opt_data.get("report_content"),
     }
-
-    if ifx_reference and result["optimized_tok_per_gpu"]:
-        metrics = ifx_reference.get("metrics", {})
-        ifx_tput = metrics.get("output_tput_per_gpu") or metrics.get("tput_per_gpu")
-        if ifx_tput and ifx_tput > 0:
-            ratio = result["optimized_tok_per_gpu"] / ifx_tput
-            if ratio > 3.0:
-                tp = ifx_reference.get("decode_tp") or 1
-                if tp > 1:
-                    log.warning(
-                        "optimized (%.1f) is %.0fx InferenceX (%.1f) — likely total "
-                        "throughput instead of per-GPU. Dividing by TP=%d.",
-                        result["optimized_tok_per_gpu"],
-                        ratio,
-                        ifx_tput,
-                        tp,
-                    )
-                    result["baseline_tok_per_gpu"] = (
-                        round(result["baseline_tok_per_gpu"] / tp, 2) if result["baseline_tok_per_gpu"] else None
-                    )
-                    result["optimized_tok_per_gpu"] = round(result["optimized_tok_per_gpu"] / tp, 2)
-                    if result.get("gain_pct") is not None and result["baseline_tok_per_gpu"]:
-                        result["gain_pct"] = round(
-                            (result["optimized_tok_per_gpu"] - result["baseline_tok_per_gpu"])
-                            / result["baseline_tok_per_gpu"]
-                            * 100,
-                            2,
-                        )
-            result["inferenceX_tok_per_gpu"] = ifx_tput
-            vs = round((result["optimized_tok_per_gpu"] - ifx_tput) / ifx_tput * 100, 1)
-            result["vs_inferenceX_pct"] = 0.0 if vs == -0.0 else vs
 
     return result
 
@@ -365,19 +330,18 @@ def generate_markdown_report(
         f"CI Run ID: {ci_run_id}",
         "",
         "## Summary",
-        "| Model | Precision | Depth | Baseline | Optimized | Gain | vs InferenceX | Status |",
-        "|-------|-----------|-------|----------|-----------|------|---------------|--------|",
+        "| Model | Precision | Depth | Baseline | Optimized | Gain | Status |",
+        "|-------|-----------|-------|----------|-----------|------|--------|",
     ]
 
     for r in results:
         baseline = f"{r['baseline_tok_per_gpu']:.1f} tok/s/GPU" if r.get("baseline_tok_per_gpu") else "N/A"
         optimized = f"{r['optimized_tok_per_gpu']:.1f} tok/s/GPU" if r.get("optimized_tok_per_gpu") else "N/A"
         gain = _fmt_pct(r.get("gain_pct"))
-        vs_ifx = _fmt_pct(r.get("vs_inferenceX_pct"))
         status_icon = {"completed": "✅", "failed": "❌", "timeout": "⏱️"}.get(r["status"], "❓")
 
         lines.append(
-            f"| {r['model']} | {r['precision']} | full | {baseline} | {optimized} | {gain} | {vs_ifx} | {status_icon} |"
+            f"| {r['model']} | {r['precision']} | full | {baseline} | {optimized} | {gain} | {status_icon} |"
         )
 
     lines.extend(["", "## Image Versions"])
@@ -476,12 +440,6 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
             lines.append(f"| Optimized (output tok/s/GPU) | {r['optimized_tok_per_gpu']:.2f} |")
         if r.get("gain_pct") is not None:
             lines.append(f"| **Optimization Gain** | **{_fmt_pct(r['gain_pct'])}** |")
-        if r.get("inferenceX_tok_per_gpu") is not None:
-            gpu_label = (r.get("target_gpu") or "MI355X").upper()
-            lines.append(f"| InferenceX {gpu_label} (output tok/s/GPU) | {r['inferenceX_tok_per_gpu']:.2f} |")
-        if r.get("vs_inferenceX_pct") is not None:
-            gpu_label = (r.get("target_gpu") or "MI355X").upper()
-            lines.append(f"| **vs InferenceX {gpu_label}** | **{_fmt_pct(r['vs_inferenceX_pct'])}** |")
         lines.append("")
 
         actions = r.get("actions")
@@ -506,14 +464,13 @@ def generate_github_summary(results: list[dict], trigger: str, ifx_commit: str) 
     if len(completed) > 1:
         lines.append("## Overall Summary")
         lines.append("")
-        lines.append("| Model | Precision | Baseline | Optimized | Gain | vs InferenceX |")
-        lines.append("|-------|-----------|----------|-----------|------|---------------|")
+        lines.append("| Model | Precision | Baseline | Optimized | Gain |")
+        lines.append("|-------|-----------|----------|-----------|------|")
         for r in completed:
             bl = f"{r['baseline_tok_per_gpu']:.1f}" if r.get("baseline_tok_per_gpu") else "N/A"
             opt = f"{r['optimized_tok_per_gpu']:.1f}" if r.get("optimized_tok_per_gpu") else "N/A"
             gain = _fmt_pct(r.get("gain_pct"))
-            vs = _fmt_pct(r.get("vs_inferenceX_pct"))
-            lines.append(f"| {r['model']} | {r['precision']} | {bl} | {opt} | {gain} | {vs} |")
+            lines.append(f"| {r['model']} | {r['precision']} | {bl} | {opt} | {gain} |")
         lines.append("")
 
     return "\n".join(lines)
