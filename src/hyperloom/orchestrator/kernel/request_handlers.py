@@ -223,7 +223,10 @@ def _reusable_source_roots() -> tuple[str, ...]:
             if cand not in seen:
                 seen.add(cand)
                 out.append(cand)
-    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+    # No personal/internal storage defaults: FlyDSL roots come from
+    # DSL2_ROOT/FLYDSL_ROOT (above); the container checkout path is the only
+    # neutral built-in fallback.
+    for default in ("/sgl-workspace/flydsl/",):
         if default not in seen:
             seen.add(default)
             out.append(default)

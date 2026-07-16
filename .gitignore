@@ -73,7 +73,7 @@ pr.md
 *.claude
 CLAUDE.md
 
-# Large HF candidate pools are hosted off-repo on /wekafs (read by the cron at
+# Large HF candidate pools are hosted off-repo on a shared mount (read by the cron at
 # runtime) — keep only the small InferenceX daily set tracked in git.
 ci/candidates/*.json
 !ci/candidates/inferencex_daily_fixed.json
