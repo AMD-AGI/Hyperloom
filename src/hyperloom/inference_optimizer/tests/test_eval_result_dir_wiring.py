@@ -5,11 +5,12 @@
 InferenceX ``run_lm_eval`` (benchmark_lib.sh) reads ``$EVAL_RESULT_DIR`` for
 lm-eval's ``--output_path``; unset, it falls back to ``/tmp/eval_out-*`` so the
 ``results*.json`` escape the task workspace and the accuracy gate sees no
-baseline (``baseline_accuracy=0.0`` -> throughput-only KEEP). Hyperloom only set
-``$RESULT_DIR``. These tests pin that:
+baseline (``baseline_accuracy=0.0`` -> throughput-only KEEP). These tests pin
+that:
 
-* the baseline / grid subprocess env exports ``$EVAL_RESULT_DIR`` mirrored from
-  ``$RESULT_DIR``; and
+* the baseline / grid subprocess env exports ``$EVAL_RESULT_DIR`` under, but
+  separate from, ``$RESULT_DIR`` so lm-eval cleanup cannot delete Magpie traces;
+  and
 * the accuracy parse search root is aligned to that dir, where lm-eval
   (lm_eval 0.4.9.2) writes ``<root>/<model_sanitized>/results_<ts>.json``.
 """
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,9 +59,8 @@ def test_parse_eval_results_finds_lm_eval_output_under_root(tmp_path):
 
 
 def test_parse_eval_results_misses_when_root_is_benchmark_subdir(tmp_path):
-    # Root-cause shape: lm-eval writes under the slot (== $EVAL_RESULT_DIR), a
-    # sibling of the Magpie ``benchmark_*`` workspace. Searching from the
-    # benchmark_* subdir (the pre-fix baseline root) cannot reach the sibling.
+    # lm-eval writes outside the Magpie ``benchmark_*`` workspace. Searching from
+    # the benchmark_* subdir (the pre-fix baseline root) cannot reach it.
     _write_lm_eval_output(tmp_path)
     bench_ws = tmp_path / "benchmark_sglang_20260715_010101"
     bench_ws.mkdir(parents=True)
@@ -70,7 +71,7 @@ def test_parse_eval_results_misses_when_root_is_benchmark_subdir(tmp_path):
 # --- Grid runner env wiring ---
 
 
-def test_run_magpie_exports_eval_result_dir_mirrored_from_result_dir(tmp_path, monkeypatch):
+def test_run_magpie_exports_eval_result_dir_under_result_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     captured: dict = {}
 
@@ -89,8 +90,8 @@ def test_run_magpie_exports_eval_result_dir_mirrored_from_result_dir(tmp_path, m
             timeout_sec=5,
             cwd=str(tmp_path),
         )
-    assert captured["env"].get("EVAL_RESULT_DIR") == captured["env"]["RESULT_DIR"]
-    assert captured["env"]["EVAL_RESULT_DIR"] == str(tmp_path / "slot")
+    assert captured["env"]["RESULT_DIR"] == str(tmp_path / "slot")
+    assert captured["env"]["EVAL_RESULT_DIR"] == str(tmp_path / "slot" / "eval_output")
 
 
 def test_run_magpie_eval_result_dir_follows_result_dir_override(tmp_path, monkeypatch):
@@ -113,8 +114,39 @@ def test_run_magpie_eval_result_dir_follows_result_dir_override(tmp_path, monkey
             cwd=str(tmp_path),
             result_dir="/tmp/redirect_leak",
         )
-    assert captured["env"]["EVAL_RESULT_DIR"] == "/tmp/redirect_leak"
     assert captured["env"]["RESULT_DIR"] == "/tmp/redirect_leak"
+    assert captured["env"]["EVAL_RESULT_DIR"] == "/tmp/redirect_leak/eval_output"
+
+
+def test_run_magpie_keeps_magpie_traces_when_eval_output_is_cleaned(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
+    output_dir = tmp_path / "slot"
+    trace_file = output_dir / "benchmark_sglang_20260716_010101" / "magpie_trace.json"
+
+    def fake_run(cmd, *args, **kwargs):
+        env = dict(kwargs.get("env") or {})
+        trace_file.parent.mkdir(parents=True)
+        trace_file.write_text("{}", encoding="utf-8")
+        eval_dir = Path(env["EVAL_RESULT_DIR"])
+        (eval_dir / "model__sanitized").mkdir(parents=True, exist_ok=True)
+        (eval_dir / "model__sanitized" / "results.json").write_text("{}", encoding="utf-8")
+        # Match benchmark_lib.sh cleanup after lm-eval output is processed.
+        shutil.rmtree(eval_dir)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        _run_magpie(
+            magpie_python="/opt/venv/bin/python",
+            config_path=tmp_path / "config.yaml",
+            output_dir=output_dir,
+            timeout_sec=5,
+            cwd=str(tmp_path),
+        )
+
+    assert trace_file.exists()
 
 
 # --- Baseline executor env wiring + accuracy parse ---
@@ -205,8 +237,8 @@ def test_baseline_exports_eval_result_dir_env(tmp_path):
         result = asyncio.run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert captured["env"].get("EVAL_RESULT_DIR") == captured["env"]["RESULT_DIR"]
-    assert captured["env"]["EVAL_RESULT_DIR"] == str(output_dir)
+    assert captured["env"]["RESULT_DIR"] == str(output_dir)
+    assert captured["env"]["EVAL_RESULT_DIR"] == str(output_dir / "eval_output")
 
 
 def test_baseline_parses_accuracy_from_eval_result_dir(tmp_path):
