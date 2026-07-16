@@ -154,7 +154,7 @@ The following credentials are optional and only needed for specific backends.
 ### LLM RCA in robustness-agent
 
 `robustness-agent`'s LLM root-cause-analysis engine activates when an
-LLM base URL and API key are available (normally via the aliases above).
+LLM base URL and API key are available (normally through the aliases above).
 Set `ROBUSTNESS_LLM_RCA_DISABLED=1` to force-disable it even when
 credentials are present.
 
@@ -231,8 +231,7 @@ When you launch through the [Hyperloom UI](https://crusoe.primus-safe.amd.com/hy
 you do not need to set any of the variables above by hand. The
 sandbox initializer binds your LLM Gateway key as `SAFE_API_KEY`,
 populates the path env from sandbox defaults, and runs install/preflight
-so downstream tools inherit the gateway URL and aliases. See
-[Quickstart](../../examples/README.md).
+so downstream tools inherit the gateway URL and aliases.
 
 ---
 
