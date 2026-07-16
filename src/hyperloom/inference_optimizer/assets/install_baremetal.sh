@@ -1274,7 +1274,7 @@ Optimize inference for this workload:
 - Model: /path/to/your/model
 - Framework: ${framework_hint}
 - GPU: ${DETECTED_GPU}
-- TP: 8
+- TP: 1
 - CONC: 64
 - ISL: 1024
 - OSL: 1024
