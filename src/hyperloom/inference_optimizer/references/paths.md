@@ -85,7 +85,7 @@ want a fully self-contained session:
   required by `_server_patcher`.
 - `/sgl-workspace/{aiter,sglang,vllm}/`
 - `~/.cache/amd-ai-devtool/semantic-index/` (GEAK RAG embedding cache)
-- `/wekafs/hyperloom/geak-memory/memory.db` (GEAK cross-session memory)
+- `/path/hyperloom/geak-memory/memory.db` (GEAK cross-session memory)
 
 Paths emitted by agents must resolve under the **session dir** — PolicyGate
 enforces this (with a framework-source allowlist for `source_file`:

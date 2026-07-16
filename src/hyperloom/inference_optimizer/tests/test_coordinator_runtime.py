@@ -1171,7 +1171,7 @@ def test_fingerprint_stringifies_scalar_values():
     fp = _baseline_params_fingerprint(
         {
             "benchmark_script": "sglang_mi300x.sh",
-            "model_path": "/wekafs/models/DeepSeek-R1",
+            "model_path": "/path/models/DeepSeek-R1",
             "gpu_type": "mi300x",
         }
     )
@@ -1195,7 +1195,7 @@ async def test_promote_baseline_records_fingerprint(session_dir):
         task = _mk_baseline_task(
             {
                 "benchmark_script": "sglang_mi300x.sh",
-                "model_path": "/wekafs/models/DeepSeek-R1",
+                "model_path": "/path/models/DeepSeek-R1",
                 "gpu_type": "mi300x",
             }
         )
@@ -1209,7 +1209,7 @@ async def test_promote_baseline_records_fingerprint(session_dir):
         assert last["status"] == "succeeded"
         fp = last["extras"]["fingerprint"]
         assert fp["benchmark_script"] == "sglang_mi300x.sh"
-        assert fp["model_path"] == "/wekafs/models/DeepSeek-R1"
+        assert fp["model_path"] == "/path/models/DeepSeek-R1"
         assert fp["gpu_type"] == "mi300x"
     finally:
         await c.stop()
@@ -1462,5 +1462,113 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.stop_reason == "target_reached"
         assert persisted.last_tick_exception["stage"] == "advance_phase"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
+    # Defensive audit (log-only): killing a queued/running task must still
+    # cancel it (behaviour unchanged) AND emit a log-only audit record.
+    import logging
+
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    try:
+        task = await c.tasks.create(
+            kind="long_running",
+            params={},
+            idempotency_key="k-audit-kill-1",
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"
+        ):
+            await c._handle_intent(
+                "robustness",
+                Intent(
+                    type=IntentType.KILL_TASK,
+                    payload={"task_id": task.task_id, "reason": "stalled", "scope": "task"},
+                ),
+            )
+        after = await c.tasks.get(task.task_id)
+        assert after.state == "cancelled"
+        assert any(
+            "kill_task audit" in r.getMessage() and task.task_id in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
+    # Defensive audit (log-only): a queued task whose kind has no registered
+    # executor is flagged in the process log; dispatch itself is unchanged
+    # (the task still fails on the missing runner).
+    import logging
+
+    delegate = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "long_running",
+            "params": {},
+            "idempotency_key": "k-audit-dispatch-1",
+        },
+    )
+    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
+    c = Coordinator(session_dir, backends=_build_backends(plans))
+
+    async def _noop_executor(ctx):
+        return {}
+
+    # A fresh SubAgentRunner has an empty registry; the audit only fires once the
+    # registry is populated, so register one unrelated executor first.
+    c.sub.register_executor("report", _noop_executor)
+    try:
+        with caplog.at_level(
+            logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"
+        ):
+            await c.tick(1)
+        assert any(
+            "dispatch audit" in r.getMessage() and "long_running" in r.getMessage()
+            for r in caplog.records
+        )
+        assert await c.tasks.by_state("failed")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_audit_skips_kernel_owned_kind_under_no_kernel(session_dir, caplog):
+    # Defensive audit (log-only): kernel-owned kinds are legitimately not
+    # registered under --no-kernel, so a leftover queued kernel-owned task must
+    # NOT be flagged by the dispatch audit (no false positive). Dispatch is
+    # unchanged (the task still fails on the missing runner).
+    import logging
+
+    c = Coordinator(session_dir, backends=_build_backends({}))
+
+    async def _noop_executor(ctx):
+        return {}
+
+    # Populate the registry with a non-kernel executor only (mimics the
+    # --no-kernel lean registry, where kernel-owned kinds are unregistered).
+    c.sub.register_executor("report", _noop_executor)
+    await c.tasks.create(
+        kind="kernel_opt",
+        params={},
+        idempotency_key="k-nokernel-audit-1",
+        requires_lanes=[],
+    )
+    try:
+        with caplog.at_level(
+            logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"
+        ):
+            await c.dispatcher._pump_dispatcher_once()
+        assert not any(
+            "dispatch audit" in r.getMessage() and "kernel_opt" in r.getMessage()
+            for r in caplog.records
+        )
+        # dispatch unchanged: the task still fails on the missing runner.
+        assert await c.tasks.by_state("failed")
     finally:
         await c.stop()
