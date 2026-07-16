@@ -26,7 +26,7 @@ benchmark:
   framework: hunyuan_image3
   workload_kind: scriptable        # drives server-less branching in the loop
   # benchmark_script: hunyuan_image3_mi355x.sh  # uncomment to force a script
-  model: /primus/models/tencent-HunyuanImage-3.0   # OVERRIDDEN at runtime
+  model: /models/tencent-HunyuanImage-3.0   # OVERRIDDEN at runtime
   precision: bf16                  # LOCKED for a hunyuan_image3 session
   run_mode: local
 

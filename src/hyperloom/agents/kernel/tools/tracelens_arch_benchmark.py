@@ -2,7 +2,7 @@
 """Ensure TraceLens GPU arch JSON exists before running the TL report.
 
 Public (open-source) TraceLens does not carry MAF values; those live only in
-the TraceLens-internal extension. When the internal extension is not enabled we
+TraceLens-internal. When TraceLens-internal is not enabled we
 run the TraceLens GPU microbenchmark suite to produce a measured arch spec
 (``TraceLens/Agent/Analysis/utils/arch/<platform>.json``); when it is enabled it
 backfills MAF itself and the microbenchmark is skipped. The benchmark selects an
@@ -377,7 +377,7 @@ def populate_gpu_arch_json(
 ) -> Path | None:
     """Ensure a GPU arch JSON is available for roofline, returning its path.
 
-    The microbenchmark is gated on whether the TraceLens-internal extension
+    The microbenchmark is gated on whether TraceLens-internal
     is enabled:
 
     - When ``internal_extension_enabled`` is True the internal extension

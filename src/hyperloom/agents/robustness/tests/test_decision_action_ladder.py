@@ -361,8 +361,8 @@ async def test_wekafs_degraded_alert_only():
             _sym(
                 "wekafs_degraded",
                 SymptomSeverity.HIGH,
-                evidence={"env_name": "TRACELENS_ROOT", "path": "/wekafs/hyperloom"},
-                subject={"path": "/wekafs/hyperloom"},
+                evidence={"env_name": "TRACELENS_ROOT", "path": "/path/hyperloom"},
+                subject={"path": "/path/hyperloom"},
             )
         ],
         tick_index=0,

@@ -4,8 +4,8 @@ description: |
   Build a single self-contained `session_breakdown.json` capturing every
   fact a dashboard needs about one hyperloom optimization session. Use
   when the user mentions session-breakdown, kernel attribution,
-  stats-service, capability summary, or wants to surface hyperloom data
-  to an external consumer (claw-stats-service, results service, notebook).
+  a stats/reporting service, capability summary, or wants to surface hyperloom
+  data to an external consumer (a results/stats service, notebook, dashboard).
 globs:
   - "**/breakdown/**"
   - "**/session_breakdown*"
@@ -45,11 +45,11 @@ The JSON has 14 top-level sections plus envelope:
 
 ## Who reads it
 
-- **`claw-stats-service`** — primary consumer. Replaces the
-  MAE-synthesized `raw_report` / `fact_sheet`. Read order in
-  stats-service should be: prefer `session_breakdown.json` if present,
-  fall back to legacy MAE output otherwise.
-- **`hyperloom-results-service`** — `ci/publish_artifacts.py` POSTs this
+- **A downstream stats/reporting service** — primary consumer. Replaces the
+  MAE-synthesized `raw_report` / `fact_sheet`. Recommended read order:
+  prefer `session_breakdown.json` if present, fall back to legacy MAE
+  output otherwise.
+- **`hyperloom-results-service`** — downstream automation may POST this
   JSON when `HYPERLOOM_RESULTS_SERVICE_URL` is set.
 - **Offline / notebook analysis** — single file, easy to load, no DB
   needed.
@@ -99,9 +99,9 @@ out_path = write_breakdown_json("/workspace/hyperloom")
 # Live session in this sandbox
 python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
 
-# Historical session on WekaFS
+# Historical session on a shared filesystem
 python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
-    --session-dir /wekafs/users/zgong/inference_optimizer-sessions/<sid>
+    --session-dir /shared/hyperloom-sessions/<user>/<sid>
 
 # Override output path (e.g. write to a staging area)
 python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
@@ -111,7 +111,7 @@ python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
 ### Bulk historical (operator)
 
 ```bash
-for d in /wekafs/users/*/inference_optimizer-sessions/*; do
+for d in /shared/hyperloom-sessions/*/*; do
     [ -d "$d" ] || continue
     python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
         --session-dir "$d" > /dev/null
@@ -150,8 +150,8 @@ another (each becomes a `warnings[]` entry instead).
   features on it, comparing the **major** version (`vN`) rather than the
   exact string: the producer emits both `…v2` and `…v3.0` today (see
   Versioning policy) and they are wire-compatible.
-- **Cross-session aggregation** — one file per session. Use
-  `ci/build_summary.py` (or a Jupyter notebook) for fleet views.
+- **Cross-session aggregation** — one file per session. Use a Jupyter
+  notebook or downstream analytics job for fleet views.
 
 ## Failure modes
 

@@ -111,7 +111,7 @@ class LocalProbeConfig:
     max_extra_server_logs: int = 5
     log_tail_lines: int = 200
     # Surface ``/dev/shm`` alongside ``/`` so signals fire shm_pressure separately.
-    disk_mountpoints: tuple[str, ...] = ("/", "/dev/shm")
+    disk_mountpoints: tuple[str, ...] = ("/", "/dev/shm")  # nosec B108 - mountpoint probe, not temp file creation.
     process_patterns: tuple[str, ...] = _DEFAULT_PROCESS_PATTERNS
     coordinator_event_limit: int = 200
     log_error_patterns: tuple[str, ...] = _DEFAULT_LOG_ERROR_PATTERNS

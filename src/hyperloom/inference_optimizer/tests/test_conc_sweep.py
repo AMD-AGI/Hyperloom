@@ -7,7 +7,9 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from unittest.mock import patch
 
@@ -406,6 +408,13 @@ def _fake_variant(
     )
 
 
+def _fake_materialize(src, out_dir, **_kw):
+    """Copy the base YAML into the run dir (mock for materialize_config_with_envs)."""
+    out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
+    out.write_text(Path(src).read_text())
+    return out
+
+
 def test_run_conc_sweep_happy_path_writes_reports(
     session_dir: Path,
     baseline_yaml: Path,
@@ -427,11 +436,6 @@ def test_run_conc_sweep_happy_path_writes_reports(
                     envs=v.extra_envs,
                 )
             )
-        return out
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
         return out
 
     with (
@@ -568,11 +572,6 @@ def test_run_conc_sweep_optimized_oom_yields_failed_pair(
                     )
         return out
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch(
             "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
@@ -616,11 +615,6 @@ def test_run_conc_sweep_args_only_optimization_triggers_run(
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch(
             "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
@@ -661,11 +655,6 @@ def test_run_conc_sweep_envs_only_optimization_triggers_run(
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch(
             "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
@@ -699,11 +688,6 @@ def test_run_conc_sweep_does_not_touch_final_json(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch(
@@ -754,11 +738,6 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
         calls["n"] += 1
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch(
             "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
@@ -803,11 +782,6 @@ def test_run_conc_sweep_zero_budget_disables_gate(
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch(
             "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
@@ -841,11 +815,6 @@ def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch(
@@ -1286,11 +1255,6 @@ def test_run_conc_sweep_single_server_arm_major_order(
             call_log.append(v.name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1319,11 +1283,6 @@ def test_run_conc_sweep_single_server_concs_descending(
         for v in grid:
             call_log.append(v.name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1354,11 +1313,6 @@ def test_run_conc_sweep_legacy_path_with_env_off(
         for v in grid:
             call_log.append(v.name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1397,11 +1351,6 @@ def test_run_conc_sweep_partial_sweep_writes_incremental_checkpoint(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1519,11 +1468,6 @@ def test_run_conc_sweep_stops_on_closing_phase(
         state.closing_phase = True
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1554,11 +1498,6 @@ def test_run_conc_sweep_session_deadline_via_remaining_minutes(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1662,6 +1601,138 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
     assert result is None
 
 
+def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
+    from hyperloom.orchestrator.kernel import conc_sweep_plot
+
+    xs, ys = conc_sweep_plot._arm_series(
+        [
+            {"conc": 4, "output_throughput": 800.0},
+            {"conc": 2, "output_throughput": "300"},
+            {"conc": 0, "output_throughput": 1000.0},
+            {"conc": 1, "output_throughput": None},
+            {"conc": "bad", "output_throughput": 10},
+            {"conc": 8, "output_throughput": -1},
+        ],
+        tp_eff=2.0,
+    )
+    assert xs == [150.0, 200.0]
+    assert ys == [150.0, 400.0]
+    assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0) == ([], [])
+
+    cx, cy = conc_sweep_plot._ceiling_series(
+        {
+            "rows": [
+                {"conc": 4, "t_peak_tok_s": 1000},
+                {"conc": 2, "t_peak_tok_s": "600"},
+                {"conc": None, "t_peak_tok_s": 1},
+                {"conc": "bad", "t_peak_tok_s": 1},
+                {"conc": 1, "t_peak_tok_s": -1},
+            ]
+        },
+        tp_eff=4.0,
+    )
+    assert cx == [250.0, 300.0]
+    assert cy == [250.0, 150.0]
+    assert conc_sweep_plot._ceiling_series({"rows": [{"conc": 0, "t_peak_tok_s": 0}]}, 1.0) == ([], [])
+
+
+def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+    calls: dict[str, Any] = {"plots": [], "annotations": [], "labels": [], "titles": [], "closed": False}
+
+    class _FakePatch:
+        def set_facecolor(self, value):
+            calls["fig_facecolor"] = value
+
+    class _FakeFig:
+        patch = _FakePatch()
+
+        def tight_layout(self):
+            calls["tight_layout"] = True
+
+        def savefig(self, path, **kwargs):
+            calls["saved"] = (path, kwargs)
+            Path(path).write_bytes(b"fake-png")
+
+    class _FakeSpine:
+        def set_color(self, value):
+            calls.setdefault("spines", []).append(value)
+
+    class _FakeLegendText:
+        def set_color(self, value):
+            calls.setdefault("legend_text_colors", []).append(value)
+
+    class _FakeLegend:
+        def get_texts(self):
+            return [_FakeLegendText(), _FakeLegendText()]
+
+    class _FakeAx:
+        spines = {"left": _FakeSpine(), "right": _FakeSpine()}
+
+        def set_facecolor(self, value):
+            calls["ax_facecolor"] = value
+
+        def plot(self, *args, **kwargs):
+            calls["plots"].append((args, kwargs))
+
+        def annotate(self, *args, **kwargs):
+            calls["annotations"].append((args, kwargs))
+
+        def set_xlabel(self, value, **kwargs):
+            calls["labels"].append(("x", value, kwargs))
+
+        def set_ylabel(self, value, **kwargs):
+            calls["labels"].append(("y", value, kwargs))
+
+        def set_title(self, value, **kwargs):
+            calls["titles"].append((value, kwargs))
+
+        def grid(self, *args, **kwargs):
+            calls["grid"] = (args, kwargs)
+
+        def tick_params(self, **kwargs):
+            calls["ticks"] = kwargs
+
+        def legend(self, **kwargs):
+            calls["legend"] = kwargs
+            return _FakeLegend()
+
+    fake_matplotlib = ModuleType("matplotlib")
+    fake_matplotlib.use = lambda backend: calls.setdefault("backend", backend)
+    fake_pyplot = ModuleType("matplotlib.pyplot")
+    fake_pyplot.subplots = lambda figsize: (_FakeFig(), _FakeAx())
+    fake_pyplot.close = lambda fig: calls.update({"closed": fig is not None})
+    fake_matplotlib.pyplot = fake_pyplot
+    monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+
+    payload = {
+        "baseline": {"points": [{"conc": 4, "output_throughput": 800.0}]},
+        "optimized": {"points": [{"conc": 8, "output_throughput": 1200.0}]},
+        "roofline_ceiling": {"rows": [{"conc": 4, "t_peak_tok_s": 1600.0}]},
+    }
+    out_path = tmp_path / "plots" / "curve.png"
+    result = render_conc_sweep_curve(
+        payload,
+        out_path,
+        model_label="M",
+        gpu_label="MI300X",
+        tp=4,
+        isl=1024,
+        osl=512,
+        draw_ceiling=True,
+    )
+
+    assert result == out_path
+    assert out_path.read_bytes() == b"fake-png"
+    assert calls["backend"] == "Agg"
+    assert len(calls["plots"]) == 3
+    assert len(calls["annotations"]) == 2
+    assert "ISL=1024 OSL=512" in calls["titles"][0][0]
+    assert calls["closed"] is True
+
+
 def test_format_conc_sweep_curve_section_empty_summary():
     from hyperloom.orchestrator.actions.executors.report import _format_conc_sweep_curve_section
 
@@ -1719,11 +1790,6 @@ def test_single_server_option_a_boot_and_reuse(
         )
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1778,11 +1844,6 @@ def test_single_server_boot_retry_descend(
                 return [_fake_variant(name, throughput=None, status="failed", envs=grid[0].extra_envs, error="boot fail")]
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1819,11 +1880,6 @@ def test_single_server_all_boot_fail_falls_back_option_b(
             option_b_calls.append(name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1857,11 +1913,6 @@ def test_single_server_not_eligible_uses_option_b(
         calls.append({"name": grid[0].name, "server_lifecycle": kw.get("server_lifecycle")})
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -1890,11 +1941,6 @@ def test_single_server_reuse_loop_stops_on_closing_phase(
         if kw.get("server_already_ready") is False:
             state.closing_phase = True
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1925,11 +1971,6 @@ def test_single_server_reuse_exception_recorded_as_failed(
         if kw.get("server_already_ready") is True:
             raise RuntimeError("reuse boom")
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -1963,11 +2004,6 @@ def test_single_server_reuse_loop_budget_exhausted(
         if kw.get("server_already_ready") is False:
             _t.sleep(1.2)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
@@ -2008,11 +2044,6 @@ def test_single_server_boot_exception_falls_back(
             raise RuntimeError("boot boom")
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
-
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
@@ -2043,11 +2074,6 @@ def test_single_server_pre_arm_skip_on_closing_phase(
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
         ran.append(grid[0].name)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    def _fake_materialize(src, out_dir, **_kw):
-        out = Path(out_dir) / "conc_sweep_base.with_envs.yaml"
-        out.write_text(Path(src).read_text())
-        return out
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),

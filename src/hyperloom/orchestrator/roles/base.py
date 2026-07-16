@@ -222,6 +222,21 @@ async def retry_with_backoff(
             await sleep(delay)
 
 
+def safe_int(value: Any) -> int:
+    """Coerce a possibly-missing usage value to a non-negative int.
+
+    Args:
+        value (Any): A token-count value that may be ``None`` or non-numeric.
+
+    Returns:
+        int: The integer value, or ``0`` when it is falsy or not coercible.
+    """
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class BackendTurnResult:
     """One turn's output from a backend."""
@@ -271,4 +286,5 @@ __all__ = [
     "build_chat_messages",
     "parse_call_timeout_env",
     "retry_with_backoff",
+    "safe_int",
 ]

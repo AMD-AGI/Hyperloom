@@ -22,6 +22,42 @@ log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
 
+# stop_reason recorded when the baseline could not produce an accuracy result
+# even though the accuracy test was expected to run. A broken baseline accuracy
+# means the environment/config is fundamentally wrong, so the whole run halts
+# rather than optimizing against an unvalidated baseline.
+BASELINE_ACCURACY_STOP_REASON = "baseline_accuracy_failed"
+
+
+def request_baseline_accuracy_stop(shared_state: Any, *, context: str) -> bool:
+    """Halt the run when the baseline accuracy test produced no result.
+
+    Only the baseline stops the run on a missing accuracy verdict: a baseline
+    with no accuracy signal (eval failed or the scriptable quality gate is
+    missing) indicates a fundamentally broken setup. Post-baseline variants that
+    fail the accuracy gate are reverted instead (the offending change is
+    dropped, the run continues).
+
+    Args:
+        shared_state: The live SharedState (``None`` in some unit contexts).
+        context: Short audit tag identifying the call site.
+
+    Returns:
+        bool: ``True`` if a stop reason was recorded.
+    """
+    if shared_state is None:
+        return False
+    setter = getattr(shared_state, "set_stop_reason", None)
+    if not callable(setter):
+        return False
+    log.warning(
+        "baseline accuracy test produced no result (%s); stopping run "
+        "(broken baseline setup)",
+        context,
+    )
+    setter(BASELINE_ACCURACY_STOP_REASON)
+    return True
+
 
 def require_framework_accuracy_default() -> bool:
     """Default for the framework source-patch accuracy-KEEP gate.
@@ -287,17 +323,16 @@ def parse_eval_results(
     result_files: list[Path] = []
     for pattern in search_paths:
         result_files.extend(Path(f) for f in glob.glob(str(pattern), recursive=True))
-    # Never grade a discarded cold-start warmup round: ``run_grid`` (used by
-    # integrate_patch) and the baseline double-run both nest the throwaway round
-    # under a ``warmup_round/`` slot whose eval output is discarded. When the
-    # search root sits ABOVE such a round (e.g. integrate_patch grades from the
-    # grid slot, the parent of the measured ``benchmark_*`` workspace), the
-    # recursive glob would otherwise also match the warmup eval and
-    # ``sorted(...)[-1]`` can lexicographically favor it over the measured round.
-    # Drop nested ``warmup_round/`` results using a workspace-relative check so a
-    # parse rooted AT the warmup slot itself still finds its own output.
+    # Never grade a discarded warmup round: grid/baseline warmups nest throwaway
+    # eval output under a named warmup slot. When the search root sits above such
+    # a slot, the recursive glob would otherwise also match the discarded eval.
+    # Drop nested warmup results using a workspace-relative check so a parse
+    # rooted AT the warmup slot itself still finds its own output.
+    discarded_warmup_dirs = {"warmup_round", "mn_warmup"}
     result_files = [
-        p for p in result_files if "warmup_round" not in p.relative_to(workspace).parts
+        p
+        for p in result_files
+        if discarded_warmup_dirs.isdisjoint(p.relative_to(workspace).parts)
     ]
     if not result_files:
         return {"accuracy": None, "error": f"no results*.json in {workspace}"}
@@ -352,9 +387,11 @@ def accuracy_passed(
 
 __all__ = [
     "ACCURACY_THRESHOLD",
+    "BASELINE_ACCURACY_STOP_REASON",
     "accuracy_keep_block",
     "accuracy_passed",
     "is_high_accuracy_risk",
     "parse_eval_results",
+    "request_baseline_accuracy_stop",
     "require_framework_accuracy_default",
 ]

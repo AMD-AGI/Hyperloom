@@ -31,7 +31,7 @@ Optimize inference for this workload:
 - Model: /path/to/your/model
 - Framework: sglang
 - GPU: MI300X
-- TP: 8
+- TP: 1
 - CONC: 64
 - ISL: 1024
 - OSL: 1024
@@ -51,7 +51,7 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `8`) | Set to your target concurrency; the post-run concurrency sweep separately measures a ladder (default `1,2,4,8,16,32,64,128`) |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency; the post-run concurrency sweep separately measures a ladder (default `1,2,4,8,16,32,64,128`) |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 

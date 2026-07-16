@@ -284,7 +284,7 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
         value = _walk_path(payload, path)
         subset[path] = _strip_blacklisted(value)
     canonical = json.dumps(subset, sort_keys=True, default=str)
-    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha1(canonical.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def _walk_path(payload: dict[str, Any], path: str) -> Any:

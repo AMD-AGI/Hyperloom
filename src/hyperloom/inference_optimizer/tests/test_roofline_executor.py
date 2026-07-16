@@ -685,7 +685,7 @@ def test_strip_preserves_empty_alt_text():
 def test_strip_reduces_real_r1_report_by_90pct_plus():
     import os
 
-    p = "/wekafs/xiaofei/sessions/kernel-agent/runs/sessions/tracelens/analysis.md"
+    p = "/shared/user1/sessions/kernel-agent/runs/sessions/tracelens/analysis.md"
     if not os.path.exists(p):
         pytest.skip(f"sample analysis.md not present at {p}")
     with open(p, encoding="utf-8") as f:

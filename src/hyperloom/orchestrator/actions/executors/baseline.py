@@ -29,6 +29,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.env_safety import scrub_child_process_env
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
@@ -490,8 +491,8 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
             "inferencex_local",
         )
     )
-    src_hash = hashlib.sha1(real_src.encode("utf-8")).hexdigest()[:16]
-    key_hash = hashlib.sha1(str(mirror_key or "").encode("utf-8")).hexdigest()[:16]
+    src_hash = hashlib.sha1(real_src.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+    key_hash = hashlib.sha1(str(mirror_key or "").encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     dest_name = src_hash if not mirror_key else f"{src_hash}-{key_hash}"
     dest = local_root / dest_name
     try:
@@ -768,7 +769,7 @@ class BaselineExecutor:
         session_dir: Path | str | None = None,
         shared_state: Any | None = None,
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
-        cwd: Path | str = "/tmp",
+        cwd: Path | str | None = None,
     ):
         """Initialize the baseline executor with launch defaults.
 
@@ -783,9 +784,9 @@ class BaselineExecutor:
                 eager-fallback one-shot is consumed in memory before saving so
                 Coordinator cannot later re-persist a stale True value.
             default_timeout_sec (int): Default (warm-start) subprocess timeout.
-            cwd (Path | str): Working directory for the Magpie subprocess.
+            cwd (Path | str | None): Working directory for the Magpie subprocess.
         """
-        from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
+        from ._grid_runner import _resolve_session_dir
 
         # Backend-aware interpreter: bypass uses a plain python3, magpie
         # uses the Magpie-importable venv.
@@ -797,7 +798,7 @@ class BaselineExecutor:
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.shared_state = shared_state
         self.default_timeout_sec = default_timeout_sec
-        self.cwd = Path(cwd)
+        self.cwd = Path(cwd if cwd is not None else tempfile.gettempdir())
 
     def _resolve_default_config(self) -> Path:
         """Hook for subclasses (ProfileExecutor) to swap the resolver.
@@ -1103,8 +1104,70 @@ class BaselineExecutor:
             retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
             if retry.get("status") == "succeeded":
                 retry["accuracy_source"] = "eval_unavailable"
-            return retry
+            result = retry
+        self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
+
+    def _maybe_stop_on_missing_baseline_accuracy(
+        self,
+        ctx: RunnerContext,
+        result: dict[str, Any],
+    ) -> None:
+        """Halt the run when a genuine baseline produced no accuracy result.
+
+        A baseline is supposed to establish the accuracy reference. If the
+        accuracy test was expected to run but produced no usable result, the
+        setup is fundamentally broken and the whole run stops.
+
+        "No usable result" means a missing or non-positive accuracy: scriptable
+        workloads record ``accuracy=0.0`` (fail-closed) when the quality gate is
+        absent, and serving records no accuracy at all, so both are covered.
+
+        "Expected" means accuracy was not intentionally turned off. Scriptable
+        workloads always carry the quality gate. For serving, the operator can
+        opt out via ``disable_run_eval``, an explicit ``RUN_EVAL=false`` env, or
+        a YAML/reference-env ``RUN_EVAL=false`` -- all folded into the
+        authoritative ``run_eval_disabled`` on the result. The eval-failure
+        fallback also disables eval, but it is tagged
+        ``accuracy_source="eval_unavailable"`` and must still stop (eval was
+        expected and broke). Throughput-level baseline failures are handled by
+        the Coordinator's existing ``baseline_failed`` streak logic.
+
+        Args:
+            ctx (RunnerContext): The runner context (task kind + shared_state).
+            result (dict): The final baseline result dict.
+        """
+        if not _should_establish_quality_ref(getattr(ctx.task, "kind", "")):
+            return
+        if result.get("status") != "succeeded":
+            return
+        acc = result.get("accuracy")
+        if acc is not None and float(acc) > 0.0:
+            return  # a usable baseline accuracy exists
+        params = ctx.task.params or {}
+        framework = (
+            str(params.get("framework") or "").strip()
+            or os.environ.get("FRAMEWORK", "").strip()
+            or None
+        )
+        from hyperloom.inference_optimizer import framework_registry
+        from ._accuracy_gate import request_baseline_accuracy_stop
+
+        scriptable = framework_registry.is_scriptable(framework)
+        # Operator opt-out only when eval was disabled AND this is not the
+        # eval-failure fallback (which forces RUN_EVAL=false but still means the
+        # eval was expected and broke). Scriptable always runs its quality gate.
+        operator_disabled_eval = bool(result.get("run_eval_disabled")) and (
+            result.get("accuracy_source") != "eval_unavailable"
+        )
+        if not (scriptable or not operator_disabled_eval):
+            return
+        extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or self.shared_state
+        request_baseline_accuracy_stop(
+            shared_state,
+            context=f"baseline:{framework or 'unknown'}",
+        )
 
     async def _run_once(
         self,
@@ -1540,7 +1603,7 @@ class BaselineExecutor:
             r = urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/health",
                 timeout=timeout,
-            )
+            )  # nosec B310 - fixed loopback health check.
             return r.status == 200
         except Exception:  # noqa: BLE001
             return False
@@ -1677,7 +1740,7 @@ class BaselineExecutor:
             config_path=config_path,
             output_dir=output_dir,
         )
-        env = os.environ.copy()
+        env = scrub_child_process_env(os.environ.copy())
         # Put the venv first in PATH so the benchmark script's `python3`
         # resolves to one with torch+rocm (defense in depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
@@ -1690,12 +1753,10 @@ class BaselineExecutor:
         # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts
         # that ignore it are caught by the salvage pass.
         env["RESULT_DIR"] = override_result_dir or str(output_dir)
-        # InferenceX ``run_lm_eval`` reads ``$EVAL_RESULT_DIR`` for lm-eval's
-        # ``--output_path``; unset it defaults to ``/tmp/eval_out-*`` and the
-        # ``results*.json`` never reach the task workspace, so the accuracy gate
-        # finds no baseline. Mirror it to ``$RESULT_DIR`` so eval artifacts land
-        # under ``output_dir`` (a sibling of the Magpie ``benchmark_*`` dir).
-        env["EVAL_RESULT_DIR"] = env["RESULT_DIR"]
+        # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
+        # lm-eval output. Keep it under the task workspace but separate from
+        # Magpie's ``benchmark_*`` traces in ``$RESULT_DIR``.
+        env["EVAL_RESULT_DIR"] = str(Path(env["RESULT_DIR"]) / "eval_output")
         # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the
         # task workspace; ``harvest_leaked_artifacts`` is the defense-in-depth net.
         env["SERVER_LOG"] = str(output_dir / "server.log")
@@ -1781,6 +1842,7 @@ class BaselineExecutor:
                 _mn_warm_cmd = [str(_mn_warm_dir) if c == str(output_dir) else c for c in cmd]
                 _mn_warm_env = dict(env)
                 _mn_warm_env["RESULT_DIR"] = str(_mn_warm_dir)
+                _mn_warm_env["EVAL_RESULT_DIR"] = str(_mn_warm_dir / "eval_output")
                 _mn_warm_env["SERVER_LOG"] = str(_mn_warm_dir / "server.log")
                 _mn_warm_env["GPU_METRICS_CSV"] = str(_mn_warm_dir / "gpu_metrics.csv")
                 await asyncio.to_thread(
@@ -2057,6 +2119,11 @@ class BaselineExecutor:
             # promotes into ``SharedState.baseline_runtime_sec``, the explore
             # overtime-kill anchor. Omitted on failure paths.
             "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+            # Authoritative (materialized-config) view of whether the serving
+            # lm-eval ran this run. The accuracy-stop decision reads this rather
+            # than re-deriving from params, so a YAML/reference-env RUN_EVAL=false
+            # is honored as an intentional opt-out.
+            "run_eval_disabled": bool(run_eval_disabled),
         }
 
         # Parse accuracy eval results (GSM8K for serving, or the image-quality
@@ -2087,11 +2154,10 @@ class BaselineExecutor:
         else:
             from ._accuracy_gate import parse_eval_results
 
-            # lm-eval writes ``results*.json`` under ``$EVAL_RESULT_DIR`` (== the
-            # ``RESULT_DIR`` set above), a sibling of (not inside) the Magpie
-            # ``benchmark_*`` workspace. Search from that root so the recursive
-            # ``**/results*.json`` glob finds it.
-            eval_search_root = Path(env["EVAL_RESULT_DIR"])
+            # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh
+            # moving/cleaning ``$EVAL_RESULT_DIR`` and scriptable quality gates
+            # still resolve from Magpie's benchmark reports.
+            eval_search_root = Path(env["RESULT_DIR"])
             eval_data = parse_eval_results(eval_search_root, framework=eval_framework)
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]
