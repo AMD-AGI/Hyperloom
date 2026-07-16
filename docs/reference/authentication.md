@@ -72,8 +72,8 @@ One OpenAI-compatible endpoint serves both Claude and GPT models
 
 | Variable           | Issuer                              | Where to obtain                                                                                       | Format              |
 |--------------------|-------------------------------------|-------------------------------------------------------------------------------------------------------|---------------------|
-| `SAFE_API_KEY`     | AMD LiteLLM gateway                 | [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway)                                     | `ak-...`            |
-| `OPENAI_BASE_URL`  | AMD LiteLLM gateway                 | `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1` (default for the hosted SaFE setup)          | URL ending in `/v1` |
+| `SAFE_API_KEY`     | Your LiteLLM gateway                | Your gateway's LLM Gateway page                                                                       | `ak-...`            |
+| `OPENAI_BASE_URL`  | Your LiteLLM gateway                | `https://<your-gateway-host>/api/v1/llm-proxy/v1` (adjust to your gateway)                            | URL ending in `/v1` |
 
 `SAFE_API_KEY` is the single AMD credential used by all downstream
 tooling:
@@ -101,7 +101,7 @@ For one-off use without writing to disk:
 
 ```bash
 export SAFE_API_KEY=ak-your-safe-apikey
-export OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
+export OPENAI_BASE_URL=https://<your-gateway-host>/api/v1/llm-proxy/v1
 ```
 
 ### Split entrypoints (native Anthropic + OpenAI)
@@ -227,7 +227,7 @@ GEAK uses the generated runtime configuration directly.
 
 ## Hosted mode (Primus-Claw)
 
-When you launch through the [Hyperloom UI](https://crusoe.primus-safe.amd.com/hyperloom/),
+When you launch through the hosted Hyperloom UI,
 you do not need to set any of the variables above by hand. The
 sandbox initializer binds your LLM Gateway key as `SAFE_API_KEY`,
 populates the path env from sandbox defaults, and runs install/preflight
