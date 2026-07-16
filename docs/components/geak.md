@@ -20,6 +20,9 @@ handed off, the orchestrator invokes GEAK once at the kernel-agent phase through
 `interface/run_e2e.py` contract (a `handoff.json` in, a `result.json` back). Parallel exploration of
 candidate kernels then happens inside GEAK's Workflows on the on-box GPUs.
 
+- **Source**: <https://github.com/AMD-AGI/GEAK>
+- **License**: MIT
+
 ## Role in Hyperloom
 
 Hyperloom uses GEAK as the **whole-pipeline e2e delegate** when
