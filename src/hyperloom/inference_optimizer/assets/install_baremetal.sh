@@ -31,7 +31,6 @@ HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v0.8}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
-SAFE_API_KEY_PLACEHOLDER="ak-your-api-key-here"
 
 FRAMEWORKS="sglang,vllm"
 INSTALL_FRAMEWORK="none"
@@ -71,8 +70,6 @@ CHECK_ONLY=0
 ASSUME_YES=0
 USER_DATA_PATH_ARG=""
 DEPS_ROOT_ARG=""
-SAFE_API_KEY_ARG=""
-OPENAI_BASE_URL_ARG=""
 
 usage() {
   cat <<'EOF'
@@ -83,8 +80,6 @@ optionally installs SGLang/vLLM, resolves credentials, and writes the combined
 runtime env. Stops BEFORE launching.
 
 Options:
-  --safe-api-key KEY     LLM gateway key (ak-...); overrides env / .env
-  --openai-base-url URL  LLM gateway endpoint; overrides env / .env
   --user-data-path PATH  Writable artifact root (default: /workspace/hyperloom)
   --deps-root PATH       Directory for auto-cloned dependency checkouts
   --frameworks LIST      Comma list to verify in Phase 1 (default: sglang,vllm)
@@ -102,8 +97,8 @@ Options:
   --yes, -y              Non-interactive; fail fast on missing credentials
   -h, --help             Show this help
 
-Credential resolution (highest precedence first): flags > env > .env >
-interactive prompt (TTY + not --yes). Configure Anthropic
+Credential resolution (highest precedence first): env > .env > interactive
+prompt (TTY + not --yes). Configure Anthropic
 (ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN) or DeepSeek
 (DEEPSEEK_API_KEY, optional DEEPSEEK_BASE_URL), matching runtime credential
 rules.
@@ -119,8 +114,6 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --safe-api-key)     [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --safe-api-key requires a value" >&2; exit 2; }; shift; SAFE_API_KEY_ARG="${1:-}" ;;
-    --openai-base-url)  [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --openai-base-url requires a value" >&2; exit 2; }; shift; OPENAI_BASE_URL_ARG="${1:-}" ;;
     --user-data-path)   [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --user-data-path requires a value" >&2; exit 2; }; shift; USER_DATA_PATH_ARG="${1:-}" ;;
     --deps-root)        [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --deps-root requires a value" >&2; exit 2; }; shift; DEPS_ROOT_ARG="${1:-}" ;;
     --frameworks)       [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --frameworks requires a value" >&2; exit 2; }; shift; FRAMEWORKS="${1:-}" ;;
@@ -1067,9 +1060,9 @@ remove_dotenv_var() {
 # validation: DeepSeek may omit DEEPSEEK_BASE_URL because the CLI has a provider default.
 resolve_credentials() {
   log "Phase 4: credentials"
-  local safe_key openai_key anthropic_key anthropic_token deepseek_key openai_url anthropic_url deepseek_url
-  local dv_safe dv_openai_key dv_anthropic_key dv_anthropic_token dv_deepseek_key
-  local dv_openai_url dv_anthropic_url dv_deepseek_url
+  local anthropic_key anthropic_token deepseek_key anthropic_url deepseek_url
+  local dv_anthropic_key dv_anthropic_token dv_deepseek_key
+  local dv_anthropic_url dv_deepseek_url
   local has_url=0 has_key=0 setup_env_authoritative=0 setup_llm_mode=""
 
   if [ ! -f "$DOTENV" ] && [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
@@ -1077,18 +1070,14 @@ resolve_credentials() {
       cp "$ENV_TEMPLATE" "$DOTENV"; chmod 600 "$DOTENV" 2>/dev/null || true
       log "created ${DOTENV} from .env.template"
     else
-      warn "no .env and no .env.template at ${ENV_TEMPLATE}; expecting LLM credentials from flags or shell env"
+      warn "no .env and no .env.template at ${ENV_TEMPLATE}; expecting LLM credentials from shell env"
     fi
   fi
 
-  # .env fallbacks (used only for values missing from flags / process env).
-  dv_safe="$(read_dotenv_var SAFE_API_KEY || true)"
-  [ "$dv_safe" = "$SAFE_API_KEY_PLACEHOLDER" ] && dv_safe=""
-  dv_openai_key="$(read_dotenv_var OPENAI_API_KEY || true)"
+  # .env fallbacks (used only for values missing from process env).
   dv_anthropic_key="$(read_dotenv_var ANTHROPIC_API_KEY || true)"
   dv_anthropic_token="$(read_dotenv_var ANTHROPIC_AUTH_TOKEN || true)"
   dv_deepseek_key="$(read_dotenv_var DEEPSEEK_API_KEY || true)"
-  dv_openai_url="$(read_dotenv_var OPENAI_BASE_URL || true)"
   dv_anthropic_url="$(read_dotenv_var ANTHROPIC_BASE_URL || true)"
   dv_deepseek_url="$(read_dotenv_var DEEPSEEK_BASE_URL || true)"
   setup_llm_mode="$(read_dotenv_var HYPERLOOM_LLM_MODE || true)"
@@ -1101,38 +1090,26 @@ resolve_credentials() {
       setup_llm_mode="anthropic"
     elif [ -n "$dv_deepseek_key" ] || [ -n "$dv_deepseek_url" ]; then
       setup_llm_mode="deepseek"
-    elif [ -n "$dv_openai_key" ] || [ -n "$dv_safe" ] || [ -n "$dv_openai_url" ]; then
-      setup_llm_mode="openai"
     fi
   fi
   if [ "$setup_env_authoritative" -eq 1 ] && [ -n "$setup_llm_mode" ]; then
     export HYPERLOOM_SETUP_LLM_MODE="$setup_llm_mode"
   fi
 
-  # Precedence: flags > process env > .env.
-  safe_key="${SAFE_API_KEY_ARG:-${SAFE_API_KEY:-$dv_safe}}"
-  openai_key="${OPENAI_API_KEY:-$dv_openai_key}"
+  # Precedence: process env > .env.
   anthropic_key="${ANTHROPIC_API_KEY:-$dv_anthropic_key}"
   anthropic_token="${ANTHROPIC_AUTH_TOKEN:-$dv_anthropic_token}"
   deepseek_key="${DEEPSEEK_API_KEY:-$dv_deepseek_key}"
-  openai_url="${OPENAI_BASE_URL_ARG:-${OPENAI_BASE_URL:-$dv_openai_url}}"
   anthropic_url="${ANTHROPIC_BASE_URL:-$dv_anthropic_url}"
   deepseek_url="${DEEPSEEK_BASE_URL:-$dv_deepseek_url}"
 
   # In the interactive setup flow, .env is the source of truth the user just
-  # confirmed. Do not let stale OpenAI/SaFE values leak into the downstream
-  # installers, because those scripts source env with "env wins" and may persist
-  # or propagate the wrong provider back into runtime env files.
+  # confirmed. Clear unsupported credential families before downstream scripts
+  # source env with "env wins".
   if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
-    safe_key=""
-    openai_key=""
-    openai_url=""
     unset SAFE_API_KEY LLM_GATEWAY_KEY
     unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
   elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "deepseek" ]; then
-    safe_key=""
-    openai_key=""
-    openai_url=""
     anthropic_key=""
     anthropic_token=""
     anthropic_url=""
@@ -1141,9 +1118,7 @@ resolve_credentials() {
     unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
   fi
 
-  # Prompt for the single-gateway key only when no key of any kind is available.
-  if [ -z "$safe_key" ] && [ -z "$openai_key" ] && [ -z "$anthropic_key" ] \
-     && [ -z "$anthropic_token" ] && [ -z "$deepseek_key" ] && is_interactive; then
+  if [ -z "$anthropic_key" ] && [ -z "$anthropic_token" ] && [ -z "$deepseek_key" ] && is_interactive; then
     read -rsp "[install-baremetal] Enter Anthropic/DeepSeek API key (or leave blank if already configured): " anthropic_key; echo >&2
   fi
 
@@ -1159,12 +1134,9 @@ resolve_credentials() {
 
   # Export resolved credentials and persist them to .env for the downstream
   # inference_optimizer skill install and CLI preflight.
-  [ -n "$safe_key" ] && export SAFE_API_KEY="$safe_key"
-  [ -n "$openai_key" ] && export OPENAI_API_KEY="$openai_key"
   [ -n "$anthropic_key" ] && export ANTHROPIC_API_KEY="$anthropic_key"
   [ -n "$anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$anthropic_token"
   [ -n "$deepseek_key" ] && export DEEPSEEK_API_KEY="$deepseek_key"
-  [ -n "$openai_url" ] && export OPENAI_BASE_URL="$openai_url"
   [ -n "$anthropic_url" ] && export ANTHROPIC_BASE_URL="$anthropic_url"
   [ -n "$deepseek_url" ] && export DEEPSEEK_BASE_URL="$deepseek_url"
 
@@ -1179,13 +1151,9 @@ resolve_credentials() {
       remove_dotenv_var ANTHROPIC_BASE_URL
     else
       local persist_anthropic_key="${anthropic_key:-$anthropic_token}"
-      local persist_openai_key="${openai_key:-$safe_key}"
       if [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "anthropic" ]; then
-        persist_openai_key=""
-        openai_url=""
-      elif [ "$setup_env_authoritative" -eq 1 ] && [ "$setup_llm_mode" = "openai" ]; then
-        persist_anthropic_key=""
-        anthropic_url=""
+        remove_dotenv_var DEEPSEEK_API_KEY
+        remove_dotenv_var DEEPSEEK_BASE_URL
       fi
       if [ -n "$persist_anthropic_key" ]; then
         upsert_dotenv_var ANTHROPIC_API_KEY "$persist_anthropic_key"
@@ -1197,17 +1165,9 @@ resolve_credentials() {
       else
         remove_dotenv_var ANTHROPIC_BASE_URL
       fi
-      if [ -n "$persist_openai_key" ]; then
-        upsert_dotenv_var OPENAI_API_KEY "$persist_openai_key"
-      else
-        remove_dotenv_var OPENAI_API_KEY
-      fi
-      if [ -n "$openai_url" ]; then
-        upsert_dotenv_var OPENAI_BASE_URL "$openai_url"
-      else
-        remove_dotenv_var OPENAI_BASE_URL
-      fi
     fi
+    remove_dotenv_var OPENAI_API_KEY
+    remove_dotenv_var OPENAI_BASE_URL
     remove_dotenv_var SAFE_API_KEY
     remove_dotenv_var LLM_GATEWAY_KEY
     remove_dotenv_var ANTHROPIC_AUTH_TOKEN

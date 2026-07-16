@@ -323,6 +323,52 @@ def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
         subprocess.run(["bash", str(runner)], check=True)
 
 
+def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
+    install_script = (
+        Path(setup.__file__).resolve().parent
+        / "assets"
+        / "install_baremetal.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    credential_start = script_text.index("resolve_credentials() {")
+    credential_end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_text = script_text[credential_start:credential_end]
+
+    assert "--safe-api-key" not in script_text
+    assert "--openai-base-url" not in script_text
+    assert "SAFE_API_KEY_ARG" not in script_text
+    assert "OPENAI_BASE_URL_ARG" not in script_text
+    assert "safe_key" not in credential_text
+    assert "openai_key" not in credential_text
+    assert "openai_url" not in credential_text
+    assert "dv_safe" not in credential_text
+    assert "dv_openai" not in credential_text
+
+
+def test_kernel_install_no_longer_exports_openai_safe_credentials():
+    install_script = (
+        Path(setup.__file__).resolve().parents[1]
+        / "agents"
+        / "kernel"
+        / "scripts"
+        / "install.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    write_start = script_text.index("write_env_file() {")
+    write_end = script_text.index("\nensure_geak()", write_start)
+    write_text = script_text[write_start:write_end]
+
+    assert "_OPENAI_BASE_URL_VAL" not in script_text
+    assert "_OPENAI_KEY_VAL" not in script_text
+    assert "_snap_safe" not in script_text
+    assert "_snap_openai" not in script_text
+    assert "export OPENAI_BASE_URL" not in write_text
+    assert "export OPENAI_API_KEY" not in write_text
+    assert "upsert_dotenv_var OPENAI_BASE_URL" not in write_text
+    assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
+    assert "SAFE_API_KEY:-" not in script_text
+
+
 def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):
     install_script = (
         Path(setup.__file__).resolve().parents[1]

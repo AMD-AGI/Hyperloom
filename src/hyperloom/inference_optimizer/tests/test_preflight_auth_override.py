@@ -470,6 +470,29 @@ def test_preflight_deepseek_only_sets_geak_v4_claude_model(
     assert cli.os.environ["GEAK_CLAUDE_MODEL"] == "deepseek-chat"
 
 
+def test_preflight_deepseek_only_exports_claude_cli_auth_aliases(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+
+    cli._preflight()
+
+    assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert cli.os.environ["_".join(("ANTHROPIC", "API", "KEY"))] == "deepseek-token"
+    assert cli.os.environ["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "deepseek-token"
+
+
 def test_sync_geak_config_empty_args_are_safe(tmp_path):
     cfg = tmp_path / "geak.yaml"
     cfg.write_text(_GEAK_CFG_TEMPLATE.format(url="https://x/v1"), encoding="utf-8")
