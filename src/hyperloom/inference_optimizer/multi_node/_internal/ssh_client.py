@@ -24,6 +24,9 @@ Keys are session-scoped and ephemeral:
 from __future__ import annotations
 
 import base64
+import os
+import re
+import secrets
 import shlex
 import subprocess
 from pathlib import Path
@@ -38,6 +41,7 @@ from .log import info, warn
 # loses the IPv4 :2222 bind and the controller's SSH hits the node sshd (wrong
 # key -> Permission denied). Use a higher, unused base to avoid both.
 DEFAULT_SSH_PORT = 2233
+_AGENT_ENV_RE = re.compile(r"^(SSH_AUTH_SOCK|SSH_AGENT_PID)=([^;]+);")
 
 
 def _ssh_common_opts(known_hosts: Path) -> list[str]:
@@ -71,6 +75,65 @@ def _ssh_common_opts(known_hosts: Path) -> list[str]:
     ]
 
 
+def _start_session_ssh_agent() -> dict[str, str]:
+    """Start an ssh-agent for passphrase-protected session keys."""
+    proc = subprocess.run(
+        ["ssh-agent", "-s"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh-agent failed rc={proc.returncode}: {proc.stderr.strip()}")
+    env: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        match = _AGENT_ENV_RE.match(line.strip())
+        if match:
+            env[match.group(1)] = match.group(2)
+    if "SSH_AUTH_SOCK" not in env:
+        raise RuntimeError("ssh-agent did not report SSH_AUTH_SOCK")
+    os.environ.update(env)
+    return env
+
+
+def _add_key_to_agent(priv: Path, passphrase: str) -> None:
+    """Load ``priv`` into ssh-agent without leaving passphrase material behind."""
+    agent_env = {"SSH_AUTH_SOCK": os.environ.get("SSH_AUTH_SOCK", "")}
+    if not agent_env["SSH_AUTH_SOCK"]:
+        agent_env = _start_session_ssh_agent()
+
+    passfile = priv.with_suffix(".pass")
+    askpass = priv.with_name("mn_ssh_askpass.sh")
+    passfile.write_text(passphrase, encoding="utf-8")
+    askpass.write_text(f"#!/bin/sh\ncat {shlex.quote(str(passfile))}\n", encoding="utf-8")
+    passfile.chmod(0o600)
+    askpass.chmod(0o700)
+    env = {
+        **os.environ,
+        **agent_env,
+        "SSH_ASKPASS": str(askpass),
+        "SSH_ASKPASS_REQUIRE": "force",
+        "DISPLAY": os.environ.get("DISPLAY") or "none:0",
+    }
+    try:
+        proc = subprocess.run(
+            ["ssh-add", str(priv)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+    finally:
+        for p in (passfile, askpass):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh-add failed rc={proc.returncode}: {proc.stderr.strip()}")
+
+
 def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     """Generate (or reuse) an ed25519 keypair under ``dest_dir``.
 
@@ -102,13 +165,14 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
             p.unlink()
         except FileNotFoundError:
             pass
+    passphrase = secrets.token_urlsafe(32)
     proc = subprocess.run(
         [
             "ssh-keygen",
             "-t",
             "ed25519",
             "-N",
-            "",
+            passphrase,
             "-q",
             "-C",
             "hyperloom-mn-infera",
@@ -122,6 +186,7 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     if proc.returncode != 0:
         raise RuntimeError(f"ssh-keygen failed rc={proc.returncode}: {proc.stderr.strip()}")
     priv.chmod(0o600)
+    _add_key_to_agent(priv, passphrase)
     pub_str = pub.read_text(encoding="utf-8").strip()
     info(f"generated session SSH keypair at {priv}")
     return priv, pub_str

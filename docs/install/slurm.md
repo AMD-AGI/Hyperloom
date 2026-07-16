@@ -80,7 +80,7 @@ directory as `submit.sh`. Verify the key before submitting:
 
 ```bash
 set -a; . ./proxy.env; set +a
-curl -sS --resolve global.primus-safe.amd.com:443:<GATEWAY_JUMP_HOST_IP> \
+curl -sS --resolve llm-gateway.example.invalid:443:<GATEWAY_JUMP_HOST_IP> \
   "$OPENAI_BASE_URL/models" -H "Authorization: Bearer $OPENAI_API_KEY"
 ```
 
@@ -234,6 +234,7 @@ hard-allowlisted:
 | `HL_SHARED_MOUNT` | `/wekafs` | Shared FS bind-mounted into the container. |
 | `HL_DATA_ROOT` | `<shared-mount>/hyperloom-slurm` | Artifact root. |
 | `HL_CA_BUNDLE_HOST` | — | Combined CA bundle path (see [Build a combined CA bundle](#build-a-combined-ca-bundle)). |
+| `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | unset | Set `1` only in dedicated internal containers to restore the legacy Claude/Codex approval and sandbox bypass. |
 | `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL` | unset | Set `1` to relax the orchestration model allowlist (not recommended). |
 
 ---

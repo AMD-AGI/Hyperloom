@@ -9,6 +9,23 @@ deployment. Public forks should treat that path as an adapter that requires
 their own service URL, workspace, storage volume, images, and credentials. The
 default public workflow should run the pure Python tests only.
 
+## Internal-Only Adapters
+
+The following helpers are retained in this public tree as integration adapters,
+but they are not self-contained CI for public forks:
+
+- `orchestrator.py` creates and monitors private SaFE/Claw optimization sessions.
+- `optimize_submit.py` and `optimize_submit_lib/safe_client.py` submit to a
+  compatible SaFE API and require caller-provided credentials and workspaces.
+- `publish_results.py` and `publish_artifacts.py` publish to an external results
+  service configured by the caller.
+
+The GPU/SaFE GitHub Actions workflows are similarly internal by default. Jobs
+that require AMD self-hosted runners are guarded with
+`github.repository == 'AMD-AGI/Hyperloom'` so forks skip them instead of waiting
+forever for unavailable runner labels. Portable quality gates remain on
+`ubuntu-latest`: lint, coverage/tests, docs, CodeQL, and secret scanning.
+
 ## Quick Start
 
 ```bash

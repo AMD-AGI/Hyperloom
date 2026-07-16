@@ -50,6 +50,7 @@ jobs:
   optimize:
     name: "${{ matrix.key }}"
     needs: prepare
+    if: github.repository == 'AMD-AGI/Hyperloom'
     runs-on: hyperloom-mh826
     # InferenceX-comparable models are the small fixed corpus in
     # ci/ci-config.yaml. They are allowed to run much longer than the

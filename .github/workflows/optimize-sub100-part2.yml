@@ -46,6 +46,7 @@ concurrency:
 jobs:
   dispatch-submit:
     name: Dispatch sub100 part2 submit
+    if: github.repository == 'AMD-AGI/Hyperloom'
     runs-on: hyperloom-mh826
     timeout-minutes: 10
     env:

@@ -29,11 +29,26 @@ def test_now_iso():
 
 
 def test_safe_redact():
-    line = "export ANTHROPIC_API_KEY=sk-123 and GITHUB_TOKEN=ghp_x"
+    line = "export ANTHROPIC_API_KEY=sk-ant-123 and GITHUB_TOKEN=ghp_secret"
     out = sr._safe_redact(line)
-    assert "ANTHROPIC_API_KEY[REDACTED]" in out
-    assert "GITHUB_TOKEN[REDACTED]" in out
+    assert "ANTHROPIC_API_KEY=[REDACTED]" in out
+    assert "GITHUB_TOKEN=[REDACTED]" in out
+    assert "sk-ant-123" not in out
+    assert "ghp_secret" not in out
     assert sr._safe_redact("plain line") == "plain line"
+
+
+def test_safe_redact_headers_and_token_shapes():
+    line = (
+        "Authorization: Bearer sk-live-secret "
+        "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig "
+        "aws=AKIA1234567890ABCDEF"
+    )
+    out = sr._safe_redact(line)
+    assert "Authorization: Bearer [REDACTED]" in out
+    assert "sk-live-secret" not in out
+    assert "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig" not in out
+    assert "AKIA1234567890ABCDEF" not in out
 
 
 def test_extra_focus_tags(monkeypatch):

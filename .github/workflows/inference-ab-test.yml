@@ -68,7 +68,7 @@ jobs:
   group-a:
     name: "A: ${{ matrix.key }}"
     needs: prepare
-    if: github.event.inputs.mode != 'single'
+    if: github.repository == 'AMD-AGI/Hyperloom' && github.event.inputs.mode != 'single'
     runs-on: hyperloom-mh826
     timeout-minutes: 510
     strategy:
@@ -103,6 +103,7 @@ jobs:
   group-b:
     name: "B: ${{ matrix.key }}"
     needs: prepare
+    if: github.repository == 'AMD-AGI/Hyperloom'
     runs-on: hyperloom-mh826
     timeout-minutes: 510
     strategy:
@@ -137,7 +138,7 @@ jobs:
   compare:
     name: "Compare A vs B"
     needs: [group-a, group-b]
-    if: always()
+    if: always() && github.repository == 'AMD-AGI/Hyperloom'
     runs-on: hyperloom-mh826
     steps:
       - uses: actions/download-artifact@v8

@@ -182,6 +182,44 @@ def test_generate_session_keypair_idempotent_reuse(tmp_path, monkeypatch):
     assert pub_str == "ssh-ed25519 AAAA reuse"
 
 
+def test_generate_session_keypair_uses_passphrase_and_agent(tmp_path, monkeypatch):
+    calls = []
+
+    def _run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[0] == "ssh-keygen":
+            passphrase = argv[argv.index("-N") + 1]
+            assert passphrase
+            assert passphrase != ""
+            (tmp_path / "mn_id_ed25519").write_text("PRIVATE", encoding="utf-8")
+            (tmp_path / "mn_id_ed25519.pub").write_text(
+                "ssh-ed25519 AAAA generated\n",
+                encoding="utf-8",
+            )
+            return _FakeCompleted(0, "", "")
+        if argv[0] == "ssh-agent":
+            return _FakeCompleted(
+                0,
+                "SSH_AUTH_SOCK=/tmp/hyperloom-agent.sock; export SSH_AUTH_SOCK;\n"
+                "SSH_AGENT_PID=12345; export SSH_AGENT_PID;\n",
+                "",
+            )
+        if argv[0] == "ssh-add":
+            assert kwargs["env"]["SSH_ASKPASS_REQUIRE"] == "force"
+            assert kwargs["env"]["SSH_AUTH_SOCK"] == "/tmp/hyperloom-agent.sock"
+            return _FakeCompleted(0, "", "")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(ssh_client.subprocess, "run", _run)
+    out_priv, pub_str = ssh_client.generate_session_keypair(tmp_path)
+    assert out_priv == tmp_path / "mn_id_ed25519"
+    assert pub_str == "ssh-ed25519 AAAA generated"
+    assert [c[0][0] for c in calls] == ["ssh-keygen", "ssh-agent", "ssh-add"]
+    assert not (tmp_path / "mn_id_ed25519.pass").exists()
+    assert not (tmp_path / "mn_ssh_askpass.sh").exists()
+
+
 def test_generate_session_keypair_raises_on_keygen_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ssh_client.subprocess,

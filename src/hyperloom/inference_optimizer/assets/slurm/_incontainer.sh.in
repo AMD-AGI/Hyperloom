@@ -99,7 +99,12 @@ case "$BACKEND" in
     # Kernel-opt rewrite ladder fixed to GEAK for the carrier (plan T-series).
     export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
     PROMPT="$(hl_build_prompt)"
-    exec claude --dangerously-skip-permissions -p "$PROMPT"
+    claude_args=(-p "$PROMPT")
+    if [ "${HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS:-0}" = "1" ]; then
+      echo "[hl] WARNING: enabling claude --dangerously-skip-permissions by explicit opt-in" >&2
+      claude_args=(--dangerously-skip-permissions "${claude_args[@]}")
+    fi
+    exec claude "${claude_args[@]}"
     ;;
   codex)
     # --- Codex CLI carrier -------------------------------------------------
@@ -146,13 +151,15 @@ CODEX_EOF
     export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
     PROMPT="$(hl_build_prompt)"
     # -C $REPO_ROOT: run inside the (git) checkout so the repo-trust check
-    # passes; bypass approvals/sandbox so the carrier can run benchmarks freely
-    # (this job already runs in a dedicated container).
-    exec codex exec \
-      --dangerously-bypass-approvals-and-sandbox \
-      -C "$REPO_ROOT" \
-      -m "${CODEX_MODEL:-gpt-5.4}" \
-      "$PROMPT"
+    # passes. Agent approvals/sandbox stay enabled by default; dedicated
+    # internal containers can opt into the legacy bypass with
+    # HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS=1.
+    codex_args=(exec -C "$REPO_ROOT" -m "${CODEX_MODEL:-gpt-5.4}" "$PROMPT")
+    if [ "${HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS:-0}" = "1" ]; then
+      echo "[hl] WARNING: enabling codex --dangerously-bypass-approvals-and-sandbox by explicit opt-in" >&2
+      codex_args=(exec --dangerously-bypass-approvals-and-sandbox -C "$REPO_ROOT" -m "${CODEX_MODEL:-gpt-5.4}" "$PROMPT")
+    fi
+    exec codex "${codex_args[@]}"
     ;;
   *)
     echo "[hl] unknown backend: $BACKEND" >&2; exit 2 ;;
