@@ -629,6 +629,96 @@ def test_gpu_specialist_lease_start_passes_serving_slot(monkeypatch: pytest.Monk
     assert seen == {"num_gpus": 8.0, "serving_slot": True}
 
 
+# ── P4 (skeleton): ServingGroupManager — placement group + rank actors ───────
+def test_serving_group_manager_lifecycle(monkeypatch: pytest.MonkeyPatch):
+    """start reserves a PG + one rank actor per node; stop/close reap them."""
+    fake = _FakeRayP2()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+
+    fake_pg = object()
+    pg_calls: dict = {}
+
+    def _fake_make_pg(nodes, gpus, *, serving_slot):
+        pg_calls.update(nodes=nodes, gpus=gpus, serving_slot=serving_slot)
+        return fake_pg
+
+    monkeypatch.setattr(rs, "_make_serving_placement_group", _fake_make_pg)
+
+    made: list = []
+
+    def _fake_make_rank(pg, idx, num_gpus, *, serving_slot):
+        assert pg is fake_pg
+        actor = _FakeGpuActor()
+        made.append((idx, num_gpus, serving_slot, actor))
+        return actor
+
+    monkeypatch.setattr(rs, "_make_rank_actor", _fake_make_rank)
+    removed: dict = {"pg": None}
+    monkeypatch.setattr(
+        rs, "_remove_serving_placement_group", lambda pg: removed.__setitem__("pg", pg)
+    )
+
+    sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8, serving_slot=True)
+    pids = sgm.start([["srv", "rank0"], ["srv", "rank1"]])
+    assert pids == [4242, 4242]
+    assert pg_calls == {"nodes": 2, "gpus": 8.0, "serving_slot": True}
+    assert [m[0] for m in made] == [0, 1]  # one rank pinned per bundle index
+    assert all(m[1] == 8.0 for m in made)  # num_gpus per rank
+    assert sgm.ranks_alive() == [True, True]
+    assert sgm.is_alive() is True
+
+    sgm.stop()
+    assert all(m[3].stopped for m in made)
+    assert sgm.is_alive() is False
+
+    sgm.close()
+    assert len(fake.killed) == 2  # both rank actors killed
+    assert removed["pg"] is fake_pg
+    sgm.close()  # idempotent
+
+
+def test_serving_group_manager_start_arity_mismatch():
+    """A rank_cmds count that doesn't match nodes fails fast (before any Ray)."""
+    sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8)
+    with pytest.raises(ValueError):
+        sgm.start([["only-one-rank"]])
+
+
+def test_maybe_serving_group_manager_default_none(monkeypatch: pytest.MonkeyPatch):
+    """P4 is deferred: off by default even multi-node (needs the explicit flag)."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", raising=False)
+    assert rs.maybe_serving_group_manager(nodes=2, gpus_per_node=8) is None
+
+
+def test_maybe_serving_group_manager_flag_on_single_node_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    assert rs.maybe_serving_group_manager(nodes=2, gpus_per_node=8) is None
+
+
+def test_maybe_serving_group_manager_flag_on_multi_node(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    sgm = rs.maybe_serving_group_manager(nodes=2, gpus_per_node=8)
+    assert isinstance(sgm, rs.ServingGroupManager)
+
+
+def test_maybe_serving_group_manager_zero_nodes_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    assert rs.maybe_serving_group_manager(nodes=0, gpus_per_node=8) is None
+
+
 def test_run_magpie_local_path_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

@@ -681,12 +681,311 @@ def maybe_gpu_specialist_lease(
     )
 
 
+# ── P4 (skeleton) — multi-node serving via placement group + rank actors ──────
+#
+# ray_modify.plan.md §4.2 / §6 P4. This is a SKELETON building block only,
+# gated OFF by default (decisions 4/5 defer multi-node out of this round). The
+# live multi-node serving path stays the detached
+# ``_multi_node_server_lifecycle.restart_server_for_round`` (SSH / RayJob
+# Dashboard) — this scaffolds the eventual replacement so a serving process's
+# whole lifetime is held by Ray rank actors (no detached RayJob server escaping
+# the lease), mirroring how P0's ServingActor/ManagedServerProcess did for
+# single-node. Wiring it into ``restart_server_for_round`` and downgrading
+# ``magpie_remote_env()`` to a placement strategy is left to the multi-node
+# maintainer (§12 footer). Nothing here runs unless a caller explicitly opts in
+# via :func:`maybe_serving_group_manager` (multi-node + the env flag below).
+
+
+def _mn_serving_ray_enabled() -> bool:
+    """Return whether the P4 Ray multi-node serving skeleton is opted into.
+
+    Off by default: multi-node is deferred (decisions 4/5). ``True`` only when
+    ``INFERENCE_OPTIMIZER_RAY_MN_SERVING`` is explicitly truthy.
+
+    Returns:
+        ``True`` when the multi-node Ray serving path is enabled.
+    """
+    return os.environ.get("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _make_serving_placement_group(nodes: int, gpus_per_node: float, *, serving_slot: bool):
+    """Reserve one whole-node bundle per serving rank (STRICT_SPREAD).
+
+    Each bundle asks for ``gpus_per_node`` GPUs (+ optional ``serving_slot``) and
+    STRICT_SPREAD forces one bundle per distinct node, so the rank actors below
+    land one-per-node and collectively hold every serving card until the group
+    is torn down. Blocks until the group is scheduled.
+
+    Args:
+        nodes: Number of serving nodes (bundles).
+        gpus_per_node: GPUs each node's rank holds.
+        serving_slot: Whether each bundle also reserves the node's
+            ``serving_slot`` (declared on GPU worker pods by the multi-node
+            maintainer, §4.5).
+
+    Returns:
+        The ready Ray ``PlacementGroup``.
+    """
+    import ray  # noqa: PLC0415
+    from ray.util.placement_group import placement_group  # noqa: PLC0415
+
+    bundle: dict[str, float] = {"GPU": float(gpus_per_node)}
+    if serving_slot:
+        bundle["serving_slot"] = 1
+    pg = placement_group([dict(bundle) for _ in range(int(nodes))], strategy="STRICT_SPREAD")
+    ray.get(pg.ready())
+    return pg
+
+
+def _remove_serving_placement_group(pg: Any) -> None:
+    """Release a serving placement group's reserved bundles.
+
+    Args:
+        pg: The placement group to remove.
+    """
+    from ray.util.placement_group import remove_placement_group  # noqa: PLC0415
+
+    remove_placement_group(pg)
+
+
+def _make_rank_actor(pg: Any, bundle_index: int, num_gpus: float, *, serving_slot: bool):
+    """Create one serving rank actor pinned to ``pg``'s ``bundle_index``.
+
+    Args:
+        pg: The serving placement group.
+        bundle_index: Bundle (node) this rank is pinned to.
+        num_gpus: GPUs this rank holds.
+        serving_slot: Whether the rank also holds ``serving_slot``.
+
+    Returns:
+        A Ray actor handle for the rank (a ServingActor pinned to the bundle).
+    """
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy  # noqa: PLC0415
+
+    actor_cls: Any = _serving_actor_body()
+    resources = {"serving_slot": 1} if serving_slot else None
+    return actor_cls.options(
+        num_gpus=num_gpus,
+        resources=resources,
+        scheduling_strategy=PlacementGroupSchedulingStrategy(
+            placement_group=pg,
+            placement_group_bundle_index=int(bundle_index),
+        ),
+    ).remote()
+
+
+class ServingGroupManager:
+    """Multi-node serving held by a Ray placement group + per-node rank actors.
+
+    **P4 SKELETON — gated OFF by default (decisions 4/5).** Reserves a
+    STRICT_SPREAD placement group of ``nodes`` bundles (each ``gpus_per_node``
+    GPUs, optionally + ``serving_slot``) and launches one :class:`ServingActor`
+    rank per bundle. Each rank runs its server-rank subprocess via
+    ``ManagedServerProcess`` (new POSIX session + ``PR_SET_PDEATHSIG`` + tree
+    reap), so a rank server dies with its actor — no detached RayJob server
+    escapes the lease, and rank actors hold their GPUs until :meth:`stop` /
+    :meth:`close` (§4.2). The rank *commands* are supplied by the caller; this
+    skeleton does not invent the distributed sglang/vLLM bootstrap (rendezvous /
+    head-vs-worker roles / KV transport) — that, plus wiring into
+    ``restart_server_for_round`` and the ``magpie_remote_env`` placement
+    strategy, is left to the multi-node maintainer (§12 footer).
+
+    Interface mirrors :class:`ServingLease` (``start`` / ``is_alive`` / ``stop``
+    / ``close``) so the eventual executor wiring matches the single-node path.
+    """
+
+    def __init__(
+        self,
+        *,
+        nodes: int,
+        gpus_per_node: float,
+        serving_slot: bool = True,
+        ensure_log_path: Any = None,
+    ) -> None:
+        """Configure the group (the PG + rank actors are created on :meth:`start`).
+
+        Args:
+            nodes: Number of serving nodes (rank actors / bundles).
+            gpus_per_node: GPUs each rank holds.
+            serving_slot: Whether each rank reserves the node ``serving_slot``.
+            ensure_log_path: Optional path forwarded to the cluster ensure.
+        """
+        self._nodes = int(nodes)
+        self._gpus_per_node = float(gpus_per_node)
+        self._serving_slot = bool(serving_slot)
+        self._ensure_log_path = ensure_log_path
+        self._pg: Any = None
+        self._ranks: list[Any] = []
+        self._pids: list[int] = []
+
+    def start(
+        self,
+        rank_cmds: list[list[str]],
+        *,
+        envs: list[dict[str, str] | None] | None = None,
+        cwds: list[str | None] | None = None,
+        log_paths: list[str | None] | None = None,
+    ) -> list[int]:
+        """Reserve the placement group and launch one server rank per node.
+
+        Args:
+            rank_cmds: One command per rank (``len == nodes``).
+            envs: Optional per-rank env overlays.
+            cwds: Optional per-rank working directories.
+            log_paths: Optional per-rank stdout/stderr log paths.
+
+        Returns:
+            The launched rank pids (one per node).
+
+        Raises:
+            ValueError: If ``len(rank_cmds)`` does not match ``nodes``.
+        """
+        if len(rank_cmds) != self._nodes:
+            raise ValueError(f"expected {self._nodes} rank_cmds, got {len(rank_cmds)}")
+        import ray  # noqa: PLC0415
+
+        from ._ray_backend import get_ray_backend  # noqa: PLC0415
+
+        get_ray_backend().ensure(log_path=self._ensure_log_path)
+        self._pg = _make_serving_placement_group(
+            self._nodes, self._gpus_per_node, serving_slot=self._serving_slot
+        )
+        self._ranks = []
+        self._pids = []
+        for i, cmd in enumerate(rank_cmds):
+            actor = _make_rank_actor(
+                self._pg, i, self._gpus_per_node, serving_slot=self._serving_slot
+            )
+            self._ranks.append(actor)
+            pid = int(
+                ray.get(
+                    actor.start.remote(
+                        cmd,
+                        env=(envs[i] if envs else None),
+                        cwd=(cwds[i] if cwds else None),
+                        log_path=(log_paths[i] if log_paths else None),
+                    )
+                )
+            )
+            self._pids.append(pid)
+        return list(self._pids)
+
+    def pids(self) -> list[int]:
+        """Return the launched rank pids.
+
+        Returns:
+            The per-node rank pids.
+        """
+        return list(self._pids)
+
+    def ranks_alive(self) -> list[bool]:
+        """Return per-rank liveness (``False`` for a rank whose actor is gone).
+
+        Returns:
+            One bool per rank.
+        """
+        if not self._ranks:
+            return []
+        import ray  # noqa: PLC0415
+
+        out: list[bool] = []
+        for actor in self._ranks:
+            try:
+                out.append(bool(ray.get(actor.is_alive.remote())))
+            except Exception:  # noqa: BLE001 — a dead rank reads as not-alive
+                out.append(False)
+        return out
+
+    def is_alive(self) -> bool:
+        """Return whether every rank server is still running.
+
+        Returns:
+            ``True`` when all ranks are alive (and at least one exists).
+        """
+        alive = self.ranks_alive()
+        return bool(alive) and all(alive)
+
+    def stop(self) -> None:
+        """Reap every rank's server subprocess tree (keeps actors/PG alive)."""
+        if not self._ranks:
+            return
+        import ray  # noqa: PLC0415
+
+        for actor in self._ranks:
+            try:
+                ray.get(actor.stop.remote())
+            except Exception:  # noqa: BLE001 — teardown must not raise
+                pass
+
+    def close(self) -> None:
+        """Kill all rank actors and remove the placement group. Idempotent."""
+        import ray  # noqa: PLC0415
+
+        for actor in self._ranks:
+            try:
+                ray.kill(actor)
+            except Exception:  # noqa: BLE001 — teardown must not raise
+                pass
+        self._ranks = []
+        self._pids = []
+        if self._pg is not None:
+            try:
+                _remove_serving_placement_group(self._pg)
+            except Exception:  # noqa: BLE001 — teardown must not raise
+                pass
+            self._pg = None
+
+
+def maybe_serving_group_manager(
+    *,
+    nodes: int,
+    gpus_per_node: float,
+    serving_slot: bool = True,
+    ensure_log_path: Any = None,
+) -> ServingGroupManager | None:
+    """Return a :class:`ServingGroupManager` when the P4 MN-serving path is opted in.
+
+    **Off by default (decisions 4/5).** Returns ``None`` unless the run is
+    multi-node AND ``INFERENCE_OPTIMIZER_RAY_MN_SERVING`` is set — so the live
+    detached ``restart_server_for_round`` path is completely unaffected until a
+    multi-node maintainer opts in and wires it.
+
+    Args:
+        nodes: Number of serving nodes.
+        gpus_per_node: GPUs each rank holds.
+        serving_slot: Whether each rank reserves the node ``serving_slot``.
+        ensure_log_path: Optional path forwarded to the cluster ensure.
+
+    Returns:
+        A group manager to start rank servers through, or ``None`` (legacy path).
+    """
+    if nodes <= 0 or gpus_per_node <= 0:
+        return None
+    from ._multi_node_env import is_multi_node  # noqa: PLC0415
+
+    if not is_multi_node() or not _mn_serving_ray_enabled():
+        return None
+    return ServingGroupManager(
+        nodes=nodes,
+        gpus_per_node=gpus_per_node,
+        serving_slot=serving_slot,
+        ensure_log_path=ensure_log_path,
+    )
+
+
 __all__ = [
     "GpuSpecialistLease",
     "ManagedServerProcess",
+    "ServingGroupManager",
     "ServingLease",
     "make_gpu_specialist_actor",
     "make_serving_actor",
     "maybe_gpu_specialist_lease",
+    "maybe_serving_group_manager",
     "maybe_serving_lease",
 ]
