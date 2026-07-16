@@ -65,15 +65,35 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 
 ## Workload configuration
 
-Use CLI flags for workload shape and runtime behavior:
+Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
+`TP` / `EP` env vars are ignored and overwritten (`GPU_TYPE` is a fallback when
+`--gpu-type` is omitted).
 
-`--model`, `--framework`, `--gpu-type`, `--model-class`, `--tp`, `--ep`,
-`--conc`, `--isl`, `--osl`, `--max-model-len`, `--precision`,
-`--profile-osl`, `--enable-roofline` / `--no-enable-roofline`, and
-`--enable-conc-sweep` / `--no-enable-conc-sweep`.
+- **Model / workload shape:** `--model`, `--model-class`, `--framework`,
+  `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
+  `--conc`, `--max-model-len`, `--profile-osl`.
+- **Goal / budget:** `--target-gain`, `--max-hours`, `--target-summary`,
+  `--target-tput`, `--compare-against-gpu`.
+- **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
+  `--cpus-per-node`, `--mem-per-node`, `--gpu-type`, `--mn-backend`
+  (`rayjob` / `infera`), `--mn-image`, `--server-args` (rayjob),
+  `--rayjob-extra-env` (repeatable; the supported way to inject server-side env
+  such as `SGLANG_USE_AITER=0` into RayJob pods — the sandbox's own `SGLANG_*`
+  env is not forwarded).
+- **PD disaggregation (infera):** `--pd-mode disaggregated`,
+  `--pd-prefill-nodes` / `--pd-prefill-tp` / `--pd-prefill-ep` /
+  `--pd-prefill-extra-args`, `--pd-decode-nodes` / `--pd-decode-tp` /
+  `--pd-decode-ep` / `--pd-decode-extra-args`, `--pd-transfer-backend`,
+  `--pd-ib-device`.
+- **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
+  `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
+  `--no-framework-agent`, `--no-kernel`, `--no-explore`.
+- **Agent models:** `--claude-model`, `--codex-model`.
+- **Session / resume:** `--resume`, `--resume-from`, `--session-dir`,
+  `--reset-state`.
+- **Quantization:** `--quantize`, `--quantize-scheme`.
 
-The CLI might still materialize internal envs for benchmark subprocesses, but
-those are not stable user configuration and should not be pre-set by launchers.
+Run `inference_optimizer optimize --help` for the exhaustive flag list.
 
 ---
 

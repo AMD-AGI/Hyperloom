@@ -85,6 +85,8 @@ PID, and monitors `state.json` until a terminal `stop_reason`.
 | `--mn-image` | Container image (`<INFERA_SSHD_IMAGE>` needs sshd; `<RAYJOB_IMAGE>`) |
 | `--gpus-per-node` / `--cpus-per-node` / `--mem-per-node` | Per-pod resources (default GPUs 8) |
 | `--tp` / `--ep` | Tensor / expert parallel (MoE: often `ep == tp`) |
+| `--isl` / `--osl` / `--conc` | Benchmark input/output length and concurrency (flags only — `ISL`/`OSL`/`CONC` env vars are ignored and overwritten) |
+| `--gpu-type` / `--precision` | Target GPU (e.g. `mi325x`) and dtype (`bf16`) — flags (env is not an authoritative source; `--gpu-type` is re-exported for subprocesses) |
 | `--framework` | `sglang` |
 | `--target-gain` / `--max-hours` | Optimization goal and time budget |
 | `--pd-mode disaggregated` + `--pd-prefill-*` / `--pd-decode-*` | infera PD split (prefill + decode roles; node counts sum to `--nodes`) |
@@ -96,11 +98,9 @@ PID, and monitors `state.json` until a terminal `stop_reason`.
 
 | Var | Meaning |
 |-----|---------|
-| `GPU_TYPE` / `PRECISION` | Target GPU (e.g. `mi325x`) and dtype (`bf16`) |
-| `ISL` / `OSL` / `CONC` / `RANDOM_RANGE_RATIO` | Benchmark input/output length, concurrency, length jitter |
+| `RANDOM_RANGE_RATIO` | Benchmark sequence-length jitter (env has a fallback; `ISL`/`OSL`/`CONC`/`GPU_TYPE`/`PRECISION` are flags — see FLAGS above) |
 | `INFERENCEX_PATH` / `MAGPIE_PATH` / `TRACELENS_ROOT` | Tool checkouts under `${NFS_SHARED_ROOT}` |
 | `TRACELENS_INTERNAL_ROOT` | Optional internal TraceLens extension |
-| `SGLANG_USE_AITER` / `SGLANG_AITER_MLA_PERSIST` | Enable + persist the aiter kernel path |
 | `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap / wait timeouts (infera PD only) |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | TLS check toggle for internal endpoints |
 
