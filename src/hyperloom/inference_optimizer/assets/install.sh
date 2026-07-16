@@ -1085,6 +1085,23 @@ chain_kernel_agent
 # `fa` CLI is already installed by ensure_inference_optimizer() above; no
 # more separate chain_framework_agent() delegation to a standalone installer.
 
+_write_specialist_secret_env_opt_in() {
+  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+    log "would append HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1 to ${KERNEL_AGENT_ENV}"
+    return 0
+  fi
+  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
+    sed -i 's|^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=.*|export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1|' "$KERNEL_AGENT_ENV"
+  else
+    {
+      echo ""
+      echo "# Production bootstrap: specialist subprocesses need env credentials unless claude CLI auth is preconfigured"
+      echo "export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1"
+    } >> "$KERNEL_AGENT_ENV"
+  fi
+}
+
 _probe_framework_source_roots() {
   log "probing framework source roots for INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"
   local roots
@@ -1126,6 +1143,7 @@ PY
   fi
 }
 
+_write_specialist_secret_env_opt_in
 _probe_framework_source_roots
 
 log "install complete"
