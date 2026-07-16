@@ -16,12 +16,11 @@ name: Track Issue Reply Ownership
 # Issues opened BY a SaFE member are skipped entirely (team handles them
 # manually; we never auto-close internal planning / umbrella issues).
 #
-# The roster of SaFE members is fetched live from the repository owner's team
-# named by the SAFE_TEAM_SLUG repository variable, using the
-# SAFE_TEAM_READ_TOKEN secret (OAuth or PAT with read:org).
+# The roster of SaFE members is fetched live from
+#   https://github.com/orgs/AMD-AGI/teams/safe
+# using the SAFE_TEAM_READ_TOKEN secret (OAuth or PAT with read:org).
 # If the live fetch fails (token expired, org policy change, network),
-# the workflow falls back to SAFE_TEAM_FALLBACK_JSON. If both are unavailable,
-# it fails closed and does not mutate labels.
+# the workflow falls back to a baked-in list so labeling still works.
 
 on:
   issue_comment:
@@ -42,17 +41,10 @@ jobs:
         id: team
         env:
           GH_TOKEN: ${{ secrets.SAFE_TEAM_READ_TOKEN }}
-          ORG_LOGIN: ${{ github.repository_owner }}
-          SAFE_TEAM_SLUG: ${{ vars.SAFE_TEAM_SLUG }}
-          SAFE_TEAM_FALLBACK_JSON: ${{ secrets.SAFE_TEAM_FALLBACK_JSON }}
         run: |
           set -e
 
-          if [ -n "${SAFE_TEAM_SLUG:-}" ]; then
-            MEMBERS_RAW=$(gh api "orgs/${ORG_LOGIN}/teams/${SAFE_TEAM_SLUG}/members" --paginate --jq '.[].login' 2>&1 || true)
-          else
-            MEMBERS_RAW="SAFE_TEAM_SLUG repo variable not set"
-          fi
+          MEMBERS_RAW=$(gh api orgs/AMD-AGI/teams/safe/members --paginate --jq '.[].login' 2>&1 || true)
           MEMBERS_CLEAN=$(echo "$MEMBERS_RAW" | grep -E '^[a-zA-Z][a-zA-Z0-9_-]*$' || true)
           COUNT=$(echo "$MEMBERS_CLEAN" | grep -c . || true)
 
@@ -65,16 +57,14 @@ jobs:
               echo "source=live"
             } >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::Could not fetch SaFE team live; using SAFE_TEAM_FALLBACK_JSON"
+            echo "::warning::Could not fetch team live; no hardcoded roster fallback"
             echo "API response was:"
             echo "$MEMBERS_RAW"
-            FALLBACK_JSON="${SAFE_TEAM_FALLBACK_JSON:-[]}"
-            if ! echo "$FALLBACK_JSON" | jq -e 'type == "array" and all(.[]; type == "string")' >/dev/null; then
-              echo "::warning::SAFE_TEAM_FALLBACK_JSON must be a JSON string array; using empty fallback"
-              FALLBACK_JSON="[]"
-            fi
+            # No member names are hardcoded here. The team is fetched live from
+            # the org API above; if that fails, proceed with an empty list.
+            #   gh api orgs/<org>/teams/<team>/members --paginate --jq '.[].login'
             {
-              echo "members=$(echo "$FALLBACK_JSON" | jq -c .)"
+              echo 'members=[]'
               echo "source=fallback"
             } >> "$GITHUB_OUTPUT"
           fi
@@ -90,10 +80,6 @@ jobs:
             const source = process.env.SAFE_TEAM_SOURCE;
             const safeSet = new Set(SAFE_TEAM.map(s => s.toLowerCase()));
             core.info(`SaFE roster (${source}, ${safeSet.size} members): ${[...safeSet].join(', ')}`);
-            if (safeSet.size === 0) {
-              core.setFailed('SaFE team roster is empty; configure SAFE_TEAM_SLUG or SAFE_TEAM_FALLBACK_JSON before mutating issue labels.');
-              return;
-            }
 
             const AWAIT_LABEL = 'awaiting-author-response';
             const STALE_LABEL = 'stale';

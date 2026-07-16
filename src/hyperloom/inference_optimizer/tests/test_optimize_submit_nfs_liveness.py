@@ -29,7 +29,7 @@ def _record() -> opt.SubmissionRecord:
         model="Qwen/Qwen3.6-35B-A3B-Instruct",
         task_id="task-123",
         display_name="qwen36",
-        model_path="/wekafs/models/Qwen3.6-35B-A3B-Instruct",
+        model_path="/path/models/Qwen3.6-35B-A3B-Instruct",
         safe_user_id="user-1",
         safe_started_at="2026-06-10T01:00:00Z",
         safe_finished_at="2026-06-10T01:05:00Z",

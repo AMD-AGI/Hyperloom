@@ -93,7 +93,7 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
             {
                 "success": True,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": tput / 256,
                     "output_throughput": tput,
@@ -957,7 +957,7 @@ async def test_report_executor_writes_md_and_json(session_dir):
     state = SharedState(
         session_id=session_dir.name,
         model_name="Qwen-Qwen3-8B",
-        model_path="/wekafs/models/Qwen-Qwen3-8B",
+        model_path="/path/models/Qwen-Qwen3-8B",
         baseline_tput=800.0,
         cumulative_gain=12.5,
         current_best={

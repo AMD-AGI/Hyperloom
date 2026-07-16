@@ -27,7 +27,7 @@ These variables configure LLM gateway access and optional backend credentials.
 | Variable               | Required | Default | Description                                                                                                                                                                                            |
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `SAFE_API_KEY`         | Conditional | —    | AMD primus-safe large language model (LLM) gateway key. Format `ak-...`. Required for the single-gateway setup; split-gateway deployments can instead provide provider-specific keys. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased).                                                        |
-| `OPENAI_BASE_URL`      | Conditional | —    | LLM gateway URL. Required for the single-gateway setup; split-gateway deployments can provide provider-specific base URLs instead. Production: `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`.                                                                                                                  |
+| `OPENAI_BASE_URL`      | Conditional | —    | LLM gateway URL. Required for the single-gateway setup; split-gateway deployments can provide provider-specific base URLs instead. Example: `https://<your-gateway-host>/api/v1/llm-proxy/v1`.                                                                                                                  |
 | `ANTHROPIC_BASE_URL`   | No       | Derived from `OPENAI`<br>`_BASE_URL` | Claude-side base URL for split-gateway deployments.                                                                                                        |
 | `ANTHROPIC_AUTH_TOKEN` | No       | Inherits `SAFE_API_KEY` | Claude CLI auth token alias; set explicitly only for split-gateway deployments.                                                                        |
 | `GEAK_API_KEY`         | No       | Inherits `SAFE_API_KEY` | Only set explicitly to override the default inheritance.                                                                                                                              |
@@ -184,8 +184,7 @@ The following variables configure the Critic, Robustness, and knowledge base com
 ## Session / observability hand-off
 
 These are read by `src/hyperloom/inference_optimizer/session/manifest.py` and the `src/hyperloom/inference_optimizer/breakdown/collectors/`
-package to populate `session_breakdown.json` for downstream consumers
-(`claw-stats-service`).
+package to populate `session_breakdown.json` for downstream consumers.
 
 | Variable          | Description                                                                                |
 |-------------------|--------------------------------------------------------------------------------------------|

@@ -112,27 +112,30 @@ class TestReusableSourceRoots(unittest.TestCase):
         self.assertTrue(reusable, msg=skip)
         self.assertEqual(skip, "")
 
-    def test_flydsl_default_wekafs_root_is_reusable(self) -> None:
-        cand = self._flydsl_candidate(
-            "/wekafs/yunkai/flydsl/kernels/moe_gemm_2stage.py",
-        )
-        reusable, skip = classify_patchability(cand)
-        self.assertTrue(reusable, msg=skip)
+    def test_flydsl_env_configured_root_is_reusable(self) -> None:
+        # A DSL2_ROOT/FLYDSL_ROOT-configured checkout is reusable; no personal
+        # or internal storage path is assumed as a built-in default.
+        with mock.patch.dict(os.environ, {"FLYDSL_ROOT": "/opt/flydsl"}):
+            cand = self._flydsl_candidate(
+                "/opt/flydsl/kernels/moe_gemm_2stage.py",
+            )
+            reusable, skip = classify_patchability(cand)
+            self.assertTrue(reusable, msg=skip)
 
     def test_random_path_still_rejected(self) -> None:
-        cand = self._flydsl_candidate("/wekafs/random/user/checkout/k.py")
+        cand = self._flydsl_candidate("/path/random/user/checkout/k.py")
         reusable, skip = classify_patchability(cand)
         self.assertFalse(reusable)
         self.assertIn("reusable framework root", skip)
 
     def test_dsl2_root_env_injects_flydsl_root(self) -> None:
         # $DSL2_ROOT checkout is surfaced lower-cased with a trailing slash.
-        extra = "/wekafs/user-local/FlyDSL"
+        extra = "/path/user-local/FlyDSL"
         with mock.patch.dict(os.environ, {"DSL2_ROOT": extra}):
             roots = _flydsl_reusable_roots()
-            self.assertIn("/wekafs/user-local/flydsl/", roots)
+            self.assertIn("/path/user-local/flydsl/", roots)
             cand = self._flydsl_candidate(
-                "/wekafs/user-local/flydsl/kernels/k.py",
+                "/path/user-local/flydsl/kernels/k.py",
             )
             reusable, skip = classify_patchability(cand)
             self.assertTrue(reusable, msg=skip)
@@ -144,7 +147,6 @@ class TestReusableSourceRoots(unittest.TestCase):
         env.pop("FLYDSL_ROOT", None)
         with mock.patch.dict(os.environ, env, clear=True):
             roots = _flydsl_reusable_roots()
-            self.assertIn("/wekafs/yunkai/flydsl/", roots)
             self.assertIn("/sgl-workspace/flydsl/", roots)
 
 
@@ -383,13 +385,12 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
     def test_orchestrator_allowlist_has_flydsl(self) -> None:
         roots = self.handlers._reusable_source_roots()
         self.assertIn("/sgl-workspace/flydsl/", roots)
-        self.assertIn("/wekafs/yunkai/flydsl/", roots)
 
     def test_orchestrator_honours_dsl2_root_env(self) -> None:
-        extra = "/wekafs/user-local/FlyDSL"
+        extra = "/path/user-local/FlyDSL"
         with mock.patch.dict(os.environ, {"DSL2_ROOT": extra}):
             self.assertIn(
-                "/wekafs/user-local/flydsl/",
+                "/path/user-local/flydsl/",
                 self.handlers._reusable_source_roots(),
             )
 

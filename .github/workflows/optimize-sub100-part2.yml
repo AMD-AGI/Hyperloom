@@ -1,0 +1,149 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+name: optimize-sub100-part2
+
+# Thin scheduler shell for the sub100 part2 pool (formerly optimize-tiny). It
+# delegates to `SaFE Optimize Submit` (optimize-submit.yml) so submission,
+# waiting, artifact collection, summary rendering, webhook, and perf publishing
+# stay byte-for-byte on the regular SaFE submit path — same shape as
+# part1/part3.
+#
+#   pool   = $WEKAFS_CHENYI_DIR/ci-candidates/hf_sub100_part2.20260630.json
+#   batch  = 240 (= max_parallel; a batch always runs fully in parallel)
+#   budget = max_hours 6 (== cron period)
+#
+# Cadence: every 6h at UTC 03:00 / 09:00 / 15:00 / 21:00 (Beijing 11:00 / 17:00 /
+# 23:00 / 05:00). First fire 03:00Z = Beijing 11:00 -> batch 0 (anchored
+# 2026-06-30 03:00Z = Beijing 11:00). INVARIANT: cron period == MAX_HOURS.
+# The candidates JSON lives on /path (RO-mounted on the hyperloom runners)
+# instead of the git repo, so the large pool never bloats git history.
+
+on:
+  schedule:
+    # Beijing 11:00 / 17:00 / 23:00 / 05:00 (UTC 03:00 / 09:00 / 15:00 / 21:00).
+    # First fire 03:00Z -> batch 0 (anchor 2026-06-30 03:00Z). Every 6h == MAX_HOURS.
+    - cron: '0 3,9,15,21 * * *'
+  workflow_dispatch:
+    inputs:
+      batch_index:
+        description: 'Optional 0-based batch override. Empty = derive from the current 6-hour UTC slot.'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Forward dry_run=true to SaFE Optimize Submit.'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: optimize-sub100-part2-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch-submit:
+    name: Dispatch sub100 part2 submit
+    runs-on: hyperloom-mh826
+    timeout-minutes: 10
+    env:
+      # Off-repo pool on /path (the /path root lives in the WEKAFS_CHENYI_DIR
+      # secret; generate_hf_matrix reads the absolute path as-is, and the
+      # hyperloom runners RO-mount /path).
+      CANDIDATES_FILE: ${{ format('{0}/ci-candidates/hf_sub100_part2.20260630.json', secrets.WEKAFS_CHENYI_DIR) }}
+      CANDIDATES_PATH: ${{ format('{0}/ci-candidates/hf_sub100_part2.20260630.json', secrets.WEKAFS_CHENYI_DIR) }}
+      BATCH_SIZE: '240'
+      # Rotation step (hours). MUST equal the cron PERIOD (this cron fires every
+      # 6h: 1/7/13/19 UTC), same invariant as the other pools. Also the per-task
+      # optimizer budget forwarded below.
+      MAX_HOURS: '6'
+      SUBMIT_WORKSPACES: 'example-hyperloom'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve part2 batch
+        id: batch
+        env:
+          INPUT_BATCH_INDEX: ${{ github.event.inputs.batch_index }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "${CANDIDATES_PATH}" ]; then
+            echo "::error::candidates pool not found: ${CANDIDATES_PATH}"
+            exit 1
+          fi
+          # Same max_hours-paced rotation as the sibling pools (ci/batch_rotate.py,
+          # unit-tested): one batch advances per MAX_HOURS of wall-clock time since
+          # the anchor, auto-rotating on schedule and honoring an explicit
+          # batch_index on manual dispatch. ANCHOR 2026-06-30 03:00Z (Beijing
+          # 11:00) restarts THIS pool's sweep at batch 0 on the first fire
+          # (03:00Z = Beijing 11:00) for the freshly-split part2 pool.
+          n=$(python3 -c "import json,os;print(len(json.load(open(os.environ['CANDIDATES_PATH'])).get('candidates') or []))")
+          out=$(python3 ci/batch_rotate.py \
+            --count "${n}" \
+            --batch-size "${BATCH_SIZE}" \
+            --batch-index "${INPUT_BATCH_INDEX:-}" \
+            --max-hours "${MAX_HOURS}" \
+            --anchor "2026-06-30T03:00:00+00:00" \
+            --event "${EVENT}")
+          bi=$(echo "$out" | cut -f1); pool=$(echo "$out" | cut -f2)
+          batches=$(echo "$out" | cut -f3); start=$(echo "$out" | cut -f4); end=$(echo "$out" | cut -f5)
+          {
+            echo "batch_index=${bi}"
+            echo "pool_size=${pool}"
+            echo "batches=${batches}"
+            echo "slice=${start}:${end}"
+          } >> "$GITHUB_OUTPUT"
+          echo "### part2 pool: ${pool} models; batch ${bi}/${batches}; slice ${start}:${end}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dispatch SaFE Optimize Submit
+        run: |
+          set -euo pipefail
+          dry_run="${DRY_RUN:-false}"
+          ref="${GITHUB_REF_NAME}"
+          batch_index="${{ steps.batch.outputs.batch_index }}"
+
+          echo "Dispatching optimize-submit.yml on ref=${ref}"
+          echo "part2 pool: ${{ steps.batch.outputs.pool_size }} models; batch ${batch_index}/${{ steps.batch.outputs.batches }}; slice ${{ steps.batch.outputs.slice }}"
+          echo "Batch size: ${BATCH_SIZE}; max_parallel=${BATCH_SIZE}; submit_workspaces=${SUBMIT_WORKSPACES}"
+
+          payload=$(python3 - <<'PY'
+          import json
+          import os
+
+          payload = {
+              "ref": os.environ["GITHUB_REF_NAME"],
+              "inputs": {
+                  "models": "",
+                  "candidates_file": os.environ["CANDIDATES_FILE"],
+                  "batch_index": os.environ["BATCH_INDEX"],
+                  "batch_size": os.environ["BATCH_SIZE"],
+                  "exclude_leaderboard": "false",
+                  "exclude_active_workflows": "true",
+                  # A batch always runs fully in parallel, so max_parallel == batch_size.
+                  "max_parallel": os.environ["BATCH_SIZE"],
+                  "submit_workspaces": os.environ["SUBMIT_WORKSPACES"],
+                  # task wait + job timeout are derived from max_hours in
+                  # optimize-submit's prepare job (max_hours+30m / +60m).
+                  "max_hours": os.environ["MAX_HOURS"],
+                  "all_artifacts": "true",
+                  "dry_run": os.environ.get("DRY_RUN") or "false",
+              },
+          }
+          print(json.dumps(payload))
+          PY
+          )
+
+          curl -fsS \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/optimize-submit.yml/dispatches" \
+            -d "$payload"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          BATCH_INDEX: ${{ steps.batch.outputs.batch_index }}

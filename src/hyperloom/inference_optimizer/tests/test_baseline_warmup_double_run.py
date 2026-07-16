@@ -38,7 +38,7 @@ def _write_yaml(path: Path, *, framework: str = "vllm") -> None:
     cfg: dict = {
         "benchmark": {
             "framework": framework,
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "fp8",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 64, "ISL": 1024, "OSL": 1024},
@@ -63,7 +63,7 @@ def _fake_workspace(slot: Path, *, tput: float) -> Path:
             {
                 "success": True,
                 "framework": "vllm",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": tput / 1024,
                     "output_throughput": tput,

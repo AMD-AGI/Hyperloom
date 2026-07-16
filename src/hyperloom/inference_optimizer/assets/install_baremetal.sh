@@ -32,6 +32,8 @@ HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v0.8}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
+# LLM gateway base URL. No internal endpoint is baked in; set OPENAI_BASE_URL /
+# ANTHROPIC_BASE_URL (or export DEFAULT_OPENAI_BASE_URL) to your own gateway.
 DEFAULT_OPENAI_BASE_URL="${DEFAULT_OPENAI_BASE_URL:-}"
 SAFE_API_KEY_PLACEHOLDER="ak-your-api-key-here"
 
@@ -46,11 +48,12 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # Framework versions track docs/compatibility.md (SGLang v0.5.12,
 # ROCm 7.2). vLLM uses the wheels.vllm.ai pip snapshot instead of the
 # v0.21.0-rocm720 Docker image (no matching pip snapshot exists); 0.22.0+rocm722
-# is the nearest published ROCm 7.2 wheel. AITER_REF must be a pinned commit
-# SHA by default; set AITER_ALLOW_UNPINNED=1 to restore the legacy auto-select
-# flow when doing local compatibility exploration.
+# is the nearest published ROCm 7.2 wheel. AITER_REF can pin ROCm/aiter to a
+# released tag; when unset, the installer selects the newest tag compatible
+# with the already-installed ROCm torch/triton stack.
 SGLANG_REF="${SGLANG_REF:-v0.5.12}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
+_AITER_REF_WAS_SET="${AITER_REF+x}"
 SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm720}"
 if [ -z "$_SGLANG_ROCM_PYPI_VERSION_WAS_SET" ]; then
   case "$SGLANG_ROCM_EXTRA" in
@@ -59,10 +62,11 @@ if [ -z "$_SGLANG_ROCM_PYPI_VERSION_WAS_SET" ]; then
   esac
 fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
-SGLANG_ROCM_INDEX_URL="${SGLANG_ROCM_INDEX_URL:-}"
+# AMD-hosted ROCm wheel index for amd-sglang (an AMD-published dependency).
+# Declared explicitly; override to use a mirror or a fully public index.
+SGLANG_ROCM_PYPI_INDEX="${SGLANG_ROCM_PYPI_INDEX:-https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-AITER_ALLOW_UNPINNED="${AITER_ALLOW_UNPINNED:-0}"
 VLLM_VERSION="${VLLM_VERSION:-0.22.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm722}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
@@ -113,10 +117,9 @@ Env overrides honored: REPO_ROOT,
 USER_DATA_PATH, HYPERLOOM_RUNTIME_DIR, HYPERLOOM_DEPS_ROOT / _OPEN_SOURCE_ROOT,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON, TRACELENS_INTERNAL_ROOT,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
-SGLANG_ROCM_EXTRA, SGLANG_ROCM_INDEX_URL, AITER_REPO, AITER_REF,
-AITER_ALLOW_UNPINNED, AITER_ROOT, ROCM_PATH, HIP_PATH, LD_LIBRARY_PATH,
-VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX, VLLM_VENV_ROOT,
-HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
+SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
+LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
+VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
 EOF
 }
 
@@ -167,22 +170,6 @@ SGLang/vLLM image such as primussafe/sglang:*-rocm*-mi30x|mi35x-profilerfix, or 
 install an equivalent ROCm torch + framework stack), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
-
-is_full_git_sha() {
-  [[ "${1:-}" =~ ^[0-9a-fA-F]{40}$ ]]
-}
-
-require_pinned_aiter_ref() {
-  if [ "${AITER_ALLOW_UNPINNED:-0}" = "1" ]; then
-    return 0
-  fi
-  if [ -z "${AITER_REF:-}" ]; then
-    die "AITER_REF must be set to a 40-character commit SHA before installing AITER (set AITER_ALLOW_UNPINNED=1 only for local compatibility exploration)"
-  fi
-  if ! is_full_git_sha "$AITER_REF"; then
-    die "AITER_REF must be a 40-character commit SHA, got '${AITER_REF}' (set AITER_ALLOW_UNPINNED=1 to allow tags/auto-select)"
-  fi
-}
 
 # Resolve a Python interpreter, mirroring install.sh: prefer the canonical ROCm
 # venv (/opt/venv) unless INFERENCE_OPTIMIZER_FORCE_PYTHON=1 pins $PYTHON.
@@ -532,7 +519,6 @@ install_compatible_aiter() {
   constraint_file="$(mktemp)"
   write_rocm_torch_constraints "$py" "$constraint_file"
 
-  require_pinned_aiter_ref
   ensure_aiter_checkout "$aiter_root"
   if [ -n "$AITER_REF" ]; then
     log "installing AITER ${AITER_REF} with existing torch/triton constraints"
@@ -565,14 +551,13 @@ install_compatible_aiter() {
 # ROCm target is overridable so hosts pinned to an older driver (e.g. amdgpu
 # 6.3.x, which supports up to ROCm 7.0 user space) can select a matching wheel.
 install_sglang_from_wheel() {
-  local py="$1" pip_args
+  local py="$1"
   log "installing amd-sglang ROCm ${SGLANG_ROCM_PYPI_VERSION} wheel (extra=${SGLANG_ROCM_EXTRA})"
   "$py" -m pip uninstall -y sglang-kernel sgl-kernel sglang amd-sglang || true
-  pip_args=("amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]")
-  if [ -n "${SGLANG_ROCM_INDEX_URL:-}" ]; then
-    pip_args+=(-i "$SGLANG_ROCM_INDEX_URL" --extra-index-url https://pypi.org/simple)
-  fi
-  "$py" -m pip install "${pip_args[@]}"
+  "$py" -m pip install \
+    "amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]" \
+    -i "${SGLANG_ROCM_PYPI_INDEX}" \
+    --extra-index-url https://pypi.org/simple
 }
 
 # Install the AMD SGLang ROCm wheel and its source-only AITER dependency.
@@ -592,18 +577,11 @@ PY
   log "AITER_ROOT=${aiter_root}"
   if [ -n "$AITER_REF" ]; then
     log "AITER_REF=${AITER_REF}"
-  elif [ "${AITER_ALLOW_UNPINNED:-0}" = "1" ]; then
-    log "AITER_REF=auto (AITER_ALLOW_UNPINNED=1; newest tag compatible with installed torch/triton)"
   else
-    log "AITER_REF unset (install will require a pinned commit SHA before cloning AITER)"
+    log "AITER_REF=auto (newest tag compatible with installed torch/triton)"
   fi
   log "SGLANG_ROCM_EXTRA=${SGLANG_ROCM_EXTRA}"
   log "SGLANG_ROCM_PYPI_VERSION=${SGLANG_ROCM_PYPI_VERSION}"
-  if [ -n "${SGLANG_ROCM_INDEX_URL:-}" ]; then
-    log "SGLANG_ROCM_INDEX_URL=${SGLANG_ROCM_INDEX_URL}"
-  else
-    log "SGLANG_ROCM_INDEX_URL unset (using the default pip index)"
-  fi
 
   if [ "$SGLANG_ROCM_EXTRA" = "rocm700" ] && [ "$py_mm" != "3.10" ]; then
     die "SGLANG_ROCM_EXTRA=rocm700 currently supports Python 3.10 AMD wheels only; Python ${py_mm} would use source install and can pull mismatched ROCm 7.2 Triton."
@@ -615,10 +593,8 @@ PY
       log "aiter import OK"
     elif [ -n "$AITER_REF" ]; then
       warn "aiter missing (check-only; would clone/install ${AITER_REPO}@${AITER_REF})"
-    elif [ "${AITER_ALLOW_UNPINNED:-0}" = "1" ]; then
-      warn "aiter missing (check-only; would auto-select newest compatible tag from ${AITER_REPO})"
     else
-      warn "aiter missing (check-only; install requires AITER_REF=<40-char commit SHA>)"
+      warn "aiter missing (check-only; would auto-select newest compatible tag from ${AITER_REPO})"
     fi
     _py_has "$py" sgl_kernel && log "sgl_kernel import OK" || warn "sgl_kernel missing (check-only; installed by amd-sglang)"
     return 0
@@ -626,21 +602,15 @@ PY
 
   if [ "$DRY_RUN" -eq 1 ]; then
     if [ "$py_mm" = "3.10" ]; then
-      if [ -n "${SGLANG_ROCM_INDEX_URL:-}" ]; then
-        log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]' -i ${SGLANG_ROCM_INDEX_URL} --extra-index-url https://pypi.org/simple"
-      else
-        log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]'"
-      fi
+      log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]' -i ${SGLANG_ROCM_PYPI_INDEX} --extra-index-url https://pypi.org/simple"
     else
       log "would clone/build SGLang source ${SGLANG_REPO}@${SGLANG_REF} under ${SGLANG_ROOT:-${deps_root}/sglang}"
       log "would install SGLang source with [srt_hip] runtime dependencies under current torch/triton constraints"
     fi
     if [ -n "$AITER_REF" ]; then
       log "would clone/update ${AITER_REPO}@${AITER_REF} at ${aiter_root} and install it with current torch/triton constraints"
-    elif [ "${AITER_ALLOW_UNPINNED:-0}" = "1" ]; then
-      log "would auto-select the newest compatible AITER tag from ${AITER_REPO} and install it with current torch/triton constraints"
     else
-      log "would require AITER_REF=<40-char commit SHA> before cloning ${AITER_REPO}"
+      log "would auto-select the newest compatible AITER tag from ${AITER_REPO} and install it with current torch/triton constraints"
     fi
     return 0
   fi
@@ -1180,10 +1150,9 @@ resolve_credentials() {
     read -rsp "[install-baremetal] Enter SAFE_API_KEY (ak-...) or leave blank if using ANTHROPIC/OPENAI keys: " safe_key; echo >&2
   fi
 
-  # Single-gateway convenience: use an operator-provided default endpoint only
-  # when no base URL is set at all. The public installer intentionally carries
-  # no private gateway URL.
-  if [ -n "${DEFAULT_OPENAI_BASE_URL:-}" ] && [ -z "$openai_url" ] && [ -z "$anthropic_url" ]; then
+  # Single-gateway convenience: default the OpenAI endpoint only when no base URL is
+  # set at all AND a default was explicitly provided (no internal endpoint is baked in).
+  if [ -z "$openai_url" ] && [ -z "$anthropic_url" ] && [ -n "$DEFAULT_OPENAI_BASE_URL" ]; then
     openai_url="$DEFAULT_OPENAI_BASE_URL"
     warn "no LLM base URL set; defaulting OPENAI_BASE_URL to ${openai_url}"
   fi
@@ -1276,9 +1245,7 @@ write_runtime_dotenv() {
   [ -n "${HIP_PATH:-}" ] && upsert_dotenv_var HIP_PATH "$HIP_PATH"
   [ -n "${SGLANG_ROCM_EXTRA:-}" ] && upsert_dotenv_var SGLANG_ROCM_EXTRA "$SGLANG_ROCM_EXTRA"
   [ -n "${SGLANG_ROCM_PYPI_VERSION:-}" ] && upsert_dotenv_var SGLANG_ROCM_PYPI_VERSION "$SGLANG_ROCM_PYPI_VERSION"
-  [ -n "${SGLANG_ROCM_INDEX_URL:-}" ] && upsert_dotenv_var SGLANG_ROCM_INDEX_URL "$SGLANG_ROCM_INDEX_URL"
   [ -n "${AITER_REF:-}" ] && upsert_dotenv_var AITER_REF "$AITER_REF"
-  [ "${AITER_ALLOW_UNPINNED:-0}" = "1" ] && upsert_dotenv_var AITER_ALLOW_UNPINNED "$AITER_ALLOW_UNPINNED"
   [ -n "${KERNEL_OPT_BACKEND_ORDER:-}" ] && upsert_dotenv_var KERNEL_OPT_BACKEND_ORDER "$KERNEL_OPT_BACKEND_ORDER"
   [ -n "${HYPERLOOM_WHEEL_REPO:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_REPO "$HYPERLOOM_WHEEL_REPO"
   [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_TAG "$HYPERLOOM_WHEEL_TAG"

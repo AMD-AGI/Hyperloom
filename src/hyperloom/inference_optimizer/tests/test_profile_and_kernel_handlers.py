@@ -172,11 +172,11 @@ def test_materialize_config_injects_model_path(tmp_path):
     out = _materialize_config_with_envs(
         PROFILE_DEFAULT_CONFIG,
         tmp_path,
-        model_path="/wekafs/models/DeepSeek-R1-0528",
+        model_path="/path/models/DeepSeek-R1-0528",
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
-    assert rendered["benchmark"]["model"] == "/wekafs/models/DeepSeek-R1-0528"
+    assert rendered["benchmark"]["model"] == "/path/models/DeepSeek-R1-0528"
 
 
 def test_materialize_config_leaves_model_alone_without_override(tmp_path, monkeypatch):
@@ -491,11 +491,11 @@ def test_materialize_persists_inferencex_path_for_magpie(
     import yaml
 
     _clear_workload_env(monkeypatch)
-    monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/InferenceX")
+    monkeypatch.setenv("INFERENCEX_PATH", "/path/InferenceX")
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
-    assert rendered["benchmark"]["inferencex_path"] == "/wekafs/InferenceX"
+    assert rendered["benchmark"]["inferencex_path"] == "/path/InferenceX"
 
 
 def test_materialize_profile_window_clamps_to_skill_floor(
@@ -862,7 +862,7 @@ def test_materialize_profile_sglang_skips_shape_discovery_gemma2_by_path(
     monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
     # Path looks like Gemma2 but ships no config.json (not-yet-materialized).
-    model = "/wekafs/models/google-gemma-2-9b-it"
+    model = "/path/models/google-gemma-2-9b-it"
     src = _profile_yaml_model(
         tmp_path,
         "sglang",
@@ -885,7 +885,7 @@ def test_materialize_profile_sglang_no_config_non_gemma_keeps_shape_discovery(
     _clear_workload_env(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", raising=False)
     _mock_patchers(monkeypatch, vllm=False, sglang=True)
-    model = "/wekafs/models/meta-llama-3-8b-instruct"
+    model = "/path/models/meta-llama-3-8b-instruct"
     src = _profile_yaml_model(
         tmp_path,
         "sglang",
@@ -1257,7 +1257,7 @@ async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tm
             {
                 "success": False,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": 1.8,
                     "output_throughput": 1872.0,
@@ -1334,7 +1334,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
             {
                 "success": True,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": 3.2,
                     "output_throughput": 800.0,
@@ -1415,7 +1415,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
             {
                 "success": True,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": 3.2,
                     "output_throughput": 800.0,
@@ -1472,7 +1472,7 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
             {
                 "success": True,
                 "framework": "vllm",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": 3.2,
                     "output_throughput": 800.0,
@@ -2076,7 +2076,7 @@ async def test_trace_analyze_handler_backfills_workload_context_from_state(
     state = SharedState.load_or_init(session_dir)
     state.framework = "vllm"
     state.gpu_type = "mi300x"
-    state.model_path = "/wekafs/models/Qwen3-30B-A3B"
+    state.model_path = "/path/models/Qwen3-30B-A3B"
     state.model_name = "Qwen3-30B-A3B"
     state.save(session_dir)
 
@@ -3185,18 +3185,18 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
     # ``_sequence_denial_for_request`` needs baseline_tput > 0 and
     # last_profile_trace set; simulate the post-baseline + post-profile state.
     c.shared_state.baseline_tput = 1234.5
-    c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
-    cached_path = "/wekafs/cached/kernel_candidates.json"
+    c.shared_state.last_profile_trace = "/path/trace/x.json.gz"
+    cached_path = "/path/cached/kernel_candidates.json"
     c.shared_state.last_trace_analyze = {
-        "trace_input": "/wekafs/trace/x.json.gz",
+        "trace_input": "/path/trace/x.json.gz",
         "candidates_path": cached_path,
     }
     # The gate also consults ``last_select_kernels``; seed it with the same trace.
     c.shared_state.last_select_kernels = {
-        "trace_input": "/wekafs/trace/x.json.gz",
+        "trace_input": "/path/trace/x.json.gz",
         "candidates_path": cached_path,
     }
-    explicit = "/wekafs/operator/override_candidates.json"
+    explicit = "/path/operator/override_candidates.json"
 
     captured: dict = {}
 
@@ -3244,13 +3244,21 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     completion_log: list[str] = []
     recorded: list[dict] = []
 
+    # Deterministic completion order kB -> kC -> kA via an explicit gate chain
+    # instead of real sleeps, so the assertion never depends on wall-clock
+    # timing (which is flaky under a loaded parallel test run).
+    _gates = {kid: asyncio.Event() for kid in ("kA", "kB", "kC")}
+    _release_after = {"kB": "kC", "kC": "kA"}  # kB done -> release kC -> release kA
+
     async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
         kid = str(candidate.get("kernel_id"))
-        # Stagger completion times so kA finishes last; the streaming
-        # callback should still see kB and kC's results before kA.
-        delay = {"kA": 0.05, "kB": 0.01, "kC": 0.02}[kid]
-        await asyncio.sleep(delay)
+        if kid != "kB":
+            # kC and kA wait until their predecessor signals completion.
+            await _gates[kid].wait()
         completion_log.append(kid)
+        nxt = _release_after.get(kid)
+        if nxt:
+            _gates[nxt].set()
         return {
             "status": "ok",
             "kernel_id": kid,
@@ -3523,10 +3531,10 @@ async def test_coordinator_streams_batch_results_and_dedups_final_record(
     """End-to-end: record_partial records each sub-attempt in flight, and the post-gather record_kernel_opt(best) is skipped in batch_mode (no double-counting)."""
     c = Coordinator(session_dir, backends=_backends_silent())
     c.shared_state.baseline_tput = 1234.5
-    c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
+    c.shared_state.last_profile_trace = "/path/trace/x.json.gz"
     c.shared_state.last_trace_analyze = {
-        "trace_input": "/wekafs/trace/x.json.gz",
-        "candidates_path": "/wekafs/cached/candidates.json",
+        "trace_input": "/path/trace/x.json.gz",
+        "candidates_path": "/path/cached/candidates.json",
     }
     # The sequence gate also consults ``last_select_kernels``.
     c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
@@ -3575,10 +3583,10 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
     """Explicit operator-supplied ``base_tput`` must NOT be clobbered by the auto-injection."""
     c = Coordinator(session_dir, backends=_backends_silent())
     c.shared_state.baseline_tput = 4319.5
-    c.shared_state.last_profile_trace = "/wekafs/trace/x.json.gz"
+    c.shared_state.last_profile_trace = "/path/trace/x.json.gz"
     c.shared_state.last_trace_analyze = {
-        "trace_input": "/wekafs/trace/x.json.gz",
-        "candidates_path": "/wekafs/cached/candidates.json",
+        "trace_input": "/path/trace/x.json.gz",
+        "candidates_path": "/path/cached/candidates.json",
     }
     c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
     c.shared_state.current_best = {"action": "backends", "tput": 4500.0}

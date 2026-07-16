@@ -70,6 +70,10 @@ test = [
 ci = [
     "pytest-cov>=5.0",
     "coverage>=7.0",
+    # Parallel test execution for the coverage job (``-n auto`` in
+    # ``pytest_ci_args``). pytest-cov merges the per-worker coverage data, so
+    # the reported total is identical to a serial run.
+    "pytest-xdist>=3.5",
     "tomli>=2.0.1; python_version < '3.11'",
 ]
 # Optional live-Langfuse trace push (HYPERLOOM_LANGFUSE_ENABLE=1). The local
@@ -416,6 +420,9 @@ fail_under = 90
 # Full trailing argv for ``pytest`` in ``tests-coverage.yml`` (marker filter + cov).
 pytest_ci_args = [
     "-m", "not critic_agent_e2e and not robustness_agent_e2e",
+    # Parallel workers (pytest-xdist). Coverage is merged across workers, so the
+    # total matches a serial run; cuts wall-clock roughly in half.
+    "-n", "auto",
     "--cov=.", "--cov-report=xml", "--cov-report=term",
 ]
 # Repository variable name: when set to 1/true/yes/on, CI skips fail_under
