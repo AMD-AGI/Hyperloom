@@ -14,6 +14,8 @@ subtrees:
 
 - caption: Install
   entries:
+  - file: install/install.md
+    title: Quickstart — Docker and Bare metal
   - file: install/slurm.md
     title: Quickstart — Slurm
 

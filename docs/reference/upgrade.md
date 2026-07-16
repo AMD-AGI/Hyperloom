@@ -11,7 +11,7 @@ Per-version migration steps. This page is a companion to
 changed*, this page answers *what you have to do about it*.
 
 If you are starting fresh, skip this page and follow the
-[setup and examples guide](../../examples/README.md).
+[installation instructions](../install/install).
 
 ---
 
