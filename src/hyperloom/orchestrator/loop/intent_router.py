@@ -206,7 +206,7 @@ class IntentRouter:
                 else "needs_review"
             )
 
-            # SWSPLAT-33400 (defense-in-depth, log-only): a verdict_map that
+            # Defense-in-depth (log-only): a verdict_map that
             # collapses to a permissive verdict while carrying non-approving
             # sub-verdicts materialises the whole grid off a single approval.
             # Record it to the process log for audit; behaviour is unchanged.
@@ -215,7 +215,7 @@ class IntentRouter:
                     sv in ("reject", "needs_review") for sv in sub_verdicts
                 ):
                     log.warning(
-                        "review_verdict collapse (SWSPLAT-33400): target=%s "
+                        "review_verdict collapse: target=%s "
                         "collapsed to %r despite mixed sub_verdicts=%r",
                         target, verdict, sub_verdicts,
                     )
@@ -774,13 +774,13 @@ class IntentRouter:
                 task_id, "cancelled",
                 evidence={"reason": intent.payload.get("reason"), "by": source},
             )
-            # SWSPLAT-33474 (defense-in-depth, log-only): KILL_TASK has no
+            # Defense-in-depth (log-only): KILL_TASK has no
             # lease ownership/lane check by design (robustness is the safety net
             # that may kill any task). Emit an audit trail so a forged/unexpected
             # kill is traceable; behaviour is unchanged.
             try:
                 log.warning(
-                    "kill_task audit (SWSPLAT-33474): source=%s task_id=%s "
+                    "kill_task audit: source=%s task_id=%s "
                     "prior_state=%s reason=%r",
                     source, task_id, task.state, intent.payload.get("reason"),
                 )
