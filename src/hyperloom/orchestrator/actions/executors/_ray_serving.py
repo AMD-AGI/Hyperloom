@@ -138,6 +138,16 @@ class ManagedServerProcess:
         """
         return self._proc is not None and self._proc.poll() is None
 
+    def exit_code(self) -> int | None:
+        """Return the process exit code, or ``None`` while running / never started.
+
+        Returns:
+            The exit code once the process has terminated, else ``None``.
+        """
+        if self._proc is None:
+            return None
+        return self._proc.poll()
+
     def stop(self, *, grace_seconds: float = 5.0) -> None:
         """Reap the whole process tree (SIGTERM → grace → SIGKILL). Idempotent.
 
@@ -241,6 +251,14 @@ def _serving_actor_body() -> Any:
                 The pid or ``None``.
             """
             return self._mgr.pid()
+
+        def exit_code(self) -> int | None:
+            """Return the supervised process exit code, or ``None`` while running.
+
+            Returns:
+                The exit code once the process has terminated, else ``None``.
+            """
+            return self._mgr.exit_code()
 
         def stop(self) -> None:
             """Reap the serving process tree."""
@@ -464,10 +482,173 @@ def maybe_serving_lease(
     )
 
 
+class GpuSpecialistLease:
+    """A held Ray GPU lease that runs a ``needs_gpu`` specialist subprocess (§12 T4).
+
+    Wraps a :func:`make_gpu_specialist_actor` actor holding ``num_gpus``
+    (serving-disjoint — it takes no ``serving_slot``). The specialist's *entire*
+    subprocess (the agent runtime and every Bash / GPU command it spawns) runs
+    inside the actor, so any GPU command lands within Ray's assigned visible
+    devices — the specialist can no longer reach a card outside its lease
+    (ray_modify.plan.md §4.2 / §8). Unlike a benchmark round the process is
+    long-lived and reaper-polled, so this exposes ``start`` / ``is_alive`` /
+    ``exit_code`` / ``stop`` (mirroring a ``Popen`` for the reap loop) rather
+    than a single blocking call; ``close`` releases the lease.
+
+    Single-node only (callers gate via :func:`maybe_gpu_specialist_lease`). The
+    physical card assignment is Ray's (``num_gpus``); the Coordinator's SQLite
+    pool is now only capacity/TTL accounting (decision 3 / §12 T5).
+    """
+
+    def __init__(self, *, num_gpus: float, ensure_log_path: Any = None) -> None:
+        """Configure the lease (the actor is created on :meth:`start`).
+
+        Args:
+            num_gpus: GPUs the specialist actor leases.
+            ensure_log_path: Optional path forwarded to the cluster ensure.
+        """
+        self._num_gpus = float(num_gpus)
+        self._ensure_log_path = ensure_log_path
+        self._actor: Any = None
+        self._pid: int | None = None
+
+    def start(
+        self,
+        cmd: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        log_path: str | None = None,
+    ) -> int:
+        """Ensure the cluster, create the actor, and launch the subprocess.
+
+        Ray sets ``*_VISIBLE_DEVICES`` in the actor's worker; the subprocess
+        inherits them (the actor drops the caller env's device vars).
+
+        Args:
+            cmd: The specialist command to launch.
+            env: Caller env (device vars are dropped inside the actor).
+            cwd: Working directory for the subprocess.
+            log_path: Path the subprocess's stdout/stderr are written to (read
+                by the caller's reaper — single-node, same host).
+
+        Returns:
+            The launched subprocess pid.
+        """
+        import ray  # noqa: PLC0415
+
+        from ._ray_backend import get_ray_backend  # noqa: PLC0415
+
+        get_ray_backend().ensure(log_path=self._ensure_log_path)
+        self._actor = make_gpu_specialist_actor(self._num_gpus)
+        self._pid = int(
+            ray.get(self._actor.start.remote(cmd, env=env, cwd=cwd, log_path=log_path))
+        )
+        return self._pid
+
+    def pid(self) -> int | None:
+        """Return the launched pid, or ``None`` before :meth:`start`.
+
+        Returns:
+            The pid, or ``None``.
+        """
+        return self._pid
+
+    def is_alive(self) -> bool:
+        """Return whether the specialist subprocess is still running.
+
+        Returns:
+            ``True`` when the actor reports the process alive; ``False`` when it
+            has exited, was never started, or the actor is unreachable.
+        """
+        if self._actor is None:
+            return False
+        import ray  # noqa: PLC0415
+
+        try:
+            return bool(ray.get(self._actor.is_alive.remote()))
+        except Exception:  # noqa: BLE001 — a dead actor reads as not-alive
+            return False
+
+    def exit_code(self) -> int | None:
+        """Return the subprocess exit code, or ``None`` while running.
+
+        Returns:
+            The exit code once the process terminates, else ``None``.
+        """
+        if self._actor is None:
+            return None
+        import ray  # noqa: PLC0415
+
+        try:
+            return ray.get(self._actor.exit_code.remote())
+        except Exception:  # noqa: BLE001
+            return None
+
+    def stop(self) -> None:
+        """Reap the specialist subprocess tree (keeps the actor/lease alive).
+
+        Used by the reaper on wall-budget / stall kills; the lease itself is
+        released later by :meth:`close`. Never raises.
+        """
+        if self._actor is None:
+            return
+        import ray  # noqa: PLC0415
+
+        try:
+            ray.get(self._actor.stop.remote())
+        except Exception:  # noqa: BLE001 — teardown must not raise
+            pass
+
+    def close(self) -> None:
+        """Kill the actor, releasing the GPU lease. Idempotent, never raises."""
+        if self._actor is None:
+            return
+        try:
+            import ray  # noqa: PLC0415
+
+            ray.kill(self._actor)
+        except Exception:  # noqa: BLE001 — teardown must not raise
+            pass
+        self._actor = None
+
+
+def maybe_gpu_specialist_lease(
+    *,
+    num_gpus: float,
+    ensure_log_path: Any = None,
+) -> GpuSpecialistLease | None:
+    """Return a :class:`GpuSpecialistLease` when single-node Ray execution is active.
+
+    Mirrors :func:`maybe_serving_lease`: the single seam the dispatcher uses to
+    route a ``needs_gpu`` specialist's whole subprocess into a Ray ``num_gpus``
+    actor (§12 T4). Returns ``None`` (keep the legacy SQLite-gpu-id device path)
+    for multi-node, ``INFERENCE_OPTIMIZER_RAY_EXEC`` off, the pytest default, or
+    a non-positive ``num_gpus``.
+
+    Args:
+        num_gpus: GPUs the specialist would lease.
+        ensure_log_path: Optional path forwarded to the cluster ensure.
+
+    Returns:
+        A lease to run the specialist subprocess through, or ``None`` (local).
+    """
+    if num_gpus <= 0:
+        return None
+    from ._multi_node_env import is_multi_node  # noqa: PLC0415
+    from ._ray_backend import _should_use_ray_backend  # noqa: PLC0415
+
+    if not _should_use_ray_backend() or is_multi_node():
+        return None
+    return GpuSpecialistLease(num_gpus=num_gpus, ensure_log_path=ensure_log_path)
+
+
 __all__ = [
+    "GpuSpecialistLease",
     "ManagedServerProcess",
     "ServingLease",
     "make_gpu_specialist_actor",
     "make_serving_actor",
+    "maybe_gpu_specialist_lease",
     "maybe_serving_lease",
 ]

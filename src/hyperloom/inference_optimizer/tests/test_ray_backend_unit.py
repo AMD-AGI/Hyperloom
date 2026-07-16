@@ -447,6 +447,131 @@ def test_run_magpie_routes_through_lease_and_strips_devices(
     assert lease.calls[0]["timeout"] == 10
 
 
+# ── P2: ManagedServerProcess.exit_code (real subprocess) ─────────────────────
+def test_managed_process_exit_code_none_then_latched():
+    """exit_code is None before start / while alive, then the real return code."""
+    mgr = ManagedServerProcess()
+    assert mgr.exit_code() is None  # never started
+    mgr.start(["sh", "-c", "sleep 0.2; exit 3"])
+    assert mgr.exit_code() is None  # still running
+    deadline = time.time() + 5.0
+    while time.time() < deadline and mgr.is_alive():
+        time.sleep(0.05)
+    assert mgr.exit_code() == 3
+    mgr.stop()
+
+
+# ── P2: GpuSpecialistLease (fake ray + fake actor) ───────────────────────────
+class _FakeActorMethodP2:
+    def __init__(self, fn):
+        self._fn = fn
+
+    def remote(self, *a, **k):
+        # Defer the call to fake ray.get, mirroring Ray's ObjectRef.
+        return ("call", self._fn, a, k)
+
+
+class _FakeGpuActor:
+    def __init__(self):
+        self._alive = True
+        self._exit: int | None = None
+        self.stopped = False
+        self.started_with: dict | None = None
+        self.start = _FakeActorMethodP2(self._start)
+        self.is_alive = _FakeActorMethodP2(lambda: self._alive)
+        self.exit_code = _FakeActorMethodP2(lambda: self._exit)
+        self.stop = _FakeActorMethodP2(self._stop)
+
+    def _start(self, cmd, env=None, cwd=None, log_path=None):
+        self.started_with = {"cmd": cmd, "env": env, "cwd": cwd, "log_path": log_path}
+        return 4242
+
+    def _stop(self):
+        self.stopped = True
+        self._alive = False
+        self._exit = -15
+        return None
+
+
+class _FakeRayP2:
+    class exceptions:  # noqa: N801 — mirror ray.exceptions namespace
+        class RayTaskError(Exception):
+            pass
+
+    def __init__(self):
+        self.killed: list = []
+
+    def get(self, ref):
+        _tag, fn, a, k = ref
+        return fn(*a, **k)
+
+    def kill(self, actor):
+        self.killed.append(actor)
+
+
+class _StubBackendP2:
+    def ensure(self, *a, **k):
+        return None
+
+
+def test_gpu_specialist_lease_lifecycle(monkeypatch: pytest.MonkeyPatch):
+    fake = _FakeRayP2()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    actor = _FakeGpuActor()
+    monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda n: actor)
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+
+    lease = rs.GpuSpecialistLease(num_gpus=2)
+    pid = lease.start(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log")
+    assert pid == 4242
+    assert lease.pid() == 4242
+    assert actor.started_with["log_path"] == "/tmp/p.log"
+    assert lease.is_alive() is True
+    assert lease.exit_code() is None
+    lease.stop()
+    assert actor.stopped is True
+    assert lease.is_alive() is False
+    lease.close()
+    assert actor in fake.killed
+    lease.close()  # idempotent
+
+
+def test_gpu_specialist_lease_is_alive_false_before_start():
+    lease = rs.GpuSpecialistLease(num_gpus=1)
+    assert lease.is_alive() is False
+    assert lease.exit_code() is None
+    lease.close()  # no-op, no actor
+
+
+def test_maybe_gpu_specialist_lease_pytest_default_none(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
+    assert rs.maybe_gpu_specialist_lease(num_gpus=2) is None
+
+
+def test_maybe_gpu_specialist_lease_zero_gpus_none(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    assert rs.maybe_gpu_specialist_lease(num_gpus=0) is None
+
+
+def test_maybe_gpu_specialist_lease_single_node_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    lease = rs.maybe_gpu_specialist_lease(num_gpus=2)
+    assert isinstance(lease, rs.GpuSpecialistLease)
+
+
+def test_maybe_gpu_specialist_lease_multi_node_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    assert rs.maybe_gpu_specialist_lease(num_gpus=2) is None
+
+
 def test_run_magpie_local_path_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
