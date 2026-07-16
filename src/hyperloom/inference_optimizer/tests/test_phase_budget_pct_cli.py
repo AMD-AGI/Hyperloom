@@ -18,6 +18,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,
     normalize_budget_pct,
+    redistribute_budget_pct,
 )
 
 
@@ -108,3 +109,43 @@ def test_optimize_path_is_wired_to_helper() -> None:
     src = inspect.getsource(cli)
     assert "_build_phase_budget_pct(args)" in src
     assert '("phase_budget_kernel_pct", "KERNEL")' not in src
+
+
+def test_redistribute_disabled_phase_share_goes_to_work_phases() -> None:
+    """A disabled phase's pct is zeroed and spread across enabled work phases.
+
+    PRELUDE/CLOSE are fixed overhead and must not absorb; the total is preserved.
+    """
+    base = dict(DEFAULT_PHASE_BUDGET_PCT)
+    out = redistribute_budget_pct(
+        base, explore_enabled=False, kernel_enabled=True, framework_enabled=True
+    )
+    assert out["EXPLORE"] == 0.0
+    assert out["PRELUDE"] == base["PRELUDE"]
+    assert out["CLOSE"] == base["CLOSE"]
+    # Freed EXPLORE share landed on the enabled work phases.
+    assert out[PHASE_FRAMEWORK_AGENT] > base[PHASE_FRAMEWORK_AGENT]
+    assert out[PHASE_KERNEL_AGENT] > base[PHASE_KERNEL_AGENT]
+    assert out["SWEEP"] > base["SWEEP"]
+    assert sum(out.values()) == pytest.approx(sum(base.values()))
+
+
+def test_redistribute_all_enabled_is_noop_and_idempotent() -> None:
+    """No disabled phase → unchanged; re-running never drifts."""
+    base = dict(DEFAULT_PHASE_BUDGET_PCT)
+    once = redistribute_budget_pct(
+        base, explore_enabled=True, kernel_enabled=True, framework_enabled=True
+    )
+    assert once == base
+    twice = redistribute_budget_pct(
+        redistribute_budget_pct(
+            base, explore_enabled=False, kernel_enabled=True, framework_enabled=True
+        ),
+        explore_enabled=False,
+        kernel_enabled=True,
+        framework_enabled=True,
+    )
+    single = redistribute_budget_pct(
+        base, explore_enabled=False, kernel_enabled=True, framework_enabled=True
+    )
+    assert twice == single
