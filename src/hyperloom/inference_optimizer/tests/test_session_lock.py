@@ -222,8 +222,7 @@ def test_heartbeat_refreshes_body(tmp_path):
     reason="O_NOFOLLOW is POSIX-only",
 )
 def test_acquire_refuses_symlinked_lock_path(tmp_path):
-    """SWSPLAT-33431: if the lock path is a symlink, acquire must refuse it
-    (O_NOFOLLOW) rather than follow the link and lock/write an attacker file."""
+    """A symlinked lock path is refused rather than followed and written."""
     lock_path = session_paths.optimizer_lock_path(tmp_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     outside = tmp_path / "outside_target"
