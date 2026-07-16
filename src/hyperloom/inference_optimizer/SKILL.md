@@ -317,7 +317,7 @@ After Step 1, source the generated `kernel-agent.env.sh` in the same shell.
 ### Step 1 — Install (one-time per pod / venv rebuild)
 
 ```bash
-export REPO_ROOT="$(pwd)"   # repo root containing src/hyperloom/ + .env
+export REPO_ROOT="$(pwd -P)"   # repo root containing src/hyperloom/ + .env
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
 ```
