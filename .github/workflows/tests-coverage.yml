@@ -11,6 +11,7 @@ name: Tests with Coverage
 # When ``OOB/`` is present, ``pip install -e \"./OOB\"`` enables ``agent_mcp_server``
 # UTs; if absent, install is skipped (``importorskip`` in OOB tests).
 # Two matrix legs (Python 3.10 + 3.11).
+# pull_request runs use the workflow definition from the PR merge ref.
 on:
   # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
   # PR does not double-trigger (one run per event class).
