@@ -73,6 +73,10 @@ def test_common_env_safety_filters_workload_dotenv_and_kernel_agent_keys():
     assert not common_env_safety.is_allowed_dotenv_key("BAD-NAME")
 
     assert common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_ROOT")
+    assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_MN_KEEP_SSH_PASSPHRASE_CACHE")
+    assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS")
+    assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
+    assert common_env_safety.is_allowed_kernel_agent_env_key("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS")
     assert not common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_TOKEN")
 
     allowed, dropped = common_env_safety.filter_untrusted_env_mapping(

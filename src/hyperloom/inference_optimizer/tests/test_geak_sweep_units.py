@@ -13,6 +13,7 @@ row/flatten helpers the GEAK sweep result feeds into downstream.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import _parse_server_arg_va
 def _bench_script(tmp_path: Path) -> Path:
     """A ``bench_e2e.sh`` stub that records NUM_PROMPTS and reports throughput."""
     bench = tmp_path / "bench_e2e.sh"
+    bench.parent.mkdir(parents=True, exist_ok=True)
     bench.write_text(
         """#!/usr/bin/env bash
 set -euo pipefail
@@ -69,9 +71,27 @@ async def test_sweep_via_geak_uses_validated_regimes_and_pins_num_prompts(
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("TP", "1")
 
+    def _fake_run(_cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        env = kwargs["env"]
+        out = Path(env["OUT_DIR"])
+        summary = {
+            "output_throughput_tok_s_median": 200.0,
+            "ttft_ms_median": 10.0,
+            "tpot_ms_median": 3.0,
+            "e2el_ms_median": 50.0,
+        }
+        (out / "bench_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        (out / "env.json").write_text(
+            json.dumps({"NUM_PROMPTS": env.get("NUM_PROMPTS")}), encoding="utf-8"
+        )
+        return subprocess.CompletedProcess(_cmd, 0, "", "")
+
+    monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
+
     result = await sweep_via_geak(
         result={
             "bench_script": str(bench),
+            "output_dir": str(tmp_path),
             # No ``bench_protocol`` -> validated_regimes[0] fallback.
             "validated_regimes": [
                 {"num_warmups": 3, "seed": 7, "num_prompts": 64},
@@ -108,7 +128,7 @@ async def test_sweep_via_geak_marks_variant_failed_on_subprocess_error(
     monkeypatch.setattr(_geak_sweep.subprocess, "run", _boom)
 
     result = await sweep_via_geak(
-        result={"bench_script": str(bench), "accepted_config": {}},
+        result={"bench_script": str(bench), "output_dir": str(tmp_path), "accepted_config": {}},
         conc_values=[1],
         isl_osl_configs=["16:16"],
         output_root=tmp_path / "sweep",
@@ -119,6 +139,24 @@ async def test_sweep_via_geak_marks_variant_failed_on_subprocess_error(
     entry = result["sweep_grid"][0]
     assert entry["status"] == "failed"
     assert "cannot spawn bench process" in entry["error"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_via_geak_rejects_bench_script_outside_output_root(tmp_path: Path) -> None:
+    bench = _bench_script(tmp_path / "other")
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+
+    result = await sweep_via_geak(
+        result={"bench_script": str(bench), "output_dir": str(trusted), "accepted_config": {}},
+        conc_values=[1],
+        isl_osl_configs=["16:16"],
+        output_root=tmp_path / "sweep",
+        variant_timeout_sec=30,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "untrusted_bench_script"
 
 
 def test_point_from_variant_defaults_conc_zero_on_bad_env() -> None:

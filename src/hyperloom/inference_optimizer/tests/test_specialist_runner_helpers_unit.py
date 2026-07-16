@@ -163,6 +163,25 @@ def test_append_transcript(tmp_path):
     assert json.loads(lines[0])["turn"] == 1
 
 
+def test_append_transcript_redacts_nested_metadata(tmp_path):
+    r = _runner()
+    r._append_transcript(
+        tmp_path,
+        1,
+        {
+            "metadata": {
+                "prompt": "OPENAI_API_KEY=sk-live-secret",
+                "headers": ["Authorization: Bearer ghp_secretvalue"],
+            }
+        },
+    )
+
+    text = (tmp_path / "transcript.jsonl").read_text(encoding="utf-8")
+    assert "sk-live-secret" not in text
+    assert "ghp_secretvalue" not in text
+    assert "[REDACTED]" in text
+
+
 def test_write_heartbeat(tmp_path):
     r = _runner()
     r._write_heartbeat(tmp_path, turn=3, max_turns=10, status="working")

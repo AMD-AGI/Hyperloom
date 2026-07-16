@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.actions.executors._grid_server_args import validate_server_args_shell_safe
 
 
 def _clear_env(monkeypatch):
@@ -59,6 +60,12 @@ def _stub_server_arg_injectors(monkeypatch):
     monkeypatch.setattr(we, "inject_sglang_watchdog_timeout", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_attention_backend", lambda args, *a, **k: args)
     monkeypatch.setattr(we, "inject_sglang_moe_runner_backend", lambda args, *a, **k: args)
+
+
+def test_validate_server_args_rejects_bare_positionals():
+    assert validate_server_args_shell_safe("--flag value --other=value") == "--flag value --other=value"
+    with pytest.raises(ValueError, match="bare positional"):
+        validate_server_args_shell_safe("--flag value stray")
 
 
 def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):

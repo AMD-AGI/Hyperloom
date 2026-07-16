@@ -1758,3 +1758,27 @@ def test_expected_framework_guard_unset_is_noop(monkeypatch):
     # No env pins -> guard is a no-op.
     cli._enforce_expected_framework("sglang")
     cli._enforce_expected_framework("anything")
+
+
+def test_resume_model_path_allows_huggingface_id(monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", raising=False)
+
+    assert cli._validate_resume_model_path("org/model-name_1") == "org/model-name_1"
+
+
+def test_resume_model_path_allows_configured_absolute_root(tmp_path, monkeypatch):
+    root = tmp_path / "models"
+    model = root / "M"
+    model.mkdir(parents=True)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", str(root))
+
+    assert cli._validate_resume_model_path(str(model)) == str(model.resolve())
+
+
+def test_resume_model_path_rejects_untrusted_absolute_path(tmp_path, monkeypatch):
+    model = tmp_path / "evil"
+    model.mkdir()
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", raising=False)
+
+    with pytest.raises(ValueError, match="outside allowed model roots"):
+        cli._validate_resume_model_path(str(model))

@@ -216,7 +216,7 @@ def test_generate_session_keypair_reloads_reused_encrypted_key(tmp_path, monkeyp
     assert not (tmp_path / "mn_ssh_askpass.sh").exists()
 
 
-def test_generate_session_keypair_uses_passphrase_and_agent(tmp_path, monkeypatch):
+def test_generate_session_keypair_uses_passphrase_and_agent_without_cache_by_default(tmp_path, monkeypatch):
     calls = []
 
     def _run(argv, **kwargs):
@@ -245,11 +245,34 @@ def test_generate_session_keypair_uses_passphrase_and_agent(tmp_path, monkeypatc
         raise AssertionError(f"unexpected command: {argv}")
 
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.delenv("HYPERLOOM_MN_KEEP_SSH_PASSPHRASE_CACHE", raising=False)
     monkeypatch.setattr(ssh_client.subprocess, "run", _run)
     out_priv, pub_str = ssh_client.generate_session_keypair(tmp_path)
     assert out_priv == tmp_path / "mn_id_ed25519"
     assert pub_str == "ssh-ed25519 AAAA generated"
     assert [c[0][0] for c in calls] == ["ssh-keygen", "ssh-agent", "ssh-add"]
+    assert not (tmp_path / "mn_id_ed25519.pass").exists()
+    assert not (tmp_path / "mn_ssh_askpass.sh").exists()
+
+
+def test_generate_session_keypair_keeps_passphrase_cache_by_opt_in(tmp_path, monkeypatch):
+    def _run(argv, **kwargs):
+        if argv[0] == "ssh-keygen":
+            (tmp_path / "mn_id_ed25519").write_text("PRIVATE", encoding="utf-8")
+            (tmp_path / "mn_id_ed25519.pub").write_text("ssh-ed25519 AAAA generated\n", encoding="utf-8")
+            return _FakeCompleted(0, "", "")
+        if argv[0] == "ssh-agent":
+            return _FakeCompleted(0, "SSH_AUTH_SOCK=/tmp/hyperloom-agent.sock; export SSH_AUTH_SOCK;\n", "")
+        if argv[0] == "ssh-add":
+            return _FakeCompleted(0, "", "")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_KEEP_SSH_PASSPHRASE_CACHE", "1")
+    monkeypatch.setattr(ssh_client.subprocess, "run", _run)
+
+    ssh_client.generate_session_keypair(tmp_path)
+
     assert (tmp_path / "mn_id_ed25519.pass").exists()
     assert not (tmp_path / "mn_ssh_askpass.sh").exists()
 

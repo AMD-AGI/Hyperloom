@@ -44,6 +44,15 @@ DEFAULT_SSH_PORT = 2233
 _AGENT_ENV_RE = re.compile(r"^(SSH_AUTH_SOCK|SSH_AGENT_PID)=([^;]+);")
 
 
+def _keep_passphrase_cache_enabled() -> bool:
+    return str(os.environ.get("HYPERLOOM_MN_KEEP_SSH_PASSPHRASE_CACHE", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _ssh_common_opts(known_hosts: Path) -> list[str]:
     """Build hardened non-interactive SSH options using a session known_hosts file.
 
@@ -209,7 +218,7 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     if proc.returncode != 0:
         raise RuntimeError(f"ssh-keygen failed rc={proc.returncode}: {proc.stderr.strip()}")
     priv.chmod(0o600)
-    _add_key_to_agent(priv, passphrase, keep_passphrase_cache=True)
+    _add_key_to_agent(priv, passphrase, keep_passphrase_cache=_keep_passphrase_cache_enabled())
     pub_str = pub.read_text(encoding="utf-8").strip()
     info(f"generated session SSH keypair at {priv}")
     return priv, pub_str

@@ -10,8 +10,8 @@ registering up to two streamable-HTTP MCP servers:
 - ``cortex_kb`` (at :meth:`KnowledgePlane.cortex_specialist_mcp_url`) — the
   read-only KB-graph (gbrain) server; the name MUST be ``cortex_kb`` so the
   ``mcp__cortex_kb__*`` whitelist names resolve. Bearer auth headers are not
-  written to disk; callers must disable the matching tools when such headers
-  are required.
+  written to disk unless ``HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS=1`` is
+  set by an operator.
 
 Schema follows :data:`claude_agent_sdk.types.McpHttpServerConfig`.
 """
@@ -20,14 +20,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.env import is_truthy
 
 
 log = logging.getLogger(__name__)
 
 
 SPECIALIST_MCP_CONFIG_FILENAME = "specialist_mcp.json"
+
+
+def _allow_persistent_mcp_auth_headers() -> bool:
+    return is_truthy(os.environ.get("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS"))
 
 
 def write_specialist_mcp_config(
@@ -71,11 +78,17 @@ def write_specialist_mcp_config(
             for k, v in (cortex_kb_mcp_headers or {}).items()
             if str(k).strip() and str(v).strip()
         }
-        if any(k.lower() == "authorization" for k in kb_headers):
+        has_auth = any(k.lower() == "authorization" for k in kb_headers)
+        if has_auth and not _allow_persistent_mcp_auth_headers():
             log.warning(
-                "specialist_mcp_config: skipping cortex_kb MCP because auth headers would be written to disk"
+                "specialist_mcp_config: skipping cortex_kb MCP because auth headers would be written to disk; "
+                "set HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS=1 to opt in"
             )
         else:
+            if has_auth:
+                log.warning(
+                    "specialist_mcp_config: writing cortex_kb auth headers by explicit operator opt-in"
+                )
             kb_server: dict[str, Any] = {
                 "type": "http",
                 "url": kb_url,

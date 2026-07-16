@@ -56,6 +56,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the pod-local open-source root (`HYPER`<br>`LOOM_OP`<br>`EN_SOU`<br>`RCE_ROOT` / `$TMPDIR`), not this path. |
 | `HYPERLOOM`<br>`_OPEN_`<br>`SOURCE`<br>`_ROOT`              | No                   | `/opt/hyperloom/`<br>`open-source`<br>`-repos`                      | Pod-local root for dependency checkouts. Decoupled from `USER_DATA_PATH` so shared session storage does not collocate concurrent pods' checkouts. |
 | `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
+| `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during `--resume`. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
 | `SESSION_DIR`                             | No (robustness-agent)| Scan known paths                                                   | Path containing `storage/coordinator.db`; the robustness FindingSink writes under `{session_`<br>`dir}/ag`<br>`ents/ro`<br>`bustne`<br>`ss/fin`<br>`dings/`<br>`{sess`<br>`ion_id}.jsonl`.                                       |
 | `ROBUSTNESS_SERVER_URL`                   | No (robustness-agent)| Scan known DNS                                                     | M1 primary data source; empty disables the primary path and forces local-only probes.                                                                                                |
 | `WORKSPACE_PATH` *(legacy)*               | No                   | Unset                                                              | Legacy path variable. Still consumed in two narrow spots: the CLI `setdefault`s it to the repo root for the critic subprocess's static assets, and TraceLens uses it as a `USER_DATA_PATH` fallback. Prefer `USER_DATA_PATH`. See [Upgrade Hyperloom version](upgrade.md).                            |
@@ -118,10 +119,13 @@ creates RayJob / Dynamo workloads; callers should not depend on those env names
 as a public configuration API.
 
 Multi-node SSH fanout creates session-scoped keys under the active session
-directory. Treat `mn_id_ed25519`, `mn_id_ed25519.pub`, and the encrypted-key
-reload cache `mn_id_ed25519.pass` as sensitive session artifacts: keep the
-session directory on an access-controlled filesystem and do not publish it
-unchanged in support bundles.
+directory. Treat `mn_id_ed25519` and `mn_id_ed25519.pub` as sensitive session
+artifacts: keep the session directory on an access-controlled filesystem and
+do not publish it unchanged in support bundles. By default the passphrase used
+to load encrypted keys into `ssh-agent` is not cached on disk. Set
+`HYPERLOOM_MN_KEEP_SSH_PASSPHRASE_CACHE=1` only when a restarted orchestrator
+must re-add an already-authorized encrypted key; that creates the sensitive
+reload cache `mn_id_ed25519.pass`.
 
 ---
 
@@ -160,6 +164,7 @@ the blast radius. Leave them unset for normal runs.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`0`) | Lets the Bash-enabled specialist subprocess inherit a limited credential set: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. This is for deployments that cannot authenticate the `claude` CLI through its own settings; unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS` | Unset (`0`) | Allows the specialist MCP config file to include auth headers such as `Authorization` for `cortex_kb`. Leave unset to avoid persisting bearer tokens; set to `1` only when the session runtime directory is access-controlled and Cortex KB requires bearer auth. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---

@@ -37,9 +37,18 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
     if _UNSAFE_SERVER_ARG_CHARS_RE.search(args):
         raise ValueError("extra_server_args contains shell control characters")
     try:
-        shlex.split(args)
+        tokens = shlex.split(args)
     except ValueError as exc:
         raise ValueError(f"extra_server_args is not shell-tokenizable: {exc}") from exc
+    expect_value = False
+    for token in tokens:
+        if token.startswith("-"):
+            expect_value = "=" not in token
+            continue
+        if expect_value:
+            expect_value = False
+            continue
+        raise ValueError("extra_server_args must be argv-like flags, not bare positional arguments")
     return args
 
 

@@ -11,7 +11,10 @@ specialist tool whitelist.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
+
+from hyperloom.common.env import is_truthy
 
 from .pr_monitor import (
     DEFAULT_PR_MONITOR_MCP_URL,
@@ -25,6 +28,10 @@ log = logging.getLogger(__name__)
 def _has_persistent_secret_header(headers: dict[str, str]) -> bool:
     """Return true when headers cannot be safely persisted in MCP config."""
     return any(str(name).lower() == "authorization" for name in headers)
+
+
+def _allow_persistent_mcp_auth_headers() -> bool:
+    return is_truthy(os.environ.get("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS"))
 
 
 @dataclass
@@ -93,8 +100,11 @@ class KnowledgePlane:
             bool: ``True`` when a ``cortex_kb_mcp_url`` is configured and can
             be written to the specialist MCP config without persisting secrets.
         """
-        return bool((self.cortex_kb_mcp_url or "").strip()) and not _has_persistent_secret_header(
-            self.cortex_kb_mcp_headers
+        if not bool((self.cortex_kb_mcp_url or "").strip()):
+            return False
+        return (
+            not _has_persistent_secret_header(self.cortex_kb_mcp_headers)
+            or _allow_persistent_mcp_auth_headers()
         )
 
     def cortex_specialist_mcp_url(self) -> str:

@@ -181,6 +181,18 @@ def _safe_redact(s: str) -> str:
     return out
 
 
+def _redact_transcript_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _safe_redact(value)
+    if isinstance(value, dict):
+        return {str(k): _redact_transcript_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_transcript_value(v) for v in value]
+    if isinstance(value, tuple):
+        return [_redact_transcript_value(v) for v in value]
+    return value
+
+
 @dataclass
 class _PreparedRun:
     """Shared setup-phase output threaded into both execution paths."""
@@ -1448,11 +1460,12 @@ class SpecialistRunner:
         path = self._transcript_path(workspace)
         if path is None:
             return
+        safe_entry = _redact_transcript_value(entry)
         line = json.dumps(
             {
                 "turn": turn,
                 "ts": _now_iso(),
-                **entry,
+                **safe_entry,
             },
             sort_keys=True,
             separators=(",", ":"),
