@@ -124,6 +124,34 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(_KB_WRITE)
 _now_iso = now_iso
 
 
+def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
+    """True when ``path`` resolves inside one of the specialist sandbox bases.
+
+    SWSPLAT-33372: a claimed patch path (possibly absolute or ``..``-relative)
+    must stay under the specialist worktree/workspace before it is read back;
+    only sandbox-internal paths are legitimate.
+    """
+    try:
+        rp = path.resolve()
+    except OSError:
+        return False
+    for base in bases:
+        try:
+            br = base.resolve()
+        except OSError:
+            continue
+        try:
+            if rp == br or rp.is_relative_to(br):
+                return True
+        except AttributeError:  # pragma: no cover - Python <3.9
+            try:
+                rp.relative_to(br)
+                return True
+            except ValueError:
+                continue
+    return False
+
+
 def _safe_redact(s: str) -> str:
     """Redact obvious secrets from a transcript line before writing to disk.
 
@@ -1155,7 +1183,7 @@ class SpecialistRunner:
                 p: Patch path (absolute or relative to a search base).
 
             Returns:
-                The first existing file path as a string, or ``None``.
+                The first existing sandbox-internal file path, or ``None``.
             """
             raw = Path(str(p))
             candidates = [raw] if raw.is_absolute() else []
@@ -1163,7 +1191,7 @@ class SpecialistRunner:
                 candidates.append(base / raw)
             for c in candidates:
                 try:
-                    if c.is_file():
+                    if c.is_file() and _patch_path_within_bases(c, search_bases):
                         return str(c)
                 except OSError:
                     continue
