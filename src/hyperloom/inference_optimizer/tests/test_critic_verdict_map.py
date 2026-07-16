@@ -353,9 +353,9 @@ async def test_verdict_map_collapses_to_summary_single_verdict(coord):
 
 @pytest.mark.asyncio
 async def test_verdict_map_mixed_collapse_logs_audit(coord, caplog):
-    # Defense-in-depth (log-only): a mixed verdict_map that
-    # collapses to approve must STILL materialise the whole proposal (behaviour
-    # unchanged) AND emit a log-only audit record for traceability.
+    # Defensive audit (log-only): a verdict_map that collapses to approve must
+    # STILL materialise the whole proposal (behaviour unchanged) AND emit a
+    # log-only audit record for traceability.
     import logging
 
     pending = _seed_explore_proposal(coord)

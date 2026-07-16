@@ -23,11 +23,10 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-# request-kind aliases that route to a kernel-owned handler.
-# apply_patch is a REQUEST-kind alias of integrate (both dispatch to
-# integrate_handler); PolicyGate resolves the alias to its canonical owned
-# action so the phase-action gate applies identically and the alias cannot
-# bypass it.
+# Request-kind aliases that route to a kernel-owned handler. apply_patch is
+# an alias of integrate (both dispatch to integrate_handler); PolicyGate
+# resolves the alias to its canonical owned action so the phase-action gate
+# applies identically.
 KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
     "apply_patch": "integrate",
 }
