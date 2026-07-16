@@ -117,6 +117,12 @@ The optimizer writes the resolved values into internal handoff envs when it
 creates RayJob / Dynamo workloads; callers should not depend on those env names
 as a public configuration API.
 
+Multi-node SSH fanout creates session-scoped keys under the active session
+directory. Treat `mn_id_ed25519`, `mn_id_ed25519.pub`, and the encrypted-key
+reload cache `mn_id_ed25519.pass` as sensitive session artifacts: keep the
+session directory on an access-controlled filesystem and do not publish it
+unchanged in support bundles.
+
 ---
 
 ## Quantization prelude
@@ -140,6 +146,21 @@ The following variables configure framework source discovery and path overrides.
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_STRICT_PATHS`                | `1` when CLI bootstraps                                                | When `1`, missing path env raises instead of falling back to discovery. Set by the CLI at session start; do not override unless debugging.              |
 | `HYPERLOOM_`<br>`SGLANG_PA`<br>`TCH_EXACT`<br>`_VERSIONS`           | Unset                                                                  | Pin the sglang server-patch step to specific upstream versions; advanced compatibility option.                                                          |
 | `HYPERLOOM_`<br>`ENABLE`<br>`_PATCH`                          | `1`                                                                    | Set to `0` to skip the in-place server patch step (useful when the upstream is already pre-patched).                                                    |
+| `SGLANG_ROCM_INDEX_URL` | Unset | Optional ROCm wheel index for bare-metal SGLang wheel installs, for example an operator-approved AMD ROCm PyPI mirror. The public installer intentionally does not bake in an internal index URL. |
+| `AITER_REF` | Unset | Bare-metal AITER install pin. Production installs require a 40-character commit SHA. |
+| `AITER_ALLOW_UNPINNED` | `0` | Set to `1` only for local compatibility exploration that may auto-select tags or use non-SHA AITER refs. |
+
+---
+
+## Security compatibility opt-ins
+
+These switches restore legacy behavior only when an operator explicitly accepts
+the blast radius. Leave them unset for normal runs.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`0`) | Lets the Bash-enabled specialist subprocess inherit a limited credential set: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. This is for deployments that cannot authenticate the `claude` CLI through its own settings; unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
 

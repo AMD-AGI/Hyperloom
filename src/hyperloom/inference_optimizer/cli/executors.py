@@ -41,10 +41,15 @@ if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycl
 log = logging.getLogger(__name__)
 
 
-def _mcp_servers_from_config(config_path: str | None) -> tuple[str, ...]:
-    """Return MCP server names declared by an operator-supplied config file."""
+def _mcp_servers_from_config(config_path: str | None) -> tuple[str, ...] | None:
+    """Return MCP server names declared by an operator-supplied config file.
+
+    ``None`` means no explicit config was supplied. A tuple, including an empty
+    tuple, means an explicit config was supplied and should be authoritative for
+    MCP tool gating.
+    """
     if not config_path:
-        return ()
+        return None
     try:
         payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -163,7 +168,7 @@ def _build_specialist_executor(
             )
             if generated is not None:
                 mcp_config_path = str(generated)
-                forced_mcp_servers = ()
+                forced_mcp_servers = None
         sub_config = SpecialistSubprocessConfig(
             claude_executable=claude_bin or "claude",
             model=claude_model,

@@ -146,18 +146,20 @@ Common keys:
 - `HYPERLOOM_DOCKER_TARGET_HOST` (only when `HYPERLOOM_RUN_MODE=docker`)
 
 Bare-metal setup may also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
-`VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. SGLang source installs require a pinned
-`AITER_REF` commit SHA by default; set `AITER_ALLOW_UNPINNED=1` only for local
-compatibility exploration. `SGLANG_ROCM_INDEX_URL` is optional and lets operators
-provide a private ROCm wheel index without baking internal infrastructure URLs
-into the public installer. Kernel-agent paths (`MAGPIE_PATH`, `INFERENCEX_PATH`,
-`TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the workload skill's
-`install.sh`.
+`VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. Production SGLang installs require a pinned
+`AITER_REF` 40-character commit SHA by default; set `AITER_ALLOW_UNPINNED=1`
+only for local compatibility exploration. `SGLANG_ROCM_INDEX_URL` is optional
+and lets operators provide an approved ROCm wheel index (for example an AMD ROCm
+PyPI mirror) without baking infrastructure URLs into the public installer. If it
+is unset, pip uses its configured default indexes. Kernel-agent paths
+(`MAGPIE_PATH`, `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later
+by the workload skill's `install.sh`.
 
 Specialist subprocesses inherit only a minimal non-secret environment by
-default. If a deployment still relies on parent-process LLM key variables for
-the `claude` CLI, set `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1` explicitly, or
-configure credentials in the CLI's own settings before launching Hyperloom.
+default. If a deployment still relies on parent-process LLM key variables,
+custom Anthropic headers, or AWS Bedrock env vars for the `claude` CLI, set
+`HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1` explicitly, or configure credentials
+in the CLI's own settings before launching Hyperloom.
 
 `.env` is the single source of truth; no extra script needs sourcing.
 

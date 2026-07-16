@@ -103,6 +103,16 @@ def test_mcp_servers_from_explicit_config(tmp_path):
     assert set(cli_executors._mcp_servers_from_config(str(cfg))) == {"cortex_kb", "pr_monitor"}
 
 
+def test_mcp_servers_from_absent_config_is_not_authoritative():
+    assert cli_executors._mcp_servers_from_config(None) is None
+
+
+def test_mcp_servers_from_empty_explicit_config_is_authoritative(tmp_path):
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    assert cli_executors._mcp_servers_from_config(str(cfg)) == ()
+
+
 def test_build_specialist_executor_subprocess_kp_missing_methods(monkeypatch, tmp_path):
     """subprocess path tolerates a KnowledgePlane lacking the MCP-url methods."""
     import shutil

@@ -40,6 +40,8 @@ from hyperloom.orchestrator.state.task_registry import Task
 
 def test_build_specialist_env_drops_secrets_by_default(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sk-secret")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA0000000000000000")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
     monkeypatch.setenv("KB_SERVICE_TOKEN", "kb-secret")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "/tmp/session")
@@ -48,6 +50,8 @@ def test_build_specialist_env_drops_secrets_by_default(monkeypatch):
     env = _build_specialist_env()
     assert env["PATH"] == "/usr/bin"
     assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in env
+    assert "AWS_ACCESS_KEY_ID" not in env
     assert "GITHUB_TOKEN" not in env
     assert "KB_SERVICE_TOKEN" not in env
     assert "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR" not in env
@@ -57,9 +61,17 @@ def test_build_specialist_env_drops_secrets_by_default(monkeypatch):
 def test_build_specialist_env_secret_inheritance_is_explicit(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sk-secret")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA0000000000000000")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
     env = _build_specialist_env()
     assert env["ANTHROPIC_API_KEY"] == "sk-secret"
+    assert env["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: sk-secret"
+    assert env["AWS_ACCESS_KEY_ID"] == "AKIA0000000000000000"
+    assert env["AWS_SECRET_ACCESS_KEY"] == "aws-secret"
+    assert env["AWS_REGION"] == "us-east-1"
     assert "GITHUB_TOKEN" not in env
 
 
