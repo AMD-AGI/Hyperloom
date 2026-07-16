@@ -827,6 +827,61 @@ def normalize_budget_pct(
     return out
 
 
+def redistribute_budget_pct(
+    base: dict[str, float],
+    *,
+    explore_enabled: bool = True,
+    kernel_enabled: bool = True,
+    framework_enabled: bool = False,
+) -> dict[str, float]:
+    """Reallocate disabled phases' budget shares to the enabled work phases.
+
+    When a work phase is turned off (``--no-explore`` → EXPLORE, ``--no-kernel``
+    → KERNEL_AGENT, framework phase off → FRAMEWORK_AGENT), its ``pct`` is zeroed
+    and its freed share is spread across the still-enabled work phases
+    (FRAMEWORK/EXPLORE/KERNEL/SWEEP), weighted by their base ``pct``. PRELUDE and
+    CLOSE are fixed overhead and never absorb. Idempotent: once a phase is 0 its
+    freed share is 0, so re-running per tick is a no-op.
+
+    Args:
+        base (dict[str, float]): A ``phase -> pct`` map, already sanitized by
+            :func:`normalize_budget_pct`.
+        explore_enabled (bool): Whether the EXPLORE phase runs.
+        kernel_enabled (bool): Whether the KERNEL_AGENT phase runs.
+        framework_enabled (bool): Whether the FRAMEWORK_AGENT phase runs.
+
+    Returns:
+        dict[str, float]: A new map with disabled phases at 0 and their share
+        redistributed to the enabled work phases.
+    """
+    out = dict(base)
+    disabled: list[str] = []
+    if not explore_enabled:
+        disabled.append(PHASE_EXPLORE)
+    if not kernel_enabled:
+        disabled.append(PHASE_KERNEL_AGENT)
+    if not framework_enabled:
+        disabled.append(PHASE_FRAMEWORK_AGENT)
+    freed = sum(float(out.get(p, 0.0)) for p in disabled)
+    for p in disabled:
+        out[p] = 0.0
+    if freed <= 0.0:
+        return out
+    absorbers = [
+        p
+        for p in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP)
+        if p not in disabled
+    ]
+    weight = sum(float(out.get(p, 0.0)) for p in absorbers)
+    if weight > 0.0:
+        for p in absorbers:
+            out[p] = float(out.get(p, 0.0)) + freed * float(out.get(p, 0.0)) / weight
+    else:
+        # No weighted absorber left → park the freed share on SWEEP (always on).
+        out[PHASE_SWEEP] = float(out.get(PHASE_SWEEP, 0.0)) + freed
+    return out
+
+
 # Pure judgment helpers (used by Coordinator at each tick end)
 def _now_unix(state: Any) -> float:
     """Resolve the "now" timestamp; tests can inject ``state._now_unix``.
