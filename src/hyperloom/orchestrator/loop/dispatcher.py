@@ -334,7 +334,7 @@ class DispatcherCollaborator:
                                 )
                         continue
                     extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
-            # SWSPLAT-33426 (defense-in-depth, log-only): resume-hydrated task
+            # Defense-in-depth (log-only): resume-hydrated task
             # rows are dispatched from coordinator.db without re-running
             # PolicyGate. Flag a task with no registered executor (a strong
             # forged-row signal); dispatch is unchanged.
@@ -343,7 +343,7 @@ class DispatcherCollaborator:
                 _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
                 if isinstance(_execs, dict) and _execs and task.kind not in _execs and task.kind != "specialist":
                     log.warning(
-                        "dispatch audit (SWSPLAT-33426): queued task_id=%s kind=%r "
+                        "dispatch audit: queued task_id=%s kind=%r "
                         "has no registered executor; possible forged coordinator.db "
                         "row (dispatch unchanged)",
                         task.task_id, task.kind,
@@ -946,7 +946,7 @@ class DispatcherCollaborator:
         loop = self._coordinator_loop
         if loop is None or loop.is_closed():
             return "(run_action_now unavailable: coordinator loop not running)"
-        # SWSPLAT-33344 (defense-in-depth, log-only): this bridge blocks on
+        # Defense-in-depth (log-only): this bridge blocks on
         # fut.result via run_coroutine_threadsafe, which self-deadlocks if it is
         # ever invoked ON the coordinator loop thread. Detect and log that
         # condition; behaviour is unchanged.
@@ -954,7 +954,7 @@ class DispatcherCollaborator:
             _running = asyncio.get_running_loop()
             if _running is loop:
                 log.warning(
-                    "run_action_now (SWSPLAT-33344): invoked on the coordinator "
+                    "run_action_now: invoked on the coordinator "
                     "loop thread; fut.result() would block the loop up to the "
                     "inline timeout (action=%r)",
                     name,
