@@ -55,7 +55,7 @@ hl_build_prompt() {
   python3 - <<'PY'
 import os
 tpl = open("ci/prompt_template.md").read()
-tpl = tpl.replace("/wekafs/HyperloomV2/src/hyperloom/inference_optimizer/SKILL.md",
+tpl = tpl.replace("/shared/Hyperloom/src/hyperloom/inference_optimizer/SKILL.md",
                   os.environ["REPO_ROOT"] + "/src/hyperloom/inference_optimizer/SKILL.md")
 vals = dict(
     model_hf=os.environ["REPO_ID"], model_path=os.environ.get("MODEL_PATH", os.environ["REPO_ID"]),
