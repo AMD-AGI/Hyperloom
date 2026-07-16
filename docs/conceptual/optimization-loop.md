@@ -12,7 +12,7 @@ and old DFS demo mechanics; the live action catalogue, phase allowlist,
 PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
-![Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT when the time budget exceeds 24 hours. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.](../images/optimization-loop.svg)
+![Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT when the time budget exceeds 24 hours. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.](../images/Hyperloom_optimization_loop.png)
 
 ## Runtime contract
 
