@@ -639,7 +639,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "last_kernel_opt",
         "last_kernel_opt_dispatch_skip",
         "kernel_opt_attempts",
-        # SWSPLAT-33402 / SWSPLAT-33398: closing-phase wind-down flag and the
+        # closing-phase wind-down flag and the
         # baseline launch-config path are Coordinator-only. Locked so an LLM
         # UPDATE_STATE cannot force a global wind-down denial of every later
         # intent, nor inject a config_path that flows into a launch after
@@ -1089,7 +1089,7 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # SWSPLAT-33424: resolve a request-kind alias (e.g. apply_patch ->
+        # resolve a request-kind alias (e.g. apply_patch ->
         # integrate) to its canonical owned action so the phase-action gate
         # applies identically and the alias cannot bypass it.
         gated_kind = KERNEL_REQUEST_KIND_ALIASES.get(kind, kind)
