@@ -106,6 +106,63 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
         assert key not in env
 
 
+def test_setup_cli_scrubs_stale_workspace_runtime_env_when_dotenv_exists(tmp_path: Path, monkeypatch):
+    installer = tmp_path / "install_baremetal.sh"
+    installer.write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "ANTHROPIC_API_KEY=<PLEASE_FILL_IN>",
+                "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                "CLAUDE_MODEL=claude-opus-4-8",
+                "USER_DATA_PATH=/new/workspace/session",
+                "HYPERLOOM_RUN_MODE=baremetal",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def _fake_run(cmd, *, env):
+        seen["cmd"] = cmd
+        seen["env"] = env
+        return _Completed()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("USER_DATA_PATH", "/old/workspace/session")
+    monkeypatch.setenv("HYPERLOOM_RUNTIME_DIR", "/old/workspace/session/runtime")
+    monkeypatch.setenv("KERNEL_AGENT_ENV", "/old/workspace/session/runtime/kernel-agent.env.sh")
+    monkeypatch.setenv("HYPERLOOM_ROOT", "/old/workspace/session/runtime/source-mirrors")
+    monkeypatch.setenv("KERNEL_AGENT_ROOT", "/old/workspace/hyperloom/agents/kernel")
+    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/old/workspace/hyperloom/agents/kernel")
+    monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", "/old/workspace/hyperloom/agents/framework")
+    monkeypatch.setenv("HYPERLOOM_SKILL_PATH", "/old/workspace/hyperloom/inference_optimizer/SKILL.md")
+    monkeypatch.setenv("PYTHONPATH", "/old/workspace:/old/site-packages")
+    monkeypatch.setattr(setup, "_INSTALL_BAREMETAL_SH", installer)
+    monkeypatch.setattr(setup, "_PACKAGE_SKILL", tmp_path / "SKILL.md")
+    monkeypatch.setattr(setup.subprocess, "run", _fake_run)
+
+    rc = setup.main(["--", "--install-framework", "none"])
+
+    assert rc == 7
+    env = seen["env"]
+    assert env["REPO_ROOT"] == str(tmp_path)
+    assert env["HYPERLOOM_SKILL_PATH"] == str(tmp_path / "SKILL.md")
+    assert env["HYPERLOOM_SETUP_ENV_AUTHORITATIVE"] == "1"
+    for key in (
+        "USER_DATA_PATH",
+        "HYPERLOOM_RUNTIME_DIR",
+        "KERNEL_AGENT_ENV",
+        "HYPERLOOM_ROOT",
+        "KERNEL_AGENT_ROOT",
+        "HYPERLOOM_KERNEL_AGENT_ROOT",
+        "FRAMEWORK_AGENT_ROOT",
+        "PYTHONPATH",
+    ):
+        assert key not in env
+
+
 def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_path: Path):
     install_script = (
         Path(setup.__file__).resolve().parent
@@ -151,6 +208,8 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
                 "die() { echo \"$*\" >&2; exit 99; }",
                 "is_interactive() { return 1; }",
                 credential_functions,
+                "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS",
+                "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL",
                 "HYPERLOOM_SETUP_ENV_AUTHORITATIVE=1",
                 "OPENAI_BASE_URL=https://api.anthropic.com",
                 "OPENAI_API_KEY=ambient-openai-key",
@@ -367,6 +426,56 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
     assert "upsert_dotenv_var OPENAI_BASE_URL" not in write_text
     assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
     assert "SAFE_API_KEY:-" not in script_text
+
+
+def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):
+    install_script = (
+        Path(setup.__file__).resolve().parent
+        / "assets"
+        / "install.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("resolve_repo_root() {")
+    end = script_text.index('\nREPO_ROOT="$(resolve_repo_root)"', start)
+    resolve_repo_root = script_text[start:end]
+
+    source_root = tmp_path / "source"
+    source_assets = source_root / "src" / "hyperloom" / "inference_optimizer" / "assets"
+    source_assets.mkdir(parents=True)
+    (source_root / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+
+    target_root = tmp_path / "target"
+    packaged_assets = target_root / "hyperloom" / "inference_optimizer" / "assets"
+    packaged_assets.mkdir(parents=True)
+
+    runner = tmp_path / "resolve-root.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                resolve_repo_root,
+                f"_script_dir={source_assets}",
+                "unset REPO_ROOT",
+                "printf 'source=%s\n' \"$(resolve_repo_root)\"",
+                f"_script_dir={packaged_assets}",
+                "unset REPO_ROOT",
+                "printf 'packaged=%s\n' \"$(resolve_repo_root)\"",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = subprocess.run(
+        ["bash", str(runner)],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+
+    assert f"source={source_root}\n" in out
+    assert f"packaged={target_root}\n" in out
 
 
 def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):

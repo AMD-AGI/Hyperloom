@@ -82,7 +82,8 @@ If `MODEL_PATH` is set, inspect that path first: use it when it already contains
 
 ```bash
 python -m pip install -U huggingface_hub
-export MODEL_PATH="${MODEL_PATH:-$(pwd)/.cache/hyperloom-models/Qwen3-30B-A3B}"
+export REPO_ROOT="$(pwd -P)"
+export MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/.cache/hyperloom-models/Qwen3-30B-A3B}"
 python - <<'PY'
 import os
 from pathlib import Path
@@ -112,13 +113,18 @@ For Docker mode, run this inside the container. For bare-metal mode, run it on
 the host:
 
 ```bash
-set -a; . ./.env; set +a
+export REPO_ROOT="$(pwd -P)"
+set -a; . "${REPO_ROOT}/.env"; set +a
 export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true
-bash hyperloom/inference_optimizer/assets/install.sh
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+bash "$INSTALL_SH"
 . "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ```
 
 If `hyperloom/inference_optimizer/assets/install.sh` is not present (source

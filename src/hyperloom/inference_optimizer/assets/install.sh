@@ -57,7 +57,23 @@ done
 # $HYPERLOOM_RUNTIME_DIR.
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
+
+resolve_repo_root() {
+  if [ -n "${REPO_ROOT:-}" ]; then
+    printf '%s\n' "$REPO_ROOT"
+    return 0
+  fi
+  local source_root packaged_root
+  source_root="$(cd "${_script_dir}/../../../.." && pwd)"
+  packaged_root="$(cd "${_script_dir}/../../.." && pwd)"
+  if [ -f "${source_root}/pyproject.toml" ]; then
+    printf '%s\n' "$source_root"
+  else
+    printf '%s\n' "$packaged_root"
+  fi
+}
+
+REPO_ROOT="$(resolve_repo_root)"
 DOTENV_LOADED_COUNT=0
 
 load_dotenv_no_clobber() {
