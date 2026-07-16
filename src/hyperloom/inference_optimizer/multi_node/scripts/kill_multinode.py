@@ -32,6 +32,14 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 # the colocated inference port; 30000/30001 are the PD prefill/decode ports.
 _DEFAULT_DIST_INIT_PORT = 29500
 
+# _kill_remote runs SIGTERM -> sleep(grace) -> SIGKILL sequentially per pid file,
+# so a node with K pid files spends up to K*grace in the grace phase. main() does
+# not know K per node (each actor globs its own remote pid_dir), so budget the
+# ray.get timeout for this many pid files/node (ranks + prefill/decode/router).
+# Over-budgeting is harmless (ray.get returns as soon as the actor does); only
+# under-budgeting would falsely mark a successful kill as FAILED.
+_GRACE_PID_BUDGET = 16
+
 
 def _log(msg: str) -> None:
     """Write a timestamped progress line to stderr and flush it.
@@ -602,9 +610,14 @@ def main() -> int:
         )
         refs.append((node_id[:16], ref))
 
-    # Actor upper bound: grace + death-wait + port-wait + gpu-wait + margin.
+    # Actor upper bound: per-pid grace (budgeted for up to _GRACE_PID_BUDGET pid
+    # files/node) + death-wait + port-wait + gpu-wait + margin.
     get_timeout = int(
-        args.grace_sec + args.death_timeout + args.port_timeout + args.gpu_free_timeout + 30
+        args.grace_sec * _GRACE_PID_BUDGET
+        + args.death_timeout
+        + args.port_timeout
+        + args.gpu_free_timeout
+        + 30
     )
     out: dict[str, dict] = {}
     for short_id, ref in refs:
