@@ -100,7 +100,8 @@ PID, and monitors `state.json` until a terminal `stop_reason`.
 |-----|---------|
 | `RANDOM_RANGE_RATIO` | Benchmark sequence-length jitter (env has a fallback; `ISL`/`OSL`/`CONC`/`GPU_TYPE`/`PRECISION` are flags — see FLAGS above) |
 | `INFERENCEX_PATH` / `MAGPIE_PATH` / `TRACELENS_ROOT` | Tool checkouts under `${NFS_SHARED_ROOT}` |
-| `TRACELENS_INTERNAL_ROOT` | Optional internal TraceLens extension |
+| `TRACELENS_INTERNAL_ROOT` | Optional `TraceLens-internal` checkout |
+| `SGLANG_USE_AITER` / `SGLANG_AITER_MLA_PERSIST` | Enable + persist the aiter kernel path |
 | `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap / wait timeouts (infera PD only) |
 
 Platform-injected (do **not** set): `SAFE_API_URL`, `SAFE_API_KEY`,

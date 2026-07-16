@@ -91,7 +91,7 @@ def build_server_command(
         cmd = [
             python_exe, "-m", "sglang.launch_server",
             "--model-path", model,
-            "--host", "0.0.0.0",
+            "--host", "0.0.0.0",  # nosec B104 - bypass server must accept benchmark probes.
             "--port", str(port),
             "--trust-remote-code",
             "--tensor-parallel-size", str(tp),
@@ -274,7 +274,7 @@ def wait_for_server_ready(
     health_url = f"{base_url.rstrip('/')}/health"
 
     def _default_probe(url: str) -> int:
-        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 - localhost health probe
+        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310  # nosec B310 - fixed local health probe
             return int(getattr(resp, "status", 0) or resp.getcode())
 
     do_probe = probe or _default_probe
@@ -355,7 +355,7 @@ def server_health_ok(base_url: str, *, probe: Callable[[str], int] | None = None
     health_url = f"{base_url.rstrip('/')}/health"
 
     def _default_probe(url: str) -> int:
-        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 - localhost health probe
+        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310  # nosec B310 - fixed local health probe
             return int(getattr(resp, "status", 0) or resp.getcode())
 
     do_probe = probe or _default_probe
