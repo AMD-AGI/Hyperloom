@@ -199,13 +199,13 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     out = _materialize_config_with_envs(
         PROFILE_DEFAULT_CONFIG,
         tmp_path,
-        extra_envs={"FOO": "bar"},
+        extra_envs={"BENCH_FOO": "bar"},
         model_path="/some/model",
     )
     with out.open() as f:
         rendered = yaml.safe_load(f)
     assert rendered["benchmark"]["model"] == "/some/model"
-    assert rendered["benchmark"]["envs"]["FOO"] == "bar"
+    assert rendered["benchmark"]["envs"]["BENCH_FOO"] == "bar"
 
 
 def test_materialize_config_injects_runner_type(tmp_path):

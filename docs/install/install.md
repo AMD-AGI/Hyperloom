@@ -154,6 +154,11 @@ into the public installer. Kernel-agent paths (`MAGPIE_PATH`, `INFERENCEX_PATH`,
 `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the workload skill's
 `install.sh`.
 
+Specialist subprocesses inherit only a minimal non-secret environment by
+default. If a deployment still relies on parent-process LLM key variables for
+the `claude` CLI, set `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1` explicitly, or
+configure credentials in the CLI's own settings before launching Hyperloom.
+
 `.env` is the single source of truth; no extra script needs sourcing.
 
 ## Run a demo

@@ -96,13 +96,23 @@ def _start_session_ssh_agent() -> dict[str, str]:
     return env
 
 
-def _add_key_to_agent(priv: Path, passphrase: str) -> None:
-    """Load ``priv`` into ssh-agent without leaving passphrase material behind."""
+def _passphrase_cache_path(priv: Path) -> Path:
+    """Session-scoped passphrase cache for reloading encrypted ephemeral keys."""
+    return priv.with_suffix(".pass")
+
+
+def _add_key_to_agent(priv: Path, passphrase: str, *, keep_passphrase_cache: bool = False) -> None:
+    """Load ``priv`` into ssh-agent via askpass.
+
+    ``keep_passphrase_cache`` is used for session keys so a restarted
+    orchestrator can re-add the encrypted key that already-authorized pods
+    trust. The askpass script remains temporary and is always deleted.
+    """
     agent_env = {"SSH_AUTH_SOCK": os.environ.get("SSH_AUTH_SOCK", "")}
     if not agent_env["SSH_AUTH_SOCK"]:
         agent_env = _start_session_ssh_agent()
 
-    passfile = priv.with_suffix(".pass")
+    passfile = _passphrase_cache_path(priv)
     askpass = priv.with_name("mn_ssh_askpass.sh")
     passfile.write_text(passphrase, encoding="utf-8")
     askpass.write_text(f"#!/bin/sh\ncat {shlex.quote(str(passfile))}\n", encoding="utf-8")
@@ -125,7 +135,8 @@ def _add_key_to_agent(priv: Path, passphrase: str) -> None:
             stdin=subprocess.DEVNULL,
         )
     finally:
-        for p in (passfile, askpass):
+        cleanup = (askpass,) if keep_passphrase_cache else (passfile, askpass)
+        for p in cleanup:
             try:
                 p.unlink()
             except FileNotFoundError:
@@ -158,6 +169,18 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     priv = dest_dir / "mn_id_ed25519"
     pub = dest_dir / "mn_id_ed25519.pub"
     if priv.is_file() and pub.is_file():
+        passfile = _passphrase_cache_path(priv)
+        if passfile.is_file():
+            _add_key_to_agent(
+                priv,
+                passfile.read_text(encoding="utf-8").strip(),
+                keep_passphrase_cache=True,
+            )
+        else:
+            warn(
+                f"reusing existing SSH key {priv} without passphrase cache; "
+                "the key must already be loaded in SSH_AUTH_SOCK for BatchMode SSH"
+            )
         return priv, pub.read_text(encoding="utf-8").strip()
     # Remove any half-written remnant before regenerating.
     for p in (priv, pub):
@@ -186,7 +209,7 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     if proc.returncode != 0:
         raise RuntimeError(f"ssh-keygen failed rc={proc.returncode}: {proc.stderr.strip()}")
     priv.chmod(0o600)
-    _add_key_to_agent(priv, passphrase)
+    _add_key_to_agent(priv, passphrase, keep_passphrase_cache=True)
     pub_str = pub.read_text(encoding="utf-8").strip()
     info(f"generated session SSH keypair at {priv}")
     return priv, pub_str

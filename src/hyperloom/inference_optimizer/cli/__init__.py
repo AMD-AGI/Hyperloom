@@ -709,6 +709,12 @@ def _custom_orch_model_allowed() -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _custom_orch_model_explicitly_disabled() -> bool:
+    """Whether the operator explicitly requested strict AMD model allowlisting."""
+    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
+    return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
+
+
 def _critic_agent_runtime_needed(
     critic_choice: str,
     *,
@@ -752,7 +758,9 @@ def _validate_and_resolve_claude_model(
     # Custom orchestration models are enabled by default; the gateway catalog
     # probe below is the sole gate. Set INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0
     # to restore the stricter AMD Claude allowlist.
-    allow_custom = _custom_orch_model_allowed() or _claude_model_should_follow_codex()
+    allow_custom = _custom_orch_model_allowed()
+    if not _custom_orch_model_explicitly_disabled():
+        allow_custom = allow_custom or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "

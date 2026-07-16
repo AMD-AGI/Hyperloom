@@ -22,6 +22,11 @@ from .pr_monitor import (
 log = logging.getLogger(__name__)
 
 
+def _has_persistent_secret_header(headers: dict[str, str]) -> bool:
+    """Return true when headers cannot be safely persisted in MCP config."""
+    return any(str(name).lower() == "authorization" for name in headers)
+
+
 @dataclass
 class KnowledgePlane:
     """Single facade for the knowledge sources.
@@ -85,9 +90,12 @@ class KnowledgePlane:
         """Whether the read-only ``cortex_kb`` KB-graph MCP is wired.
 
         Returns:
-            bool: ``True`` when a ``cortex_kb_mcp_url`` is configured.
+            bool: ``True`` when a ``cortex_kb_mcp_url`` is configured and can
+            be written to the specialist MCP config without persisting secrets.
         """
-        return bool((self.cortex_kb_mcp_url or "").strip())
+        return bool((self.cortex_kb_mcp_url or "").strip()) and not _has_persistent_secret_header(
+            self.cortex_kb_mcp_headers
+        )
 
     def cortex_specialist_mcp_url(self) -> str:
         """KB-graph MCP URL to advertise as the specialist ``cortex_kb`` server.
@@ -95,6 +103,8 @@ class KnowledgePlane:
         Returns:
             The configured URL, or ``""`` when the KB-graph MCP is disabled.
         """
+        if not self.cortex_enabled:
+            return ""
         return (self.cortex_kb_mcp_url or "").strip()
 
     def cortex_specialist_mcp_headers(self) -> dict[str, str]:
@@ -103,7 +113,7 @@ class KnowledgePlane:
         Returns:
             A copy of the configured header map (``{}`` when none / disabled).
         """
-        if not (self.cortex_kb_mcp_url or "").strip():
+        if not self.cortex_enabled:
             return {}
         return dict(self.cortex_kb_mcp_headers or {})
 

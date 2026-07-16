@@ -1183,7 +1183,7 @@ resolve_credentials() {
   # Single-gateway convenience: use an operator-provided default endpoint only
   # when no base URL is set at all. The public installer intentionally carries
   # no private gateway URL.
-  if [ -n "$DEFAULT_OPENAI_BASE_URL" ] && [ -z "$openai_url" ] && [ -z "$anthropic_url" ]; then
+  if [ -n "${DEFAULT_OPENAI_BASE_URL:-}" ] && [ -z "$openai_url" ] && [ -z "$anthropic_url" ]; then
     openai_url="$DEFAULT_OPENAI_BASE_URL"
     warn "no LLM base URL set; defaulting OPENAI_BASE_URL to ${openai_url}"
   fi

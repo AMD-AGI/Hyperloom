@@ -9,8 +9,9 @@ registering up to two streamable-HTTP MCP servers:
   be ``pr_monitor`` so the ``mcp__pr_monitor__*`` whitelist names resolve.
 - ``cortex_kb`` (at :meth:`KnowledgePlane.cortex_specialist_mcp_url`) — the
   read-only KB-graph (gbrain) server; the name MUST be ``cortex_kb`` so the
-  ``mcp__cortex_kb__*`` whitelist names resolve. Auth headers (bearer token)
-  are passed through when supplied.
+  ``mcp__cortex_kb__*`` whitelist names resolve. Bearer auth headers are not
+  written to disk; callers must disable the matching tools when such headers
+  are required.
 
 Schema follows :data:`claude_agent_sdk.types.McpHttpServerConfig`.
 """

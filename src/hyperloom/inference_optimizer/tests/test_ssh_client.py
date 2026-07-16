@@ -182,6 +182,40 @@ def test_generate_session_keypair_idempotent_reuse(tmp_path, monkeypatch):
     assert pub_str == "ssh-ed25519 AAAA reuse"
 
 
+def test_generate_session_keypair_reloads_reused_encrypted_key(tmp_path, monkeypatch):
+    priv = tmp_path / "mn_id_ed25519"
+    pub = tmp_path / "mn_id_ed25519.pub"
+    passfile = tmp_path / "mn_id_ed25519.pass"
+    priv.write_text("PRIV", encoding="utf-8")
+    pub.write_text("ssh-ed25519 AAAA reuse\n", encoding="utf-8")
+    passfile.write_text("cached-passphrase", encoding="utf-8")
+    calls = []
+
+    def _run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[0] == "ssh-agent":
+            return _FakeCompleted(
+                0,
+                "SSH_AUTH_SOCK=/tmp/hyperloom-agent.sock; export SSH_AUTH_SOCK;\n"
+                "SSH_AGENT_PID=12345; export SSH_AGENT_PID;\n",
+                "",
+            )
+        if argv[0] == "ssh-add":
+            assert kwargs["env"]["SSH_ASKPASS_REQUIRE"] == "force"
+            assert kwargs["env"]["SSH_AUTH_SOCK"] == "/tmp/hyperloom-agent.sock"
+            return _FakeCompleted(0, "", "")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(ssh_client.subprocess, "run", _run)
+    out_priv, pub_str = ssh_client.generate_session_keypair(tmp_path)
+    assert out_priv == priv
+    assert pub_str == "ssh-ed25519 AAAA reuse"
+    assert [c[0][0] for c in calls] == ["ssh-agent", "ssh-add"]
+    assert passfile.read_text(encoding="utf-8") == "cached-passphrase"
+    assert not (tmp_path / "mn_ssh_askpass.sh").exists()
+
+
 def test_generate_session_keypair_uses_passphrase_and_agent(tmp_path, monkeypatch):
     calls = []
 
@@ -216,7 +250,7 @@ def test_generate_session_keypair_uses_passphrase_and_agent(tmp_path, monkeypatc
     assert out_priv == tmp_path / "mn_id_ed25519"
     assert pub_str == "ssh-ed25519 AAAA generated"
     assert [c[0][0] for c in calls] == ["ssh-keygen", "ssh-agent", "ssh-add"]
-    assert not (tmp_path / "mn_id_ed25519.pass").exists()
+    assert (tmp_path / "mn_id_ed25519.pass").exists()
     assert not (tmp_path / "mn_ssh_askpass.sh").exists()
 
 

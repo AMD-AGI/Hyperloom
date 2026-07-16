@@ -53,6 +53,12 @@ BLOCKED_CHILD_ENV_NAMES: frozenset[str] = frozenset(
 )
 
 _SECRET_KEY_RE = re.compile(r"(?:^|_)(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)(?:_|$)", re.IGNORECASE)
+_NON_SECRET_TOKEN_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        # SGLang tuning switch; TOKEN describes quantization granularity, not a credential.
+        "SGLANG_USE_AITER_FP8_PER_TOKEN",
+    }
+)
 
 WORKLOAD_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
@@ -166,6 +172,7 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HYPERLOOM_RUNTIME_DIR",
         "INFERENCEX_PATH",
         "KERNEL_AGENT_ENV",
+        "KERNEL_AGENT_LOG_LEVEL",
         "KERNEL_AGENT_ROOT",
         "MAGPIE_PATH",
         "MAGPIE_PYTHON",
@@ -188,7 +195,7 @@ def is_blocked_untrusted_env_key(key: object) -> bool:
     return (
         not valid_env_key(name)
         or upper in BLOCKED_UNTRUSTED_ENV_NAMES
-        or bool(_SECRET_KEY_RE.search(upper))
+        or (upper not in _NON_SECRET_TOKEN_ENV_NAMES and bool(_SECRET_KEY_RE.search(upper)))
     )
 
 

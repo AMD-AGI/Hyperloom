@@ -32,15 +32,25 @@ def test_plane_enabled_pr_returns_mcp_url():
     assert plane.specialist_mcp_url() == "http://pr.test/mcp/"
 
 
-def test_plane_cortex_enabled_when_url_set():
+def test_plane_cortex_enabled_when_headerless_url_set():
+    plane = KnowledgePlane.from_clients(
+        pr_monitor=PRMonitorClient.from_args(enabled=False),
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+    )
+    assert plane.cortex_enabled is True
+    assert plane.cortex_specialist_mcp_url() == "http://gbrain.test/mcp"
+    assert plane.cortex_specialist_mcp_headers() == {}
+
+
+def test_plane_cortex_disabled_when_auth_header_would_persist():
     plane = KnowledgePlane.from_clients(
         pr_monitor=PRMonitorClient.from_args(enabled=False),
         cortex_kb_mcp_url="http://gbrain.test/mcp",
         cortex_kb_mcp_headers={"Authorization": "Bearer t"},
     )
-    assert plane.cortex_enabled is True
-    assert plane.cortex_specialist_mcp_url() == "http://gbrain.test/mcp"
-    assert plane.cortex_specialist_mcp_headers() == {"Authorization": "Bearer t"}
+    assert plane.cortex_enabled is False
+    assert plane.cortex_specialist_mcp_url() == ""
+    assert plane.cortex_specialist_mcp_headers() == {}
 
 
 def test_plane_reset_round_caches_noop():
