@@ -64,7 +64,18 @@ def test_plane_reset_round_caches_is_noop():
     plane.reset_round_caches()
 
 
-def test_plane_cortex_enabled_when_url_set():
+def test_plane_cortex_enabled_when_headerless_url_set():
+    plane = KnowledgePlane.from_clients(
+        pr_monitor=PRMonitorClient.from_args(enabled=False),
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+    )
+    assert plane.cortex_enabled is True
+    assert plane.cortex_specialist_mcp_url() == "http://gbrain.test/mcp"
+    assert plane.cortex_specialist_mcp_headers() == {}
+
+
+def test_plane_cortex_auth_header_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS", raising=False)
     plane = KnowledgePlane.from_clients(
         pr_monitor=PRMonitorClient.from_args(enabled=False),
         cortex_kb_mcp_url="http://gbrain.test/mcp",
@@ -73,6 +84,18 @@ def test_plane_cortex_enabled_when_url_set():
     assert plane.cortex_enabled is True
     assert plane.cortex_specialist_mcp_url() == "http://gbrain.test/mcp"
     assert plane.cortex_specialist_mcp_headers() == {"Authorization": "Bearer t"}
+
+
+def test_plane_cortex_auth_header_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS", "0")
+    plane = KnowledgePlane.from_clients(
+        pr_monitor=PRMonitorClient.from_args(enabled=False),
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+        cortex_kb_mcp_headers={"Authorization": "Bearer t"},
+    )
+    assert plane.cortex_enabled is False
+    assert plane.cortex_specialist_mcp_url() == ""
+    assert plane.cortex_specialist_mcp_headers() == {}
 
 
 def test_default_specialist_tools_include_all_pr_monitor_mcp_tools():
@@ -118,7 +141,6 @@ def test_specialist_runner_keeps_cortex_kb_when_mcp_wired():
     plane = KnowledgePlane.from_clients(
         pr_monitor=PRMonitorClient.from_args(enabled=False),
         cortex_kb_mcp_url="http://gbrain.test/mcp",
-        cortex_kb_mcp_headers={"Authorization": "Bearer t"},
     )
     runner = SpecialistRunner(
         backend_factory=lambda d: None,
@@ -129,6 +151,39 @@ def test_specialist_runner_keeps_cortex_kb_when_mcp_wired():
         assert t in tools
 
 
+def test_specialist_runner_keeps_forced_cortex_kb_from_explicit_mcp_config():
+    plane = KnowledgePlane.from_clients(
+        pr_monitor=PRMonitorClient.from_args(enabled=False),
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+        cortex_kb_mcp_headers={"Authorization": "Bearer t"},
+    )
+    runner = SpecialistRunner(
+        backend_factory=lambda d: None,
+        knowledge_plane=plane,
+        forced_mcp_servers=("cortex_kb",),
+    )
+    tools = runner._resolve_tools()
+    for t in CORTEX_KB_READONLY_MCP_TOOLS:
+        assert t in tools
+
+
+def test_specialist_runner_explicit_mcp_config_is_authoritative():
+    plane = KnowledgePlane.from_clients(
+        pr_monitor=PRMonitorClient.from_args(enabled=True),
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+    )
+    runner = SpecialistRunner(
+        backend_factory=lambda d: None,
+        knowledge_plane=plane,
+        forced_mcp_servers=("pr_monitor",),
+    )
+    tools = runner._resolve_tools()
+    for t in PR_MONITOR_MCP_TOOLS:
+        assert t in tools
+    for t in CORTEX_KB_READONLY_MCP_TOOLS:
+        assert t not in tools
+
+
 def test_specialist_runner_without_plane_keeps_default_tools():
     runner = SpecialistRunner(backend_factory=lambda d: None)
     tools = runner._resolve_tools()
@@ -136,7 +191,8 @@ def test_specialist_runner_without_plane_keeps_default_tools():
         assert t in tools
 
 
-def test_mcp_config_writes_cortex_kb_server_with_headers(tmp_path):
+def test_mcp_config_writes_cortex_kb_auth_headers_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS", raising=False)
     from hyperloom.orchestrator.specialists.mcp_config import (
         SPECIALIST_MCP_CONFIG_FILENAME,
         write_specialist_mcp_config,
@@ -149,12 +205,28 @@ def test_mcp_config_writes_cortex_kb_server_with_headers(tmp_path):
         cortex_kb_mcp_headers={"Authorization": "Bearer secret"},
     )
     assert path is not None and path.name == SPECIALIST_MCP_CONFIG_FILENAME
-    cfg = json.loads(path.read_text())
+    text = path.read_text()
+    cfg = json.loads(text)
     servers = cfg["mcpServers"]
     assert servers["pr_monitor"] == {"type": "http", "url": "http://pr.test/mcp/"}
-    assert servers["cortex_kb"]["type"] == "http"
-    assert servers["cortex_kb"]["url"] == "http://gbrain.test/mcp"
     assert servers["cortex_kb"]["headers"] == {"Authorization": "Bearer secret"}
+
+
+def test_mcp_config_skips_cortex_kb_auth_headers_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS", "0")
+    from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
+
+    path = write_specialist_mcp_config(
+        session_dir=tmp_path,
+        pr_monitor_mcp_url="http://pr.test/mcp/",
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+        cortex_kb_mcp_headers={"Authorization": "Bearer secret"},
+    )
+    assert path is not None
+    text = path.read_text()
+    cfg = json.loads(text)
+    assert "cortex_kb" not in cfg["mcpServers"]
+    assert "secret" not in text
 
 
 def test_mcp_config_omits_cortex_kb_when_url_absent(tmp_path):

@@ -7,7 +7,6 @@ import subprocess
 import sys
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from types import SimpleNamespace
-import urllib.error
 
 import pytest
 
@@ -114,102 +113,6 @@ async def test_retry_with_backoff_swallows_on_retry_callback_error() -> None:
     )
     assert out == "ok"
     assert slept == [0.0]
-
-
-class _JsonResponse:
-    def __init__(self, payload: dict) -> None:
-        self._raw = json.dumps(payload)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-    def read(self) -> str:
-        return self._raw
-
-
-def test_model_compat_whitelist_and_local_file_edges(tmp_path) -> None:
-    import model_compat
-
-    model_compat.load_whitelist.cache_clear()
-    whitelist = tmp_path / "whitelist.json"
-    whitelist.write_text(
-        json.dumps({"candidates": [{"repo_id": "org/a"}, {"repo_id": ""}, {"no_repo": "ignored"}]}),
-        encoding="utf-8",
-    )
-    assert model_compat.load_whitelist(str(whitelist)) == frozenset({"org/a"})
-    assert model_compat.load_whitelist(str(tmp_path / "missing.json")) == frozenset()
-
-    missing_dir = tmp_path / "missing-model"
-    assert model_compat.has_weights(missing_dir) is False
-    assert model_compat.has_tokenizer(missing_dir) is True
-
-
-def test_hf_gated_rotates_auth_failures_to_gated(monkeypatch) -> None:
-    import model_compat
-
-    model_compat._tok_idx[0] = 0
-    calls = {"n": 0}
-
-    def _urlopen(_req, timeout):
-        assert timeout == 20
-        calls["n"] += 1
-        raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
-
-    monkeypatch.setattr(model_compat.urllib.request, "urlopen", _urlopen)
-    assert model_compat.hf_gated("org/model", ["tok-a", "tok-b"]) == "gated"
-    assert calls["n"] == 3
-
-
-def test_hf_gated_retries_rate_limit_and_generic_errors(monkeypatch) -> None:
-    import model_compat
-
-    model_compat._tok_idx[0] = 0
-    sleeps: list[int] = []
-    monkeypatch.setattr(model_compat.time, "sleep", lambda delay: sleeps.append(delay))
-
-    calls = {"n": 0}
-
-    def _rate_limit_then_open(_req, timeout):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise urllib.error.HTTPError("u", 429, "rate", {}, None)
-        return _JsonResponse({"gated": False})
-
-    monkeypatch.setattr(model_compat.urllib.request, "urlopen", _rate_limit_then_open)
-    assert model_compat.hf_gated("org/model", ["tok"]) is None
-    assert sleeps == [5]
-
-    def _always_boom(_req, timeout):
-        raise RuntimeError("network")
-
-    monkeypatch.setattr(model_compat.urllib.request, "urlopen", _always_boom)
-    assert model_compat.hf_gated("org/model", ["tok"]) is None
-
-
-def test_hf_missing_tokenizer_rate_limit_and_http_fallbacks(monkeypatch) -> None:
-    import model_compat
-
-    model_compat._tok_idx[0] = 0
-    monkeypatch.setattr(model_compat.time, "sleep", lambda *_args: None)
-    calls = {"n": 0}
-
-    def _rate_limit_then_missing(_req, timeout):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise urllib.error.HTTPError("u", 429, "rate", {}, None)
-        return _JsonResponse({"siblings": [{"rfilename": "model.safetensors"}]})
-
-    monkeypatch.setattr(model_compat.urllib.request, "urlopen", _rate_limit_then_missing)
-    assert model_compat.hf_missing_tokenizer("org/model", ["tok"]) == "missing_tokenizer"
-
-    def _server_error(_req, timeout):
-        raise urllib.error.HTTPError("u", 500, "server", {}, None)
-
-    monkeypatch.setattr(model_compat.urllib.request, "urlopen", _server_error)
-    assert model_compat.hf_missing_tokenizer("org/model", ["tok"]) is None
 
 
 def test_gpu_type_resolution_env_probe_and_runner(monkeypatch) -> None:

@@ -75,7 +75,7 @@ def test_workspace_root_independent_of_session_pin(tmp_path, monkeypatch):
 def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
     """Default: per-model/per-launch subdir + pin propagation."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    sd = paths.make_session_dir(model_name="/wekafs/models/DeepSeek-R1-0528")
+    sd = paths.make_session_dir(model_name="/path/models/DeepSeek-R1-0528")
     # Layout: <ws>/DeepSeek-R1-0528/<UTC ts>/
     assert sd.parent.parent == tmp_path
     assert sd.parent.name == "DeepSeek-R1-0528"
@@ -104,7 +104,7 @@ def test_make_session_dir_accepts_path_object(tmp_path, monkeypatch):
     """The helper must accept any os.PathLike (args.model is a Path in the CLI), not just str."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir(
-        model_name=Path("/wekafs/models/DeepSeek-R1-0528"),
+        model_name=Path("/path/models/DeepSeek-R1-0528"),
     )
     assert sd.parent.name == "DeepSeek-R1-0528"
 

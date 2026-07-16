@@ -12,7 +12,7 @@ disaster-recovery runbook.
 
 ```{note}
 This topic is intended for Site reliability and platform engineers self-hosting
-Hyperloom on their own AMD GPU infrastructure (Kubernetes, bare metal, or a managed platform as a service (PaaS)). For the hosted [Primus-Claw experience](https://crusoe.example-internal-host.invalid/hyperloom/) AMD owns operations; this document does not apply.
+Hyperloom on their own AMD GPU infrastructure (Kubernetes, bare metal, or a managed platform as a service (PaaS)). For the hosted Primus-Claw experience AMD owns operations; this document does not apply.
 ```
 
 For application-level configuration see
@@ -39,11 +39,11 @@ GEAK workers. The Coordinator pod itself is small.
 | Critic (subprocess)                | 1 core    | 2 GiB     | none                                      | <100 MB (knowledge base (KB) drafts)                                                       |
 | Robustness (subprocess)            | 1 core    | 2 GiB     | none                                      | <100 MB (findings JSONL)                                                                   |
 | Kernel-agent + Ray head            | 4 cores   | 16 GiB    | none for head; workers below              | varies                                                                                     |
-| Ray worker (GEAK attempt)          | 8 cores   | 32 GiB    | 1 × MI300X / MI308X / MI325X / MI355X              | ~10 GB per attempt for build artifacts                                                     |
-| Inference server (sglang / vllm)   | 16 cores  | 128 GiB   | 1–8 × MI300X / MI308X / MI325X / MI355X (matches TP)| weights + KV cache; depends on model                                                       |
+| Ray worker (GEAK attempt)          | 8 cores   | 32 GiB    | 1 × MI300X / MI325X / MI355X              | ~10 GB per attempt for build artifacts                                                     |
+| Inference server (sglang / vllm)   | 16 cores  | 128 GiB   | 1–8 × MI300X / MI325X / MI355X (matches TP)| weights + KV cache; depends on model                                                       |
 | GEAK retrieval-augmented generation (RAG) index (first build) | 4 cores   | 16 GiB    | 1 × any GPU (CPU is hours-slow)           | ~1.3 GB BGE embedding model + index in `~/.cache/amd-ai-devtool/semantic-index/`           |
 
-Minimum viable node: one AMD GPU (MI300X / MI308X / MI325X / MI355X) with
+Minimum viable node: one AMD GPU (MI300X / MI325X / MI355X) with
 ≥ 256 GiB system RAM, 32 cores, and 500 GB local fast disk for the
 session dir + GEAK build artifacts.
 
@@ -97,7 +97,7 @@ namespace: hyperloom
 │   ├── (subprocess) robustness-agent
 │   └── (subprocess) kernel-agent + Ray head
 ├── PersistentVolumeClaim: user-data       # mounted at /workspace/hyperloom
-├── PersistentVolumeClaim: weka-tracelens  # read-only mount of TraceLens-internal
+├── PersistentVolumeClaim: tracelens-extension  # optional read-only private extension mount
 ├── Secret: hyperloom-creds                # SAFE_API_KEY
 └── ConfigMap: hyperloom-env               # path env, KB env, observability env
 ```
@@ -140,7 +140,7 @@ Back up the following artifacts from each session.
 | Artifact                                | Source path                                                       | Retention                                                                                                |
 |-----------------------------------------|-------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
 | Session manifest + state                | `$SESSION_DIR/manifest.json`, `$SESSION_DIR/state.json`           | Until the session ends; not normally needed afterwards.                                                  |
-| `session_breakdown.json` (downstream contract) | `$SESSION_DIR/session_breakdown.json`                       | Permanent. This is the canonical record consumed by `claw-stats-service` and downstream notebooks.   |
+| `session_breakdown.json` (downstream contract) | `$SESSION_DIR/session_breakdown.json`                       | Permanent. This is the canonical record consumed by downstream dashboards and notebooks.   |
 | Local recipe KB                         | `${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}`                  | Permanent. Backup before cleanup of `USER_DATA_PATH`.                                                |
 | Robustness findings                     | `$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl`      | 30 days minimum; longer if your incident process needs it.                                               |
 | Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.                       |

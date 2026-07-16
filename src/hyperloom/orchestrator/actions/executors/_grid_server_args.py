@@ -16,10 +16,41 @@ import re
 import shlex
 from typing import Any
 
-from hyperloom.common.coerce import optional_positive_int
+from hyperloom.common.coerce import optional_positive_int, to_str_list
 
 
 log = logging.getLogger(__name__)
+
+_UNSAFE_SERVER_ARG_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
+
+
+def validate_server_args_shell_safe(server_args: str | None) -> str:
+    """Reject server-arg strings that would be shell control syntax.
+
+    Magpie benchmark scripts expand ``EXTRA_*_ARGS`` through shell wrappers, so
+    this is the final sink-side guard against LLM/payload content escaping from
+    argv-like flags into shell control operators.
+    """
+    args = str(server_args or "").strip()
+    if not args:
+        return ""
+    if _UNSAFE_SERVER_ARG_CHARS_RE.search(args):
+        raise ValueError("extra_server_args contains shell control characters")
+    try:
+        tokens = shlex.split(args)
+    except ValueError as exc:
+        raise ValueError(f"extra_server_args is not shell-tokenizable: {exc}") from exc
+    expect_value = False
+    for token in tokens:
+        if token.startswith("-"):
+            expect_value = "=" not in token
+            continue
+        if expect_value:
+            expect_value = False
+            continue
+        raise ValueError("extra_server_args must be argv-like flags, not bare positional arguments")
+    return args
+
 
 def server_args_env_name(framework: str | None) -> str:
     """Return the Magpie env var used to append backend server args.
@@ -63,18 +94,6 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
-def _coerce_str_list(value: Any) -> list[str]:
-    """Normalize optional string/list controls to non-empty strings."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, (list, tuple, set)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    text = str(value).strip()
-    return [text] if text else []
-
-
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     """Remove flag specs from a server-arg string.
 
@@ -84,7 +103,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     unparseable inputs are left untouched rather than guessed.
     """
     args = str(server_args or "").strip()
-    removes = _coerce_str_list(remove_args)
+    removes = to_str_list(remove_args)
     if not args or not removes:
         return args
     try:

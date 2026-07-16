@@ -23,7 +23,28 @@ log = logging.getLogger(__name__)
 __all__ = [
     "_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT",
     "_MIN_KERNEL_ENGAGED_GAIN_PCT",
+    "coerce_needs_gpu",
 ]
+
+
+def coerce_needs_gpu(value: Any) -> bool:
+    """Coerce a ``needs_gpu`` specialist parameter value to a Python bool.
+
+    Specialist params arrive as JSON-decoded values which may be a bare bool
+    or a string (``"true"``, ``"1"``, ``"yes"``, ``"on"``).  Handles both so
+    callers don't repeat this conversion.
+
+    Args:
+        value: The raw ``needs_gpu`` parameter value (bool, str, or anything
+            else that ``bool()`` can handle).
+
+    Returns:
+        ``True`` when ``value`` is a truthy string token or a truthy non-string
+        value; ``False`` otherwise.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def format_exc_brief(exc: BaseException, limit: int | None = None) -> str:

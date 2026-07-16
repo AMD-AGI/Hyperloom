@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import logging
 import re
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
-
+from hyperloom.common.coerce import to_str_list
 from ._canonical_fingerprint import canonical_fingerprint
 
 log = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ def variant_fingerprint(
         args_mode=args_mode,
     )
 
-_MAGPIE_CWD_DEFAULT = "/tmp"
+_MAGPIE_CWD_DEFAULT = tempfile.gettempdir()
 
 _VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
 
@@ -115,23 +116,11 @@ class GridVariant:
         self.name = name
         self.extra_server_args = extra_server_args
         self.extra_envs = dict(extra_envs) if extra_envs is not None else {}
-        self.remove_args = self._coerce_str_list(remove_args)
-        self.unset_envs = self._coerce_str_list(unset_envs)
+        self.remove_args = to_str_list(remove_args)
+        self.unset_envs = to_str_list(unset_envs)
         mode = str(args_mode or "append").strip().lower()
         self.args_mode = mode if mode in {"append", "replace"} else "append"
         self.note = note
-
-    @staticmethod
-    def _coerce_str_list(value: Any) -> list[str]:
-        """Normalize optional string/list controls to non-empty strings."""
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [value.strip()] if value.strip() else []
-        if isinstance(value, (list, tuple, set)):
-            return [str(v).strip() for v in value if str(v).strip()]
-        text = str(value).strip()
-        return [text] if text else []
 
     @property
     def fingerprint(self) -> str:

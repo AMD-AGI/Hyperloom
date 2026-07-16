@@ -26,13 +26,13 @@ These variables configure LLM gateway access and optional backend credentials.
 
 | Variable               | Required | Default | Description                                                                                                                                                                                            |
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `SAFE_API_KEY`         | Conditional | —    | AMD primus-safe large language model (LLM) gateway key. Format `ak-...`. Required for the single-gateway setup; split-gateway deployments may instead provide provider-specific keys. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased).                                                        |
-| `OPENAI_BASE_URL`      | Conditional | —    | LLM gateway URL. Required for the single-gateway setup; split-gateway deployments may provide provider-specific base URLs instead. Production: `https://your-openai-compatible-gateway.example.com/v1`.                                                                                                                  |
+| `SAFE_API_KEY`         | Conditional | —    | AMD primus-safe large language model (LLM) gateway key. Format `ak-...`. Required for the single-gateway setup; split-gateway deployments can instead provide provider-specific keys. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased).                                                        |
+| `OPENAI_BASE_URL`      | Conditional | —    | LLM gateway URL. Required for the single-gateway setup; split-gateway deployments can provide provider-specific base URLs instead. Example: `https://<your-gateway-host>/api/v1/llm-proxy/v1`.                                                                                                                  |
 | `ANTHROPIC_BASE_URL`   | No       | Derived from `OPENAI`<br>`_BASE_URL` | Claude-side base URL for split-gateway deployments.                                                                                                        |
 | `ANTHROPIC_AUTH_TOKEN` | No       | Inherits `SAFE_API_KEY` | Claude CLI auth token alias; set explicitly only for split-gateway deployments.                                                                        |
 | `GEAK_API_KEY`         | No       | Inherits `SAFE_API_KEY` | Only set explicitly to override the default inheritance.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | Inherits `OPENAI`<br>`_BASE_URL` | Only set explicitly to override the default inheritance.                                                                                                                          |
-| `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL`; DeepSeek-only defaults to `deepseek-chat` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
+| `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL`; DeepSeek-only defaults to `deepseek-v4-pro` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
 | `ANTHROPIC_API_KEY`    | No       | Inherits `SAFE_API_KEY` (using preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
 | `OPENAI_API_KEY`       | No       | Inherits `SAFE_API_KEY` (using preflight alias fan-out) | Only set explicitly to override.                                                                                                                                |
 | `LANGFUSE_HOST`        | No (required <br> only <br> when `HYPER`<br>`LOOM_LA`<br>`NGFUSE`<br>`_ENABLE=1`) | Unset | Base URL of your Langfuse deployment (for example, `https://langfuse.<your-domain>`). Used by both the live trace push and the offline `backfill_langfuse` CLI. |
@@ -56,6 +56,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the pod-local open-source root (`HYPER`<br>`LOOM_OP`<br>`EN_SOU`<br>`RCE_ROOT` / `$TMPDIR`), not this path. |
 | `HYPERLOOM`<br>`_OPEN_`<br>`SOURCE`<br>`_ROOT`              | No                   | `/opt/hyperloom/`<br>`open-source`<br>`-repos`                      | Pod-local root for dependency checkouts. Decoupled from `USER_DATA_PATH` so shared session storage does not collocate concurrent pods' checkouts. |
 | `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
+| `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during `--resume`. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
 | `SESSION_DIR`                             | No (robustness-agent)| Scan known paths                                                   | Path containing `storage/coordinator.db`; the robustness FindingSink writes under `{session_`<br>`dir}/ag`<br>`ents/ro`<br>`bustne`<br>`ss/fin`<br>`dings/`<br>`{sess`<br>`ion_id}.jsonl`.                                       |
 | `ROBUSTNESS_SERVER_URL`                   | No (robustness-agent)| Scan known DNS                                                     | M1 primary data source; empty disables the primary path and forces local-only probes.                                                                                                |
 | `WORKSPACE_PATH` *(legacy)*               | No                   | Unset                                                              | Legacy path variable. Still consumed in two narrow spots: the CLI `setdefault`s it to the repo root for the critic subprocess's static assets, and TraceLens uses it as a `USER_DATA_PATH` fallback. Prefer `USER_DATA_PATH`. See [Upgrade Hyperloom version](upgrade.md).                            |
@@ -65,15 +66,35 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 
 ## Workload configuration
 
-Use CLI flags for workload shape and runtime behavior:
+Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
+`TP` / `EP` env vars are ignored and overwritten (`GPU_TYPE` is a fallback when
+`--gpu-type` is omitted).
 
-`--model`, `--framework`, `--gpu-type`, `--model-class`, `--tp`, `--ep`,
-`--conc`, `--isl`, `--osl`, `--max-model-len`, `--precision`,
-`--profile-osl`, `--enable-roofline` / `--no-enable-roofline`, and
-`--enable-conc-sweep` / `--no-enable-conc-sweep`.
+- **Model / workload shape:** `--model`, `--model-class`, `--framework`,
+  `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
+  `--conc`, `--max-model-len`, `--profile-osl`.
+- **Goal / budget:** `--target-gain`, `--max-hours`, `--target-summary`,
+  `--target-tput`, `--compare-against-gpu`.
+- **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
+  `--cpus-per-node`, `--mem-per-node`, `--gpu-type`, `--mn-backend`
+  (`rayjob` / `infera`), `--mn-image`, `--server-args` (rayjob),
+  `--rayjob-extra-env` (repeatable; the supported way to inject server-side env
+  such as `SGLANG_USE_AITER=0` into RayJob pods — the sandbox's own `SGLANG_*`
+  env is not forwarded).
+- **PD disaggregation (infera):** `--pd-mode disaggregated`,
+  `--pd-prefill-nodes` / `--pd-prefill-tp` / `--pd-prefill-ep` /
+  `--pd-prefill-extra-args`, `--pd-decode-nodes` / `--pd-decode-tp` /
+  `--pd-decode-ep` / `--pd-decode-extra-args`, `--pd-transfer-backend`,
+  `--pd-ib-device`.
+- **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
+  `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
+  `--no-framework-agent`, `--no-kernel`, `--no-explore`.
+- **Agent models:** `--claude-model`, `--codex-model`.
+- **Session / resume:** `--resume`, `--resume-from`, `--session-dir`,
+  `--reset-state`.
+- **Quantization:** `--quantize`, `--quantize-scheme`.
 
-The CLI may still materialize internal envs for benchmark subprocesses, but
-those are not stable user configuration and should not be pre-set by launchers.
+Run `inference_optimizer optimize --help` for the exhaustive flag list.
 
 ---
 
@@ -107,15 +128,42 @@ endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
 
 ## Multi-node / prefill-decode (PD)
 
-Use CLI flags for multi-node and prefill-decode configuration:
+Use CLI flags for multi-node topology and prefill-decode configuration:
 
-`--nodes`, `--mn-backend`, `--rayjob-image`, `--rayjob-gpus-per-node`,
+`--nodes`, `--mn-backend`, `--mn-image`, `--gpus-per-node`,
+`--cpus-per-node`, `--mem-per-node`, `--tp`, `--ep`,
 `--pd-mode`, `--pd-prefill-nodes`, `--pd-decode-nodes`, `--pd-prefill-tp`,
 `--pd-decode-tp`, `--pd-transfer-backend`, and `--pd-ib-device`.
 
-The optimizer writes the resolved values into internal handoff envs when it
-creates RayJob / Dynamo workloads; callers should not depend on those env names
-as a public configuration API.
+When the optimizer provisions the cluster itself (Primus-SaFE flow), those
+flags are all you need — no environment variables are required.
+
+### External-mode variables (SaFE-less cluster)
+
+When SaFE is unavailable (`SAFE_API_URL` / `SAFE_API_KEY` not both set) and
+`HYPERLOOM_MN_EXT_SERVICE_URL` is set, the optimizer skips all
+provisioning and benchmarks an already-running cluster described by these
+variables. When both `SAFE_API_*` are present these are ignored.
+
+| Variable | Backend | Required | Description |
+|----------|---------|----------|-------------|
+| `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`). Its presence triggers external mode. |
+| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Private SSH key already authorized on the pods (SaFE injects one otherwise). |
+| `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |
+| `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs (comma-separated) for aggregated (non-PD) runs. At least one of `_PREFILL_IPS` / `_DECODE_IPS` / `_WORKER_IPS` is required. |
+| `HYPERLOOM_MN_EXT_SSH_PORT` | infera | No (default `2233`) | SSH base port; decode role is offset `+10`. |
+| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera | No | `known_hosts` path; else a relaxed host-key check is used. |
+| `HYPERLOOM_MN_EXT_HEAD_IP` | rayjob | No (recommended) | Ray head IP (Dashboard `:8265`, GCS `:6379`). Enables per-round restarts; omit for benchmark-only. |
+| `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | No | Ray Dashboard auth token, only if the dashboard is authenticated. |
+
+Infera external mode requires `HYPERLOOM_MN_EXT_SSH_KEY` plus at least one
+`*_IPS` list, or the run fails fast at startup. RayJob external mode ignores
+the SSH / IP vars and uses `HYPERLOOM_MN_EXT_HEAD_IP` for restarts.
+
+Multi-node SSH fanout creates session-scoped keys under the active session
+directory. Treat `mn_id_ed25519` and `mn_id_ed25519.pub` as sensitive session
+artifacts: keep the session directory on an access-controlled filesystem and
+do not publish it unchanged in support bundles.
 
 ---
 
@@ -123,8 +171,8 @@ as a public configuration API.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_QUANTIZE_ENABLED` | Unset | Master switch (`1` to enable) for the AMD Quark PTQ quantization prelude driven by `--quantize` / `--quantize-scheme`. |
-| `QUARK_ROOT` | `/primus/hyperloom/Quark` | AMD Quark checkout used by the quantization-agent. |
+| `HYPERLOOM_QUANTIZE_ENABLED` | Unset | Primary switch (`1` to enable) for the AMD Quark PTQ quantization prelude driven by `--quantize` / `--quantize-scheme`. |
+| `QUARK_ROOT` | Unset | AMD Quark checkout used by the quantization-agent. Set this explicitly when quantization is enabled. |
 
 ---
 
@@ -134,12 +182,27 @@ The following variables configure framework source discovery and path overrides.
 
 | Variable                                          | Default                                                                | Description                                                                                                                                            |
 |---------------------------------------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`SOURCE_ROOTS`      | Union with `/sgl-workspace`<br>`/{aiter,sglang`<br>`,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `src/hyperloom/inference_optimizer/assets/install.sh`'s `_probe_framework_source_roots` step (via `hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env`).   |
+| `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`SOURCE_ROOTS`      | Union with `/sgl-workspace`<br>`/{aiter,sglang`<br>`,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `src/hyperloom/inference_optimizer/assets/install.sh`'s `_probe_framework_source_roots` step (using `hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env`).   |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_RESCUE_PATHS`                | Unset                                                                  | Colon-separated list of extra directories the harvest step scans for stray `result.json` files written outside the session dir (InferenceX-native scripts that hardcode `--result-dir`). |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_AITER_JIT_DIR`               | Aiter default                                                          | Override the aiter just-in-time (JIT) cache root for cold-cap sizing.                                                                                                  |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_STRICT_PATHS`                | `1` when CLI bootstraps                                                | When `1`, missing path env raises instead of falling back to discovery. Set by the CLI at session start; do not override unless debugging.              |
 | `HYPERLOOM_`<br>`SGLANG_PA`<br>`TCH_EXACT`<br>`_VERSIONS`           | Unset                                                                  | Pin the sglang server-patch step to specific upstream versions; advanced compatibility option.                                                          |
 | `HYPERLOOM_`<br>`ENABLE`<br>`_PATCH`                          | `1`                                                                    | Set to `0` to skip the in-place server patch step (useful when the upstream is already pre-patched).                                                    |
+| `AITER_REF` | Unset | Optional bare-metal AITER install pin. When unset, the installer selects the newest tag compatible with the installed torch/triton stack. |
+
+---
+
+## Security compatibility switches
+
+These switches keep production-compatible behavior by default while still
+allowing operators to turn off credential/env persistence in hardened
+deployments.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS` | Unset (`1`) | Allows the specialist MCP config file to include auth headers such as `Authorization` for `cortex_kb` by default for production compatibility. The generated config is chmod `0600`. Set to `0` to skip bearer-auth Cortex KB MCP wiring when no auth header should be persisted. |
+| `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
 
@@ -163,18 +226,17 @@ The following variables configure the Critic, Robustness, and knowledge base com
 ## Session / observability hand-off
 
 These are read by `src/hyperloom/inference_optimizer/session/manifest.py` and the `src/hyperloom/inference_optimizer/breakdown/collectors/`
-package to populate `session_breakdown.json` for downstream consumers
-(`claw-stats-service`).
+package to populate `session_breakdown.json` for downstream consumers.
 
 | Variable          | Description                                                                                |
 |-------------------|--------------------------------------------------------------------------------------------|
 | `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the Primus-Claw sandbox; unset for local runs. |
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by Primus-Claw; unset for local runs.                                            |
-| `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. See details below. |
+| `HYPERLOOM_LANGFUSE_ENABLE` | Primary switch (default **off**) for live Langfuse trace push. See details below. |
 
 **`HYPERLOOM_LANGFUSE_ENABLE`** details:
 
-Master switch (default **off**) for live Langfuse trace push.
+Primary switch (default **off**) for live Langfuse trace push.
 
 - **SDK install**: when this flag is on, `src/hyperloom/inference_optimizer/assets/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
 - **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, robustness, specialist) and KEEP/REVERT decision Scores.

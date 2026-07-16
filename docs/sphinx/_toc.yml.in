@@ -5,6 +5,8 @@ root: index
 
 subtrees:
 - entries:
+  - file: what-is-hyperloom.md
+    title: What is Hyperloom?
   - file: release-notes.md
     title: Release notes
   - file: compatibility.md
@@ -12,24 +14,32 @@ subtrees:
 
 - caption: Install
   entries:
+  - file: install/install.md
+    title: Quickstart — Docker and Bare metal
   - file: install/slurm.md
     title: Quickstart — Slurm
+  - file: install/multi-node/hyperloom-remote-demo.md
+    title: Quickstart — Remote multi-node
+    subtrees:
+    - entries:
+      - file: install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md
+        title: Qwen3-30B-A3B multi-node workload
 
-- caption: Components
+- caption: Overview
   entries:
   - file: components/index.md
     title: Components
     subtrees:
     - entries:
-      - file: components/intellikit.md
+      - url: https://rocm.docs.amd.com/projects/intellikit/en/latest/
         title: IntelliKit
-      - file: components/magpie.md
+      - url: https://rocm.docs.amd.com/projects/magpie/en/latest
         title: Magpie
-      - file: components/tracelens.md
+      - url: https://rocm.docs.amd.com/projects/tracelens/en/latest/
         title: TraceLens
-      - file: components/geak.md
+      - url: https://rocm.docs.amd.com/projects/geak/en/latest/
         title: GEAK
-      - file: components/agentkernelarena.md
+      - url: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/
         title: AgentKernelArena
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
@@ -49,18 +59,18 @@ subtrees:
     title: Environment variables
   - file: reference/authentication.md
     title: Authentication and credentials
-  - file: reference/troubleshooting.md
-    title: Troubleshooting
+  - file: reference/operations.md
+    title: Operations and self-hosting
+  - file: reference/upgrade.md
+    title: Upgrade guide
+  - file: reference/session-breakdown.md
+    title: Session output schema
   - file: reference/integrate-kb.md
     title: Knowledge base integration
   - file: reference/operator-scripts.md
     title: Operator scripts
-  - file: reference/session-breakdown.md
-    title: session_breakdown.json
-  - file: reference/operations.md
-    title: Operations
-  - file: reference/upgrade.md
-    title: Upgrade
+  - file: reference/troubleshooting.md
+    title: Troubleshooting
 
 - caption: About
   entries:

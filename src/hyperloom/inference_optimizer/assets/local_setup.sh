@@ -234,7 +234,7 @@ Optimize inference for this workload:
 - Model: /path/to/your/model
 - Framework: sglang
 - GPU: MI300X
-- TP: 8
+- TP: 1
 - CONC: 64
 - ISL: 1024
 - OSL: 1024

@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import sys
 import time
@@ -71,6 +72,7 @@ from .credentials import (
 from .multi_node import (
     _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
     _dump_mn_input_params as _dump_mn_input_params,
+    _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
     _run_quantization_prelude as _run_quantization_prelude,
@@ -101,9 +103,25 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
+_HF_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
+_DEFAULT_MODEL_PATH_ROOTS: tuple[str, ...] = (
+    "/models",
+    "/path/models",
+    "/mnt/models",
+    "/shared_nfs",
+    "/wekafs",
+    "/hyperloom/models",
+)
+
 from .parser import (
     _build_parser as _build_parser,
     _positive_int_arg as _positive_int_arg,
+    DEFAULT_ISL,
+    DEFAULT_OSL,
+    DEFAULT_CONC,
+    DEFAULT_TP,
+    DEFAULT_EP,
+    DEFAULT_PRECISION,
 )
 from .preflight import (
     _preflight as _preflight,
@@ -158,6 +176,62 @@ def _enforce_expected_framework(
             file=sys.stderr,
         )
         raise SystemExit(2)
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        return path == root or path.is_relative_to(root)
+    except AttributeError:  # pragma: no cover - Python <3.9
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+
+def _resume_model_path_roots() -> tuple[Path, ...]:
+    raw = os.environ.get("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", "").strip()
+    configured = [p for p in raw.split(os.pathsep) if p.strip()] if raw else []
+    roots = configured + list(_DEFAULT_MODEL_PATH_ROOTS)
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        p = Path(root).expanduser().resolve()
+        marker = str(p)
+        if marker not in seen:
+            out.append(p)
+            seen.add(marker)
+    return tuple(out)
+
+
+def _validate_resume_model_path(model_path: str) -> str:
+    """Validate persisted ``state.model_path`` before re-exporting MODEL_PATH.
+
+    Resume trusts state.json for continuity, but state.json is writable session
+    data. Keep local model paths under known model roots; still allow
+    HuggingFace-style repo IDs because fresh launches support them too.
+    """
+    raw = str(model_path or "").strip()
+    if not raw:
+        return ""
+    if any(ch in raw for ch in ("\x00", "\n", "\r")):
+        raise ValueError("model_path contains control characters")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        if _HF_MODEL_ID_RE.fullmatch(raw) and ".." not in raw.split("/"):
+            return raw
+        raise ValueError(
+            "model_path must be a HuggingFace repo id or an absolute path under "
+            "INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS"
+        )
+    resolved = path.resolve()
+    roots = _resume_model_path_roots()
+    if any(_path_is_under(resolved, root) for root in roots):
+        return str(resolved)
+    raise ValueError(
+        "model_path is outside allowed model roots; set "
+        "INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS to opt into this root"
+    )
 
 
 def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
@@ -529,8 +603,6 @@ def _probe_llm_catalog(
 ) -> set[str] | frozenset[str] | None:
     """Probe ``<base_url>/models`` with retry (gateway flakes); return set of model ids or None.
 
-    TLS verification is on by default; ``INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1`` skips it (warns).
-
     Args:
         base_url (str): The gateway base URL; ``""`` returns ``None``.
         api_key (str): Optional bearer key sent in the ``Authorization``
@@ -554,24 +626,6 @@ def _probe_llm_catalog(
         )
         return None
 
-    insecure = os.environ.get(
-        "INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE",
-        "",
-    ).strip().lower() in ("1", "true", "yes")
-    if insecure:
-        print(
-            "Preflight: WARNING — INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1 "
-            "is set; catalog probe will skip TLS verification while sending "
-            "an Authorization: Bearer header. Use only against trusted internal "
-            "gateways with self-signed certs."
-        )
-        try:
-            import urllib3  # type: ignore[import-not-found]
-
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        except Exception:  # noqa: BLE001
-            pass
-
     probe_url = base_url.rstrip("/") + "/models"
     headers = _catalog_probe_headers(base_url=base_url, api_key=api_key)
 
@@ -585,7 +639,6 @@ def _probe_llm_catalog(
                 probe_url,
                 headers=headers,
                 timeout=_CATALOG_REQUEST_TIMEOUT_SEC,
-                verify=not insecure,
             )
         except Exception as exc:  # noqa: BLE001
             last_err = f"{type(exc).__name__}: {exc}"
@@ -703,6 +756,12 @@ def _custom_orch_model_allowed() -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _custom_orch_model_explicitly_disabled() -> bool:
+    """Whether the operator explicitly requested strict AMD model allowlisting."""
+    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
+    return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
+
+
 def _critic_agent_runtime_needed(
     critic_choice: str,
     *,
@@ -746,7 +805,9 @@ def _validate_and_resolve_claude_model(
     # Custom orchestration models are enabled by default; the gateway catalog
     # probe below is the sole gate. Set INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0
     # to restore the stricter AMD Claude allowlist.
-    allow_custom = _custom_orch_model_allowed() or _claude_model_should_follow_codex()
+    allow_custom = _custom_orch_model_allowed()
+    if not _custom_orch_model_explicitly_disabled():
+        allow_custom = allow_custom or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
@@ -950,6 +1011,47 @@ DEFAULT_CRITIC_BACKEND = os.environ.get(
 _VALID_CRITIC_BACKENDS = ("mock", "agent")
 
 
+def _resolve_choice(
+    attr: str,
+    default: str,
+    valid: tuple[str, ...],
+    flag_hint: str,
+    *,
+    args: argparse.Namespace,
+) -> tuple[str, bool]:
+    """Resolve a backend choice from CLI args with validation and fallback to default.
+
+    Args:
+        attr (str): The ``args`` attribute name to read (e.g. ``"critic_backend"``).
+        default (str): The fallback value when the attribute is ``None``.
+        valid (tuple[str, ...]): Allowable backend names; hard-fails outside this set.
+        flag_hint (str): Human-readable hint for the error message describing how to
+            set the value (e.g. ``"--critic-mock / --critic-agent or
+            INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND"``).
+        args (argparse.Namespace): The parsed CLI namespace.
+
+    Returns:
+        tuple[str, bool]: ``(chosen, explicit)`` where ``chosen`` is the resolved
+        backend name and ``explicit`` is ``True`` when the arg was set by the
+        caller (not defaulted).
+
+    Raises:
+        SystemExit: With code 2 when the resolved backend is not in ``valid``.
+    """
+    chosen = getattr(args, attr, None)
+    explicit = chosen is not None
+    if chosen is None:
+        chosen = default
+    if chosen not in valid:
+        print(
+            f"ERROR: {attr.replace('_', ' ')} {chosen!r} not in {valid!r} "
+            f"(set by {flag_hint})",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return chosen, explicit
+
+
 def _resolve_critic_choice(args: argparse.Namespace) -> str:
     """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid.
 
@@ -963,17 +1065,13 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     Raises:
         SystemExit: With code 2 when the chosen backend is invalid.
     """
-    chosen = args.critic_backend
-    if chosen is None:
-        chosen = DEFAULT_CRITIC_BACKEND
-    if chosen not in _VALID_CRITIC_BACKENDS:
-        print(
-            f"ERROR: critic backend {chosen!r} not in {_VALID_CRITIC_BACKENDS!r} "
-            f"(set by --critic-mock / --critic-agent or "
-            f"INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND)",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    chosen, _ = _resolve_choice(
+        "critic_backend",
+        DEFAULT_CRITIC_BACKEND,
+        _VALID_CRITIC_BACKENDS,
+        "--critic-mock / --critic-agent or INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND",
+        args=args,
+    )
     return chosen
 
 
@@ -1003,19 +1101,13 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     Raises:
         SystemExit: With code 2 when the chosen backend is invalid.
     """
-    chosen = getattr(args, "robustness_backend", None)
-    explicit = chosen is not None
-    if chosen is None:
-        chosen = DEFAULT_ROBUSTNESS_BACKEND
-    if chosen not in _VALID_ROBUSTNESS_BACKENDS:
-        print(
-            f"ERROR: robustness backend {chosen!r} not in "
-            f"{_VALID_ROBUSTNESS_BACKENDS!r} (set by --robustness-mock / "
-            f"--robustness-agent or "
-            f"INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND)",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    chosen, explicit = _resolve_choice(
+        "robustness_backend",
+        DEFAULT_ROBUSTNESS_BACKEND,
+        _VALID_ROBUSTNESS_BACKENDS,
+        "--robustness-mock / --robustness-agent or INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
+        args=args,
+    )
     nodes = int(getattr(args, "nodes", 1) or 1)
     if nodes >= 2 and chosen == "agent" and not _robustness_server_configured(args):
         if explicit:
@@ -1175,6 +1267,43 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     return phase_budget_pct
 
 
+def _resolve_workload_knobs(
+    args: argparse.Namespace,
+    state: Any | None = None,
+) -> None:
+    """Fill unset workload knobs on ``args`` from a fixed priority ladder.
+
+    Priority: explicit CLI flag (non-``None``) > resumed ``SharedState`` value >
+    fallback default. Writes the resolved values back onto ``args`` so every
+    downstream consumer (SharedState seed, manifest, env projection) reads one
+    authoritative source instead of racing argparse defaults against env
+    (issue #903). Inherited process env is deliberately NOT a config source.
+
+    Args:
+        args: Parsed CLI namespace; mutated in place.
+        state: Resumed ``SharedState`` whose persisted knobs win over defaults
+            when the flag is unset; ``None`` on a fresh launch.
+    """
+    int_knobs = (
+        ("isl", DEFAULT_ISL),
+        ("osl", DEFAULT_OSL),
+        ("conc", DEFAULT_CONC),
+        ("tp", DEFAULT_TP),
+        ("ep", DEFAULT_EP),
+    )
+    for name, default in int_knobs:
+        val = getattr(args, name, None)
+        if val is None:
+            persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
+            val = persisted if persisted > 0 else default
+        setattr(args, name, int(val))
+    precision = getattr(args, "precision", None)
+    if not precision:
+        persisted = (getattr(state, "precision", "") or "").strip() if state is not None else ""
+        precision = persisted or DEFAULT_PRECISION
+    args.precision = precision
+
+
 def _export_workload_envs_for_optimize(
     args: argparse.Namespace,
     *,
@@ -1183,24 +1312,26 @@ def _export_workload_envs_for_optimize(
     ep_resolved: int,
     argv: list[str] | None = None,
 ) -> None:
-    """Mirror explicit workload CLI flags (--tp/--conc/--ep) into env so executors' Magpie YAMLs honor them.
+    """Project resolved workload knobs (TP/CONC/EP) into env for downstream Magpie YAMLs.
+
+    After ``_resolve_workload_knobs`` the values on ``args`` are already the
+    authoritative resolution (flag > resume-state > default), so export them
+    unconditionally. This keeps SharedState, the manifest, and the materialized
+    YAML in agreement instead of the old gated export that only fired for
+    explicit flags / multi-node and left SharedState and the served value split
+    (issue #903).
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads ``conc``).
-        nodes_resolved (int): The resolved node count; ``>= 2`` forces export
-            of all three knobs regardless of whether they were passed.
+        nodes_resolved (int): The resolved node count (unused; retained for the
+            call-site contract).
         tp_resolved (int): The resolved tensor-parallel size to export as ``TP``.
         ep_resolved (int): The resolved expert-parallel size to export as ``EP``.
-        argv (list[str] | None): The argument vector to inspect for explicit
-            flags; defaults to ``sys.argv[1:]`` when ``None``.
+        argv (list[str] | None): Unused; retained for the call-site contract.
     """
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if nodes_resolved >= 2 or _argv_has_option(argv, "--tp"):
-        os.environ["TP"] = str(tp_resolved)
-    if nodes_resolved >= 2 or _argv_has_option(argv, "--conc"):
-        os.environ["CONC"] = str(max(1, int(getattr(args, "conc", 8) or 8)))
-    if nodes_resolved >= 2 or _argv_has_option(argv, "--ep"):
-        os.environ["EP"] = str(ep_resolved)
+    os.environ["TP"] = str(max(1, int(tp_resolved or 1)))
+    os.environ["CONC"] = str(max(1, int(getattr(args, "conc", DEFAULT_CONC) or DEFAULT_CONC)))
+    os.environ["EP"] = str(max(1, int(ep_resolved or 1)))
 
 
 async def _run_optimize(args: argparse.Namespace) -> int:
@@ -1251,16 +1382,32 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
+    # Multi-node topology handoff: export the CLI-flag-resolved backend / image /
+    # gpus-per-node so downstream subprocesses (kernel agent, benchmark, KB
+    # topology, external-mode state synthesis) read a single stable source. These
+    # are internal handoff envs, not a public config API; users pass --mn-backend
+    # / --mn-image / --gpus-per-node instead.
+    if nodes_resolved >= 2:
+        os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
+        os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
+        mn_image_resolved = str(getattr(args, "mn_image", "") or "").strip()
+        if mn_image_resolved:
+            os.environ["INFERENCE_OPTIMIZER_MN_IMAGE"] = mn_image_resolved
     operator_server_args = str(getattr(args, "server_args", "") or "").strip()
     if operator_server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
-    # Re-export $TP/$CONC/$EP when explicitly supplied (always for multi-node); skip defaults in single-node.
-    _export_workload_envs_for_optimize(
-        args,
-        nodes_resolved=nodes_resolved,
-        tp_resolved=tp_resolved,
-        ep_resolved=ep_resolved,
-    )
+    # Project resolved workload knobs into env for the fresh-launch path only.
+    # A resume must NOT export here: ``args.tp``/etc. are still unresolved
+    # (``None`` -> 1) because the persisted SharedState is loaded later; the
+    # resume branch re-exports the real values after ``_resolve_workload_knobs``
+    # so downstream (incl. preflight) never sees the placeholder default.
+    if not args.resume and not args.resume_from:
+        _export_workload_envs_for_optimize(
+            args,
+            nodes_resolved=nodes_resolved,
+            tp_resolved=tp_resolved,
+            ep_resolved=ep_resolved,
+        )
     # User-declared grid skip list; re-export so subprocess executors inherit it (empty clears stale values).
     skip_variants_resolved = (getattr(args, "skip_variants", "") or "").strip()
     os.environ["SKIP_VARIANTS"] = skip_variants_resolved
@@ -1428,12 +1575,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
         # Re-export session-level env from persisted state so a fresh-shell resume doesn't fall back to YAML defaults.
         if state.model_path:
-            os.environ["MODEL_PATH"] = state.model_path
-            print(f"  re-exported MODEL_PATH: {state.model_path}")
+            try:
+                resume_model_path = _validate_resume_model_path(state.model_path)
+            except ValueError as exc:
+                print(f"ERROR: --resume refused persisted model_path: {exc}", file=sys.stderr)
+                sys.exit(2)
+            os.environ["MODEL_PATH"] = resume_model_path
+            print(f"  re-exported MODEL_PATH: {resume_model_path}")
             # Backfill model_info for sessions created before the field existed
             # (or whose config was unreadable at launch); fail-soft to {}.
             if not state.model_info:
-                state.model_info = summarize_model_config(state.model_path)
+                state.model_info = summarize_model_config(resume_model_path)
                 if state.model_info:
                     state.save(session_dir)
                     print("  backfilled model_info (from config.json)")
@@ -1448,20 +1600,24 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
             if runner_gpu_type != state.gpu_type:
                 print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
-        # Re-export workload metadata from SharedState so resume sees the same workload contract (not YAML defaults).
-        for state_attr, env_name in (
-            ("tp", "TP"),
-            # ``ep`` mirrors EP so single-node vLLM MoE resume still injects --enable-expert-parallel.
-            ("ep", "EP"),
-            ("conc", "CONC"),
-            ("isl", "ISL"),
-            ("osl", "OSL"),
-            ("max_model_len", "MAX_MODEL_LEN"),
+        # Resolve workload knobs with the resumed state as the fallback source
+        # (explicit --isl/--conc/... on this resume still win), then project the
+        # resolved values into env so resume sees the same workload contract
+        # (not YAML defaults). ``ep`` mirrors EP so single-node vLLM MoE resume
+        # still injects --enable-expert-parallel.
+        _resolve_workload_knobs(args, state)
+        _resume_max_model_len = getattr(args, "max_model_len", None) or getattr(state, "max_model_len", 0) or 0
+        for env_name, val in (
+            ("TP", args.tp),
+            ("EP", args.ep),
+            ("CONC", args.conc),
+            ("ISL", args.isl),
+            ("OSL", args.osl),
+            ("MAX_MODEL_LEN", _resume_max_model_len),
         ):
-            val = getattr(state, state_attr, 0) or 0
             if val:
-                os.environ[env_name] = str(val)
-                print(f"  re-exported {env_name:<14s}: {val}")
+                os.environ[env_name] = str(int(val))
+                print(f"  re-exported {env_name:<14s}: {int(val)}")
         # Profile-scoped OSL: an explicit --profile-osl on this resume wins;
         # otherwise re-export the value persisted from the original run.
         _resume_profile_osl = getattr(args, "profile_osl", None) or getattr(state, "profile_osl", 0)
@@ -1469,9 +1625,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             os.environ["PROFILE_OSL"] = str(int(_resume_profile_osl))
             state.profile_osl = int(_resume_profile_osl)
             print(f"  re-exported PROFILE_OSL   : {int(_resume_profile_osl)}")
-        if state.precision:
-            os.environ["PRECISION"] = state.precision
-            print(f"  re-exported PRECISION     : {state.precision}")
+        if args.precision:
+            os.environ["PRECISION"] = args.precision
+            print(f"  re-exported PRECISION     : {args.precision}")
         if getattr(state, "framework_version", ""):
             os.environ["FRAMEWORK_VERSION"] = state.framework_version
             print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
@@ -1654,6 +1810,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args.gpu_type = None
             print("GPU type        : <unset> (Magpie will auto-detect)")
 
+        # Resolve workload knobs (flag > default; no resume state on a fresh
+        # launch) so ISL/OSL/CONC/TP/EP are authoritative reals before
+        # MAX_MODEL_LEN auto-derivation and env projection (issue #903).
+        _resolve_workload_knobs(args)
         # MAX_MODEL_LEN is operator-overridable. Auto resolution only runs when
         # neither --max-model-len nor $MAX_MODEL_LEN was supplied.
         max_model_len, max_model_len_source = _resolve_run_max_model_len(args)

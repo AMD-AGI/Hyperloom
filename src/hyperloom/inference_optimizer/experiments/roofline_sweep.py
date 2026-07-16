@@ -203,7 +203,7 @@ class SglangServer:
             if self.proc is None or self.proc.poll() is not None:
                 raise RuntimeError(f"sglang server died during startup; see {self.log_path}")
             try:
-                with urllib.request.urlopen(url, timeout=2) as r:
+                with urllib.request.urlopen(url, timeout=2) as r:  # nosec B310 - fixed loopback health check.
                     if r.status < 500:
                         print(f"[server] ready on port {self.port}", flush=True)
                         return

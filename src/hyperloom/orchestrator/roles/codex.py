@@ -34,7 +34,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from .agent_role import DEFAULT_CODEX_MODEL
-from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env
+from .base import BackendError, BackendTurnResult, build_chat_messages, parse_call_timeout_env, safe_int
 
 
 _OUTPUT_INSTRUCTIONS = """
@@ -300,8 +300,8 @@ class CodexBackend:
         # Map OpenAI usage onto the SAME metadata keys ClaudeBackend uses so the
         # Coordinator's accumulator stays backend-agnostic; cache_* counters are 0.
         usage = getattr(resp, "usage", None)
-        input_tokens = self._safe_int(getattr(usage, "prompt_tokens", None))
-        output_tokens = self._safe_int(getattr(usage, "completion_tokens", None))
+        input_tokens = safe_int(getattr(usage, "prompt_tokens", None))
+        output_tokens = safe_int(getattr(usage, "completion_tokens", None))
         return text, finish, input_tokens, output_tokens, {}
 
     # ------------------------------------------------------------------
@@ -351,31 +351,12 @@ class CodexBackend:
         text, citations = _extract_responses_output(resp)
         finish = _field(resp, "status")
         usage = _field(resp, "usage")
-        input_tokens = self._safe_int(_field(usage, "input_tokens"))
-        output_tokens = self._safe_int(_field(usage, "output_tokens"))
+        input_tokens = safe_int(_field(usage, "input_tokens"))
+        output_tokens = safe_int(_field(usage, "output_tokens"))
         extra_meta: dict[str, Any] = {}
         if citations:
             extra_meta["web_search_citations"] = citations
         return text, finish, input_tokens, output_tokens, extra_meta
-
-    @staticmethod
-    def _safe_int(value: Any) -> int:
-        """Coerce a usage value to int, defaulting to 0 on None / bad type.
-
-        Mirrors ``ClaudeBackend._safe_int`` so both backends report
-        identically-shaped token counts on metadata.
-
-        Args:
-            value: A raw usage counter of any type to coerce to an integer.
-
-        Returns:
-            The integer value, or ``0`` when ``value`` is ``None`` or not
-            coercible.
-        """
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
 
 
 __all__ = ["CodexBackend", "_extract_envelope", "_extract_responses_output"]

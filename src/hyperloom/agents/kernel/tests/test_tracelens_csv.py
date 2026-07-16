@@ -2617,9 +2617,9 @@ def test_classify_patchability_rejects_missing_source_file():
 def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
     """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling
     .cuh/.cpp.jinja) must be skipped, not edited."""
-    src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
+    src = "/path/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
     # Make the reusable-root gate pass deterministically regardless of host env.
-    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/wekafs/aiter/",))
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/path/aiter/",))
     reusable, reason = tla.classify_patchability(
         {"name": "paged_attention_ragged", "source_file": src, "source_type": "python"},
     )
@@ -2666,8 +2666,8 @@ def test_classify_patchability_still_rejects_aiter_py_dispatcher(monkeypatch):
 
 def test_classify_patchability_keeps_cpp_itfs_device_source(monkeypatch):
     """The real device source (.cuh) under cpp_itfs stays reusable."""
-    src = "/wekafs/aiter/csrc/cpp_itfs/pa/pa_kernels.cuh"
-    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/wekafs/aiter/",))
+    src = "/path/aiter/csrc/cpp_itfs/pa/pa_kernels.cuh"
+    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/path/aiter/",))
     reusable, reason = tla.classify_patchability(
         {"name": "paged_attention", "source_file": src, "source_type": "hip_cpp"},
     )
@@ -3433,6 +3433,16 @@ def test_is_native_source_detects_device_extensions():
         assert tlr._is_native_source(p), p
     for p in ("model.py", "wrapper.pyi", "notes.txt", ""):
         assert not tlr._is_native_source(p), p
+
+
+def test_grep_for_keyword_treats_dash_prefixed_keyword_as_literal(tmp_path):
+    """Profiler-derived names can begin with ``-``; grep must not treat them
+    as command-line options."""
+    src = tmp_path / "kernel.py"
+    src.write_text("def uses_dash_prefixed_name():\n    return '--danger'\n", encoding="utf-8")
+
+    tla._GREP_CACHE.clear()
+    assert tla._grep_for_keyword("--danger", tmp_path) == [src]
 
 
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):

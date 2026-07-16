@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes"
+    "description": "Hyperloom release notes: headline capabilities for version 0.8.0, including the agentic optimization loop, multi-agent runtime, TraceLens integration, and session artifacts."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
@@ -28,7 +28,7 @@ core of the current runtime:
 - **Multi-agent runtime** — A single-mode 4-agent architecture
   (Orchestration / Kernel / Critic / Robustness) drives the loop, with
   additional framework-agent (upstream framework PR discovery / authoring) and
-  quantization-agent (AMD Quark PTQ prelude) roles available via the
+  quantization-agent (AMD Quark PTQ prelude) roles available through the
   `--quantize` / `--framework`-driven paths.
 
 - **TraceLens integration** — Agentic trace analysis that captures bottlenecks
@@ -44,6 +44,6 @@ core of the current runtime:
   file that records the final throughput, cumulative validated gain, and the ordered
   action path — designed for dashboard and downstream delivery integrations.
 
-- **Bare-metal and Docker setup for self-hosted deployments** — Users can install
-  Hyperloom on their own AMD GPU hardware and run the full optimization loop
+- **Bare-metal and Docker setup for self-hosted deployments** — Install
+  Hyperloom on your own AMD GPU hardware and run the full optimization loop
   with an agent-driven setup flow.
