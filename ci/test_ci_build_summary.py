@@ -13,7 +13,6 @@ if str(_CI_DIR) not in sys.path:
     sys.path.insert(0, str(_CI_DIR))
 
 import build_summary as bs  # noqa: E402
-import inferenceX_parser as ix  # noqa: E402
 
 
 # ── formatting helpers ──
@@ -42,13 +41,6 @@ def test_gain_medal():
     assert bs.gain_medal(-1) == ""
 
 
-def test_vs_infx_decoration():
-    assert bs.vs_infx_decoration(None) == ""
-    assert bs.vs_infx_decoration(60) == "✅✅"
-    assert bs.vs_infx_decoration(5) == "✅"
-    assert bs.vs_infx_decoration(-1) == ""
-
-
 def test_status_icon():
     assert bs.status_icon({"ci_success": True}) == "✅"
     assert bs.status_icon({"final_status": "Failed"}) == "❌"
@@ -73,51 +65,6 @@ def test_gain_sort_key():
     assert bs.gain_sort_key({"ci_success": True, "gain_pct": 10}) == (0, -10.0)
     assert bs.gain_sort_key({"ci_success": False}) == (1, 1.0)
     assert bs.gain_sort_key({"ci_success": True, "gain_pct": "bad"}) == (0, 1.0)
-
-
-# ── load_hf_to_ifx_map ──
-
-
-def test_load_hf_to_ifx_map(tmp_path: Path):
-    p = tmp_path / "ifx.yaml"
-    p.write_text("models:\n  - hf_model: org/m\n    api_name: m-api\n  - hf_model: x\n", encoding="utf-8")
-    assert bs.load_hf_to_ifx_map(p) == {"org/m": "m-api"}
-
-
-def test_load_hf_to_ifx_map_missing(tmp_path: Path):
-    assert bs.load_hf_to_ifx_map(tmp_path / "no.yaml") == {}
-
-
-# ── fetch_inferenceX_ref ──
-
-
-def test_fetch_inferenceX_ref_no_mapping():
-    assert bs.fetch_inferenceX_ref("org/m", {}, "b200", 1024, 1024) is None
-
-
-def test_fetch_inferenceX_ref_match(monkeypatch):
-    monkeypatch.setattr(
-        ix,
-        "fetch_benchmarks",
-        lambda name: [
-            {"hardware": "b200", "isl": 1024, "osl": 1024, "precision": "fp8", "metrics": {"output_tput_per_gpu": 123}}
-        ],
-    )
-    ref = bs.fetch_inferenceX_ref("org/m", {"org/m": "m-api"}, "b200", 1024, 1024)
-    assert ref == 123
-
-
-def test_fetch_inferenceX_ref_api_error(monkeypatch):
-    def boom(name):
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(ix, "fetch_benchmarks", boom)
-    assert bs.fetch_inferenceX_ref("org/m", {"org/m": "api"}, "b200", 1024, 1024) is None
-
-
-def test_fetch_inferenceX_ref_no_bench(monkeypatch):
-    monkeypatch.setattr(ix, "fetch_benchmarks", lambda name: [])
-    assert bs.fetch_inferenceX_ref("org/m", {"org/m": "api"}, "b200", 1024, 1024) is None
 
 
 # ── build_run_metadata ──
@@ -157,24 +104,20 @@ def _make_artifacts(tmp_path: Path) -> tuple[Path, Path]:
     return artifacts, manifests
 
 
-def test_collect_rows(tmp_path: Path, monkeypatch):
+def test_collect_rows(tmp_path: Path):
     artifacts, manifests = _make_artifacts(tmp_path)
-    monkeypatch.setattr(bs, "fetch_inferenceX_ref", lambda *a, **k: 120.0)
-    rows, normalized = bs.collect_rows(artifacts, manifests, {}, "b200", 1024, 1024)
+    rows, normalized = bs.collect_rows(artifacts, manifests)
     assert len(rows) == 1
     row = rows[0]
     assert row["model"] == "org/m-7B"
     assert row["gain_pct"] == 30.0
-    assert row["inferenceX_tok_per_gpu"] == 120.0
-    assert row["vs_inferenceX_pct"] is not None
     assert row["ci_success"] is True
 
 
-def test_render_markdown(tmp_path: Path, monkeypatch):
+def test_render_markdown(tmp_path: Path):
     artifacts, manifests = _make_artifacts(tmp_path)
-    monkeypatch.setattr(bs, "fetch_inferenceX_ref", lambda *a, **k: None)
-    rows, _ = bs.collect_rows(artifacts, manifests, {}, "b200", 1024, 1024)
-    md = bs.render_markdown(rows, "b200", 1024, 1024)
+    rows, _ = bs.collect_rows(artifacts, manifests)
+    md = bs.render_markdown(rows, 1024, 1024)
     assert "# Hyperloom CI Summary" in md
     assert "`m-7B`" in md
 
@@ -182,7 +125,6 @@ def test_render_markdown(tmp_path: Path, monkeypatch):
 def test_main(tmp_path: Path, monkeypatch):
     artifacts, manifests = _make_artifacts(tmp_path)
     out_dir = tmp_path / "out"
-    monkeypatch.setattr(bs, "fetch_inferenceX_ref", lambda *a, **k: None)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -194,8 +136,6 @@ def test_main(tmp_path: Path, monkeypatch):
             str(manifests),
             "--out-dir",
             str(out_dir),
-            "--ifx-models-yaml",
-            str(tmp_path / "absent.yaml"),
         ],
     )
     assert bs.main() == 0
