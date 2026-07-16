@@ -353,7 +353,7 @@ async def test_verdict_map_collapses_to_summary_single_verdict(coord):
 
 @pytest.mark.asyncio
 async def test_verdict_map_mixed_collapse_logs_audit(coord, caplog):
-    # SWSPLAT-33400 (defense-in-depth, log-only): a mixed verdict_map that
+    # Defense-in-depth (log-only): a mixed verdict_map that
     # collapses to approve must STILL materialise the whole proposal (behaviour
     # unchanged) AND emit a log-only audit record for traceability.
     import logging
@@ -375,7 +375,7 @@ async def test_verdict_map_mixed_collapse_logs_audit(coord, caplog):
     assert pending.verdict == "approve"
     assert len(coord._materialise_calls) == 1
     # log-only audit fired
-    assert any("SWSPLAT-33400" in r.getMessage() for r in caplog.records)
+    assert any("review_verdict collapse" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
