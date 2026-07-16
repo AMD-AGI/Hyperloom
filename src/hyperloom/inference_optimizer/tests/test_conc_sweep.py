@@ -7,7 +7,9 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from unittest.mock import patch
 
@@ -1597,6 +1599,138 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
         tp=1,
     )
     assert result is None
+
+
+def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
+    from hyperloom.orchestrator.kernel import conc_sweep_plot
+
+    xs, ys = conc_sweep_plot._arm_series(
+        [
+            {"conc": 4, "output_throughput": 800.0},
+            {"conc": 2, "output_throughput": "300"},
+            {"conc": 0, "output_throughput": 1000.0},
+            {"conc": 1, "output_throughput": None},
+            {"conc": "bad", "output_throughput": 10},
+            {"conc": 8, "output_throughput": -1},
+        ],
+        tp_eff=2.0,
+    )
+    assert xs == [150.0, 200.0]
+    assert ys == [150.0, 400.0]
+    assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0) == ([], [])
+
+    cx, cy = conc_sweep_plot._ceiling_series(
+        {
+            "rows": [
+                {"conc": 4, "t_peak_tok_s": 1000},
+                {"conc": 2, "t_peak_tok_s": "600"},
+                {"conc": None, "t_peak_tok_s": 1},
+                {"conc": "bad", "t_peak_tok_s": 1},
+                {"conc": 1, "t_peak_tok_s": -1},
+            ]
+        },
+        tp_eff=4.0,
+    )
+    assert cx == [250.0, 300.0]
+    assert cy == [250.0, 150.0]
+    assert conc_sweep_plot._ceiling_series({"rows": [{"conc": 0, "t_peak_tok_s": 0}]}, 1.0) == ([], [])
+
+
+def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+    calls: dict[str, Any] = {"plots": [], "annotations": [], "labels": [], "titles": [], "closed": False}
+
+    class _FakePatch:
+        def set_facecolor(self, value):
+            calls["fig_facecolor"] = value
+
+    class _FakeFig:
+        patch = _FakePatch()
+
+        def tight_layout(self):
+            calls["tight_layout"] = True
+
+        def savefig(self, path, **kwargs):
+            calls["saved"] = (path, kwargs)
+            Path(path).write_bytes(b"fake-png")
+
+    class _FakeSpine:
+        def set_color(self, value):
+            calls.setdefault("spines", []).append(value)
+
+    class _FakeLegendText:
+        def set_color(self, value):
+            calls.setdefault("legend_text_colors", []).append(value)
+
+    class _FakeLegend:
+        def get_texts(self):
+            return [_FakeLegendText(), _FakeLegendText()]
+
+    class _FakeAx:
+        spines = {"left": _FakeSpine(), "right": _FakeSpine()}
+
+        def set_facecolor(self, value):
+            calls["ax_facecolor"] = value
+
+        def plot(self, *args, **kwargs):
+            calls["plots"].append((args, kwargs))
+
+        def annotate(self, *args, **kwargs):
+            calls["annotations"].append((args, kwargs))
+
+        def set_xlabel(self, value, **kwargs):
+            calls["labels"].append(("x", value, kwargs))
+
+        def set_ylabel(self, value, **kwargs):
+            calls["labels"].append(("y", value, kwargs))
+
+        def set_title(self, value, **kwargs):
+            calls["titles"].append((value, kwargs))
+
+        def grid(self, *args, **kwargs):
+            calls["grid"] = (args, kwargs)
+
+        def tick_params(self, **kwargs):
+            calls["ticks"] = kwargs
+
+        def legend(self, **kwargs):
+            calls["legend"] = kwargs
+            return _FakeLegend()
+
+    fake_matplotlib = ModuleType("matplotlib")
+    fake_matplotlib.use = lambda backend: calls.setdefault("backend", backend)
+    fake_pyplot = ModuleType("matplotlib.pyplot")
+    fake_pyplot.subplots = lambda figsize: (_FakeFig(), _FakeAx())
+    fake_pyplot.close = lambda fig: calls.update({"closed": fig is not None})
+    fake_matplotlib.pyplot = fake_pyplot
+    monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+
+    payload = {
+        "baseline": {"points": [{"conc": 4, "output_throughput": 800.0}]},
+        "optimized": {"points": [{"conc": 8, "output_throughput": 1200.0}]},
+        "roofline_ceiling": {"rows": [{"conc": 4, "t_peak_tok_s": 1600.0}]},
+    }
+    out_path = tmp_path / "plots" / "curve.png"
+    result = render_conc_sweep_curve(
+        payload,
+        out_path,
+        model_label="M",
+        gpu_label="MI300X",
+        tp=4,
+        isl=1024,
+        osl=512,
+        draw_ceiling=True,
+    )
+
+    assert result == out_path
+    assert out_path.read_bytes() == b"fake-png"
+    assert calls["backend"] == "Agg"
+    assert len(calls["plots"]) == 3
+    assert len(calls["annotations"]) == 2
+    assert "ISL=1024 OSL=512" in calls["titles"][0][0]
+    assert calls["closed"] is True
 
 
 def test_format_conc_sweep_curve_section_empty_summary():
