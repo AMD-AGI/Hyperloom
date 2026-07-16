@@ -11,6 +11,7 @@ PR Monitor-compatible source hard-failing and GitHub best-effort).
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -450,7 +451,7 @@ class ExploreRequest:
         repo_url = str(raw.get("repo_url") or "").strip()
         if not repo_url:
             raise ValueError("repo_url is required")
-        work_dir = Path(str(raw.get("work_dir") or "/tmp/framework-agent")).expanduser()
+        work_dir = Path(str(raw.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent"))).expanduser()
         baseline_raw = raw.get("baseline")
         if not isinstance(baseline_raw, dict):
             raise ValueError("baseline object is required")

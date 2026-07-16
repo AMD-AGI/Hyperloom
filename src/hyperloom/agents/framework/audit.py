@@ -25,6 +25,7 @@ static evidence backing it.
 from __future__ import annotations
 
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -272,7 +273,7 @@ def _classify(
 
 def _persist_audit(request: dict[str, Any], result: dict[str, Any]) -> None:
     """Persist the semantic audit result next to audit material."""
-    work_dir = Path(str(request.get("work_dir") or "/tmp/framework-agent/phase-audit")).expanduser()
+    work_dir = Path(str(request.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent" / "phase-audit"))).expanduser()
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
         import json
@@ -312,7 +313,7 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
         return result
 
     roots = [Path(str(r)).expanduser() for r in (request.get("framework_source_roots") or []) if str(r).strip()]
-    work_dir = Path(str(request.get("work_dir") or "/tmp/framework-agent/phase-audit")).expanduser()
+    work_dir = Path(str(request.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent" / "phase-audit"))).expanduser()
 
     patch_text, patch_source = _obtain_patch_text(request, work_dir)
     if not patch_text.strip():
