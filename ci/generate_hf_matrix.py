@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,15 @@ from pathlib import Path
 # Reuse HuggingFaceClient for the pool-then-filter logic.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from optimize_submit import HuggingFaceClient  # noqa: E402
+
+
+def _http_urlopen(url: str | urllib.request.Request, *, timeout: int):
+    """Open only HTTP(S) URLs for CI metadata fetches."""
+    raw_url = url.full_url if isinstance(url, urllib.request.Request) else str(url)
+    scheme = urllib.parse.urlparse(raw_url).scheme
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported URL scheme for CI metadata fetch: {scheme!r}")
+    return urllib.request.urlopen(url, timeout=timeout)  # nosec B310 - scheme checked above.
 
 # Empty-env fallback; the schedule sets INPUT_CANDIDATES_FILE explicitly.
 DEFAULT_CRON_CANDIDATES_FILE = os.environ.get(
@@ -100,7 +110,7 @@ def _paginate_models(api_path: str) -> tuple[set[str], set[str]]:
     while True:
         url = f"{_LB_BASE}{api_path}{sep}limit=500&offset={offset}"
         try:
-            with urllib.request.urlopen(url, timeout=30) as r:
+            with _http_urlopen(url, timeout=30) as r:
                 data = json.load(r)
         except Exception as e:
             raise RuntimeError(f"failed to query {api_path} page offset={offset}: {e}") from e
@@ -158,7 +168,7 @@ def _resolve_task_models(task_ids: list[str], max_workers: int = 16) -> set[str]
                 absent.
         """
         try:
-            with urllib.request.urlopen(
+            with _http_urlopen(
                 f"{_LB_BASE}/api/v1/tasks/{tid}",
                 timeout=15,
             ) as r:
@@ -196,7 +206,7 @@ def _dashboard_task_ids() -> set[str]:
     while True:
         url = f"{_LB_BASE}/dashboard?limit=500&offset={offset}"
         try:
-            with urllib.request.urlopen(url, timeout=30) as r:
+            with _http_urlopen(url, timeout=30) as r:
                 html = r.read().decode("utf-8", errors="replace")
         except Exception as e:
             print(
@@ -281,7 +291,7 @@ def _active_workflow_slugs() -> set[str]:
             dict: The parsed JSON response.
         """
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with _http_urlopen(req, timeout=30) as r:
             return json.load(r)
 
     for status in ("queued", "in_progress"):

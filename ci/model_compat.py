@@ -20,12 +20,23 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # Context window at or below this is too small to be worth a sandbox slot.
 SHORT_CTX_MAX = 2048
 
 # Curated daily-fixed pool: repos exempt from all compatibility filtering.
+
+
+def _http_urlopen(url: str | urllib.request.Request, *, timeout: int):
+    """Open only HTTP(S) URLs for Hugging Face metadata probes."""
+    raw_url = url.full_url if isinstance(url, urllib.request.Request) else str(url)
+    scheme = urllib.parse.urlparse(raw_url).scheme
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported URL scheme for HF metadata fetch: {scheme!r}")
+    return urllib.request.urlopen(url, timeout=timeout)  # nosec B310 - scheme checked above.
+
 DAILY_FIXED_DEFAULT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "candidates", "inferencex_daily_fixed.json")
@@ -325,7 +336,7 @@ def hf_gated(repo, tokens):
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {tok}", "User-Agent": "ci-gated-check"})
         try:
-            with urllib.request.urlopen(req, timeout=20) as r:
+            with _http_urlopen(req, timeout=20) as r:
                 d = json.load(r)
             return "gated" if d.get("gated") in (True, "auto", "manual") else None
         except urllib.error.HTTPError as e:
@@ -367,7 +378,7 @@ def hf_missing_tokenizer(repo, tokens):
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {tok}", "User-Agent": "ci-tokenizer-check"})
         try:
-            with urllib.request.urlopen(req, timeout=20) as r:
+            with _http_urlopen(req, timeout=20) as r:
                 d = json.load(r)
             files = {s.get("rfilename", "") for s in (d.get("siblings") or [])}
             if not files:
