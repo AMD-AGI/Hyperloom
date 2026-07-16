@@ -25,10 +25,12 @@ benchmark:
   run_mode: local
 
   envs:
-    TP: 8                      # full-node default; env can override
-    CONC: 64                   # production throughput default; env can override
-    ISL: 256
-    OSL: 256
+    # Last-resort fallbacks only; the CLI always projects the resolved
+    # workload (flag > resume-state > default) into these envs before launch.
+    TP: 1
+    CONC: 64
+    ISL: 1024
+    OSL: 1024
     RANDOM_RANGE_RATIO: 1
     MAX_MODEL_LEN: 8192        # smaller context = faster warmup
     # ROCR_VISIBLE_DEVICES is INTENTIONALLY NOT SET here. The executor

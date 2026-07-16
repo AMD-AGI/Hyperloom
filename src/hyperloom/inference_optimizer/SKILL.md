@@ -442,13 +442,21 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
   --framework vllm \           # sglang (default) / vllm / atom / xdit
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; categorical key for atom seed grid + framework gap token + recipe key + prompt label
+  --isl 512 --osl 512 \        # workload shape — pass whatever the prompt states; omitting them uses defaults ISL=1024/OSL=1024
+  --conc 64 \                  # client concurrency — pass the prompt's value; default 64
+  --tp 1 --ep 1 \              # parallelism — pass the prompt's TP/EP; defaults 1/1
+  --precision bf16 \           # match the checkpoint (bf16 default); use fp8 for an FP8 checkpoint
   --max-hours 2 \
   --compare-against-gpu B200   # optional — when set, fetches real InferenceX reference; when unset, target_analysis still runs and writes a 'no_target_gpu_configured' marker JSON
 ```
 
 **Caller responsibility (post-classify-removal)**: the in-loop `setup` /
 `classify` actions were deleted; the SKILL caller is now expected to
-supply session metadata directly via CLI flags:
+supply session metadata directly via CLI flags. **Any workload value the
+operator states in the prompt (ISL, OSL, CONC, TP, EP, precision, budget) MUST
+be forwarded as the matching CLI flag** — these flags are the only source of
+truth; an omitted flag silently falls back to its default and the operator's
+stated value is lost (issue #903):
 
 | Surface | CLI flag | Notes |
 |---|---|---|
@@ -456,6 +464,14 @@ supply session metadata directly via CLI flags:
 | Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server) |
 | GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
+| Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
+| Output seq length | `--osl` | Pass the prompt's OSL. Default `1024` when omitted. |
+| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. Use `--conc-sweep-concs` for a ladder. |
+| Tensor parallel | `--tp` | Pass the prompt's TP. Default `1`. |
+| Expert parallel | `--ep` | Pass the prompt's EP for MoE. Default `1`. |
+| Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). Keep consistent with `--quantize`. |
+| Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. |
+| Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
 
@@ -714,8 +730,8 @@ audit.
 as `baseline_config.with_envs.yaml`, and forwards the path as
 `task.params["config_path"]` to every `explore` / `sweep` task — so variants
 benchmark the **same workload baseline ran** (without it they'd fall back to
-the YAML's smoke defaults `TP=1`/`CONC=8`/`ISL=256`/`OSL=256`, ~10x lower
-tput). Per-variant `extra_envs` still win (applied last).
+the YAML's fallback defaults `CONC=64`/`ISL=1024`/`OSL=1024`). Per-variant
+`extra_envs` still win (applied last).
 
 ## Critic Backend Selection
 

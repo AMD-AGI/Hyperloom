@@ -27,6 +27,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.session.paths import asset_root
 from ._grid_runner import (
     compact_json_server_args,
@@ -55,17 +56,6 @@ log = logging.getLogger(__name__)
 # gemm_a8w8_bpreshuffle kernel. MI355X is gfx950 and excluded.
 _GFX942_GPU_TYPES = frozenset({"mi300x", "mi308x", "mi325x"})
 
-
-def _coerce_str_list(value: Any) -> list[str]:
-    """Normalize optional string/list controls to non-empty strings."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, (list, tuple, set)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    text = str(value).strip()
-    return [text] if text else []
 
 _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:[=\s]+)\S+")
 
@@ -438,9 +428,12 @@ def materialize_config_with_envs(
             )
         envs["ROCR_VISIBLE_DEVICES"] = derived
 
-    isl_val = int(envs.get("ISL") or 256)
-    osl_val = int(envs.get("OSL") or 256)
-    conc_val = int(envs.get("CONC") or 8)
+    # Last-resort fallbacks kept in sync with the CLI workload defaults
+    # (parser.DEFAULT_ISL/OSL/CONC); normally the CLI has already projected the
+    # resolved values into these envs before materialization.
+    isl_val = int(envs.get("ISL") or 1024)
+    osl_val = int(envs.get("OSL") or 1024)
+    conc_val = int(envs.get("CONC") or 64)
 
     # Steady-state window for profiling configs (detected by PROFILE env or
     # ``profiler.torch_profiler.enabled``). The captured-step count is capped at
@@ -964,8 +957,8 @@ def materialize_config_with_envs(
         and _fp8_is_per_channel_per_token(_model_for_quant)
     ):
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
-    remove_list = _coerce_str_list(remove_args)
-    unset_list = _coerce_str_list(unset_envs)
+    remove_list = to_str_list(remove_args)
+    unset_list = to_str_list(unset_envs)
     if remove_list:
         envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
     for key in unset_list:

@@ -31,6 +31,7 @@ from .base import (
     RetryPolicy,
     parse_call_timeout_env,
     retry_with_backoff,
+    safe_int,
 )
 from .mcp_context_tools import (
     CONTEXT_TOOL_QUALIFIED_NAMES,
@@ -376,10 +377,10 @@ class ClaudeBackend:
             )
             if session_id:
                 self._session_id = session_id
-        cache_creation = self._safe_int(usage.get("cache_creation_input_tokens") if usage else None)
-        cache_read = self._safe_int(usage.get("cache_read_input_tokens") if usage else None)
-        input_tokens = self._safe_int(usage.get("input_tokens") if usage else None)
-        output_tokens = self._safe_int(usage.get("output_tokens") if usage else None)
+        cache_creation = safe_int(usage.get("cache_creation_input_tokens") if usage else None)
+        cache_read = safe_int(usage.get("cache_read_input_tokens") if usage else None)
+        input_tokens = safe_int(usage.get("input_tokens") if usage else None)
+        output_tokens = safe_int(usage.get("output_tokens") if usage else None)
         self.calls.append(
             {
                 "prompt_chars": len(full_prompt),
@@ -416,22 +417,6 @@ class ClaudeBackend:
                 "response": raw_text,
             },
         )
-
-    @staticmethod
-    def _safe_int(value: Any) -> int:
-        """Coerce a possibly-missing usage value to a non-negative int.
-
-        Args:
-            value (Any): A token-count value that may be ``None`` or
-                non-numeric.
-
-        Returns:
-            int: The integer value, or ``0`` when it is falsy or not coercible.
-        """
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
 
     # ------------------------------------------------------------------
     # Internals

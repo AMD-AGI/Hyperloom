@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from .coordinator_helpers import format_exc_brief, serialize_verdict_advisory
+from .coordinator_helpers import coerce_needs_gpu, format_exc_brief, serialize_verdict_advisory
 from ..bus.message_bus import Message
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import Task
@@ -398,12 +398,7 @@ class IntentRouter:
                 # Any GPU-holding specialist serializes against serving via
                 # gpu_research_lane. Its lane lease TTL comes from the agent wall
                 # budget (iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL).
-                needs_gpu_raw = params.get("needs_gpu", False)
-                needs_gpu = (
-                    needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
-                    if isinstance(needs_gpu_raw, str)
-                    else bool(needs_gpu_raw)
-                )
+                needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     try:
