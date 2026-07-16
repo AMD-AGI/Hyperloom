@@ -68,13 +68,14 @@ jobs:
 
       - name: Report latest InferenceX image versions
         continue-on-error: true
+        env:
+          INFERENCEX_CONFIG_CANDIDATES: >-
+            ${{ vars.HYPERLOOM_INFERENCEX_CONFIG ||
+                format('{0}/InferenceX/.github/configs/amd-master.yaml', secrets.NFS_ROOT) ||
+                '/shared/InferenceX/.github/configs/amd-master.yaml' }}
         run: |
           SCRIPT="$GITHUB_WORKSPACE/inference_optimization/InferenceX/utils/check_image_versions.py"
-          for INFERENCEX_CONFIG in \
-            "${NFS_ROOT}/InferenceX/.github/configs/amd-master.yaml" \
-            /wekafs/hyperloom/InferenceX/.github/configs/amd-master.yaml \
-            /wekafs/InferenceX/.github/configs/amd-master.yaml \
-            /hyperloom/InferenceX/.github/configs/amd-master.yaml; do
+          for INFERENCEX_CONFIG in ${INFERENCEX_CONFIG_CANDIDATES}; do
             if [ -f "$INFERENCEX_CONFIG" ]; then
               pip install requests packaging pyyaml --quiet
               python3 "$SCRIPT" --config-files "$INFERENCEX_CONFIG"

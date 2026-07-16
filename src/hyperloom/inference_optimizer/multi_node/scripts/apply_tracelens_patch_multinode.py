@@ -175,7 +175,7 @@ def _apply_on_pod(
 
     Args:
         tracelens_root: Path to the public TraceLens checkout on the pod.
-        tracelens_internal_root: Path to the TraceLens-internal checkout
+        tracelens_internal_root: Path to the private TraceLens extension checkout
             (reserved; not consumed by current patch logic).
         sglang_version_pin: Optional advisory version pin, logged on mismatch.
 
@@ -399,7 +399,7 @@ def main() -> int:
     parser.add_argument(
         "--tracelens-internal-root",
         default=os.environ.get("TRACELENS_INTERNAL_ROOT", ""),
-        help="path to TraceLens-internal checkout (default: $TRACELENS_INTERNAL_ROOT). "
+        help="path to private TraceLens extension checkout (default: $TRACELENS_INTERNAL_ROOT). "
         "Reserved for future use; not consumed by current patch logic.",
     )
     parser.add_argument(

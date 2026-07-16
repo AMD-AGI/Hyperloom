@@ -10,7 +10,7 @@ benchmark:
   framework: xdit
   workload_kind: scriptable
   # benchmark_script: xdit_mi355x.sh  # uncomment to force a specific Magpie script
-  model: /wekafs/models/FLUX.1-dev     # OVERRIDDEN at runtime.
+  model: /models/FLUX.1-dev     # OVERRIDDEN at runtime.
   precision: bf16
   run_mode: local
 
