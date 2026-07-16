@@ -513,6 +513,31 @@ pipe),因此天然适配 P0 的 `ServingActor.start/is_alive/stop` 模型。
 - **验收(§6 P3)**:并发压力下 serving/specialist 不共卡(serving_slot + num_gpus)、`ray status`
   可见 pending 资源需求、lane 门冗余生效——三项均满足;真机 `ray status` 对照并入 T3 类真机跑。
 
+### 🚧 P4 —— 多节点 ServingGroupManager(**骨架已交付,默认关闭;决策 4/5 本轮不落地**)
+
+决策 4/5 明确 P4(多节点)**不在本轮范围**("只做单节点;多节点代码尽量不改" / "P4 暂缓")。
+因此本轮只交付**骨架构建块**(类比 P0 交付单节点 `ServingActor` 骨架),**默认关闭、未接线**,
+活的多节点 serving 路径(detached `restart_server_for_round`,SSH / RayJob Dashboard)**逐字不变**。
+
+- **骨架**(commit `feat(ray-exec): P4 ServingGroupManager skeleton …`):
+  - `_ray_serving.py`:新增 `ServingGroupManager`(`start`/`pids`/`ranks_alive`/`is_alive`/
+    `stop`/`close`,接口与 `ServingLease` 对齐),底层 `_make_serving_placement_group`
+    (STRICT_SPREAD,每节点一个 `{GPU, [serving_slot]}` bundle)+ `_make_rank_actor`
+    (`PlacementGroupSchedulingStrategy` 按 bundle 钉住);每 rank 一个 `ServingActor` 经
+    `ManagedServerProcess` 跑 server-rank 子进程 → rank actor 持 GPU 至 stop、rank server
+    随 actor 亡(无 detached 逃逸,§4.2)。`maybe_serving_group_manager()` 是唯一 opt-in 入口:
+    仅当**多节点 AND** `INFERENCE_OPTIMIZER_RAY_MN_SERVING` 显式开启才返回 manager,否则 `None`
+    ——默认什么都不跑。
+- **明确留给多节点维护者**(§12 footer):分布式 sglang/vLLM 的 rank bootstrap(rendezvous /
+  head-vs-worker / KV transport)、接线进 `restart_server_for_round`、`magpie_remote_env()`
+  降级为放置策略——骨架只从调用方接收 rank 命令,不发明分布式启动。
+- **不退化 / 不可验证**:纯新增、默认关;无 GPU 更无多节点 RayJob/KubeRay 集群,真机全 pipeline
+  验收(§6 P4 门槛)无法在本轮执行,交由多节点维护者镜像 T1–T3 后一并跑。
+- **测试**:`test_ray_backend_unit.py` +6(`ServingGroupManager` 生命周期:start 建 PG + 每
+  bundle 一 rank、stop reap、close 杀 actor + 删 PG;start arity 校验;
+  `maybe_serving_group_manager` 四门,均用 fake ray + 注入 PG/rank 工厂);9808 项 collect 无
+  import 错。ruff/mypy 交 CI。
+
 ### ⏭ 进行中 / 待办 —— 见 §12
 
 ---
@@ -560,3 +585,9 @@ pipe),因此天然适配 P0 的 `ServingActor.start/is_alive/stop` 模型。
 
 > 多节点(原 P4/§4.3 收敛、`ServingGroupManager`、`magpie_remote_env` 降级)按决策 4/5
 > **不在本轮范围**;保留现状,交由多节点维护者镜像 T1–T3 的单节点改动。
+>
+> **P4 更新**:已交付 `ServingGroupManager` **骨架**(`_ray_serving.py`,默认关闭,
+> `INFERENCE_OPTIMIZER_RAY_MN_SERVING` opt-in;详见 §11 P4 段)作为多节点接线的基座——
+> placement group + per-node rank actors 的生命周期已就位,活的 detached
+> `restart_server_for_round` 路径逐字不变。剩余接线(分布式 rank bootstrap、替换
+> `restart_server_for_round`、`magpie_remote_env` 降级)+ 多节点真机验收仍待多节点维护者完成。
