@@ -277,6 +277,53 @@ def test_baseline_parses_accuracy_from_eval_result_dir(tmp_path):
     assert result.get("accuracy_task") == "gsm8k"
 
 
+def test_baseline_mn_warmup_eval_result_dir_is_discarded(tmp_path, monkeypatch):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    output_dir = tmp_path / "ws"
+    calls: list[tuple[Path, dict]] = []
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+
+    async def fake_restart_server_for_round(*args, **kwargs):
+        return None
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
+
+    monkeypatch.setattr(mnl, "restart_server_for_round", fake_restart_server_for_round)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        env = dict(kwargs.get("env") or {})
+        calls.append((slot, env))
+        if slot.name == "mn_warmup":
+            _write_lm_eval_output(Path(env["EVAL_RESULT_DIR"]))
+        else:
+            _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = asyncio.run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert [slot.name for slot, _env in calls] == ["mn_warmup", "ws"]
+    assert calls[0][1]["RESULT_DIR"] == str(output_dir / "mn_warmup")
+    assert calls[0][1]["EVAL_RESULT_DIR"] == str(output_dir / "mn_warmup" / "eval_output")
+    assert calls[1][1]["EVAL_RESULT_DIR"] == str(output_dir / "eval_output")
+    assert result.get("accuracy") is None
+
+
 def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
     """RUN_EVAL off -> no accuracy parse, even if the slot holds stale results.
 

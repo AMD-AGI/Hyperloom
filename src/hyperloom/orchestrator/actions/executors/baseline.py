@@ -1779,6 +1779,7 @@ class BaselineExecutor:
                 _mn_warm_cmd = [str(_mn_warm_dir) if c == str(output_dir) else c for c in cmd]
                 _mn_warm_env = dict(env)
                 _mn_warm_env["RESULT_DIR"] = str(_mn_warm_dir)
+                _mn_warm_env["EVAL_RESULT_DIR"] = str(_mn_warm_dir / "eval_output")
                 _mn_warm_env["SERVER_LOG"] = str(_mn_warm_dir / "server.log")
                 _mn_warm_env["GPU_METRICS_CSV"] = str(_mn_warm_dir / "gpu_metrics.csv")
                 await asyncio.to_thread(
