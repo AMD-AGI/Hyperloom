@@ -1932,6 +1932,31 @@ class WritebackCollaborator:
                 (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
             )
 
+    def _should_run_prelude_bootstrap(self, tput: Any) -> bool:
+        """Whether to enqueue the post-baseline PRELUDE bootstrap chain.
+
+        Returns ``False`` when there is no positive baseline throughput, when a
+        roofline task is already pending, or when a stop is already pending
+        (e.g. the baseline accuracy test produced no result ->
+        ``baseline_accuracy_failed``). In the stop case the run is about to halt
+        at the Coordinator's end-of-tick check, so no new bootstrap work (warm
+        replay / roofline / scout / static recon) must be enqueued or dispatched
+        in the meantime.
+
+        Args:
+            tput: The promoted baseline throughput.
+
+        Returns:
+            bool: True only when the bootstrap chain should run.
+        """
+        if not (isinstance(tput, (int, float)) and tput > 0):
+            return False
+        if (self.shared_state.auto_roofline_pending_task_id or "").strip():
+            return False
+        if (self.shared_state.stop_reason or "").strip():
+            return False
+        return True
+
     async def _promote_to_shared_state(
         self,
         task_kind: str,
@@ -2049,11 +2074,7 @@ class WritebackCollaborator:
                         "baseline roofline-ceiling backup failed: %r", exc,
                     )
             # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis, (4) research scout.
-            if (
-                isinstance(tput, (int, float))
-                and tput > 0
-                and not (self.shared_state.auto_roofline_pending_task_id or "").strip()
-            ):
+            if self._should_run_prelude_bootstrap(tput):
                 # History injection (fires regardless of --no-warm-replay).
                 try:
                     self._inject_warm_recipe_history_into_ledger()
