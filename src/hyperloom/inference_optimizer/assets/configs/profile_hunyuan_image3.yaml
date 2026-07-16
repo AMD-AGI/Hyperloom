@@ -8,7 +8,7 @@ benchmark:
   framework: hunyuan_image3
   workload_kind: scriptable
   # benchmark_script: hunyuan_image3_mi355x.sh
-  model: /primus/models/tencent-HunyuanImage-3.0   # OVERRIDDEN at runtime
+  model: /models/tencent-HunyuanImage-3.0   # OVERRIDDEN at runtime
   precision: bf16
   run_mode: local
 
