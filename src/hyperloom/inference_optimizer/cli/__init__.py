@@ -956,6 +956,47 @@ DEFAULT_CRITIC_BACKEND = os.environ.get(
 _VALID_CRITIC_BACKENDS = ("mock", "agent")
 
 
+def _resolve_choice(
+    attr: str,
+    default: str,
+    valid: tuple[str, ...],
+    flag_hint: str,
+    *,
+    args: argparse.Namespace,
+) -> tuple[str, bool]:
+    """Resolve a backend choice from CLI args with validation and fallback to default.
+
+    Args:
+        attr (str): The ``args`` attribute name to read (e.g. ``"critic_backend"``).
+        default (str): The fallback value when the attribute is ``None``.
+        valid (tuple[str, ...]): Allowable backend names; hard-fails outside this set.
+        flag_hint (str): Human-readable hint for the error message describing how to
+            set the value (e.g. ``"--critic-mock / --critic-agent or
+            INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND"``).
+        args (argparse.Namespace): The parsed CLI namespace.
+
+    Returns:
+        tuple[str, bool]: ``(chosen, explicit)`` where ``chosen`` is the resolved
+        backend name and ``explicit`` is ``True`` when the arg was set by the
+        caller (not defaulted).
+
+    Raises:
+        SystemExit: With code 2 when the resolved backend is not in ``valid``.
+    """
+    chosen = getattr(args, attr, None)
+    explicit = chosen is not None
+    if chosen is None:
+        chosen = default
+    if chosen not in valid:
+        print(
+            f"ERROR: {attr.replace('_', ' ')} {chosen!r} not in {valid!r} "
+            f"(set by {flag_hint})",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return chosen, explicit
+
+
 def _resolve_critic_choice(args: argparse.Namespace) -> str:
     """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid.
 
@@ -969,17 +1010,13 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     Raises:
         SystemExit: With code 2 when the chosen backend is invalid.
     """
-    chosen = args.critic_backend
-    if chosen is None:
-        chosen = DEFAULT_CRITIC_BACKEND
-    if chosen not in _VALID_CRITIC_BACKENDS:
-        print(
-            f"ERROR: critic backend {chosen!r} not in {_VALID_CRITIC_BACKENDS!r} "
-            f"(set by --critic-mock / --critic-agent or "
-            f"INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND)",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    chosen, _ = _resolve_choice(
+        "critic_backend",
+        DEFAULT_CRITIC_BACKEND,
+        _VALID_CRITIC_BACKENDS,
+        "--critic-mock / --critic-agent or INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND",
+        args=args,
+    )
     return chosen
 
 
@@ -1009,19 +1046,13 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     Raises:
         SystemExit: With code 2 when the chosen backend is invalid.
     """
-    chosen = getattr(args, "robustness_backend", None)
-    explicit = chosen is not None
-    if chosen is None:
-        chosen = DEFAULT_ROBUSTNESS_BACKEND
-    if chosen not in _VALID_ROBUSTNESS_BACKENDS:
-        print(
-            f"ERROR: robustness backend {chosen!r} not in "
-            f"{_VALID_ROBUSTNESS_BACKENDS!r} (set by --robustness-mock / "
-            f"--robustness-agent or "
-            f"INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND)",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    chosen, explicit = _resolve_choice(
+        "robustness_backend",
+        DEFAULT_ROBUSTNESS_BACKEND,
+        _VALID_ROBUSTNESS_BACKENDS,
+        "--robustness-mock / --robustness-agent or INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
+        args=args,
+    )
     nodes = int(getattr(args, "nodes", 1) or 1)
     if nodes >= 2 and chosen == "agent" and not _robustness_server_configured(args):
         if explicit:
@@ -1187,19 +1218,16 @@ def _resolve_workload_knobs(
 ) -> None:
     """Fill unset workload knobs on ``args`` from a fixed priority ladder.
 
-    Fresh priority: explicit CLI flag (non-``None``) > fallback default.
-    Resume priority: persisted ``SharedState`` value > fallback default.
-    Resume intentionally keeps the original workload contract stable; changing
-    TP/EP/CONC/ISL/OSL/precision requires a fresh launch. Writes the resolved
-    values back onto ``args`` so every downstream consumer (SharedState seed,
-    manifest, env projection) reads one authoritative source instead of racing
-    argparse defaults against env (issue #903). Inherited process env is
-    deliberately NOT a config source.
+    Priority: explicit CLI flag (non-``None``) > resumed ``SharedState`` value >
+    fallback default. Writes the resolved values back onto ``args`` so every
+    downstream consumer (SharedState seed, manifest, env projection) reads one
+    authoritative source instead of racing argparse defaults against env
+    (issue #903). Inherited process env is deliberately NOT a config source.
 
     Args:
         args: Parsed CLI namespace; mutated in place.
-        state: Resumed ``SharedState`` whose persisted knobs define the
-            workload contract; ``None`` on a fresh launch.
+        state: Resumed ``SharedState`` whose persisted knobs win over defaults
+            when the flag is unset; ``None`` on a fresh launch.
     """
     int_knobs = (
         ("isl", DEFAULT_ISL),
@@ -1209,15 +1237,15 @@ def _resolve_workload_knobs(
         ("ep", DEFAULT_EP),
     )
     for name, default in int_knobs:
-        persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
-        val = persisted if persisted > 0 else getattr(args, name, None)
+        val = getattr(args, name, None)
         if val is None:
-            val = default
+            persisted = int(getattr(state, name, 0) or 0) if state is not None else 0
+            val = persisted if persisted > 0 else default
         setattr(args, name, int(val))
-    persisted_precision = (getattr(state, "precision", "") or "").strip() if state is not None else ""
-    precision = persisted_precision or getattr(args, "precision", None)
+    precision = getattr(args, "precision", None)
     if not precision:
-        precision = DEFAULT_PRECISION
+        persisted = (getattr(state, "precision", "") or "").strip() if state is not None else ""
+        precision = persisted or DEFAULT_PRECISION
     args.precision = precision
 
 
@@ -1232,11 +1260,11 @@ def _export_workload_envs_for_optimize(
     """Project resolved workload knobs (TP/CONC/EP) into env for downstream Magpie YAMLs.
 
     After ``_resolve_workload_knobs`` the values on ``args`` are already the
-    authoritative resolution (fresh: flag > default; resume: state > default),
-    so export them unconditionally. This keeps SharedState, the manifest, and
-    the materialized YAML in agreement instead of the old gated export that only
-    fired for explicit flags / multi-node and left SharedState and the served
-    value split (issue #903).
+    authoritative resolution (flag > resume-state > default), so export them
+    unconditionally. This keeps SharedState, the manifest, and the materialized
+    YAML in agreement instead of the old gated export that only fired for
+    explicit flags / multi-node and left SharedState and the served value split
+    (issue #903).
 
     Args:
         args (argparse.Namespace): The parsed CLI namespace (reads ``conc``).
@@ -1501,10 +1529,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
             if runner_gpu_type != state.gpu_type:
                 print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
-        # Resolve workload knobs with the resumed state as the source of truth,
-        # then project the resolved values into env so resume sees the same
-        # workload contract (not YAML defaults). ``ep`` mirrors EP so single-node
-        # vLLM MoE resume still injects --enable-expert-parallel.
+        # Resolve workload knobs with the resumed state as the fallback source
+        # (explicit --isl/--conc/... on this resume still win), then project the
+        # resolved values into env so resume sees the same workload contract
+        # (not YAML defaults). ``ep`` mirrors EP so single-node vLLM MoE resume
+        # still injects --enable-expert-parallel.
         _resolve_workload_knobs(args, state)
         _resume_max_model_len = getattr(args, "max_model_len", None) or getattr(state, "max_model_len", 0) or 0
         for env_name, val in (

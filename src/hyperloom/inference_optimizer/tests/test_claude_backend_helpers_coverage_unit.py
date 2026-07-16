@@ -14,6 +14,7 @@ from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     EMIT_INTENT_TOOL_NAME,
 )
+from hyperloom.orchestrator.roles.base import safe_int
 
 
 @dataclass
@@ -60,10 +61,10 @@ def _backend(**over: Any) -> ClaudeBackend:
 
 
 def test_safe_int() -> None:
-    assert ClaudeBackend._safe_int(None) == 0
-    assert ClaudeBackend._safe_int("bad") == 0
-    assert ClaudeBackend._safe_int(7) == 7
-    assert ClaudeBackend._safe_int("9") == 9
+    assert safe_int(None) == 0
+    assert safe_int("bad") == 0
+    assert safe_int(7) == 7
+    assert safe_int("9") == 9
 
 
 def test_compose_prompt_raw_vs_normal() -> None:

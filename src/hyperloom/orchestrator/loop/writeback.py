@@ -23,23 +23,16 @@ from ..state.optimization_journal import (
 from ..state.shared_state import SharedState
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
-from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
-    _BASELINE_FINGERPRINT_KEYS,
+from .coordinator_helpers import (
     _MIN_KERNEL_ENGAGED_GAIN_PCT,
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
-    _infer_model_class_from_config,
     _merge_cumulative_extra_server_args,
     _parse_baseline_workload_extra,
-    _parse_iso_unix,
     _geak_revalidation_decision,
     _geak_sweep_measured_tput,
-    _resolve_roofline_watermark_ratio,
     _scrape_resolved_launch_flags,
     _split_env_and_flags,
-    effective_closing_grace_sec,
-    format_exc_brief,
-    serialize_verdict_advisory,
 )
 from ..policy.gate import (
     PolicyDenied,
@@ -211,6 +204,24 @@ class WritebackCollaborator:
                 (result or {}).get("kernel_id") if isinstance(result, dict) else None,
             )
 
+    def _update_cumulative_gain_validated(self, new_tput: float) -> None:
+        """Update cumulative_gain_validated, its timestamp, and stack-length watermark.
+
+        Call only when ``baseline_tput > 0`` and ``new_tput`` is a positive
+        measured throughput.  The caller remains responsible for any surrounding
+        guard (e.g. ``if self.shared_state.baseline_tput > 0``).
+
+        Args:
+            new_tput: The newly measured throughput to promote as the validated
+                gain anchor.
+        """
+        validated_gain = (
+            (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
+        )
+        self.shared_state.cumulative_gain_validated = float(validated_gain)
+        self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
+        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+
     async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         """Promote a kernel integrate KEEP into the optimization stack.
 
@@ -293,12 +304,7 @@ class WritebackCollaborator:
                 (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
             )
             # Integrate KEEP is already rebench-validated: promote into cumulative_gain_validated + watermark.
-            validated_gain = (
-                (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
-            )
-            self.shared_state.cumulative_gain_validated = float(validated_gain)
-            self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+            self._update_cumulative_gain_validated(new_tput)
             await self._maybe_enqueue_watermark_roofline(
                 reason="integrate_keep_watermark",
             )
@@ -673,6 +679,101 @@ class WritebackCollaborator:
         """
         return str(getattr(self.shared_state, "phase", "") or "").strip().upper() or "UNKNOWN"
 
+    def _record_fact_impl(
+        self,
+        *,
+        task: "Task",
+        source_session_id: str,
+        is_keep: bool,
+        change: str,
+        gain_pct: float | None,
+        throughput_after: float | None,
+        best_config_candidate: dict[str, Any] | None,
+        evidence_refs: list[str],
+        pitfall_severity_dict: dict[str, Any],
+        variant_name: str | None = None,
+    ) -> None:
+        """Shared KB write for _record_fact_per_task and _record_fact_per_variant.
+
+        Writes one KB lesson (on KEEP with positive gain) or one KB pitfall
+        (on REVERT/failure) to the recipe row, then returns.  Call only after
+        the journal entry has been appended and ``cortex_kb`` is confirmed
+        non-None by the caller.
+
+        Args:
+            task: The completed task (provides task_id).
+            source_session_id: Hyperloom-local session id stamped on provenance.
+            is_keep: True when the outcome is a validated KEEP.
+            change: Summarized change string (used in the statement).
+            gain_pct: Measured gain percentage, or ``None``.
+            throughput_after: Measured throughput after the change, or ``None``.
+            best_config_candidate: Pre-extracted best-config dict (differs
+                between per-task and per-variant callers).
+            evidence_refs: List of evidence reference strings to stamp on the
+                provenance (caller builds task-only or task+variant refs).
+            pitfall_severity_dict: The dict passed to ``_pitfall_severity_for``
+                (per-task passes ``result_dict``; per-variant passes a merged
+                metrics + outcome dict).
+            variant_name: Variant name, present only for per-variant calls;
+                added to ``provenance_details`` when non-None.
+        """
+        models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
+        hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
+        workload_tags = self._coord._collect_workload_tags()
+        extra = workload_tags if workload_tags else None
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        provenance_base: dict[str, Any] = {
+            "source_session_id":   source_session_id,
+            "source_task_id":      task.task_id,
+            "evidence":            list(evidence_refs or []),
+            "applicable_models":   list(models or []),
+            "applicable_hardware": list(hardware or []),
+            "extra":               dict(extra or {}),
+            "now":                 now_iso,
+        }
+        if variant_name is not None:
+            provenance_base["source_variant_name"] = variant_name
+
+        if is_keep and gain_pct is not None and gain_pct > 0:
+            statement = self._coord._build_statement(
+                change=change, gain_pct=gain_pct, kind="lesson",
+            )
+            impact = self._coord._build_measured_impact(
+                gain_pct=gain_pct,
+                throughput_after=throughput_after,
+                stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
+                measured_at=now_iso,
+            )
+            live = self._read_local_recipe_row()
+            recipe_overrides = self._kb_best_config_overrides_for_keep(
+                live=live,
+                best_config_candidate=best_config_candidate,
+                throughput_after=throughput_after,
+            )
+            self._kb_amend_recipe(
+                append_lesson={
+                    "statement":       statement,
+                    "measured_impact": impact,
+                },
+                recipe_overrides=recipe_overrides or None,
+                provenance_details=provenance_base,
+            )
+            return
+
+        severity = self._pitfall_severity_for(pitfall_severity_dict)
+        if severity is not None:
+            description = self._coord._build_statement(
+                change=change, severity=severity, kind="pitfall",
+            )
+            self._kb_amend_recipe(
+                append_pitfall={
+                    "description": description,
+                    "severity":    severity,
+                },
+                provenance_details=provenance_base,
+            )
+
     def _record_fact_per_task(
         self,
         *,
@@ -733,73 +834,21 @@ class WritebackCollaborator:
         if self.cortex_kb is None:
             return
 
-        models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
-        hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        # evidence_refs (log:task-...) gives traceability since source_session_id lands in attrs.
-        evidence_refs = [f"log:task-{task.task_id}"]
-        # Workload-shape tags for lesson/pitfall attrs so the warm-start reader filters cross-framework noise.
-        workload_tags = self._coord._collect_workload_tags()
-        extra = workload_tags if workload_tags else None
-        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if is_keep and gain_pct is not None and gain_pct > 0:
-            statement = self._coord._build_statement(
-                change=change, gain_pct=gain_pct, kind="lesson",
-            )
-            impact = self._coord._build_measured_impact(
-                gain_pct=gain_pct,
-                throughput_after=throughput_after,
-                stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
-                measured_at=now_iso,
-            )
-            live = self._read_local_recipe_row()
-            best_config_candidate = self._extract_kept_best_config(
+        self._record_fact_impl(
+            task=task,
+            source_session_id=source_session_id,
+            is_keep=is_keep,
+            change=change,
+            gain_pct=gain_pct,
+            throughput_after=throughput_after,
+            best_config_candidate=self._extract_kept_best_config(
                 task=task,
                 result_dict=result_dict,
-            )
-            recipe_overrides = self._kb_best_config_overrides_for_keep(
-                live=live,
-                best_config_candidate=best_config_candidate,
-                throughput_after=throughput_after,
-            )
-            # v2: append onto the recipe's lessons[] (no cross-recipe dedup).
-            self._kb_amend_recipe(
-                append_lesson={
-                    "statement":       statement,
-                    "measured_impact": impact,
-                },
-                recipe_overrides=recipe_overrides or None,
-                provenance_details={
-                    "source_session_id": source_session_id,
-                    "source_task_id":    task.task_id,
-                    "evidence":          list(evidence_refs or []),
-                    "applicable_models":   list(models or []),
-                    "applicable_hardware": list(hardware or []),
-                    "extra":             dict(extra or {}),
-                    "now":               now_iso,
-                },
-            )
-            return
-
-        severity = self._pitfall_severity_for(result_dict)
-        if severity is not None:
-            description = self._coord._build_statement(
-                change=change, severity=severity, kind="pitfall",
-            )
-            self._kb_amend_recipe(
-                append_pitfall={
-                    "description": description,
-                    "severity":    severity,
-                },
-                provenance_details={
-                    "source_session_id": source_session_id,
-                    "source_task_id":    task.task_id,
-                    "evidence":          list(evidence_refs or []),
-                    "applicable_models":   list(models or []),
-                    "applicable_hardware": list(hardware or []),
-                    "extra":             dict(extra or {}),
-                    "now":               now_iso,
-                },
-            )
+            ),
+            # evidence_refs (log:task-...) gives traceability since source_session_id lands in attrs.
+            evidence_refs=[f"log:task-{task.task_id}"],
+            pitfall_severity_dict=result_dict,
+        )
 
     def _build_statement(
         self,
@@ -949,83 +998,26 @@ class WritebackCollaborator:
         if self.cortex_kb is None:
             return
 
-        models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
-        hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
-        evidence_refs = [
-            f"log:task-{task.task_id}",
-            f"variant:{variant_name}",
-        ]
-        # Workload-shape tags — see _record_fact_per_task.
-        workload_tags = self._coord._collect_workload_tags()
-        extra = workload_tags if workload_tags else None
-
-        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if outcome == OUTCOME_KEEP and gain_pct is not None and gain_pct > 0:
-            statement = self._coord._build_statement(
-                change=change, gain_pct=gain_pct, kind="lesson",
-            )
-            impact = self._coord._build_measured_impact(
-                gain_pct=gain_pct,
-                throughput_after=throughput_after,
-                stack_depth=len(getattr(self.shared_state, "optimization_stack", []) or []),
-                measured_at=now_iso,
-            )
-            live = self._read_local_recipe_row()
-            best_config_candidate = self._extract_kept_best_config(
+        self._record_fact_impl(
+            task=task,
+            source_session_id=source_session_id,
+            is_keep=(outcome == OUTCOME_KEEP),
+            change=change,
+            gain_pct=gain_pct,
+            throughput_after=throughput_after,
+            best_config_candidate=self._extract_kept_best_config(
                 task=task,
                 variant_attrs=change_attrs,
-            )
-            recipe_overrides = self._kb_best_config_overrides_for_keep(
-                live=live,
-                best_config_candidate=best_config_candidate,
-                throughput_after=throughput_after,
-            )
-            # v2: per-variant lesson append onto recipe.lessons[]
-            # (no cross-recipe dedup, see _record_fact_per_task).
-            self._kb_amend_recipe(
-                append_lesson={
-                    "statement":       statement,
-                    "measured_impact": impact,
-                },
-                recipe_overrides=recipe_overrides or None,
-                provenance_details={
-                    "source_session_id":   source_session_id,
-                    "source_task_id":      task.task_id,
-                    "source_variant_name": variant_name,
-                    "evidence":            list(evidence_refs or []),
-                    "applicable_models":   list(models or []),
-                    "applicable_hardware": list(hardware or []),
-                    "extra":               dict(extra or {}),
-                    "now":                 now_iso,
-                },
-            )
-            return
-
-        severity = self._pitfall_severity_for({
-            **(metrics if isinstance(metrics, dict) else {}),
-            "error_class": variant_outcome.get("error_class"),
-            "status":      variant_outcome.get("outcome"),
-        })
-        if severity is not None:
-            description = self._coord._build_statement(
-                change=change, severity=severity, kind="pitfall",
-            )
-            self._kb_amend_recipe(
-                append_pitfall={
-                    "description": description,
-                    "severity":    severity,
-                },
-                provenance_details={
-                    "source_session_id":   source_session_id,
-                    "source_task_id":      task.task_id,
-                    "source_variant_name": variant_name,
-                    "evidence":            list(evidence_refs or []),
-                    "applicable_models":   list(models or []),
-                    "applicable_hardware": list(hardware or []),
-                    "extra":               dict(extra or {}),
-                    "now":                 now_iso,
-                },
-            )
+            ),
+            # Workload-shape tags — see _record_fact_per_task.
+            evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
+            pitfall_severity_dict={
+                **(metrics if isinstance(metrics, dict) else {}),
+                "error_class": variant_outcome.get("error_class"),
+                "status":      variant_outcome.get("outcome"),
+            },
+            variant_name=variant_name,
+        )
 
     def _collect_workload_tags(self) -> dict[str, Any]:
         """Return the workload-shape KB tag dict for the current session; shared by recipe attrs + lesson/pitfall writes so the warm-start reader filters symmetrically.
@@ -2327,13 +2319,7 @@ class WritebackCollaborator:
                     changed = True
                 else:
                     if measured_ok and self.shared_state.baseline_tput > 0:
-                        self.shared_state.cumulative_gain_validated = (
-                            (float(measured) - self.shared_state.baseline_tput)
-                            / self.shared_state.baseline_tput
-                            * 100.0
-                        )
-                        self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                        self._update_cumulative_gain_validated(measured)
                         cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                         recorded = cb_rec.get("tput")
                         floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
@@ -2396,12 +2382,7 @@ class WritebackCollaborator:
                 # explore inlines the per-KEEP rebench: promote into cumulative_gain_validated +
                 # advance validated_stack_len so the unvalidated-stack guard clears.
                 if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
-                    validated_gain = (
-                        (float(best_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
-                    )
-                    self.shared_state.cumulative_gain_validated = float(validated_gain)
-                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                    self._update_cumulative_gain_validated(best_tput)
                     # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
                     await self._maybe_enqueue_watermark_roofline(
                         reason="explore_keep_watermark",
@@ -2442,12 +2423,7 @@ class WritebackCollaborator:
                 }
                 self._lift_to_current_best("integrate_patch", float(new_tput), lift)
                 if self.shared_state.baseline_tput > 0:
-                    validated_gain = (
-                        (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
-                    )
-                    self.shared_state.cumulative_gain_validated = float(validated_gain)
-                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                    self._update_cumulative_gain_validated(new_tput)
                     self.shared_state.resume_pending_revalidation = False
                     await self._maybe_enqueue_watermark_roofline(
                         reason="integrate_keep_watermark",
@@ -2547,12 +2523,7 @@ class WritebackCollaborator:
                 }
                 self._lift_to_current_best("framework", float(new_tput), lift)
                 if self.shared_state.baseline_tput > 0:
-                    validated_gain = (
-                        (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
-                    )
-                    self.shared_state.cumulative_gain_validated = float(validated_gain)
-                    self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
-                    self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+                    self._update_cumulative_gain_validated(new_tput)
                     await self._maybe_enqueue_watermark_roofline(
                         reason="framework_keep_watermark",
                     )

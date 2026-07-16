@@ -68,17 +68,13 @@ def test_resolve_workload_knobs_resume_restores_state():
     assert (a.isl, a.osl, a.conc, a.tp, a.ep, a.precision) == (4096, 2048, 128, 8, 8, "fp8")
 
 
-def test_resolve_workload_knobs_resume_keeps_state_over_explicit_flag():
-    """Resume keeps the original workload contract from SharedState.
-
-    A one-sided override such as ``--tp 1`` on a TP/EP=8 session must not
-    produce TP=1/EP=8; changing workload shape requires a fresh launch.
-    """
-    a = _knob_ns(tp=1, precision="bf16")
+def test_resolve_workload_knobs_resume_explicit_flag_overrides_state():
+    """Resume WITH an explicit flag: the flag wins over the persisted state."""
+    a = _knob_ns(tp=1)
     state = SimpleNamespace(isl=4096, osl=2048, conc=128, tp=8, ep=8, precision="fp8")
     _resolve_workload_knobs(a, state)
-    assert (a.tp, a.ep, a.precision) == (8, 8, "fp8")
-    assert a.isl == 4096
+    assert a.tp == 1  # explicit --tp 1 wins
+    assert a.isl == 4096  # unset -> restored from state
 
 
 def test_framework_script_mismatch_fails_fast(tmp_path):
