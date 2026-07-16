@@ -289,8 +289,8 @@ jobs:
               a_wins = b_wins = ties = 0
               for model in models:
                   ra, rb = a.get(model, {}), b.get(model, {})
-                  a_bl, a_opt, a_gain, a_vs = ra.get("baseline_tok_per_gpu"), ra.get("optimized_tok_per_gpu"), ra.get("gain_pct"), ra.get("vs_inferenceX_pct")
-                  b_bl, b_opt, b_gain, b_vs = rb.get("baseline_tok_per_gpu"), rb.get("optimized_tok_per_gpu"), rb.get("gain_pct"), rb.get("vs_inferenceX_pct")
+                  a_bl, a_opt, a_gain = ra.get("baseline_tok_per_gpu"), ra.get("optimized_tok_per_gpu"), ra.get("gain_pct")
+                  b_bl, b_opt, b_gain = rb.get("baseline_tok_per_gpu"), rb.get("optimized_tok_per_gpu"), rb.get("gain_pct")
                   if a_opt is not None and b_opt is not None:
                       if a_opt > b_opt: winner = f"A (+{abs(a_opt-b_opt):.1f} tok/s)"; a_wins += 1
                       elif b_opt > a_opt: winner = f"B (+{abs(b_opt-a_opt):.1f} tok/s)"; b_wins += 1
@@ -308,7 +308,6 @@ jobs:
                           make_row("Baseline (tok/s/GPU)", v(a_bl), v(b_bl)),
                           make_row("Optimized (tok/s/GPU)", v(a_opt), v(b_opt), bold=True),
                           make_row("Optimization Gain", v(a_gain, "%"), v(b_gain, "%"), color="Good"),
-                          make_row("vs InferenceX", v(a_vs, "%"), v(b_vs, "%"), color="Good"),
                           {"type": "TableRow", "style": "accent", "cells": [
                               cell("Winner", weight="Bolder"),
                               cell(winner, weight="Bolder", color="Good" if winner != "N/A" else "Default", size="Medium"),

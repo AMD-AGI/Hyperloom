@@ -47,10 +47,7 @@ ci_metrics.json contract — written automatically by `src/hyperloom/inference_o
 
 If manifest.py fails to emit a complete file, fall back: read `/workspace/hyperloom/state.json` (`baseline_tput`, `current_best`, `cumulative_gain`) and write ci_metrics.json yourself before exiting. All six field names are MANDATORY — the CI shows N/A if missing or renamed.
 
-InferenceX floor (target to beat — already published on Hyperloom):
-{inferenceX_data}
-
-Same {gpu_type}/{framework}/{precision}/TP={tp}/CONC={conc} workload. Your baseline should land within 5% of these numbers. Much lower likely = cold aiter JIT (SKILL.md "Cold-start Discipline" auto-bumps timeout to 3600s).
+Baseline sanity check for the {gpu_type}/{framework}/{precision}/TP={tp}/CONC={conc} workload: a much-lower-than-expected baseline is usually a cold aiter JIT (SKILL.md "Cold-start Discipline" auto-bumps timeout to 3600s) — re-run before trusting it.
 
 Auth: SAFE_API_KEY and SAFE_API_BASE are already exported into the sandbox env
 by kernel-agent.env.sh — read them via `os.environ.get(...)` or `$SAFE_API_KEY`

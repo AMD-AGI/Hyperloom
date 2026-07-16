@@ -191,26 +191,6 @@ def test_build_model_result_basic(tmp_path: Path):
     assert result["optimized_tok_per_gpu"] == 120
 
 
-def test_build_model_result_with_ifx_reference(tmp_path: Path):
-    (tmp_path / "ci_metrics.json").write_text(
-        json.dumps({"tok_per_gpu_baseline": 80, "tok_per_gpu_optimized": 100}), encoding="utf-8"
-    )
-    ifx = {"metrics": {"output_tput_per_gpu": 90}, "decode_tp": 8}
-    result = rg.build_model_result("M", "k", "img", "fp8", "completed", "ts", str(tmp_path), ifx_reference=ifx)
-    assert result["inferenceX_tok_per_gpu"] == 90
-    assert result["vs_inferenceX_pct"] is not None
-
-
-def test_build_model_result_total_throughput_correction(tmp_path: Path):
-    # optimized >3x ifx -> treated as total throughput, divided by TP.
-    (tmp_path / "ci_metrics.json").write_text(
-        json.dumps({"tok_per_gpu_baseline": 800, "tok_per_gpu_optimized": 1000}), encoding="utf-8"
-    )
-    ifx = {"metrics": {"output_tput_per_gpu": 100}, "decode_tp": 8}
-    result = rg.build_model_result("M", "k", "img", "fp8", "completed", "ts", str(tmp_path), ifx_reference=ifx)
-    assert result["optimized_tok_per_gpu"] == 125.0  # 1000 / 8
-
-
 # ── report renderers ──
 
 
@@ -224,8 +204,6 @@ def _results():
             "baseline_tok_per_gpu": 100,
             "optimized_tok_per_gpu": 120,
             "gain_pct": 20.0,
-            "vs_inferenceX_pct": 5.0,
-            "inferenceX_tok_per_gpu": 114,
             "report_exists": True,
             "actions": ["x"],
         },

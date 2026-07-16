@@ -67,12 +67,6 @@ on:
         description: 'Kernel optimization backends forwarded to SaFE.'
         required: false
         default: 'geak,claude,codex'
-      target_gpu:
-        description: 'Reference GPU for InferenceX comparison in the summary table.'
-        required: false
-        default: 'mi300x'
-        type: choice
-        options: [mi300x, b200, h100, mi355x, mi325x]
       dry_run:
         description: 'Dry run (auto-detect + print plan only, do not submit).'
         type: boolean
@@ -399,14 +393,12 @@ jobs:
       - name: Build summary table
         working-directory: ci
         env:
-          INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
           INPUT_ISL:        ${{ github.event.inputs.isl || '1024' }}
           INPUT_OSL:        ${{ github.event.inputs.osl || '1024' }}
         run: |
           python3 build_summary.py \
             --artifacts-dir "${{ github.workspace }}/task-artifacts-merged" \
             --manifests-dir "${{ github.workspace }}/manifests" \
-            --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
             --isl           "${INPUT_ISL:-1024}" \
             --osl           "${INPUT_OSL:-1024}" \
             --out-dir       "${{ github.workspace }}/summary-out"
