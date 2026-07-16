@@ -22,6 +22,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import is_truthy
+from hyperloom.common.env_safety import scrub_child_process_env
+
 from ..trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
@@ -31,6 +34,58 @@ from ..trace.parse_usage import (
 
 
 log = logging.getLogger(__name__)
+
+
+_SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "ANTHROPIC_BASE_URL",
+        "AWS_DEFAULT_REGION",
+        "AWS_REGION",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_MODEL",
+        "CODEX_MODEL",
+        "HOME",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "LANG",
+        "LC_ALL",
+        "NO_PROXY",
+        "OPENAI_BASE_URL",
+        "PATH",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USER",
+        "USERNAME",
+    }
+)
+_SPECIALIST_SECRET_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_CONFIG_FILE",
+        "AWS_PROFILE",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "OPENAI_API_KEY",
+    }
+)
+
+
+def _build_specialist_env() -> dict[str, str]:
+    """Build a minimal env for Bash-enabled specialist subprocesses."""
+    inherit_setting = os.environ.get("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
+    inherit_secrets = True if inherit_setting is None else is_truthy(inherit_setting)
+    allowed = set(_SPECIALIST_ENV_ALLOWLIST)
+    if inherit_secrets:
+        allowed.update(_SPECIALIST_SECRET_ENV_ALLOWLIST)
+    env = {key: value for key, value in os.environ.items() if key in allowed}
+    return scrub_child_process_env(env)
 
 
 # Configuration
@@ -313,8 +368,10 @@ class SpecialistSubprocessDispatcher:
             allowed_tools=allowed_tools,
         )
 
-        # Compose the env (pass through parent so API keys propagate).
-        env = os.environ.copy()
+        # Compose a minimal env. Provider credentials are inherited by default
+        # for compatibility with deployments that authenticate the claude CLI
+        # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
+        env = _build_specialist_env()
         # Bound the spawned claude CLI's request transport so a stalled gateway
         # stream raises client-side instead of hanging forever.
         from ..roles._llm_stability_env import apply_llm_stability_env
