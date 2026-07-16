@@ -10,12 +10,13 @@
 ## Base URL
 
 ```
-http://primus-cortex-pr-api.primus-cortex.svc.cluster.local
+http://<pr-monitor-host>
 ```
 
-The base URL is wired into `ExploreRequest.primus_cortex.base_url`
-or the `PRIMUS_CORTEX_PR_API` env var. The framework-agent client
-trims a trailing slash before composing paths.
+The base URL is deployment-specific (no host is hardcoded). It is wired
+into `ExploreRequest.primus_cortex.base_url` or the `PRIMUS_CORTEX_PR_API`
+env var. The framework-agent client trims a trailing slash before
+composing paths.
 
 `GET /v1/healthz` returns `{"status": "ok"}` and is the recommended
 liveness probe before kicking off a run.
@@ -129,6 +130,6 @@ the operator must see the original error.
 * HTTP requests are made via stdlib `urllib.request` (no `requests`
   dependency). The User-Agent is `framework-agent-primus-cortex/0.1`.
 * All requests are GET; framework-agent never POSTs to primus.
-* The service is an AMD-internal cluster service; offline / external
-  CI must omit `primus_cortex` from `search_modes` and rely on the
-  github backend.
+* The service is an optional, deployment-provided cluster service; when
+  it is not configured (offline / external CI), omit `primus_cortex`
+  from `search_modes` and rely on the github backend.
