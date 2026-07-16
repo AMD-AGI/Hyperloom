@@ -8,7 +8,7 @@ myst:
 
 ```{note}
 This page is for **integrators and downstream consumers** — teams building
-dashboards, reporting pipelines, or services (such as `claw-stats-service`)
+dashboards, reporting pipelines, or services
 that read Hyperloom session output programmatically. If you just ran an
 optimization and want to check your results, read the three headline fields
 described in [Run a Hyperloom optimization](../how-to/optimize.md#output-and-artifacts)
@@ -17,7 +17,7 @@ first.
 
 `session_breakdown.json` is the single external contract between
 the `inference_optimizer` runtime (producer) and any downstream
-consumer (`claw-stats-service`, results service, notebooks, custom
+consumer (results service, notebooks, custom
 dashboards). One file per session, written to
 `$SESSION_DIR/session_breakdown.json` at session end (and on
 operator demand using [`dump_session_breakdown.py`](operator-scripts.md)).
@@ -361,7 +361,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "framework_name": "sglang",
     "framework_version": "0.5.11",
     "model_name": "GLM-5-FP8",
-    "model_path": "/wekafs/models/GLM-5-FP8",
+    "model_path": "/path/models/GLM-5-FP8",
     "model_class": "moe_mla_nsa",
     "gpu_type": "mi355x",
     "tp": 4,
@@ -392,7 +392,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     }],
     "failure_streak": 0,
     "invocation": {
-      "framework_args": "python -m sglang.launch_server --model /wekafs/models/GLM-5-FP8 --tp 4",
+      "framework_args": "python -m sglang.launch_server --model /path/models/GLM-5-FP8 --tp 4",
       "framework_args_source": "log_non_default_args",
       "extra_envs": { "GPU_TYPE": "mi355x", "TP": "4", "ISL": "1024", "OSL": "1024" },
       "config_path": "runs/baseline/baseline_config.with_envs.yaml",

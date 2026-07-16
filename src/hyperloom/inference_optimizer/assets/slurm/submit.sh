@@ -17,7 +17,7 @@
 #       --gpu-type <TYPE>           override the optimizer --gpu-type for all jobs
 #                                   (lowercase, e.g. mi355x)
 #       --shared-mount <path>       shared FS bind-mounted into the container
-#                                   (default: /wekafs; on vultr use /mnt/vast)
+#                                   (default: /path; on vultr use /mnt/vast)
 #       --source-dir <path>         existing Hyperloom checkout to use instead of
 #                                   cloning (e.g. /mnt/vast/hyperloom)
 #       --data-root <path>          artifact root (default: <shared-mount>/hyperloom-slurm)
@@ -29,8 +29,8 @@
 #   -h, --help                      show this help
 #
 # Examples:
-#   ./submit.sh dsv4pro_sglang
-#   ./submit.sh -b claude -p mi355x -c gfx950 dsv4pro_vllm
+#   ./submit.sh deepseek_r1_sglang
+#   ./submit.sh -b claude -p mi300x -c gfx942 deepseek_r1_vllm
 #   ./submit.sh --all -p mi300x
 
 set -euo pipefail

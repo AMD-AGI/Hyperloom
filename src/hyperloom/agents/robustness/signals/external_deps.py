@@ -155,7 +155,7 @@ def _gateway_symptoms(
                 subject={},
                 source="local",
                 suggestion=(
-                    "rotate $SAFE_API_KEY at https://llm.amd.com/ and re-export; the upstream key is revoked / expired"
+                    "rotate $SAFE_API_KEY at your LLM gateway and re-export; the upstream key is revoked / expired"
                 ),
             )
         ]
