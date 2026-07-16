@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.session import session_paths
 from hyperloom.inference_optimizer.session.lock import (
     SessionAlreadyRunning,
     SessionLock,
+    SessionLockPathError,
 )
 
 
@@ -228,7 +229,7 @@ def test_acquire_refuses_symlinked_lock_path(tmp_path):
     outside = tmp_path / "outside_target"
     outside.write_text("victim", encoding="utf-8")
     os.symlink(outside, lock_path)
-    with pytest.raises(OSError):
+    with pytest.raises(SessionLockPathError, match="must not be a symlink"):
         SessionLock(tmp_path).acquire()
     # The symlink target must be untouched (not opened/truncated/locked).
     assert outside.read_text(encoding="utf-8") == "victim"
