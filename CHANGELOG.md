@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **breaking(inference_optimizer)**: rename the multi-node `optimize` CLI
+  flags `--rayjob-image` → `--mn-image` and `--rayjob-gpus-per-node` →
+  `--gpus-per-node`, covering both the `rayjob` and `infera` multi-node
+  backends. No alias is kept; the legacy flags now fail argparse. The former
+  `INFERENCE_OPTIMIZER_RAYJOB_IMAGE` env is no longer read — set the image via
+  `--mn-image`. See the [upgrade guide](docs/reference/upgrade.md).
 - **feat(orchestrator)**: absorb PR #461 free-form dynamic specialist
   dispatch. The orchestration agent can `delegate{action_name='dynamic_specialist'}`
   to spawn CPU-only, non-domain-locked specialist sub-agents (claude CLI
