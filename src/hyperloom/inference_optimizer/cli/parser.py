@@ -233,7 +233,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "once, and exports RAY_ADDRESS for kernel-agent. Does not stop the "
         "RayJob on exit; run `python3 -m hyperloom.inference_optimizer.multi_node "
         "stop-multi-job` when you want to release it. Requires "
-        "--mn-image or INFERENCE_OPTIMIZER_MN_IMAGE. "
+        "--mn-image. "
         "Default: 1.",
     )
     opt.add_argument(
@@ -242,23 +242,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
         "head+workers) or 'infera' (idle InferaDeployment + SSH control "
-        "plane). Resolution: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND "
-        "> rayjob. Single-node runs ignore this flag.",
+        "plane). Defaults to rayjob when omitted. Single-node runs ignore "
+        "this flag.",
     )
     opt.add_argument(
         "--mn-image",
         default=None,
         help="Container image for the multi-node pods (Infera worker/prefill/"
         "decode pods, or RayJob head+workers). Required when --nodes>=2 unless "
-        "INFERENCE_OPTIMIZER_MN_IMAGE is set or state file "
-        "last_create_request.image is present.",
+        "the state file last_create_request.image is present.",
     )
     opt.add_argument(
         "--gpus-per-node",
         type=int,
         default=None,
         help="GPUs per multi-node pod (Infera worker/prefill/decode or RayJob "
-        "head+workers). Resolution: flag > INFERENCE_OPTIMIZER_GPUS_PER_NODE > 8.",
+        "head+workers). Defaults to 8 when omitted.",
     )
     opt.add_argument(
         "--cpus-per-node",

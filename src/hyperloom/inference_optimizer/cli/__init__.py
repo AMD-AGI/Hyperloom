@@ -71,6 +71,7 @@ from .credentials import (
 from .multi_node import (
     _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
     _dump_mn_input_params as _dump_mn_input_params,
+    _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
     _run_quantization_prelude as _run_quantization_prelude,
@@ -1251,6 +1252,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
+    # Multi-node topology handoff: export the CLI-flag-resolved backend / image /
+    # gpus-per-node so downstream subprocesses (kernel agent, benchmark, KB
+    # topology, external-mode state synthesis) read a single stable source. These
+    # are internal handoff envs, not a public config API; users pass --mn-backend
+    # / --mn-image / --gpus-per-node instead.
+    if nodes_resolved >= 2:
+        os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
+        os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
+        mn_image_resolved = str(getattr(args, "mn_image", "") or "").strip()
+        if mn_image_resolved:
+            os.environ["INFERENCE_OPTIMIZER_MN_IMAGE"] = mn_image_resolved
     operator_server_args = str(getattr(args, "server_args", "") or "").strip()
     if operator_server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
