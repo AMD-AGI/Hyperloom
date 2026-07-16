@@ -28,6 +28,8 @@ ENV_USER_DATA_PATH = "USER_DATA_PATH"
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 ENV_SESSION_LAYOUT = "INFERENCE_OPTIMIZER_SESSION_LAYOUT"
 ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
+ENV_CACHE_DIR = "HYPERLOOM_CACHE_DIR"
+ENV_REPO_ROOT = "REPO_ROOT"
 
 # Shipped read-only asset dirs live directly under ``inference_optimizer/``,
 # one level up from this ``session/`` module — hence ``.parent.parent``.
@@ -310,25 +312,36 @@ def runtime_dir() -> Path:
     return workspace_root() / "runtime"
 
 
-def open_source_root() -> Path:
-    """Pod-local base for auto-cloned open-source deps, mirroring the install
-    scripts: ``$HYPERLOOM_OPEN_SOURCE_ROOT`` else
-    ``/opt/hyperloom/open-source-repos``. A pod-internal, non-ephemeral dir
-    (NOT /tmp, which a reaper can wipe mid-run). Decoupled from
-    ``$USER_DATA_PATH`` so a shared workspace root never collocates concurrent
-    pods' checkouts.
+def deps_cache_root() -> Path:
+    """Writable cache root for open-source dependency checkouts.
 
-    Returns:
-        The pod-local open-source repos root path.
+    Resolution: ``$HYPERLOOM_CACHE_DIR`` else ``$REPO_ROOT/.cache``
+    (``REPO_ROOT`` falls back to the current working directory). Deps are cloned
+    per revision under this root; see :func:`dep_dir`.
     """
-    override = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT")
+    override = os.environ.get(ENV_CACHE_DIR)
     if override:
         return Path(override)
-    return Path("/opt/hyperloom/open-source-repos")
+    repo_root = os.environ.get(ENV_REPO_ROOT) or os.getcwd()
+    return Path(repo_root) / ".cache"
+
+
+def dep_dir(name: str, sha: str) -> Path:
+    """Per-revision dependency checkout dir ``<deps_cache_root>/<name>@<sha>``.
+
+    Args:
+        name: Dependency name (e.g. ``Magpie``).
+        sha: Resolved commit SHA (or immutable tag) the checkout is pinned to.
+
+    Returns:
+        The per-revision checkout path.
+    """
+    return deps_cache_root() / f"{name}@{sha}"
 
 
 def magpie_dir() -> Path:
-    """Magpie package root (``$MAGPIE_PATH`` override, else legacy default).
+    """Magpie checkout. ``$MAGPIE_PATH`` (installer-written, per-revision) wins;
+    otherwise falls back to ``<deps_cache_root>/Magpie``.
 
     ``install.sh`` resolves ``MAGPIE_PATH`` from the pip-installed package.
     This helper keeps the old default path for back-compat with callers that
@@ -340,15 +353,12 @@ def magpie_dir() -> Path:
     override = os.environ.get("MAGPIE_PATH")
     if override:
         return Path(override)
-    return open_source_root() / "Magpie"
+    return deps_cache_root() / "Magpie"
 
 
 def tracelens_root() -> Path:
-    """``<open_source_root>/TraceLens/`` — TraceLens checkout (pod-local;
-    ``$TRACELENS_ROOT`` overrides). Aligned with
-    src/hyperloom/agents/kernel/scripts/install.sh so script and runtime
-    resolve the same checkout even when the consuming
-    process did not inherit the installer-written env.
+    """TraceLens checkout. ``$TRACELENS_ROOT`` (installer-written, per-revision)
+    wins; otherwise falls back to ``<deps_cache_root>/TraceLens``.
 
     Returns:
         The TraceLens checkout path.
@@ -356,7 +366,7 @@ def tracelens_root() -> Path:
     override = os.environ.get("TRACELENS_ROOT")
     if override:
         return Path(override)
-    return open_source_root() / "TraceLens"
+    return deps_cache_root() / "TraceLens"
 
 
 def mn_profile_trace_root() -> Path:
@@ -386,7 +396,8 @@ __all__ = [
     "magpie_dir",
     "make_session_dir",
     "mn_profile_trace_root",
-    "open_source_root",
+    "deps_cache_root",
+    "dep_dir",
     "runtime_dir",
     "session_dir",
     "find_latest_per_session_dir",

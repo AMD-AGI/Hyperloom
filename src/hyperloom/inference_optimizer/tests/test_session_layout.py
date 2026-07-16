@@ -208,52 +208,55 @@ def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
     assert paths.runtime_dir() == tmp_path / "runtime"
 
 
-def test_magpie_dir_is_pod_local_and_decoupled_from_user_data(tmp_path, monkeypatch):
-    # Magpie resolves under the pod-local open-source root, not under
-    # $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
+def test_magpie_dir_is_cache_and_decoupled_from_user_data(tmp_path, monkeypatch):
+    # Magpie resolves under the deps cache root (mirrors install.sh),
+    # NOT under $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "shared"))
-    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
-    expected = tmp_path / "podlocal"
-    assert paths.open_source_root() == expected
+    expected = tmp_path / "cache"
+    assert paths.deps_cache_root() == expected
     assert paths.magpie_dir() == expected / "Magpie"
     assert str(tmp_path / "shared") not in str(paths.magpie_dir())
 
 
-def test_open_source_root_defaults_to_opt_hyperloom_not_tmp(monkeypatch):
- # Default must be the non-ephemeral pod-internal dir and must NOT follow
-    # TMPDIR/tmp.
-    monkeypatch.delenv("HYPERLOOM_OPEN_SOURCE_ROOT", raising=False)
-    monkeypatch.setenv("TMPDIR", "/tmp/should-be-ignored")
-    assert paths.open_source_root() == Path("/opt/hyperloom/open-source-repos")
+def test_deps_cache_root_defaults_to_repo_root_cache(tmp_path, monkeypatch):
+    # Default is $REPO_ROOT/.cache: portable and repo-local.
+    monkeypatch.delenv("HYPERLOOM_CACHE_DIR", raising=False)
+    monkeypatch.setenv(paths.ENV_REPO_ROOT, str(tmp_path / "repo"))
+    assert paths.deps_cache_root() == tmp_path / "repo" / ".cache"
 
 
-def test_open_source_root_honours_explicit_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "custom"))
-    monkeypatch.setenv("TMPDIR", str(tmp_path / "ignored"))
+def test_deps_cache_root_honours_explicit_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "custom"))
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
-    assert paths.open_source_root() == tmp_path / "custom"
+    assert paths.deps_cache_root() == tmp_path / "custom"
     assert paths.magpie_dir() == tmp_path / "custom" / "Magpie"
 
 
 def test_magpie_dir_honours_explicit_override(tmp_path, monkeypatch):
     monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "operator-magpie"))
-    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "ignored"))
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "ignored"))
     assert paths.magpie_dir() == tmp_path / "operator-magpie"
 
 
-# TraceLens root resolution mirrors magpie_dir so trace analysis resolves the
-# same checkout even when TRACELENS_ROOT was not inherited.
-def test_tracelens_root_derives_from_open_source_root_when_env_unset(tmp_path, monkeypatch):
+def test_dep_dir_pins_revision(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
+    assert paths.dep_dir("Magpie", "abc1234") == tmp_path / "cache" / "Magpie@abc1234"
+
+
+# TraceLens root resolution: mirrors magpie_dir so trace analysis resolves the
+# same checkout as install.sh even when TRACELENS_ROOT was not inherited.
+def test_tracelens_root_derives_from_cache_root_when_env_unset(tmp_path, monkeypatch):
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
-    expected = tmp_path / "podlocal" / "TraceLens"
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
+    expected = tmp_path / "cache" / "TraceLens"
     assert paths.tracelens_root() == expected
 
 
 def test_tracelens_root_honours_explicit_override(tmp_path, monkeypatch):
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "operator-tracelens"))
-    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "ignored"))
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "ignored"))
     assert paths.tracelens_root() == tmp_path / "operator-tracelens"
 
 
@@ -365,7 +368,7 @@ def test_manifest_pod_local_dependency_warning_matches_default_policy(
 
     messages = [r.message for r in caplog.records if "MAGPIE_PATH" in r.message]
     assert messages
-    assert "defaults open-source dependencies to pod-local storage" in messages[0]
+    assert "defaults open-source dependencies to the repo-local cache" in messages[0]
     assert "point MAGPIE_PATH back" not in messages[0]
 
 

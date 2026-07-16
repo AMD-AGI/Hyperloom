@@ -373,7 +373,7 @@ PY
 
 # Return the shared dependency root used for bare-metal framework sources.
 framework_deps_root() {
-  printf '%s' "${HYPERLOOM_OPEN_SOURCE_ROOT:-${HYPERLOOM_DEPS_ROOT:-/opt/hyperloom/open-source-repos}}"
+  printf '%s' "${HYPERLOOM_CACHE_DIR:-${HYPERLOOM_DEPS_ROOT:-${REPO_ROOT}/.cache}}"
 }
 
 # Return the first visible AMD GPU arch, e.g. gfx942.
@@ -1272,7 +1272,7 @@ main() {
 
   if [ -n "$DEPS_ROOT_ARG" ]; then
     export HYPERLOOM_DEPS_ROOT="$DEPS_ROOT_ARG"
-    export HYPERLOOM_OPEN_SOURCE_ROOT="$DEPS_ROOT_ARG"
+    export HYPERLOOM_CACHE_DIR="$DEPS_ROOT_ARG"
   fi
 
   log "REPO_ROOT=${REPO_ROOT}"

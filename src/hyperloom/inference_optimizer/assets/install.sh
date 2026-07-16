@@ -146,7 +146,7 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
 # Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
 # /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
-_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
+_open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
 # tree-reform.MD P2.5: kernel-agent/framework-agent live under the hyperloom
 # package tree in both source and pip-installed layouts. A missing pyproject at
 # REPO_ROOT means setup is running from a pip --target workspace rather than a
@@ -164,6 +164,18 @@ FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/fram
 # installer/venv, so FRAMEWORK_AGENT_ROOT now just points at that in-tree
 # package (still overridable) and the old chain_framework_agent() delegation
 # below is a no-op.
+# Resolve a git ref to a commit SHA: 7-40 hex passes through; branch/tag via
+# ls-remote (falls back to the raw ref). The SHA keys the per-revision cache.
+_resolve_ref_sha() {
+  local repo="$1" ref="$2" sha=""
+  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  sha="$(git ls-remote "$repo" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
+  printf '%s' "${sha:-$ref}"
+}
+
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a release commit/tag instead of the default branch. Operators can
 # re-pin with MAGPIE_REF=<tag|sha>.
@@ -183,7 +195,8 @@ INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX
 # per-install clone is reproducible (same rationale as MAGPIE_REF). Operators
 # can re-pin with INFERENCEX_REF=<tag|branch|sha>.
 INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
-INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"
+_INFERENCEX_SHA="$(_resolve_ref_sha "$INFERENCEX_REPO" "$INFERENCEX_REF")"
+INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX@${_INFERENCEX_SHA}}"
 
 DRY_RUN=0
 CHECK_ONLY=0

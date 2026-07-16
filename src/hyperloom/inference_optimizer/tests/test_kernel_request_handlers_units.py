@@ -1862,7 +1862,7 @@ class TestTracelensRootResolution:
 
     def test_resolve_derives_from_open_source_root_when_env_unset(self, tmp_path, monkeypatch):
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         expected = tmp_path / "podlocal" / "TraceLens"
         assert krh._resolve_tracelens_root() == expected
 
@@ -1891,7 +1891,7 @@ class TestTracelensRootResolution:
         # Stub the heal to a no-op so the handler returns the structured error.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "no-tracelens-here"))
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "no-tracelens-here"))
         called = {"n": 0}
 
         def _fake_heal(root, *, log=None):
@@ -1910,8 +1910,8 @@ class TestTracelensRootResolution:
         # trigger self-heal.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
-        # Incomplete default checkout: dir exists but has no .git.
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+        # Create an incomplete default checkout: the dir exists but has no .git.
         incomplete = tmp_path / "podlocal" / "TraceLens"
         incomplete.mkdir(parents=True)
         (incomplete / "partial").write_text("half", encoding="utf-8")
@@ -1934,7 +1934,7 @@ class TestTracelensRootResolution:
  # an incomplete non-default operator override (dir present, no .git)
         # must fail fast — never adopted, never auto-cloned.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
-        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         override = tmp_path / "operator-tl"
         override.mkdir()
         (override / "partial").write_text("half", encoding="utf-8")  # no .git
@@ -1951,9 +1951,10 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_selfheal_skips_non_default_override(self, tmp_path, monkeypatch):
-        # An operator override at a non-default path is never auto-cloned, even
-        # with TRACELENS_ROOT set. A counting fake trips if _ensure_tracelens_checkout runs.
-        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+        # An operator override at a NON-default path is never auto-cloned, even
+        # though TRACELENS_ROOT is set in env. Inject a counting fake module so a
+        # regression that reaches _ensure_tracelens_checkout would trip the assert.
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         override = tmp_path / "operator-tl"
         monkeypatch.setenv("TRACELENS_ROOT", str(override))
         called = {"n": 0}
@@ -1977,9 +1978,10 @@ class TestTracelensRootResolution:
         assert called["n"] == 0
 
     def test_selfheal_runs_on_default_path_even_when_env_set(self, tmp_path, monkeypatch):
- # the default path is persisted as TRACELENS_ROOT, so "env set" is not
-        # an override; a missing default path must still attempt self-heal.
-        monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "podlocal"))
+ # the default path is persisted as TRACELENS_ROOT in
+        # kernel-agent.env.sh, so "env set" must NOT be treated as an override.
+        # A missing default path must still attempt self-heal.
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         default_root = tmp_path / "podlocal" / "TraceLens"
         monkeypatch.setenv("TRACELENS_ROOT", str(default_root))
         called = {"n": 0, "root": None}

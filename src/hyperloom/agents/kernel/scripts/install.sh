@@ -66,7 +66,7 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
 # Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
 # /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
-_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
+_open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
 HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-}"
 # MAGPIE_PATH is the single override shared with the Python runtime; a standalone
 # run never clones upstream Magpie when MAGPIE_PATH is set.
@@ -154,13 +154,25 @@ _canonicalize_path() {
   [ -z "$p" ] && return 0
   readlink -f -- "$p" 2>/dev/null || printf '%s' "${p%/}"
 }
-_tracelens_default_root="$(_canonicalize_path "${_open_source_root}/TraceLens")"
+# Resolve a git ref to a commit SHA (7-40 hex passes through; branch/tag via
+# ls-remote, falling back to the raw ref). The SHA keys the per-revision cache.
+_resolve_ref_sha() {
+  local repo="$1" ref="$2" sha=""
+  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  sha="$(git ls-remote "$repo" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
+  printf '%s' "${sha:-$ref}"
+}
+_TRACELENS_SHA="$(_resolve_ref_sha "$TRACELENS_REPO" "$TRACELENS_REF")"
+_tracelens_default_root="$(_canonicalize_path "${_open_source_root}/TraceLens@${_TRACELENS_SHA}")"
 _tracelens_root_was_set=""
 if [ -n "${TRACELENS_ROOT:-}" ] \
    && [ "$(_canonicalize_path "${TRACELENS_ROOT}")" != "${_tracelens_default_root}" ]; then
   _tracelens_root_was_set=1
 fi
-TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"
+TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens@${_TRACELENS_SHA}}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 # Writable mirror when the optional internal extension is on a read-only mount.
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"
@@ -200,8 +212,9 @@ fi
 # repo/ref/root with GEAK_REPO / GEAK_REF / GEAK_ROOT. NOTE: only Hyperloom's
 # internal naming changed — no upstream GEAK branch was renamed.
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 GEAK_REF="${GEAK_REF:-main}"
+_GEAK_SHA="$(_resolve_ref_sha "$GEAK_REPO" "$GEAK_REF")"
+GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK@${_GEAK_SHA}}"
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
 GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-4-8}}"
 if [ -z "${GEAK_CLAUDE_MODEL:-}" ] && [ -z "${CLAUDE_MODEL:-}" ] && [ -n "${DEEPSEEK_API_KEY:-${DEEPSEEK_BASE_URL:-}}" ]; then

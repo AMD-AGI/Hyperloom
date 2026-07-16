@@ -1061,7 +1061,7 @@ def _preflight(
     if not inferencex_path:
         from ..session.paths import (
             magpie_dir as _magpie_default,
-            open_source_root as _open_source_default,
+            deps_cache_root as _open_source_default,
         )
 
         open_source_root = _open_source_default()
@@ -1084,7 +1084,7 @@ def _preflight(
     # When no writable checkout was found, clone one ourselves. baseline cannot
     # run without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from ..session.paths import open_source_root as _open_source_default
+        from ..session.paths import deps_cache_root as _open_source_default
 
         dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")
