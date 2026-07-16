@@ -41,6 +41,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -289,7 +290,7 @@ def _compile_like_fraction(names: list[str], sources: list[str]) -> float:
         "inductor",
         "triton",
         "torchinductor",
-        "/tmp/",
+        "/tmp/",  # nosec B108 - marker for generated torch.compile artifact paths.
         "generated",
         "CompiledFunction",
         "autotune",
@@ -395,9 +396,7 @@ async def _run_mode_kernels(args: argparse.Namespace) -> int:
         print(f"config not found: {config}", file=sys.stderr)
         return 2
 
-    root = args.output_root or Path(
-        f"/tmp/ab_kernel_usage_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}",
-    )
+    root = args.output_root or Path(tempfile.gettempdir()) / f"ab_kernel_usage_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     root.mkdir(parents=True, exist_ok=True)
 
     base, a_extra, b_extra = _arm_extras(args.base_extra_args, args.arm_b_suffix)
@@ -553,7 +552,7 @@ async def _run_mode_magpie(args: argparse.Namespace) -> int:
         print(f"config not found: {config}", file=sys.stderr)
         return 2
 
-    root = args.output_root or Path(f"/tmp/ab_torch_compile_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}")
+    root = args.output_root or Path(tempfile.gettempdir()) / f"ab_torch_compile_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     root.mkdir(parents=True, exist_ok=True)
 
     base, a_extra, b_extra = _arm_extras(args.base_extra_args, args.arm_b_suffix)
@@ -650,7 +649,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--output-root", type=Path, default=None)
     ap.add_argument("--magpie-python", default="/opt/venv/bin/python")
-    ap.add_argument("--cwd", default="/tmp")
+    ap.add_argument("--cwd", default=tempfile.gettempdir())
     ap.add_argument("--variant-timeout-sec", type=int, default=2400)
     ap.add_argument(
         "--top-k",
