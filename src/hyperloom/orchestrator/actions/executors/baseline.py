@@ -1103,8 +1103,59 @@ class BaselineExecutor:
             retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
             if retry.get("status") == "succeeded":
                 retry["accuracy_source"] = "eval_unavailable"
-            return retry
+            result = retry
+        self._maybe_stop_on_missing_baseline_accuracy(ctx, result, eval_already_off=eval_already_off)
         return result
+
+    def _maybe_stop_on_missing_baseline_accuracy(
+        self,
+        ctx: RunnerContext,
+        result: dict[str, Any],
+        *,
+        eval_already_off: bool,
+    ) -> None:
+        """Halt the run when a genuine baseline produced no accuracy result.
+
+        A baseline is supposed to establish the accuracy reference. If the
+        accuracy test was expected to run (serving eval not operator-disabled,
+        or any scriptable workload) but produced no result, the setup is
+        fundamentally broken and the whole run stops. When the operator
+        explicitly disabled the serving eval, accuracy is intentionally off and
+        no stop is issued. Throughput-level baseline failures are handled by the
+        Coordinator's existing ``baseline_failed`` streak logic.
+
+        Args:
+            ctx (RunnerContext): The runner context (task kind + shared_state).
+            result (dict): The final baseline result dict.
+            eval_already_off (bool): Whether the operator disabled the eval.
+        """
+        if not _should_establish_quality_ref(getattr(ctx.task, "kind", "")):
+            return
+        if result.get("status") != "succeeded":
+            return
+        if result.get("accuracy") is not None:
+            return
+        params = ctx.task.params or {}
+        framework = (
+            str(params.get("framework") or "").strip()
+            or os.environ.get("FRAMEWORK", "").strip()
+            or None
+        )
+        from hyperloom.inference_optimizer import framework_registry
+        from ._accuracy_gate import request_baseline_accuracy_stop
+
+        scriptable = framework_registry.is_scriptable(framework)
+        # Accuracy is "expected" unless the operator explicitly disabled the
+        # serving eval. Scriptable workloads always carry the quality gate, so a
+        # missing gate always counts as expected-but-failed.
+        if not (scriptable or not eval_already_off):
+            return
+        extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or self.shared_state
+        request_baseline_accuracy_stop(
+            shared_state,
+            context=f"baseline:{framework or 'unknown'}",
+        )
 
     async def _run_once(
         self,

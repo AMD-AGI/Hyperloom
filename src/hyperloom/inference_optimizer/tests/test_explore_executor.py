@@ -501,6 +501,67 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 
 
 @pytest.mark.asyncio
+async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner, tmp_path):
+    """A high-risk serving variant that clears throughput but yields no accuracy
+    verdict used to skip the gate (throughput-only fallback). That fallback is
+    removed: the variant REVERTs (the change likely broke the eval path), but
+    the run does NOT stop -- only a broken baseline halts the run."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.baseline_accuracy = 0.80
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-acc-revert"
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=840.0)  # +5% vs base 800 (clears throughput)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    grid = [
+        {
+            # High-risk (precision) flag -> serving accuracy gate applies.
+            "name": "v_risky",
+            "extra_args": "--kv-cache-dtype fp8",
+            "extra_envs": {},
+            "provenance": "llm_direct",
+        }
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "accuracy_baseline": 0.80,
+            "grid": grid,
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-acc-revert",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    assert out["status"] == "succeeded"
+    fp = canonical_fingerprint("--kv-cache-dtype fp8", {})
+    tested = out["explore_search_update"]["tested"][fp]
+    assert tested["outcome"] == "REVERT"
+    reasons = {lr["name"]: lr.get("reason") for lr in out["losers"]}
+    assert reasons.get("v_risky") == "accuracy_unavailable"
+    # Post-baseline accuracy failure reverts the variant but never halts the run.
+    assert state.stop_reason == ""
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_runner, tmp_path):
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"

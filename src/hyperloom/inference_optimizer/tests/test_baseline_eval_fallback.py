@@ -269,6 +269,138 @@ def test_non_eval_failure_does_not_retry(tmp_path):
     assert result.get("accuracy_source") != "eval_unavailable"
 
 
+def _make_baseline_ctx(params: dict, shared_state) -> SimpleNamespace:
+    """A genuine ``baseline`` ctx carrying a live SharedState for stop wiring."""
+    task = SimpleNamespace(task_id="t-bl-acc", kind="baseline", params=params)
+    return SimpleNamespace(task=task, extra={"shared_state": shared_state})
+
+
+# --- baseline accuracy missing -> stop the whole run -----------------------
+def test_baseline_missing_accuracy_stops_run(tmp_path):
+    """Serving baseline with eval expected but no accuracy result -> the run
+    halts with ``stop_reason=baseline_accuracy_failed`` (broken setup)."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]))  # throughput only, no GSM8K
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    state = SharedState()
+    ctx = _make_baseline_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "gpu_type": "mi300x",
+        },
+        state,
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert result.get("accuracy") is None
+    assert state.stop_reason == "baseline_accuracy_failed"
+
+
+def test_baseline_operator_disabled_eval_does_not_stop(tmp_path):
+    """When the operator explicitly disables the serving eval, accuracy is
+    intentionally off: a missing accuracy result must NOT stop the run."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    state = SharedState()
+    ctx = _make_baseline_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "gpu_type": "mi300x",
+            "disable_run_eval": True,
+        },
+        state,
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert state.stop_reason == ""
+
+
+def test_baseline_eval_failure_fallback_stops_run(tmp_path):
+    """The eval-failure fallback still salvages the throughput baseline, but a
+    genuine baseline with no accuracy result now halts the run."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+
+    def fake_run(cmd, *args, **kwargs):
+        cfg_idx = cmd.index("--benchmark-config")
+        out_idx = cmd.index("--output-dir")
+        cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
+        slot = Path(cmd[out_idx + 1])
+        run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
+        if run_eval != "false":
+            return subprocess.CompletedProcess(
+                cmd, 1, "", "ERROR: run_eval failed with exit code 1\n"
+            )
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    state = SharedState()
+    ctx = _make_baseline_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "gpu_type": "mi300x",
+        },
+        state,
+    )
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert result.get("accuracy_source") == "eval_unavailable"
+    assert state.stop_reason == "baseline_accuracy_failed"
+
+
 def test_eval_already_off_does_not_retry(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base)
