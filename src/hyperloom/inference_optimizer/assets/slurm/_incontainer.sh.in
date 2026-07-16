@@ -65,7 +65,7 @@ vals = dict(
     isl=os.environ["ISL"], osl=os.environ["OSL"], nodes="1",
     random_range_ratio="1.0", target_gain=os.environ["TARGET_GAIN"],
     max_hours=os.environ["MAX_HOURS"], kernel_agent_build_geak_rag_index="1",
-    oob_path="", tracelens_root="", multinode_section="", inferenceX_data="(none)",
+    oob_path="", tracelens_root="", multinode_section="",
 )
 print(tpl.format(**vals))
 PY
