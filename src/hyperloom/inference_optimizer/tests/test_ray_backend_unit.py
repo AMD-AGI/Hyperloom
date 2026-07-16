@@ -765,3 +765,401 @@ def test_run_magpie_local_path_untouched(
     # The local path uses the ORIGINAL config (no .ray.yaml rewrite).
     assert seen["config_path"] == cfg
     assert not (tmp_path / "config.ray.yaml").exists()
+
+
+# ── coverage: backend sync submit + shared-root MN + strip fallbacks ─────────
+def test_run_subprocess_sync_passthrough(monkeypatch: pytest.MonkeyPatch):
+    """run_subprocess_sync submits via ray and returns the SubprocessResult."""
+    fake = _FakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    backend = rb.RayExecutionBackend()
+    backend._ensured = True
+    result = backend.run_subprocess_sync(
+        ["echo", "sync-ray"], num_gpus=1, resources={"serving_slot": 1}, timeout_s=30
+    )
+    assert isinstance(result, rb.SubprocessResult)
+    assert result.returncode == 0
+    assert "sync-ray" in result.stdout
+    assert fake.last_ref["num_gpus"] == 1
+
+
+def test_resolve_shared_artifact_root_multi_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Multi-node + HYPERLOOM_MN_PROFILE_TRACE_DIR -> the shared root wins."""
+    mn_root = tmp_path / "shared"
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(mn_root))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    assert rb.resolve_shared_artifact_root(tmp_path / "sess") == mn_root
+
+
+def test_strip_visible_devices_unparseable_yaml_returns_src(tmp_path: Path):
+    """A YAML parse error returns the original path unchanged (fail-soft)."""
+    cfg = tmp_path / "bad.yaml"
+    cfg.write_text("benchmark: [unbalanced\n", encoding="utf-8")
+    assert rb.strip_visible_devices_from_config(cfg) == cfg
+
+
+def test_strip_visible_devices_no_envs_dict_returns_src(tmp_path: Path):
+    """When benchmark.envs is not a dict, return the original path."""
+    cfg = tmp_path / "noenvs.yaml"
+    cfg.write_text("benchmark:\n  envs: not_a_dict\n", encoding="utf-8")
+    assert rb.strip_visible_devices_from_config(cfg) == cfg
+
+
+def test_should_use_ray_backend_explicit_off(monkeypatch: pytest.MonkeyPatch):
+    """Explicit RAY_EXEC=0 forces the local path even outside pytest gating."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "0")
+    assert rb._should_use_ray_backend() is False
+
+
+# ── coverage: GpuSpecialistLease exception branches (dead actor) ─────────────
+class _RaisingActor:
+    """Fake actor whose method .remote() refs make fake ray.get/kill raise."""
+
+    class _M:
+        def remote(self, *a, **k):
+            return "boom-ref"
+
+    def __init__(self):
+        self.is_alive = self._M()
+        self.exit_code = self._M()
+        self.stop = self._M()
+
+
+class _RaisingRay:
+    class exceptions:  # noqa: N801
+        class RayTaskError(Exception):
+            pass
+
+    def get(self, ref):
+        raise RuntimeError("actor dead")
+
+    def kill(self, actor):
+        raise RuntimeError("kill failed")
+
+
+def test_gpu_specialist_lease_dead_actor_degrades(monkeypatch: pytest.MonkeyPatch):
+    """is_alive/exit_code/stop/close swallow a dead-actor error (never raise)."""
+    monkeypatch.setitem(sys.modules, "ray", _RaisingRay())
+    lease = rs.GpuSpecialistLease(num_gpus=1)
+    lease._actor = _RaisingActor()  # force the ray.get/kill paths
+    assert lease.is_alive() is False       # 598-600
+    assert lease.exit_code() is None       # 613-615
+    lease.stop()                           # 628-630 (no raise)
+    lease.close()                          # 639-641 (kill raises, swallowed)
+    assert lease._actor is None
+
+
+# ── coverage: ServingGroupManager empty + exception branches ─────────────────
+def test_serving_group_manager_empty_before_start():
+    """A never-started SGM: ranks_alive=[] / is_alive False / stop no-op."""
+    sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8)
+    assert sgm.pids() == []
+    assert sgm.ranks_alive() == []   # 892-893
+    assert sgm.is_alive() is False
+    sgm.stop()                       # 915-916 (no ranks -> return)
+    sgm.close()                      # no pg / no ranks -> clean
+
+
+def test_serving_group_manager_rank_errors_degrade(monkeypatch: pytest.MonkeyPatch):
+    """A rank actor that raises reads as not-alive; stop/close swallow errors."""
+    monkeypatch.setitem(sys.modules, "ray", _RaisingRay())
+    sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8)
+    sgm._ranks = [_RaisingActor(), _RaisingActor()]
+    sgm._pids = [1, 2]
+    sgm._pg = object()
+    removed: dict = {"hit": False}
+    monkeypatch.setattr(
+        rs,
+        "_remove_serving_placement_group",
+        lambda pg: removed.__setitem__("hit", (_ for _ in ()).throw(RuntimeError("pg gone"))),
+    )
+    assert sgm.ranks_alive() == [False, False]  # 899-901
+    assert sgm.is_alive() is False
+    sgm.stop()                                  # 921-923 swallowed
+    sgm.close()                                 # 931-933 + 939-940 swallowed
+    assert sgm._ranks == [] and sgm._pg is None
+
+
+# ── coverage: ManagedServerProcess pid/exit_code before start ────────────────
+def test_managed_process_pid_exit_code_before_start():
+    mgr = ManagedServerProcess()
+    assert mgr.pid() is None
+    assert mgr.exit_code() is None
+    assert mgr.is_alive() is False
+
+
+# ── coverage: ServingActor class body via a pass-through fake ray.remote ─────
+class _PassthroughRay:
+    """Fake ray whose @remote is an identity decorator, so the ServingActor
+    class body runs as plain Python (no cluster) for coverage of start /
+    run_blocking / is_alive / pid / exit_code / stop."""
+
+    def remote(self, *dargs, **dkw):
+        # Support both @ray.remote and @ray.remote(...) forms.
+        if len(dargs) == 1 and callable(dargs[0]) and not dkw:
+            return dargs[0]
+
+        def _deco(cls):
+            return cls
+
+        return _deco
+
+
+def test_serving_actor_body_methods_drive_real_subprocess(monkeypatch: pytest.MonkeyPatch):
+    """Instantiate the ServingActor class directly and drive its lifecycle on a
+    real short-lived subprocess (covers _serving_actor_body's method bodies)."""
+    monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
+    actor_cls = rs._serving_actor_body()
+    actor = actor_cls()  # plain instance (identity-decorated)
+
+    # start(): device vars in caller env are dropped; non-device vars flow.
+    pid = actor.start(["sh", "-c", "sleep 0.3; exit 0"], env={"ROCR_VISIBLE_DEVICES": "9", "FOO": "bar"})
+    assert isinstance(pid, int) and pid > 0
+    assert actor.pid() == pid
+    assert actor.is_alive() is True
+    assert actor.exit_code() is None
+    deadline = time.time() + 5.0
+    while time.time() < deadline and actor.is_alive():
+        time.sleep(0.05)
+    assert actor.exit_code() == 0
+    actor.stop()  # idempotent reap
+
+    # run_blocking(): fresh actor runs one round to completion, returns triple.
+    actor2 = actor_cls()
+    rc, out, err = actor2.run_blocking(["echo", "hello-actor"], timeout=30)
+    assert rc == 0 and "hello-actor" in out
+    actor2.stop()
+
+
+def test_serving_actor_run_blocking_timeout_sentinel(monkeypatch: pytest.MonkeyPatch):
+    """A hard timeout in run_blocking is reported as the sentinel returncode."""
+    monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
+    actor = rs._serving_actor_body()()
+    rc, _out, err = actor.run_blocking(["sleep", "30"], timeout=1)
+    assert rc == rs._ACTOR_TIMEOUT_RC
+    assert "TimeoutExpired" in err
+    actor.stop()
+
+
+# ── coverage: RayExecutionBackend.ensure (reuses kernel ray_runtime) ─────────
+def test_backend_ensure_reuses_kernel_runtime(monkeypatch: pytest.MonkeyPatch):
+    """ensure() calls ensure_ray_cluster + quiet_ray_init once, then is idempotent."""
+    from hyperloom.agents.kernel.tools.backends import ray_runtime as rr
+
+    calls: dict = {"ensure": 0, "init": 0, "num_gpus": None}
+
+    def _fake_ensure(*, num_gpus=None, log_path=None):
+        calls["ensure"] += 1
+        calls["num_gpus"] = num_gpus
+        return True
+
+    def _fake_init(*, num_gpus=None, log_path=None):
+        calls["init"] += 1
+
+    monkeypatch.setattr(rr, "ensure_ray_cluster", _fake_ensure)
+    monkeypatch.setattr(rr, "quiet_ray_init", _fake_init)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "3")
+
+    backend = rb.RayExecutionBackend()
+    backend.ensure()
+    assert calls == {"ensure": 1, "init": 1, "num_gpus": 3}
+    backend.ensure()  # idempotent: no second call
+    assert calls["ensure"] == 1
+
+
+# ── coverage: PG + rank-actor factory helpers (fake ray.util modules) ────────
+def test_make_serving_placement_group_and_rank_actor(monkeypatch: pytest.MonkeyPatch):
+    """Cover the placement-group + rank-actor factories via fake ray.util modules."""
+    import types
+
+    seen: dict = {}
+
+    class _FakePG:
+        def ready(self):
+            return "ready-ref"
+
+    def _fake_placement_group(bundles, strategy):
+        seen["bundles"] = bundles
+        seen["strategy"] = strategy
+        return _FakePG()
+
+    class _FakePassRay:
+        def remote(self, *da, **dk):
+            if len(da) == 1 and callable(da[0]) and not dk:
+                return da[0]
+            return lambda cls: cls
+
+        def get(self, ref):
+            return ref
+
+    # Fake ray + ray.util.placement_group + ray.util.scheduling_strategies.
+    monkeypatch.setitem(sys.modules, "ray", _FakePassRay())
+    pg_mod = types.ModuleType("ray.util.placement_group")
+    pg_mod.placement_group = _fake_placement_group
+    pg_mod.remove_placement_group = lambda pg: seen.__setitem__("removed", pg)
+    monkeypatch.setitem(sys.modules, "ray.util.placement_group", pg_mod)
+
+    class _FakeSchedStrat:
+        def __init__(self, *, placement_group, placement_group_bundle_index):
+            seen["bundle_index"] = placement_group_bundle_index
+
+    ss_mod = types.ModuleType("ray.util.scheduling_strategies")
+    ss_mod.PlacementGroupSchedulingStrategy = _FakeSchedStrat
+    monkeypatch.setitem(sys.modules, "ray.util.scheduling_strategies", ss_mod)
+
+    pg = rs._make_serving_placement_group(2, 8, serving_slot=True)
+    assert isinstance(pg, _FakePG)
+    assert seen["strategy"] == "STRICT_SPREAD"
+    assert seen["bundles"][0] == {"GPU": 8.0, "serving_slot": 1}
+    assert len(seen["bundles"]) == 2
+
+    # rank actor: options()(...).remote() — the ServingActor class is identity
+    # under _FakePassRay.remote, so .options must exist. Wrap it.
+    actor_cls = rs._serving_actor_body()
+
+    class _Opts:
+        def options(self, **kw):
+            seen["opts"] = kw
+            return self
+
+        def remote(self):
+            return "rank-actor"
+
+    monkeypatch.setattr(rs, "_serving_actor_body", lambda: _Opts())
+    handle = rs._make_rank_actor(pg, 1, 8, serving_slot=True)
+    assert handle == "rank-actor"
+    assert seen["bundle_index"] == 1
+    assert seen["opts"]["resources"] == {"serving_slot": 1}
+
+    rs._remove_serving_placement_group(pg)
+    assert seen["removed"] is pg
+    # Defensive: drop the injected fake ray.util.* submodules so a later test's
+    # lazy ``import ray`` never sees this test's fakes (belt-and-suspenders on
+    # top of monkeypatch's own setitem teardown).
+    for mod in ("ray.util.scheduling_strategies", "ray.util.placement_group"):
+        sys.modules.pop(mod, None)
+
+
+# ── coverage: ServingLease ensure/context-manager/close + make_serving_actor ─
+def test_serving_lease_context_manager_and_ensure(monkeypatch: pytest.MonkeyPatch):
+    """ensure() creates the actor once; __enter__/__exit__ ensure+close it."""
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    made: list = []
+    monkeypatch.setattr(
+        rs, "make_serving_actor",
+        lambda n, *, serving_slot=True: made.append((n, serving_slot)) or _FakeActor((0, "", "")),
+    )
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+
+    lease = rs.ServingLease(num_gpus=2, serving_slot=True)
+    lease.ensure()
+    assert made == [(2.0, True)]
+    lease.ensure()  # idempotent — actor already set, no second make
+    assert len(made) == 1
+    actor = lease._actor
+    lease.close()  # ray.kill path (actor present)
+    assert actor in fake.killed
+    assert lease._actor is None
+
+    # Context manager: __enter__ ensures, __exit__ closes.
+    with rs.ServingLease(num_gpus=1) as l2:
+        assert l2._actor is not None
+    assert l2._actor is None  # __exit__ closed it
+
+
+def test_make_serving_actor_slot_modes(monkeypatch: pytest.MonkeyPatch):
+    """make_serving_actor toggles the serving_slot resource on/off."""
+    captured: dict = {}
+
+    class _Opts:
+        def options(self, **kw):
+            captured.update(kw)
+            return self
+
+        def remote(self):
+            return "actor"
+
+    monkeypatch.setattr(rs, "_serving_actor_body", lambda: _Opts())
+    rs.make_serving_actor(4, serving_slot=True)
+    assert captured["num_gpus"] == 4 and captured["resources"] == {"serving_slot": 1}
+    rs.make_serving_actor(2, serving_slot=False)
+    assert captured["resources"] is None
+    rs.make_gpu_specialist_actor(1)  # default serving_slot=False
+    assert captured["resources"] is None
+
+
+def test_gpu_specialist_lease_stop_no_actor_noop():
+    """stop()/close() on a never-started GpuSpecialistLease are safe no-ops."""
+    lease = rs.GpuSpecialistLease(num_gpus=1)
+    lease.stop()   # 623-624: no actor -> return
+    lease.close()  # no actor -> return
+    assert lease.pid() is None
+
+
+def test_gpu_specialist_lease_close_kills_live_actor(monkeypatch: pytest.MonkeyPatch):
+    """close() ray.kill()s a live actor and clears the handle (normal path)."""
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    lease = rs.GpuSpecialistLease(num_gpus=1)
+    actor = _FakeGpuActor()
+    lease._actor = actor
+    lease.close()                      # 432-435: ray.kill path
+    assert actor in fake.killed
+    assert lease._actor is None
+
+
+def test_should_use_ray_backend_unset_single_node_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Env unset + not-under-pytest + single-node -> True (production default)."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)  # bypass the pytest gate
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    assert rb._should_use_ray_backend() is True  # 80-82
+
+
+def test_strip_visible_devices_write_error_returns_src(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A write failure on the .ray.yaml sibling returns the original path."""
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        "benchmark:\n  envs:\n    TP: 1\n    ROCR_VISIBLE_DEVICES: '0'\n",
+        encoding="utf-8",
+    )
+    real_open = Path.open
+
+    def _boom_open(self, *a, **k):
+        if self.name.endswith(".ray.yaml") and (a[:1] == ("w",) or k.get("mode") == "w"):
+            raise OSError("disk full")
+        return real_open(self, *a, **k)
+
+    monkeypatch.setattr(Path, "open", _boom_open)
+    assert rb.strip_visible_devices_from_config(cfg) == cfg  # 395-396
+
+
+def test_serving_lease_close_swallows_kill_error(monkeypatch: pytest.MonkeyPatch):
+    """ServingLease.close swallows a ray.kill error and still clears the handle."""
+    monkeypatch.setitem(sys.modules, "ray", _RaisingRay())  # kill() raises
+    lease = rs.ServingLease(num_gpus=1)
+    lease._actor = object()
+    lease.close()  # 432-435: except path swallowed
+    assert lease._actor is None
+
+
+def test_managed_process_start_with_log_path(tmp_path: Path):
+    """start(log_path=...) opens the log file (covers the log_path branch)."""
+    log = tmp_path / "nested" / "server.log"
+    mgr = ManagedServerProcess()
+    pid = mgr.start(["sh", "-c", "echo hi; sleep 0.2"], log_path=str(log))  # 98-100
+    try:
+        assert pid > 0
+        assert log.parent.is_dir()      # os.makedirs ran
+    finally:
+        mgr.stop()
+    assert log.exists()

@@ -651,8 +651,15 @@ PY
     num_gpus="$RAY_NUM_GPUS"
   fi
   log "starting ray head with --num-gpus=${num_gpus}"
+  # Declare the ``serving_slot`` custom resource so serving-family GPU work
+  # (baseline / profile / explore / sweep / gpu_research) routed through the
+  # Ray execution backend can hold the whole-machine mutex (ray_modify.plan.md
+  # §12 T6). Without it those tasks request an undeclared resource and deadlock
+  # PENDING forever, since ensure_ray_cluster connects to this existing head
+  # instead of starting its own with the resource.
   if ! ray start --head --disable-usage-stats \
-       --num-gpus="$num_gpus" --include-dashboard=false >/dev/null; then
+       --num-gpus="$num_gpus" --include-dashboard=false \
+       --resources='{"serving_slot": 1}' >/dev/null; then
     warn "ray start failed; kernel optimization will hang. Check ROCm visibility."
     return 0
   fi
