@@ -694,7 +694,7 @@ def _wait_health(
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{_INFERENCE_PORT}/health",
                 timeout=3,
-            ) as resp:
+            ) as resp:  # nosec B310 - fixed loopback health check.
                 if 200 <= resp.status < 300:
                     return True
         except (urllib.error.URLError, OSError):

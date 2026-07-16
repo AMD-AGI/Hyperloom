@@ -1540,7 +1540,7 @@ class BaselineExecutor:
             r = urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/health",
                 timeout=timeout,
-            )
+            )  # nosec B310 - fixed loopback health check.
             return r.status == 200
         except Exception:  # noqa: BLE001
             return False
