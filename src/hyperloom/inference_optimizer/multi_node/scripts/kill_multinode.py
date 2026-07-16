@@ -16,6 +16,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -44,17 +45,32 @@ def _log(msg: str) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
-    """Return True if ``pid`` still exists (signal-0 probe).
+    """Return True if ``pid`` is a live (non-zombie) process.
+
+    A killed sglang scheduler whose launcher parent is already dead lingers as
+    a zombie (``<defunct>``) until pid-1 reaps it; SIGKILL cannot clear it. A
+    zombie has already released every resource (GPU/VRAM/ports included), so it
+    must count as gone — otherwise the death-wait spins on it for no reason.
 
     Args:
         pid: Process id to probe.
 
     Returns:
-        bool: True when the process is still present.
+        bool: True only when the process exists and is not a zombie.
     """
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            data = fh.read()
+        # Fields: "pid (comm) state ...". comm may contain ')', so split after
+        # the last ')': the state char is two bytes past it.
+        rparen = data.rfind(b")")
+        if rparen != -1 and data[rparen + 2 : rparen + 3] == b"Z":
+            return False
+    except OSError:
         return False
     return True
 
@@ -133,19 +149,91 @@ def _wait_ports_free(ports: list[int], timeout_s: float) -> list[int]:
         time.sleep(1.0)
 
 
+def _gpu_vram_used_mb() -> list[float] | None:
+    """Return per-GPU used VRAM (MiB) via rocm-smi, or None if unavailable.
+
+    Uses ``rocm-smi --showmeminfo vram --json`` so it works without HIP device
+    visibility (the kill actor runs with num_gpus=0). Best-effort: any parse or
+    exec failure returns None so the caller skips the GPU-free wait.
+
+    Returns:
+        list[float] | None: Used VRAM per GPU in MiB, or None when rocm-smi is
+        missing / unparseable.
+    """
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showmeminfo", "vram", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    used: list[float] = []
+    for fields in data.values():
+        if not isinstance(fields, dict):
+            continue
+        for key, val in fields.items():
+            kl = key.lower()
+            if "vram" in kl and "used" in kl:
+                try:
+                    used.append(float(val) / (1024.0 * 1024.0))
+                except (TypeError, ValueError):
+                    pass
+    return used or None
+
+
+def _wait_gpu_free(threshold_mb: float, timeout_s: float) -> list[float]:
+    """Wait until every GPU's used VRAM drops below ``threshold_mb``.
+
+    ROCm reclaims a dead process's VRAM asynchronously, so a launch fired the
+    instant the pids exit can hit a still-occupied GPU and abort the scheduler
+    during init (``EOFError`` / exit -6). Block until the driver has actually
+    returned the memory. Best-effort: returns [] immediately when rocm-smi is
+    unavailable.
+
+    Args:
+        threshold_mb: Per-GPU used-VRAM ceiling considered "free".
+        timeout_s: Max seconds to wait for reclamation.
+
+    Returns:
+        list[float]: Per-GPU used VRAM (MiB) still above threshold at timeout
+        (empty on a clean reclaim or when rocm-smi is unavailable).
+    """
+    deadline = time.time() + max(0.0, timeout_s)
+    while True:
+        used = _gpu_vram_used_mb()
+        if used is None:
+            return []
+        busy = [round(u, 1) for u in used if u > threshold_mb]
+        if not busy or time.time() >= deadline:
+            return busy
+        time.sleep(2.0)
+
+
 def _kill_remote(
     pid_dir: str,
     grace_sec: int,
     drain_ports: list[int] | None = None,
     death_timeout_s: float = 30.0,
     port_timeout_s: float = 60.0,
+    gpu_free_threshold_mb: float = 2048.0,
+    gpu_free_timeout_s: float = 120.0,
 ) -> dict:
     """Kill the rank_*/prefill_*/decode_*/router* PID-file processes under ``pid_dir`` on this pod; returns a per-PID summary.
 
     One sweep covers both colocated and PD-disaggregated modes (unused
     patterns are no-ops). After signalling, block until every killed process
-    truly exits and the rendezvous/serving ports drain, so the next launch's
-    rank-0 can bind its TCPStore + HTTP without an EADDRINUSE abort.
+    truly exits, the rendezvous/serving ports drain, and the GPUs reclaim their
+    VRAM, so the next launch's rank-0 binds its TCPStore + HTTP and inits its
+    scheduler on a clean GPU (avoiding EADDRINUSE and the async-VRAM-reclaim
+    ``EOFError`` / exit -6 scheduler abort).
 
     Args:
         pid_dir: Directory containing the PID files to sweep.
@@ -154,10 +242,13 @@ def _kill_remote(
             them; worker nodes drain instantly).
         death_timeout_s: Max seconds to wait for signalled pids to disappear.
         port_timeout_s: Max seconds to wait for ``drain_ports`` to free.
+        gpu_free_threshold_mb: Per-GPU used-VRAM ceiling considered "free".
+        gpu_free_timeout_s: Max seconds to wait for VRAM reclamation.
 
     Returns:
         dict: Summary with ``killed``, ``stale``, ``missing`` lists plus
-        ``still_alive`` / ``ports_busy`` diagnostics (empty on a clean drain).
+        ``still_alive`` / ``ports_busy`` / ``gpu_busy`` diagnostics (empty on a
+        clean teardown).
     """
     summary: dict[str, list] = {
         "killed": [],
@@ -165,6 +256,7 @@ def _kill_remote(
         "missing": [],
         "still_alive": [],
         "ports_busy": [],
+        "gpu_busy": [],
     }
     p = Path(pid_dir)
     if not p.is_dir():
@@ -280,6 +372,11 @@ def _kill_remote(
         if busy:
             summary["ports_busy"] = [str(port) for port in busy]
             _log(f"WARN ports still bound after {port_timeout_s:.0f}s: {busy}")
+    if killed_pids:
+        gpu_busy = _wait_gpu_free(gpu_free_threshold_mb, gpu_free_timeout_s)
+        if gpu_busy:
+            summary["gpu_busy"] = [str(mb) for mb in gpu_busy]
+            _log(f"WARN GPUs still hold VRAM after {gpu_free_timeout_s:.0f}s (MiB): {gpu_busy}")
 
     return summary
 
@@ -311,6 +408,18 @@ def main() -> int:
     )
     p.add_argument("--death-timeout", type=float, default=30.0, help="max seconds to wait for pids to exit (default 30)")
     p.add_argument("--port-timeout", type=float, default=60.0, help="max seconds to wait for ports to drain (default 60)")
+    p.add_argument(
+        "--gpu-free-threshold-mb",
+        type=float,
+        default=2048.0,
+        help="per-GPU used-VRAM ceiling (MiB) treated as free (default 2048)",
+    )
+    p.add_argument(
+        "--gpu-free-timeout",
+        type=float,
+        default=120.0,
+        help="max seconds to wait for GPU VRAM reclaim (default 120)",
+    )
     args = p.parse_args()
 
     if args.drain_ports.strip():
@@ -323,7 +432,9 @@ def main() -> int:
     _log(
         f"pid_dir={args.pid_dir} grace={args.grace_sec}s "
         f"drain_ports={drain_ports} death_timeout={args.death_timeout:.0f}s "
-        f"port_timeout={args.port_timeout:.0f}s"
+        f"port_timeout={args.port_timeout:.0f}s "
+        f"gpu_free_threshold_mb={args.gpu_free_threshold_mb:.0f} "
+        f"gpu_free_timeout={args.gpu_free_timeout:.0f}s"
     )
 
     ray.init(ignore_reinit_error=True, log_to_driver=True)
@@ -339,11 +450,21 @@ def main() -> int:
                 node_id=node_id,
                 soft=False,
             ),
-        ).remote(args.pid_dir, args.grace_sec, drain_ports, args.death_timeout, args.port_timeout)
+        ).remote(
+            args.pid_dir,
+            args.grace_sec,
+            drain_ports,
+            args.death_timeout,
+            args.port_timeout,
+            args.gpu_free_threshold_mb,
+            args.gpu_free_timeout,
+        )
         refs.append((node_id[:16], ref))
 
-    # Actor upper bound: grace + death-wait + port-wait + margin.
-    get_timeout = int(args.grace_sec + args.death_timeout + args.port_timeout + 30)
+    # Actor upper bound: grace + death-wait + port-wait + gpu-wait + margin.
+    get_timeout = int(
+        args.grace_sec + args.death_timeout + args.port_timeout + args.gpu_free_timeout + 30
+    )
     out: dict[str, dict] = {}
     for short_id, ref in refs:
         try:
