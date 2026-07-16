@@ -1000,6 +1000,65 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     return max(0.0, now - started)
 
 
+def _phase_budget_total_seconds(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+) -> float | None:
+    """Effective TOTAL budget (seconds) allotted to the current phase.
+
+    Short bounded runs (``max_minutes>0`` and not :func:`is_long_run`) use
+    "charge-back": the phase gets its share of the time still remaining in the
+    session, renormalized over the current phase and the phases yet to come. This
+    makes an earlier phase's overrun (e.g. a slow PRELUDE) transparently reduce
+    every later phase's budget instead of the fixed ``max_minutes*pct`` allotment.
+
+    Long/cyclic and unbounded runs keep the legacy per-window allotment
+    (``_budget_minutes*60*pct``) so per-cycle budgeting is untouched.
+
+    Args:
+        state (Any): Frozen SharedState view.
+        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
+            to ``state.phase_budget_pct`` when None.
+        now_unix (float | None): Override for the current time (shared with
+            ``session_remaining_seconds`` / ``phase_elapsed_seconds``).
+
+    Returns:
+        float | None: Effective total budget in seconds, or ``None`` when no
+        finite budget applies (unbounded window or the phase has no fraction).
+    """
+    budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
+    phase = (getattr(state, "phase", "") or "").strip().upper()
+    pct = float(budget.get(phase, 0.0))
+    if pct <= 0.0:
+        return None
+    session_remaining = session_remaining_seconds(state, now_unix=now_unix)
+    if session_remaining is not None and not is_long_run(state):
+        # Charge-back (short bounded run). remaining_at_entry reconstructs the
+        # session time left when this phase started (session_remaining shrinks as
+        # phase_elapsed grows, so their sum is constant across the phase).
+        remaining_at_entry = max(
+            0.0, session_remaining + phase_elapsed_seconds(state, now_unix=now_unix)
+        )
+        # Normalize ONLY over the current phase and the phases still to come:
+        # already-elapsed phases (notably PRELUDE) are excluded — their spend is
+        # already reflected in session_remaining — while CLOSE stays in so it
+        # keeps its reserved share. Do NOT normalize over all six phases.
+        denom = sum(
+            float(budget.get(p, 0.0))
+            for p in PHASE_NAMES[phase_index(phase):]
+            if float(budget.get(p, 0.0)) > 0.0
+        )
+        if denom <= 0.0:
+            return None
+        return remaining_at_entry * pct / denom
+    mm = _budget_minutes(state)
+    if mm <= 0:
+        return None
+    return mm * 60.0 * pct
+
+
 def phase_budget_remaining_seconds(
     state: Any,
     *,
@@ -1019,15 +1078,10 @@ def phase_budget_remaining_seconds(
         or ``None`` when the budget window is unlimited or the phase has no
         allocated fraction.
     """
-    mm = _budget_minutes(state)
-    if mm <= 0:
+    total = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
+    if total is None:
         return None
-    budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
-    pct = budget.get((getattr(state, "phase", "") or "").upper(), 0.0)
-    if pct <= 0:
-        return None
-    budget_seconds = mm * 60.0 * pct
-    return max(0.0, budget_seconds - phase_elapsed_seconds(state, now_unix=now_unix))
+    return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
 
 
 def effective_max_minutes(state: Any) -> float:
@@ -1124,7 +1178,12 @@ def session_remaining_seconds(
         start = datetime.fromisoformat(start_ts)
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
-        now_dt = datetime.now(timezone.utc)
+        # Honor an injected now_unix so this stays in the same time source as
+        # phase_elapsed_seconds(now_unix=...) for pure/testable budget math.
+        if now_unix is not None:
+            now_dt = datetime.fromtimestamp(float(now_unix), tz=timezone.utc)
+        else:
+            now_dt = datetime.now(timezone.utc)
         elapsed_sec = max(0.0, (now_dt - start).total_seconds())
     except (ValueError, TypeError):
         return None
@@ -1195,14 +1254,14 @@ def should_force_exit_explore(
         now_unix=now_unix,
     )
     if phase_remaining is not None:
-        # Express remaining as a fraction of the phase's total budget (per-cycle
-        # window in cyclic mode, else the whole run).
-        mm = _budget_minutes(state)
-        budget = normalize_budget_pct(budget_pct or getattr(state, "phase_budget_pct", None))
-        pct_alloc = budget.get((getattr(state, "phase", "") or "").upper(), 0.0)
-        if mm > 0 and pct_alloc > 0:
-            phase_total_sec = mm * 60.0 * pct_alloc
-            remaining_pct = phase_remaining / phase_total_sec if phase_total_sec > 0 else 0.0
+        # Fraction of the phase's EFFECTIVE total budget — same helper that
+        # produced phase_remaining, so numerator and denominator stay in the same
+        # units (charge-back for short bounded runs, legacy window otherwise).
+        phase_total_sec = _phase_budget_total_seconds(
+            state, budget_pct=budget_pct, now_unix=now_unix
+        )
+        if phase_total_sec and phase_total_sec > 0:
+            remaining_pct = phase_remaining / phase_total_sec
             evidence["phase_remaining_pct"] = round(remaining_pct, 4)
             evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
             if pct_threshold_enabled and remaining_pct <= float(budget_pct_threshold):
