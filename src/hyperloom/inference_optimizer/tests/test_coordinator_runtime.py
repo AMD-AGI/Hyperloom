@@ -1468,7 +1468,7 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
 
 @pytest.mark.asyncio
 async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
-    # SWSPLAT-33474 (defense-in-depth, log-only): killing a queued/running task
+    # Defense-in-depth (log-only): killing a queued/running task
     # must still cancel it (behaviour unchanged) AND emit a log-only audit
     # record so a forged or unexpected kill is traceable.
     import logging
@@ -1493,7 +1493,7 @@ async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
         after = await c.tasks.get(task.task_id)
         assert after.state == "cancelled"
         assert any(
-            "SWSPLAT-33474" in r.getMessage() and task.task_id in r.getMessage()
+            "kill_task audit" in r.getMessage() and task.task_id in r.getMessage()
             for r in caplog.records
         )
     finally:
@@ -1502,7 +1502,7 @@ async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
 
 @pytest.mark.asyncio
 async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
-    # SWSPLAT-33426 (defense-in-depth, log-only): a queued task whose kind has no
+    # Defense-in-depth (log-only): a queued task whose kind has no
     # registered executor (a strong forged coordinator.db row signal) is flagged
     # in the process log; dispatch itself is unchanged (the task still fails on
     # the missing runner).
@@ -1531,7 +1531,7 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
         ):
             await c.tick(1)
         assert any(
-            "SWSPLAT-33426" in r.getMessage() and "long_running" in r.getMessage()
+            "dispatch audit" in r.getMessage() and "long_running" in r.getMessage()
             for r in caplog.records
         )
         assert await c.tasks.by_state("failed")
