@@ -236,27 +236,16 @@ asyncio_mode = "auto"
 # be listed individually here (inference_optimizer/tests,
 # agents/{robustness,critic/runtime,framework,quantization,kernel}/tests)
 # are collapsed into one recursive glob (pytest supports ``**`` glob
-# expansion in testpaths); ``ci`` stays a separate entry since it is not
-# under src/hyperloom (P2.6 "ci/ 拆库" has not been done). Collecting all of
-# kernel-agent's 40 test files here was itself a real fix landed in P2.5:
-# previously only 7 of the 33 files co-located with their source under
-# tools/ were explicitly listed, so 26 were "orphaned" and only ran when
-# pytest was pointed directly at them. ci/'s genuine unit tests
-# (test_submit_body.py + the test_ci_*.py suites) were never collected
-# before ci/ was added here.
+# expansion in testpaths). The former live-submit integration helpers were
+# retired from this tree because they were internal SaFE/Claw plumbing.
 testpaths = [
     "src/hyperloom/**/tests",
-    "ci",
 ]
-# ``ci`` is on the import path and is now both collected for tests (see
-# ``testpaths``) and measured for coverage (see ``[tool.coverage.run].source``).
 # Tree-reform transition (tree-reform.MD P2.0): ``src`` (new ``hyperloom.*``
 # namespace) is added alongside the legacy import roots so both resolve during
 # the migration window (dual-importable). Legacy roots are removed only in
-# P2.7. ``.`` is still required for the still-flat ``ci`` package
-# (tree-reform.MD P2.4 only promoted ``inference_optimizer``; ci src-layout
-# promotion is a later phase). tree-reform.MD P2.5: critic-agent,
-# robustness-agent, framework-agent, and quantization_agent were all promoted
+# P2.7. tree-reform.MD P2.5: critic-agent, robustness-agent, framework-agent,
+# and quantization_agent were all promoted
 # into ``src/hyperloom/agents/{critic,robustness,framework,quantization}``
 # (bare/sibling module names -> package-qualified ``hyperloom.agents.*``), so
 # their standalone ``critic-agent`` / ``robustness-agent/src`` /
@@ -268,17 +257,14 @@ testpaths = [
 # self-location hacks (so they keep working both as package members and as
 # directly-executed CLI scripts), not via a package-relative or pythonpath
 # import, so no pythonpath entry is added or removed for it here.
-pythonpath = ["src", ".", "ci"]
+pythonpath = ["src", "."]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
-# ``source`` trees. The ``ci/`` benchmark pipeline is now collected for tests
-# (see ``testpaths``) and measured for coverage (listed in ``source``), so it
-# DOES count toward the ``fail_under`` (90%) settlement. ``OOB/`` is included
-# and measured as well.
+# ``source`` trees. ``OOB/`` is included and measured when present.
 #
 # omit patterns exclude:
 #   * tests / __init__.py / __main__.py — non-source
@@ -306,7 +292,6 @@ source = [
     # "kernel-agent/tools" entries).
     "src/hyperloom",
     "OOB",  # optional component; not always present in a clone (see CLAUDE.md)
-    "ci",
 ]
 omit = [
     "*/tests/*",
@@ -403,28 +388,6 @@ omit = [
     # modules these paths used to point at (superseded by the M1 reactor)
     # were already deleted from disk before tree-reform.MD P2.5; the ghost
     # omit entries were dropped in this same step rather than rewritten.
-    # ── ci/ inference-optimization pipeline ──
-    # The measured ci/ set is the library-shaped logic modules
-    # (generate_hf_matrix, generate_matrix,
-    # inferenceX_parser, artifact_normalizer, transform_to_session_summary_v2,
-    # build_summary, report_generator). Everything below is a SaFE/Claw/HF/
-    # GitHub network client or a subprocess-driven CLI driver — the same
-    # "subprocess plumbing dominated" reasoning that omits inference_optimizer
-    # cli.py and the kernel-agent tool CLIs. Each is exercised end-to-end by
-    # the live optimize-submit workflow, not unit tests.
-    "ci/optimize_submit.py",
-    "ci/optimize_submit_lib/*.py",
-    "ci/orchestrator.py",
-    "ci/claw_client.py",
-    "ci/prewarm_models.py",
-    "ci/send_webhook.py",
-    "ci/publish_results.py",
-    "ci/publish_artifacts.py",
-    "ci/build_candidates.py",
-    "ci/build_production_hf_pool.py",
-    # In-tree test support / CLI test scripts / live smoke scripts.
-    "ci/conftest.py",
-    "ci/test_*.py",
 ]
 
 [tool.coverage.report]
@@ -448,7 +411,7 @@ ignore_errors = true
 fail_under = 90
 
 # GitHub Actions ``tests-coverage.yml`` reads ``pytest_ci_args`` from this table
-# using inline Python (no separate helper script under ``ci/``).
+# using inline Python.
 [tool.hyperloom.tests_coverage]
 # Full trailing argv for ``pytest`` in ``tests-coverage.yml`` (marker filter + cov).
 pytest_ci_args = [

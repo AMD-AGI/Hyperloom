@@ -6,7 +6,7 @@ name: Tests with Coverage
 # matches paths-ignore (documentation-only and repo-metadata edits).
 #
 # Pytest argv for CI lives in ``pyproject.toml`` → ``[tool.hyperloom.tests_coverage]``.
-# This workflow reads that table with inline Python (no ``ci/coverage_summary.py``).
+# This workflow reads that table with inline Python.
 # Coverage per-tree summary reads ``[tool.coverage.run].source`` the same way.
 # When ``OOB/`` is present, ``pip install -e \"./OOB\"`` enables ``agent_mcp_server``
 # UTs; if absent, install is skipped (``importorskip`` in OOB tests).
@@ -141,7 +141,6 @@ jobs:
           _SOURCE_SEGMENTS = {
               "src/hyperloom": ["/hyperloom/"],
               "OOB": ["/OOB/", "/agent_mcp_server/"],
-              "ci": ["/ci/"],
           }
 
           def _row_path_stmts_miss(line: str):

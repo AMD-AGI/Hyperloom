@@ -1,9 +1,0 @@
-# actionlint configuration.
-#
-# Declare the self-hosted runner labels used across the optimization workflows
-# so actionlint does not flag them as unknown ``runs-on`` values (false
-# positives that otherwise drown out real workflow errors).
-self-hosted-runner:
-  labels:
-    - hyperloom-4hhzn
-    - hyperloom-mh826

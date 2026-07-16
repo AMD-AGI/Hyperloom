@@ -3,7 +3,7 @@
 name: Scan & poke stale issues
 
 # Manually-triggered ops tool. Scans every open issue and, for those where:
-#   - the issue author is NOT on the AMD-AGI/safe team, AND
+#   - the issue author is NOT on the configured SaFE team, AND
 #   - the last real (non-bot) reply was from a SaFE member, AND
 #   - that reply was >= HOURS_THRESHOLD hours ago
 # adds labels 'awaiting-author-response' + 'stale' and posts the standard
@@ -44,10 +44,17 @@ jobs:
         id: team
         env:
           GH_TOKEN: ${{ secrets.SAFE_TEAM_READ_TOKEN }}
+          ORG_LOGIN: ${{ github.repository_owner }}
+          SAFE_TEAM_SLUG: ${{ vars.SAFE_TEAM_SLUG }}
+          SAFE_TEAM_FALLBACK_JSON: ${{ secrets.SAFE_TEAM_FALLBACK_JSON }}
         run: |
           set -e
 
-          MEMBERS_RAW=$(gh api orgs/AMD-AGI/teams/safe/members --paginate --jq '.[].login' 2>&1 || true)
+          if [ -n "${SAFE_TEAM_SLUG:-}" ]; then
+            MEMBERS_RAW=$(gh api "orgs/${ORG_LOGIN}/teams/${SAFE_TEAM_SLUG}/members" --paginate --jq '.[].login' 2>&1 || true)
+          else
+            MEMBERS_RAW="SAFE_TEAM_SLUG repo variable not set"
+          fi
           MEMBERS_CLEAN=$(echo "$MEMBERS_RAW" | grep -E '^[a-zA-Z][a-zA-Z0-9_-]*$' || true)
           COUNT=$(echo "$MEMBERS_CLEAN" | grep -c . || true)
 
@@ -60,14 +67,16 @@ jobs:
               echo "source=live"
             } >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::Could not fetch SaFE team live; using fallback list"
+            echo "::warning::Could not fetch SaFE team live; using SAFE_TEAM_FALLBACK_JSON"
             echo "API response was:"
             echo "$MEMBERS_RAW"
-            # Fallback list (last refreshed: 2026-05-21)
-            # To refresh:
-            #   gh api orgs/AMD-AGI/teams/safe/members --paginate --jq '.[].login'
+            FALLBACK_JSON="${SAFE_TEAM_FALLBACK_JSON:-[]}"
+            if ! echo "$FALLBACK_JSON" | jq -e 'type == "array" and all(.[]; type == "string")' >/dev/null; then
+              echo "::warning::SAFE_TEAM_FALLBACK_JSON must be a JSON string array; using empty fallback"
+              FALLBACK_JSON="[]"
+            fi
             {
-              echo 'members=["nehaprakriya","haishuok0525","chaojhou","weilei0120","zhanglei-amd","fengshaoyi-amd","xiaofei-zheng","chennyiiis","lishuoshuo-amd","luochen-amd","BaoYunkai","ZhengGong-amd"]'
+              echo "members=$(echo "$FALLBACK_JSON" | jq -c .)"
               echo "source=fallback"
             } >> "$GITHUB_OUTPUT"
           fi
