@@ -154,7 +154,7 @@ def _find_benchmark_serving() -> str | None:
     """Locate HL's ``benchmark_serving.py`` (the canonical E2E driver)."""
     roots = [
         Path("/root/.cache/hyperloom/inferencex_local"),
-        Path(os.environ.get("INFERENCEX_PATH", "/wekafs/InferenceX")),
+        Path(os.environ.get("INFERENCEX_PATH", "/opt/InferenceX")),
     ]
     for root in roots:
         if not root.exists():

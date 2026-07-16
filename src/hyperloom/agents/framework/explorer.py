@@ -62,7 +62,7 @@ def _coalesce_str(*values: Any) -> str:
 def _summary_of(detail: dict[str, Any]) -> dict[str, Any]:
     """Return the nested ``summary`` mapping from a PR detail payload.
 
-    primus-cortex wraps PR metadata under a ``summary`` key; this defaults
+    PR Monitor wraps PR metadata under a ``summary`` key; this defaults
     to ``{}`` when it is absent or not a dict.
 
     Args:

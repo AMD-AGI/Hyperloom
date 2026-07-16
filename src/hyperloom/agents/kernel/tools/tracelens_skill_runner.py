@@ -300,7 +300,7 @@ questions; proceed with the analysis.
 Execution context:
 - Environment: local
 - TraceLens root: {tracelens_root}
-- TraceLens-internal root: {internal_root_text}
+- TraceLens extension root: {internal_root_text}
 - Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
 - Trace file path: {trace_path}
 - Output directory: {output_dir}

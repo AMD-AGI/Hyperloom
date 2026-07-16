@@ -23,7 +23,7 @@ trace/source paths, the TraceLens public source at
 pre-existing checkout you maintain is only used as an explicit operator
 override — export `TRACELENS_ROOT=<path>` to opt in, which makes the
 installer skip both the clone and the SHA pin), and —
-when enabled — the optional TraceLens-internal source at
+when enabled — the optional private TraceLens extension source at
 `$TRACELENS_INTERNAL_ROOT` (no default; set it to opt in, otherwise
 open-source-only).
 The legacy `WORKSPACE_PATH` env was retired during the
