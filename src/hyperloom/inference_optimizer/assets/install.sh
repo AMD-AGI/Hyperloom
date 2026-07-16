@@ -76,6 +76,24 @@ resolve_repo_root() {
 REPO_ROOT="$(resolve_repo_root)"
 DOTENV_LOADED_COUNT=0
 
+setup_dotenv_is_authoritative() {
+  [ -f "$REPO_ROOT/.env" ] || return 1
+  grep -q '^HYPERLOOM_RUN_MODE=' "$REPO_ROOT/.env" 2>/dev/null
+}
+
+scrub_stale_workspace_env_for_setup_dotenv() {
+  setup_dotenv_is_authoritative || return 0
+  unset USER_DATA_PATH
+  unset HYPERLOOM_RUNTIME_DIR
+  unset KERNEL_AGENT_ENV
+  unset HYPERLOOM_ROOT
+  unset HYPERLOOM_KERNEL_AGENT_ROOT
+  unset KERNEL_AGENT_ROOT
+  unset FRAMEWORK_AGENT_ROOT
+  unset HYPERLOOM_SKILL_PATH
+  unset PYTHONPATH
+}
+
 load_dotenv_no_clobber() {
   DOTENV_LOADED_COUNT=0
   [ -f "$REPO_ROOT/.env" ] || return 0
@@ -110,6 +128,7 @@ load_dotenv_no_clobber() {
 # Load .env before deriving USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR so a
 # freshly-copied .env.template can be the single configuration entrypoint.
 # The loader is no-clobber: explicit shell exports always win.
+scrub_stale_workspace_env_for_setup_dotenv
 load_dotenv_no_clobber
 # Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset

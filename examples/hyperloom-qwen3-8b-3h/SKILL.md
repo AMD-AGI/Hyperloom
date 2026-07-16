@@ -35,27 +35,28 @@ In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
 
 ```bash
+export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
   --device /dev/kfd \
   --device /dev/dri \
   --group-add video \
-  -v "$PWD:$PWD" \
+  -v "$REPO_ROOT:$REPO_ROOT" \
   "$HYPERLOOM_IMAGE" \
   tail -f /dev/null
 ```
 
-Mount the Hyperloom workspace at the same path (`-v "$PWD:$PWD"`) so paths in `.env`, logs, and session artifacts stay valid. If `USER_DATA_PATH` or a pre-downloaded model directory is outside the workspace, add matching `-v host_path:host_path` mounts before starting the container.
+Mount the Hyperloom workspace at the same absolute path (`-v "$REPO_ROOT:$REPO_ROOT"`) so paths in `.env`, logs, and session artifacts stay valid. If `USER_DATA_PATH` or a pre-downloaded model directory is outside the workspace, add matching `-v host_path:host_path` mounts before starting the container.
 
 Then run the setup backend inside the container:
 
 ```bash
-docker exec -w "$PWD" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
-  'PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
+docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
+  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
 ```
 
-After that, run all remaining commands for this demo inside the same container with `docker exec -w "$PWD" ...`; do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host in Docker mode. When the demo is finished, ask the user whether to stop the container. If they say yes, run:
+After that, run all remaining commands for this demo inside the same container with `docker exec -w "$REPO_ROOT" ...`; do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host in Docker mode. When the demo is finished, ask the user whether to stop the container. If they say yes, run:
 
 ```bash
 docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
@@ -171,7 +172,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 
 1. Run the pre-launch runtime install above and source
    `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
-2. Keep `PYTHONPATH="$PWD:${PYTHONPATH:-}"` in the launch shell so robustness
+2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so robustness
    and critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run in background with `setsid nohup`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.

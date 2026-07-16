@@ -108,7 +108,8 @@ Requirements:
 In this scenario, `/hyperloom-setup` runs the packaged setup backend on the host:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup
 ```
 
 The backend runs `install_baremetal.sh` in five phases:
@@ -325,18 +326,19 @@ so `.env`, logs, and session artifacts stay valid:
 
 ```bash
 export HYPERLOOM_IMAGE=docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix
+export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
   --device /dev/kfd \
   --device /dev/dri \
   --group-add video \
-  -v "$PWD:$PWD" \
+  -v "$REPO_ROOT:$REPO_ROOT" \
   "$HYPERLOOM_IMAGE" \
   tail -f /dev/null
 ```
 
 Then run all Hyperloom commands inside that container with
-`docker exec -w "$PWD" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" ...`,
-using `PYTHONPATH="$PWD/src"` so the source checkout is importable. Use the same
-launch prompt as bare metal above.
+`docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" ...`,
+using `PYTHONPATH="$REPO_ROOT/src"` so the source checkout is importable. Use the
+same launch prompt as bare metal above.

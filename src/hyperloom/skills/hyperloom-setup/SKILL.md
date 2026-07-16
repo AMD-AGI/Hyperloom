@@ -229,22 +229,22 @@ Common keys (all modes):
 
 ### AMD APIM subscription header
 
-For `Anthropic` or `DeepSeek`, if the chosen base URL host is `llm-api.amd.com`,
-that gateway requires the API key to also be sent as an
-`Ocp-Apim-Subscription-Key` header. Add the custom-headers key, reusing the same
-key value:
+Only for `Anthropic`, if the chosen base URL host is `llm-api.amd.com`, that
+gateway requires the API key to also be sent as an
+`Ocp-Apim-Subscription-Key` header. Write the custom-headers key as a reference
+to the same API key, so the user only fills one secret:
 
-- `Anthropic`: `ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: <ANTHROPIC_API_KEY>"`
-- `DeepSeek`: `ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: <DEEPSEEK_API_KEY>"`
+```bash
+ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}"
+```
 
-The value **must** be wrapped in double quotes: the setup backend loads `.env`
-with a shell `source`, so an unquoted value containing a space and a colon
-(`Ocp-Apim-Subscription-Key: ...`) is parsed as a command and fails with exit
-127. Any `.env` value containing spaces or `:` must be double-quoted.
+The value **must** be wrapped in double quotes: the setup backend and launch
+scripts may load `.env` with a shell `source`, so an unquoted value containing a
+space and a colon (`Ocp-Apim-Subscription-Key: ...`) is parsed as a command and
+fails with exit 127.
 
-Write the placeholder header with `<PLEASE_FILL_IN>` when the key itself is
-still a placeholder, so the header value tracks the real key after the user
-edits `.env`. Skip this entirely when the base URL host is not `llm-api.amd.com`.
+Do not add custom headers for DeepSeek. Skip this key entirely when the selected
+Anthropic base URL host is not `llm-api.amd.com`.
 
 After writing `.env`, tell the user to edit the file directly and replace each `<PLEASE_FILL_IN>` placeholder. Wait for the user to confirm before running setup.
 
@@ -269,20 +269,23 @@ framework the user chose in Step 2.
 For `none`:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none
 ```
 
 For `sglang`:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
 ```
 
 For `vllm` (installs into an isolated venv; `--install-framework vllm` already
 defaults to isolated, the flag below is explicit):
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
 ### `docker`

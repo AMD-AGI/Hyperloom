@@ -41,6 +41,14 @@ def test_parse_custom_headers_accepts_anthropic_env_format():
     }
 
 
+def test_parse_custom_headers_expands_env_references():
+    headers = parse_custom_headers(
+        "Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}",
+        env={"ANTHROPIC_API_KEY": "ak-from-env"},
+    )
+    assert headers == {"Ocp-Apim-Subscription-Key": "ak-from-env"}
+
+
 def test_derive_openai_base_url_from_amd_anthropic_endpoint():
     assert (
         derive_openai_base_url("https://llm-api.amd.com/anthropic")
@@ -132,6 +140,18 @@ def test_claude_sdk_env_options_forwards_anthropic_custom_headers():
     )
     headers = parse_custom_headers(opts["env"]["ANTHROPIC_CUSTOM_HEADERS"])
     assert headers["Ocp-Apim-Subscription-Key"] == "operator-key"
+
+
+def test_claude_sdk_env_options_expands_anthropic_custom_header_reference():
+    opts = claude_sdk_env_options(
+        env={
+            "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
+            "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/anthropic",
+            "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}",
+        }
+    )
+    headers = parse_custom_headers(opts["env"]["ANTHROPIC_CUSTOM_HEADERS"])
+    assert headers["Ocp-Apim-Subscription-Key"] == "ak-anthropic"
 
 
 def test_claude_sdk_env_options_no_header_auto_injection():

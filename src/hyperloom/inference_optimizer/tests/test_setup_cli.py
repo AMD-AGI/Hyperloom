@@ -478,6 +478,79 @@ def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):
     assert f"packaged={target_root}\n" in out
 
 
+def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
+    install_script = (
+        Path(setup.__file__).resolve().parent
+        / "assets"
+        / "install.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("setup_dotenv_is_authoritative() {")
+    end = script_text.index("\nload_dotenv_no_clobber() {", start)
+    helpers = script_text[start:end]
+    load_start = script_text.index("load_dotenv_no_clobber() {")
+    load_end = script_text.index("\n# Load .env before deriving", load_start)
+    loader = script_text[load_start:load_end]
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    (workspace / ".env").write_text(
+        "\n".join(
+            [
+                "HYPERLOOM_RUN_MODE=baremetal",
+                f"USER_DATA_PATH={workspace}/session",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    runner = tmp_path / "install-scrub.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"REPO_ROOT={workspace}",
+                helpers,
+                loader,
+                "USER_DATA_PATH=/old/workspace/session",
+                "HYPERLOOM_RUNTIME_DIR=/old/workspace/session/runtime",
+                "KERNEL_AGENT_ENV=/old/workspace/session/runtime/kernel-agent.env.sh",
+                "HYPERLOOM_ROOT=/old/workspace/session/runtime/source-mirrors",
+                "KERNEL_AGENT_ROOT=/old/workspace/hyperloom/agents/kernel",
+                "HYPERLOOM_KERNEL_AGENT_ROOT=/old/workspace/hyperloom/agents/kernel",
+                "FRAMEWORK_AGENT_ROOT=/old/workspace/hyperloom/agents/framework",
+                "HYPERLOOM_SKILL_PATH=/old/workspace/hyperloom/inference_optimizer/SKILL.md",
+                "PYTHONPATH=/old/workspace",
+                "scrub_stale_workspace_env_for_setup_dotenv",
+                "load_dotenv_no_clobber",
+                'HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"',
+                'KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"',
+                "printf 'USER_DATA_PATH=%s\n' \"${USER_DATA_PATH-}\"",
+                "printf 'HYPERLOOM_RUNTIME_DIR=%s\n' \"${HYPERLOOM_RUNTIME_DIR-}\"",
+                "printf 'KERNEL_AGENT_ENV=%s\n' \"${KERNEL_AGENT_ENV-}\"",
+                "printf 'KERNEL_AGENT_ROOT=%s\n' \"${KERNEL_AGENT_ROOT-}\"",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = subprocess.run(
+        ["bash", str(runner)],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+
+    assert f"USER_DATA_PATH={workspace}/session\n" in out
+    assert f"HYPERLOOM_RUNTIME_DIR={workspace}/session/runtime\n" in out
+    assert f"KERNEL_AGENT_ENV={workspace}/session/runtime/kernel-agent.env.sh\n" in out
+    assert "KERNEL_AGENT_ROOT=\n" in out
+    assert "/old/workspace" not in out
+
+
 def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):
     install_script = (
         Path(setup.__file__).resolve().parents[1]
