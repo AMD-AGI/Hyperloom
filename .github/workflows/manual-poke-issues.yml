@@ -60,14 +60,14 @@ jobs:
               echo "source=live"
             } >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::Could not fetch SaFE team live; using fallback list"
+            echo "::warning::Could not fetch team live; no hardcoded roster fallback"
             echo "API response was:"
             echo "$MEMBERS_RAW"
-            # Fallback list (last refreshed: 2026-05-21)
-            # To refresh:
-            #   gh api orgs/AMD-AGI/teams/safe/members --paginate --jq '.[].login'
+            # No member names are hardcoded here. The team is fetched live from
+            # the org API above; if that fails, proceed with an empty list.
+            #   gh api orgs/<org>/teams/<team>/members --paginate --jq '.[].login'
             {
-              echo 'members=["nehaprakriya","haishuok0525","chaojhou","weilei0120","zhanglei-amd","fengshaoyi-amd","xiaofei-zheng","chennyiiis","lishuoshuo-amd","luochen-amd","BaoYunkai","ZhengGong-amd"]'
+              echo 'members=[]'
               echo "source=fallback"
             } >> "$GITHUB_OUTPUT"
           fi
