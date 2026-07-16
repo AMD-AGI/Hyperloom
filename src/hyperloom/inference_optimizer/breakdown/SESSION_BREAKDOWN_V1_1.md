@@ -7,7 +7,7 @@ Schema target: `hyperloom.session_breakdown.v1.1` (additive over v1).
 
 ## Problem
 
-v1 breakdown is the contract for dashboards, stats-service, and offline analysis, but
+v1 breakdown is the contract for dashboards, reporting services, and offline analysis, but
 collectors intentionally **summarize** search and kernel activity:
 
 | Area | On disk / in `state.json` | v1 export gap |
@@ -130,7 +130,7 @@ Pass = expected keys and counts on **synthetic** session trees.
 ### wekafs replay (integration)
 
 Pass = for a archived session under
-`/wekafs/users/<hash>/.claw/workspaces/<claw_sid>/current/hyperloom/`:
+`/path/to/<archived-session>/current/hyperloom/`:
 
 - `dump_session_breakdown` exits 0, writes v1.1 JSON
 - `decision_journal` variant **names** match `state.*_search` ledgers
