@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -523,7 +524,7 @@ def _dump_mn_input_params(args: argparse.Namespace, nodes_resolved: int) -> None
 
         base = os.path.expandvars("$USER_DATA_PATH/optimizer_runs")
         if "$" in base or not base.startswith("/"):
-            base = "/tmp/optimizer_runs"
+            base = str(Path(tempfile.gettempdir()) / "optimizer_runs")
         os.makedirs(base, exist_ok=True)
         ts = _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 

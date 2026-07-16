@@ -47,7 +47,7 @@ class LocalHealthConfig:
     disk_used_warn_pct: float = 85.0
     disk_used_crit_pct: float = 95.0
     # SHM gets stricter thresholds — small (16-64 GiB) and SGLang/vLLM crash hard when it fills.
-    shm_mountpoints: tuple[str, ...] = ("/dev/shm",)
+    shm_mountpoints: tuple[str, ...] = ("/dev/shm",)  # nosec B108 - mountpoint probe, not temp file creation.
     shm_used_warn_pct: float = 75.0
     shm_used_crit_pct: float = 90.0
     fd_warn_used_pct: float = 80.0
