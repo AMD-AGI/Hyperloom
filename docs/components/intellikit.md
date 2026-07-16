@@ -28,6 +28,6 @@ validation in Hyperloom is powered by [Magpie](magpie.md), which in turn relies
 on IntelliKit for some of its low-level GPU profiling primitives. IntelliKit is
 an indirect, transitive dependency reached through Magpie.
 
-## IntelliKit Documentation
+## IntelliKit documentation
 
-For detailed documentation on IntelliKit, please visit [ROCm Docs](https://rocm.docs.amd.com/projects/intellikit/en/latest/).
+For detailed documentation on IntelliKit, see [IntelliKit on ROCm Docs](https://rocm.docs.amd.com/projects/intellikit/en/latest/).
