@@ -24,12 +24,13 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
   .. grid-item-card:: Components
 
     * :doc:`Components </components/index>`
+    * :doc:`Hyperloom optimization loop </conceptual/optimization-loop>`
 
   .. grid-item-card:: How to
 
     * :doc:`Run a Hyperloom optimization </how-to/optimize>`
     * :doc:`Quantization with AMD Quark </how-to/quantization-quark>`
-    * :doc:`Multi-node inference optimization demo </how-to/hyperloom-remote-demo>`
+    * :doc:`Multi-node inference optimization demo </how-to/multi-node/hyperloom-remote-demo>`
 
   .. grid-item-card:: Reference
 
