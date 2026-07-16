@@ -184,6 +184,7 @@ class _RenderMixin:
             DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
             DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
             PHASE_EXPLORE,
+            _phase_budget_total_seconds,
             llm_proposable_actions_for_with_interleave,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
@@ -243,10 +244,11 @@ class _RenderMixin:
                 now_unix=now_unix,
             )
             session_buffer = int(session_remaining - hours_thresh * 3600.0) if session_remaining is not None else None
-            if remaining is not None and budget_pct_for_phase > 0:
-                mm = float(self.max_minutes or 0)
-                phase_total_sec = mm * 60.0 * budget_pct_for_phase
-                phase_remaining_pct = remaining / phase_total_sec if phase_total_sec > 0 else 0.0
+            # Same effective-total helper as `remaining` so the fraction stays in
+            # one unit (charge-back for short bounded runs, legacy otherwise).
+            phase_total_sec = _phase_budget_total_seconds(self, budget_pct=budget, now_unix=now_unix)
+            if remaining is not None and phase_total_sec and phase_total_sec > 0:
+                phase_remaining_pct = remaining / phase_total_sec
             else:
                 phase_remaining_pct = None
             force_line = f"force_exit: hours_thresh={hours_thresh:.1f}h pct_thresh={pct_thresh:.2f}"

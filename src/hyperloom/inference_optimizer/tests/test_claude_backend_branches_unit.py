@@ -289,3 +289,55 @@ def test_parse_tool_use_block_invalid_returns_none():
     b = _backend()
     bad = ToolUseBlock(name=cl.EMIT_INTENT_TOOL_QUALIFIED, input={"intent_type": "not_a_real_type", "payload": {}})
     assert b._parse_tool_use_block(bad) is None
+
+
+# ---- mcp_emit_intent: handler + validation branches -----------------------
+
+from hyperloom.orchestrator.roles import mcp_emit_intent as mei  # noqa: E402
+from hyperloom.inference_optimizer.protocol.intent import (  # noqa: E402
+    IntentValidationError,
+)
+
+
+def test_validate_emit_intent_input_non_dict_payload_raises():
+    with pytest.raises(IntentValidationError, match="'payload' must be an object"):
+        mei.validate_emit_intent_input({"intent_type": "send_message", "payload": "nope"})
+
+
+def test_validate_emit_intent_input_not_an_object_raises():
+    with pytest.raises(IntentValidationError, match="must be an object"):
+        mei.validate_emit_intent_input(["not", "a", "dict"])  # type: ignore[arg-type]
+
+
+def test_validate_emit_intent_input_unexpected_keys_raises():
+    with pytest.raises(IntentValidationError, match="unexpected keys"):
+        mei.validate_emit_intent_input(
+            {"intent_type": "send_message", "payload": {}, "extra": 1}
+        )
+
+
+def test_validate_emit_intent_input_missing_top_level_key_raises():
+    with pytest.raises(IntentValidationError, match="requires both"):
+        mei.validate_emit_intent_input({"intent_type": "send_message"})
+
+
+def test_validate_emit_intent_input_missing_required_payload_field_raises():
+    # send_message requires 'topic'; omit it.
+    with pytest.raises(IntentValidationError, match="missing required fields"):
+        mei.validate_emit_intent_input({"intent_type": "send_message", "payload": {}})
+
+
+@pytest.mark.asyncio
+async def test_emit_intent_handler_ok():
+    res = await mei._emit_intent_handler(
+        {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
+    )
+    assert res["content"][0]["text"] == "ok"
+    assert "is_error" not in res
+
+
+@pytest.mark.asyncio
+async def test_emit_intent_handler_validation_error_returns_is_error():
+    res = await mei._emit_intent_handler({"intent_type": "bogus", "payload": {}})
+    assert res["is_error"] is True
+    assert "validation_error" in res["content"][0]["text"]

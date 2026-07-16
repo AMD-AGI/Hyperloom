@@ -69,7 +69,7 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("REPO_ROOT", "/stale/root")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-anthropic-key")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: stale")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
@@ -102,6 +102,63 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
         "LLM_GATEWAY_KEY",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
+    ):
+        assert key not in env
+
+
+def test_setup_cli_scrubs_stale_workspace_runtime_env_when_dotenv_exists(tmp_path: Path, monkeypatch):
+    installer = tmp_path / "install_baremetal.sh"
+    installer.write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "ANTHROPIC_API_KEY=<PLEASE_FILL_IN>",
+                "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                "CLAUDE_MODEL=claude-opus-4-8",
+                "USER_DATA_PATH=/new/workspace/session",
+                "HYPERLOOM_RUN_MODE=baremetal",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def _fake_run(cmd, *, env):
+        seen["cmd"] = cmd
+        seen["env"] = env
+        return _Completed()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("USER_DATA_PATH", "/old/workspace/session")
+    monkeypatch.setenv("HYPERLOOM_RUNTIME_DIR", "/old/workspace/session/runtime")
+    monkeypatch.setenv("KERNEL_AGENT_ENV", "/old/workspace/session/runtime/kernel-agent.env.sh")
+    monkeypatch.setenv("HYPERLOOM_ROOT", "/old/workspace/session/runtime/source-mirrors")
+    monkeypatch.setenv("KERNEL_AGENT_ROOT", "/old/workspace/hyperloom/agents/kernel")
+    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/old/workspace/hyperloom/agents/kernel")
+    monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", "/old/workspace/hyperloom/agents/framework")
+    monkeypatch.setenv("HYPERLOOM_SKILL_PATH", "/old/workspace/hyperloom/inference_optimizer/SKILL.md")
+    monkeypatch.setenv("PYTHONPATH", "/old/workspace:/old/site-packages")
+    monkeypatch.setattr(setup, "_INSTALL_BAREMETAL_SH", installer)
+    monkeypatch.setattr(setup, "_PACKAGE_SKILL", tmp_path / "SKILL.md")
+    monkeypatch.setattr(setup.subprocess, "run", _fake_run)
+
+    rc = setup.main(["--", "--install-framework", "none"])
+
+    assert rc == 7
+    env = seen["env"]
+    assert env["REPO_ROOT"] == str(tmp_path)
+    assert env["HYPERLOOM_SKILL_PATH"] == str(tmp_path / "SKILL.md")
+    assert env["HYPERLOOM_SETUP_ENV_AUTHORITATIVE"] == "1"
+    for key in (
+        "USER_DATA_PATH",
+        "HYPERLOOM_RUNTIME_DIR",
+        "KERNEL_AGENT_ENV",
+        "HYPERLOOM_ROOT",
+        "KERNEL_AGENT_ROOT",
+        "HYPERLOOM_KERNEL_AGENT_ROOT",
+        "FRAMEWORK_AGENT_ROOT",
+        "PYTHONPATH",
     ):
         assert key not in env
 
@@ -151,6 +208,8 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
                 "die() { echo \"$*\" >&2; exit 99; }",
                 "is_interactive() { return 1; }",
                 credential_functions,
+                "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS",
+                "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL",
                 "HYPERLOOM_SETUP_ENV_AUTHORITATIVE=1",
                 "OPENAI_BASE_URL=https://api.anthropic.com",
                 "OPENAI_API_KEY=ambient-openai-key",
@@ -187,6 +246,309 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
         "SAFE_API_KEY=\n"
         "LLM_GATEWAY_KEY=\n"
     )
+
+
+def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_path: Path):
+    install_script = (
+        Path(setup.__file__).resolve().parent
+        / "assets"
+        / "install_baremetal.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("read_dotenv_var() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_functions = script_text[start:end]
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "\n".join(
+            [
+                "HYPERLOOM_LLM_MODE=deepseek",
+                "DEEPSEEK_API_KEY=sk-deepseek",
+                "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic",
+                "OPENAI_BASE_URL=https://gateway.example/v1",
+                "OPENAI_API_KEY=stale-openai-key",
+                "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                "ANTHROPIC_API_KEY=stale-anthropic-key",
+                "SAFE_API_KEY=stale-safe-key",
+                "LLM_GATEWAY_KEY=stale-gateway-key",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runner = tmp_path / "deepseek-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"DOTENV={dotenv}",
+                "SAFE_API_KEY_PLACEHOLDER=ak-your-api-key-here",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "SAFE_API_KEY_ARG=",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                "warn() { :; }",
+                "die() { echo \"$*\" >&2; exit 99; }",
+                "is_interactive() { return 1; }",
+                credential_functions,
+                "HYPERLOOM_SETUP_ENV_AUTHORITATIVE=1",
+                "OPENAI_BASE_URL=https://gateway.example/v1",
+                "OPENAI_API_KEY=ambient-openai-key",
+                "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                "ANTHROPIC_API_KEY=ambient-anthropic-key",
+                "SAFE_API_KEY=ambient-safe-key",
+                "LLM_GATEWAY_KEY=ambient-gateway-key",
+                "resolve_credentials",
+                f"printf 'OPENAI_BASE_URL=%s\n' \"${{OPENAI_BASE_URL-}}\" > {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'OPENAI_API_KEY=%s\n' \"${{OPENAI_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'ANTHROPIC_BASE_URL=%s\n' \"${{ANTHROPIC_BASE_URL-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'ANTHROPIC_API_KEY=%s\n' \"${{ANTHROPIC_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'SAFE_API_KEY=%s\n' \"${{SAFE_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'DEEPSEEK_API_KEY=%s\n' \"${{DEEPSEEK_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'DEEPSEEK_BASE_URL=%s\n' \"${{DEEPSEEK_BASE_URL-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["bash", str(runner)], check=True)
+
+    text = dotenv.read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY=sk-deepseek" in text
+    assert "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic" in text
+    assert "OPENAI_BASE_URL=" not in text
+    assert "OPENAI_API_KEY=" not in text
+    assert "ANTHROPIC_BASE_URL=" not in text
+    assert "ANTHROPIC_API_KEY=" not in text
+    assert "SAFE_API_KEY=" not in text
+    resolved_env = (tmp_path / "deepseek-env.txt").read_text(encoding="utf-8")
+    assert resolved_env == (
+        "OPENAI_BASE_URL=\n"
+        "OPENAI_API_KEY=\n"
+        "ANTHROPIC_BASE_URL=\n"
+        "ANTHROPIC_API_KEY=\n"
+        "SAFE_API_KEY=\n"
+        "DEEPSEEK_API_KEY=sk-deepseek\n"
+        "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic\n"
+    )
+
+
+def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1]
+            / "agents"
+            / "kernel"
+            / "scripts"
+            / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_validate_credentials() {")
+        end = script_text.index("\npreflight_validate_credentials", start)
+        runner = tmp_path / f"{name}-deepseek-preflight.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -euo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    "DEEPSEEK_API_KEY=sk-deepseek",
+                    "log() { :; }",
+                    "warn() { :; }",
+                    "die() { echo \"$*\" >&2; exit 99; }",
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(["bash", str(runner)], check=True)
+
+
+def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
+    install_script = (
+        Path(setup.__file__).resolve().parent
+        / "assets"
+        / "install_baremetal.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    credential_start = script_text.index("resolve_credentials() {")
+    credential_end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_text = script_text[credential_start:credential_end]
+
+    assert "--safe-api-key" not in script_text
+    assert "--openai-base-url" not in script_text
+    assert "SAFE_API_KEY_ARG" not in script_text
+    assert "OPENAI_BASE_URL_ARG" not in script_text
+    assert "safe_key" not in credential_text
+    assert "openai_key" not in credential_text
+    assert "openai_url" not in credential_text
+    assert "dv_safe" not in credential_text
+    assert "dv_openai" not in credential_text
+
+
+def test_kernel_install_no_longer_exports_openai_safe_credentials():
+    install_script = (
+        Path(setup.__file__).resolve().parents[1]
+        / "agents"
+        / "kernel"
+        / "scripts"
+        / "install.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    write_start = script_text.index("write_env_file() {")
+    write_end = script_text.index("\nensure_geak()", write_start)
+    write_text = script_text[write_start:write_end]
+
+    assert "_OPENAI_BASE_URL_VAL" not in script_text
+    assert "_OPENAI_KEY_VAL" not in script_text
+    assert "_snap_safe" not in script_text
+    assert "_snap_openai" not in script_text
+    assert "export OPENAI_BASE_URL" not in write_text
+    assert "export OPENAI_API_KEY" not in write_text
+    assert "upsert_dotenv_var OPENAI_BASE_URL" not in write_text
+    assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
+    assert "SAFE_API_KEY:-" not in script_text
+
+
+def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):
+    install_script = (
+        Path(setup.__file__).resolve().parent
+        / "assets"
+        / "install.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("resolve_repo_root() {")
+    end = script_text.index('\nREPO_ROOT="$(resolve_repo_root)"', start)
+    resolve_repo_root = script_text[start:end]
+
+    source_root = tmp_path / "source"
+    source_assets = source_root / "src" / "hyperloom" / "inference_optimizer" / "assets"
+    source_assets.mkdir(parents=True)
+    (source_root / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+
+    target_root = tmp_path / "target"
+    packaged_assets = target_root / "hyperloom" / "inference_optimizer" / "assets"
+    packaged_assets.mkdir(parents=True)
+
+    runner = tmp_path / "resolve-root.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                resolve_repo_root,
+                f"_script_dir={source_assets}",
+                "unset REPO_ROOT",
+                "printf 'source=%s\n' \"$(resolve_repo_root)\"",
+                f"_script_dir={packaged_assets}",
+                "unset REPO_ROOT",
+                "printf 'packaged=%s\n' \"$(resolve_repo_root)\"",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = subprocess.run(
+        ["bash", str(runner)],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+
+    assert f"source={source_root}\n" in out
+    assert f"packaged={target_root}\n" in out
+
+
+def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
+    install_script = (
+        Path(setup.__file__).resolve().parent
+        / "assets"
+        / "install.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("setup_dotenv_is_authoritative() {")
+    end = script_text.index("\nload_dotenv_no_clobber() {", start)
+    helpers = script_text[start:end]
+    load_start = script_text.index("load_dotenv_no_clobber() {")
+    load_end = script_text.index("\n# Load .env before deriving", load_start)
+    loader = script_text[load_start:load_end]
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    (workspace / ".env").write_text(
+        "\n".join(
+            [
+                "HYPERLOOM_RUN_MODE=baremetal",
+                f"USER_DATA_PATH={workspace}/session",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    runner = tmp_path / "install-scrub.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"REPO_ROOT={workspace}",
+                helpers,
+                loader,
+                "USER_DATA_PATH=/old/workspace/session",
+                "HYPERLOOM_RUNTIME_DIR=/old/workspace/session/runtime",
+                "KERNEL_AGENT_ENV=/old/workspace/session/runtime/kernel-agent.env.sh",
+                "HYPERLOOM_ROOT=/old/workspace/session/runtime/source-mirrors",
+                "KERNEL_AGENT_ROOT=/old/workspace/hyperloom/agents/kernel",
+                "HYPERLOOM_KERNEL_AGENT_ROOT=/old/workspace/hyperloom/agents/kernel",
+                "FRAMEWORK_AGENT_ROOT=/old/workspace/hyperloom/agents/framework",
+                "HYPERLOOM_SKILL_PATH=/old/workspace/hyperloom/inference_optimizer/SKILL.md",
+                "PYTHONPATH=/old/workspace",
+                "scrub_stale_workspace_env_for_setup_dotenv",
+                "load_dotenv_no_clobber",
+                'HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"',
+                'KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"',
+                "printf 'USER_DATA_PATH=%s\n' \"${USER_DATA_PATH-}\"",
+                "printf 'HYPERLOOM_RUNTIME_DIR=%s\n' \"${HYPERLOOM_RUNTIME_DIR-}\"",
+                "printf 'KERNEL_AGENT_ENV=%s\n' \"${KERNEL_AGENT_ENV-}\"",
+                "printf 'KERNEL_AGENT_ROOT=%s\n' \"${KERNEL_AGENT_ROOT-}\"",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = subprocess.run(
+        ["bash", str(runner)],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+
+    assert f"USER_DATA_PATH={workspace}/session\n" in out
+    assert f"HYPERLOOM_RUNTIME_DIR={workspace}/session/runtime\n" in out
+    assert f"KERNEL_AGENT_ENV={workspace}/session/runtime/kernel-agent.env.sh\n" in out
+    assert "KERNEL_AGENT_ROOT=\n" in out
+    assert "/old/workspace" not in out
 
 
 def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):

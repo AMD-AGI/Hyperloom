@@ -24,7 +24,7 @@ _VERSION_MISMATCH_MSG = (
     "Version mismatch: The cluster was started with:\n"
     "    Ray: 2.44.1\n"
     "    Python: 3.10.12\n"
-    "This process on node 10.170.172.63 was started with:\n"
+    "This process on node 192.0.2.63 was started with:\n"
     "    Ray: 2.44.1\n"
     "    Python: 3.12.13\n"
 )

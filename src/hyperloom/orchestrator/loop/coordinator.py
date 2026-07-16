@@ -36,7 +36,7 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 # Enablement stall cap: consecutive enablement rounds that neither made the combo
 # runnable nor advanced to a NEW failure signature; reaching it stops the loop
 # with ``enablement_stalled``. A progressing round resets the streak.
-_ENABLEMENT_MAX_STALL: int = 3
+_ENABLEMENT_MAX_STALL: int = 5
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
 # Floor on the per-repo framework-PR discover timeout.
@@ -75,15 +75,8 @@ from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
-from .coordinator_helpers import (  # noqa: F401 - re-exported for callers/tests
-    _BASELINE_FINGERPRINT_KEYS,
-    _baseline_params_fingerprint,
-    _dedupe_extra_server_args,
+from .coordinator_helpers import (
     _infer_model_class_from_config,
-    _merge_cumulative_extra_server_args,
-    _parse_baseline_workload_extra,
-    _parse_iso_unix,
-    _resolve_roofline_watermark_ratio,
     effective_closing_grace_sec,
     format_exc_brief,
     serialize_verdict_advisory,
@@ -1097,6 +1090,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "cortex_finalize_recipe_and_journal": "writeback",
         "_lift_to_current_best": "writeback",
         "_promote_to_shared_state": "writeback",
+        "_should_run_prelude_bootstrap": "writeback",
         "_detect_resume_state": "writeback",
         "replay_for_resume": "writeback",
         "_materialize_stack_config_for_resume": "writeback",
@@ -2062,14 +2056,7 @@ __all__ = [
     "PendingProposal",
     "SharedState",
     # Re-exported from coordinator_helpers for callers/tests.
-    "_BASELINE_FINGERPRINT_KEYS",
-    "_baseline_params_fingerprint",
-    "_dedupe_extra_server_args",
     "_infer_model_class_from_config",
-    "_merge_cumulative_extra_server_args",
-    "_parse_baseline_workload_extra",
-    "_parse_iso_unix",
-    "_resolve_roofline_watermark_ratio",
     "effective_closing_grace_sec",
     # Re-exported from policy.gate; referenced via ``coordinator.<name>`` in tests.
     "SPECIALIST_FROM_AGENT_PREFIX",

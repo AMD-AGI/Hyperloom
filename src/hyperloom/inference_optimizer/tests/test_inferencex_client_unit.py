@@ -1,11 +1,8 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the InferenceX HTTP client (env resolvers, SSL context,
-and the ``_fetch_raw`` transport)."""
+"""Unit tests for the InferenceX HTTP client (env resolvers and transport)."""
 
 from __future__ import annotations
-
-import ssl
 
 import pytest
 
@@ -36,23 +33,6 @@ def test_max_attempts_variants(monkeypatch):
     assert ix._max_attempts() == 1
     monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "bad")
     assert ix._max_attempts() == ix.DEFAULT_MAX_ATTEMPTS
-
-
-def test_insecure_flag(monkeypatch):
-    monkeypatch.setenv("INFERENCEX_INSECURE", "true")
-    assert ix._insecure() is True
-    monkeypatch.setenv("INFERENCEX_INSECURE", "0")
-    assert ix._insecure() is False
-
-
-def test_build_ssl_context(monkeypatch):
-    monkeypatch.setenv("INFERENCEX_INSECURE", "0")
-    assert ix._build_ssl_context() is None
-    monkeypatch.setenv("INFERENCEX_INSECURE", "1")
-    ctx = ix._build_ssl_context()
-    assert isinstance(ctx, ssl.SSLContext)
-    assert ctx.check_hostname is False
-    assert ctx.verify_mode == ssl.CERT_NONE
 
 
 # ---- _fetch_raw -----------------------------------------------------------

@@ -8,7 +8,7 @@ myst:
 
 This topic describes the current Hyperloom agentic code optimizer loop from the
 runtime contracts outward. It intentionally avoids retired action names
-and old DFS demo mechanics; the live action catalogue, phase allowlist,
+and old DFS demo mechanics; the live action catalog, phase allowlist,
 PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
@@ -44,7 +44,7 @@ once. Cyclic macro-cycling is always enabled; with a large or unbounded budget
 
 `machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
 actions can run in each phase. Coordinator-owned actions such as
-analysis refreshes and close sequencing may be enqueued internally even
+analysis refreshes and close sequencing might be enqueued internally even
 when the LLM is not allowed to propose them.
 
 ## PRELUDE
@@ -66,7 +66,7 @@ metadata at boot. There is no separate live `classify` action.
 ## FRAMEWORK_PR
 
 When enabled, the `FRAMEWORK_PR` phase (framework-PR enablement) is managed
-by the Coordinator. It covers discovery/ranking/audit via `fa phase-discover`,
+by the Coordinator. It covers discovery/ranking/audit through `fa phase-discover`,
 plus authoring-specialist dispatch (`framework_agent_authoring_enabled` is on by
 default), enablement repair, and Critic review of each candidate — discovery is
 one integration among several, not the only one.
@@ -90,7 +90,7 @@ canonical `explore` ledger:
 - `explore` runs server-argument and environment variants.
 - `specialist` delegates targeted research or patch proposals. A single
   unified specialist covers single-domain, cross-domain (`scope=domains`),
-  and free-form (`scope=freeform`) investigations via its dispatch dials
+  and free-form (`scope=freeform`) investigations through its dispatch dials
   (`scope` / `mode` / `bench` / `lane`).
 - `integrate_patch` applies Critic-reviewed specialist patches and
   benchmarks them.
