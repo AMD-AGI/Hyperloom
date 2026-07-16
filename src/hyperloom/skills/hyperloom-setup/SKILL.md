@@ -342,7 +342,7 @@ mode, ask the user whether they want to run a demo optimization now, and if so
 which length:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
-- `8h` — medium-length run.
+- `8h` — medium-length Qwen3-14B-FP8 run.
 - `24h` — long-horizon cyclic run.
 
 If the user wants to run a custom model, keep using one of these demo presets.
@@ -364,7 +364,7 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 `.claude/skills/`, `.cursor/skills/`); load the matching one by name:
 
 - `3h` → `hyperloom-qwen3-8b-3h`
-- `8h` → `hyperloom-qwen3-30b-a3b-8h`
+- `8h` → `hyperloom-qwen3-14b-fp8-8h`
 - `24h` → `hyperloom-gpt-oss-120b-24h`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,

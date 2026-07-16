@@ -81,7 +81,15 @@ Required optimize CLI flags:
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
-If `MODEL_PATH` is set, inspect that path first: use it when it already contains `config.json`; otherwise download `Qwen/Qwen3-8B` into that exact directory. If `MODEL_PATH` is unset, ask the user whether they want to provide a target model path. If they provide one, export `MODEL_PATH` to that path; if not, use `.cache/hyperloom-models/Qwen3-8B`. Do not assume the Hugging Face CLI exists; resolve or download the model with Python:
+Before resolving or downloading any model, always ask the user which model path to use. Present the currently resolved option when `MODEL_PATH` is already set, and always offer a custom local path plus the demo default. Do not continue until the user chooses one.
+
+Use this decision flow:
+
+- If the user chooses the existing `MODEL_PATH`, inspect that path and use it only when it contains `config.json`; otherwise ask again for a valid path or the demo default.
+- If the user provides a custom local path, export `MODEL_PATH` to that path and require `config.json` before launch.
+- If the user chooses the demo default, set `MODEL_PATH=${REPO_ROOT}/.cache/hyperloom-models/Qwen3-8B` and download `Qwen/Qwen3-8B` there when `config.json` is not already present.
+
+Do not assume the Hugging Face CLI exists; resolve or download the selected model with Python:
 
 ```bash
 python -m pip install -U huggingface_hub

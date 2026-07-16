@@ -1,11 +1,11 @@
 ---
-name: hyperloom-qwen3-30b-a3b-8h
-description: Run an 8-hour Hyperloom Qwen3-30B-A3B optimization session. Use when the user wants a medium-length Hyperloom demo on the local AMD ROCm environment.
+name: hyperloom-qwen3-14b-fp8-8h
+description: Run an 8-hour Hyperloom Qwen3-14B-FP8 optimization session. Use when the user wants a medium-length Hyperloom demo on the local AMD ROCm environment.
 ---
 
-# Hyperloom Qwen3-30B-A3B 8h Run
+# Hyperloom Qwen3-14B-FP8 8h Run
 
-Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for an 8-hour Qwen3-30B-A3B demo.
+Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for an 8-hour Qwen3-14B-FP8 demo.
 
 ## Run Mode
 
@@ -64,7 +64,7 @@ docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
 
 ## Environment
 
-- `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-30B-A3B from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
+- `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-14B-FP8 from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
 - `FRAMEWORK=<provided by the existing environment or repository-root .env; do not invent it>`
 - `GPU_TYPE=<do not set; omit --gpu-type and let Hyperloom auto-detect from ROCm/system info>`
 Required optimize CLI flags:
@@ -79,12 +79,20 @@ Required optimize CLI flags:
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
-If `MODEL_PATH` is set, inspect that path first: use it when it already contains `config.json`; otherwise download `Qwen/Qwen3-30B-A3B` into that exact directory. If `MODEL_PATH` is unset, ask the user whether they want to provide a target model path. If they provide one, export `MODEL_PATH` to that path; if not, use `.cache/hyperloom-models/Qwen3-30B-A3B`. Do not assume the Hugging Face CLI exists; resolve or download the model with Python:
+Before resolving or downloading any model, always ask the user which model path to use. Present the currently resolved option when `MODEL_PATH` is already set, and always offer a custom local path plus the demo default. Do not continue until the user chooses one.
+
+Use this decision flow:
+
+- If the user chooses the existing `MODEL_PATH`, inspect that path and use it only when it contains `config.json`; otherwise ask again for a valid path or the demo default.
+- If the user provides a custom local path, export `MODEL_PATH` to that path and require `config.json` before launch.
+- If the user chooses the demo default, set `MODEL_PATH=${REPO_ROOT}/.cache/hyperloom-models/Qwen3-14B-FP8` and download `Qwen/Qwen3-14B-FP8` there when `config.json` is not already present.
+
+Do not assume the Hugging Face CLI exists; resolve or download the selected model with Python:
 
 ```bash
 python -m pip install -U huggingface_hub
 export REPO_ROOT="$(pwd -P)"
-export MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/.cache/hyperloom-models/Qwen3-30B-A3B}"
+export MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/.cache/hyperloom-models/Qwen3-14B-FP8}"
 python - <<'PY'
 import os
 from pathlib import Path
@@ -95,7 +103,7 @@ if (target / "config.json").is_file():
     print(f"Using existing model at {target.resolve()}")
 else:
     snapshot_download(
-        repo_id="Qwen/Qwen3-30B-A3B",
+        repo_id="Qwen/Qwen3-14B-FP8",
         local_dir=str(target),
         local_dir_use_symlinks=False,
     )

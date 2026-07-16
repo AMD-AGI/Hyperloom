@@ -188,7 +188,7 @@ and hands off to the matching demo skill. Pick a length:
 
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
-- [`8h`](hyperloom-qwen3-30b-a3b-8h/SKILL.md) — Qwen3-30B-A3B, medium-length run.
+- [`8h`](hyperloom-qwen3-14b-fp8-8h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
 - [`24h`](hyperloom-gpt-oss-120b-24h/SKILL.md) — gpt-oss-120b, long-horizon cyclic
   run.
 
