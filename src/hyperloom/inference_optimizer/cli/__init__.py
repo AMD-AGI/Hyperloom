@@ -950,6 +950,47 @@ DEFAULT_CRITIC_BACKEND = os.environ.get(
 _VALID_CRITIC_BACKENDS = ("mock", "agent")
 
 
+def _resolve_choice(
+    attr: str,
+    default: str,
+    valid: tuple[str, ...],
+    flag_hint: str,
+    *,
+    args: argparse.Namespace,
+) -> tuple[str, bool]:
+    """Resolve a backend choice from CLI args with validation and fallback to default.
+
+    Args:
+        attr (str): The ``args`` attribute name to read (e.g. ``"critic_backend"``).
+        default (str): The fallback value when the attribute is ``None``.
+        valid (tuple[str, ...]): Allowable backend names; hard-fails outside this set.
+        flag_hint (str): Human-readable hint for the error message describing how to
+            set the value (e.g. ``"--critic-mock / --critic-agent or
+            INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND"``).
+        args (argparse.Namespace): The parsed CLI namespace.
+
+    Returns:
+        tuple[str, bool]: ``(chosen, explicit)`` where ``chosen`` is the resolved
+        backend name and ``explicit`` is ``True`` when the arg was set by the
+        caller (not defaulted).
+
+    Raises:
+        SystemExit: With code 2 when the resolved backend is not in ``valid``.
+    """
+    chosen = getattr(args, attr, None)
+    explicit = chosen is not None
+    if chosen is None:
+        chosen = default
+    if chosen not in valid:
+        print(
+            f"ERROR: {attr.replace('_', ' ')} {chosen!r} not in {valid!r} "
+            f"(set by {flag_hint})",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return chosen, explicit
+
+
 def _resolve_critic_choice(args: argparse.Namespace) -> str:
     """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid.
 
@@ -963,17 +1004,13 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     Raises:
         SystemExit: With code 2 when the chosen backend is invalid.
     """
-    chosen = args.critic_backend
-    if chosen is None:
-        chosen = DEFAULT_CRITIC_BACKEND
-    if chosen not in _VALID_CRITIC_BACKENDS:
-        print(
-            f"ERROR: critic backend {chosen!r} not in {_VALID_CRITIC_BACKENDS!r} "
-            f"(set by --critic-mock / --critic-agent or "
-            f"INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND)",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    chosen, _ = _resolve_choice(
+        "critic_backend",
+        DEFAULT_CRITIC_BACKEND,
+        _VALID_CRITIC_BACKENDS,
+        "--critic-mock / --critic-agent or INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND",
+        args=args,
+    )
     return chosen
 
 
@@ -1003,19 +1040,13 @@ def _resolve_robustness_choice(args: argparse.Namespace) -> str:
     Raises:
         SystemExit: With code 2 when the chosen backend is invalid.
     """
-    chosen = getattr(args, "robustness_backend", None)
-    explicit = chosen is not None
-    if chosen is None:
-        chosen = DEFAULT_ROBUSTNESS_BACKEND
-    if chosen not in _VALID_ROBUSTNESS_BACKENDS:
-        print(
-            f"ERROR: robustness backend {chosen!r} not in "
-            f"{_VALID_ROBUSTNESS_BACKENDS!r} (set by --robustness-mock / "
-            f"--robustness-agent or "
-            f"INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND)",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    chosen, explicit = _resolve_choice(
+        "robustness_backend",
+        DEFAULT_ROBUSTNESS_BACKEND,
+        _VALID_ROBUSTNESS_BACKENDS,
+        "--robustness-mock / --robustness-agent or INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
+        args=args,
+    )
     nodes = int(getattr(args, "nodes", 1) or 1)
     if nodes >= 2 and chosen == "agent" and not _robustness_server_configured(args):
         if explicit:
