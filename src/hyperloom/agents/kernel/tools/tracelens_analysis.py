@@ -666,7 +666,17 @@ def _is_safe_litellm_gateway() -> bool:
         os.environ.get("ANTHROPIC_BASE_URL", "")
         or os.environ.get("OPENAI_BASE_URL", "")
     ).lower()
-    markers = ("primus-safe", "core42", "litellm", "llm-proxy")
+    # Generic protocol markers by default (no operator/brand strings shipped);
+    # a specific deployment can add its own gateway host substrings via
+    # HYPERLOOM_STRICT_GATEWAY_MARKERS (comma-separated). SAFE_API_KEY is the
+    # strong signal and is checked regardless.
+    markers = tuple(
+        m.strip().lower()
+        for m in os.environ.get(
+            "HYPERLOOM_STRICT_GATEWAY_MARKERS", "litellm,llm-proxy"
+        ).split(",")
+        if m.strip()
+    )
     return bool(os.environ.get("SAFE_API_KEY")) or any(m in base_url for m in markers)
 
 
@@ -1494,7 +1504,10 @@ def _flydsl_reusable_roots() -> tuple[str, ...]:
         val = (os.environ.get(env_key, "") or "").strip()
         if val:
             out.append((val.rstrip("/") + "/").lower())
-    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+    # No personal/internal storage defaults: FlyDSL roots come from
+    # DSL2_ROOT/FLYDSL_ROOT (above); the container checkout path is the only
+    # neutral built-in fallback.
+    for default in ("/sgl-workspace/flydsl/",):
         if default not in out:
             out.append(default)
     return tuple(out)
@@ -4951,7 +4964,6 @@ def _resolve_flydsl_source_fallback() -> str:
     roots = [
         os.environ.get("DSL2_ROOT", "").strip(),
         os.environ.get("FLYDSL_ROOT", "").strip(),
-        "/wekafs/yunkai/FlyDSL",
         "/sgl-workspace/flydsl",
     ]
     for root in roots:

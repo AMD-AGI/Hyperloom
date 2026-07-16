@@ -30,7 +30,7 @@ def _write_yaml(path: Path) -> None:
     cfg = {
         "benchmark": {
             "framework": "sglang",
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
@@ -55,7 +55,7 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
             {
                 "success": True,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": tput / 256,
                     "output_throughput": tput,
@@ -171,7 +171,7 @@ def test_disable_run_eval_param_forces_run_eval_false(tmp_path):
         {
             "output_dir": str(tmp_path / "ws"),
             "timeout_sec": 10,
-            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "model_path": "/path/models/Qwen-Qwen3-8B",
             "gpu_type": "mi300x",
             "disable_run_eval": True,
         }
@@ -217,7 +217,7 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
         {
             "output_dir": str(tmp_path / "ws"),
             "timeout_sec": 10,
-            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "model_path": "/path/models/Qwen-Qwen3-8B",
             "gpu_type": "mi300x",
         }
     )
@@ -254,7 +254,7 @@ def test_non_eval_failure_does_not_retry(tmp_path):
         {
             "output_dir": str(tmp_path / "ws"),
             "timeout_sec": 10,
-            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "model_path": "/path/models/Qwen-Qwen3-8B",
             "gpu_type": "mi300x",
         }
     )
@@ -291,7 +291,7 @@ def test_eval_already_off_does_not_retry(tmp_path):
         {
             "output_dir": str(tmp_path / "ws"),
             "timeout_sec": 10,
-            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
+            "model_path": "/path/models/Qwen-Qwen3-8B",
             "gpu_type": "mi300x",
             "disable_run_eval": True,
         }

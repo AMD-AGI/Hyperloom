@@ -131,7 +131,7 @@ URL/path). The per-version
 TraceLens is required by `_server_patcher`),
 `/sgl-workspace/{aiter,sglang,vllm}/`,
 `~/.cache/amd-ai-devtool/semantic-index/`
-(GEAK RAG embedding cache), `/wekafs/hyperloom/geak-memory/memory.db`
+(GEAK RAG embedding cache), `/path/hyperloom/geak-memory/memory.db`
 (GEAK cross-session memory). Each is overridable via its own env if
 you want a fully self-contained session.
 
@@ -604,7 +604,7 @@ In sandboxes where `/workspace/hyperloom` is unwritable, override the
 **workspace root** with `USER_DATA_PATH` (not the per-session subdir):
 
 ```bash
-export USER_DATA_PATH="/wekafs/xiaofei/sessions"   # workspace root
+export USER_DATA_PATH="/shared/user1/sessions"   # workspace root
 mkdir -p "$USER_DATA_PATH"
 ```
 

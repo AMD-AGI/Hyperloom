@@ -260,9 +260,9 @@ def test_preflight_anthropic_only_ignores_stale_kernel_env_openai_fallback(
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 
     def _stale_kernel_env_loader():
-        monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
         monkeypatch.setenv("_".join(("SAFE", "API", "KEY")), "old-gateway-key")
-        monkeypatch.setenv("LLM_API_BASE", "https://llm-api.amd.com/Unified/v1")
+        monkeypatch.setenv("LLM_API_BASE", "https://llm.example.invalid/Unified/v1")
 
     monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", _stale_kernel_env_loader)
 
@@ -387,7 +387,7 @@ def test_sync_geak_config_rewrites_stale_base_url(tmp_path):
     cfg = tmp_path / "geak.yaml"
     cfg.write_text(
         _GEAK_CFG_TEMPLATE.format(
-            url="https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1",
+            url="https://old-gateway.example.invalid/api/v1/llm-proxy/v1",
         ),
         encoding="utf-8",
     )
@@ -398,7 +398,7 @@ def test_sync_geak_config_rewrites_stale_base_url(tmp_path):
     assert changed is True
     text = cfg.read_text(encoding="utf-8")
     assert f"base_url: {tunnel}" in text
-    assert "core42.primus-safe.amd.com" not in text
+    assert "old-gateway.example.invalid" not in text
     assert "model_class: litellm" in text
     assert "api_key: test-token" in text
 
@@ -1101,11 +1101,11 @@ def test_probe_llm_catalog_passes_anthropic_custom_headers(monkeypatch):
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     ids = cli._probe_llm_catalog(
-        base_url="https://llm-api.amd.com/anthropic",
+        base_url="https://llm.example.invalid/anthropic",
         api_key="dummy",
     )
     assert ids == {"claude-opus-4-6"}
-    assert seen["url"] == "https://llm-api.amd.com/anthropic/models"
+    assert seen["url"] == "https://llm.example.invalid/anthropic/models"
     assert seen["headers"]["Ocp-Apim-Subscription-Key"] == "sub-key"
     assert seen["headers"]["Authorization"] == "Bearer dummy"
 
@@ -1114,7 +1114,7 @@ def test_probe_llm_catalog_uses_openai_custom_headers_for_openai_side(monkeypatc
     """Strict per-side: probing the OpenAI base uses OPENAI_CUSTOM_HEADERS (not
     ANTHROPIC_CUSTOM_HEADERS)."""
     monkeypatch.setattr("time.sleep", lambda s: None)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: openai-key")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: anthropic-key")
     seen: dict[str, Any] = {}
@@ -1126,7 +1126,7 @@ def test_probe_llm_catalog_uses_openai_custom_headers_for_openai_side(monkeypatc
     fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get)})
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    ids = cli._probe_llm_catalog(base_url="https://llm-api.amd.com/Unified/v1", api_key="dummy")
+    ids = cli._probe_llm_catalog(base_url="https://llm.example.invalid/Unified/v1", api_key="dummy")
     assert ids == {"gpt-5.4"}
     assert seen["headers"]["Ocp-Apim-Subscription-Key"] == "openai-key"
 
@@ -1141,7 +1141,7 @@ def test_probe_llm_catalog_normalizes_claude_catalog_ids(monkeypatch):
     fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get)})
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    ids = cli._probe_llm_catalog(base_url="https://llm-api.amd.com/anthropic", api_key="dummy")
+    ids = cli._probe_llm_catalog(base_url="https://llm.example.invalid/anthropic", api_key="dummy")
 
     assert "Claude-Opus-4.6" in ids
     assert "claude-opus-4-6" in ids
@@ -1299,7 +1299,7 @@ def test_smoke_test_codex_model_skips_for_anthropic_only_fallback(monkeypatch, c
 
 def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):
     """With only Anthropic configured, an empty CODEX_MODEL follows CLAUDE_MODEL."""
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "")
@@ -1356,7 +1356,7 @@ def test_parser_deepseek_key_only_defaults_to_deepseek_chat(monkeypatch):
 
 def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeypatch):
     """Generated setup env defaults must not force GPT on an Anthropic-only run."""
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "gpt-5.4")
@@ -1370,7 +1370,7 @@ def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeyp
 def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(monkeypatch, tmp_path, clean_url_env, stub_install_steps):
     """Single Anthropic-compatible gateways may populate OPENAI_BASE_URL during preflight; model-follow intent is preflight-time."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
@@ -1394,7 +1394,7 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(monkeypatch
 
     # The OpenAI/Codex side derives the /Unified/v1 chat-completions base from
     # the single Anthropic-compatible gateway (was previously the raw /anthropic).
-    assert resolved == ("https://llm-api.amd.com/anthropic", "https://llm-api.amd.com/Unified/v1")
+    assert resolved == ("https://llm.example.invalid/anthropic", "https://llm.example.invalid/Unified/v1")
     assert cli._codex_model_should_follow_claude() is False
     assert args.codex_model == "claude-sonnet-5"
 
@@ -1402,7 +1402,7 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(monkeypatch
 def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
     """With only OpenAI configured, an empty CLAUDE_MODEL follows CODEX_MODEL."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
 
@@ -1416,8 +1416,8 @@ def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
 def test_parser_marker_forces_claude_model_to_follow_codex(monkeypatch):
     """Launchers may pre-derive ANTHROPIC_BASE_URL while preserving OpenAI-only model semantics."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", "1")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/Unified")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/Unified")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.5")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
 
@@ -1430,7 +1430,7 @@ def test_parser_marker_forces_claude_model_to_follow_codex(monkeypatch):
 def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
     """OpenAI-only runs validate the followed orchestration model against the OpenAI catalog."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
@@ -1443,9 +1443,9 @@ def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
     args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
-    cli._validate_and_resolve_claude_model(args, ("https://llm-api.amd.com/Unified", "https://llm-api.amd.com/Unified/v1"))
+    cli._validate_and_resolve_claude_model(args, ("https://llm.example.invalid/Unified", "https://llm.example.invalid/Unified/v1"))
 
-    assert seen == {"base_url": "https://llm-api.amd.com/Unified/v1", "api_key": "openai-token"}
+    assert seen == {"base_url": "https://llm.example.invalid/Unified/v1", "api_key": "openai-token"}
     assert args.claude_model == "GPT-5.4"
 
 

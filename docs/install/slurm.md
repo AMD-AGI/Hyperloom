@@ -80,7 +80,8 @@ directory as `submit.sh`. Verify the key before submitting:
 
 ```bash
 set -a; . ./proxy.env; set +a
-curl -sS --resolve global.primus-safe.amd.com:443:<GATEWAY_JUMP_HOST_IP> \
+# Map your gateway hostname (the one in $OPENAI_BASE_URL) to its jump-host IP.
+curl -sS --resolve <your-gateway-host>:443:<GATEWAY_JUMP_HOST_IP> \
   "$OPENAI_BASE_URL/models" -H "Authorization: Bearer $OPENAI_API_KEY"
 ```
 
@@ -132,20 +133,20 @@ clones `main` from GitHub at runtime, which requires GitHub egress on the node.
 
 ```bash
 # Generic (pyxis/enroot or docker auto-detected; requests TP GPUs by default)
-./submit.sh dsv4pro_sglang
+./submit.sh deepseek_r1_sglang
 
-# Preset for an MI355X / docker / /mnt/vast cluster
-./submit-vultr.sh dsv4pro_sglang
+# Preset for a docker / /mnt/vast cluster
+./submit-vultr.sh deepseek_r1_sglang
 
 # Print the sbatch command without submitting
-./submit.sh --dry-run dsv4pro_sglang
+./submit.sh --dry-run deepseek_r1_sglang
 
 # claude-code backend (the image must ship the claude CLI)
-./submit.sh -b claude dsv4pro_sglang
+./submit.sh -b claude deepseek_r1_sglang
 ```
 
-Model keys shipped in `models.tsv`: `dsv4pro_sglang`, `dsv4pro_vllm`,
-`dsv4flash_vllm`, `dsv4flash_sglang`.
+Example model keys in `models.tsv`: `deepseek_r1_sglang`, `deepseek_r1_vllm`,
+`gptoss_vllm` (edit the file to add your own).
 
 Useful `submit.sh` options (run `./submit.sh --help` for the full list):
 
@@ -231,7 +232,7 @@ hard-allowlisted:
 | `HL_SHM_SIZE` | `64g` | docker `--shm-size`; raise it for high concurrency. |
 | `HL_CONTAINER_RUNTIME` | `auto` | Force `docker` or `pyxis`. |
 | `HL_GPU_TYPE_OVERRIDE` | — | Override `--gpu-type` (lowercase) when hardware differs from the table row. |
-| `HL_SHARED_MOUNT` | `/wekafs` | Shared FS bind-mounted into the container. |
+| `HL_SHARED_MOUNT` | `/path` | Shared FS bind-mounted into the container. |
 | `HL_DATA_ROOT` | `<shared-mount>/hyperloom-slurm` | Artifact root. |
 | `HL_CA_BUNDLE_HOST` | — | Combined CA bundle path (see [Build a combined CA bundle](#build-a-combined-ca-bundle)). |
 | `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL` | unset | Set `1` to relax the orchestration model allowlist (not recommended). |
