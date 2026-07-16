@@ -19,13 +19,14 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 # Public port the router binds (matches launch_multinode._INFERENCE_PORT).
 _PUBLIC_PORT = 8888
-_DEFAULT_PID_FILE = "/tmp/multi_node_pids/router.pid"
-_DEFAULT_LOG_FILE = "/tmp/multi_node_logs/router.log"
+_DEFAULT_PID_FILE = str(Path(tempfile.gettempdir()) / "multi_node_pids" / "router.pid")
+_DEFAULT_LOG_FILE = str(Path(tempfile.gettempdir()) / "multi_node_logs" / "router.log")
 
 
 def _log(msg: str) -> None:

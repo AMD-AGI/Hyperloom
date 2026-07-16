@@ -9,6 +9,8 @@ unit-testable without a live cluster.
 from __future__ import annotations
 
 import shlex
+import tempfile
+from pathlib import Path
 from typing import Any
 
 # Frontend HTTP port (SaFE common.InferaFrontendPort). Benchmarks target this
@@ -391,8 +393,8 @@ def build_node_launch_args(
     nnodes: int,
     ep: int = 1,
     dist_init_port: int = 5000,
-    pid_file: str = "/tmp/mn_infera_server.pid",
-    log_file: str = "/tmp/mn_infera_server.log",
+    pid_file: str = str(Path(tempfile.gettempdir()) / "mn_infera_server.pid"),
+    log_file: str = str(Path(tempfile.gettempdir()) / "mn_infera_server.log"),
     extra_args: str = "",
     health_port: int = INFERA_FRONTEND_PORT,
     health_wait_sec: int = 0,

@@ -35,6 +35,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -821,8 +822,8 @@ def main() -> int:
     p.add_argument("--ep", type=int, default=1)
     p.add_argument("--nnodes", type=int, default=1)
     p.add_argument("--dist-init-port", type=int, default=_DEFAULT_DIST_INIT_PORT)
-    p.add_argument("--pid-file", default="/tmp/mn_infera_server.pid")
-    p.add_argument("--log-file", default="/tmp/mn_infera_server.log")
+    p.add_argument("--pid-file", default=str(Path(tempfile.gettempdir()) / "mn_infera_server.pid"))
+    p.add_argument("--log-file", default=str(Path(tempfile.gettempdir()) / "mn_infera_server.log"))
     p.add_argument("--extra-args", default="")
     p.add_argument("--health-port", type=int, default=8000, help="leader local readiness probe port (frontend/http)")
     p.add_argument(
