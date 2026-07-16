@@ -4,6 +4,8 @@
 
 Isolate the small SDK-runner transcript contract so CI covers the transcript
 feature without pulling in environment-dependent TraceLens integration paths.
+Injected ``sdk_query_factory`` / ``sdk_options_cls`` must keep the Claude SDK
+path even when no LLM credentials are present in the environment.
 """
 
 from __future__ import annotations
