@@ -467,7 +467,30 @@ def test_preflight_deepseek_only_sets_geak_v4_claude_model(
     cli._preflight()
 
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
-    assert cli.os.environ["GEAK_CLAUDE_MODEL"] == "deepseek-chat"
+    assert cli.os.environ["GEAK_CLAUDE_MODEL"] == "deepseek-v4-pro"
+
+
+def test_preflight_deepseek_only_exports_claude_cli_auth_aliases(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+
+    cli._preflight()
+
+    assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert cli.os.environ["_".join(("ANTHROPIC", "API", "KEY"))] == "deepseek-token"
+    assert cli.os.environ["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "deepseek-token"
 
 
 def test_sync_geak_config_empty_args_are_safe(tmp_path):
@@ -819,13 +842,13 @@ def test_validate_claude_model_deepseek_allowed_by_default(monkeypatch, capsys):
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
-        lambda **kw: {"deepseek-chat"},
+        lambda **kw: {"deepseek-v4-pro"},
     )
-    args = _make_args(claude_model="deepseek-chat")
+    args = _make_args(claude_model="deepseek-v4-pro")
     catalog = cli._validate_and_resolve_claude_model(args, None)
 
-    assert args.claude_model == "deepseek-chat"
-    assert "deepseek-chat" in catalog
+    assert args.claude_model == "deepseek-v4-pro"
+    assert "deepseek-v4-pro" in catalog
     assert "confirmed in gateway catalog" in capsys.readouterr().out
 
 
@@ -1293,7 +1316,7 @@ def test_parser_deepseek_only_empty_codex_model_uses_claude_model(monkeypatch):
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.setenv("CLAUDE_MODEL", "deepseek-chat")
+    monkeypatch.setenv("CLAUDE_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("CODEX_MODEL", "")
 
     resolved = cli_credentials._resolve_llm_endpoints()
@@ -1305,8 +1328,8 @@ def test_parser_deepseek_only_empty_codex_model_uses_claude_model(monkeypatch):
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
     assert resolved == ("https://api.deepseek.com/anthropic", "")
-    assert args.claude_model == "deepseek-chat"
-    assert args.codex_model == "deepseek-chat"
+    assert args.claude_model == "deepseek-v4-pro"
+    assert args.codex_model == "deepseek-v4-pro"
     assert cli._codex_model_should_follow_claude() is True
 
 
@@ -1327,8 +1350,8 @@ def test_parser_deepseek_key_only_defaults_to_deepseek_chat(monkeypatch):
             monkeypatch.delenv(key, raising=False)
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
-    assert args.claude_model == "deepseek-chat"
-    assert args.codex_model == "deepseek-chat"
+    assert args.claude_model == "deepseek-v4-pro"
+    assert args.codex_model == "deepseek-v4-pro"
 
 
 def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeypatch):
