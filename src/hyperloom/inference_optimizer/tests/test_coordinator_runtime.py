@@ -1171,7 +1171,7 @@ def test_fingerprint_stringifies_scalar_values():
     fp = _baseline_params_fingerprint(
         {
             "benchmark_script": "sglang_mi300x.sh",
-            "model_path": "/wekafs/models/DeepSeek-R1",
+            "model_path": "/path/models/DeepSeek-R1",
             "gpu_type": "mi300x",
         }
     )
@@ -1195,7 +1195,7 @@ async def test_promote_baseline_records_fingerprint(session_dir):
         task = _mk_baseline_task(
             {
                 "benchmark_script": "sglang_mi300x.sh",
-                "model_path": "/wekafs/models/DeepSeek-R1",
+                "model_path": "/path/models/DeepSeek-R1",
                 "gpu_type": "mi300x",
             }
         )
@@ -1209,7 +1209,7 @@ async def test_promote_baseline_records_fingerprint(session_dir):
         assert last["status"] == "succeeded"
         fp = last["extras"]["fingerprint"]
         assert fp["benchmark_script"] == "sglang_mi300x.sh"
-        assert fp["model_path"] == "/wekafs/models/DeepSeek-R1"
+        assert fp["model_path"] == "/path/models/DeepSeek-R1"
         assert fp["gpu_type"] == "mi300x"
     finally:
         await c.stop()

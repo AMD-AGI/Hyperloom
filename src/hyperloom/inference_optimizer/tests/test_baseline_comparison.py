@@ -19,13 +19,13 @@ def test_name_mapping_known_display_name_passthrough():
 def test_name_mapping_strips_vendor_prefix_from_path():
     from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
-    assert to_inferencex_name("/wekafs/models/MiniMaxAI-MiniMax-M2.5") == "MiniMax-M2.5"
+    assert to_inferencex_name("/path/models/MiniMaxAI-MiniMax-M2.5") == "MiniMax-M2.5"
 
 
 def test_name_mapping_case_insensitive():
     from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
-    assert to_inferencex_name("/wekafs/x/minimaxai-minimax-m2.5") == "MiniMax-M2.5"
+    assert to_inferencex_name("/path/x/minimaxai-minimax-m2.5") == "MiniMax-M2.5"
 
 
 def test_name_mapping_canonical_names_starting_with_vendor_token():
@@ -36,13 +36,13 @@ def test_name_mapping_canonical_names_starting_with_vendor_token():
     assert to_inferencex_name("DeepSeek-R1-0528") == "DeepSeek-R1-0528"
     assert to_inferencex_name("Qwen-3.5-397B-A17B") == "Qwen-3.5-397B-A17B"
     # HF-style paths for the same models still resolve via basename + strip.
-    assert to_inferencex_name("/wekafs/models/deepseek-ai/DeepSeek-R1-0528") == "DeepSeek-R1-0528"
+    assert to_inferencex_name("/path/models/deepseek-ai/DeepSeek-R1-0528") == "DeepSeek-R1-0528"
 
 
 def test_name_mapping_unknown_returns_none():
     from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
-    assert to_inferencex_name("/wekafs/models/MyCorp-Custom-FT-7B") is None
+    assert to_inferencex_name("/path/models/MyCorp-Custom-FT-7B") is None
     assert to_inferencex_name("") is None
     assert to_inferencex_name(None) is None  # type: ignore[arg-type]
 
@@ -124,7 +124,7 @@ def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="/wekafs/models/MiniMaxAI-MiniMax-M2.5",
+        model_path="/path/models/MiniMaxAI-MiniMax-M2.5",
         compare_against_gpu="b300",
         framework="vllm",
         precision="fp8",
@@ -228,7 +228,7 @@ def test_analyze_mapping_miss_writes_skipped_summary(tmp_path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="/wekafs/models/MyCorp-Custom-FT-7B",
+        model_path="/path/models/MyCorp-Custom-FT-7B",
         compare_against_gpu="b300",
         framework="vllm",
         precision="fp8",
@@ -251,7 +251,7 @@ def test_analyze_no_target_gpu_writes_marker(tmp_path):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="/wekafs/models/MiniMaxAI-MiniMax-M2.5",
+        model_path="/path/models/MiniMaxAI-MiniMax-M2.5",
         compare_against_gpu="",
     )
     assert summary.status == "skipped"
