@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -85,14 +86,14 @@ KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS
 _MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
 
 # Multi-node signal file (nodes >= 2); $MULTI_NODE_STATE_FILE overrides.
-_MN_STATE_FILE_DEFAULT = "/tmp/multi_node_state.json"
+_MN_STATE_FILE_DEFAULT = str(Path(tempfile.gettempdir()) / "multi_node_state.json")
 
 
 def _mn_state_path() -> Path:
     """Resolve where ``hyperloom.inference_optimizer.multi_node`` dropped its state.
 
     Honours the ``$MULTI_NODE_STATE_FILE`` override and falls back to
-    ``/tmp/multi_node_state.json``.
+    a state file under :func:`tempfile.gettempdir`.
 
     Returns:
         Path: The resolved multi-node state-file path.
@@ -718,8 +719,9 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
     ):
         if path.exists():
             remove_path(path)
-    for pattern in ("/tmp/torchinductor_*", "/tmp/triton_*"):
-        for path in Path("/tmp").glob(Path(pattern).name):
+    temp_root = Path(tempfile.gettempdir())
+    for pattern in ("torchinductor_*", "triton_*"):  # nosec B108 - intentionally clears known runtime cache prefixes.
+        for path in temp_root.glob(pattern):
             if path.exists():
                 remove_path(path)
     return {"status": "ok", "removed": removed}
