@@ -480,6 +480,39 @@ pipe),因此天然适配 P0 的 `ServingActor.start/is_alive/stop` 模型。
   dispatch_params、auto_retry、resource_lanes、gpu_pool、framework_whole_machine、
   longrun_phase0、rebench 等,共 ~350 项)全绿;9796 项 collect 无 import 错。ruff/mypy 交 CI。
 
+### ✅ P3 —— lane 互斥下沉到 Ray 自定义资源(T6+T7 完成,决策 1)
+
+把**权威**物理 GPU 互斥从 SQLite lane 下沉到 Ray 自定义资源:整机 `serving_slot`(serving
+族)+ `num_gpus`(GPU specialist),Ray 从物理上阻止共卡;SQLite lane 降为冗余的调度/可观测
+视图(保留,不删)。
+
+- **T6 注册 + 持槽**(commit `feat(ray-exec): P3 serving_slot custom resource …`):
+  - `ray_runtime.py`:`ensure_ray_cluster` + `force_restart_local_cluster` 在**单节点本地 head**
+    的 `ray start` 上声明 `--resources '{"serving_slot": 1}'`(经 `_resources_start_args()`)。
+    放在**共享**启动器里,谁(kernel-agent / orchestrator)先起 head 谁声明,规避"资源未声明→
+    actor 永久 PENDING"(§8);多节点连外部集群、不走此路径;该资源对 GEAK 无害。
+  - `_ray_serving.py`:`ServingLease`/`maybe_serving_lease` 默认 `serving_slot=True`(每个 serving
+    族调用者整机互斥,第二个 serving lease 在 `serving_slot` 上 PENDING 直到前者释放);
+    `make_gpu_specialist_actor`/`GpuSpecialistLease`/`maybe_gpu_specialist_lease` 新增 `serving_slot`
+    开关——serving-disjoint 池 `False`(仅 `num_gpus`,可跑在与 serving 不相交的卡上),
+    whole-machine/bench-capable(`gpu_research_lane`)`True`(与 serving 互斥)。
+- **T6 接线 + T7 降级**(commit `feat(ray-exec): dispatch gpu_research specialists onto serving_slot …`):
+  - `dispatcher`:whole-machine/bench specialist(`uses_whole_machine_gpu_lane`)向
+    `maybe_gpu_specialist_lease` 传 `serving_slot=True`,Ray 令其与 serving 在 `serving_slot`
+    上互斥;serving-disjoint 池保持 `num_gpus` only。
+  - **T7**:`resource_lock.py` + `dispatcher` 文档化——单节点 Ray 下**权威**互斥是 Ray 自定义
+    资源(`serving_slot` + `num_gpus`),SQLite lane 不再是 GPU 互斥真相源;lane 门**保留**(不删)
+    为便宜、支持 resume 的调度/可观测层(acquire/release/expiry 事件仍喂 lane timeline),两层冗余。
+- **不退化**:Ray 路径外(多节点 / `RAY_EXEC` off / pytest)一切照旧——SQLite lane 仍是唯一门;
+  `serving_slot` 仅在真机 Ray 集群声明,对现有 lane/dispatch 测试无影响。
+- **测试**:`test_ray_fd_limit.py` +2(`ensure`/`restart` 的 `ray start` argv 含 serving_slot);
+  `test_ray_backend_unit.py` +4(`_resources_start_args`、`maybe_serving_lease` 默认持槽、
+  `maybe_gpu_specialist_lease` serving_slot 透传、`GpuSpecialistLease.start` 透传 serving_slot);
+  本地跑通 ray_fd_limit / version_mismatch / specialist / dispatch / lane / framework_whole_machine /
+  longrun / coordinator 套件(共 ~360 项)全绿;9802 项 collect 无 import 错。ruff/mypy 交 CI。
+- **验收(§6 P3)**:并发压力下 serving/specialist 不共卡(serving_slot + num_gpus)、`ray status`
+  可见 pending 资源需求、lane 门冗余生效——三项均满足;真机 `ray status` 对照并入 T3 类真机跑。
+
 ### ⏭ 进行中 / 待办 —— 见 §12
 
 ---
@@ -511,11 +544,16 @@ pipe),因此天然适配 P0 的 `ServingActor.start/is_alive/stop` 模型。
   prompt 展示),`try_acquire`/`release` 保留(现有 dispatch 测试仍绿);物理分配交给 Ray
   `num_gpus`,其返回的 `gpu_ids` 不再是设备 pin(Ray 路径由 dispatcher 用逻辑 `range(N)`
   覆盖)。彻底删除留待 P5。
-- [ ] **T6 (P3, 决策 1)** 注册 `serving_slot` 自定义资源(单节点 `ray start --resources`
-  / ensure 时声明);serving/benchmark/profile 类任务 `resources={"serving_slot":1}`
-  独占;GPU specialist 用 `num_gpus` 不占 slot。
-- [ ] **T7 (P3, 决策 1)** `resource_lock.py` 从权威门降为 logs/记账;dispatcher 不再以
-  SQLite lane 作为 GPU 互斥的真相源(Ray 资源权威)。保留 lane 事件写入用于可观测。
+- [x] **T6 (P3, 决策 1,已完成)** 注册 `serving_slot` 自定义资源:`ensure_ray_cluster` /
+  `force_restart_local_cluster` 在单节点本地 head 的 `ray start` 上声明 `--resources
+  '{"serving_slot":1}'`;serving/benchmark/profile/gpu_research 类 lease 持
+  `serving_slot=1`(`ServingLease`/`maybe_serving_lease` 默认 True、whole-machine specialist
+  传 True),serving-disjoint GPU specialist 用 `num_gpus` 不占 slot。仅单节点本地 head 受影响
+  (多节点连外部集群、不走此路径)。真机 `ray status` 对照并入 T3 类真机跑。
+- [x] **T7 (P3, 决策 1,已完成)** `resource_lock.py` + `dispatcher` 从权威门降为 logs/记账
+  (文档化):单节点 Ray 下权威互斥是 Ray 自定义资源;dispatcher 不再以 SQLite lane 作为 GPU
+  互斥真相源。lane 门**保留**(便宜、支持 resume、可观测),acquire/release/expiry 事件仍写入
+  喂 lane timeline;两层冗余。彻底删 lane 门待 P5(避免动 resume/大量测试)。
 - [ ] **T8 (P5)** 单节点闭环回归绿 + `RAY_EXEC` 默认已为单节点 ON 后,清理单节点旧本地
   GPU 分配/手工 ROCR 掩码死代码(多节点分支保留)。
 - [ ] **T9** 每步:ruff + mypy + 相关单测;涉及 GPU 的用真机 smoke/flow 脚本验收。
