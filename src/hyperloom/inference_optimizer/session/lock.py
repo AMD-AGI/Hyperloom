@@ -118,6 +118,15 @@ class SessionAlreadyRunning(RuntimeError):
         )
 
 
+class SessionLockPathError(RuntimeError):
+    """Raised when the lock path itself is unsafe to open."""
+
+    def __init__(self, path: Path, reason: str):
+        self.path = Path(path)
+        self.reason = reason
+        super().__init__(f"session lock path {self.path} is unsafe: {reason}")
+
+
 class SessionLock:
     """Exclusive, crash-safe, single-optimizer-per-session lock.
 
@@ -152,7 +161,12 @@ class SessionLock:
         # lock alive past the optimizer. 0o600: owner-only. O_NOFOLLOW refuses
         # a symlinked lock path so it cannot redirect the lock/write elsewhere.
         open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(self.path, open_flags, 0o600)
+        try:
+            fd = os.open(self.path, open_flags, 0o600)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise SessionLockPathError(self.path, "lock file must not be a symlink") from exc
+            raise
         if fcntl is not None:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
