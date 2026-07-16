@@ -84,40 +84,22 @@ KNOWN_TARGET_ROOTS = _FALLBACK_KNOWN_TARGET_ROOTS
 # Pod-local multi-node backup dir; overridable via $HYPERLOOM_MN_KERNEL_BACKUP_DIR.
 _MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
 
-# Multi-node signal file (nodes >= 2); $MULTI_NODE_STATE_FILE overrides.
-_MN_STATE_FILE_DEFAULT = "/tmp/multi_node_state.json"
-
-
-def _mn_state_path() -> Path:
-    """Resolve where ``hyperloom.inference_optimizer.multi_node`` dropped its state.
-
-    Honours the ``$MULTI_NODE_STATE_FILE`` override and falls back to
-    ``/tmp/multi_node_state.json``.
-
-    Returns:
-        Path: The resolved multi-node state-file path.
-    """
-    return Path(os.environ.get("MULTI_NODE_STATE_FILE", _MN_STATE_FILE_DEFAULT))
-
-
-# Module attribute kept for direct importers; runtime uses _mn_state_path.
-_MN_STATE_FILE = Path(_MN_STATE_FILE_DEFAULT)
-
 
 def _is_multi_node() -> bool:
     """Report whether a multi-node RayJob is active.
 
+    Relies solely on the trusted in-process ``$INFERENCE_OPTIMIZER_NODES``
+    signal that the optimizer CLI exports at launch (inherited by this
+    process). No state file is read, so a co-tenant cannot force multi-node
+    fan-out by planting a world-writable ``/tmp/multi_node_state.json``.
+
     Returns:
-        ``True`` when the state file reports ``nodes >= 2``; ``False`` when the
-        state file is missing or unreadable.
+        ``True`` when ``$INFERENCE_OPTIMIZER_NODES`` is ``>= 2``; ``False``
+        otherwise (including when the env var is unset or non-numeric).
     """
-    state_path = _mn_state_path()
     try:
-        if not state_path.is_file():
-            return False
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-        return int(data.get("nodes") or 0) >= 2
-    except (OSError, ValueError):
+        return int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "0") or 0) >= 2
+    except ValueError:
         return False
 
 
