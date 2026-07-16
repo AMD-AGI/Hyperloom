@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 # Kill the previous vllm/sglang server on the RayJob head pod.
 #

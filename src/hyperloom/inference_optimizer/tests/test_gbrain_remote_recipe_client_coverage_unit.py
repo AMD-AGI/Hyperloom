@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Supplemental coverage for gbrain_remote_client: MCP envelope parsing,
 scan pagination, metric filters, label-match edges, and env construction."""

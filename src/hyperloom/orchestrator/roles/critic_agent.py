@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CriticAgentBackend — bridges the ``hyperloom.agents.critic`` runtime into
 the Coordinator as a real Critic Backend.

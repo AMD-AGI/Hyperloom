@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: REUSE Compliance
+
+# Enforces license hygiene: every file must resolve to a copyright + SPDX
+# license via per-file headers or the aggregate annotation in ``REUSE.toml``.
+# ``reuse lint`` also fails on conflicting notices (e.g. an "All rights
+# reserved" header on an MIT-licensed repo), so this gate keeps headers and
+# LICENSE/REUSE.toml consistent going forward.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  reuse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: fsfe/reuse-action@v5

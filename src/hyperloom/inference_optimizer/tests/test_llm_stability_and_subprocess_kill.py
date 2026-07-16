@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Covers the LLM-transport stability env helper and the process-group kill in
 ``_run_subprocess`` that reaps a hung grandchild instead of orphaning it.

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for Coordinator async/stateful methods invoked directly against a
 real (mock-backed) Coordinator: SharedState promotion across task kinds, prompt

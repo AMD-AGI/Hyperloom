@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """ci/prewarm_models.py — pre-populate a shared model cache from HuggingFace,
 bypassing the single-flight + slow SaFE playground download.

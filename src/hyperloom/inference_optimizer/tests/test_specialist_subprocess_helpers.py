@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for specialist_subprocess helpers: worktree pick/setup/teardown,
 claude argv assembly, patch discovery, and done-file parse/unwrap."""

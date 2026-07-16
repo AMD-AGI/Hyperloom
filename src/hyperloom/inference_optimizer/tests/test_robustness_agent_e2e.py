@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """End-to-end test: real robustness-agent runtime + Coordinator (marker ``robustness_agent_e2e``)."""
 

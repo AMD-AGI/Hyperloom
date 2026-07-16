@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit coverage for the HL_HONEST_E2E hardening helpers:
 umbrella-flag resolution, VRAM util guard, import-grep source confirmation,

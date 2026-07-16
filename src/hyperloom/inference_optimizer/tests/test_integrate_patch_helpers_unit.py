@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Branch coverage for integrate_patch helper functions: framework-root
 resolution, git apply / reverse / checkout spawn-failure handling, patch-path

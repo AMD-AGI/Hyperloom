@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for framework_agent.runtime.cli.main. Hermetic - argv-only; ``candidates`` / ``explore`` subcommands stub ``sources.enumerate_candidates`` / ``explorer.explore`` so no network or git is required."""
 

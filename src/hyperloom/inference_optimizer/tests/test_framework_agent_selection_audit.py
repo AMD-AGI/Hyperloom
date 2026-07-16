@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for FRAMEWORK agent-ranked selection, semantic-audit routing,
 ranker-client plumbing, config-lever extraction, and the cyclic phase-budget

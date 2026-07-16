@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for ``cli_backends``: per-role backend construction (mock/agent
 choices, kernel selection, validation errors), advisory proposal-scorer

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """ExploreExecutor.
 
@@ -65,7 +66,7 @@ from ._grid_runner import (
     sanitize_script_name,
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
-from ._stack_rebench import measure_stack_rebench
+from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -86,9 +87,9 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 # Stack rebench stability threshold: after a KEEP, rebench tput must beat
 # ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)`` else evict
-# (KEEP_UNSTABLE → REVERT). Set below the KEEP threshold. Override via
-# ``params['stack_stable_threshold_pct']``.
-DEFAULT_STACK_STABLE_PCT = 0.5
+# (KEEP_UNSTABLE → REVERT). Sourced from ``_stack_rebench`` so the explore
+# ledger and integrate_patch share one confirmation floor (below the KEEP
+# gate). Override via ``params['stack_stable_threshold_pct']``.
 
 
 _now_iso = functools.partial(now_iso, "auto")

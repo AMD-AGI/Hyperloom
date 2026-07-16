@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Batch 2 coverage for Coordinator: synchronous context readers, the
 no-progress circuit-breaker signal, resume replay, orchestration-conversation

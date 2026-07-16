@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """PRELUDE phase handler: warm-recipe replay (KB best_config auto-apply) and
 the initial baseline/roofline internal-analysis task enqueue."""

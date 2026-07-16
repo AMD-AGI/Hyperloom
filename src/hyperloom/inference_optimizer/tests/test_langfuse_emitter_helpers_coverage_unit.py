@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for langfuse_emitter SDK-version-tolerant helpers: ns conversion,
 observation start/end shims, OTEL attribute coercion, trace-attr fallback, and

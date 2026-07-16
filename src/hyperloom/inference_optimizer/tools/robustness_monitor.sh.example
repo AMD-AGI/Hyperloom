@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 # Robustness monitor for long-running ``python -m hyperloom.inference_optimizer.cli optimize`` runs.
 #

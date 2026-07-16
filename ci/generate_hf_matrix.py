@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Generate GitHub Actions matrix JSON from HuggingFace top-N, explicit list,
 or a pre-built candidates file (preferred for batch-driven dispatch).

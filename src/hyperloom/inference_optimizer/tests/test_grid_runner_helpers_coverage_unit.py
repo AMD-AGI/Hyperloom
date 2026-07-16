@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Supplemental coverage for _grid_runner pure helpers: compatibility filter
 model-class drop, runtime override env branches, report parsing, and

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Shared full-stack rebench step.
 
@@ -14,6 +15,18 @@ from pathlib import Path
 from typing import Any
 
 from ._grid_runner import GridVariant, run_grid
+
+
+# Single source of truth for the post-KEEP confirmation floor shared by every
+# executor that layers a variant on the live stack and re-benches it (the
+# explore ledger and integrate_patch). A KEPT gain must re-clear at least this
+# margin over ``base_tput`` -- i.e. still reproduce a positive gain above grid
+# noise -- rather than merely not regressing (a 0.0 floor only checks
+# non-regression and lets noise-level "wins" survive). Kept below the KEEP gate
+# (the grid noise floor) so confirmation is a stability check, not a second
+# discovery gate. Override per task via ``params['stack_stable_threshold_pct']``
+# / ``params['rebench_stable_threshold_pct']``.
+DEFAULT_STACK_STABLE_PCT = 0.5
 
 
 @dataclass
@@ -94,4 +107,4 @@ async def measure_stack_rebench(
     return StackRebenchResult(tput=tput, workspace=workspace, warnings=warnings, stable_floor=stable_floor)
 
 
-__all__ = ["StackRebenchResult", "measure_stack_rebench"]
+__all__ = ["DEFAULT_STACK_STABLE_PCT", "StackRebenchResult", "measure_stack_rebench"]

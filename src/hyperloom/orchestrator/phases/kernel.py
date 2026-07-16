@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """KERNEL_AGENT phase handler: bf16-dense-GEMM fallback, GEAK e2e run,
 GEMM-tuning keep/promote, and watermark-roofline gating."""

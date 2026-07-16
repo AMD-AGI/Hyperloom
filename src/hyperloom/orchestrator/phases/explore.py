@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """EXPLORE phase handler: macro-cycle strategy, specialist fan-out/retry, gap
 tracking, and autosubmit of specialist patches / framework configs."""

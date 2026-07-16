@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 # Bootstrap the BYOI toolchain inside the RayJob head pod.
 #

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Apply specialist patches to live framework roots and KEEP or REVERT by benchmark."""
 
@@ -40,7 +41,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
-from ._stack_rebench import measure_stack_rebench
+from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -2441,7 +2442,9 @@ class IntegratePatchExecutor:
             base_extra_args=base_extra_args,
             variant=variant,
             base_tput=base_tput,
-            stable_threshold_pct=float(params.get("rebench_stable_threshold_pct", 0.0)),
+            stable_threshold_pct=float(
+                params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)
+            ),
             output_slot=output_root / "stack_rebench",
             variant_timeout_sec=int(params.get("variant_timeout_sec", self.variant_timeout_sec)),
             model_path=resolved_model or None,

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Phase-independent internal task handler: research-scout, static-recon, and
 trajectory-reviewer auto-enqueue helpers used across multiple phases."""

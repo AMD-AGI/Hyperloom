@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Branch-coverage tests for shared workload-env materialization: GPU-count
 detection, profile-window math, per-model work-arounds, and NUM_PROMPTS

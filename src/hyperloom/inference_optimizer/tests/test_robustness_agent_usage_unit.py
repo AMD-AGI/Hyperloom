@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for ``RobustnessAgentBackend._merge_llm_usage`` — folds the
 runtime's ``llm_usage`` block onto ``BackendTurnResult.metadata`` token

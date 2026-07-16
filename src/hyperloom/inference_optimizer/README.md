@@ -7,8 +7,9 @@ four-agent architecture — Orchestration, Kernel, Critic, and
 Robustness — through baseline measurement, profiling, parameter
 search, kernel optimization, and validated promotion.
 
-This is the package referenced by `src/hyperloom/inference_optimizer/SKILL.md` and
-installed by `pip install hyperloom-inference_optimizer`.
+This is the package referenced by `src/hyperloom/inference_optimizer/SKILL.md`;
+it is installed from the `hyperloom-inference_optimizer` wheel published on
+GitHub Releases (see `examples/README.md`), not from PyPI.
 
 ## Where to read next
 
@@ -85,5 +86,7 @@ The Coordinator + agent roles + action executors live in the sibling
 
 * **License:** MIT (see top-level `LICENSE`).
 * **Python:** 3.10+.
-* **Distribution:** PyPI as `hyperloom-inference_optimizer`. Source of
-  truth: `pyproject.toml` at the repo root.
+* **Distribution:** built from `pyproject.toml` (at the repo root) as the
+  `hyperloom-inference_optimizer` wheel and attached to GitHub Releases; it is
+  not published to PyPI. Install the release wheel directly (see
+  `examples/README.md` for the `gh release download` + `pip install` flow).
