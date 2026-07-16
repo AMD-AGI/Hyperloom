@@ -1382,6 +1382,7 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
                                 "backup_path": str(bp),
                             }
                         )
+                        log.warning("revert: skipping source backup with untrusted backup_path %r", bp)
                     elif Path(bp).exists():
                         dst.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(bp, dst, follow_symlinks=False)
@@ -1400,6 +1401,10 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
                     "path": str(source_backup.get("path", "")),
                     "backup_path": str(source_backup.get("backup_path", "")),
                 }
+            )
+            log.warning(
+                "revert: skipping source backup with untrusted backup_path %r",
+                source_backup.get("backup_path"),
             )
         elif src.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
