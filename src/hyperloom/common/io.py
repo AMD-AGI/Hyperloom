@@ -35,7 +35,7 @@ from typing import Any
 
 
 def _best_effort_fsync(fh: Any) -> None:
-    """``os.fsync`` the file handle, swallowing OSError (tmpfs/wekafs reject it)."""
+    """``os.fsync`` the file handle, swallowing OSError (tmpfs/path reject it)."""
     with suppress(OSError):
         fh.flush()
         os.fsync(fh.fileno())

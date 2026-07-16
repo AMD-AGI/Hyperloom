@@ -282,14 +282,14 @@ def write_summary(run_dir: Path, summary: dict[str, Any]) -> None:
 def main() -> int:
     """Drive the full parallel end-to-end run."""
     parser = argparse.ArgumentParser(description="Run Kernel-agent real parallel E2E")
-    parser.add_argument("--model-path", default="/wekafs/models/Qwen3-30B-A3B")
+    parser.add_argument("--model-path", default="/path/models/Qwen3-30B-A3B")
     parser.add_argument(
         "--workspace-path",
         default=workspace_root(),
         help="Root the tool writes under; defaults to $USER_DATA_PATH.",
     )
     parser.add_argument("--session-id", default=f"qwen3-30b-{int(time.time())}")
-    parser.add_argument("--env-file", default="/wekafs/xiaofei/AgentKernelArena/.env")
+    parser.add_argument("--env-file", default="/shared/user1/AgentKernelArena/.env")
     parser.add_argument("--tp", type=int, default=8)
     parser.add_argument("--conc", type=int, default=4)
     parser.add_argument("--isl", type=int, default=256)
