@@ -71,8 +71,10 @@ def _gain_attribution_lines(
 ) -> tuple[list[str], str]:
     """Compute per-source gain attribution + the method used.
 
-    Priority: validated ``source_breakdown`` split, then single-entry
-    ``final.action_path``, then best-effort ``optimization_stack``.
+    Priority: validated ``source_breakdown`` split. When that is absent we do
+    NOT reverse-infer a KEEP from ``final.action_path`` / ``optimization_stack``
+    (those can be seeded, not real this-session KEEPs); the gain is reported as
+    ``unattributed`` with stack entries listed for reference only.
 
     Args:
         breakdown: The full ``session_breakdown.json`` dict.
@@ -103,23 +105,27 @@ def _gain_attribution_lines(
     final = breakdown.get("final") or {}
     path = final.get("action_path") or []
     gain_v = to_float(final.get("cumulative_gain_pct_validated"))
-    if len(path) == 1 and gain_v is not None and gain_v > 0:
-        entry = str(path[0])
-        action = entry.split(":")[0]
+    # No validated per-source split. We must NOT claim a KEEP or "100% via"
+    # from optimization_stack alone: action_path is built from the final stack,
+    # which can include seeded / warm-replayed entries that were never a real
+    # this-session KEEP. Surface the gain as unattributed and list the stack
+    # entries only for reference (never as adoption evidence).
+    if path and gain_v is not None and gain_v > 0:
+        n = len(path)
+        listed = ", ".join(str(p) for p in path)
         return (
-            [f"100% via 1 {action} KEEP ({entry})"],
-            "single-source (inferred from final.action_path)",
-        )
-    if len(path) > 1 and gain_v is not None and gain_v > 0:
-        return (
-            [f"{gain_v:.2f}% spread across {len(path)} stack entries: " + ", ".join(str(p) for p in path)],
-            "best-effort reconstructed from optimization_stack",
+            [
+                f"{gain_v:.2f}% total gain, source unattributed "
+                f"(no validated source_breakdown); optimization_stack lists "
+                f"{n} entr{'y' if n == 1 else 'ies'} for reference: {listed}"
+            ],
+            "unattributed (stack listed for reference, not verified as KEEP)",
         )
     if gain_v in (None, 0.0):
         return ([], "missing")
     return (
-        [f"{gain_v:.2f}% from unknown source"],
-        "best-effort reconstructed",
+        [f"{gain_v:.2f}% total gain, source unattributed"],
+        "unattributed",
     )
 
 

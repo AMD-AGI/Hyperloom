@@ -71,3 +71,35 @@ def test_attribution_backward_compatible_without_forge() -> None:
     out = collectors.collect_attribution({}, [], [], [])
     assert "source_breakdown" in out
     assert out["source_breakdown"]["forge_pct_of_total"] == 0.0
+
+
+def test_capability_not_reverse_inferred_from_optimization_stack() -> None:
+    # A session whose optimization_stack lists an "explore" entry but has NO
+    # explore_attempts record must report explore as not_attempted (the stack
+    # entry may be seeded / warm-replayed), never fabricated as kept.
+    state = {
+        "optimization_stack": [
+            {"action": "explore", "variant_name": "v1", "source": "seeded_from_current_best"}
+        ],
+        # no explore_attempts key => no real attempt evidence
+    }
+    cap = collectors.collect_capability_summary(state, [], [])
+    assert cap["explore"]["status"] == "not_attempted"
+    assert cap["explore"]["attempts"] == 0
+    assert cap["explore"]["keeps"] == 0
+
+
+def test_kernel_gain_without_forge_keep_is_unattributed_not_credited_to_forge() -> None:
+    # Kernel-lane gain exists but there is NO Forge KEEP evidence. The gain must
+    # stay unattributed rather than being reverse-inferred onto Forge.
+    state = {"gain_per_stack_entry": [{"action": "kernel_opt", "delta_pct": 12.0}]}
+    out = collectors.collect_attribution(
+        state,
+        [],
+        [],  # no adopted kernels
+        [],
+        forge_invocations=[],  # no Forge KEEP
+    )
+    sb = out["source_breakdown"]
+    assert sb["forge_pct_of_total"] == 0.0
+    assert sb["kernel_unattributed_pct_of_total"] == 12.0

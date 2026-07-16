@@ -240,7 +240,14 @@ def _capability_for_action(
     state: dict[str, Any],
     action: str,
 ) -> dict[str, Any]:
-    """Per-action capability tally from ``<action>_attempts``, with an ``optimization_stack`` KEEP fallback.
+    """Per-action capability tally from the real ``<action>_attempts`` ledger.
+
+    Status is derived strictly from recorded attempt evidence (written forward
+    by ``SharedState.record_action_attempt``). We deliberately do NOT reverse-
+    infer ``kept`` from ``optimization_stack``: the stack is the final adopted
+    state and can carry seeded / warm-replayed / cross-harness entries that were
+    never a real this-session attempt, so counting them would fabricate KEEPs
+    and attempts. No attempt record => ``not_attempted``.
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
@@ -256,18 +263,6 @@ def _capability_for_action(
         if isinstance(attempts_list, list)
         else 0
     )
-
-    # Fallback from optimization_stack (adopted entries only), counted per action.
-    stack = state.get("optimization_stack") or []
-    if isinstance(stack, list):
-        stack_keeps = sum(1 for e in stack if isinstance(e, dict) and str(e.get("action") or "") == action)
-    else:
-        stack_keeps = 0
-    if stack_keeps > n_keeps:
-        n_keeps = stack_keeps
-        # Stack keeps imply at least as many attempts.
-        if n_attempts < stack_keeps:
-            n_attempts = stack_keeps
 
     status = "kept" if n_keeps > 0 else "tried" if n_attempts > 0 else "not_attempted"
     return {
