@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -700,8 +701,9 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
     ):
         if path.exists():
             remove_path(path)
-    for pattern in ("/tmp/torchinductor_*", "/tmp/triton_*"):
-        for path in Path("/tmp").glob(Path(pattern).name):
+    temp_root = Path(tempfile.gettempdir())
+    for pattern in ("torchinductor_*", "triton_*"):  # nosec B108 - intentionally clears known runtime cache prefixes.
+        for path in temp_root.glob(pattern):
             if path.exists():
                 remove_path(path)
     return {"status": "ok", "removed": removed}

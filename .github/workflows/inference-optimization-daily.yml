@@ -15,7 +15,7 @@ name: Inference Optimization Daily (fixed models)
 #     (ci/optimize_submit.py) AND the "pull latest code every run" behaviour:
 #     the sandbox git-clones Hyperloom @ ${GITHUB_SHA} via the CI SOURCE PIN
 #     prepended to ci/prompt_prefix.txt, so each daily run validates the
-#     freshest main commit (NOT any stale pre-deployed snapshot).
+#     freshest main commit (not a lagging deployment snapshot).
 #
 # Independent of both files above — no shared state / cache.
 #
@@ -81,6 +81,7 @@ jobs:
   # ── Stage 1: build the fixed matrix ──────────────────────────────────────────
   prepare:
     name: Build fixed matrix
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true'
     runs-on: hyperloom-mh826
     timeout-minutes: 5
     outputs:
@@ -139,7 +140,7 @@ jobs:
   optimize:
     name: optimize-${{ matrix.key }}
     needs: prepare
-    if: needs.prepare.outputs.count != '0'
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true' && needs.prepare.outputs.count != '0'
     runs-on: hyperloom-4hhzn
     # GitHub counts this from JOB START, while the optimize_submit.py wait loop
     # (up to task_timeout_min=2920) only begins AFTER prewarm + submit-jitter +
@@ -175,8 +176,8 @@ jobs:
         working-directory: ci
         run: pip install --quiet requests PyYAML 'huggingface_hub>=0.24'
 
-      - name: Prewarm /path/models for this repo
-        # Pre-pull the HF repo into /path/models/<owner>-<repo>/ so SaFE
+      - name: Prewarm shared model cache for this repo
+        # Pre-pull the HF repo into a shared model cache so SaFE
         # register can use local_path mode (skips its slow K8s download job).
         # continue-on-error: a missing mount / gated repo / not-yet-published
         # repo just falls back to SaFE handling the download itself.
@@ -186,16 +187,17 @@ jobs:
           HF_TOKEN:   ${{ secrets.HF_TOKEN }}
           HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
           MODEL_REPO: ${{ matrix.model }}
+          SHARED_MODEL_CACHE: ${{ vars.HYPERLOOM_SHARED_MODEL_CACHE || '/shared/models' }}
         run: |
           set -euo pipefail
-          if [ ! -d /path/models ] || [ ! -w /path/models ]; then
-            echo "WARN: /path/models not writable on this runner — skipping prewarm"
+          if [ ! -d "${SHARED_MODEL_CACHE}" ] || [ ! -w "${SHARED_MODEL_CACHE}" ]; then
+            echo "WARN: shared model cache not writable on this runner — skipping prewarm: ${SHARED_MODEL_CACHE}"
             echo "      (SaFE register will handle the download on its own)"
             exit 0
           fi
           python3 ci/prewarm_models.py \
             --repos        "${MODEL_REPO}" \
-            --target-root  /path/models \
+            --target-root  "${SHARED_MODEL_CACHE}" \
             --concurrency  1 \
             --inner-workers 8 \
             --log          "${{ github.workspace }}/prewarm.log"
@@ -283,8 +285,8 @@ jobs:
           # The hard contract: SaFE promptPrefix MUST be non-empty. The base
           # prefix is ci/prompt_prefix.txt (single source of truth); on top of
           # it we prepend a CI SOURCE PIN block that makes the sandbox clone
-          # Hyperloom @ this run's commit (GITHUB_SHA) instead of any
-          # pre-deployed snapshot.
+          # Hyperloom @ this run's commit (GITHUB_SHA) instead of any deployed
+          # snapshot.
           PROMPT_PREFIX_VALUE=""
           if [ -f "prompt_prefix.txt" ]; then
             PROMPT_PREFIX_VALUE="$(cat prompt_prefix.txt)"
@@ -365,7 +367,7 @@ jobs:
     # Both: optimize for ordering, prepare so needs.prepare.outputs.count is
     # actually resolvable in the `if` below.
     needs: [prepare, optimize]
-    if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
+    if: vars.HYPERLOOM_INTERNAL_CI == 'true' && always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
     runs-on: hyperloom-4hhzn
     timeout-minutes: 20
     env:

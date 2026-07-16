@@ -1524,6 +1524,8 @@ def _apply_fellow_env(env: dict) -> None:
         cur_path = env.get("PATH", "")
         if bindir and bindir not in cur_path.split(os.pathsep):
             env["PATH"] = bindir + os.pathsep + cur_path if cur_path else bindir
+    # Public defaults keep TLS verification enabled. Internal deployments with
+    # self-signed proxies can opt out by exporting their own TLS override envs.
     base_url = str(env.get("ANTHROPIC_BASE_URL") or "").strip()
     if base_url.endswith("/llm-gateway"):
         env["ANTHROPIC_BASE_URL"] = base_url[: -len("/llm-gateway")] + "/api/v1/llm-proxy"
