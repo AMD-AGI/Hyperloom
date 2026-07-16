@@ -28,6 +28,10 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env_safety import (
+    filter_untrusted_env_mapping,
+    is_allowed_workload_env_key,
+)
 from hyperloom.inference_optimizer.session.paths import asset_root
 from ._grid_runner import (
     compact_json_server_args,
@@ -39,6 +43,7 @@ from ._grid_runner import (
     server_args_env_name,
 )
 from ._grid_server_args import remove_server_args
+from ._grid_server_args import validate_server_args_shell_safe
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
@@ -685,7 +690,13 @@ def materialize_config_with_envs(
         envs[_ref_fw_env] = (
             merge_server_args(ref_args, _ref_existing) if _ref_existing else ref_args
         )
-    for _rk, _rv in (reference_envs or {}).items():
+    safe_reference_envs, dropped_reference_envs = filter_untrusted_env_mapping(
+        reference_envs,
+        allow_predicate=is_allowed_workload_env_key,
+    )
+    for _rk in dropped_reference_envs:
+        log.warning("Dropping unsafe reference_envs key %s before benchmark materialization", _rk)
+    for _rk, _rv in safe_reference_envs.items():
         envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
@@ -705,7 +716,13 @@ def materialize_config_with_envs(
             envs[framework_env] = merge_server_args(existing, server_args)
         elif not replace_args:
             envs[framework_env] = server_args
-    for key, value in (extra_envs or {}).items():
+    safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
+        extra_envs,
+        allow_predicate=is_allowed_workload_env_key,
+    )
+    for _dk in dropped_extra_envs:
+        log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
+    for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     framework_env = server_args_env_name(bench.get("framework"))
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
@@ -870,6 +887,7 @@ def materialize_config_with_envs(
     resolved_server_args = compact_json_server_args(
         resolved_server_args, bench.get("framework"),
     )
+    resolved_server_args = validate_server_args_shell_safe(resolved_server_args)
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
     # ── Client trust-remote-code (model-agnostic) ─────────────────────────

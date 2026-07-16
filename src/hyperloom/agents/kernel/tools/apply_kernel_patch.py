@@ -13,6 +13,7 @@ import logging
 import os
 import py_compile
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,7 @@ COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".
 PYTHON_SOURCE_SUFFIXES = {".py"}
 COMPILED_ARTIFACT_SUFFIXES = {".so", ".co", ".hsaco"}
 TEXT_ARTIFACT_SUFFIXES = {".txt", ".md", ".markdown", ".log", ".patch", ".diff"}
+_UNSAFE_COMMAND_TOKENS = {";", "&&", "||", "|", ">", ">>", "<", "<<", "`"}
 # Fallback when ``inference_optimizer`` is not on ``sys.path`` (standalone CLI).
 _FALLBACK_KNOWN_TARGET_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
@@ -48,6 +50,26 @@ _FALLBACK_KNOWN_TARGET_ROOTS: tuple[str, ...] = (
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
 )
+
+
+def _coerce_rebuild_command(rebuild_command: list[str] | str | None) -> list[str]:
+    """Return a rebuild argv, never a shell command string."""
+    if not rebuild_command:
+        return []
+    if isinstance(rebuild_command, str):
+        try:
+            argv = shlex.split(rebuild_command)
+        except ValueError as exc:
+            raise ValueError(f"invalid rebuild_command: {exc}") from exc
+    else:
+        argv = [str(part) for part in rebuild_command]
+    if not argv:
+        return []
+    if any(part in _UNSAFE_COMMAND_TOKENS for part in argv):
+        raise ValueError("rebuild_command must be argv-like and cannot contain shell control operators")
+    if any(("\n" in part or "\r" in part or "\x00" in part) for part in argv):
+        raise ValueError("rebuild_command contains invalid control characters")
+    return argv
 
 _CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
 
@@ -1616,10 +1638,8 @@ def apply_kernel_patch(
         )
 
     command: list[str] = []
-    if isinstance(rebuild_command, str):
-        command = ["/bin/bash", "-lc", rebuild_command]
-    elif rebuild_command:
-        command = list(rebuild_command)
+    if rebuild_command:
+        command = _coerce_rebuild_command(rebuild_command)
     elif not skip_rebuild:
         command = list(strategy["rebuild_command"])
 
@@ -1899,10 +1919,8 @@ def _apply_kernel_patch_snapshot(
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     command: list[str] = []
-    if isinstance(rebuild_command, str):
-        command = ["/bin/bash", "-lc", rebuild_command]
-    elif rebuild_command:
-        command = list(rebuild_command)
+    if rebuild_command:
+        command = _coerce_rebuild_command(rebuild_command)
 
     rebuild: dict[str, Any] = {"status": "skipped", "reason": "source-only patch or skip_rebuild=true"}
     jit_build_backup: dict[str, Any] = {"status": "skipped", "reason": "rebuild not run"}

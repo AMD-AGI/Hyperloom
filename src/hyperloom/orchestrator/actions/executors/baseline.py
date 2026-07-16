@@ -29,6 +29,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.env_safety import scrub_child_process_env
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from . import _server_lifecycle as _lifecycle
@@ -1677,7 +1678,7 @@ class BaselineExecutor:
             config_path=config_path,
             output_dir=output_dir,
         )
-        env = os.environ.copy()
+        env = scrub_child_process_env(os.environ.copy())
         # Put the venv first in PATH so the benchmark script's `python3`
         # resolves to one with torch+rocm (defense in depth vs Magpie YAML).
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"

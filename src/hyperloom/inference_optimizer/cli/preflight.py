@@ -15,6 +15,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import (
+    filter_untrusted_env_mapping,
+    is_allowed_dotenv_key,
+    is_allowed_kernel_agent_env_key,
+)
+
 from .credentials import (
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
@@ -41,6 +47,27 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "GEAK_BASE_URL",
     "LLM_API_BASE",
 )
+
+
+def _resolve_dotenv_file() -> Path | None:
+    """Resolve the trusted repo ``.env`` file without trusting arbitrary cwd."""
+    explicit_root = os.environ.get("REPO_ROOT", "").strip()
+    candidates: list[Path] = []
+    if explicit_root:
+        candidates.append(Path(explicit_root))
+    else:
+        # Development checkout: preflight.py -> cli -> inference_optimizer ->
+        # hyperloom -> src -> repo root.
+        package_root = Path(__file__).resolve().parents[4]
+        candidates.append(package_root)
+        cwd = Path.cwd()
+        if (cwd / "pyproject.toml").is_file() and (cwd / "src" / "hyperloom").is_dir():
+            candidates.append(cwd)
+    for root in candidates:
+        env_file = root / ".env"
+        if env_file.is_file():
+            return env_file
+    return None
 
 
 def _provider_only_mode_before_fallback() -> str:
@@ -107,10 +134,10 @@ def _load_dotenv_fallback() -> None:
     environment, regardless of whether LLM credentials are already set (so
     operational vars like ``TRACELENS_ROOT`` / ``FORGE_PATH`` are also picked up).
     """
-    repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
-    env_file = Path(repo_root) / ".env"
-    if not env_file.exists():
+    env_file = _resolve_dotenv_file()
+    if env_file is None:
         return
+    parsed: dict[str, str] = {}
     loaded = 0
     for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw.strip()
@@ -129,6 +156,14 @@ def _load_dotenv_fallback() -> None:
             value = value[1:-1]
         if key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT") and _is_placeholder_tracelens_path(value):
             continue
+        parsed[key] = value
+    safe_vars, dropped_vars = filter_untrusted_env_mapping(
+        parsed,
+        allow_predicate=is_allowed_dotenv_key,
+    )
+    for key in dropped_vars:
+        print(f"Preflight: WARNING — ignoring unsupported .env key {key} from {env_file}", file=sys.stderr)
+    for key, value in safe_vars.items():
         if key not in os.environ:
             os.environ[key] = value
             loaded += 1
@@ -243,7 +278,16 @@ def _load_kernel_agent_env_fallback() -> None:
             text = env_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return
-        _correct_kernel_agent_path_vars(_parse_env_assignments(text), env_path)
+        file_vars, dropped_file_vars = filter_untrusted_env_mapping(
+            _parse_env_assignments(text),
+            allow_predicate=is_allowed_kernel_agent_env_key,
+        )
+        for key in dropped_file_vars:
+            print(
+                f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
+                file=sys.stderr,
+            )
+        _correct_kernel_agent_path_vars(file_vars, env_path)
         return
 
     if not candidate:
@@ -280,7 +324,16 @@ def _load_kernel_agent_env_fallback() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    file_vars = _parse_env_assignments(text)
+    parsed_file_vars = _parse_env_assignments(text)
+    file_vars, dropped_file_vars = filter_untrusted_env_mapping(
+        parsed_file_vars,
+        allow_predicate=is_allowed_kernel_agent_env_key,
+    )
+    for key in dropped_file_vars:
+        print(
+            f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
+            file=sys.stderr,
+        )
     loaded = 0
     for key, value in file_vars.items():
         if key not in os.environ:

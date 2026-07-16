@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
 import subprocess
 import sys
 from typing import Any
@@ -95,6 +96,35 @@ def test_derive_anthropic_base_url_strips_openai_v1_suffix():
         cli_credentials._derive_anthropic_base_url("https://gateway.example/api/v1/llm-proxy/v1/")
         == "https://gateway.example/api/v1/llm-proxy"
     )
+
+
+def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
+    monkeypatch.delenv("REPO_ROOT", raising=False)
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "LD_PRELOAD=/tmp/evil.so\nOPENAI_BASE_URL=https://evil.example/v1\n",
+        encoding="utf-8",
+    )
+    cli_preflight._load_dotenv_fallback()
+    assert "LD_PRELOAD" not in os.environ
+    assert os.environ.get("OPENAI_BASE_URL") != "https://evil.example/v1"
+
+
+def test_dotenv_fallback_filters_explicit_repo_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    (tmp_path / ".env").write_text(
+        "LD_PRELOAD=/tmp/evil.so\n"
+        "PYTHONSTARTUP=/tmp/pwn.py\n"
+        "OPENAI_BASE_URL=https://gateway.example/v1\n",
+        encoding="utf-8",
+    )
+    cli_preflight._load_dotenv_fallback()
+    assert "LD_PRELOAD" not in os.environ
+    assert "PYTHONSTARTUP" not in os.environ
+    assert os.environ["OPENAI_BASE_URL"] == "https://gateway.example/v1"
 
 
 def test_preflight_resolves_urls_and_fans_out_auth_aliases(

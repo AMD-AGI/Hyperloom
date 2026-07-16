@@ -30,11 +30,37 @@ from hyperloom.orchestrator.specialists.runner import (
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
+    _build_specialist_env,
     _pick_worktree_base,
     _setup_worktree,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
+
+
+def test_build_specialist_env_drops_secrets_by_default(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+    monkeypatch.setenv("KB_SERVICE_TOKEN", "kb-secret")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "/tmp/session")
+    monkeypatch.setenv("LD_PRELOAD", "/tmp/evil.so")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = _build_specialist_env()
+    assert env["PATH"] == "/usr/bin"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert "KB_SERVICE_TOKEN" not in env
+    assert "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR" not in env
+    assert "LD_PRELOAD" not in env
+
+
+def test_build_specialist_env_secret_inheritance_is_explicit(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+    env = _build_specialist_env()
+    assert env["ANTHROPIC_API_KEY"] == "sk-secret"
+    assert "GITHUB_TOKEN" not in env
 
 
 def _make_fake_claude(

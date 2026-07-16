@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import scrub_child_process_env
 from hyperloom.common.jsonio import read_json
 
 log = logging.getLogger(__name__)
@@ -128,9 +129,13 @@ async def sweep_via_geak(
     flags = str(cfg.get("flags") or "")
     env_str = str(cfg.get("env") or "")
 
-    if not bench_script or not Path(bench_script).is_file():
+    bench_script_path = Path(str(bench_script or "")).resolve()
+    if not bench_script or not bench_script_path.is_file():
         return {"status": "failed", "error_class": "missing_bench_script",
                 "error": f"GEAK bench script not found: {bench_script}"}
+    if bench_script_path.suffix != ".sh" or not bench_script_path.name.startswith("bench"):
+        return {"status": "failed", "error_class": "invalid_bench_script",
+                "error": f"GEAK bench script is not an allowed benchmark shell script: {bench_script}"}
 
     model = os.environ.get("MODEL_PATH", "").strip()
     backend = (os.environ.get("FRAMEWORK", "") or "sglang").strip()
@@ -181,7 +186,7 @@ async def sweep_via_geak(
             variant_idx += 1
             out_dir = output_root / variant_name
             out_dir.mkdir(parents=True, exist_ok=True)
-            env = dict(os.environ)
+            env = scrub_child_process_env(dict(os.environ))
             env.update({
                 "BACKEND": backend,
                 "OUT_DIR": str(out_dir),
@@ -201,7 +206,7 @@ async def sweep_via_geak(
             # setdefault: forwarded config/trust apply unless already pinned.
             for _k, _v in protocol_env.items():
                 env.setdefault(_k, _v)
-            cmd = ["bash", str(bench_script)]
+            cmd = ["bash", str(bench_script_path)]
 
             def _run() -> subprocess.CompletedProcess:
                 return subprocess.run(

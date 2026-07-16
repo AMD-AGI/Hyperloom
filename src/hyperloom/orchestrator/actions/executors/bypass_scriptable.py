@@ -22,6 +22,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import scrub_child_process_env
+
 
 def _scriptable_script_name(framework: str, runner_type: str) -> str:
     """Return the scriptable entrypoint name (e.g. xdit_mi300x.sh)."""
@@ -74,7 +76,7 @@ def build_scriptable_env(
     Returns:
         The environment mapping for the scriptable subprocess.
     """
-    env = os.environ.copy()
+    env = scrub_child_process_env(os.environ.copy())
     env["MODEL"] = str(bench.get("model") or env.get("MODEL", ""))
     if bench.get("precision"):
         env["PRECISION"] = str(bench["precision"])

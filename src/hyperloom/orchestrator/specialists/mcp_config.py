@@ -65,18 +65,23 @@ def write_specialist_mcp_config(
 
     kb_url = (cortex_kb_mcp_url or "").strip()
     if kb_url:
-        kb_server: dict[str, Any] = {
-            "type": "http",
-            "url": kb_url,
-        }
         kb_headers = {
             str(k): str(v)
             for k, v in (cortex_kb_mcp_headers or {}).items()
             if str(k).strip() and str(v).strip()
         }
-        if kb_headers:
-            kb_server["headers"] = kb_headers
-        servers["cortex_kb"] = kb_server
+        if any(k.lower() == "authorization" for k in kb_headers):
+            log.warning(
+                "specialist_mcp_config: skipping cortex_kb MCP because auth headers would be written to disk"
+            )
+        else:
+            kb_server: dict[str, Any] = {
+                "type": "http",
+                "url": kb_url,
+            }
+            if kb_headers:
+                kb_server["headers"] = kb_headers
+            servers["cortex_kb"] = kb_server
 
     if not servers:
         log.info(
