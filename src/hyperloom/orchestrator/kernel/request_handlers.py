@@ -223,7 +223,7 @@ def _reusable_source_roots() -> tuple[str, ...]:
             if cand not in seen:
                 seen.add(cand)
                 out.append(cand)
-    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+    for default in ("/opt/flydsl/", "/sgl-workspace/flydsl/"):
         if default not in seen:
             seen.add(default)
             out.append(default)

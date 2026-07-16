@@ -517,7 +517,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
         "falls back to $USER_DATA_PATH (legacy flat layout). "
         "USER_DATA_PATH MUST stay at workspace level "
-        "(/wekafs/.../sessions/, not the per-session subdir) "
+        "(/shared/hyperloom-sessions, not the per-session subdir) "
         "so runtime/ resolution works. Skips the SharedState "
         "seed and lets the Coordinator replay the prior "
         "event log + state.json.",

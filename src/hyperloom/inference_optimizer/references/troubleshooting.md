@@ -34,7 +34,7 @@ In sandboxes where `/workspace/hyperloom` is unwritable, override the
 **workspace root** with `USER_DATA_PATH` (not the per-session subdir):
 
 ```bash
-export USER_DATA_PATH="/wekafs/xiaofei/sessions"   # workspace root
+export USER_DATA_PATH="/shared/hyperloom-sessions"   # workspace root
 mkdir -p "$USER_DATA_PATH"
 ```
 
