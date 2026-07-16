@@ -207,3 +207,35 @@ def test_maybe_setup_worktree_readonly(tmp_path):
     r = _runner(backend_factory=None, subprocess_config=cfg)
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"readonly": True}))
     assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, "")
+
+
+def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):
+    # SWSPLAT-33372: legitimate patch paths inside the worktree/workspace.
+    from pathlib import Path
+
+    worktree = tmp_path / "worktree"
+    workspace = tmp_path / "workspace"
+    worktree.mkdir()
+    workspace.mkdir()
+    bases = [worktree, workspace]
+
+    inside = worktree / "patches" / "x.patch"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("diff", encoding="utf-8")
+    assert sr._patch_path_within_bases(inside, bases) is True
+    assert sr._patch_path_within_bases(workspace / "y.patch", bases) is True
+
+
+def test_patch_path_within_bases_rejects_outside_paths(tmp_path):
+    # SWSPLAT-33372: absolute / traversal paths outside the sandbox are refused.
+    from pathlib import Path
+
+    worktree = tmp_path / "worktree"
+    workspace = tmp_path / "workspace"
+    worktree.mkdir()
+    workspace.mkdir()
+    bases = [worktree, workspace]
+
+    assert sr._patch_path_within_bases(Path("/etc/passwd"), bases) is False
+    assert sr._patch_path_within_bases(worktree / ".." / "escape.patch", bases) is False
+    assert sr._patch_path_within_bases(tmp_path / "sibling.patch", bases) is False
