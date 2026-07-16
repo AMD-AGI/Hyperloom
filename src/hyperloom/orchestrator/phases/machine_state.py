@@ -456,7 +456,7 @@ PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
 
 # Plateau judgment defaults (CLI --plateau-* flags); kept here for pure callers + tests.
 DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT: float = 0.5
-DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK: int = 3
+DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK: int = 5
 DEFAULT_PLATEAU_EXPLORE_LOOKBACK: int = 5
 DEFAULT_PLATEAU_KERNEL_REVERT_STREAK: int = 3
 DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT: float = 0.5
@@ -502,7 +502,7 @@ def _default_framework_force_exit_ratio() -> float:
 DEFAULT_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO: float = _default_framework_force_exit_ratio()
 # FRAMEWORK per-candidate plateau: after this many consecutive benchmarked
 # candidate tests without a KEEP, the phase exits to EXPLORE. A KEEP resets it.
-DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 3
+DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 
 
 # R1 cyclic phase machine: when enabled, SWEEP loops back to EXPLORE (a new
