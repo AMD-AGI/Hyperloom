@@ -418,7 +418,7 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     """
     from hyperloom.inference_optimizer.session import paths
 
-    default_root = paths.open_source_root() / "TraceLens"
+    default_root = paths.deps_cache_root() / "TraceLens"
     try:
         is_default = Path(root).resolve() == default_root.resolve()
     except OSError:
