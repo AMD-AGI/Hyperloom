@@ -1048,7 +1048,7 @@ class LangfuseEmitter:
                 continue
             meta0 = scores[0].get("metadata") or {}
             phase = str(meta0.get("phase") or lfmap.UNPHASED)
-            agent = self._span_agent_for(str(meta0.get("component") or ""))
+            agent = lfmap.span_agent_for(str(meta0.get("component") or ""))
             # Per-decision span carrying ``operation_kind`` so the trace can be
             # filtered by step. Scores attach here when it opens, else to the agent span.
             step_span = self._open_decision_span(drow, phase, agent)
@@ -1061,29 +1061,6 @@ class LangfuseEmitter:
                 )
             if step_span is not None:
                 self._safe_end(step_span)
-
-    @staticmethod
-    def _span_agent_for(proposer: str) -> str:
-        """Map a resolved proposer back to a span-attachable agent name.
-
-        ``specialist:<domain>`` collapses to the ``specialist`` agent span and
-        ``grid`` to ``orchestration`` so the per-decision score lands under a
-        real agent span.
-
-        Args:
-            proposer: the resolved proposer label from the decision metadata.
-
-        Returns:
-            str: the span-attachable agent name (``specialist`` / ``orchestration``
-                for the collapsed aliases, else the proposer or the unknown-agent
-                fallback).
-        """
-        p = (proposer or "").strip()
-        if p.startswith("specialist:"):
-            return "specialist"
-        if p == "grid":
-            return "orchestration"
-        return p or lfmap.UNKNOWN_AGENT
 
     def _open_decision_span(
         self,
