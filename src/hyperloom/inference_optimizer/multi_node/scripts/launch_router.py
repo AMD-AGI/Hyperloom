@@ -65,7 +65,7 @@ def _build_sglang_router_cmd(
         "--decode",
         decode_url,
         "--host",
-        "0.0.0.0",
+        "0.0.0.0",  # nosec B104 - router is the public multi-node endpoint.
         "--port",
         str(public_port),
     ]
@@ -105,7 +105,7 @@ def _build_vllm_router_cmd(
         "--decode-url",
         decode_url,
         "--host",
-        "0.0.0.0",
+        "0.0.0.0",  # nosec B104 - router is the public multi-node endpoint.
         "--port",
         str(public_port),
     ]

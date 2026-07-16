@@ -200,7 +200,7 @@ def _launch_server(
             "--model",
             model,
             "--host",
-            "0.0.0.0",
+            "0.0.0.0",  # nosec B104 - benchmark server must accept local/container probes.
             "--port",
             str(port),
             "--trust-remote-code",

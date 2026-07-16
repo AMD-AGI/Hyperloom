@@ -91,7 +91,7 @@ def build_server_command(
         cmd = [
             python_exe, "-m", "sglang.launch_server",
             "--model-path", model,
-            "--host", "0.0.0.0",
+            "--host", "0.0.0.0",  # nosec B104 - bypass server must accept benchmark probes.
             "--port", str(port),
             "--trust-remote-code",
             "--tensor-parallel-size", str(tp),

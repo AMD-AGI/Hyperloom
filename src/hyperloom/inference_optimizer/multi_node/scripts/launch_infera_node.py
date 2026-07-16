@@ -516,7 +516,7 @@ def _build_sglang_cmd(
         str(a.tp),
         "--trust-remote-code",
         "--host",
-        "0.0.0.0",
+        "0.0.0.0",  # nosec B104 - Infera worker must bind for pod-to-pod traffic.
         "--port",
         str(getattr(a, "engine_port", _DEFAULT_ENGINE_PORT)),
         "--discovery-backend",
@@ -605,7 +605,7 @@ def _build_vllm_cmd(a: argparse.Namespace, *, advertise_host: str) -> list[str]:
         "--tensor-parallel-size",
         str(a.tp),
         "--host",
-        "0.0.0.0",
+        "0.0.0.0",  # nosec B104 - Infera worker must bind for pod-to-pod traffic.
         "--port",
         str(getattr(a, "engine_port", _DEFAULT_ENGINE_PORT)),
         "--discovery-backend",

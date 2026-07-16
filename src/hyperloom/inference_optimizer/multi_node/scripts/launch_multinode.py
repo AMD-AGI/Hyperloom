@@ -238,7 +238,7 @@ def _build_sglang_cmd(
     ]
     if node_rank == 0:
         # rank-0 HTTP port = internal prefill/decode port in PD mode, else public.
-        cmd.extend(["--host", "0.0.0.0", "--port", str(pd_port)])
+        cmd.extend(["--host", "0.0.0.0", "--port", str(pd_port)])  # nosec B104 - rank-0 server must accept pod traffic.
     if ep > 1:
         cmd.extend(["--expert-parallel-size", str(ep)])
     role = pd_role.strip().lower()
@@ -292,7 +292,7 @@ def _build_vllm_cmd(
         "--tensor-parallel-size",
         str(tp),
         "--host",
-        "0.0.0.0",
+        "0.0.0.0",  # nosec B104 - vLLM rank-0 server must accept pod traffic.
         "--port",
         str(pd_port),
         "--distributed-executor-backend",
