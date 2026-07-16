@@ -189,6 +189,140 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
     )
 
 
+def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_path: Path):
+    install_script = (
+        Path(setup.__file__).resolve().parent
+        / "assets"
+        / "install_baremetal.sh"
+    )
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("read_dotenv_var() {")
+    end = script_text.index("\nwrite_runtime_dotenv() {")
+    credential_functions = script_text[start:end]
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "\n".join(
+            [
+                "HYPERLOOM_LLM_MODE=deepseek",
+                "DEEPSEEK_API_KEY=sk-deepseek",
+                "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic",
+                "OPENAI_BASE_URL=https://gateway.example/v1",
+                "OPENAI_API_KEY=stale-openai-key",
+                "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                "ANTHROPIC_API_KEY=stale-anthropic-key",
+                "SAFE_API_KEY=stale-safe-key",
+                "LLM_GATEWAY_KEY=stale-gateway-key",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runner = tmp_path / "deepseek-run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"DOTENV={dotenv}",
+                "SAFE_API_KEY_PLACEHOLDER=ak-your-api-key-here",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "SAFE_API_KEY_ARG=",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                "warn() { :; }",
+                "die() { echo \"$*\" >&2; exit 99; }",
+                "is_interactive() { return 1; }",
+                credential_functions,
+                "HYPERLOOM_SETUP_ENV_AUTHORITATIVE=1",
+                "OPENAI_BASE_URL=https://gateway.example/v1",
+                "OPENAI_API_KEY=ambient-openai-key",
+                "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                "ANTHROPIC_API_KEY=ambient-anthropic-key",
+                "SAFE_API_KEY=ambient-safe-key",
+                "LLM_GATEWAY_KEY=ambient-gateway-key",
+                "resolve_credentials",
+                f"printf 'OPENAI_BASE_URL=%s\n' \"${{OPENAI_BASE_URL-}}\" > {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'OPENAI_API_KEY=%s\n' \"${{OPENAI_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'ANTHROPIC_BASE_URL=%s\n' \"${{ANTHROPIC_BASE_URL-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'ANTHROPIC_API_KEY=%s\n' \"${{ANTHROPIC_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'SAFE_API_KEY=%s\n' \"${{SAFE_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'DEEPSEEK_API_KEY=%s\n' \"${{DEEPSEEK_API_KEY-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+                f"printf 'DEEPSEEK_BASE_URL=%s\n' \"${{DEEPSEEK_BASE_URL-}}\" >> {tmp_path / 'deepseek-env.txt'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["bash", str(runner)], check=True)
+
+    text = dotenv.read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY=sk-deepseek" in text
+    assert "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic" in text
+    assert "OPENAI_BASE_URL=" not in text
+    assert "OPENAI_API_KEY=" not in text
+    assert "ANTHROPIC_BASE_URL=" not in text
+    assert "ANTHROPIC_API_KEY=" not in text
+    assert "SAFE_API_KEY=" not in text
+    resolved_env = (tmp_path / "deepseek-env.txt").read_text(encoding="utf-8")
+    assert resolved_env == (
+        "OPENAI_BASE_URL=\n"
+        "OPENAI_API_KEY=\n"
+        "ANTHROPIC_BASE_URL=\n"
+        "ANTHROPIC_API_KEY=\n"
+        "SAFE_API_KEY=\n"
+        "DEEPSEEK_API_KEY=sk-deepseek\n"
+        "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic\n"
+    )
+
+
+def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
+    script_paths = [
+        (
+            "install",
+            Path(setup.__file__).resolve().parent / "assets" / "install.sh",
+            ["preflight_load_dotenv() { :; }"],
+        ),
+        (
+            "kernel",
+            Path(setup.__file__).resolve().parents[1]
+            / "agents"
+            / "kernel"
+            / "scripts"
+            / "install.sh",
+            [],
+        ),
+    ]
+    for name, script_path, stubs in script_paths:
+        script_text = script_path.read_text(encoding="utf-8")
+        start = script_text.index("preflight_validate_credentials() {")
+        end = script_text.index("\npreflight_validate_credentials", start)
+        runner = tmp_path / f"{name}-deepseek-preflight.sh"
+        runner.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -euo pipefail",
+                    f"REPO_ROOT={tmp_path}",
+                    "CHECK_ONLY=0",
+                    "DRY_RUN=0",
+                    "DEEPSEEK_API_KEY=sk-deepseek",
+                    "log() { :; }",
+                    "warn() { :; }",
+                    "die() { echo \"$*\" >&2; exit 99; }",
+                    *stubs,
+                    script_text[start:end],
+                    "preflight_validate_credentials",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(["bash", str(runner)], check=True)
+
+
 def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):
     install_script = (
         Path(setup.__file__).resolve().parents[1]
