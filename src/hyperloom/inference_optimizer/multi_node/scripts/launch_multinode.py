@@ -20,6 +20,7 @@ import shlex
 import subprocess
 import pathlib
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -591,7 +592,7 @@ def _rank0_pid_from_log(log_dir: str) -> int | None:
     Args:
         log_dir (str): The log directory; its parent is probed for the
             ``multi_node_pids/rank_0.pid`` file before falling back to the
-            default ``/tmp`` location.
+            default temp-directory location.
 
     Returns:
         int | None: The rank-0 PID, or ``None`` if it cannot be read.
@@ -599,7 +600,7 @@ def _rank0_pid_from_log(log_dir: str) -> int | None:
     try:
         pid_path = pathlib.Path(log_dir).parent / "multi_node_pids" / "rank_0.pid"
         if not pid_path.is_file():
-            pid_path = pathlib.Path("/tmp/multi_node_pids/rank_0.pid")
+            pid_path = pathlib.Path(tempfile.gettempdir()) / "multi_node_pids" / "rank_0.pid"
         return int(pid_path.read_text().strip())
     except Exception:  # noqa: BLE001
         return None

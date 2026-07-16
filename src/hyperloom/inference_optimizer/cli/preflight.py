@@ -481,7 +481,7 @@ def _check_gpu_visibility() -> None:
 def _check_shm_disk() -> None:
     """Warn (not fail-fast) on tight ``/dev/shm`` (vLLM/NCCL IPC needs headroom)."""
     try:
-        usage = shutil.disk_usage("/dev/shm")
+        usage = shutil.disk_usage("/dev/shm")  # nosec B108 - mountpoint probe, not temp file creation.
     except (FileNotFoundError, OSError):
         return
     if usage.free < _DEV_SHM_MIN_FREE_BYTES:
