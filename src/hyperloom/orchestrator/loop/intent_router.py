@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from .coordinator_helpers import format_exc_brief, serialize_verdict_advisory
+from .coordinator_helpers import coerce_needs_gpu, format_exc_brief, serialize_verdict_advisory
 from ..bus.message_bus import Message
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import Task
@@ -205,6 +205,20 @@ class IntentRouter:
                 else "advise" if "advise" in sub_verdicts
                 else "needs_review"
             )
+
+            # Defensive audit (log-only): record verdict_map collapse
+            # outcomes for traceability. Behaviour is unchanged.
+            try:
+                if verdict in ("approve", "advise") and any(
+                    sv in ("reject", "needs_review") for sv in sub_verdicts
+                ):
+                    log.warning(
+                        "review_verdict collapse: target=%s "
+                        "collapsed to %r (sub_verdicts=%r)",
+                        target, verdict, sub_verdicts,
+                    )
+            except Exception:  # noqa: BLE001 - audit log must never affect flow
+                pass
         await self._coord._handle_single_verdict(
             source=source,
             pending=pending,
@@ -370,7 +384,8 @@ class IntentRouter:
         raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
         if not raw_key:
             content_fp = hashlib.sha1(
-                json.dumps(params, sort_keys=True, default=str).encode()
+                json.dumps(params, sort_keys=True, default=str).encode(),
+                usedforsecurity=False,
             ).hexdigest()[:10]
             raw_key = (
                 f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:"
@@ -397,12 +412,7 @@ class IntentRouter:
                 # Any GPU-holding specialist serializes against serving via
                 # gpu_research_lane. Its lane lease TTL comes from the agent wall
                 # budget (iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL).
-                needs_gpu_raw = params.get("needs_gpu", False)
-                needs_gpu = (
-                    needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
-                    if isinstance(needs_gpu_raw, str)
-                    else bool(needs_gpu_raw)
-                )
+                needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
                     try:
@@ -758,6 +768,16 @@ class IntentRouter:
                 task_id, "cancelled",
                 evidence={"reason": intent.payload.get("reason"), "by": source},
             )
+            # Defensive audit (log-only): emit an audit trail for KILL_TASK
+            # so kills are traceable. Behaviour is unchanged.
+            try:
+                log.warning(
+                    "kill_task audit: source=%s task_id=%s "
+                    "prior_state=%s reason=%r",
+                    source, task_id, task.state, intent.payload.get("reason"),
+                )
+            except Exception:  # noqa: BLE001 - audit log must never affect flow
+                pass
         await self.bus.append_and_seq(Message.new(
             source, "*", "kill",
             {"task_id": task_id, "reason": intent.payload.get("reason")},

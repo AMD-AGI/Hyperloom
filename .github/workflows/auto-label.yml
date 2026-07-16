@@ -58,7 +58,7 @@ jobs:
             Inference)          LABELS="$LABELS,domain:inference" ;;
             Training)           LABELS="$LABELS,domain:training" ;;
             "MCP tools")        LABELS="$LABELS,domain:mcp" ;;
-            "UI / PrimusClaw")  LABELS="$LABELS,domain:ui" ;;
+            UI)                 LABELS="$LABELS,domain:ui" ;;
           esac
 
           # --- Detect sub-domain from "Issue type" dropdown (bug report) ---

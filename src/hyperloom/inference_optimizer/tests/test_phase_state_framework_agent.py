@@ -148,9 +148,8 @@ def test_exit_normal_framework_agent_exits_on_consecutive_reject_plateau():
         },
     ]
     progress = [
-        {"batch_id": "b1", "candidate_id": "c1a", "status": "reject"},
-        {"batch_id": "b2", "candidate_id": "c2a", "status": "reject"},
-        {"batch_id": "b3", "candidate_id": "c3a", "status": "reject"},
+        {"batch_id": f"b{i}", "candidate_id": f"c{i}a", "status": "reject"}
+        for i in range(phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK)
     ]
     state = _State(
         framework_agent_batches=batches,
@@ -159,7 +158,7 @@ def test_exit_normal_framework_agent_exits_on_consecutive_reject_plateau():
     out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
-    assert out[1]["consecutive_no_keep"] == 3
+    assert out[1]["consecutive_no_keep"] == phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
 def test_compute_plateau_framework_agent_returns_signal():
@@ -228,20 +227,20 @@ def test_exit_normal_framework_agent_phase_done_when_signalled():
     assert ev["evidence"] == "no_more_candidates"
 
 
-def test_exit_normal_framework_agent_plateau_after_three_consecutive_no_keep():
-    """3 consecutive benchmarked tests with no KEEP → framework_agent_plateau."""
+def test_exit_normal_framework_agent_plateau_at_threshold_consecutive_no_keep():
+    """N consecutive benchmarked tests with no KEEP → framework_agent_plateau."""
+    n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
     progress = [
-        {"candidate_id": "c1", "status": "reverted", "kept": False},
-        {"candidate_id": "c2", "status": "reverted", "kept": False},
-        {"candidate_id": "c3", "status": "reverted", "kept": False},
+        {"candidate_id": f"c{i}", "status": "reverted", "kept": False}
+        for i in range(n)
     ]
     state = _State(framework_agent_phase_progress=progress)
     out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
     reason, ev = out
     assert reason == "framework_agent_plateau"
-    assert ev["consecutive_no_keep"] == 3
-    assert ev["threshold"] == 3
+    assert ev["consecutive_no_keep"] == n
+    assert ev["threshold"] == n
 
 
 def test_exit_normal_framework_agent_no_plateau_below_threshold():
@@ -290,12 +289,14 @@ def test_exit_normal_framework_agent_plateau_counts_non_benchmarked_no_keep_rows
         {"candidate_id": "c1", "status": "not_applicable", "kept": False},
         {"candidate_id": "c2", "status": "apply_failed", "kept": False},
         {"candidate_id": "c3", "status": "authored_empty", "kept": False},
+        {"candidate_id": "c4", "status": "no_patches", "kept": False},
+        {"candidate_id": "c5", "status": "already_present", "kept": False},
     ]
     state = _State(framework_agent_phase_progress=progress)
     out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
-    assert out[1]["consecutive_no_keep"] == 3
+    assert out[1]["consecutive_no_keep"] == phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
 def test_exit_normal_framework_agent_plateau_mixed_terminal_no_keep_rows():
@@ -306,12 +307,14 @@ def test_exit_normal_framework_agent_plateau_mixed_terminal_no_keep_rows():
         {"candidate_id": "c1", "status": "reverted", "kept": False},
         {"candidate_id": "c2", "status": "not_applicable", "kept": False},
         {"candidate_id": "c3", "status": "apply_failed", "kept": False},
+        {"candidate_id": "c4", "status": "authored_empty", "kept": False},
+        {"candidate_id": "c5", "status": "reverted", "kept": False},
     ]
     state = _State(framework_agent_phase_progress=progress)
     out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
-    assert out[1]["consecutive_no_keep"] == 3
+    assert out[1]["consecutive_no_keep"] == phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
 def test_exit_normal_framework_agent_force_exit_beats_plateau():
@@ -333,9 +336,8 @@ def test_exit_normal_framework_agent_force_exit_beats_plateau():
 def test_exit_normal_framework_agent_plateau_beats_phase_done():
     """Priority order: plateau > phase_done."""
     progress = [
-        {"candidate_id": "c1", "status": "reverted", "kept": False},
-        {"candidate_id": "c2", "status": "reverted", "kept": False},
-        {"candidate_id": "c3", "status": "reverted", "kept": False},
+        {"candidate_id": f"c{i}", "status": "reverted", "kept": False}
+        for i in range(phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK)
     ]
     state = _State(
         framework_agent_phase_progress=progress,
@@ -349,9 +351,8 @@ def test_exit_normal_framework_agent_plateau_beats_phase_done():
 def test_exit_normal_framework_agent_plateau_routes_to_explore():
     """A plateau exit routes FRAMEWORK_AGENT → EXPLORE via compute_next_phase."""
     progress = [
-        {"candidate_id": "c1", "status": "reverted", "kept": False},
-        {"candidate_id": "c2", "status": "reverted", "kept": False},
-        {"candidate_id": "c3", "status": "reverted", "kept": False},
+        {"candidate_id": f"c{i}", "status": "reverted", "kept": False}
+        for i in range(phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK)
     ]
     state = _State(framework_agent_phase_progress=progress)
     out = phase_state.compute_next_phase(state, framework_agent_phase_enabled=True)
@@ -364,19 +365,21 @@ def test_exit_normal_framework_agent_plateau_routes_to_explore():
 def test_exit_normal_framework_agent_plateau_uses_default_threshold():
     """The framework plateau threshold is fixed at the default."""
     progress = [
-        {"candidate_id": "c1", "status": "reverted", "kept": False},
-        {"candidate_id": "c2", "status": "reverted", "kept": False},
-        {"candidate_id": "c3", "status": "reverted", "kept": False},
+        {"candidate_id": f"c{i}", "status": "reverted", "kept": False}
+        for i in range(phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK)
     ]
     state = _State(framework_agent_phase_progress=progress)
     out = phase_state.exit_normal_framework_agent(state)
     assert out is not None
     assert out[0] == "framework_agent_plateau"
-    assert out[1]["threshold"] == 3
+    assert out[1]["threshold"] == phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
 def test_framework_agent_plateau_streak_threshold_is_default():
-    assert phase_state._framework_agent_plateau_streak_threshold() == 3  # noqa: SLF001
+    assert (
+        phase_state._framework_agent_plateau_streak_threshold()  # noqa: SLF001
+        == phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    )
 
 
 def test_exit_normal_framework_agent_force_exit_beats_phase_done():

@@ -178,7 +178,7 @@ def _kernel_agent_root_from_env() -> Path | None:
 HandlerResult = dict[str, Any]
 HandlerFn = Callable[..., Awaitable[HandlerResult]]
 
-_RUNTIME_GENERATED_SOURCE_MARKERS = (
+_RUNTIME_GENERATED_SOURCE_MARKERS = (  # nosec B108 - marker strings, not filesystem writes.
     "/tmp/torchinductor",
     "/torchinductor_",
     "/.cache/torch/inductor",
@@ -223,7 +223,7 @@ def _reusable_source_roots() -> tuple[str, ...]:
             if cand not in seen:
                 seen.add(cand)
                 out.append(cand)
-    for default in ("/wekafs/yunkai/flydsl/", "/sgl-workspace/flydsl/"):
+    for default in ("/opt/flydsl/", "/sgl-workspace/flydsl/"):
         if default not in seen:
             seen.add(default)
             out.append(default)

@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.session import session_paths
 from hyperloom.inference_optimizer.session.lock import (
     SessionAlreadyRunning,
     SessionLock,
+    SessionLockPathError,
 )
 
 
@@ -215,6 +216,37 @@ def test_heartbeat_refreshes_body(tmp_path):
         assert after["pid"] == os.getpid()
     finally:
         lock.release()
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "O_NOFOLLOW"),
+    reason="O_NOFOLLOW is POSIX-only",
+)
+def test_acquire_refuses_symlinked_lock_path(tmp_path):
+    """A symlinked lock path is refused rather than followed and written."""
+    lock_path = session_paths.optimizer_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_target"
+    outside.write_text("victim", encoding="utf-8")
+    os.symlink(outside, lock_path)
+    with pytest.raises(SessionLockPathError, match="must not be a symlink"):
+        SessionLock(tmp_path).acquire()
+    # The symlink target must be untouched (not opened/truncated/locked).
+    assert outside.read_text(encoding="utf-8") == "victim"
+
+
+def test_acquire_plain_file_still_works(tmp_path):
+    """A regular (non-symlink) lock file acquires normally with O_NOFOLLOW."""
+    lock = SessionLock(tmp_path)
+    lock.acquire()
+    try:
+        assert session_lock.read_owner(tmp_path) is not None
+    finally:
+        lock.release()
+    # Re-acquire on the now-existing regular file also works.
+    again = SessionLock(tmp_path)
+    again.acquire()
+    again.release()
 
 
 @pytest.mark.skipif(

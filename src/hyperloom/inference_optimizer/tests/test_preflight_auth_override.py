@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
 import subprocess
 import sys
 from typing import Any
@@ -95,6 +96,60 @@ def test_derive_anthropic_base_url_strips_openai_v1_suffix():
         cli_credentials._derive_anthropic_base_url("https://gateway.example/api/v1/llm-proxy/v1/")
         == "https://gateway.example/api/v1/llm-proxy"
     )
+
+
+def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
+    monkeypatch.delenv("REPO_ROOT", raising=False)
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "LD_PRELOAD=/tmp/evil.so\nOPENAI_BASE_URL=https://evil.example/v1\n",
+        encoding="utf-8",
+    )
+    cli_preflight._load_dotenv_fallback()
+    assert "LD_PRELOAD" not in os.environ
+    assert os.environ.get("OPENAI_BASE_URL") != "https://evil.example/v1"
+
+
+def test_dotenv_fallback_filters_explicit_repo_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    (tmp_path / ".env").write_text(
+        "LD_PRELOAD=/tmp/evil.so\n"
+        "PYTHONSTARTUP=/tmp/pwn.py\n"
+        "OPENAI_BASE_URL=https://gateway.example/v1\n",
+        encoding="utf-8",
+    )
+    cli_preflight._load_dotenv_fallback()
+    assert "LD_PRELOAD" not in os.environ
+    assert "PYTHONSTARTUP" not in os.environ
+    assert os.environ["OPENAI_BASE_URL"] == "https://gateway.example/v1"
+
+
+def test_dotenv_fallback_parses_safe_lines_and_preserves_env_wins(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://operator.example/v1")
+    monkeypatch.delenv("HYPERLOOM_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    (tmp_path / ".env").write_text(
+        "\n"
+        "# comment\n"
+        "export HYPERLOOM_RUNTIME_DIR='/runtime from env'\n"
+        "OPENAI_BASE_URL=https://from-file.example/v1\n"
+        "TRACELENS_ROOT=/path/to/your/TraceLens\n"
+        "NO_EQUALS_LINE\n"
+        "BAD-NAME=drop\n",
+        encoding="utf-8",
+    )
+
+    cli_preflight._load_dotenv_fallback()
+
+    assert os.environ["HYPERLOOM_RUNTIME_DIR"] == "/runtime from env"
+    assert os.environ["OPENAI_BASE_URL"] == "https://operator.example/v1"
+    assert "TRACELENS_ROOT" not in os.environ
+    err = capsys.readouterr().err
+    assert "BAD-NAME" in err
 
 
 def test_preflight_resolves_urls_and_fans_out_auth_aliases(
@@ -260,9 +315,9 @@ def test_preflight_anthropic_only_ignores_stale_kernel_env_openai_fallback(
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 
     def _stale_kernel_env_loader():
-        monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
         monkeypatch.setenv("_".join(("SAFE", "API", "KEY")), "old-gateway-key")
-        monkeypatch.setenv("LLM_API_BASE", "https://llm-api.amd.com/Unified/v1")
+        monkeypatch.setenv("LLM_API_BASE", "https://llm.example.invalid/Unified/v1")
 
     monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", _stale_kernel_env_loader)
 
@@ -387,7 +442,7 @@ def test_sync_geak_config_rewrites_stale_base_url(tmp_path):
     cfg = tmp_path / "geak.yaml"
     cfg.write_text(
         _GEAK_CFG_TEMPLATE.format(
-            url="https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1",
+            url="https://old-gateway.example.invalid/api/v1/llm-proxy/v1",
         ),
         encoding="utf-8",
     )
@@ -398,7 +453,7 @@ def test_sync_geak_config_rewrites_stale_base_url(tmp_path):
     assert changed is True
     text = cfg.read_text(encoding="utf-8")
     assert f"base_url: {tunnel}" in text
-    assert "core42.primus-safe.amd.com" not in text
+    assert "old-gateway.example.invalid" not in text
     assert "model_class: litellm" in text
     assert "api_key: test-token" in text
 
@@ -467,7 +522,30 @@ def test_preflight_deepseek_only_sets_geak_v4_claude_model(
     cli._preflight()
 
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
-    assert cli.os.environ["GEAK_CLAUDE_MODEL"] == "deepseek-chat"
+    assert cli.os.environ["GEAK_CLAUDE_MODEL"] == "deepseek-v4-pro"
+
+
+def test_preflight_deepseek_only_exports_claude_cli_auth_aliases(
+    monkeypatch,
+    tmp_path,
+    clean_url_env,
+    stub_install_steps,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("SAFE", "API", "KEY")), raising=False)
+
+    cli._preflight()
+
+    assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert cli.os.environ["_".join(("ANTHROPIC", "API", "KEY"))] == "deepseek-token"
+    assert cli.os.environ["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "deepseek-token"
 
 
 def test_sync_geak_config_empty_args_are_safe(tmp_path):
@@ -819,13 +897,13 @@ def test_validate_claude_model_deepseek_allowed_by_default(monkeypatch, capsys):
     monkeypatch.setattr(
         cli,
         "_probe_llm_catalog",
-        lambda **kw: {"deepseek-chat"},
+        lambda **kw: {"deepseek-v4-pro"},
     )
-    args = _make_args(claude_model="deepseek-chat")
+    args = _make_args(claude_model="deepseek-v4-pro")
     catalog = cli._validate_and_resolve_claude_model(args, None)
 
-    assert args.claude_model == "deepseek-chat"
-    assert "deepseek-chat" in catalog
+    assert args.claude_model == "deepseek-v4-pro"
+    assert "deepseek-v4-pro" in catalog
     assert "confirmed in gateway catalog" in capsys.readouterr().out
 
 
@@ -1078,11 +1156,11 @@ def test_probe_llm_catalog_passes_anthropic_custom_headers(monkeypatch):
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     ids = cli._probe_llm_catalog(
-        base_url="https://llm-api.amd.com/anthropic",
+        base_url="https://llm.example.invalid/anthropic",
         api_key="dummy",
     )
     assert ids == {"claude-opus-4-6"}
-    assert seen["url"] == "https://llm-api.amd.com/anthropic/models"
+    assert seen["url"] == "https://llm.example.invalid/anthropic/models"
     assert seen["headers"]["Ocp-Apim-Subscription-Key"] == "sub-key"
     assert seen["headers"]["Authorization"] == "Bearer dummy"
 
@@ -1091,7 +1169,7 @@ def test_probe_llm_catalog_uses_openai_custom_headers_for_openai_side(monkeypatc
     """Strict per-side: probing the OpenAI base uses OPENAI_CUSTOM_HEADERS (not
     ANTHROPIC_CUSTOM_HEADERS)."""
     monkeypatch.setattr("time.sleep", lambda s: None)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: openai-key")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: anthropic-key")
     seen: dict[str, Any] = {}
@@ -1103,7 +1181,7 @@ def test_probe_llm_catalog_uses_openai_custom_headers_for_openai_side(monkeypatc
     fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get)})
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    ids = cli._probe_llm_catalog(base_url="https://llm-api.amd.com/Unified/v1", api_key="dummy")
+    ids = cli._probe_llm_catalog(base_url="https://llm.example.invalid/Unified/v1", api_key="dummy")
     assert ids == {"gpt-5.4"}
     assert seen["headers"]["Ocp-Apim-Subscription-Key"] == "openai-key"
 
@@ -1118,7 +1196,7 @@ def test_probe_llm_catalog_normalizes_claude_catalog_ids(monkeypatch):
     fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_get)})
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    ids = cli._probe_llm_catalog(base_url="https://llm-api.amd.com/anthropic", api_key="dummy")
+    ids = cli._probe_llm_catalog(base_url="https://llm.example.invalid/anthropic", api_key="dummy")
 
     assert "Claude-Opus-4.6" in ids
     assert "claude-opus-4-6" in ids
@@ -1276,7 +1354,7 @@ def test_smoke_test_codex_model_skips_for_anthropic_only_fallback(monkeypatch, c
 
 def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):
     """With only Anthropic configured, an empty CODEX_MODEL follows CLAUDE_MODEL."""
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "")
@@ -1293,7 +1371,7 @@ def test_parser_deepseek_only_empty_codex_model_uses_claude_model(monkeypatch):
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.setenv("CLAUDE_MODEL", "deepseek-chat")
+    monkeypatch.setenv("CLAUDE_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("CODEX_MODEL", "")
 
     resolved = cli_credentials._resolve_llm_endpoints()
@@ -1305,8 +1383,8 @@ def test_parser_deepseek_only_empty_codex_model_uses_claude_model(monkeypatch):
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
     assert resolved == ("https://api.deepseek.com/anthropic", "")
-    assert args.claude_model == "deepseek-chat"
-    assert args.codex_model == "deepseek-chat"
+    assert args.claude_model == "deepseek-v4-pro"
+    assert args.codex_model == "deepseek-v4-pro"
     assert cli._codex_model_should_follow_claude() is True
 
 
@@ -1327,13 +1405,13 @@ def test_parser_deepseek_key_only_defaults_to_deepseek_chat(monkeypatch):
             monkeypatch.delenv(key, raising=False)
     args = cli._build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
 
-    assert args.claude_model == "deepseek-chat"
-    assert args.codex_model == "deepseek-chat"
+    assert args.claude_model == "deepseek-v4-pro"
+    assert args.codex_model == "deepseek-v4-pro"
 
 
 def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeypatch):
     """Generated setup env defaults must not force GPT on an Anthropic-only run."""
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "gpt-5.4")
@@ -1347,7 +1425,7 @@ def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeyp
 def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(monkeypatch, tmp_path, clean_url_env, stub_install_steps):
     """Single Anthropic-compatible gateways may populate OPENAI_BASE_URL during preflight; model-follow intent is preflight-time."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
@@ -1371,7 +1449,7 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(monkeypatch
 
     # The OpenAI/Codex side derives the /Unified/v1 chat-completions base from
     # the single Anthropic-compatible gateway (was previously the raw /anthropic).
-    assert resolved == ("https://llm-api.amd.com/anthropic", "https://llm-api.amd.com/Unified/v1")
+    assert resolved == ("https://llm.example.invalid/anthropic", "https://llm.example.invalid/Unified/v1")
     assert cli._codex_model_should_follow_claude() is False
     assert args.codex_model == "claude-sonnet-5"
 
@@ -1379,7 +1457,7 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(monkeypatch
 def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
     """With only OpenAI configured, an empty CLAUDE_MODEL follows CODEX_MODEL."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
 
@@ -1393,8 +1471,8 @@ def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
 def test_parser_marker_forces_claude_model_to_follow_codex(monkeypatch):
     """Launchers may pre-derive ANTHROPIC_BASE_URL while preserving OpenAI-only model semantics."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX", "1")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/Unified")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/Unified")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.5")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
 
@@ -1407,7 +1485,7 @@ def test_parser_marker_forces_claude_model_to_follow_codex(monkeypatch):
 def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
     """OpenAI-only runs validate the followed orchestration model against the OpenAI catalog."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
@@ -1420,9 +1498,9 @@ def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
     args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
-    cli._validate_and_resolve_claude_model(args, ("https://llm-api.amd.com/Unified", "https://llm-api.amd.com/Unified/v1"))
+    cli._validate_and_resolve_claude_model(args, ("https://llm.example.invalid/Unified", "https://llm.example.invalid/Unified/v1"))
 
-    assert seen == {"base_url": "https://llm-api.amd.com/Unified/v1", "api_key": "openai-token"}
+    assert seen == {"base_url": "https://llm.example.invalid/Unified/v1", "api_key": "openai-token"}
     assert args.claude_model == "GPT-5.4"
 
 
@@ -1703,3 +1781,27 @@ def test_expected_framework_guard_unset_is_noop(monkeypatch):
     # No env pins -> guard is a no-op.
     cli._enforce_expected_framework("sglang")
     cli._enforce_expected_framework("anything")
+
+
+def test_resume_model_path_allows_huggingface_id(monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", raising=False)
+
+    assert cli._validate_resume_model_path("org/model-name_1") == "org/model-name_1"
+
+
+def test_resume_model_path_allows_configured_absolute_root(tmp_path, monkeypatch):
+    root = tmp_path / "models"
+    model = root / "M"
+    model.mkdir(parents=True)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", str(root))
+
+    assert cli._validate_resume_model_path(str(model)) == str(model.resolve())
+
+
+def test_resume_model_path_rejects_untrusted_absolute_path(tmp_path, monkeypatch):
+    model = tmp_path / "evil"
+    model.mkdir()
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", raising=False)
+
+    with pytest.raises(ValueError, match="outside allowed model roots"):
+        cli._validate_resume_model_path(str(model))

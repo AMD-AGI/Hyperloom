@@ -80,5 +80,5 @@ and are recorded in `explore_search`.
 `baseline_config.with_envs.yaml`, and forwards the path as
 `task.params["config_path"]` to every `explore` / `sweep` task — so variants
 benchmark the **same workload baseline ran** (without it they'd fall back to the
-YAML's smoke defaults `TP=1`/`CONC=8`/`ISL=256`/`OSL=256`, ~10x lower tput).
-Per-variant `extra_envs` still win (applied last).
+YAML's fallback defaults `TP=1`/`CONC=64`/`ISL=1024`/`OSL=1024`). Per-variant
+`extra_envs` still win (applied last).
