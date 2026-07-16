@@ -526,10 +526,9 @@ def test_policy_gate_denies_kernel_request_in_explore():
 
 
 def test_policy_gate_gates_apply_patch_alias_like_integrate():
-    # apply_patch is a REQUEST-kind alias of integrate. It must be
-    # phase-gated identically, so it cannot bypass PolicyGate's phase-action gate.
-    # In EXPLORE, a kernel-owned integrate REQUEST is denied by R1; the alias must
-    # be denied with the same rule.
+    # apply_patch is a REQUEST-kind alias of integrate and must be phase-gated
+    # identically. In EXPLORE, a kernel-owned integrate REQUEST is denied by
+    # R1; the alias must be denied with the same rule.
     state = SharedState()
     state.record_phase_transition(
         to_phase="EXPLORE",

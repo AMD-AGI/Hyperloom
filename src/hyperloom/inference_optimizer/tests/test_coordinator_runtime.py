@@ -1468,9 +1468,8 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
 
 @pytest.mark.asyncio
 async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
-    # Defense-in-depth (log-only): killing a queued/running task
-    # must still cancel it (behaviour unchanged) AND emit a log-only audit
-    # record so a forged or unexpected kill is traceable.
+    # Defensive audit (log-only): killing a queued/running task must still
+    # cancel it (behaviour unchanged) AND emit a log-only audit record.
     import logging
 
     c = Coordinator(session_dir, backends=_build_backends({}))
@@ -1502,10 +1501,9 @@ async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
 
 @pytest.mark.asyncio
 async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
-    # Defense-in-depth (log-only): a queued task whose kind has no
-    # registered executor (a strong forged coordinator.db row signal) is flagged
-    # in the process log; dispatch itself is unchanged (the task still fails on
-    # the missing runner).
+    # Defensive audit (log-only): a queued task whose kind has no registered
+    # executor is flagged in the process log; dispatch itself is unchanged
+    # (the task still fails on the missing runner).
     import logging
 
     delegate = Intent(
