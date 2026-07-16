@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -31,7 +32,7 @@ ROBUSTNESS_SERVER_CANDIDATES: list[str] = [
 
 SESSION_DIR_CANDIDATES: list[Path] = [
     Path("/workspace/session"),
-    Path("/tmp/robustness-session"),
+    Path(tempfile.gettempdir()) / "robustness-session",
 ]
 
 
@@ -65,7 +66,7 @@ class Config:
         family (A–L) for their meaning.
     """
 
-    session_dir: Path = field(default_factory=lambda: Path("/tmp/robustness-session"))
+    session_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / "robustness-session")
 
     # Primary data source; empty means "skip server, only use local probe".
     robustness_server_url: str = ""

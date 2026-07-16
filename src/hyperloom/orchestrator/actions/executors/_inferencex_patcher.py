@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from functools import partial
 from pathlib import Path
 from typing import Callable
@@ -36,8 +37,8 @@ _PATCHED_LINE = '        num_prompts="${NUM_PROMPTS:-$max_concurrency}"'
 # "Already patched?" sentinel.
 _PATCH_SENTINEL = "${NUM_PROMPTS:-$max_concurrency}"
 
-# System-wide lock (``/tmp`` is writable; cross-reboot persistence not needed).
-_LOCK_PATH = "/tmp/hyperloom_benchmark_lib_patcher.lock"
+# System-wide lock; cross-reboot persistence is not needed.
+_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_patcher.lock")
 
 
 # ``benchmark_serving.py`` hardcodes the ``/start_profile`` ``extra_body`` and
@@ -55,7 +56,7 @@ _BENCH_SERVING_PATCHED = (
     '\'{"num_steps": 1, "merge_profiles": true, "profile_by_stage": true}\'),'
 )
 _BENCH_SERVING_SENTINEL = "PROFILE_EXTRA_BODY"
-_BENCH_SERVING_LOCK_PATH = "/tmp/hyperloom_benchmark_serving_patcher.lock"
+_BENCH_SERVING_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_serving_patcher.lock")
 
 
 def _discover_inferencex_roots(
