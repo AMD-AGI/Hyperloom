@@ -60,12 +60,12 @@ value.
    descriptions, vendor examples, or base URLs to this first question.
 
 2. Ask the base URL as a structured follow-up after the mode is chosen.
-   - For `Anthropic`, offer three options:
+   - For `Anthropic`, present exactly these three option labels in this order:
      - `Use default (https://api.anthropic.com)` — this remains the recommended
        default.
      - `Use AMD gateway (https://llm-api.amd.com/anthropic)`.
      - `Custom`.
-   - For `DeepSeek`, offer two options:
+   - For `DeepSeek`, present exactly these two option labels in this order:
      - `Use default (https://api.deepseek.com/anthropic)`.
      - `Custom`.
    - If the user picks `Custom`, ask a plain-text follow-up for the URL.
@@ -84,13 +84,15 @@ value.
 
    For `Anthropic`:
    - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask `ANTHROPIC_BASE_URL`: options `Use default (https://api.anthropic.com)` /
+   - Ask `ANTHROPIC_BASE_URL` with exactly these option labels in this order:
+     `Use default (https://api.anthropic.com)` /
      `Use AMD gateway (https://llm-api.amd.com/anthropic)` / `Custom`.
    - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-4-8)` / `Custom`.
 
    For `DeepSeek`:
    - Write `DEEPSEEK_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask `DEEPSEEK_BASE_URL`: options `Use default (https://api.deepseek.com/anthropic)` / `Custom`.
+   - Ask `DEEPSEEK_BASE_URL` with exactly these option labels in this order:
+     `Use default (https://api.deepseek.com/anthropic)` / `Custom`.
    - Ask `DEEPSEEK_MODEL`: options `Use default (deepseek-chat)` / `Custom`.
 5. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
@@ -106,12 +108,19 @@ value.
    this question if `HYPERLOOM_RUN_MODE` is already set in the shell environment
    (see [Run Mode Resolution](#run-mode-resolution)); just confirm it and use it
    for this run.
-   - `baremetal`: run the setup backend directly on this host. Choose this when
-     the host provides ROCm (the framework may already be present, or setup can
-     install it).
+
+   Present exactly these two option labels in this order:
+
+   1. `docker`
+   2. `baremetal`
+
    - `docker`: record docker as the run mode; the example (workload) skill will
      generate a ROCm container later. Choose this when the host does not have the
      framework installed but Docker with GPU access is available.
+   - `baremetal`: run the setup backend directly on this host. Choose this when
+     the host provides ROCm, or when Hyperloom is already installed inside a
+     Docker container and setup should run directly in that current container
+     environment.
    - If the user is unsure and is already inside a framework image or shell with
      a working framework, recommend `baremetal`; otherwise recommend `docker`.
 

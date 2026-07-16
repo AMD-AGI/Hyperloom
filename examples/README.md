@@ -53,15 +53,33 @@ That command runs the setup skill installed from
 The setup skill is interactive. It creates `.env`, records the selected run
 scenario, and stops before launching an optimization.
 
-It asks for:
+It asks for these values with a fixed option order:
 
-- LLM mode: Anthropic or DeepSeek.
-- Non-secret LLM settings: base URL and model.
-- Secret placeholders in `.env`; edit secrets directly in `.env` and never
-  paste API keys into chat.
-- `USER_DATA_PATH` (defaults to `<workspace>/session`).
-- Setup scenario: `baremetal` or `baremetal + Docker` (recorded in `.env` as
-  `HYPERLOOM_RUN_MODE=baremetal` or `HYPERLOOM_RUN_MODE=docker`).
+1. LLM mode:
+   - `Anthropic`
+   - `DeepSeek`
+2. Anthropic URL, when Anthropic is selected:
+   - `Use default (https://api.anthropic.com)`
+   - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
+   - `Custom`
+3. DeepSeek URL, when DeepSeek is selected:
+   - `Use default (https://api.deepseek.com/anthropic)`
+   - `Custom`
+4. Model:
+   - `Use default (<provider default>)`
+   - `Custom`
+5. Secrets:
+   - Setup writes placeholders in `.env`.
+   - Edit secrets directly in `.env`; never paste API keys into chat.
+6. `USER_DATA_PATH`:
+   - Default: `<workspace>/session`
+   - Custom path
+7. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
+   - `docker`
+   - `baremetal`
+
+If Hyperloom is already installed inside a Docker container, choose `baremetal`
+because setup should run directly in the current container environment.
 
 ## Setup Scenarios
 
