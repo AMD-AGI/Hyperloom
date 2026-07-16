@@ -205,7 +205,7 @@ GEAK_REF="${GEAK_REF:-main}"
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
 GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-4-8}}"
 if [ -z "${GEAK_CLAUDE_MODEL:-}" ] && [ -z "${CLAUDE_MODEL:-}" ] && [ -n "${DEEPSEEK_API_KEY:-${DEEPSEEK_BASE_URL:-}}" ]; then
-  GEAK_CLAUDE_MODEL_VAL="${DEEPSEEK_MODEL:-deepseek-chat}"
+  GEAK_CLAUDE_MODEL_VAL="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
 fi
 # Run mode for the GEAKv4 Claude Code workflow. ``full`` (default) selects the
 # 2 h / 5-round preset; ``quick`` selects the 1 h / 2-round smoke-test preset.

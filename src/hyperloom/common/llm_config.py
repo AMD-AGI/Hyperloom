@@ -49,7 +49,7 @@ CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
 )
 
 DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 

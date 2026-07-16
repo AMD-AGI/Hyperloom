@@ -902,7 +902,7 @@ def _preflight(
             geak_claude_model = (
                 os.environ.get("CLAUDE_MODEL", "").strip()
                 or os.environ.get("DEEPSEEK_MODEL", "").strip()
-                or ("deepseek-chat" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
+                or ("deepseek-v4-pro" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
                 or "claude-opus-4-8"
             )
             os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model

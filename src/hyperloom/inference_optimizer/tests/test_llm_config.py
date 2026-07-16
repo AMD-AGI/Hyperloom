@@ -106,7 +106,7 @@ def test_openai_kwargs_requires_a_key():
 
 def test_claude_sdk_env_options_from_deepseek_key_only():
     opts = claude_sdk_env_options(
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         env={"_".join(("DEEPSEEK", "API", "KEY")): "deepseek-token"},
     )
     assert opts["setting_sources"] == []
@@ -114,12 +114,12 @@ def test_claude_sdk_env_options_from_deepseek_key_only():
     assert child_env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
     assert child_env["_".join(("ANTHROPIC", "API", "KEY"))] == "deepseek-token"
     assert child_env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "deepseek-token"
-    assert child_env["ANTHROPIC_MODEL"] == "deepseek-chat"
+    assert child_env["ANTHROPIC_MODEL"] == "deepseek-v4-pro"
 
 
 def test_claude_sdk_env_options_keeps_explicit_deepseek_base_url():
     opts = claude_sdk_env_options(
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         env={
             "_".join(("DEEPSEEK", "API", "KEY")): "deepseek-token",
             "DEEPSEEK_BASE_URL": "https://deepseek.example/anthropic",

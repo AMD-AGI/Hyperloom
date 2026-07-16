@@ -159,7 +159,7 @@ LLM defaults:
 | Mode | Required secret | Default base URL | Default model |
 |------|-----------------|------------------|---------------|
 | Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-4-8` |
-| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic` | `DEEPSEEK_MODEL=deepseek-chat` |
+| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic` | `DEEPSEEK_MODEL=deepseek-v4-pro` |
 
 Setup creates or updates `.env` in the current workspace and writes the resolved
 values there.

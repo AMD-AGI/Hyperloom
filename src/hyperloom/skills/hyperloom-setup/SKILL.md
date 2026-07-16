@@ -116,7 +116,7 @@ value.
    - Write `DEEPSEEK_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
    - Ask `DEEPSEEK_BASE_URL` with exactly these option labels in this order:
      `Use default (https://api.deepseek.com/anthropic)` / `Custom`.
-   - Ask `DEEPSEEK_MODEL`: options `Use default (deepseek-chat)` / `Custom`.
+   - Ask `DEEPSEEK_MODEL`: options `Use default (deepseek-v4-pro)` / `Custom`.
 5. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
    - Offer `<workspace>/session` (the current workspace directory plus a
