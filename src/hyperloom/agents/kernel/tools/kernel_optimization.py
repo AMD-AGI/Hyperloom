@@ -2904,7 +2904,7 @@ def _select_source_artifact(
         ):
             return str(path), "source_file", ""
 
-    extraction_root = run_dir or Path(attempt.get("optimized_path") or "/tmp").parent
+    extraction_root = run_dir or Path(attempt.get("optimized_path") or tempfile.gettempdir()).parent
     for path in candidates:
         if path.suffix.lower() not in {".txt", ".md", ".markdown", ".log", ".patch", ".diff"}:
             continue

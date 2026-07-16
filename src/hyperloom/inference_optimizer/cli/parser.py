@@ -527,7 +527,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
         "falls back to $USER_DATA_PATH (legacy flat layout). "
         "USER_DATA_PATH MUST stay at workspace level "
-        "(/path/.../sessions/, not the per-session subdir) "
+        "(/shared/hyperloom-sessions, not the per-session subdir) "
         "so runtime/ resolution works. Skips the SharedState "
         "seed and lets the Coordinator replay the prior "
         "event log + state.json.",
@@ -946,10 +946,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip() or None,
         help="PR Monitor REST URL for this run (flag wins). Default: "
-        "$PRIMUS_CORTEX_PR_API (the canonical PR API env), else unset. "
-        "Set this flag / $PRIMUS_CORTEX_PR_API to a reachable HTTPS "
-        "endpoint for your PR Monitor deployment. Pair "
-        "with --pr-monitor-mcp-url when port-forwarding for local debug.",
+        "$PRIMUS_CORTEX_PR_API, else unset. Set this flag or env var to a "
+        "reachable primus_cortex HTTPS endpoint. Pair with "
+        "--pr-monitor-mcp-url when exposing the corresponding MCP server.",
     )
     opt.add_argument(
         "--pr-monitor-mcp-url",
@@ -957,8 +956,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="PR Monitor MCP URL handed to specialist LLM backends (flag "
-        "wins). Default: the in-cluster MCP endpoint. The trailing slash "
-        "is mandatory.",
+        "wins). Default: unset, which disables PR Monitor MCP tools. The "
+        "trailing slash is mandatory when configured.",
     )
     opt.add_argument(
         "--degraded-pr",

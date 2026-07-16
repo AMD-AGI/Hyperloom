@@ -112,7 +112,7 @@ def tmp_dir(target_root: Path, repo_id: str) -> Path:
 # ── Completeness check (uses HF tree API) ───────────────────────────────────
 
 
-def is_complete(dest: Path, repo_id: str, hf_api: HfApi, token: str) -> bool:
+def is_complete(dest: Path, repo_id: str, hf_api: HfApi, token: str, revision: str) -> bool:
     """Report whether a local copy fully mirrors the HF repo.
 
     One ``list_repo_files`` call; partial prior runs fail this because they
@@ -123,6 +123,7 @@ def is_complete(dest: Path, repo_id: str, hf_api: HfApi, token: str) -> bool:
         repo_id: HF repo id to compare against.
         hf_api: An :class:`HfApi` client.
         token: HF token for gated repos.
+        revision: HF git revision to compare against.
 
     Returns:
         ``True`` iff ``dest`` has every claimed file with non-zero size.
@@ -130,7 +131,7 @@ def is_complete(dest: Path, repo_id: str, hf_api: HfApi, token: str) -> bool:
     if not dest.is_dir():
         return False
     try:
-        files = hf_api.list_repo_files(repo_id, token=token)
+        files = hf_api.list_repo_files(repo_id, revision=revision, token=token)
     except Exception as e:
         log.warning("[%s] HF list_repo_files failed (%s) — re-downloading", repo_id, e)
         return False
@@ -162,7 +163,7 @@ def _dir_stats(p: Path) -> tuple[int, float]:
     return n, total / 1e9
 
 
-def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int = 4) -> dict:
+def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int = 4, revision: str = "main") -> dict:
     """Download a single HF repo to <target_root>/<slug>/.
 
     Skips already-complete destinations, downloads into a temporary ``.part``
@@ -174,6 +175,7 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
         target_root (Path): Root directory for per-model folders.
         hf_token (str): HF token for authenticated/gated repos.
         inner_workers (int): Parallel file workers for ``snapshot_download``.
+        revision (str): HF git revision to download; defaults to ``main``.
 
     Returns:
         dict: A result dict with ``status`` (OK/SKIP/FAIL), ``size_gb``,
@@ -192,7 +194,7 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
     def _cur_token():
         return tokens[tok_idx % len(tokens)] if tokens else None
 
-    if is_complete(dest, repo_id, hf_api, _cur_token()):
+    if is_complete(dest, repo_id, hf_api, _cur_token(), revision):
         n, gb = _dir_stats(dest)
         return {"status": "SKIP", "size_gb": gb, "n_files": n, "elapsed_s": 0, "reason": "already complete"}
 
@@ -212,6 +214,7 @@ def download_one(repo_id: str, target_root: Path, hf_token, inner_workers: int =
                 local_dir_use_symlinks=False,
                 token=_cur_token(),
                 max_workers=inner_workers,
+                revision=revision,
                 allow_patterns=None,
                 ignore_patterns=[
                     "*.h5",
@@ -424,6 +427,7 @@ def main() -> int:
         default=4,
         help="parallel file workers inside a single snapshot_download (default 4, multiplies with --concurrency)",
     )
+    p.add_argument("--revision", default="main", help="HF git revision to download (default: main)")
     p.add_argument("--exclude-done", action="store_true", help="also skip repos listed in already_done.json")
     p.add_argument("--already-done", type=Path, default=Path(__file__).parent / "candidates" / "already_done.json")
     p.add_argument("--log", type=Path, help="also append progress to this file (in addition to stdout)")
@@ -463,9 +467,10 @@ def main() -> int:
     (args.target_root / ".tmp").mkdir(parents=True, exist_ok=True)
 
     log.info(
-        "PREWARM start: %d repos → %s (concurrency=%d, inner=%d)",
+        "PREWARM start: %d repos → %s (revision=%s, concurrency=%d, inner=%d)",
         len(repos),
         args.target_root,
+        args.revision,
         args.concurrency,
         args.inner_workers,
     )
@@ -479,7 +484,9 @@ def main() -> int:
         max_workers=args.concurrency,
         thread_name_prefix="prewarm",
     ) as ex:
-        future_to_repo = {ex.submit(download_one, r, args.target_root, hf_tokens, args.inner_workers): r for r in repos}
+        future_to_repo = {
+            ex.submit(download_one, r, args.target_root, hf_tokens, args.inner_workers, args.revision): r for r in repos
+        }
         for done_count, fut in enumerate(concurrent.futures.as_completed(future_to_repo), 1):
             repo = future_to_repo[fut]
             try:
