@@ -45,14 +45,14 @@ python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
 
 # Historical session on WekaFS
 python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
-    --session-dir /wekafs/users/zgong/inference_optimizer-sessions/<sid>
+    --session-dir /path/to/inference_optimizer-sessions/<sid>
 
 # Override output path (don't touch session_dir)
 python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
     --session-dir <SD> --output /tmp/breakdown-<sid>.json
 
 # Bulk historical
-for d in /wekafs/users/*/inference_optimizer-sessions/*; do
+for d in /path/to/inference_optimizer-sessions/*; do
     [ -d "$d" ] || continue
     python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
         --session-dir "$d" > /dev/null
@@ -91,16 +91,16 @@ Use the following commands to render a session report.
 ```bash
 # Deterministic only (no LLM):
 python -m hyperloom.inference_optimizer.tools.dump_session_report \
-    --input  /wekafs/.../session_breakdown.json \
-    --output /wekafs/.../session_report.md
+    --input  /path/to/session_breakdown.json \
+    --output /path/to/session_report.md
 
 # With LLM-polished prose (OpenAI-compatible endpoint):
 HYPERLOOM_REPORT_LLM_BACKEND=openai \
-OPENAI_BASE_URL=https://your-openai-compatible-gateway.example.com/v1 \
+OPENAI_BASE_URL=https://<your-gateway-host>/api/v1/llm-proxy/v1 \
 OPENAI_API_KEY=... \
 python -m hyperloom.inference_optimizer.tools.dump_session_report \
-    --input  /wekafs/.../session_breakdown.json \
-    --output /wekafs/.../session_report.md
+    --input  /path/to/session_breakdown.json \
+    --output /path/to/session_report.md
 ```
 
 When `--output` is omitted the report is written to
