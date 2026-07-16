@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -48,19 +49,32 @@ CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
 )
 
 DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
+_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-def parse_custom_headers(raw: str | None) -> dict[str, str]:
+def _expand_env_refs(raw: str, env: Mapping[str, str] | None = None) -> str:
+    source = env if env is not None else os.environ
+
+    def repl(match: re.Match[str]) -> str:
+        return str(source.get(match.group(1), ""))
+
+    return _ENV_REF_RE.sub(repl, raw)
+
+
+def parse_custom_headers(raw: str | None, *, env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Parse custom LLM headers from env.
 
     ``ANTHROPIC_CUSTOM_HEADERS`` is newline-delimited ``Name: value`` in the
     Anthropic SDK. JSON object input is accepted as a convenience for launchers
-    that already store structured environment values.
+    that already store structured environment values. Shell-style ``${VAR}``
+    references are expanded from the supplied env mapping so .env files can keep
+    one copy of a secret and derive gateway headers from it.
     """
     if not raw:
         return {}
-    text = raw.strip()
+    expanded = _expand_env_refs(raw, env)
+    text = expanded.strip()
     if not text:
         return {}
     if text.startswith("{"):
@@ -72,7 +86,7 @@ def parse_custom_headers(raw: str | None) -> dict[str, str]:
             return {str(k).strip(): str(v).strip() for k, v in parsed.items() if str(k).strip()}
 
     headers: dict[str, str] = {}
-    for line in raw.splitlines():
+    for line in expanded.splitlines():
         name, sep, value = line.partition(":")
         if sep and name.strip():
             headers[name.strip()] = value.strip()
@@ -141,7 +155,7 @@ def resolve_openai_client_config(
     base_url = base_url or None
 
     # OpenAI/Codex side reads only OPENAI_CUSTOM_HEADERS; gateway headers are operator-supplied.
-    headers = parse_custom_headers(source.get("OPENAI_CUSTOM_HEADERS"))
+    headers = parse_custom_headers(source.get("OPENAI_CUSTOM_HEADERS"), env=source)
     return OpenAIClientConfig(api_key=api_key, base_url=base_url, default_headers=headers)
 
 
@@ -187,7 +201,9 @@ def claude_sdk_env_options(
     if fallback_key:
         source.setdefault("ANTHROPIC_API_KEY", fallback_key)
         source.setdefault("ANTHROPIC_AUTH_TOKEN", fallback_key)
-    # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS; gateway headers are operator-supplied.
+    # Claude/Anthropic side reads only ANTHROPIC_CUSTOM_HEADERS.
+    if source.get("ANTHROPIC_CUSTOM_HEADERS"):
+        source["ANTHROPIC_CUSTOM_HEADERS"] = _expand_env_refs(source["ANTHROPIC_CUSTOM_HEADERS"], source)
     # Disable the advisor-tool beta header by default since strict gateways reject it.
     source.setdefault("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
     if model:

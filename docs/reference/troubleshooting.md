@@ -75,11 +75,6 @@ internal CA, or on self-hosted gateways with private certificates.
    ```
 3. Re-run preflight or the installer after updating certificates.
 
-For one-off diagnosis only, you can set
-`INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1` to skip TLS verification for the
-model-catalog probe. Do not leave this enabled in normal runs because the probe
-sends gateway credentials.
-
 ---
 
 ## Ray `--num-gpus` rejected
