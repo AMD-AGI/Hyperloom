@@ -29,10 +29,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
 
     * :doc:`Run a Hyperloom optimization </how-to/optimize>`
     * :doc:`Quantization with AMD Quark </how-to/quantization-quark>`
-
-  .. grid-item-card:: Conceptual
-
-    * :doc:`Hyperloom optimization loop <conceptual/optimization-loop>`
+    * :doc:`Multi-node inference optimization demo </how-to/hyperloom-remote-demo>`
 
   .. grid-item-card:: Reference
 
