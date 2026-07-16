@@ -10,6 +10,8 @@ Hyperloom orchestrates several specialized tools. Each has its own
 documentation page; the overarching optimization flow that ties them together
 is described in [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
+The following table lists each component with its role, source repository, and documentation link.
+
 | Component | Role | Source | Documentation|
 |-----------|------|--------|--------------|
 | [IntelliKit](intellikit.md) | Low-level GPU profiling primitives | [AMDResearch/intellikit](https://github.com/AMDResearch/intellikit) | [IntelliKit Docs](https://rocm.docs.amd.com/projects/intellikit/en/latest/) |

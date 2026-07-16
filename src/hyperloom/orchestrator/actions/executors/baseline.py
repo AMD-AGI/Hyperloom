@@ -785,7 +785,7 @@ class BaselineExecutor:
             default_timeout_sec (int): Default (warm-start) subprocess timeout.
             cwd (Path | str): Working directory for the Magpie subprocess.
         """
-        from ._grid_runner import _resolve_magpie_python, _resolve_session_dir
+        from ._grid_runner import _resolve_session_dir
 
         # Backend-aware interpreter: bypass uses a plain python3, magpie
         # uses the Magpie-importable venv.
@@ -1690,12 +1690,10 @@ class BaselineExecutor:
         # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts
         # that ignore it are caught by the salvage pass.
         env["RESULT_DIR"] = override_result_dir or str(output_dir)
-        # InferenceX ``run_lm_eval`` reads ``$EVAL_RESULT_DIR`` for lm-eval's
-        # ``--output_path``; unset it defaults to ``/tmp/eval_out-*`` and the
-        # ``results*.json`` never reach the task workspace, so the accuracy gate
-        # finds no baseline. Mirror it to ``$RESULT_DIR`` so eval artifacts land
-        # under ``output_dir`` (a sibling of the Magpie ``benchmark_*`` dir).
-        env["EVAL_RESULT_DIR"] = env["RESULT_DIR"]
+        # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
+        # lm-eval output. Keep it under the task workspace but separate from
+        # Magpie's ``benchmark_*`` traces in ``$RESULT_DIR``.
+        env["EVAL_RESULT_DIR"] = str(Path(env["RESULT_DIR"]) / "eval_output")
         # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the
         # task workspace; ``harvest_leaked_artifacts`` is the defense-in-depth net.
         env["SERVER_LOG"] = str(output_dir / "server.log")
@@ -1781,6 +1779,7 @@ class BaselineExecutor:
                 _mn_warm_cmd = [str(_mn_warm_dir) if c == str(output_dir) else c for c in cmd]
                 _mn_warm_env = dict(env)
                 _mn_warm_env["RESULT_DIR"] = str(_mn_warm_dir)
+                _mn_warm_env["EVAL_RESULT_DIR"] = str(_mn_warm_dir / "eval_output")
                 _mn_warm_env["SERVER_LOG"] = str(_mn_warm_dir / "server.log")
                 _mn_warm_env["GPU_METRICS_CSV"] = str(_mn_warm_dir / "gpu_metrics.csv")
                 await asyncio.to_thread(
@@ -2087,11 +2086,10 @@ class BaselineExecutor:
         else:
             from ._accuracy_gate import parse_eval_results
 
-            # lm-eval writes ``results*.json`` under ``$EVAL_RESULT_DIR`` (== the
-            # ``RESULT_DIR`` set above), a sibling of (not inside) the Magpie
-            # ``benchmark_*`` workspace. Search from that root so the recursive
-            # ``**/results*.json`` glob finds it.
-            eval_search_root = Path(env["EVAL_RESULT_DIR"])
+            # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh
+            # moving/cleaning ``$EVAL_RESULT_DIR`` and scriptable quality gates
+            # still resolve from Magpie's benchmark reports.
+            eval_search_root = Path(env["RESULT_DIR"])
             eval_data = parse_eval_results(eval_search_root, framework=eval_framework)
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]

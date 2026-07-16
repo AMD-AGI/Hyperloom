@@ -16,6 +16,17 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
+# Workload knob fallbacks applied when the operator passes neither the CLI flag
+# nor an inherited value. Flags default to ``None`` so "omitted" is
+# distinguishable from "typed the default"; the resolver in ``cli`` applies
+# these constants only for genuinely-unset knobs (issue #903).
+DEFAULT_ISL = 1024
+DEFAULT_OSL = 1024
+DEFAULT_CONC = 64
+DEFAULT_TP = 1
+DEFAULT_EP = 1
+DEFAULT_PRECISION = "bf16"
+
 
 class _RetiredFlag(argparse.Action):
     """Argparse action that hard-fails on a retired CLI flag with a migration hint (exits 2)."""
@@ -292,17 +303,17 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--tp",
         type=int,
-        default=1,
+        default=None,
         help="Tensor parallel size. Pass `--tp N` directly from the prompt's "
-        "Environment block. Default: 1.",
+        f"Environment block. Default: {DEFAULT_TP}.",
     )
     opt.add_argument(
         "--conc",
         type=_positive_int_arg,
-        default=8,
+        default=None,
         help="Magpie client concurrency cap (max in-flight requests). "
         "Pass `--conc N` directly from the prompt. Use "
-        "--conc-sweep-concs for a concurrency ladder. Default: 8.",
+        f"--conc-sweep-concs for a concurrency ladder. Default: {DEFAULT_CONC}.",
     )
     opt.add_argument(
         "--max-model-len",
@@ -328,7 +339,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--ep",
         type=int,
-        default=1,
+        default=None,
         help="Expert-parallel size for MoE inference. 1 (default) keeps "
         "experts sharded by TP (legacy behaviour). >=2 enables true "
         "expert parallelism: sglang adds `--expert-parallel-size N`, "
@@ -437,8 +448,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "min(120, max_hours * 60 * 0.02). Pass 0 to disable closing phase."
         ),
     )
-    opt.add_argument("--isl", type=int, default=256, help="Input sequence length (default 256)")
-    opt.add_argument("--osl", type=int, default=256, help="Output sequence length (default 256)")
+    opt.add_argument("--isl", type=int, default=None, help=f"Input sequence length (default {DEFAULT_ISL})")
+    opt.add_argument("--osl", type=int, default=None, help=f"Output sequence length (default {DEFAULT_OSL})")
     opt.add_argument(
         "--profile-osl",
         dest="profile_osl",
@@ -469,7 +480,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "discovery runs and the baseline is unchanged."
         ),
     )
-    opt.add_argument("--precision", type=str, default="bf16", help="Model precision (default bf16)")
+    opt.add_argument("--precision", type=str, default=None, help=f"Model precision (default {DEFAULT_PRECISION})")
     opt.add_argument(
         "--framework-version",
         dest="framework_version",

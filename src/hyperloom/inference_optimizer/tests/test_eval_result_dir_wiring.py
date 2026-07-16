@@ -5,11 +5,12 @@
 InferenceX ``run_lm_eval`` (benchmark_lib.sh) reads ``$EVAL_RESULT_DIR`` for
 lm-eval's ``--output_path``; unset, it falls back to ``/tmp/eval_out-*`` so the
 ``results*.json`` escape the task workspace and the accuracy gate sees no
-baseline (``baseline_accuracy=0.0`` -> throughput-only KEEP). Hyperloom only set
-``$RESULT_DIR``. These tests pin that:
+baseline (``baseline_accuracy=0.0`` -> throughput-only KEEP). These tests pin
+that:
 
-* the baseline / grid subprocess env exports ``$EVAL_RESULT_DIR`` mirrored from
-  ``$RESULT_DIR``; and
+* the baseline / grid subprocess env exports ``$EVAL_RESULT_DIR`` under, but
+  separate from, ``$RESULT_DIR`` so lm-eval cleanup cannot delete Magpie traces;
+  and
 * the accuracy parse search root is aligned to that dir, where lm-eval
   (lm_eval 0.4.9.2) writes ``<root>/<model_sanitized>/results_<ts>.json``.
 """
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,9 +59,8 @@ def test_parse_eval_results_finds_lm_eval_output_under_root(tmp_path):
 
 
 def test_parse_eval_results_misses_when_root_is_benchmark_subdir(tmp_path):
-    # Root-cause shape: lm-eval writes under the slot (== $EVAL_RESULT_DIR), a
-    # sibling of the Magpie ``benchmark_*`` workspace. Searching from the
-    # benchmark_* subdir (the pre-fix baseline root) cannot reach the sibling.
+    # lm-eval writes outside the Magpie ``benchmark_*`` workspace. Searching from
+    # the benchmark_* subdir (the pre-fix baseline root) cannot reach it.
     _write_lm_eval_output(tmp_path)
     bench_ws = tmp_path / "benchmark_sglang_20260715_010101"
     bench_ws.mkdir(parents=True)
@@ -70,7 +71,7 @@ def test_parse_eval_results_misses_when_root_is_benchmark_subdir(tmp_path):
 # --- Grid runner env wiring ---
 
 
-def test_run_magpie_exports_eval_result_dir_mirrored_from_result_dir(tmp_path, monkeypatch):
+def test_run_magpie_exports_eval_result_dir_under_result_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     captured: dict = {}
 
@@ -89,8 +90,8 @@ def test_run_magpie_exports_eval_result_dir_mirrored_from_result_dir(tmp_path, m
             timeout_sec=5,
             cwd=str(tmp_path),
         )
-    assert captured["env"].get("EVAL_RESULT_DIR") == captured["env"]["RESULT_DIR"]
-    assert captured["env"]["EVAL_RESULT_DIR"] == str(tmp_path / "slot")
+    assert captured["env"]["RESULT_DIR"] == str(tmp_path / "slot")
+    assert captured["env"]["EVAL_RESULT_DIR"] == str(tmp_path / "slot" / "eval_output")
 
 
 def test_run_magpie_eval_result_dir_follows_result_dir_override(tmp_path, monkeypatch):
@@ -113,8 +114,39 @@ def test_run_magpie_eval_result_dir_follows_result_dir_override(tmp_path, monkey
             cwd=str(tmp_path),
             result_dir="/tmp/redirect_leak",
         )
-    assert captured["env"]["EVAL_RESULT_DIR"] == "/tmp/redirect_leak"
     assert captured["env"]["RESULT_DIR"] == "/tmp/redirect_leak"
+    assert captured["env"]["EVAL_RESULT_DIR"] == "/tmp/redirect_leak/eval_output"
+
+
+def test_run_magpie_keeps_magpie_traces_when_eval_output_is_cleaned(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
+    output_dir = tmp_path / "slot"
+    trace_file = output_dir / "benchmark_sglang_20260716_010101" / "magpie_trace.json"
+
+    def fake_run(cmd, *args, **kwargs):
+        env = dict(kwargs.get("env") or {})
+        trace_file.parent.mkdir(parents=True)
+        trace_file.write_text("{}", encoding="utf-8")
+        eval_dir = Path(env["EVAL_RESULT_DIR"])
+        (eval_dir / "model__sanitized").mkdir(parents=True, exist_ok=True)
+        (eval_dir / "model__sanitized" / "results.json").write_text("{}", encoding="utf-8")
+        # Match benchmark_lib.sh cleanup after lm-eval output is processed.
+        shutil.rmtree(eval_dir)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        _run_magpie(
+            magpie_python="/opt/venv/bin/python",
+            config_path=tmp_path / "config.yaml",
+            output_dir=output_dir,
+            timeout_sec=5,
+            cwd=str(tmp_path),
+        )
+
+    assert trace_file.exists()
 
 
 # --- Baseline executor env wiring + accuracy parse ---
@@ -205,8 +237,8 @@ def test_baseline_exports_eval_result_dir_env(tmp_path):
         result = asyncio.run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert captured["env"].get("EVAL_RESULT_DIR") == captured["env"]["RESULT_DIR"]
-    assert captured["env"]["EVAL_RESULT_DIR"] == str(output_dir)
+    assert captured["env"]["RESULT_DIR"] == str(output_dir)
+    assert captured["env"]["EVAL_RESULT_DIR"] == str(output_dir / "eval_output")
 
 
 def test_baseline_parses_accuracy_from_eval_result_dir(tmp_path):
@@ -243,6 +275,89 @@ def test_baseline_parses_accuracy_from_eval_result_dir(tmp_path):
     assert result["status"] == "succeeded"
     assert result.get("accuracy") == pytest.approx(0.83)
     assert result.get("accuracy_task") == "gsm8k"
+
+
+def test_baseline_parses_accuracy_after_eval_result_dir_cleanup(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        env = dict(kwargs.get("env") or {})
+        _fake_workspace(slot)
+        eval_root = Path(env["EVAL_RESULT_DIR"])
+        raw_result = _write_lm_eval_output(eval_root)
+        processed_dir = Path(env["RESULT_DIR"]) / "eval_processed" / raw_result.parent.name
+        processed_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(raw_result.parent), str(processed_dir))
+        shutil.rmtree(eval_root)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = asyncio.run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert result.get("accuracy") == pytest.approx(0.83)
+    assert "eval_processed" in (result.get("accuracy_source") or "")
+
+
+def test_baseline_mn_warmup_eval_result_dir_is_discarded(tmp_path, monkeypatch):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    output_dir = tmp_path / "ws"
+    calls: list[tuple[Path, dict]] = []
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+
+    async def fake_restart_server_for_round(*args, **kwargs):
+        return None
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
+
+    monkeypatch.setattr(mnl, "restart_server_for_round", fake_restart_server_for_round)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        env = dict(kwargs.get("env") or {})
+        calls.append((slot, env))
+        if slot.name == "mn_warmup":
+            _write_lm_eval_output(Path(env["EVAL_RESULT_DIR"]))
+        else:
+            _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = asyncio.run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert [slot.name for slot, _env in calls] == ["mn_warmup", "ws"]
+    assert calls[0][1]["RESULT_DIR"] == str(output_dir / "mn_warmup")
+    assert calls[0][1]["EVAL_RESULT_DIR"] == str(output_dir / "mn_warmup" / "eval_output")
+    assert calls[1][1]["EVAL_RESULT_DIR"] == str(output_dir / "eval_output")
+    assert result.get("accuracy") is None
 
 
 def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
@@ -322,6 +437,21 @@ def test_parse_eval_results_ignores_discarded_warmup_round(tmp_path):
     out = parse_eval_results(slot, framework="vllm")
     assert out.get("accuracy") == pytest.approx(0.90)
     assert "warmup_round" not in (out.get("source_file") or "")
+
+
+def test_parse_eval_results_ignores_discarded_mn_warmup_round(tmp_path):
+    slot = tmp_path / "baseline"
+    _write_results_score(
+        slot / "eval_processed" / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json",
+        0.90,
+    )
+    _write_results_score(
+        slot / "mn_warmup" / "eval_output" / "Qwen__model" / "results_2026-07-15T09-00-00.000000.json",
+        0.50,
+    )
+    out = parse_eval_results(slot, framework="vllm")
+    assert out.get("accuracy") == pytest.approx(0.90)
+    assert "mn_warmup" not in (out.get("source_file") or "")
 
 
 def test_parse_eval_results_keeps_results_when_root_is_warmup_slot(tmp_path):

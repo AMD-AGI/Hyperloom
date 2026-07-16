@@ -26,8 +26,8 @@ These variables configure LLM gateway access and optional backend credentials.
 
 | Variable               | Required | Default | Description                                                                                                                                                                                            |
 |------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `SAFE_API_KEY`         | Conditional | —    | AMD primus-safe large language model (LLM) gateway key. Format `ak-...`. Required for the single-gateway setup; split-gateway deployments may instead provide provider-specific keys. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased).                                                        |
-| `OPENAI_BASE_URL`      | Conditional | —    | LLM gateway URL. Required for the single-gateway setup; split-gateway deployments may provide provider-specific base URLs instead. Production: `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`.                                                                                                                  |
+| `SAFE_API_KEY`         | Conditional | —    | AMD primus-safe large language model (LLM) gateway key. Format `ak-...`. Required for the single-gateway setup; split-gateway deployments can instead provide provider-specific keys. Source for GEAK / Claude / Codex / Critic / Robustness credentials downstream (auto-aliased).                                                        |
+| `OPENAI_BASE_URL`      | Conditional | —    | LLM gateway URL. Required for the single-gateway setup; split-gateway deployments can provide provider-specific base URLs instead. Production: `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`.                                                                                                                  |
 | `ANTHROPIC_BASE_URL`   | No       | Derived from `OPENAI`<br>`_BASE_URL` | Claude-side base URL for split-gateway deployments.                                                                                                        |
 | `ANTHROPIC_AUTH_TOKEN` | No       | Inherits `SAFE_API_KEY` | Claude CLI auth token alias; set explicitly only for split-gateway deployments.                                                                        |
 | `GEAK_API_KEY`         | No       | Inherits `SAFE_API_KEY` | Only set explicitly to override the default inheritance.                                                                                                                              |
@@ -72,7 +72,7 @@ Use CLI flags for workload shape and runtime behavior:
 `--profile-osl`, `--enable-roofline` / `--no-enable-roofline`, and
 `--enable-conc-sweep` / `--no-enable-conc-sweep`.
 
-The CLI may still materialize internal envs for benchmark subprocesses, but
+The CLI might still materialize internal envs for benchmark subprocesses, but
 those are not stable user configuration and should not be pre-set by launchers.
 
 ---
@@ -145,7 +145,7 @@ the SSH / IP vars and uses `HYPERLOOM_MN_EXT_HEAD_IP` for restarts.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_QUANTIZE_ENABLED` | Unset | Master switch (`1` to enable) for the AMD Quark PTQ quantization prelude driven by `--quantize` / `--quantize-scheme`. |
+| `HYPERLOOM_QUANTIZE_ENABLED` | Unset | Primary switch (`1` to enable) for the AMD Quark PTQ quantization prelude driven by `--quantize` / `--quantize-scheme`. |
 | `QUARK_ROOT` | `/primus/hyperloom/Quark` | AMD Quark checkout used by the quantization-agent. |
 
 ---
@@ -156,7 +156,7 @@ The following variables configure framework source discovery and path overrides.
 
 | Variable                                          | Default                                                                | Description                                                                                                                                            |
 |---------------------------------------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`SOURCE_ROOTS`      | Union with `/sgl-workspace`<br>`/{aiter,sglang`<br>`,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `src/hyperloom/inference_optimizer/assets/install.sh`'s `_probe_framework_source_roots` step (via `hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env`).   |
+| `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`SOURCE_ROOTS`      | Union with `/sgl-workspace`<br>`/{aiter,sglang`<br>`,vllm}`                        | Colon-separated list of source roots used by PolicyGate and flag discovery. Populated automatically by `src/hyperloom/inference_optimizer/assets/install.sh`'s `_probe_framework_source_roots` step (using `hyperloom.orchestrator.framework.paths.probe_framework_source_roots_for_env`).   |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_RESCUE_PATHS`                | Unset                                                                  | Colon-separated list of extra directories the harvest step scans for stray `result.json` files written outside the session dir (InferenceX-native scripts that hardcode `--result-dir`). |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_AITER_JIT_DIR`               | Aiter default                                                          | Override the aiter just-in-time (JIT) cache root for cold-cap sizing.                                                                                                  |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_STRICT_PATHS`                | `1` when CLI bootstraps                                                | When `1`, missing path env raises instead of falling back to discovery. Set by the CLI at session start; do not override unless debugging.              |
@@ -192,11 +192,11 @@ package to populate `session_breakdown.json` for downstream consumers
 |-------------------|--------------------------------------------------------------------------------------------|
 | `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the Primus-Claw sandbox; unset for local runs. |
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by Primus-Claw; unset for local runs.                                            |
-| `HYPERLOOM_LANGFUSE_ENABLE` | Master switch (default **off**) for live Langfuse trace push. See details below. |
+| `HYPERLOOM_LANGFUSE_ENABLE` | Primary switch (default **off**) for live Langfuse trace push. See details below. |
 
 **`HYPERLOOM_LANGFUSE_ENABLE`** details:
 
-Master switch (default **off**) for live Langfuse trace push.
+Primary switch (default **off**) for live Langfuse trace push.
 
 - **SDK install**: when this flag is on, `src/hyperloom/inference_optimizer/assets/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
 - **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, robustness, specialist) and KEEP/REVERT decision Scores.

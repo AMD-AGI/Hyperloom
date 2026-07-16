@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_str_list
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import resolve_source_file_allowlist
@@ -57,17 +58,6 @@ DEFAULT_VARIANT_TIMEOUT_SEC = 7800
 ENABLEMENT_ACCURACY_FLOOR = 0.0
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
 
-
-def _coerce_str_list(value: Any) -> list[str]:
-    """Normalize optional string/list controls to non-empty strings."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, (list, tuple, set)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    text = str(value).strip()
-    return [text] if text else []
 
 # Enablement environment-setup replay: allowlist of install-only command shapes.
 # A specialist may run arbitrary Bash in its own sandboxed session, but the
@@ -2266,8 +2256,8 @@ class IntegratePatchExecutor:
             name=f"integrate-patch-{specialist_task_id[:8]}",
             extra_server_args=str(params.get("base_extra_args") or "").strip(),
             extra_envs=dict(config_changes_applied),
-            remove_args=_coerce_str_list(params.get("base_remove_args")),
-            unset_envs=_coerce_str_list(params.get("base_unset_envs")),
+            remove_args=to_str_list(params.get("base_remove_args")),
+            unset_envs=to_str_list(params.get("base_unset_envs")),
             args_mode=str(params.get("base_args_mode") or "append"),
             note=f"integrate_patch:{specialist_task_id}",
         )
@@ -2305,11 +2295,10 @@ class IntegratePatchExecutor:
             }
 
         accuracy_pass: bool | None = None
-        # lm-eval writes to ``$EVAL_RESULT_DIR`` (== ``RESULT_DIR`` = the grid
-        # slot, i.e. the parent of ``VariantResult.workspace``), not inside the
-        # ``benchmark_*`` workspace. Grade from that slot so the eval output is
-        # found; honor an explicit ``result_dir`` override the same way the grid
-        # subprocess does.
+        # lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside
+        # the ``benchmark_*`` workspace. Grade from the slot so the recursive
+        # search finds eval output while honoring an explicit ``result_dir``
+        # override the same way the grid subprocess does.
         eval_search_root = override_result_dir or (
             str(Path(bench["workspace"]).parent) if bench.get("workspace") else ""
         )
@@ -2442,8 +2431,8 @@ class IntegratePatchExecutor:
             name=f"integrate-patch-rebench-{specialist_task_id[:8]}",
             extra_server_args=base_extra_args,
             extra_envs=dict(config_changes_applied),
-            remove_args=_coerce_str_list(params.get("base_remove_args")),
-            unset_envs=_coerce_str_list(params.get("base_unset_envs")),
+            remove_args=to_str_list(params.get("base_remove_args")),
+            unset_envs=to_str_list(params.get("base_unset_envs")),
             args_mode=str(params.get("base_args_mode") or "append"),
             note=f"integrate_patch_rebench:{specialist_task_id}",
         )
