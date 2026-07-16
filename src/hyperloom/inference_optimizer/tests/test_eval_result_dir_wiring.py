@@ -277,6 +277,42 @@ def test_baseline_parses_accuracy_from_eval_result_dir(tmp_path):
     assert result.get("accuracy_task") == "gsm8k"
 
 
+def test_baseline_parses_accuracy_after_eval_result_dir_cleanup(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        env = dict(kwargs.get("env") or {})
+        _fake_workspace(slot)
+        eval_root = Path(env["EVAL_RESULT_DIR"])
+        raw_result = _write_lm_eval_output(eval_root)
+        processed_dir = Path(env["RESULT_DIR"]) / "eval_processed" / raw_result.parent.name
+        processed_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(raw_result.parent), str(processed_dir))
+        shutil.rmtree(eval_root)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = asyncio.run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert result.get("accuracy") == pytest.approx(0.83)
+    assert "eval_processed" in (result.get("accuracy_source") or "")
+
+
 def test_baseline_mn_warmup_eval_result_dir_is_discarded(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
     _write_yaml(base)
@@ -401,6 +437,21 @@ def test_parse_eval_results_ignores_discarded_warmup_round(tmp_path):
     out = parse_eval_results(slot, framework="vllm")
     assert out.get("accuracy") == pytest.approx(0.90)
     assert "warmup_round" not in (out.get("source_file") or "")
+
+
+def test_parse_eval_results_ignores_discarded_mn_warmup_round(tmp_path):
+    slot = tmp_path / "baseline"
+    _write_results_score(
+        slot / "eval_processed" / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json",
+        0.90,
+    )
+    _write_results_score(
+        slot / "mn_warmup" / "eval_output" / "Qwen__model" / "results_2026-07-15T09-00-00.000000.json",
+        0.50,
+    )
+    out = parse_eval_results(slot, framework="vllm")
+    assert out.get("accuracy") == pytest.approx(0.90)
+    assert "mn_warmup" not in (out.get("source_file") or "")
 
 
 def test_parse_eval_results_keeps_results_when_root_is_warmup_slot(tmp_path):

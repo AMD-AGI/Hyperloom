@@ -2086,11 +2086,10 @@ class BaselineExecutor:
         else:
             from ._accuracy_gate import parse_eval_results
 
-            # Serving lm-eval writes ``results*.json`` under ``$EVAL_RESULT_DIR``;
-            # scriptable quality gates live in Magpie's ``$RESULT_DIR`` reports.
-            eval_search_root = Path(
-                env["RESULT_DIR"] if eval_scriptable else env["EVAL_RESULT_DIR"]
-            )
+            # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh
+            # moving/cleaning ``$EVAL_RESULT_DIR`` and scriptable quality gates
+            # still resolve from Magpie's benchmark reports.
+            eval_search_root = Path(env["RESULT_DIR"])
             eval_data = parse_eval_results(eval_search_root, framework=eval_framework)
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]
