@@ -137,9 +137,9 @@ def test_preflight_detects_checkout_via_validity_not_isdir():
 def test_detection_candidates_exclude_wekafs_host_mounts():
     """The removed read-only fallbacks must not reappear in the source."""
     src = Path(cli_preflight.__file__).read_text(encoding="utf-8")
-    assert 'Path("/wekafs/hyperloom/InferenceX")' not in src
+    assert 'Path("/path/hyperloom/InferenceX")' not in src
     assert 'Path("/opt/hyperloom/InferenceX")' not in src
-    assert 'Path("/wekafs/fully-local/inference_optimization/InferenceX")' not in src
+    assert 'Path("/path/fully-local/inference_optimization/InferenceX")' not in src
 
 
 def test_validated_inferencex_path_overwrites_env_not_setdefault():

@@ -167,7 +167,7 @@ def test_discovery_exact_underscore_model(tmp_path):
         "qwen2_5_vl_fp8_mi300x.sh",
     ])
     path, tier = discover_reference_script(
-        str(root), model_path="/wekafs/models/qwen3_moe", precision="bf16",
+        str(root), model_path="/path/models/qwen3_moe", precision="bf16",
         gpu_type="mi300x", framework="vllm",
     )
     assert tier == "exact"
@@ -194,7 +194,7 @@ def test_discovery_version_mismatch_is_none(tmp_path):
 def test_discovery_fuzzy(tmp_path):
     root = _mk_tree(tmp_path, ["kimik2.5_int4_mi300x.sh"])
     path, tier = discover_reference_script(
-        str(root), model_path="/wekafs/models/moonshotai-Kimi-K2.5-Instruct",
+        str(root), model_path="/path/models/moonshotai-Kimi-K2.5-Instruct",
         precision="int4", gpu_type="mi300x", framework="vllm",
     )
     assert tier == "fuzzy"
@@ -230,20 +230,20 @@ def test_discovery_missing_path_failsoft():
 
 
 def test_models_compatible_exact_and_fuzzy():
-    assert models_compatible("dsr1", "/wekafs/models/dsr1") is True
+    assert models_compatible("dsr1", "/path/models/dsr1") is True
     assert models_compatible(
-        "minimaxm2.5", "/wekafs/models/MiniMaxAI-MiniMax-M2.5",
+        "minimaxm2.5", "/path/models/MiniMaxAI-MiniMax-M2.5",
     ) is True
 
 
 def test_models_compatible_version_mismatch_blocked():
     """R2: a near-name version mismatch must NOT apply the recipe."""
-    assert models_compatible("minimaxm2.5", "/wekafs/models/minimax-m3") is False
-    assert models_compatible("kimik2", "/wekafs/models/kimi-k2.5") is False
+    assert models_compatible("minimaxm2.5", "/path/models/minimax-m3") is False
+    assert models_compatible("kimik2", "/path/models/kimi-k2.5") is False
 
 
 def test_models_compatible_empty_is_ungated():
-    assert models_compatible("", "/wekafs/models/anything") is True
+    assert models_compatible("", "/path/models/anything") is True
 
 
 from types import SimpleNamespace
@@ -257,7 +257,7 @@ def test_resolve_no_flag_does_not_discover(tmp_path, monkeypatch):
     monkeypatch.setenv("INFERENCEX_PATH", str(root))
     monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(
-        reference_script=None, model="/wekafs/models/dsr1",
+        reference_script=None, model="/path/models/dsr1",
         precision="fp8", gpu_type="mi300x",
     )
     server_args, envs, model, source = _resolve_reference_recipe(args)
@@ -268,7 +268,7 @@ def test_resolve_valid_flag_is_used(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
     args = SimpleNamespace(
-        reference_script=src, model="/wekafs/models/whatever",
+        reference_script=src, model="/path/models/whatever",
         precision="fp8", gpu_type="mi300x",
     )
     server_args, envs, model, source = _resolve_reference_recipe(args)
@@ -282,7 +282,7 @@ def test_resolve_invalid_flag_falls_back_to_discovery(tmp_path, monkeypatch):
     monkeypatch.setenv("INFERENCEX_PATH", str(root))
     monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(
-        reference_script="/no/such/recipe.sh", model="/wekafs/models/dsr1",
+        reference_script="/no/such/recipe.sh", model="/path/models/dsr1",
         precision="fp8", gpu_type="mi300x",
     )
     server_args, envs, model, source = _resolve_reference_recipe(args)
@@ -294,7 +294,7 @@ def test_resolve_invalid_flag_no_inferencex_returns_empty(tmp_path, monkeypatch)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(
-        reference_script="/no/such/recipe.sh", model="/wekafs/models/dsr1",
+        reference_script="/no/such/recipe.sh", model="/path/models/dsr1",
         precision="fp8", gpu_type="mi300x",
     )
     assert _resolve_reference_recipe(args) == ("", {}, "", "")

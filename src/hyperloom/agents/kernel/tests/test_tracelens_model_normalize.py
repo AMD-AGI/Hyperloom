@@ -4,7 +4,7 @@
 
 ``_resolve_tracelens_model`` must map the runtime image's dot-form
 ``ANTHROPIC_MODEL`` (e.g. ``Claude-Opus-4.7``) to the dash form
-(``claude-opus-4-7``) strict gateways (core42/SAFE) accept, instead of
+(``claude-opus-4-7``) strict gateways (e.g. SAFE) accept, instead of
 forwarding it raw and 400-ing with ``Invalid model name``.
 """
 from __future__ import annotations
@@ -38,7 +38,7 @@ def _clear_gateway_env(monkeypatch):
 
 
 def _use_safe_gateway(monkeypatch):
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://core42.primus-safe.amd.com/api/v1/llm-proxy/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.invalid/api/v1/llm-proxy/v1")
 
 
 def test_dot_form_opus_normalized_on_safe(tl_module, monkeypatch):

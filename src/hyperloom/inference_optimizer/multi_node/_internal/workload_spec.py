@@ -23,13 +23,18 @@ Pure (no I/O / env); the CLI feeds inputs in. Non-overridable decisions:
 from __future__ import annotations
 
 import base64
+import os
 from typing import Any
 
 from . import infera_support
 
 # Hard-coded per design (Brain TS impl + SKILL.md contract).
 _INFERENCE_SERVER_PORT = 8888
-_HEAD_ROLE_LABEL = "primus-safe.amd.com/ray-role"
+# Ray head-role selector label. Neutral default for portability; internal
+# deployments can restore their cluster's label via the env override.
+_HEAD_ROLE_LABEL = os.environ.get(
+    "HYPERLOOM_RAY_HEAD_ROLE_LABEL", "hyperloom.io/ray-role"
+)
 _HEAD_ROLE_VALUE = "head"
 # Submitter-only signal-interruptable driver for RayJob.spec.entrypoint.
 _SUBMITTER_BLOCK_ENTRYPOINT = "tail -f /dev/null"

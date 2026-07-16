@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
+    KERNEL_REQUEST_KIND_ALIASES,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from ..phases.machine_state import (
@@ -638,6 +639,11 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "last_kernel_opt",
         "last_kernel_opt_dispatch_skip",
         "kernel_opt_attempts",
+        # closing_phase and baseline_config_path are Coordinator-only fact
+        # fields, locked here so non-coordinator roles cannot mutate them via
+        # UPDATE_STATE.
+        "closing_phase",
+        "baseline_config_path",
     }
 )
 
@@ -1081,9 +1087,12 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
+        # resolve a request-kind alias (e.g. apply_patch -> integrate) to its
+        # canonical owned action so the phase-action gate applies identically.
+        gated_kind = KERNEL_REQUEST_KIND_ALIASES.get(kind, kind)
         # R1 phase_incompatible: treat REQUEST kind as the action name for kernel_agent-owned + coordinator-internal kinds.
-        if (target == "kernel_agent" and kind in KERNEL_AGENT_OWNED_ACTIONS) or kind in COORDINATOR_INTERNAL_ACTIONS:
-            self._validate_phase_action(role, kind, intent_kind="request")
+        if (target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS) or gated_kind in COORDINATOR_INTERNAL_ACTIONS:
+            self._validate_phase_action(role, gated_kind, intent_kind="request")
         self._validate_fp8_only_action(kind, intent_kind="request")
         # R4 / R5 — a REQUEST.kind cannot smuggle a KB write / external tool either.
         self._validate_no_kb_write_collision(kind, intent_kind="request")

@@ -35,6 +35,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -515,7 +516,7 @@ def _build_sglang_cmd(
         str(a.tp),
         "--trust-remote-code",
         "--host",
-        "0.0.0.0",
+        "0.0.0.0",  # nosec B104 - Infera worker must bind for pod-to-pod traffic.
         "--port",
         str(getattr(a, "engine_port", _DEFAULT_ENGINE_PORT)),
         "--discovery-backend",
@@ -604,7 +605,7 @@ def _build_vllm_cmd(a: argparse.Namespace, *, advertise_host: str) -> list[str]:
         "--tensor-parallel-size",
         str(a.tp),
         "--host",
-        "0.0.0.0",
+        "0.0.0.0",  # nosec B104 - Infera worker must bind for pod-to-pod traffic.
         "--port",
         str(getattr(a, "engine_port", _DEFAULT_ENGINE_PORT)),
         "--discovery-backend",
@@ -725,7 +726,7 @@ def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/health",
                 timeout=3,
-            ) as resp:
+            ) as resp:  # nosec B310 - fixed loopback health check.
                 if 200 <= resp.status < 300:
                     return True
         except (urllib.error.URLError, OSError):
@@ -821,8 +822,8 @@ def main() -> int:
     p.add_argument("--ep", type=int, default=1)
     p.add_argument("--nnodes", type=int, default=1)
     p.add_argument("--dist-init-port", type=int, default=_DEFAULT_DIST_INIT_PORT)
-    p.add_argument("--pid-file", default="/tmp/mn_infera_server.pid")
-    p.add_argument("--log-file", default="/tmp/mn_infera_server.log")
+    p.add_argument("--pid-file", default=str(Path(tempfile.gettempdir()) / "mn_infera_server.pid"))
+    p.add_argument("--log-file", default=str(Path(tempfile.gettempdir()) / "mn_infera_server.log"))
     p.add_argument("--extra-args", default="")
     p.add_argument("--health-port", type=int, default=8000, help="leader local readiness probe port (frontend/http)")
     p.add_argument(

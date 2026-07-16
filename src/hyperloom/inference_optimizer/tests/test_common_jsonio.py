@@ -27,6 +27,13 @@ class TestReadJson:
         p.write_text("[1, 2]")
         assert read_json(p, require_dict=True) is None
 
+    def test_require_dict_tolerant_reports_error(self, tmp_path):
+        p = tmp_path / "list.json"
+        p.write_text("[1, 2]")
+        errors: list[BaseException] = []
+        assert read_json(p, default={}, require_dict=True, on_error=errors.append) == {}
+        assert isinstance(errors[0], ValueError)
+
     def test_strict_missing_raises(self, tmp_path):
         with pytest.raises(OSError):
             read_json(tmp_path / "nope.json", strict=True)
@@ -135,6 +142,15 @@ class TestExtractFirstJson:
         text = '```json\n{"k": 1}\n```\n```json\n{"k": 2}\n```'
         assert extract_first_json_with_key(text, "k", last=True) == {"k": 2}
         assert extract_first_json_with_key(text, "k") == {"k": 1}
+
+    def test_invalid_fenced_json_is_skipped(self):
+        text = '```json\n{bad}\n```\n```json\n{"k": 2}\n```'
+        assert extract_first_json_with_key(text, "k") == {"k": 2}
+
+    def test_bare_candidate_trims_trailing_text(self):
+        bare_with_trailing = re.compile(r"(\{.*)", re.DOTALL)
+        text = 'prefix {"k": 3} trailing prose'
+        assert extract_first_json_with_key(text, "k", bare_with_trailing) == {"k": 3}
 
     def test_empty(self):
         assert extract_first_json_with_key("", "k", _BARE) is None
