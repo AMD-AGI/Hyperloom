@@ -20,10 +20,10 @@ from hyperloom.orchestrator.roles import (
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import (
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator_helpers import (
     _BASELINE_FINGERPRINT_KEYS,
     _baseline_params_fingerprint,
-    Coordinator,
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState

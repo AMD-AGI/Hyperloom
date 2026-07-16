@@ -138,7 +138,7 @@ def test_watermark_check_false_when_already_pending(coord: Coordinator):
 
 def test_watermark_ratio_resolver_returns_default():
     """The module-level resolver returns the fixed 1.10 ratio."""
-    from hyperloom.orchestrator.loop.coordinator import (
+    from hyperloom.orchestrator.loop.coordinator_helpers import (
         _resolve_roofline_watermark_ratio,
     )
 
