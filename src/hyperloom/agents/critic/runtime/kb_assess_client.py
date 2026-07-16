@@ -25,8 +25,15 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
+
+
+def _require_http_url(url: str) -> None:
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported URL scheme: {scheme!r}")
 
 log = logging.getLogger(__name__)
 
@@ -109,9 +116,10 @@ class KBAssessClient:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        _require_http_url(url)
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:  # nosec B310 - URL scheme checked above.
                 payload = resp.read().decode("utf-8") or "{}"
                 return json.loads(payload) if payload else {}
         except (urllib.error.URLError, ValueError, OSError) as exc:

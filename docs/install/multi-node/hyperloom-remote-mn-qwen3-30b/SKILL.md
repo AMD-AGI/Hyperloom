@@ -34,8 +34,11 @@ ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B/   # --model
 ${NFS_SHARED_ROOT}/InferenceX/             # INFERENCEX_PATH
 ${NFS_SHARED_ROOT}/Magpie/                 # MAGPIE_PATH
 ${NFS_SHARED_ROOT}/TraceLens/              # TRACELENS_ROOT
-${NFS_SHARED_ROOT}/TraceLens-internal/     # TRACELENS_INTERNAL_ROOT (optional)
 ```
+
+If your deployment has the `TraceLens-internal` checkout, set
+`TRACELENS_INTERNAL_ROOT` separately. Leave it unset for the public open-source
+path.
 
 ---
 
@@ -66,7 +69,7 @@ ${NFS_SHARED_ROOT}/TraceLens-internal/     # TRACELENS_INTERNAL_ROOT (optional)
 --pd-prefill-ep 8 --pd-decode-ep 8 \
 --pd-transfer-backend mooncake \
 --pd-prefill-extra-args "--attention-backend aiter --mem-fraction-static 0.78 --disable-radix-cache --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --deepep-mode normal --enable-dp-attention --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --trust-remote-code" \
---pd-decode-extra-args "--attention-backend aiter --mem-fraction-static 0.82 --enable-dp-attention --deepep-mode normal --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024 --trust-remote-code" 
+--pd-decode-extra-args "--attention-backend aiter --mem-fraction-static 0.82 --enable-dp-attention --deepep-mode normal --ep-dispatch-algorithm fake --load-balance-method round_robin --watchdog-timeout 3600 --moe-dense-tp-size 1 --enable-dp-lm-head --chunked-prefill-size 8192 --max-running-requests 1024 --trust-remote-code"
 ```
 
 ### Environment
@@ -77,7 +80,6 @@ SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=1200
 SGLANG_DISAGGREGATION_WAITING_TIMEOUT=1200
 INFERENCEX_PATH=${NFS_SHARED_ROOT}/InferenceX
 TRACELENS_ROOT=${NFS_SHARED_ROOT}/TraceLens
-TRACELENS_INTERNAL_ROOT=${NFS_SHARED_ROOT}/TraceLens-internal
 MAGPIE_PATH=${NFS_SHARED_ROOT}/Magpie
 ```
 
@@ -123,7 +125,6 @@ Workload A; the differences are:
 RANDOM_RANGE_RATIO=0.8
 INFERENCEX_PATH=${NFS_SHARED_ROOT}/InferenceX
 TRACELENS_ROOT=${NFS_SHARED_ROOT}/TraceLens
-TRACELENS_INTERNAL_ROOT=${NFS_SHARED_ROOT}/TraceLens-internal
 MAGPIE_PATH=${NFS_SHARED_ROOT}/Magpie
 ```
 
