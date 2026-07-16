@@ -198,8 +198,8 @@ def _backfill_ci_metrics_file(path: Path, rec: SubmissionRecord) -> None:
 
 
 def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
-    """Reverse-write audit fields back into the wekafs SOURCE files so operators
-    see them under /wekafs/users/<uid>/<sess>/ without GHA artifact zips.
+    """Reverse-write audit fields back into shared SOURCE files so operators
+    see them under <shared-root>/users/<uid>/<sess>/ without GHA artifact zips.
 
     Match: exact `model` field, else conservative session-dir match; only
     sessions modified in the last 24h. Updates ci_metrics.json, manifest.json,
@@ -213,7 +213,7 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
         int: Number of files updated; ``0`` when wekafs is unmounted or nothing
         matched.
     """
-    nfs_root = os.environ.get("NFS_ROOT", "/wekafs")
+    nfs_root = os.environ.get("NFS_ROOT", "/mnt/shared")
     users_root = os.path.join(nfs_root, "users")
     if not os.path.isdir(users_root):
         return 0
@@ -323,7 +323,7 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
                 continue
             n += _backfill_files(sess_path)
 
-        # Layout: /wekafs/users/<uid>/<model-basename>/<YYYYmmddTHHMMSSZ>/.
+        # Layout: <shared-root>/users/<uid>/<model-basename>/<YYYYmmddTHHMMSSZ>/.
         # A deleted ci_metrics.json must not block manifest.json backfill.
         if rec.safe_user_id and uid_dir != rec.safe_user_id:
             continue
@@ -355,7 +355,7 @@ def _backfill_wekafs_in_place(rec: SubmissionRecord) -> int:
 
 
 def _record_matches_session_dir(rec: SubmissionRecord, sess_name: str) -> bool:
-    """Conservative directory-name match for the /wekafs/users fallback. Prefer
+    """Conservative directory-name match for the shared users fallback. Prefer
     the displayName slug; fall back to basename with strict-term guards to avoid
     cross-wiring adjacent repos (Qwen2.5 vs -AWQ, Nano vs Super, bnb, etc.).
 

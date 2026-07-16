@@ -480,9 +480,11 @@ def _focus_research_scout_specialist(
         "   re-listing PRs the FRAMEWORK_AGENT phase already covered (the",
         "   Coordinator dedups by PR id, but skip obvious repeats).",
         "",
-        "**Gap computation** — where you find a reference throughput,",
-        "compute the gap versus our current baseline and let the gap size",
-        "drive each hint's priority.",
+        "**Gap computation** — where you find a reference throughput, use",
+        "the gap versus our current baseline only to prioritise your hints",
+        "(a bigger gap means a higher-priority hint). Do NOT emit competitor",
+        "numbers as a structured target: measured competitor baselines are",
+        "sourced from InferenceX, never authored by this scout.",
         "",
         "**Output protocol** — emit ONE ``specialist_done`` carrying a",
         "``research`` block:",
@@ -490,10 +492,6 @@ def _focus_research_scout_specialist(
         "  source, domain_tags[]}``. ``source`` is REQUIRED (PR link / blog",
         "  / MLPerf row / reference script path); a hint without a source",
         "  is dropped.",
-        "- optional ``competitor_target``: ``{gpu, model, framework,",
-        "  precision, per_conc:[{conc, tput_per_gpu, tpot_ms,",
-        "  interactivity, source}], notes}`` — every per-conc number MUST",
-        "  carry its own ``source`` or it is discarded.",
         "- optional ``prs_fetched`` / ``pr_diffs_read`` / ``nvidia_refs``:",
         "  ids you actually inspected (feeds exploration-depth tracking).",
         "",
@@ -1670,6 +1668,14 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
         "These trees are read-only. Use Read / Grep / Glob to navigate. "
         "Do NOT attempt Edit / Write / git apply (PolicyGate R4)."
     )
+    rows.append("")
+    rows.append(
+        "Use ``WebSearch`` to look up the latest upstream version of the local "
+        "repo and compare the implementation you intend to modify against what "
+        "is there now. Use ``WebFetch`` to read the relevant file or PR "
+        "directly — before authoring a patch, confirm whether the upstream "
+        "repo already contains the fix or optimization you are about to write."
+    )
     return rows
 
 
@@ -1913,6 +1919,61 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # Top-level assembler
+def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
+    """§1a — PD-disaggregation context (omitted unless pd_mode==disaggregated).
+
+    Surfaces the prefill/decode split so the specialist targets each role's
+    distinct bottleneck (prefill: compute / TTFT; decode: memory-bandwidth /
+    TPOT) and the KV-transfer path, instead of treating the server as one pool.
+    Reads the multi-node state directly; returns ``[]`` on the single-node /
+    colocated paths so the section is dropped.
+
+    Args:
+        inp (SpecialistPromptInputs): The assembled prompt inputs (unused; the
+            PD topology is read from multi-node state).
+
+    Returns:
+        list[str]: The PD-disaggregation section lines, or ``[]`` when not
+        disaggregated.
+    """
+    try:
+        from hyperloom.orchestrator.actions.executors._multi_node_env import (
+            pd_topology_from_state,
+        )
+
+        pd = pd_topology_from_state()
+    except Exception:
+        return []
+    if not pd:
+        return []
+    tb = pd.get("transfer_backend") or "the KV transfer backend"
+    return [
+        "## 1a. PD-DISAGGREGATION (prefill/decode separated)",
+        "",
+        "This deployment runs **prefill/decode disaggregation**: prefill and "
+        "decode execute on SEPARATE GPU nodes, exchanging KV cache via "
+        f"`{tb}`. Optimize each role for its OWN bottleneck — do NOT treat the "
+        "server as a single pool:",
+        "",
+        f"- **Prefill** ({pd.get('prefill_nodes')} node(s), tp={pd.get('prefill_tp')}, "
+        f"ep={pd.get('prefill_ep')}): compute-bound; drives **TTFT**. Levers: "
+        "chunked-prefill size, attention backend for long ISL, MoE dispatch, "
+        "prefill token/batch budget.",
+        f"- **Decode** ({pd.get('decode_nodes')} node(s), tp={pd.get('decode_tp')}, "
+        f"ep={pd.get('decode_ep')}): memory-bandwidth-bound; drives **TPOT/ITL**. "
+        "Levers: KV-cache / mem-fraction, max-running-requests, dp-attention, "
+        "decode MoE a2a backend.",
+        f"- **KV transfer** (`{tb}`): watch bootstrap / transfer stalls; RDMA/IB "
+        "device selection affects decode start latency.",
+        "- **Balance**: tune the prefill:decode node/TP ratio to the ISL:OSL "
+        "shape — a saturated role caps end-to-end throughput.",
+        "",
+        "Per-role GPU telemetry is in the benchmark report's "
+        "`gpu_monitor_by_role` (prefill vs decode util / power / VRAM); use it to "
+        "confirm which role is the bottleneck BEFORE proposing changes.",
+    ]
+
+
 def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     """Assemble the full specialist prompt from its section builders.
 
@@ -1936,6 +1997,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
     ]
     user_sections = [
         _section_hardware(inp),
+        _section_pd_disaggregation(inp),  # § 1a (PD-disaggregation; omitted unless disaggregated)
         _section_execution_budget(inp),  # omitted when no budget
         _section_gap(inp),
         _section_kb_subgraph(inp),

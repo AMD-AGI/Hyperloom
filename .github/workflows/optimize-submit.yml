@@ -10,16 +10,14 @@ name: SaFE Optimize Submit
 #   1. prepare    (ubuntu-latest)  — pick model source by priority:
 #                                    models > candidates_file (+ batch slice).
 #                                    Emits matrix JSON for stage 2.
-#   2. optimize   (matrix, hyperloom-4hhzn) — one model per parallel job.
-#                                    Each job pre-pulls its own repo to
-#                                    /wekafs/models BEFORE calling SaFE
-#                                    register, so download is overlapped
-#                                    with the rest of the batch (no serial
-#                                    prewarm stage that blocks optimize).
+#   2. optimize   (matrix, configured runner) — one model per parallel job.
+#                                    If CI_MODELS_DIR is configured, each job
+#                                    can pre-pull its own repo before calling
+#                                    SaFE register so download is overlapped.
 #                                    schedule forces max_parallel=240 so the
 #                                    whole 240-model batch dispatches at once
 #                                    (dispatch default stays 60).
-#   3. summarize  (hyperloom-4hhzn) — aggregate per-task artifacts into a
+#   3. summarize  (configured runner) — aggregate per-task artifacts into a
 #                                    ranked ci_summary.{md,json} (sorted by
 #                                    Gain% desc, with medals), publish the
 #                                    normalized results to the Hyperloom
@@ -99,12 +97,11 @@ on:
         required: false
         default: '600'
       submit_workspaces:
-        # Comma-separated round-robin pool. Default submits only to
-        # core42-hyperloom. Set empty explicitly only when you want to fall back
-        # to the single SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret.
-        description: 'Round-robin submit workspaces (comma-separated). Default uses core42-hyperloom only.'
+        # Comma-separated round-robin pool. Empty falls back to the single
+        # SAFE_OPTIMIZE_SUBMIT_WORKSPACE secret.
+        description: 'Round-robin submit workspaces (comma-separated). Empty uses SAFE_OPTIMIZE_SUBMIT_WORKSPACE.'
         required: false
-        default: 'core42-hyperloom'
+        default: ''
       isl:
         description: 'Input sequence length'
         required: false
@@ -137,7 +134,7 @@ on:
         required: false
         default: ''
       gpu_type:
-        description: 'GPU type tag (overrides SaFE backend default MI355X). Leave empty to use script default (MI300X for core42).'
+        description: 'GPU type tag. Leave empty to use script default.'
         required: false
         default: ''
       kernel_opt_backends:
@@ -203,7 +200,7 @@ jobs:
   # ── Stage 1: build matrix ────────────────────────────────────────────────────
   prepare:
     name: Build matrix
-    runs-on: hyperloom-mh826
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -223,9 +220,9 @@ jobs:
       # so the cycle restarts at batch 0; with batch_size=240 the pool is 8
       # batches and a full sweep takes 8 fires (~48h). With exclude_leaderboard=
       # false the pool never drains — once a batch finishes it wraps and repeats.
-      # Schedule reads the pool from /wekafs (off-repo, RO-mounted on the
-      # hyperloom runners) so the large candidates JSON never bloats the git repo.
-      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_sub100_part1_20260626.json', secrets.WEKAFS_CHENYI_DIR) || github.event.inputs.candidates_file }}
+      # Schedule can read the pool from an off-repo candidates root supplied by
+      # the deployment so large candidates JSON never bloats the git repo.
+      INPUT_CANDIDATES_FILE: ${{ github.event_name == 'schedule' && format('{0}/ci-candidates/hf_sub100_part1_20260626.json', secrets.HYPERLOOM_CANDIDATES_ROOT) || github.event.inputs.candidates_file }}
       # Schedule leaves batch_index empty so generate_hf_matrix derives a
       # SEQUENTIAL index from the scheduled-fire counter: each cron (UTC
       # 4/16) steps batch 0,1,2,... and wraps, marching the whole pool in
@@ -283,8 +280,8 @@ jobs:
   optimize:
     name: optimize-${{ matrix.key }}
     needs: prepare
-    if: needs.prepare.outputs.count != '0'
-    runs-on: hyperloom-4hhzn
+    if: needs.prepare.outputs.count != '0' && (github.event.inputs.dry_run == 'true' || vars.HYPERLOOM_ENABLE_LIVE_SUBMIT == 'true')
+    runs-on: ${{ github.event.inputs.dry_run == 'true' && 'ubuntu-latest' || vars.HYPERLOOM_OPTIMIZE_RUNNER || 'ubuntu-latest' }}
     # GitHub job timeout = max_hours + 1h (computed in the prepare job since
     # Actions expressions can't do arithmetic). Covers register + wait + collect
     # for the per-task optimizer budget. schedule/6h -> 420m; gte100/12h -> 780m.
@@ -309,11 +306,11 @@ jobs:
         working-directory: ci
         run: pip install --quiet requests PyYAML 'huggingface_hub>=0.24'
 
-      - name: Prewarm /wekafs/models for this repo
-        # Pre-pull the HF repo directly into /wekafs/models/<owner>-<repo>/
+      - name: Prewarm shared model cache for this repo
+        # Pre-pull the HF repo directly into CI_MODELS_DIR/<owner>-<repo>/
         # BEFORE invoking SaFE register, bypassing SaFE playground's slow
         # K8s-job-based download path. Same logic as optimize-batch.yml.
-        # continue-on-error: any failure here (missing /wekafs mount, HF rate
+        # continue-on-error: any failure here (missing shared model cache, HF rate
         # limit, gated repo) just lets SaFE register handle the download
         # itself, slower but still correct.
         if: always()
@@ -322,21 +319,27 @@ jobs:
           HF_TOKEN:   ${{ secrets.HF_TOKEN }}
           HF_TOKEN_2: ${{ secrets.HF_TOKEN_2 }}
           MODEL_REPO: ${{ matrix.model }}
+          CI_MODELS_DIR: ${{ secrets.CI_MODELS_DIR }}
         run: |
           set -euo pipefail
-          if [ ! -d /wekafs/models ]; then
-            echo "WARN: /wekafs/models not visible on this runner, skipping prewarm"
+          if [ -z "${CI_MODELS_DIR:-}" ]; then
+            echo "WARN: CI_MODELS_DIR secret not set, skipping prewarm"
             echo "      (SaFE register will handle the download on its own)"
             exit 0
           fi
-          if [ ! -w /wekafs/models ]; then
-            echo "WARN: /wekafs/models not writable, skipping prewarm"
-            ls -ld /wekafs/models || true
+          if [ ! -d "$CI_MODELS_DIR" ]; then
+            echo "WARN: CI_MODELS_DIR=$CI_MODELS_DIR not visible on this runner, skipping prewarm"
+            echo "      (SaFE register will handle the download on its own)"
+            exit 0
+          fi
+          if [ ! -w "$CI_MODELS_DIR" ]; then
+            echo "WARN: CI_MODELS_DIR=$CI_MODELS_DIR not writable, skipping prewarm"
+            ls -ld "$CI_MODELS_DIR" || true
             exit 0
           fi
           python3 ci/prewarm_models.py \
             --repos        "${MODEL_REPO}" \
-            --target-root  /wekafs/models \
+            --target-root  "$CI_MODELS_DIR" \
             --concurrency  1 \
             --inner-workers 8 \
             --log          "${{ github.workspace }}/prewarm.log"
@@ -355,8 +358,7 @@ jobs:
           INPUT_KERNEL_OPT_BACKENDS: ${{ github.event.inputs.kernel_opt_backends }}
           INPUT_PROMPT_PREFIX:    ${{ github.event.inputs.prompt_prefix }}
           # Round-robin pool overrides single SAFE_OPTIMIZE_SUBMIT_WORKSPACE.
-          # All tasks go to core42-hyperloom only (both schedule and dispatch).
-          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event_name == 'schedule' && 'core42-hyperloom' || github.event.inputs.submit_workspaces || 'core42-hyperloom' }}
+          SAFE_OPTIMIZE_SUBMIT_WORKSPACES: ${{ github.event.inputs.submit_workspaces }}
           INPUT_WAIT:             ${{ github.event.inputs.wait_for_completion }}
           INPUT_COLLECT:          ${{ github.event.inputs.collect_artifacts }}
           INPUT_TASK_TIMEOUT_MIN: ${{ needs.prepare.outputs.task_timeout }}
@@ -533,10 +535,9 @@ jobs:
       # The sbd-ingester publish path upserts by session/task identity, so a
       # re-dispatched model refreshes its row instead of creating a duplicate.
       #
-      # Schema-aware: import_session_breakdown auto-detects V2 (with phase_timeline),
-      # V1-flat, and universal schemas via its
-      # `looks_like_*` predicates and transforms them with
-      # transform_to_session_summary_v2 before POSTing.
+      # Schema-aware publishing is owned by the configured ingester endpoint.
+      # The workflow only relabels the selected session_breakdown payload and
+      # attaches task/session metadata before POSTing.
       #
       # Endpoint default = dev (perf-leaderboard-dev). Override at the
       # workflow / org level with the PERF_API_ENDPOINT secret for prod.
@@ -845,8 +846,8 @@ jobs:
           CS_CIM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('ci_claw_session_id') or '')" task-artifacts/sbd_publish_selection.json)
           echo "[sbd-ingester] selected session_breakdown: $BD (ci_claw_session_id='${CS_CIM:-}')"
           BD_SIZE=$(stat -c %s "$BD")
-          # Publish to sbd-ingester instead of posting straight to perf_runs_dev.
-          # The ingester cleans fields, upserts into the dev table, and reports
+          # Publish to the configured sbd-ingester endpoint.
+          # The ingester cleans fields, upserts rows, and reports
           # missing/warning fields. Its schema allowlist currently accepts only
           # v1.1, so we relabel schema_version -> v1.1 before sending (the v2
           # payload is structurally compatible — verified). Once the service
@@ -863,24 +864,6 @@ jobs:
               data = json.load(f)
           with open(selection_path, encoding="utf-8") as f:
               selection = json.load(f)
-
-          sys.path.insert(0, "ci")
-          try:
-              import import_session_breakdown as isb
-          except Exception:
-              isb = None
-
-          if isb is not None:
-              if isb.looks_like_v1_flat_schema(data):
-                  data = isb.migrate_v1_to_v2(data)
-              elif isb.looks_like_universal_schema(data) and not (
-                  isinstance(data.get("workload"), dict)
-                  and isinstance(data.get("baseline"), dict)
-                  and isinstance(data.get("final"), dict)
-              ):
-                  migrated = isb.migrate_universal_to_v2(data)
-                  if migrated:
-                      data = migrated
 
           data["schema_version"] = "hyperloom.session_breakdown.v1.1"
           task_id = selection.get("task_id") or ""
@@ -911,12 +894,15 @@ jobs:
             rm -f "$SBD_SEND"
             exit 0
           fi
-          # Endpoint + token: prefer GitHub secrets; fall back to the dev
-          # endpoint/token so the pipeline runs out-of-the-box. SET
-          # SBD_INGESTER_TOKEN as a secret for prod and rotate the dev token.
+          # Endpoint + token are deployment-specific. Public forks should
+          # configure both as GitHub secrets; otherwise publishing is skipped.
           SBD_EP='${{ secrets.SBD_INGESTER_ENDPOINT }}'
           SBD_TK='${{ secrets.SBD_INGESTER_TOKEN }}'
-          [ -n "$SBD_EP" ] || SBD_EP='https://core42.primus-safe.amd.com/sbd-ingester/api/v1/session-breakdowns'
+          if [ -z "$SBD_EP" ]; then
+            echo "::warning::SBD_INGESTER_ENDPOINT secret not set — skipping sbd-ingester publish"
+            echo "SKIP no-endpoint" > "$(dirname "$BD")/perf_publish_marker.txt"
+            exit 0
+          fi
           if [ -z "$SBD_TK" ]; then
             echo "::warning::SBD_INGESTER_TOKEN secret not set — skipping sbd-ingester publish (add it under repo Settings > Secrets and variables > Actions)"
             echo "SKIP no-token" > "$(dirname "$BD")/perf_publish_marker.txt"
@@ -978,24 +964,16 @@ jobs:
     # ``optimize`` already needs ``prepare``, so listing both here only makes
     # ``needs.prepare.outputs`` reachable in this job's ``if`` expression.
     needs: [prepare, optimize]
-    if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true'
-    # Run on the self-hosted hyperloom-4hhzn runner (a K8s pod in the
-    # core42-hyperloom namespace) so the Publish step can reach the
-    # hyperloom-results-service ingress at core42.primus-safe.amd.com.
-    # hyperloom-4hhzn mounts /wekafs as RW (vs. hyperloom-mh826 which was RO),
-    # which is what the optimize stage needs for prewarm to actually write
-    # models into /wekafs/models/. Keeping the summary on the same pool
-    # avoids one-cluster-vs-another pitfalls.
-    runs-on: hyperloom-4hhzn
+    if: always() && needs.prepare.outputs.count != '0' && github.event.inputs.dry_run != 'true' && vars.HYPERLOOM_ENABLE_LIVE_SUBMIT == 'true'
+    # Live submit deployments should run this on the same configured runner pool
+    # used by the optimize jobs so collected artifacts and optional publish
+    # endpoints are reachable.
+    runs-on: ${{ vars.HYPERLOOM_OPTIMIZE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
       - name: Install dependencies
-        # No setup-python on the self-hosted runner — it has system python3
-        # already (we use it for the optimize stage too); the pip on this
-        # runner image is older and doesn't accept --break-system-packages,
-        # but it has no PEP 668 marker either so a plain install works.
         run: pip install --quiet requests pyyaml
 
       - name: Download all submission manifests

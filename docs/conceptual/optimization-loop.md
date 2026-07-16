@@ -16,7 +16,7 @@ loop runs alongside the agentic kernel optimizer.
 
 ## Runtime contract
 
-The optimizer is launched through `inference_optimizer optimize`. A run
+The optimizer is launched through `python -m hyperloom.inference_optimizer.cli optimize`. A run
 must be able to:
 
 - Create or resume a session directory,
@@ -38,8 +38,7 @@ PRELUDE -> FRAMEWORK_AGENT -> EXPLORE -> KERNEL_AGENT -> SWEEP -> CLOSE
 ```
 
 For a normal single-pass run (`--max-hours < 24`) the chain is traversed
-once. Cyclic macro-cycling is enabled by default
-(`INFERENCE_OPTIMIZER_CYCLIC_PHASES`): with a large or unbounded budget
+once. Cyclic macro-cycling is always enabled; with a large or unbounded budget
 (`--max-hours >= 24`), SWEEP can `cycle_reloop` back to `FRAMEWORK_AGENT` /
 `EXPLORE` for another pass instead of closing.
 

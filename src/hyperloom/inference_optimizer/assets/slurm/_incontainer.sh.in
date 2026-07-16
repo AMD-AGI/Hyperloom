@@ -49,7 +49,7 @@ RUN_DIR="$USER_DATA_PATH/optimizer_runs"; mkdir -p "$RUN_DIR"
 LAUNCH_INFO_FILE="$RUN_DIR/launch_${CLAW_SESSION_ID}.json"
 
 # Build the carrier prompt from ci/prompt_template.md (shared by claude / codex).
-# The carrier loads SKILL.md and issues `inference_optimizer optimize` itself.
+# The carrier loads SKILL.md and issues `python -m hyperloom.inference_optimizer.cli optimize` itself.
 hl_build_prompt() {
   export TP  # ensure TP is visible to the child python
   python3 - <<'PY'
@@ -83,7 +83,7 @@ case "$BACKEND" in
       claude) KERNEL_BACKEND_FLAG=--kernel-claude ;;
       *) echo "[hl] unknown HL_KERNEL_BACKEND: ${HL_KERNEL_BACKEND:-} (want codex|claude)" >&2; exit 2 ;;
     esac
-    exec inference_optimizer --verbose optimize \
+    exec python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
       --model "$MODEL_PATH" \
       --framework "$FRAMEWORK" \
       --gpu-type "$GPU_TYPE" \
@@ -104,7 +104,7 @@ case "$BACKEND" in
   codex)
     # --- Codex CLI carrier -------------------------------------------------
     # Outer coding-agent host: `codex exec` loads SKILL.md and drives the same
-    # `inference_optimizer optimize` command agentically (analogous to the
+    # `python -m hyperloom.inference_optimizer.cli optimize` command agentically (analogous to the
     # claude carrier). node/npm come from install.sh (ensure_forge_claude_cli);
     # install the codex CLI on top of that.
     if ! command -v codex >/dev/null 2>&1; then
@@ -136,7 +136,7 @@ wire_api = "${HL_CODEX_WIRE_API:-responses}"
 
 # Forward the full container env to the carrier's shell tool. Without this,
 # codex-cli defaults to inherit="core" and drops USER_DATA_PATH, so the
-# carrier-launched \`inference_optimizer optimize\` falls back to the node-local
+# carrier-launched \`python -m hyperloom.inference_optimizer.cli optimize\` falls back to the node-local
 # default (/workspace/hyperloom) and its session/patches never reach NFS.
 [shell_environment_policy]
 inherit = "all"

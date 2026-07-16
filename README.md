@@ -17,23 +17,22 @@ generates a report with all proposed changes and expected performance improvemen
 automation enables developers to achieve significant performance improvements while maintaining code
 quality and reducing the manual effort traditionally required for GPU optimization.
 
-<p align="center"><img width="600" alt="Hyperloom Architecture" src="docs/images/Hyperloom_architecture.png" /></p>
+<p align="center"><img width="600" alt="Hyperloom architecture" src="docs/images/Hyperloom_architecture.png" /></p>
 
 Hyperloom combines:
 
 - Trace analysis through [TraceLens](https://github.com/AMD-AGI/TraceLens) and
   [Magpie](https://github.com/AMD-AGI/Magpie).
-- Kernel optimization through KernelForge, [GEAK](https://github.com/AMD-AGI/GEAK), Claude, Codex, and Cursor
-  backends.
-- A validated optimization loop that writes reproducible artifacts and
-  `session_breakdown.json` for downstream consumers.
+- Kernel optimization through the
+  [GEAK](https://github.com/AMD-AGI/GEAK) backend.
+- Agentic search space exploration through [Arbor](https://arxiv.org/abs/2606.12563), a tree-based cognition layer with dynamic agents, long-horizon campaigns, and self-evolving optimization guided by a curated knowledge base of hardware learnings, pitfalls, and prior campaign artifacts.
+
 
 ## Get Started
 
 | Goal | Guide |
 |------|-------|
-| Run using a Docker container | [Docker quickstart](docs/install/local-mode.md) |
-| Run directly on a ROCm host | [Bare-metal quickstart](docs/install/setup.md) |
+| Set up Hyperloom and run a demo | [Quickstart](examples/README.md) |
 | Launch and monitor an optimization | [Run an optimization](docs/how-to/optimize.md) |
 | Understand the algorithm | [Optimization loop](docs/conceptual/optimization-loop.md) |
 
@@ -55,7 +54,7 @@ Hyperloom combines:
 
 - Runtime package: `src/hyperloom/`
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md)
-- CLI entry point: `inference_optimizer optimize`
+- CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
 - Documentation source: `docs/`
 

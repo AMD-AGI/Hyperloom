@@ -370,14 +370,14 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "osl": 1024,
     "max_model_len": 8192,
     "precision": "fp8",
-    "objective": { "kind": "tput", "value": 500.0 }
+    "objective": { "kind": "tput", "value": 150.0 }
   },
 
   "baseline": {
-    "throughput_tok_s_per_gpu": 344.8,
+    "throughput_tok_s_per_gpu": 100.0,
     "accuracy": 0.812,
-    "ttft_mean_ms": 142.3,
-    "e2el_mean_ms": 2210.5,
+    "ttft_mean_ms": 0.0,
+    "e2el_mean_ms": 0.0,
     "ttft_e2el_source": "state_workspace",
     "config_path": "runs/baseline/baseline_config.with_envs.yaml",
     "benchmark_report_path": "runs/baseline/report.json",
@@ -386,7 +386,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "task_id": "t-baseline-1",
       "status": "succeeded",
       "decision": "promoted",
-      "key_metric": 344.8,
+      "key_metric": 100.0,
       "workspace": "runs/baseline",
       "error_class": null
     }],
@@ -401,9 +401,9 @@ The following example shows a complete `session_breakdown.json` for a finished G
   },
 
   "final": {
-    "throughput_tok_s_per_gpu": 509.4,
-    "cumulative_gain_pct_validated": 47.7,
-    "cumulative_gain_pct_per_round_sum": 51.2,
+    "throughput_tok_s_per_gpu": 150.0,
+    "cumulative_gain_pct_validated": 50.0,
+    "cumulative_gain_pct_per_round_sum": 50.0,
     "validated_at_stack_len": 4,
     "validated_ts": "2026-05-17T13:48:01Z",
     "stack_changed_after_validation": false,
@@ -415,8 +415,8 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "explore:aiter_allreduce_fusion",
       "kernel_opt:moe_router_gemm_n256_k6144"
     ],
-    "ttft_mean_ms": 118.7,
-    "e2el_mean_ms": 1604.1,
+    "ttft_mean_ms": 0.0,
+    "e2el_mean_ms": 0.0,
     "ttft_e2el_source": "current_best",
     "invocation": {
       "framework_args": "python -m sglang.launch_server --model ... --nsa-decode-backend aiter --enable-mixed-chunk --enable-aiter-allreduce-fusion",

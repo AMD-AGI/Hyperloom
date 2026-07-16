@@ -10,9 +10,9 @@ The pages below are generated automatically from the project's source
 docstrings for the importable ``hyperloom`` package.
 
 The reference covers the importable ``hyperloom`` package (single src-layout
-namespace). ``ci`` and ``slides`` are script
-collections that are not laid out as importable packages, so they are
-documented via their in-code docstrings rather than these autosummary pages.
+namespace). ``ci`` is a script collection that is not laid out as an
+importable package, so it is documented via its in-code docstrings rather
+than these autosummary pages.
 
 .. autosummary::
    :toctree: generated

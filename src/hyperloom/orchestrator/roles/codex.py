@@ -8,6 +8,12 @@ Claude path uses. The AMD gateway serves both Claude and OpenAI models from
 one URL, so ``ANTHROPIC_*`` env vars are accepted alongside ``OPENAI_*``
 (``OPENAI_BASE_URL`` canonical; ``ANTHROPIC_BASE_URL`` legacy fallback).
 
+Optional web search: when ``HYPERLOOM_CODEX_WEB_SEARCH`` is enabled, every turn
+uses the OpenAI **Responses API** with the built-in server-side ``web_search``
+tool instead of ``chat.completions``. The search resolves server-side in one
+call; the model's final ``output_text`` still carries the ``{"intents": [...]}``
+envelope, so the intent-transport contract is unchanged.
+
 Test seam: ``client_factory`` replaces the SDK client so unit tests need no
 real credentials or network.
 """
@@ -19,6 +25,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from hyperloom.common.env import env_bool, env_str
 from hyperloom.common.llm_config import LLMConfigError, apply_reasoning_effort, openai_client_kwargs
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
@@ -73,6 +80,48 @@ def _extract_envelope(text: str) -> dict | None:
     return extract_first_json_with_key(text, "intents", _BARE_JSON_RE)
 
 
+def _field(obj: Any, key: str) -> Any:
+    """Read ``key`` from a dict or an attribute-carrying object (SDK model).
+
+    The OpenAI SDK returns pydantic objects; tests use plain dicts/dataclasses.
+    This tolerates both shapes.
+    """
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _extract_responses_output(resp: Any) -> tuple[str, list[str]]:
+    """Extract assistant text + web_search citation URLs from a Responses result.
+
+    Walks the ``output`` array, concatenating every ``output_text`` block found
+    on ``message`` items and collecting any ``url_citation`` annotation URLs.
+
+    Args:
+        resp: A Responses API result (SDK object or dict).
+
+    Returns:
+        ``(text, citations)`` — the joined assistant text and the ordered list of
+        cited URLs (possibly empty).
+    """
+    texts: list[str] = []
+    citations: list[str] = []
+    for item in (_field(resp, "output") or []):
+        if _field(item, "type") != "message":
+            continue
+        for block in (_field(item, "content") or []):
+            if _field(block, "type") != "output_text":
+                continue
+            chunk = _field(block, "text") or ""
+            if chunk:
+                texts.append(chunk)
+            for ann in (_field(block, "annotations") or []):
+                url = _field(ann, "url")
+                if isinstance(url, str) and url:
+                    citations.append(url)
+    return "\n".join(texts), citations
+
+
 @dataclass
 class CodexBackend:
     """Production Codex backend. Implements :class:`Backend`."""
@@ -90,6 +139,17 @@ class CodexBackend:
             "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",
             default=120.0,
         )
+    )
+
+    # Web search: when enabled, each turn uses the OpenAI Responses API with the
+    # built-in server-side ``web_search`` tool. Env: ``HYPERLOOM_CODEX_WEB_SEARCH``.
+    web_search: bool = field(
+        default_factory=lambda: env_bool("HYPERLOOM_CODEX_WEB_SEARCH", False)
+    )
+    # ``low`` | ``medium`` | ``high`` — passed through as the web_search tool's
+    # ``search_context_size``. Env: ``HYPERLOOM_CODEX_WEB_SEARCH_CONTEXT_SIZE``.
+    web_search_context_size: str = field(
+        default_factory=lambda: env_str("HYPERLOOM_CODEX_WEB_SEARCH_CONTEXT_SIZE", "medium")
     )
 
     # Test seam — set to bypass real OpenAI client construction.
@@ -157,8 +217,64 @@ class CodexBackend:
                 envelope fails intent validation.
         """
         full_prompt = f"{prompt}\n\n{_OUTPUT_INSTRUCTIONS}"
-        messages = build_chat_messages(system_prompt, full_prompt)
+        if self.web_search:
+            text, finish, input_tokens, output_tokens, extra_meta = await self._run_responses(
+                system_prompt, full_prompt
+            )
+        else:
+            text, finish, input_tokens, output_tokens, extra_meta = await self._run_chat(
+                system_prompt, full_prompt
+            )
+        self.calls.append(
+            {
+                "prompt_chars": len(full_prompt),
+                "reply_chars": len(text),
+                "finish_reason": finish,
+                "model": self.model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            }
+        )
 
+        envelope = _extract_envelope(text)
+        if envelope is None:
+            raise NoIntentEmitted(
+                f"codex reply contained no parseable JSON envelope (reply_chars={len(text)}, finish={finish})"
+            )
+        try:
+            intents = validate_envelope(envelope)
+        except IntentValidationError as exc:
+            raise NoIntentEmitted(f"codex envelope invalid: {exc}") from exc
+        metadata: dict[str, Any] = {
+            "model": self.model,
+            "finish_reason": finish,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            # Full conversation text for conversations.jsonl, handed up for
+            # the caller to persist.
+            "prompt": full_prompt,
+            "response": text,
+        }
+        metadata.update(extra_meta)
+        return BackendTurnResult(intents=intents, raw_text=text, metadata=metadata)
+
+    # ------------------------------------------------------------------
+    async def _run_chat(
+        self,
+        system_prompt: str | None,
+        full_prompt: str,
+    ) -> tuple[str, Any, int, int, dict[str, Any]]:
+        """Single ``chat.completions`` call (the default, no-tools path).
+
+        Returns:
+            ``(text, finish_reason, input_tokens, output_tokens, extra_metadata)``.
+            ``extra_metadata`` is empty for this path.
+        """
+        messages = build_chat_messages(system_prompt, full_prompt)
         create_params = apply_reasoning_effort(
             {
                 "model": self.model,
@@ -186,44 +302,61 @@ class CodexBackend:
         usage = getattr(resp, "usage", None)
         input_tokens = self._safe_int(getattr(usage, "prompt_tokens", None))
         output_tokens = self._safe_int(getattr(usage, "completion_tokens", None))
-        self.calls.append(
-            {
-                "prompt_chars": len(full_prompt),
-                "reply_chars": len(text),
-                "finish_reason": finish,
-                "model": self.model,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-            }
-        )
+        return text, finish, input_tokens, output_tokens, {}
 
-        envelope = _extract_envelope(text)
-        if envelope is None:
-            raise NoIntentEmitted(
-                f"codex reply contained no parseable JSON envelope (reply_chars={len(text)}, finish={finish})"
-            )
+    # ------------------------------------------------------------------
+    async def _run_responses(
+        self,
+        system_prompt: str | None,
+        full_prompt: str,
+    ) -> tuple[str, Any, int, int, dict[str, Any]]:
+        """Single Responses API call with the built-in ``web_search`` tool.
+
+        The web search resolves server-side within this one call, so no
+        client-side tool loop is needed. The final ``output_text`` still carries
+        the intent envelope. Returns
+        ``(text, status, input_tokens, output_tokens, extra_metadata)`` where
+        ``extra_metadata`` may carry ``web_search_citations``.
+        """
+        tool_spec: dict[str, Any] = {"type": "web_search"}
+        ctx = (self.web_search_context_size or "").strip().lower()
+        if ctx in {"low", "medium", "high"}:
+            tool_spec["search_context_size"] = ctx
+        params: dict[str, Any] = {
+            "model": self.model,
+            "input": full_prompt,
+            "tools": [tool_spec],
+            "max_output_tokens": self.max_completion_tokens,
+        }
+        if system_prompt:
+            params["instructions"] = system_prompt
+        # The Responses API expresses reasoning effort as ``reasoning={"effort": ...}``
+        # (not the chat-completions ``reasoning_effort`` field); translate via the
+        # shared env-vocabulary helper so the same knob applies on both paths.
+        _eff = apply_reasoning_effort({})
+        if "reasoning_effort" in _eff:
+            params["reasoning"] = {"effort": _eff["reasoning_effort"]}
         try:
-            intents = validate_envelope(envelope)
-        except IntentValidationError as exc:
-            raise NoIntentEmitted(f"codex envelope invalid: {exc}") from exc
-        return BackendTurnResult(
-            intents=intents,
-            raw_text=text,
-            metadata={
-                "model": self.model,
-                "finish_reason": finish,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-                # Full conversation text for conversations.jsonl, handed up for
-                # the caller to persist.
-                "prompt": full_prompt,
-                "response": text,
-            },
-        )
+            resp = await asyncio.wait_for(
+                self._client.responses.create(**params),
+                timeout=self.call_timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            raise BackendError(
+                f"Codex Responses API call timed out after {self.call_timeout_s:.0f}s (likely upstream proxy stall)"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"Codex Responses API call failed: {exc!r}") from exc
+
+        text, citations = _extract_responses_output(resp)
+        finish = _field(resp, "status")
+        usage = _field(resp, "usage")
+        input_tokens = self._safe_int(_field(usage, "input_tokens"))
+        output_tokens = self._safe_int(_field(usage, "output_tokens"))
+        extra_meta: dict[str, Any] = {}
+        if citations:
+            extra_meta["web_search_citations"] = citations
+        return text, finish, input_tokens, output_tokens, extra_meta
 
     @staticmethod
     def _safe_int(value: Any) -> int:
@@ -245,4 +378,4 @@ class CodexBackend:
             return 0
 
 
-__all__ = ["CodexBackend", "_extract_envelope"]
+__all__ = ["CodexBackend", "_extract_envelope", "_extract_responses_output"]

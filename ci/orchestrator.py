@@ -45,9 +45,9 @@ CI_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE = (CI_DIR / "prompt_template.md").read_text()
 PROMPT_TEMPLATE_PR = (CI_DIR / "prompt_template_pr.md").read_text()
 
-# prompt_template.md validates the /wekafs/HyperloomV2 deployed snapshot.
-# prompt_template_pr.md has the agent git-clone the PR head into
-# /tmp/Hyperloom-pr so numbers reflect proposed code; the GH token is formatted
+# prompt_template.md targets the configured Hyperloom checkout/skill path.
+# prompt_template_pr.md has the agent git-clone the PR head into a temporary
+# sandbox checkout so numbers reflect proposed code; the GH token is formatted
 # into the prompt since the Claw API has no env-injection field.
 
 
@@ -73,9 +73,9 @@ def render_prompt(
 
     Args:
         merged: Merged model/run config (workload dims, benchmarks, image).
-        pr_mode: When False, use ``prompt_template.md`` against
-            ``/wekafs/HyperloomV2``; when True, use ``prompt_template_pr.md``
-            so the agent git-clones the PR head.
+        pr_mode: When False, use ``prompt_template.md`` against the configured
+            checkout; when True, use ``prompt_template_pr.md`` so the agent
+            git-clones the PR head.
         git_ref: PR head SHA; required when ``pr_mode`` is True.
         gh_token: GitHub token used to clone AMD-AGI/Hyperloom in PR mode.
 
@@ -102,13 +102,16 @@ def render_prompt(
     nodes = int(merged.get("nodes", 1) or 1)
     if nodes > 1:
         rayjob_image = merged.get("rayjob_image", "") or merged.get("sandbox_image", "")
+        bnxt_tar = os.environ.get("SAFE_OPTIMIZE_BNXT_TAR", "").strip()
+        env_lines = f"- NODES={nodes}\n"
+        if bnxt_tar:
+            env_lines += f"- PATH_TO_BNXT_TAR_PACKAGE={bnxt_tar}\n"
         multinode_section = (
             f"\nTask submission ({nodes}-node):\n"
             f"RayJob image: {rayjob_image}\n"
             f"RayJob resource per node: CPU=96, GPU=8, memory=1024Gi, ephemeralStorage=400Gi\n"
             f"RayJob node count: {nodes}\n"
-            f"env:\n"
-            f"- PATH_TO_BNXT_TAR_PACKAGE=/wekafs/primus/data/libbnxt/libbnxt_re-234.0.154.0.tar.gz\n"
+            f"env:\n{env_lines}"
         )
     else:
         multinode_section = ""
@@ -527,8 +530,8 @@ def main():
         help="PR-CI mode: render prompt_template_pr.md so the agent "
         "first git-clones --git-ref into /tmp/Hyperloom-pr inside "
         "the sandbox, then installs + drives the skill from PR head "
-        "(NOT from /wekafs/HyperloomV2). Required so reviewer-visible "
-        "numbers reflect the proposed code, not the wekafs snapshot.",
+        "(not from a pre-deployed shared checkout). Required so reviewer-visible "
+        "numbers reflect the proposed code, not a shared snapshot.",
     )
     parser.add_argument(
         "--git-ref",

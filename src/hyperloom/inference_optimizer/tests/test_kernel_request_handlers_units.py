@@ -619,7 +619,7 @@ class TestForgeGemmHelperCoverage:
         assert result["backend"] == "forge"
         assert result["engine"] == "forge_fusion"
         assert result["workspace"] == str(tmp_path / "runs" / "fusion" / "fusion_task")
-        assert calls[0][1] == 123
+        assert calls[0][1] == krh._forge_fusion_wrapper_timeout_sec(123)
         input_payload = json.loads(
             (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json")
             .read_text(encoding="utf-8")
@@ -627,6 +627,59 @@ class TestForgeGemmHelperCoverage:
         assert input_payload["trace_path"] == str(trace_file)
         assert input_payload["model_path"] == "/models/zaya"
         assert input_payload["max_turns"] == 7
+        assert input_payload["timeout"] == 123
+
+    def test_forge_fusion_timeout_invalid_env_falls_back(self, monkeypatch):
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
+
+        assert krh._forge_fusion_timeout_sec({}) == 7200
+
+    def test_forge_fusion_timeout_infinite_env_falls_back(self, monkeypatch):
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")
+
+        assert krh._forge_fusion_timeout_sec({}) == 7200
+
+    def test_forge_fusion_wrapper_timeout_adds_reap_grace(self):
+        assert krh._forge_fusion_wrapper_timeout_sec(123) == 153
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_invalid_timeout_env_uses_default(
+        self, tmp_path, monkeypatch
+    ):
+        trace = tmp_path / "decode.trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace),
+        ).save(tmp_path)
+        monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
+        calls: list[int] = []
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            calls.append(timeout_sec)
+            result = {"status": "complete", "decision": "REVERT", "kept": False}
+            return (
+                0,
+                "FORGE_FUSION_RESULT_BEGIN\n"
+                + json.dumps(result)
+                + "\nFORGE_FUSION_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        result = await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+
+        assert result["status"] == "complete"
+        assert calls == [krh._forge_fusion_wrapper_timeout_sec(7200)]
+        input_payload = json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json")
+            .read_text(encoding="utf-8")
+        )
+        assert input_payload["timeout"] == 7200
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_failure_branches(self, tmp_path, monkeypatch):
@@ -1175,6 +1228,47 @@ class TestRunGemmTuningHandler:
         )
 
         assert result["status"] == "ok"
+
+    def test_geak_without_config_falls_back_to_forge(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("GEAK_CONFIG", raising=False)
+        root = tmp_path / "kernel-agent"
+        root.mkdir()
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path="/models/qwen-fp8",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            baseline_tput=4479.0,
+        )
+        state.save(tmp_path)
+        called: dict[str, object] = {}
+
+        async def fake_forge(payload: dict, *, session_dir: Path):
+            called["payload"] = payload
+            called["session_dir"] = session_dir
+            return {"status": "complete", "backend": "forge", "engine": "forge"}
+
+        async def fail_geak_subprocess(cmd, *, timeout_sec):
+            raise AssertionError("legacy GEAK subprocess should not run without config")
+
+        monkeypatch.setattr(krh, "_run_forge_gemm_tuning", fake_forge)
+        monkeypatch.setattr(krh, "_run_subprocess", fail_geak_subprocess)
+
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler({"task_id": "legacy-geak"}, session_dir=tmp_path)
+        )
+
+        assert called["session_dir"] == tmp_path
+        assert result["backend"] == "forge"
+        assert result["requested_backend"] == "geak"
+        assert result["fallback_backend"] == "forge"
+        assert result["fallback_reason"] == "legacy_geak_config_missing"
 
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")

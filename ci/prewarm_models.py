@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""ci/prewarm_models.py — pre-populate /wekafs/models/ from HuggingFace,
+"""ci/prewarm_models.py — pre-populate a shared model cache from HuggingFace,
 bypassing the single-flight + slow SaFE playground download.
 
 Downloading directly to the mounted volume removes the SaFE-register
 bottleneck: a later register call dedups on the existing target files (or
 the hf-hub cache makes a re-fetch a near-no-op via ETag/sha256 matching).
 
-Layout (same convention as SaFE-registered models already in /wekafs/models):
-  /wekafs/models/<owner>-<repo>/         # final destination
-  /wekafs/models/.tmp/<slug>.part/       # in-flight, atomic rename on success
+Layout:
+  /mnt/shared/models/<owner>-<repo>/         # final destination
+  /mnt/shared/models/.tmp/<slug>.part/       # in-flight, atomic rename on success
 
 Inputs:
   --candidates ci/candidates/topN.json   (preferred, drives the same pool as
@@ -28,13 +28,13 @@ Usage examples:
   # Whole candidates pool, 16 concurrent repos:
   HF_TOKEN=hf_xxx python3 prewarm_models.py \\
       --candidates ci/candidates/top600_2026-05-12.json \\
-      --target-root /wekafs/models --concurrency 16
+      --target-root /mnt/shared/models --concurrency 16
 
   # Same slice as a single batch dispatch (matches optimize-batch.yml):
   HF_TOKEN=hf_xxx python3 prewarm_models.py \\
       --candidates ci/candidates/top600_2026-05-12.json \\
       --batch-index 0 --batch-size 10 \\
-      --target-root /wekafs/models
+      --target-root /mnt/shared/models
 
   # Smoke a single repo:
   HF_TOKEN=hf_xxx python3 prewarm_models.py --repos Qwen/Qwen3-14B-AWQ
@@ -69,7 +69,7 @@ log = logging.getLogger("prewarm")
 
 
 def slug(repo_id: str) -> str:
-    """HF repo_id → /wekafs/models/<slug>/ folder name.
+    """HF repo_id -> shared model-cache ``<slug>/`` folder name.
 
     Matches the SaFE backend convention: a single '/' separator becomes '-' and
     all other characters are preserved verbatim.
@@ -408,10 +408,9 @@ def main() -> int:
     p.add_argument(
         "--target-root",
         type=Path,
-        default=Path("/wekafs/models"),
+        default=Path(os.environ.get("CI_MODELS_DIR", "/mnt/shared/models")),
         help="root dir for <slug>/ subdirs "
-        "(default /wekafs/models; on c04u01 the real "
-        "underlying path is /mnt/weka/models via a symlink)",
+        "(default $CI_MODELS_DIR or /mnt/shared/models)",
     )
     p.add_argument(
         "--concurrency",
