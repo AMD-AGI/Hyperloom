@@ -14,7 +14,7 @@ optimize`; the agent launches it in the background and monitors `state.json`
 until a terminal `stop_reason` (`target_reached`, `global_converged`,
 `time_exhausted`, `max_ticks`). Concept and variable reference:
 `@../hyperloom-remote-demo.md`. Optimizer skill: `@${HYPERLOOM_SKILL_PATH}`
-(fallback `@../../src/hyperloom/inference_optimizer/SKILL.md`).
+(fallback `@../../../../src/hyperloom/inference_optimizer/SKILL.md`).
 
 ## Prerequisites
 

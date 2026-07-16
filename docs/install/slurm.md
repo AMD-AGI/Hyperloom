@@ -144,8 +144,8 @@ clones `main` from GitHub at runtime, which requires GitHub egress on the node.
 ./submit.sh -b claude dsv4pro_sglang
 ```
 
-Model keys shipped in `models.tsv`: `dsv4pro_sglang`, `dsv4pro_vllm`,
-`dsv4flash_vllm`, `dsv4flash_sglang`.
+Model keys shipped in `models.tsv`: `dsv4pro_sglang`, `dsv4pro_vllm`, `gptoss_vllm`,
+`dsv4pro_vllm_local`, `dsv4pro_vllm_v24`.
 
 Useful `submit.sh` options (run `./submit.sh --help` for the full list):
 
