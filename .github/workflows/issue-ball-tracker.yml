@@ -20,7 +20,8 @@ name: Track Issue Reply Ownership
 # named by the SAFE_TEAM_SLUG repository variable, using the
 # SAFE_TEAM_READ_TOKEN secret (OAuth or PAT with read:org).
 # If the live fetch fails (token expired, org policy change, network),
-# the workflow falls back to a baked-in list so labeling still works.
+# the workflow falls back to SAFE_TEAM_FALLBACK_JSON. If both are unavailable,
+# it fails closed and does not mutate labels.
 
 on:
   issue_comment:
@@ -89,6 +90,10 @@ jobs:
             const source = process.env.SAFE_TEAM_SOURCE;
             const safeSet = new Set(SAFE_TEAM.map(s => s.toLowerCase()));
             core.info(`SaFE roster (${source}, ${safeSet.size} members): ${[...safeSet].join(', ')}`);
+            if (safeSet.size === 0) {
+              core.setFailed('SaFE team roster is empty; configure SAFE_TEAM_SLUG or SAFE_TEAM_FALLBACK_JSON before mutating issue labels.');
+              return;
+            }
 
             const AWAIT_LABEL = 'awaiting-author-response';
             const STALE_LABEL = 'stale';

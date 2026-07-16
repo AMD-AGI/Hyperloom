@@ -97,6 +97,10 @@ jobs:
             const hoursThreshold = parseFloat(process.env.HOURS_THRESHOLD) || 48;
 
             core.info(`SaFE roster (${source}, ${safeSet.size}): ${[...safeSet].join(', ')}`);
+            if (safeSet.size === 0) {
+              core.setFailed('SaFE team roster is empty; configure SAFE_TEAM_SLUG or SAFE_TEAM_FALLBACK_JSON before mutating issues.');
+              return;
+            }
             core.info(`Dry-run: ${dryRun}`);
             core.info(`Hours threshold: ${hoursThreshold}`);
             core.info('');
