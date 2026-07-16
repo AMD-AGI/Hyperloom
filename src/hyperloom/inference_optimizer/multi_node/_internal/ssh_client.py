@@ -26,7 +26,6 @@ from __future__ import annotations
 import base64
 import os
 import re
-import secrets
 import shlex
 import subprocess
 from pathlib import Path
@@ -41,16 +40,6 @@ from .log import info, warn
 # loses the IPv4 :2222 bind and the controller's SSH hits the node sshd (wrong
 # key -> Permission denied). Use a higher, unused base to avoid both.
 DEFAULT_SSH_PORT = 2233
-_AGENT_ENV_RE = re.compile(r"^(SSH_AUTH_SOCK|SSH_AGENT_PID)=([^;]+);")
-
-
-def _keep_passphrase_cache_enabled() -> bool:
-    return str(os.environ.get("HYPERLOOM_MN_KEEP_SSH_PASSPHRASE_CACHE", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 def _ssh_common_opts(known_hosts: Path) -> list[str]:
@@ -84,76 +73,6 @@ def _ssh_common_opts(known_hosts: Path) -> list[str]:
     ]
 
 
-def _start_session_ssh_agent() -> dict[str, str]:
-    """Start an ssh-agent for passphrase-protected session keys."""
-    proc = subprocess.run(
-        ["ssh-agent", "-s"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"ssh-agent failed rc={proc.returncode}: {proc.stderr.strip()}")
-    env: dict[str, str] = {}
-    for line in proc.stdout.splitlines():
-        match = _AGENT_ENV_RE.match(line.strip())
-        if match:
-            env[match.group(1)] = match.group(2)
-    if "SSH_AUTH_SOCK" not in env:
-        raise RuntimeError("ssh-agent did not report SSH_AUTH_SOCK")
-    os.environ.update(env)
-    return env
-
-
-def _passphrase_cache_path(priv: Path) -> Path:
-    """Session-scoped passphrase cache for reloading encrypted ephemeral keys."""
-    return priv.with_suffix(".pass")
-
-
-def _add_key_to_agent(priv: Path, passphrase: str, *, keep_passphrase_cache: bool = False) -> None:
-    """Load ``priv`` into ssh-agent via askpass.
-
-    ``keep_passphrase_cache`` is used for session keys so a restarted
-    orchestrator can re-add the encrypted key that already-authorized pods
-    trust. The askpass script remains temporary and is always deleted.
-    """
-    agent_env = {"SSH_AUTH_SOCK": os.environ.get("SSH_AUTH_SOCK", "")}
-    if not agent_env["SSH_AUTH_SOCK"]:
-        agent_env = _start_session_ssh_agent()
-
-    passfile = _passphrase_cache_path(priv)
-    askpass = priv.with_name("mn_ssh_askpass.sh")
-    passfile.write_text(passphrase, encoding="utf-8")
-    askpass.write_text(f"#!/bin/sh\ncat {shlex.quote(str(passfile))}\n", encoding="utf-8")
-    passfile.chmod(0o600)
-    askpass.chmod(0o700)
-    env = {
-        **os.environ,
-        **agent_env,
-        "SSH_ASKPASS": str(askpass),
-        "SSH_ASKPASS_REQUIRE": "force",
-        "DISPLAY": os.environ.get("DISPLAY") or "none:0",
-    }
-    try:
-        proc = subprocess.run(
-            ["ssh-add", str(priv)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-            stdin=subprocess.DEVNULL,
-        )
-    finally:
-        cleanup = (askpass,) if keep_passphrase_cache else (passfile, askpass)
-        for p in cleanup:
-            try:
-                p.unlink()
-            except FileNotFoundError:
-                pass
-    if proc.returncode != 0:
-        raise RuntimeError(f"ssh-add failed rc={proc.returncode}: {proc.stderr.strip()}")
-
-
 def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     """Generate (or reuse) an ed25519 keypair under ``dest_dir``.
 
@@ -178,18 +97,6 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     priv = dest_dir / "mn_id_ed25519"
     pub = dest_dir / "mn_id_ed25519.pub"
     if priv.is_file() and pub.is_file():
-        passfile = _passphrase_cache_path(priv)
-        if passfile.is_file():
-            _add_key_to_agent(
-                priv,
-                passfile.read_text(encoding="utf-8").strip(),
-                keep_passphrase_cache=True,
-            )
-        else:
-            warn(
-                f"reusing existing SSH key {priv} without passphrase cache; "
-                "the key must already be loaded in SSH_AUTH_SOCK for BatchMode SSH"
-            )
         return priv, pub.read_text(encoding="utf-8").strip()
     # Remove any half-written remnant before regenerating.
     for p in (priv, pub):
@@ -197,14 +104,13 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
             p.unlink()
         except FileNotFoundError:
             pass
-    passphrase = secrets.token_urlsafe(32)
     proc = subprocess.run(
         [
             "ssh-keygen",
             "-t",
             "ed25519",
             "-N",
-            passphrase,
+            "",
             "-q",
             "-C",
             "hyperloom-mn-infera",
@@ -218,7 +124,6 @@ def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
     if proc.returncode != 0:
         raise RuntimeError(f"ssh-keygen failed rc={proc.returncode}: {proc.stderr.strip()}")
     priv.chmod(0o600)
-    _add_key_to_agent(priv, passphrase, keep_passphrase_cache=_keep_passphrase_cache_enabled())
     pub_str = pub.read_text(encoding="utf-8").strip()
     info(f"generated session SSH keypair at {priv}")
     return priv, pub_str

@@ -63,17 +63,19 @@ def test_assert_forward_env_keys_raises():
 
 def test_common_env_safety_filters_workload_dotenv_and_kernel_agent_keys():
     assert common_env_safety.is_allowed_workload_env_key("SGLANG_USE_AITER_FP8_PER_TOKEN")
+    assert common_env_safety.is_allowed_workload_env_key("HF_TOKEN")
     assert common_env_safety.is_allowed_workload_env_key("EXTRA_SGLANG_ARGS")
     assert not common_env_safety.is_allowed_workload_env_key("OPENAI_API_KEY")
     assert not common_env_safety.is_allowed_workload_env_key("LD_PRELOAD")
 
     assert common_env_safety.is_allowed_dotenv_key("OPENAI_API_KEY")
+    assert common_env_safety.is_allowed_dotenv_key("HF_TOKEN")
+    assert common_env_safety.is_allowed_dotenv_key("HTTPS_PROXY")
     assert common_env_safety.is_allowed_dotenv_key("HYPERLOOM_RUNTIME_DIR")
     assert not common_env_safety.is_allowed_dotenv_key("PYTHONPATH")
     assert not common_env_safety.is_allowed_dotenv_key("BAD-NAME")
 
     assert common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_ROOT")
-    assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_MN_KEEP_SSH_PASSPHRASE_CACHE")
     assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS")
     assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
     assert common_env_safety.is_allowed_kernel_agent_env_key("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS")
@@ -88,7 +90,7 @@ def test_common_env_safety_filters_workload_dotenv_and_kernel_agent_keys():
         },
         allow_predicate=common_env_safety.is_allowed_workload_env_key,
     )
-    assert allowed == {"BENCH_FOO": "1"}
+    assert allowed == {"bench_foo": "1"}
     assert dropped == {
         "OPENAI_API_KEY": "not_allowed",
         "bad key": "invalid_env_key",

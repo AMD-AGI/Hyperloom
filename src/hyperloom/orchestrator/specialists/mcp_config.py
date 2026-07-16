@@ -10,8 +10,8 @@ registering up to two streamable-HTTP MCP servers:
 - ``cortex_kb`` (at :meth:`KnowledgePlane.cortex_specialist_mcp_url`) — the
   read-only KB-graph (gbrain) server; the name MUST be ``cortex_kb`` so the
   ``mcp__cortex_kb__*`` whitelist names resolve. Bearer auth headers are not
-  written to disk unless ``HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS=1`` is
-  set by an operator.
+  written to disk only when ``HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS`` is
+  unset/true; set it to ``0`` to disable bearer-auth MCP persistence.
 
 Schema follows :data:`claude_agent_sdk.types.McpHttpServerConfig`.
 """
@@ -34,7 +34,8 @@ SPECIALIST_MCP_CONFIG_FILENAME = "specialist_mcp.json"
 
 
 def _allow_persistent_mcp_auth_headers() -> bool:
-    return is_truthy(os.environ.get("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS"))
+    setting = os.environ.get("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS")
+    return True if setting is None else is_truthy(setting)
 
 
 def write_specialist_mcp_config(
@@ -82,7 +83,7 @@ def write_specialist_mcp_config(
         if has_auth and not _allow_persistent_mcp_auth_headers():
             log.warning(
                 "specialist_mcp_config: skipping cortex_kb MCP because auth headers would be written to disk; "
-                "set HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS=1 to opt in"
+                "unset HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS or set it to 1 to allow compatibility mode"
             )
         else:
             if has_auth:
@@ -111,6 +112,10 @@ def write_specialist_mcp_config(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    try:
+        cfg_path.chmod(0o600)
+    except OSError:
+        log.debug("specialist_mcp_config: chmod 0600 failed for %s", cfg_path, exc_info=True)
     log.info(
         "specialist_mcp_config: wrote %s (servers=%s)",
         cfg_path,

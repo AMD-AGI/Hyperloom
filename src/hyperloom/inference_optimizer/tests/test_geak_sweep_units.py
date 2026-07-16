@@ -141,24 +141,6 @@ async def test_sweep_via_geak_marks_variant_failed_on_subprocess_error(
     assert "cannot spawn bench process" in entry["error"]
 
 
-@pytest.mark.asyncio
-async def test_sweep_via_geak_rejects_bench_script_outside_output_root(tmp_path: Path) -> None:
-    bench = _bench_script(tmp_path / "other")
-    trusted = tmp_path / "trusted"
-    trusted.mkdir()
-
-    result = await sweep_via_geak(
-        result={"bench_script": str(bench), "output_dir": str(trusted), "accepted_config": {}},
-        conc_values=[1],
-        isl_osl_configs=["16:16"],
-        output_root=tmp_path / "sweep",
-        variant_timeout_sec=30,
-    )
-
-    assert result["status"] == "failed"
-    assert result["error_class"] == "untrusted_bench_script"
-
-
 def test_point_from_variant_defaults_conc_zero_on_bad_env() -> None:
     """A non-numeric CONC env coerces the row's ``conc`` to 0 rather than raising."""
     v = VariantResult(

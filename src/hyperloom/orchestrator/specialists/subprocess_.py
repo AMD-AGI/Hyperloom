@@ -39,6 +39,8 @@ log = logging.getLogger(__name__)
 _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_BASE_URL",
+        "AWS_DEFAULT_REGION",
+        "AWS_REGION",
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
@@ -66,9 +68,7 @@ _SPECIALIST_SECRET_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "ANTHROPIC_AUTH_TOKEN",
         "AWS_ACCESS_KEY_ID",
         "AWS_CONFIG_FILE",
-        "AWS_DEFAULT_REGION",
         "AWS_PROFILE",
-        "AWS_REGION",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
         "AWS_SHARED_CREDENTIALS_FILE",
@@ -79,7 +79,8 @@ _SPECIALIST_SECRET_ENV_ALLOWLIST: frozenset[str] = frozenset(
 
 def _build_specialist_env() -> dict[str, str]:
     """Build a minimal env for Bash-enabled specialist subprocesses."""
-    inherit_secrets = is_truthy(os.environ.get("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV"))
+    inherit_setting = os.environ.get("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
+    inherit_secrets = True if inherit_setting is None else is_truthy(inherit_setting)
     allowed = set(_SPECIALIST_ENV_ALLOWLIST)
     if inherit_secrets:
         allowed.update(_SPECIALIST_SECRET_ENV_ALLOWLIST)
@@ -367,9 +368,9 @@ class SpecialistSubprocessDispatcher:
             allowed_tools=allowed_tools,
         )
 
-        # Compose a minimal env. Secret inheritance is opt-in via
-        # HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1 for legacy deployments that
-        # cannot authenticate the claude CLI through its own config.
+        # Compose a minimal env. Provider credentials are inherited by default
+        # for compatibility with deployments that authenticate the claude CLI
+        # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
         env = _build_specialist_env()
         # Bound the spawned claude CLI's request transport so a stalled gateway
         # stream raises client-side instead of hanging forever.

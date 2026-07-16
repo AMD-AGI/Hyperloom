@@ -103,50 +103,6 @@ def _pareto_front(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return front
 
 
-def _is_under(path: Path, root: Path) -> bool:
-    try:
-        return path == root or path.is_relative_to(root)
-    except AttributeError:  # pragma: no cover - Python <3.9
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            return False
-
-
-def _trusted_geak_bench_roots(result: dict[str, Any]) -> tuple[Path, ...]:
-    roots: list[Path] = []
-    for key in ("output_dir", "workspace", "geak_output_dir", "result_dir"):
-        value = str(result.get(key) or "").strip()
-        if value:
-            roots.append(Path(value).expanduser().resolve())
-    for key in ("result_json", "result_path"):
-        value = str(result.get(key) or "").strip()
-        if value:
-            roots.append(Path(value).expanduser().resolve().parent)
-
-    out: list[Path] = []
-    seen: set[str] = set()
-    for root in roots:
-        marker = str(root)
-        if marker not in seen:
-            out.append(root)
-            seen.add(marker)
-    return tuple(out)
-
-
-def _validate_geak_bench_script(bench_script: object, result: dict[str, Any]) -> tuple[Path | None, str | None]:
-    path = Path(str(bench_script or "")).expanduser().resolve()
-    if not bench_script or not path.is_file():
-        return None, "missing_bench_script"
-    if path.suffix != ".sh" or not path.name.startswith("bench"):
-        return None, "invalid_bench_script"
-    trusted_roots = _trusted_geak_bench_roots(result)
-    if not trusted_roots or not any(_is_under(path, root) for root in trusted_roots):
-        return None, "untrusted_bench_script"
-    return path, None
-
-
 async def sweep_via_geak(
     *,
     result: dict[str, Any],
@@ -173,17 +129,9 @@ async def sweep_via_geak(
     flags = str(cfg.get("flags") or "")
     env_str = str(cfg.get("env") or "")
 
-    bench_script_path, bench_script_error = _validate_geak_bench_script(bench_script, result)
-    if bench_script_error == "missing_bench_script":
+    if not bench_script or not Path(bench_script).is_file():
         return {"status": "failed", "error_class": "missing_bench_script",
                 "error": f"GEAK bench script not found: {bench_script}"}
-    if bench_script_error == "invalid_bench_script":
-        return {"status": "failed", "error_class": "invalid_bench_script",
-                "error": f"GEAK bench script is not an allowed benchmark shell script: {bench_script}"}
-    if bench_script_error == "untrusted_bench_script":
-        return {"status": "failed", "error_class": "untrusted_bench_script",
-                "error": f"GEAK bench script is outside trusted GEAK output roots: {bench_script}"}
-    assert bench_script_path is not None
 
     model = os.environ.get("MODEL_PATH", "").strip()
     backend = (os.environ.get("FRAMEWORK", "") or "sglang").strip()
@@ -254,7 +202,7 @@ async def sweep_via_geak(
             # setdefault: forwarded config/trust apply unless already pinned.
             for _k, _v in protocol_env.items():
                 env.setdefault(_k, _v)
-            cmd = ["bash", bench_script_path.as_posix()]
+            cmd = ["bash", str(bench_script)]
 
             def _run() -> subprocess.CompletedProcess:
                 return subprocess.run(

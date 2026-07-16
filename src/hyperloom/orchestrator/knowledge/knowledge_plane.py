@@ -31,7 +31,8 @@ def _has_persistent_secret_header(headers: dict[str, str]) -> bool:
 
 
 def _allow_persistent_mcp_auth_headers() -> bool:
-    return is_truthy(os.environ.get("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS"))
+    setting = os.environ.get("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS")
+    return True if setting is None else is_truthy(setting)
 
 
 @dataclass

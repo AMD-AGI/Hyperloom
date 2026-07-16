@@ -66,12 +66,17 @@ WORKLOAD_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "EP",
         "GPU_METRICS_CSV",
         "HIP_VISIBLE_DEVICES",
+        "HF_HOME",
+        "HF_TOKEN",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
         "HSA_FORCE_FINE_GRAIN_PCIE",
         "ISL",
         "MAX_MODEL_LEN",
         "MODEL_PATH",
         "NUM_PROMPTS",
         "NUM_WARMUPS",
+        "NO_PROXY",
         "OSL",
         "PORT",
         "PROFILE",
@@ -91,6 +96,7 @@ WORKLOAD_ENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "BENCH_",
     "CUDA_",
     "FLASHINFER_",
+    "HF_",
     "HIP_",
     "HSA_",
     "HYPERLOOM_PROFILE_",
@@ -121,6 +127,11 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "FRAMEWORK",
         "GEAK_CLAUDE_MODEL",
         "HIP_PATH",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HF_TOKEN",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
         "HYPERLOOM_BENCHMARK_BACKEND",
         "HYPERLOOM_DOCKER_TARGET_HOST",
         "HYPERLOOM_FRAMEWORK_ENV",
@@ -134,6 +145,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "KERNEL_AGENT_ENV",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
+        "NO_PROXY",
         "ROCM_PATH",
         "SAFE_API_KEY",
         "SGLANG_ROCM_EXTRA",
@@ -149,6 +161,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
 DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "AITER_",
     "GEAK_",
+    "HF_",
     "HYPERLOOM_",
     "INFERENCE_OPTIMIZER_",
     "SGLANG_",
@@ -168,7 +181,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "GEAK_SCORE_TARGET",
         "GEAK_SKIP_PROFILE",
         "HYPERLOOM_KERNEL_AGENT_ROOT",
-        "HYPERLOOM_MN_KEEP_SSH_PASSPHRASE_CACHE",
         "HYPERLOOM_ROOT",
         "HYPERLOOM_RUNTIME_DIR",
         "HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS",
@@ -206,7 +218,7 @@ def is_blocked_untrusted_env_key(key: object) -> bool:
 def is_allowed_workload_env_key(key: object) -> bool:
     name = str(key or "").strip()
     upper = name.upper()
-    if is_blocked_untrusted_env_key(upper):
+    if not valid_env_key(upper) or upper in BLOCKED_UNTRUSTED_ENV_NAMES:
         return False
     return (
         upper in WORKLOAD_ENV_EXACT_ALLOWLIST
@@ -251,7 +263,7 @@ def filter_untrusted_env_mapping(
         if not allow_predicate(upper):
             dropped[name] = "not_allowed"
             continue
-        allowed[upper] = str(value)
+        allowed[name] = str(value)
     return allowed, dropped
 
 

@@ -121,11 +121,7 @@ as a public configuration API.
 Multi-node SSH fanout creates session-scoped keys under the active session
 directory. Treat `mn_id_ed25519` and `mn_id_ed25519.pub` as sensitive session
 artifacts: keep the session directory on an access-controlled filesystem and
-do not publish it unchanged in support bundles. By default the passphrase used
-to load encrypted keys into `ssh-agent` is not cached on disk. Set
-`HYPERLOOM_MN_KEEP_SSH_PASSPHRASE_CACHE=1` only when a restarted orchestrator
-must re-add an already-authorized encrypted key; that creates the sensitive
-reload cache `mn_id_ed25519.pass`.
+do not publish it unchanged in support bundles.
 
 ---
 
@@ -150,21 +146,20 @@ The following variables configure framework source discovery and path overrides.
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_STRICT_PATHS`                | `1` when CLI bootstraps                                                | When `1`, missing path env raises instead of falling back to discovery. Set by the CLI at session start; do not override unless debugging.              |
 | `HYPERLOOM_`<br>`SGLANG_PA`<br>`TCH_EXACT`<br>`_VERSIONS`           | Unset                                                                  | Pin the sglang server-patch step to specific upstream versions; advanced compatibility option.                                                          |
 | `HYPERLOOM_`<br>`ENABLE`<br>`_PATCH`                          | `1`                                                                    | Set to `0` to skip the in-place server patch step (useful when the upstream is already pre-patched).                                                    |
-| `SGLANG_ROCM_INDEX_URL` | Unset | Optional ROCm wheel index for bare-metal SGLang wheel installs, for example an operator-approved AMD ROCm PyPI mirror. The public installer intentionally does not bake in an internal index URL. |
-| `AITER_REF` | Unset | Bare-metal AITER install pin. Production installs require a 40-character commit SHA. |
-| `AITER_ALLOW_UNPINNED` | `0` | Set to `1` only for local compatibility exploration that may auto-select tags or use non-SHA AITER refs. |
+| `AITER_REF` | Unset | Optional bare-metal AITER install pin. When unset, the installer selects the newest tag compatible with the installed torch/triton stack. |
 
 ---
 
-## Security compatibility opt-ins
+## Security compatibility switches
 
-These switches restore legacy behavior only when an operator explicitly accepts
-the blast radius. Leave them unset for normal runs.
+These switches keep production-compatible behavior by default while still
+allowing operators to turn off credential/env persistence in hardened
+deployments.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`0`) | Lets the Bash-enabled specialist subprocess inherit a limited credential set: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. This is for deployments that cannot authenticate the `claude` CLI through its own settings; unrelated secrets such as GitHub and KB tokens remain blocked. |
-| `HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS` | Unset (`0`) | Allows the specialist MCP config file to include auth headers such as `Authorization` for `cortex_kb`. Leave unset to avoid persisting bearer tokens; set to `1` only when the session runtime directory is access-controlled and Cortex KB requires bearer auth. |
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Bash-enabled specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS` | Unset (`1`) | Allows the specialist MCP config file to include auth headers such as `Authorization` for `cortex_kb` by default for production compatibility. The generated config is chmod `0600`. Set to `0` to skip bearer-auth Cortex KB MCP wiring when no auth header should be persisted. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
