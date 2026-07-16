@@ -13,8 +13,7 @@
 #
 # Issue #194 §5: `--enable-shape-discovery-for-cuda-graph-profile` is
 # *not* in upstream SGLang argparse — it comes from the TraceLens patch
-# set at TraceLens-internal/examples/custom_workflows/inference_analysis/
-# sglang_roofline_patches/. Hyperloom's runtime patcher
+# set from a private TraceLens extension patch set. Hyperloom's runtime patcher
 # (HYPERLOOM_ENABLE_PATCH=1, default) tries to apply the 10-patch
 # atomic transaction to the in-container SGLang install at the start
 # of every profile, but only when the installed SGLang version matches
@@ -32,7 +31,7 @@
 benchmark:
   framework: sglang
   # benchmark_script: sglang_mi300x.sh  # uncomment to force a specific Magpie script
-  model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
+  model: /models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
   precision: bf16
   run_mode: local
 

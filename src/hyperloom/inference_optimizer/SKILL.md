@@ -52,7 +52,7 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
 ├── runtime/                              # workspace-shared (install.sh, Magpie, kernel-agent.env.sh)
 │   ├── kernel-agent.env.sh
 │   ├── Magpie/
-│   └── source-mirrors/{InferenceX,TraceLens[,TraceLens-internal]}/
+│   └── source-mirrors/{InferenceX,TraceLens[,tracelens-private-extension]}/
 │       # Open-source deps are installed by install.sh.
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
@@ -131,7 +131,7 @@ URL/path). The per-version
 TraceLens is required by `_server_patcher`),
 `/sgl-workspace/{aiter,sglang,vllm}/`,
 `~/.cache/amd-ai-devtool/semantic-index/`
-(GEAK RAG embedding cache), `/wekafs/hyperloom/geak-memory/memory.db`
+(GEAK RAG embedding cache), `/shared/hyperloom/geak-memory/memory.db`
 (GEAK cross-session memory). Each is overridable via its own env if
 you want a fully self-contained session.
 
@@ -351,7 +351,7 @@ of `src/hyperloom/inference_optimizer/assets/install.sh`):
 |---|---|
 | `ray==2.44.1` + `click<8.3.0` | pip |
 | TraceLens public (editable install) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_ROOT`; skills, patches, CLI, analysis orchestrator) |
-| TraceLens-internal (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/TraceLens-internal`; rehydration module). Unset => open-source-only. |
+| Private TraceLens extension (editable install, **optional**) | `ensure_tracelens` (`pip install -e` at `$TRACELENS_INTERNAL_ROOT` only when set; mirrors read-only checkout to `${HYPERLOOM_ROOT}/tracelens-private-extension`; rehydration module). Unset => open-source-only. |
 | GEAKv4 Claude Code workflow checkout + SDK deps | `ensure_geak` |
 
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}` is
@@ -523,8 +523,8 @@ export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # pre-existing checkout you maintain; this skips both the clone and the
 # SHA pin.
 # export TRACELENS_ROOT=/path/to/your/TraceLens
-# Optional internal extension; export only to enable it (open-source-only if unset):
-# export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
+# Optional private extension; export only to enable it (open-source-only if unset):
+# export TRACELENS_INTERNAL_ROOT=/workspace/tracelens-private-extension
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
@@ -588,7 +588,7 @@ In sandboxes where `/workspace/hyperloom` is unwritable, override the
 **workspace root** with `USER_DATA_PATH` (not the per-session subdir):
 
 ```bash
-export USER_DATA_PATH="/wekafs/xiaofei/sessions"   # workspace root
+export USER_DATA_PATH="/shared/hyperloom-sessions"   # workspace root
 mkdir -p "$USER_DATA_PATH"
 ```
 

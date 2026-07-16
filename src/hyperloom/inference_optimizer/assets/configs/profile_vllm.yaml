@@ -17,7 +17,7 @@
 # Issue #194 §4: `capture_torch_profiler_dir` and
 # `detailed_trace_annotation` are *not* in upstream vLLM 0.19 — they
 # come from the TraceLens patch set at
-# TraceLens-internal/examples/custom_workflows/inference_analysis/vllm_patches/.
+# a private TraceLens extension patch set.
 # Hyperloom's runtime patcher (HYPERLOOM_ENABLE_PATCH=1, default) tries
 # to apply the matching `config_vllm_v<version>.patch` against the
 # in-container vLLM install at the start of every profile. If patching
@@ -30,7 +30,7 @@
 benchmark:
   framework: vllm
   # benchmark_script: vllm_mi300x.sh  # uncomment to force a specific Magpie script
-  model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
+  model: /models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
   precision: bf16
   run_mode: local
 
