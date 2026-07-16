@@ -129,7 +129,7 @@ def _port_free(port: int) -> bool:
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        s.bind(("0.0.0.0", port))
+        s.bind(("0.0.0.0", port))  # nosec B104 - bind probe checks whether the public service port is free.
         return True
     except OSError:
         return False

@@ -737,8 +737,14 @@ def _kill_stale_servers() -> None:
                 # Already exited or owned by another user.
                 pass
 
-    # Clear /dev/shm segments that prevent re-binding.
-    for pattern in ("/dev/shm/vllm*", "/dev/shm/nccl*", "/dev/shm/cuda*", "/dev/shm/torch*", "/dev/shm/atom*"):
+    # Clear GPU runtime shared-memory segments that prevent re-binding.
+    for pattern in (  # nosec B108 - intentionally targets known /dev/shm runtime prefixes.
+        "/dev/shm/vllm*",
+        "/dev/shm/nccl*",
+        "/dev/shm/cuda*",
+        "/dev/shm/torch*",
+        "/dev/shm/atom*",
+    ):
         for f in glob.glob(pattern):
             try:
                 os.remove(f)

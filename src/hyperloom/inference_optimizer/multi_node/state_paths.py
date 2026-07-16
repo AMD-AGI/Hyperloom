@@ -5,13 +5,14 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import tempfile
 from pathlib import Path
 
 from ..session.paths import ENV_CURRENT_SESSION_DIR
 
 from ._internal.log import warn
 
-_LEGACY_STATE_FILE = Path("/tmp/multi_node_state.json")
+_LEGACY_STATE_FILE = Path(tempfile.gettempdir()) / "multi_node_state.json"
 _RUNTIME_REL = Path("runtime") / "multi_node_state.json"
 
 
