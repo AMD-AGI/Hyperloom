@@ -52,8 +52,11 @@ def test_legit_manifest_reverts(tmp_path):
     )
     res = apk.revert_kernel_patch(mf)
     assert res["status"] == "ok"
+    assert "skipped_untrusted_backups" not in res
     assert target.read_text(encoding="utf-8") == "original\n"
     assert str(target) in res["restored_paths"]
+    manifest = json.loads(mf.read_text(encoding="utf-8"))
+    assert manifest["status"] == "reverted"
 
 
 def test_tampered_backup_path_is_skipped(tmp_path):
@@ -77,9 +80,19 @@ def test_tampered_backup_path_is_skipped(tmp_path):
         },
     )
     res = apk.revert_kernel_patch(mf)
+    assert res["status"] == "partial"
+    assert res["skipped_untrusted_backups"] == [
+        {
+            "kind": "source_backup",
+            "path": str(target),
+            "backup_path": str(secret),
+        }
+    ]
     # Skipped: target not overwritten with the secret file's bytes.
     assert target.read_text(encoding="utf-8") == "patched\n"
     assert str(target) not in res["restored_paths"]
+    manifest = json.loads(mf.read_text(encoding="utf-8"))
+    assert manifest["status"] == "reverted_partial"
 
 
 def test_tampered_artifact_backup_path_is_skipped(tmp_path):
@@ -102,6 +115,14 @@ def test_tampered_artifact_backup_path_is_skipped(tmp_path):
         },
     )
     res = apk.revert_kernel_patch(mf)
+    assert res["status"] == "partial"
+    assert res["skipped_untrusted_backups"] == [
+        {
+            "kind": "artifact",
+            "path": str(target),
+            "backup_path": str(secret),
+        }
+    ]
     assert target.read_text(encoding="utf-8") == "real-artifact\n"
     assert str(target) not in res["restored_paths"]
 
@@ -130,5 +151,13 @@ def test_source_backups_tampered_backup_path_is_skipped(tmp_path):
         },
     )
     res = apk.revert_kernel_patch(mf)
+    assert res["status"] == "partial"
+    assert res["skipped_untrusted_backups"] == [
+        {
+            "kind": "source_backups",
+            "path": str(target),
+            "backup_path": str(secret),
+        }
+    ]
     assert target.read_text(encoding="utf-8") == "patched2\n"
     assert str(target) not in res["restored_paths"]

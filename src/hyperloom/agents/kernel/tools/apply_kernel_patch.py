@@ -1343,10 +1343,18 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     # the apply-time backup tree (this manifest's own directory).
     backup_root = manifest_file.resolve().parent
     restored: list[str] = []
+    skipped_untrusted_backups: list[dict[str, str]] = []
     for item in manifest.get("artifacts", []):
         src = Path(item["backup_path"])
         dst = Path(item["path"])
         if not _revert_backup_trusted(item.get("backup_path", ""), backup_root):
+            skipped_untrusted_backups.append(
+                {
+                    "kind": "artifact",
+                    "path": str(item.get("path", "")),
+                    "backup_path": str(item.get("backup_path", "")),
+                }
+            )
             log.warning("revert: skipping artifact with untrusted backup_path %r", item.get("backup_path"))
             continue
         if src.exists():
@@ -1365,10 +1373,19 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
                 restored.append(str(dst))
             else:
                 bp = entry.get("backup_path")
-                if bp and _revert_backup_trusted(bp, backup_root) and Path(bp).exists():
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(bp, dst, follow_symlinks=False)
-                    restored.append(str(dst))
+                if bp:
+                    if not _revert_backup_trusted(bp, backup_root):
+                        skipped_untrusted_backups.append(
+                            {
+                                "kind": "source_backups",
+                                "path": str(entry.get("path", "")),
+                                "backup_path": str(bp),
+                            }
+                        )
+                    elif Path(bp).exists():
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(bp, dst, follow_symlinks=False)
+                        restored.append(str(dst))
             if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES and not cache_cleared:
                 manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
                 cache_cleared = True
@@ -1376,10 +1393,15 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     if not source_backups and source_backup:
         src = Path(source_backup["backup_path"])
         dst = Path(source_backup["path"])
-        if (
-            _revert_backup_trusted(source_backup.get("backup_path", ""), backup_root)
-            and src.exists()
-        ):
+        if not _revert_backup_trusted(source_backup.get("backup_path", ""), backup_root):
+            skipped_untrusted_backups.append(
+                {
+                    "kind": "source_backup",
+                    "path": str(source_backup.get("path", "")),
+                    "backup_path": str(source_backup.get("backup_path", "")),
+                }
+            )
+        elif src.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             restored.append(str(dst))
@@ -1418,18 +1440,22 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
                 mn_revert = {"status": "failed", "error": str(exc)}
 
     reverted_at = utc_now()
-    manifest["status"] = "reverted"
+    manifest["status"] = "reverted_partial" if skipped_untrusted_backups else "reverted"
     manifest["reverted_at"] = reverted_at
     manifest["restored_paths"] = restored
+    if skipped_untrusted_backups:
+        manifest["skipped_untrusted_backups"] = skipped_untrusted_backups
     if mn_revert:
         manifest["multinode_revert"] = mn_revert
     manifest_file.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     result: dict[str, Any] = {
-        "status": "ok",
+        "status": "partial" if skipped_untrusted_backups else "ok",
         "manifest_path": str(manifest_file),
         "restored_paths": restored,
         "reverted_at": reverted_at,
     }
+    if skipped_untrusted_backups:
+        result["skipped_untrusted_backups"] = skipped_untrusted_backups
     # Only attach multinode_revert when fan-out actually ran.
     if mn_revert:
         result["multinode_revert"] = mn_revert
