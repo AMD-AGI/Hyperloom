@@ -35,6 +35,7 @@ class _StubSharedState:
     warm_replay_outcome: dict = field(default_factory=dict)
     warm_history_injected: bool = False
     auto_roofline_pending_task_id: str = ""
+    stop_reason: str = ""
     enable_roofline: bool = True
     last_baseline: dict = field(default_factory=dict)
     explore_search: dict = field(default_factory=dict)
@@ -685,6 +686,31 @@ async def test_prelude_initial_analysis_enqueued_after_warm_replay_finishes(
     assert len(coord.tasks.calls) == 2
     assert coord.tasks.calls[1]["idempotency_key"] == ("internal-analysis-prelude_initial")
     assert coord.shared_state.auto_roofline_pending_task_id
+
+
+def test_prelude_bootstrap_runs_on_positive_baseline(tmp_path):
+    coord = _make_coord(tmp_path)
+    assert coord._should_run_prelude_bootstrap(600.0) is True
+
+
+def test_prelude_bootstrap_skipped_without_throughput(tmp_path):
+    coord = _make_coord(tmp_path)
+    assert coord._should_run_prelude_bootstrap(0.0) is False
+    assert coord._should_run_prelude_bootstrap(None) is False
+
+
+def test_prelude_bootstrap_skipped_when_roofline_pending(tmp_path):
+    coord = _make_coord(tmp_path)
+    coord.shared_state.auto_roofline_pending_task_id = "task-roofline"
+    assert coord._should_run_prelude_bootstrap(600.0) is False
+
+
+def test_prelude_bootstrap_skipped_when_stop_pending(tmp_path):
+    """A baseline that halted the run (e.g. baseline_accuracy_failed) must not
+    enqueue/dispatch any post-baseline bootstrap work before the halt fires."""
+    coord = _make_coord(tmp_path)
+    coord.shared_state.stop_reason = "baseline_accuracy_failed"
+    assert coord._should_run_prelude_bootstrap(600.0) is False
 
 
 def test_inject_warm_recipe_history_skips_when_no_recipe(tmp_path):
