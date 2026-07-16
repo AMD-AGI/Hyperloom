@@ -149,6 +149,16 @@ def _rescue_candidate_paths(
         else:
             _push(p)
 
+    # Env-derived dirs: the InferenceX checkout ($INFERENCEX_PATH), where
+    # append_lm_eval_summary's ``mv ./`` lands, plus $RESULT_DIR overrides.
+    for derived in _env_derived_leak_roots():
+        if derived.is_dir():
+            try:
+                for fp in sorted(derived.glob("inferencex_result*.json")):
+                    _push(fp)
+            except OSError:
+                continue
+
     for default in _DEFAULT_RESCUE_PATHS:
         _push(default)
 
@@ -199,12 +209,26 @@ def _materialize_rescue_into_workspace(
     return destination
 
 
+def _env_derived_leak_roots() -> list[Path]:
+    """Leak roots derived from the runtime env: the InferenceX checkout
+    (``$INFERENCEX_PATH``), where ``append_lm_eval_summary``'s ``mv ./`` lands,
+    plus ``$RESULT_DIR`` when an override routed results outside the workspace.
+    """
+    out: list[Path] = []
+    for env_key in ("INFERENCEX_PATH", "RESULT_DIR"):
+        val = (os.environ.get(env_key) or "").strip()
+        if val:
+            out.append(Path(val))
+    return out
+
+
 def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
     """Return the directory roots to scan for wrapper-side leak files.
 
     Order: explicit ``leak_root`` kwarg (tests) →
     ``$INFERENCE_OPTIMIZER_LEAK_ROOTS`` (colon-separated) →
-    :data:`_DEFAULT_LEAK_ARTIFACT_ROOT` (``/workspace``).
+    :data:`_DEFAULT_LEAK_ARTIFACT_ROOT` (``/workspace``) plus the env-derived
+    roots from :func:`_env_derived_leak_roots` (deduped).
 
     Args:
         leak_root: Optional explicit root override (used by tests); when
@@ -220,7 +244,13 @@ def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
         parts = [Path(p.strip()) for p in env_raw.split(":") if p.strip()]
         if parts:
             return tuple(parts)
-    return (_DEFAULT_LEAK_ARTIFACT_ROOT,)
+    roots: list[Path] = [_DEFAULT_LEAK_ARTIFACT_ROOT]
+    seen = {_DEFAULT_LEAK_ARTIFACT_ROOT}
+    for root in _env_derived_leak_roots():
+        if root not in seen:
+            seen.add(root)
+            roots.append(root)
+    return tuple(roots)
 
 
 def harvest_leaked_artifacts(

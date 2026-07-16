@@ -509,6 +509,42 @@ def test_harvest_explicit_leak_root_overrides_env(tmp_path, monkeypatch):
     assert (destination / "server.log").read_text() == "from-explicit"
 
 
+def test_harvest_default_roots_include_inferencex_and_result_dir(tmp_path, monkeypatch):
+    """Without an env override, the default scan roots also cover
+    ``$INFERENCEX_PATH`` (eval ``mv ./`` lands in the checkout) and
+    ``$RESULT_DIR``, not just ``/workspace``."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", raising=False)
+    ix_root = tmp_path / "InferenceX@abc123"
+    result_dir = tmp_path / "session" / "runs"
+    destination = tmp_path / "task"
+    destination.mkdir()
+    _touch(ix_root / "inferencex_result.json", '{"output_throughput": 1.0}')
+    _touch(result_dir / "gpu_metrics.csv", "from-result-dir")
+    monkeypatch.setenv("INFERENCEX_PATH", str(ix_root))
+    monkeypatch.setenv("RESULT_DIR", str(result_dir))
+
+    harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=None)
+    names = {src.name for src, _ in harvested}
+    assert {"inferencex_result.json", "gpu_metrics.csv"} <= names
+
+
+def test_rescue_candidate_paths_scan_inferencex_checkout(tmp_path, monkeypatch):
+    """A leaked ``inferencex_result.json`` in the InferenceX checkout is a
+    rescue candidate via the ``$INFERENCEX_PATH``-derived root."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", raising=False)
+    monkeypatch.setattr(br, "_DEFAULT_RESCUE_PATHS", ())
+    ix_root = tmp_path / "InferenceX@abc123"
+    ix_root.mkdir()
+    leak = ix_root / "inferencex_result.json"
+    leak.write_text("{}")
+    monkeypatch.setenv("INFERENCEX_PATH", str(ix_root))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    out = br._rescue_candidate_paths(ws)
+    assert leak.resolve() in [p.resolve() for p in out]
+
+
 def test_harvest_creates_destination_if_missing(tmp_path):
     """Destination doesn't have to exist before the call."""
     leak_root = tmp_path / "workspace"
