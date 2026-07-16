@@ -168,7 +168,7 @@ def test_multiple_inbox_sections_are_treated_independently():
 
 
 def test_try_parse_payload_typeerror_returns_none():
-    # SWSPLAT-33484: ast.literal_eval raises TypeError (not ValueError/SyntaxError)
+    # ast.literal_eval raises TypeError (not ValueError/SyntaxError)
     # when a payload constructs an unhashable container; the parser must swallow
     # it and return None instead of crashing prepare-review.
     from hyperloom.agents.critic.runtime.inbox_parser import _try_parse_payload
@@ -177,7 +177,7 @@ def test_try_parse_payload_typeerror_returns_none():
 
 
 def test_inbox_row_with_typeerror_payload_is_malformed_not_crash():
-    # SWSPLAT-33484: a proposal row carrying a TypeError-triggering payload must
+    # a proposal row carrying a TypeError-triggering payload must
     # not crash parsing; the row is kept with payload=None and excluded from
     # proposals so the Critic never reviews an unparseable proposal.
     text = _build_prompt(

@@ -2148,7 +2148,7 @@ def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> 
 
 @pytest.mark.asyncio
 async def test_run_action_now_sync_on_loop_thread_emits_audit(coord: Coordinator, monkeypatch, caplog) -> None:
-    # SWSPLAT-33344 (defense-in-depth, log-only): invoking the run_action_now
+    # Defense-in-depth (log-only): invoking the run_action_now
     # sync bridge ON the coordinator loop thread would self-deadlock on
     # fut.result(); the bridge must emit a log-only audit when it detects this.
     # run_coroutine_threadsafe is stubbed so the test never actually blocks.
@@ -2174,5 +2174,5 @@ async def test_run_action_now_sync_on_loop_thread_emits_audit(coord: Coordinator
     ):
         out = coord._run_action_now_sync("report")
 
-    assert any("SWSPLAT-33344" in r.getMessage() for r in caplog.records)
+    assert any("run_action_now:" in r.getMessage() for r in caplog.records)
     assert "stubbed inline result" in out

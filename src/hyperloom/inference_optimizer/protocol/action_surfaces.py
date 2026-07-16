@@ -23,7 +23,7 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-# SWSPLAT-33424: request-kind aliases that route to a kernel-owned handler.
+# request-kind aliases that route to a kernel-owned handler.
 # apply_patch is a REQUEST-kind alias of integrate (both dispatch to
 # integrate_handler); PolicyGate resolves the alias to its canonical owned
 # action so the phase-action gate applies identically and the alias cannot

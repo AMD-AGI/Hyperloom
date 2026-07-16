@@ -675,7 +675,7 @@ def test_system_prompt_files_exist_and_nonempty(name):
 
 
 def test_core_state_fields_includes_closing_phase_and_baseline_config():
-    # SWSPLAT-33402 / SWSPLAT-33398: closing_phase (global wind-down flag) and
+    # closing_phase (global wind-down flag) and
     # baseline_config_path (launch config path later used as config_path) are
     # Coordinator-only facts locked against LLM update_state.
     assert "closing_phase" in CORE_STATE_FIELDS
@@ -698,7 +698,7 @@ def test_gate_update_state_closing_phase_and_baseline_config_rejected(gate):
 
 
 def test_core_state_fields_synced_with_robustness_envelope():
-    # SWSPLAT-33402 / SWSPLAT-33398: gate.CORE_STATE_FIELDS and the robustness
+    # gate.CORE_STATE_FIELDS and the robustness
     # envelope copy must stay byte-identical. This direct assertion never skips
     # (unlike tests/test_role_contract.py, which needs the optimizer on sys.path).
     from hyperloom.agents.robustness.role.envelope import (
