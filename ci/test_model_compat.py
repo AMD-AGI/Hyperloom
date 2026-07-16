@@ -33,6 +33,25 @@ def _reason(cfg, **kw):
     return r[0] if r else None
 
 
+def test_model_compat_http_urlopen_rejects_non_http_scheme():
+    try:
+        model_compat._http_urlopen("file:///tmp/not-allowed", timeout=1)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "unsupported URL scheme" in str(exc)
+
+
+def test_model_compat_http_urlopen_allows_https_url(monkeypatch):
+    def fake_urlopen(url_or_req, timeout=0):
+        url = getattr(url_or_req, "full_url", url_or_req)
+        assert url == "https://huggingface.co/api/test"
+        return io.BytesIO(json.dumps({"ok": True}).encode("utf-8"))
+
+    monkeypatch.setattr(model_compat.urllib.request, "urlopen", fake_urlopen)
+    with model_compat._http_urlopen("https://huggingface.co/api/test", timeout=1) as resp:
+        assert json.loads(resp.read().decode("utf-8")) == {"ok": True}
+
+
 def test_multimodal_by_architecture():
     assert _reason({"architectures": ["Qwen2_5_VLForConditionalGeneration"],
                     "max_position_embeddings": 128000}) == "multimodal"
