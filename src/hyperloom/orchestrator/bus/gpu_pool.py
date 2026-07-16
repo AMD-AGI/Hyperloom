@@ -240,8 +240,8 @@ class SpecialistGpuPool:
                 (now_iso,),
             )
             placeholders = ",".join("?" * len(self.gpu_ids))
-            cur.execute(
-                f"SELECT gpu_id FROM gpu_leases WHERE gpu_id IN ({placeholders})",
+            cur.execute(  # nosec B608 - placeholders string is generated from configured GPU id count.
+                f"SELECT gpu_id FROM gpu_leases WHERE gpu_id IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 list(self.gpu_ids),
             )
             leased = {int(r["gpu_id"]) for r in cur.fetchall()}
@@ -278,8 +278,8 @@ class SpecialistGpuPool:
         placeholders = ",".join("?" * len(lease.gpu_ids))
         params = list(lease.gpu_ids) + [lease.holder_id]
         async with self.db.transaction() as cur:
-            cur.execute(
-                f"DELETE FROM gpu_leases WHERE gpu_id IN ({placeholders}) AND holder_id=?",
+            cur.execute(  # nosec B608 - placeholders string is generated from lease GPU id count.
+                f"DELETE FROM gpu_leases WHERE gpu_id IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
                 params,
             )
 

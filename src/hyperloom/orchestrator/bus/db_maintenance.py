@@ -124,10 +124,20 @@ async def prune_events(
     # mirrors ``replay_for_resume``.
     async with db.transaction() as cur:
         cur.execute(
-            f"""
+            """
             DELETE FROM events
             WHERE seq <= ?
-              AND seq NOT IN ({_PENDING_PROPOSAL_SEQS_SQL})
+              AND seq NOT IN (
+                SELECT seq FROM events
+                WHERE topic = 'proposal'
+                  AND msg_id NOT IN (
+                    SELECT json_extract(payload, '$.target_proposal_msg_id')
+                    FROM events
+                    WHERE topic = 'review_verdict'
+                      AND json_extract(payload, '$.target_proposal_msg_id') IS NOT NULL
+                      AND json_extract(payload, '$.target_proposal_msg_id') != ''
+                  )
+              )
             """,
             (delete_below,),
         )
@@ -155,8 +165,8 @@ async def prune_tasks(
     keep_done = max(0, int(keep_done))
     placeholders = ",".join("?" * len(_PRUNABLE_TASK_STATES))
     async with db.transaction() as cur:
-        cur.execute(
-            f"DELETE FROM tasks WHERE state IN ({placeholders}) "
+        cur.execute(  # nosec B608 - placeholders string is generated solely from fixed state count.
+            f"DELETE FROM tasks WHERE state IN ({placeholders}) "  # nosec B608 - generated placeholders only.
             f"AND task_id NOT IN ("
             f"  SELECT task_id FROM tasks WHERE state IN ({placeholders}) "
             f"  ORDER BY updated_at DESC LIMIT ?"
