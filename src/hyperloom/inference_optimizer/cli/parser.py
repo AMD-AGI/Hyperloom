@@ -528,7 +528,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
         "falls back to $USER_DATA_PATH (legacy flat layout). "
         "USER_DATA_PATH MUST stay at workspace level "
-        "(/wekafs/.../sessions/, not the per-session subdir) "
+        "(/path/.../sessions/, not the per-session subdir) "
         "so runtime/ resolution works. Skips the SharedState "
         "seed and lets the Coordinator replay the prior "
         "event log + state.json.",
@@ -947,11 +947,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip() or None,
         help="PR Monitor REST URL for this run (flag wins). Default: "
-        "$PRIMUS_CORTEX_PR_API (the canonical internal PR API env), else "
-        "the in-cluster "
-        "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local. "
+        "$PRIMUS_CORTEX_PR_API (the canonical PR API env), else unset. "
         "Set this flag / $PRIMUS_CORTEX_PR_API to a reachable HTTPS "
-        "endpoint when running outside the primus-cortex namespace. Pair "
+        "endpoint for your PR Monitor deployment. Pair "
         "with --pr-monitor-mcp-url when port-forwarding for local debug.",
     )
     opt.add_argument(

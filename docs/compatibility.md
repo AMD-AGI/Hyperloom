@@ -46,9 +46,9 @@ The following inference frameworks are supported:
 ## Container images
 
 Pick the image that matches your environment. Public Docker Hub refs
-(`primussafe/sglang:<tag>`) are used on your own GPU machine; the
-`harbor.crusoe.example-internal-host.invalid/proxy/` prefix is the internal mirror used
-inside Primus-SaFE.
+(`primussafe/sglang:<tag>`) are used on your own GPU machine. If your
+deployment uses a private registry mirror, set the registry prefix
+accordingly.
 
 | Image | GPU |
 |-------|-----|
