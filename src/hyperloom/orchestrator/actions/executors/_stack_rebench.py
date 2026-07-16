@@ -50,6 +50,7 @@ async def measure_stack_rebench(
     preclean_before_run: bool = True,
     soft_deadline_sec: float | None = None,
     server_already_ready: bool = False,
+    serving_lease: Any = None,
 ) -> StackRebenchResult:
     """Run ``variant`` once on the stack and grade it against the floor.
 
@@ -58,7 +59,10 @@ async def measure_stack_rebench(
     ``variant_timeout_sec``. ``server_already_ready`` should be ``True`` when
     ``server_lifecycle`` enables cleanup-reuse (the subprocess re-attaches to a
     hot server and never writes a ready marker, which would otherwise leave the
-    from-ready soft clock un-armed).
+    from-ready soft clock un-armed). ``serving_lease`` (Ray-managed GPU
+    execution, §12 T1) routes the round through the caller's held Ray lease so
+    the rebench shares the same lease as the warmup/decision rounds it reuses
+    the hot server from; ``None`` keeps the local path.
     """
     output_slot.mkdir(parents=True, exist_ok=True)
     results = await run_grid(
@@ -77,6 +81,7 @@ async def measure_stack_rebench(
         preclean_before_run=preclean_before_run,
         soft_deadline_sec=soft_deadline_sec,
         server_already_ready=server_already_ready,
+        serving_lease=serving_lease,
     )
     rb = results[0] if results else None
     tput: float | None = None

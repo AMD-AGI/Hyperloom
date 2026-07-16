@@ -56,6 +56,7 @@ from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
+    _num_gpus_for_config,
     _resolve_session_dir,
     apply_multi_node_invalid_variants,
     reorder_grid_for_multi_node,
@@ -64,6 +65,7 @@ from ._grid_runner import (
     sanitize_script_name,
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
+from ._ray_serving import maybe_serving_lease
 from ._stack_rebench import measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -1052,6 +1054,12 @@ class ExploreExecutor:
                 round1_lifecycle = (
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
+                # Ray-managed GPU execution (§12 T1): one held Ray lease spans
+                # this variant's warmup + decision + stack-rebench rounds, which
+                # all reuse one persistent server, so no GPU process outlives its
+                # lease. ``None`` on the local path keeps the legacy behaviour;
+                # closed in the ``finally`` below (after the server is reaped).
+                variant_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
                 try:
                     # Warm-decision warmup round. Boot the variant's server once
                     # and DISCARD the cold measurement so the decision round runs
@@ -1074,6 +1082,7 @@ class ExploreExecutor:
                             soft_deadline_sec=None,
                             server_lifecycle=round1_lifecycle,
                             base_args_mode=stack_base_args_mode,
+                            serving_lease=variant_lease,
                         )
                         w = warmup_results[0] if warmup_results else None
                         if w is None or getattr(w, "status", "") != "succeeded":
@@ -1156,6 +1165,7 @@ class ExploreExecutor:
                         base_args_mode=stack_base_args_mode,
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
+                        serving_lease=variant_lease,
                     )
                     if not results:
                         # run_grid returns one result per grid entry.
@@ -1440,6 +1450,7 @@ class ExploreExecutor:
                                 preclean_before_run=not lifecycle_eligible,
                                 soft_deadline_sec=decision_deadline_sec,
                                 server_already_ready=lifecycle_eligible,
+                                serving_lease=variant_lease,
                             )
                             stack_rebench_tput = rebench.tput
                             stack_rebench_workspace = rebench.workspace
@@ -1574,13 +1585,16 @@ class ExploreExecutor:
                         last_run_tput = cold_tput
                 finally:
                     # Reap the persistent server on every exit path. Idempotent
-                    # + no-op when reuse was ineligible.
+                    # + no-op when reuse was ineligible. Reap BEFORE releasing
+                    # the Ray lease so no GPU process outlives it (§4.2).
                     if lifecycle_eligible:
                         teardown_lifecycle_server(
                             pid_dir=slot,
                             framework=lifecycle_framework,
                             port=lifecycle_port,
                         )
+                    if variant_lease is not None:
+                        variant_lease.close()
 
         # ----- Ledger compaction (dedup + accepted preservation) -----------
         accepted_fps_now = {_entry_fp(v) for v in (search.get("accepted") or [])}

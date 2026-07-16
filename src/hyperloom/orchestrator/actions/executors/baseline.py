@@ -1295,6 +1295,18 @@ class BaselineExecutor:
         )
         double_run = double_run_requested and lifecycle["eligible"]
 
+        # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
+        # spans this baseline's benchmark rounds — a double-run's warmup +
+        # measure reuse one persistent server, so both must run under the same
+        # lease. ``None`` on the local path (multi-node / RAY_EXEC off / tests)
+        # keeps the legacy behaviour. The lease is closed on every exit below.
+        from ._grid_runner import _num_gpus_for_config
+        from ._ray_serving import maybe_serving_lease
+
+        bench_lease = maybe_serving_lease(
+            num_gpus=_num_gpus_for_config(materialized_config_path)
+        )
+
         common = {
             "timeout_sec": timeout_sec,
             "override_result_dir": override_result_dir,
@@ -1305,6 +1317,7 @@ class BaselineExecutor:
             "params": params,
             "ctx": ctx,
             "run_eval_disabled": run_eval_disabled,
+            "serving_lease": bench_lease,
         }
 
         if not double_run:
@@ -1313,11 +1326,15 @@ class BaselineExecutor:
                     "baseline_executor: cold-start double-run not eligible (%s); running single round.",
                     lifecycle["reason"],
                 )
-            return await self._run_single_benchmark(
-                config_path=config_path,
-                output_dir=output_dir,
-                **common,
-            )
+            try:
+                return await self._run_single_benchmark(
+                    config_path=config_path,
+                    output_dir=output_dir,
+                    **common,
+                )
+            finally:
+                if bench_lease is not None:
+                    bench_lease.close()
 
         framework = lifecycle["framework"]
         port = lifecycle["port"]
@@ -1418,6 +1435,8 @@ class BaselineExecutor:
             return result
         finally:
             # Defensive teardown so no persistent server leaks. Idempotent.
+            # Reap the server BEFORE releasing the Ray lease so no GPU process
+            # outlives it (§4.2).
             self._teardown_lifecycle_server(
                 pid_dir=pid_dir,
                 framework=framework,
@@ -1427,6 +1446,8 @@ class BaselineExecutor:
             # subsequent tasks that reuse the same InferenceX checkout.
             if applied_patches and _pre_patch_sha:
                 _revert_patches(patch_target, _pre_patch_sha)
+            if bench_lease is not None:
+                bench_lease.close()
 
     def _double_run_enabled(
         self,
@@ -1637,6 +1658,7 @@ class BaselineExecutor:
         params: dict[str, Any],
         ctx: RunnerContext,
         run_eval_disabled: bool = False,
+        serving_lease: Any = None,
     ) -> dict[str, Any]:
         """Run one Magpie benchmark subprocess and parse its result.
 
@@ -1666,6 +1688,13 @@ class BaselineExecutor:
                 a prior attempt's stale ``results*.json`` from the reused slot.
                 Scriptable frameworks are unaffected: RUN_EVAL does not gate
                 their per-run image ``quality_gate``, which is still parsed.
+            serving_lease: When set (Ray-managed GPU execution, §12 T1), the
+                Magpie subprocess runs inside the lease's actor — which holds
+                ``num_gpus`` across this run's rounds (double-run warmup +
+                measure share one lease) — instead of a local subprocess. Ray
+                owns ``*_VISIBLE_DEVICES``, so the YAML device list is stripped
+                first (T2). ``None`` keeps the local ``run_with_session_kill``
+                path unchanged.
 
         Returns:
             A result dict: ``status="succeeded"`` with measurements on
@@ -1818,18 +1847,43 @@ class BaselineExecutor:
                 exc,
             )
         try:
-            proc = await asyncio.to_thread(
-                run_with_session_kill,
-                cmd,
-                env=env,
-                cwd=str(output_dir),
-                timeout=timeout_sec,
-                server_log_path=str(output_dir / "server.log"),
-            )
-            subprocess_runtime_sec = max(
-                0.0,
-                time.time() - subprocess_started_unix,
-            )
+            if serving_lease is not None:
+                # Ray-managed GPU execution (§12 T1): run inside the lease's
+                # actor (holds num_gpus across this run's rounds). Ray owns
+                # *_VISIBLE_DEVICES, so strip the YAML device list first (T2).
+                from ._ray_backend import strip_visible_devices_from_config
+
+                ray_config_path = strip_visible_devices_from_config(config_path)
+                ray_cmd = build_benchmark_command(
+                    python_exe=self.magpie_python,
+                    config_path=ray_config_path,
+                    output_dir=output_dir,
+                )
+                proc_returncode, proc_stdout, proc_stderr = await asyncio.to_thread(
+                    serving_lease.run_session_kill,
+                    ray_cmd,
+                    env=env,
+                    cwd=str(output_dir),
+                    timeout=timeout_sec,
+                    server_log_path=str(output_dir / "server.log"),
+                )
+                subprocess_runtime_sec = max(0.0, time.time() - subprocess_started_unix)
+            else:
+                proc = await asyncio.to_thread(
+                    run_with_session_kill,
+                    cmd,
+                    env=env,
+                    cwd=str(output_dir),
+                    timeout=timeout_sec,
+                    server_log_path=str(output_dir / "server.log"),
+                )
+                subprocess_runtime_sec = max(
+                    0.0,
+                    time.time() - subprocess_started_unix,
+                )
+                proc_returncode = proc.returncode
+                proc_stdout = proc.stdout
+                proc_stderr = proc.stderr
         except subprocess.TimeoutExpired as exc:
             timeout_candidates = sorted(output_dir.glob("benchmark_*"))
             timeout_destination = timeout_candidates[-1] if timeout_candidates else output_dir
@@ -1845,9 +1899,6 @@ class BaselineExecutor:
                 "harvested_artifacts": [str(dst) for _, dst in timeout_harvested],
                 "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in timeout_harvested],
             }
-        proc_returncode = proc.returncode
-        proc_stdout = proc.stdout
-        proc_stderr = proc.stderr
 
         # Detokenizer-stall watchdog reap: the server came up healthy but went
         # silent for the stall grace window (hung engine / wedged detokenizer).

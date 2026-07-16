@@ -616,6 +616,8 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     Returns:
         List of VariantResult for this arm (one per CONC).
     """
+    from ..actions.executors._grid_runner import _num_gpus_for_config
+    from ..actions.executors._ray_serving import maybe_serving_lease
     from ..actions.executors._server_lifecycle import (
         resolve_lifecycle_params,
         teardown_lifecycle_server,
@@ -633,6 +635,13 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     )
     if not grid:
         return arm_results
+
+    # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
+    # spans this arm's persistent server — boot + every CONC reuse round, or the
+    # Option B per-variant restarts — so the shared server's whole lifetime is
+    # covered by a single lease and no GPU process outlives it. ``None`` on the
+    # local path (multi-node / RAY_EXEC off / tests) keeps the legacy behaviour.
+    arm_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(base_yaml_path))
 
     # Shared pid_dir for server reuse across all CONC variants in this arm.
     pid_dir = workspace / f"server_{arm_name}"
@@ -661,28 +670,33 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             arm_name,
             lc_reason,
         )
-        return await _sweep_arm_option_b(
-            arm_name=arm_name,
-            grid=grid,
-            base_yaml_path=base_yaml_path,
-            workspace=workspace,
-            model_path=model_path,
-            gpu_type=gpu_type,
-            variant_timeout_sec=variant_timeout_sec,
-            soft_deadline_sec=soft_deadline_sec,
-            deadline=deadline,
-            state=state,
-            session_dir=session_dir,
-            json_path=json_path,
-            csv_path=csv_path,
-            started_at=started_at,
-            total_budget_sec=total_budget_sec,
-            has_budget=has_budget,
-            opt_args=opt_args,
-            opt_envs=opt_envs,
-            _all_results_ref=_all_results_ref,
-            _budget_state=_budget_state,
-        )
+        try:
+            return await _sweep_arm_option_b(
+                arm_name=arm_name,
+                grid=grid,
+                base_yaml_path=base_yaml_path,
+                workspace=workspace,
+                model_path=model_path,
+                gpu_type=gpu_type,
+                variant_timeout_sec=variant_timeout_sec,
+                soft_deadline_sec=soft_deadline_sec,
+                deadline=deadline,
+                state=state,
+                session_dir=session_dir,
+                json_path=json_path,
+                csv_path=csv_path,
+                started_at=started_at,
+                total_budget_sec=total_budget_sec,
+                has_budget=has_budget,
+                opt_args=opt_args,
+                opt_envs=opt_envs,
+                _all_results_ref=_all_results_ref,
+                _budget_state=_budget_state,
+                serving_lease=arm_lease,
+            )
+        finally:
+            if arm_lease is not None:
+                arm_lease.close()
 
     # Boot-retry-descend: try each CONC from highest to lowest until boot succeeds.
     # Failed higher-CONC boots are tracked locally; they are only committed to the
@@ -720,6 +734,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 preclean_before_run=True,
                 warmup_before_measure=False,
                 soft_deadline_sec=soft_deadline_sec,
+                serving_lease=arm_lease,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -820,8 +835,11 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             opt_envs=opt_envs,
             _all_results_ref=_all_results_ref,
             _budget_state=_budget_state,
+            serving_lease=arm_lease,
         )
         arm_results.extend(ob_results)
+        if arm_lease is not None:
+            arm_lease.close()
         return arm_results
 
     # Server is up: sweep remaining CONCs by reuse.
@@ -879,6 +897,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     preclean_before_run=False,
                     warmup_before_measure=False,
                     soft_deadline_sec=soft_deadline_sec,
+                    serving_lease=arm_lease,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
@@ -921,11 +940,14 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 budget_remaining_sec=_budget_state.get("budget_remaining_sec"),
             )
     finally:
-        # Safety teardown — idempotent, no-op if already torn down.
+        # Safety teardown — idempotent, no-op if already torn down. Reap the
+        # server BEFORE releasing the Ray lease so no GPU process outlives it.
         try:
             teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
         except Exception:  # noqa: BLE001
             pass
+        if arm_lease is not None:
+            arm_lease.close()
 
     return arm_results
 
@@ -952,6 +974,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     opt_envs: dict[str, str],
     _all_results_ref: list[VariantResult],
     _budget_state: dict[str, Any],
+    serving_lease: Any = None,
 ) -> list[VariantResult]:
     """Option B fallback: run each variant with its own server (legacy behaviour).
 
@@ -1020,6 +1043,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
                 model_path=model_path,
                 gpu_type=gpu_type,
                 soft_deadline_sec=soft_deadline_sec,
+                serving_lease=serving_lease,
             )
         except Exception as exc:  # noqa: BLE001
             sub = [

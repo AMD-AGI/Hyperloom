@@ -35,12 +35,14 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ._grid_runner import (
     GridVariant,
     VariantResult,
+    _num_gpus_for_config,
     _resolve_session_dir,
     apply_multi_node_invalid_variants,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._ray_serving import maybe_serving_lease
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -342,18 +344,29 @@ class SweepExecutor:
         # single-node; keeps CONC order for the Pareto-front computation.
         grid, _ = apply_multi_node_invalid_variants(grid)
 
-        # Pass resolved_model / resolved_gpu so variant servers inherit TP/precision.
-        results = await run_grid(
-            base_yaml_path=config_path,
-            base_extra_args="",  # sweep variants carry args themselves
-            grid=grid,
-            output_root=output_root,
-            variant_timeout_sec=timeout_sec,
-            model_path=resolved_model,
-            gpu_type=resolved_gpu,
-            benchmark_script=override_script,
-            result_dir=override_result_dir,
-        )
+        # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
+        # spans the whole sweep grid — every variant (and its auto-warmup +
+        # measure rounds) runs through the same lease's actor, so no server
+        # outlives its GPU lease. ``None`` on the local path (multi-node /
+        # RAY_EXEC off / tests) keeps the legacy behaviour.
+        sweep_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+        try:
+            # Pass resolved_model / resolved_gpu so variant servers inherit TP/precision.
+            results = await run_grid(
+                base_yaml_path=config_path,
+                base_extra_args="",  # sweep variants carry args themselves
+                grid=grid,
+                output_root=output_root,
+                variant_timeout_sec=timeout_sec,
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                benchmark_script=override_script,
+                result_dir=override_result_dir,
+                serving_lease=sweep_lease,
+            )
+        finally:
+            if sweep_lease is not None:
+                sweep_lease.close()
 
         entries = [_result_dict(v) for v in results]
         # Surface skipped combos so the grid stays complete; they never enter
