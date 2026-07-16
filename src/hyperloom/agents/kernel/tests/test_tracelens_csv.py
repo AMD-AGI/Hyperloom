@@ -3435,6 +3435,16 @@ def test_is_native_source_detects_device_extensions():
         assert not tlr._is_native_source(p), p
 
 
+def test_grep_for_keyword_treats_dash_prefixed_keyword_as_literal(tmp_path):
+    """Profiler-derived names can begin with ``-``; grep must not treat them
+    as command-line options."""
+    src = tmp_path / "kernel.py"
+    src.write_text("def uses_dash_prefixed_name():\n    return '--danger'\n", encoding="utf-8")
+
+    tla._GREP_CACHE.clear()
+    assert tla._grep_for_keyword("--danger", tmp_path) == [src]
+
+
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
     """A native .cu kernel invoked from two call sites reports two different
     ``#L`` lines (no Python AST def-line exists). Native sources must key on
