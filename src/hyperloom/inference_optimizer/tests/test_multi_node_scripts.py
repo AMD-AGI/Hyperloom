@@ -90,6 +90,7 @@ def test_kill_remote_missing_pid_dir():
         "missing": [],
         "still_alive": [],
         "ports_busy": [],
+        "gpu_busy": [],
     }
 
 
@@ -158,10 +159,116 @@ def test_kill_remote_sigterms_then_process_exits(tmp_path, monkeypatch):
     monkeypatch.setattr("os.getpgid", _getpgid)
     monkeypatch.setattr("os.killpg", _killpg)
     monkeypatch.setattr("time.sleep", lambda _s: None)
+    # Neutralize the post-kill GPU-VRAM reclaim wait so the test never shells
+    # out to rocm-smi (which would block up to gpu_free_timeout on a GPU box).
+    monkeypatch.setattr(km, "_gpu_vram_used_mb", lambda: None)
 
     out = km._kill_remote(str(d), grace_sec=0)
     assert any(x.startswith("rank_0.pid:") for x in out["killed"])
     assert not (d / "rank_0.pid").exists()
+
+
+# --- GPU VRAM reclaim + zombie detection (teardown must wait for a clean GPU).
+
+
+class _FakeProc:
+    def __init__(self, returncode=0, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def test_gpu_vram_used_mb_parses_bytes_to_mib(monkeypatch):
+    """rocm-smi byte values are converted to MiB (per-card used VRAM only)."""
+    km = _load_script_module("km_gpu_parse", "kill_multinode.py")
+    payload = {
+        "card0": {"VRAM Total Memory (B)": "68702699520", "VRAM Total Used Memory (B)": str(1024 * 1024 * 100)},
+        "card1": {"VRAM Total Used Memory (B)": str(1024 * 1024 * 250)},
+        "system": {"Driver version": "6.1.4"},  # non-card dict must be ignored
+    }
+    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload)))
+    used = km._gpu_vram_used_mb()
+    # Only the "used" keys are picked (not "Total Memory"); bytes -> MiB.
+    assert used == [100.0, 250.0]
+
+
+def test_gpu_vram_used_mb_none_when_rocm_smi_missing(monkeypatch):
+    """A missing rocm-smi binary degrades to None (skip the GPU wait)."""
+    km = _load_script_module("km_gpu_missing", "kill_multinode.py")
+
+    def _boom(*a, **k):
+        raise FileNotFoundError("rocm-smi")
+
+    monkeypatch.setattr(km.subprocess, "run", _boom)
+    assert km._gpu_vram_used_mb() is None
+
+
+def test_gpu_vram_used_mb_none_on_bad_json_or_nonzero(monkeypatch):
+    """Non-zero exit, empty stdout, or unparseable JSON all degrade to None."""
+    km = _load_script_module("km_gpu_badjson", "kill_multinode.py")
+    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(1, "boom"))
+    assert km._gpu_vram_used_mb() is None
+    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, "   "))
+    assert km._gpu_vram_used_mb() is None
+    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, "{not json"))
+    assert km._gpu_vram_used_mb() is None
+
+
+def test_wait_gpu_free_returns_empty_when_below_threshold(monkeypatch):
+    """All GPUs under the threshold -> immediately clean (empty list)."""
+    km = _load_script_module("km_gpu_free", "kill_multinode.py")
+    monkeypatch.setattr(km, "_gpu_vram_used_mb", lambda: [10.0, 20.0])
+    assert km._wait_gpu_free(threshold_mb=2048.0, timeout_s=5.0) == []
+
+
+def test_wait_gpu_free_reports_busy_gpus_at_timeout(monkeypatch):
+    """A GPU above the threshold that never drains is reported busy at timeout."""
+    km = _load_script_module("km_gpu_busy", "kill_multinode.py")
+    monkeypatch.setattr(km, "_gpu_vram_used_mb", lambda: [50.0, 5000.0])
+    monkeypatch.setattr(km.time, "sleep", lambda _s: None)
+    busy = km._wait_gpu_free(threshold_mb=2048.0, timeout_s=0.0)
+    assert busy == [5000.0]
+
+
+def test_wait_gpu_free_skips_when_rocm_smi_unavailable(monkeypatch):
+    """None from rocm-smi -> skip the wait entirely (empty)."""
+    km = _load_script_module("km_gpu_skip", "kill_multinode.py")
+    monkeypatch.setattr(km, "_gpu_vram_used_mb", lambda: None)
+    assert km._wait_gpu_free(threshold_mb=2048.0, timeout_s=999.0) == []
+
+
+def test_pid_alive_false_for_zombie(monkeypatch, tmp_path):
+    """A zombie (state 'Z') counts as gone even though signal-0 succeeds."""
+    km = _load_script_module("km_zombie", "kill_multinode.py")
+    monkeypatch.setattr("os.kill", lambda _pid, _sig: None)  # signal-0 "alive"
+    # comm contains ')' to exercise the rfind-based state parse.
+    stat = tmp_path / "stat"
+    stat.write_bytes(b"4242 (sglang (rank0)) Z 1 4242 4242 0 -1 0\n")
+    real_open = open
+
+    def _fake_open(path, *a, **k):
+        if str(path) == "/proc/4242/stat":
+            return real_open(stat, *a, **k)
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", _fake_open)
+    assert km._pid_alive(4242) is False
+
+
+def test_pid_alive_true_for_running(monkeypatch, tmp_path):
+    """A running process (state 'R'/'S') is reported alive."""
+    km = _load_script_module("km_running", "kill_multinode.py")
+    monkeypatch.setattr("os.kill", lambda _pid, _sig: None)
+    stat = tmp_path / "stat"
+    stat.write_bytes(b"4242 (python3) S 1 4242 4242 0 -1 0\n")
+    real_open = open
+
+    def _fake_open(path, *a, **k):
+        if str(path) == "/proc/4242/stat":
+            return real_open(stat, *a, **k)
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", _fake_open)
+    assert km._pid_alive(4242) is True
 
 
 def test_pd_decode_dist_init_port_derives_from_prefill():
