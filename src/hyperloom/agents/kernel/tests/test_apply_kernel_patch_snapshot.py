@@ -239,3 +239,32 @@ def test_snapshot_mode_unparseable_patch_hard_fails(tmp_path, akp):
     )
     assert r["status"] == "failed"
     assert (repo / "k.py").read_text() == "V0\n"
+
+
+# _is_multi_node is env-only ($INFERENCE_OPTIMIZER_NODES): a co-tenant cannot
+# force multi-node fan-out by planting a world-writable state file.
+
+
+def test_is_multi_node_true_when_env_ge_2(akp, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    assert akp._is_multi_node() is True
+
+
+def test_is_multi_node_false_when_unset_or_single(akp, monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    assert akp._is_multi_node() is False
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    assert akp._is_multi_node() is False
+
+
+def test_is_multi_node_false_on_non_numeric(akp, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "not-an-int")
+    assert akp._is_multi_node() is False
+
+
+def test_is_multi_node_ignores_planted_state_file(akp, monkeypatch, tmp_path):
+    planted = tmp_path / "multi_node_state.json"
+    planted.write_text('{"nodes": 8}', encoding="utf-8")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(planted))
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    assert akp._is_multi_node() is False

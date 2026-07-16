@@ -11,6 +11,7 @@ stdin-only secret path. All tests stub ``subprocess.run`` so nothing is spawned.
 from __future__ import annotations
 
 import base64
+import os
 import shlex
 import subprocess
 
@@ -33,7 +34,41 @@ def known_hosts(tmp_path):
     return kh
 
 
-def test_ssh_run_builds_expected_argv(monkeypatch, known_hosts):
+@pytest.fixture
+def key_file(tmp_path):
+    # ssh key bytes are read into memory and fed via /dev/fd, so the path must
+    # point at a real (dummy) key file.
+    k = tmp_path / "mn_id_ed25519"
+    k.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nDUMMY\n")
+    return k
+
+
+def test_ssh_identity_fd_delivers_key_bytes_then_closes(key_file):
+    """_ssh_identity_fd exposes the key via /dev/fd and closes the fd on exit.
+
+    Guards the in-memory (anonymous-pipe) key transport: the identity path is a
+    /dev/fd/N pointing at the passed fd, reading it yields the exact key bytes,
+    and the fd is released after the context so nothing leaks.
+    """
+    key_bytes = key_file.read_bytes()
+    with ssh_client._ssh_identity_fd(key_file) as (identity, pass_fd):
+        assert identity == f"/dev/fd/{pass_fd}"
+        # Re-opening the /dev/fd path reads the buffered key bytes back verbatim.
+        with open(identity, "rb") as fh:
+            assert fh.read() == key_bytes
+    # Context exit must close the fd handed to the subprocess (no descriptor leak).
+    with pytest.raises(OSError):
+        os.fstat(pass_fd)
+
+
+def test_ssh_identity_fd_missing_key_raises(tmp_path):
+    """A missing key path fails loudly (read into memory) instead of silently."""
+    with pytest.raises(OSError):
+        with ssh_client._ssh_identity_fd(tmp_path / "nope"):
+            pass
+
+
+def test_ssh_run_builds_expected_argv(monkeypatch, known_hosts, key_file):
     captured = {}
 
     def _run(argv, **kwargs):
@@ -45,7 +80,7 @@ def test_ssh_run_builds_expected_argv(monkeypatch, known_hosts):
     cp = ssh_client.ssh_run(
         "10.0.0.1",
         "echo hi",
-        key_path="/k/id",
+        key_path=key_file,
         known_hosts=known_hosts,
         port=2345,
         timeout=42,
@@ -53,7 +88,11 @@ def test_ssh_run_builds_expected_argv(monkeypatch, known_hosts):
     assert cp.returncode == 0
     argv = captured["argv"]
     assert argv[0] == "ssh"
-    assert "-i" in argv and argv[argv.index("-i") + 1] == "/k/id"
+    # Identity is fed via an anonymous pipe fd, never the on-disk key path.
+    identity = argv[argv.index("-i") + 1]
+    assert identity.startswith("/dev/fd/")
+    assert str(key_file) not in argv
+    assert "IdentitiesOnly=yes" in argv
     assert "-p" in argv and argv[argv.index("-p") + 1] == "2345"
     assert "root@10.0.0.1" in argv
     assert argv[-3:] == ["bash", "-lc", shlex.quote("echo hi")]
@@ -61,9 +100,10 @@ def test_ssh_run_builds_expected_argv(monkeypatch, known_hosts):
     assert str(known_hosts) in " ".join(argv)
     assert captured["kwargs"]["timeout"] == 42
     assert captured["kwargs"]["capture_output"] is True
+    assert tuple(captured["kwargs"]["pass_fds"])  # fd handed to subprocess
 
 
-def test_ssh_run_script_base64_wraps_and_prepends_env(monkeypatch, known_hosts):
+def test_ssh_run_script_base64_wraps_and_prepends_env(monkeypatch, known_hosts, key_file):
     captured = {}
 
     def _run(argv, **kwargs):
@@ -77,7 +117,7 @@ def test_ssh_run_script_base64_wraps_and_prepends_env(monkeypatch, known_hosts):
         script,
         "python3",
         "--flag v",
-        key_path="/k",
+        key_path=key_file,
         known_hosts=known_hosts,
         env={"MORI_DISPATCH": "1", "SGLANG_FOO": "a b"},
         remote_path="/tmp/run.py",
@@ -106,24 +146,25 @@ def test_ssh_run_script_rejects_invalid_env_key(monkeypatch, known_hosts):
         )
 
 
-def test_ssh_run_script_no_env_has_no_prefix(monkeypatch, known_hosts):
+def test_ssh_run_script_no_env_has_no_prefix(monkeypatch, known_hosts, key_file):
     captured = {}
     monkeypatch.setattr(
         ssh_client.subprocess,
         "run",
         lambda argv, **kw: captured.setdefault("argv", argv) or _FakeCompleted(0),
     )
-    ssh_client.ssh_run_script("h", "x=1", "python3", "", key_path="/k", known_hosts=known_hosts)
+    ssh_client.ssh_run_script("h", "x=1", "python3", "", key_path=key_file, known_hosts=known_hosts)
     remote_cmd = captured["argv"][-1]
     assert "&& python3 /tmp/mn_infera_launch" in remote_cmd
 
 
-def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts):
+def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts, key_file):
     captured = {}
 
     def _run(argv, **kwargs):
         captured["argv"] = argv
         captured["input"] = kwargs.get("input")
+        captured["kwargs"] = kwargs
         return _FakeCompleted(0)
 
     monkeypatch.setattr(ssh_client.subprocess, "run", _run)
@@ -131,7 +172,7 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts)
         "h",
         "echo body",
         {"OOB_API_KEY": "secret-123"},
-        key_path="/k",
+        key_path=key_file,
         known_hosts=known_hosts,
     )
     assert captured["argv"][-2:] == ["bash", "-s"]
@@ -139,6 +180,9 @@ def test_ssh_run_bash_with_env_pipes_secrets_via_stdin(monkeypatch, known_hosts)
     assert "echo body" in captured["input"]
     assert "set -uo pipefail" in captured["input"]
     assert not any("secret-123" in a for a in captured["argv"])
+    # Identity fed via /dev/fd, not the on-disk key path.
+    assert captured["argv"][captured["argv"].index("-i") + 1].startswith("/dev/fd/")
+    assert tuple(captured["kwargs"]["pass_fds"])
 
 
 def test_probe_ssh_true_on_marker(monkeypatch, known_hosts):

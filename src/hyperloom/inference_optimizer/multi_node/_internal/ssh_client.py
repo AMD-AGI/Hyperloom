@@ -24,8 +24,11 @@ Keys are session-scoped and ephemeral:
 from __future__ import annotations
 
 import base64
+import contextlib
+import os
 import shlex
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 from .env_safety import assert_env_key_shapes, assert_forward_env_keys
@@ -69,6 +72,35 @@ def _ssh_common_opts(known_hosts: Path) -> list[str]:
         "-o",
         "LogLevel=ERROR",
     ]
+
+
+@contextlib.contextmanager
+def _ssh_identity_fd(key_path: Path | str) -> Iterator[tuple[str, int]]:
+    """Feed the private key to ssh via an inherited pipe fd, not an on-disk path.
+
+    Reads the key into process memory and exposes it as ``/dev/fd/N`` (an
+    anonymous pipe) so the identity handed to ``ssh -i`` is a transient fd and
+    never a discoverable filesystem path on argv/env. The key is small (ed25519
+    /RSA < pipe buffer) so the single ``os.write`` never blocks; the write end
+    is closed immediately (buffered bytes remain readable until EOF).
+
+    Args:
+        key_path: Path to the private SSH key to read into memory.
+
+    Yields:
+        A ``(identity_path, pass_fd)`` pair: ``identity_path`` for ``ssh -i``
+        and ``pass_fd`` to hand to ``subprocess`` via ``pass_fds``.
+    """
+    key_bytes = Path(key_path).read_bytes()
+    r, w = os.pipe()
+    try:
+        os.write(w, key_bytes)
+    finally:
+        os.close(w)
+    try:
+        yield f"/dev/fd/{r}", r
+    finally:
+        os.close(r)
 
 
 def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
@@ -155,19 +187,28 @@ def ssh_run(
     Returns:
         The completed SSH subprocess (not raised on non-zero exit).
     """
-    argv = [
-        "ssh",
-        *_ssh_common_opts(known_hosts),
-        "-i",
-        str(key_path),
-        "-p",
-        str(port),
-        f"{user}@{host}",
-        "bash",
-        "-lc",
-        shlex.quote(command),
-    ]
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    with _ssh_identity_fd(key_path) as (identity, pass_fd):
+        argv = [
+            "ssh",
+            *_ssh_common_opts(known_hosts),
+            "-o",
+            "IdentitiesOnly=yes",
+            "-i",
+            identity,
+            "-p",
+            str(port),
+            f"{user}@{host}",
+            "bash",
+            "-lc",
+            shlex.quote(command),
+        ]
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            pass_fds=(pass_fd,),
+        )
 
 
 def ssh_run_script(
@@ -263,24 +304,28 @@ def ssh_run_bash_with_env(
         assert_env_key_shapes(env)
     prologue = "\n".join(f"export {k}={shlex.quote(str(v))}" for k, v in (env or {}).items())
     full = f"set -uo pipefail\n{prologue}\n{script_text}\n"
-    argv = [
-        "ssh",
-        *_ssh_common_opts(known_hosts),
-        "-i",
-        str(key_path),
-        "-p",
-        str(port),
-        f"{user}@{host}",
-        "bash",
-        "-s",
-    ]
-    return subprocess.run(
-        argv,
-        input=full,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    with _ssh_identity_fd(key_path) as (identity, pass_fd):
+        argv = [
+            "ssh",
+            *_ssh_common_opts(known_hosts),
+            "-o",
+            "IdentitiesOnly=yes",
+            "-i",
+            identity,
+            "-p",
+            str(port),
+            f"{user}@{host}",
+            "bash",
+            "-s",
+        ]
+        return subprocess.run(
+            argv,
+            input=full,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            pass_fds=(pass_fd,),
+        )
 
 
 def probe_ssh(

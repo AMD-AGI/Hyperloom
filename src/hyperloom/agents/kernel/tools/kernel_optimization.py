@@ -1733,14 +1733,13 @@ def build_prompt(
         "and write `speedup: N/A` — that wastes the run.\n"
     )
     # Multi-node sandbox is GPU-less: direct the LLM to delegate compile + execution
-    # to a GPU-bearing pod. Honours $MULTI_NODE_STATE_FILE.
-    mn_state_file = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
-    is_multinode_run = False
+    # to a GPU-bearing pod. Trust only the in-process $INFERENCE_OPTIMIZER_NODES
+    # signal the optimizer CLI exports at launch; never read a co-tenant-writable
+    # state file, so a planted /tmp/multi_node_state.json cannot force multi-node
+    # fan-out guidance (same hardening as apply_kernel_patch._is_multi_node).
     try:
-        if mn_state_file.is_file():
-            _st = json.loads(mn_state_file.read_text(encoding="utf-8"))
-            is_multinode_run = int(_st.get("nodes") or 0) >= 2
-    except (OSError, ValueError):
+        is_multinode_run = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "0") or 0) >= 2
+    except ValueError:
         is_multinode_run = False
     if is_multinode_run:
         safety += (

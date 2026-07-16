@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import signal
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -83,7 +84,13 @@ def _load_script_module(unique_name: str, script_name: str):
 def test_kill_remote_missing_pid_dir():
     km = _load_script_module("km_test_missing", "kill_multinode.py")
     out = km._kill_remote("/no/such/dir/exists", grace_sec=1)
-    assert out == {"killed": [], "stale": [], "missing": []}
+    assert out == {
+        "killed": [],
+        "stale": [],
+        "missing": [],
+        "still_alive": [],
+        "ports_busy": [],
+    }
 
 
 def test_kill_remote_non_digit_pid_file_removed(tmp_path):
@@ -1299,3 +1306,54 @@ def test_create_infera_env_omits_credentials(monkeypatch):
         "OPENAI_BASE_URL",
     ):
         assert k not in env
+
+
+def _bootstrap_sh() -> Path:
+    return _repo_root() / "multi_node" / "scripts" / "bootstrap.sh"
+
+
+def test_bootstrap_renders_env_file_path_only_no_credentials(tmp_path):
+    """bootstrap.sh must render ENV_FILE with the venv PATH only, never creds.
+
+    Regression guard for the fix that stopped writing *_API_KEY / *_BASE_URL
+    into the world-readable /etc/profile.d/hyperloom-env.sh: credentials present
+    in the process env must NOT leak into the rendered file.
+    """
+    # Fake framework venv with an executable python3 so section 1 resolves.
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    py = venv / "bin" / "python3"
+    py.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    py.chmod(0o755)
+
+    env_file = tmp_path / "hyperloom-env.sh"
+    secrets = {
+        "AMD_LLM_API_KEY": "secret-amd",
+        "ANTHROPIC_API_KEY": "secret-anthropic",
+        "OPENAI_API_KEY": "secret-openai",
+        "SAFE_API_KEY": "secret-safe",
+        "ANTHROPIC_BASE_URL": "https://secret.example/v1",
+    }
+    env = {
+        **os.environ,
+        "HYPERLOOM_VENV": str(venv),
+        "ENV_FILE": str(env_file),
+        "BOOTSTRAP_MARKER": str(tmp_path / "bootstrap_done"),
+        "LOG_DIR": str(tmp_path / "log"),
+        **secrets,
+    }
+    proc = subprocess.run(
+        ["bash", str(_bootstrap_sh())],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    rendered = env_file.read_text(encoding="utf-8")
+    assert f'export PATH="{venv}/bin:${{PATH}}"' in rendered
+    # Neither the credential keys nor their values may appear in the 0644 file.
+    for key, val in secrets.items():
+        assert key not in rendered
+        assert val not in rendered
+    assert (env_file.stat().st_mode & 0o777) == 0o644
