@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import shlex
+import tempfile
 from pathlib import Path
 
 from ...loop.coordinator_helpers import format_exc_brief
@@ -1183,7 +1184,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
         return
     key_path = state.get("ssh_key_path")
     known_hosts = state.get("ssh_known_hosts")
-    remote = os.environ.get("HYPERLOOM_MN_SERVER_LOG_PATH", "/tmp/mn_infera_server.log")
+    remote = os.environ.get("HYPERLOOM_MN_SERVER_LOG_PATH", str(Path(tempfile.gettempdir()) / "mn_infera_server.log"))
     default_port = int(state.get("ssh_port") or 2233)
     ssh_run = None
     if key_path and known_hosts:

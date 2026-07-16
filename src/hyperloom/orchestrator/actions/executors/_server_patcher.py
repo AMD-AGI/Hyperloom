@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -31,7 +32,7 @@ log = logging.getLogger(__name__)
 
 
 # System-wide lock file.
-_LOCK_PATH = "/tmp/hyperloom_server_patcher.lock"
+_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_server_patcher.lock")
 
 # Per-``git`` invocation timeout (defensive against hung NFS).
 _GIT_TIMEOUT_SEC = 30

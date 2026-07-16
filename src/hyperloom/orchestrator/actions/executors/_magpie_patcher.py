@@ -143,7 +143,7 @@ _ATOMIC_REPLACE = "os.replace("
 _PREPARE_METHOD_MARKER = "def _prepare_benchmark_scripts"
 
 # System-wide lock.
-_LOCK_PATH = "/tmp/hyperloom_magpie_benchmarker_patcher.lock"
+_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_magpie_benchmarker_patcher.lock")
 
 
 def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:

@@ -768,7 +768,7 @@ class BaselineExecutor:
         session_dir: Path | str | None = None,
         shared_state: Any | None = None,
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
-        cwd: Path | str = "/tmp",
+        cwd: Path | str | None = None,
     ):
         """Initialize the baseline executor with launch defaults.
 
@@ -783,7 +783,7 @@ class BaselineExecutor:
                 eager-fallback one-shot is consumed in memory before saving so
                 Coordinator cannot later re-persist a stale True value.
             default_timeout_sec (int): Default (warm-start) subprocess timeout.
-            cwd (Path | str): Working directory for the Magpie subprocess.
+            cwd (Path | str | None): Working directory for the Magpie subprocess.
         """
         from ._grid_runner import _resolve_session_dir
 
@@ -797,7 +797,7 @@ class BaselineExecutor:
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.shared_state = shared_state
         self.default_timeout_sec = default_timeout_sec
-        self.cwd = Path(cwd)
+        self.cwd = Path(cwd if cwd is not None else tempfile.gettempdir())
 
     def _resolve_default_config(self) -> Path:
         """Hook for subclasses (ProfileExecutor) to swap the resolver.
