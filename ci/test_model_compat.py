@@ -25,6 +25,50 @@ import model_compat  # noqa: E402
 import filter_candidates  # noqa: E402
 
 
+def test_load_whitelist_missing_or_malformed_returns_empty(tmp_path):
+    model_compat.load_whitelist.cache_clear()
+    assert model_compat.load_whitelist(tmp_path / "missing.json") == frozenset()
+    bad = tmp_path / "bad.json"
+    bad.write_text("{", encoding="utf-8")
+    model_compat.load_whitelist.cache_clear()
+    assert model_compat.load_whitelist(bad) == frozenset()
+
+
+def test_load_whitelist_collects_repo_ids(tmp_path):
+    path = tmp_path / "pool.json"
+    path.write_text(
+        json.dumps({"candidates": [{"repo_id": "org/a"}, {"repo_id": ""}, {"other": "x"}]}),
+        encoding="utf-8",
+    )
+    model_compat.load_whitelist.cache_clear()
+    assert model_compat.load_whitelist(path) == frozenset({"org/a"})
+
+
+def test_http_urlopen_rejects_non_http_scheme():
+    try:
+        model_compat._http_urlopen("file:///tmp/not-allowed", timeout=1)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "unsupported URL scheme" in str(exc)
+
+
+def test_http_urlopen_allows_https_url(monkeypatch):
+    def fake_urlopen(url_or_req, timeout=0):
+        url = getattr(url_or_req, "full_url", url_or_req)
+        assert url == "https://huggingface.co/api/test"
+        return io.BytesIO(json.dumps({"ok": True}).encode("utf-8"))
+
+    monkeypatch.setattr(model_compat.urllib.request, "urlopen", fake_urlopen)
+    with model_compat._http_urlopen("https://huggingface.co/api/test", timeout=1) as resp:
+        assert json.loads(resp.read().decode("utf-8")) == {"ok": True}
+
+
+def test_has_weights_and_tokenizer_unknown_dir_is_lenient(tmp_path):
+    missing = tmp_path / "missing"
+    assert model_compat.has_weights(missing) is False
+    assert model_compat.has_tokenizer(missing) is True
+
+
 # ── unrunnable_reason: per-rule hits ────────────────────────────────────────
 
 
@@ -259,6 +303,58 @@ def test_flashinfer_backend():
     assert _reason({"architectures": ["LlamaForCausalLM"],
                     "max_position_embeddings": 8192,
                     "attn_implementation": "flashinfer"}) == "attn_backend"
+
+
+def test_invalid_context_value_is_ignored():
+    assert _reason({"architectures": ["LlamaForCausalLM"], "max_position_embeddings": "not-int"}) is None
+
+
+def test_hf_gated_retries_401_then_reports_gated(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(model_compat.urllib.request, "urlopen", fake_urlopen)
+    assert model_compat.hf_gated("org/model", ["hf_a", "hf_b"]) == "gated"
+    assert calls["n"] == 3
+
+
+def test_hf_gated_retries_429_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+    monkeypatch.setattr(model_compat.time, "sleep", lambda *_a, **_k: None)
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError("u", 429, "Too Many", {}, None)
+        return _Resp(json.dumps({"gated": False}).encode())
+
+    monkeypatch.setattr(model_compat.urllib.request, "urlopen", fake_urlopen)
+    assert model_compat.hf_gated("org/model", ["hf_a", "hf_b"]) is None
+    assert calls["n"] == 2
+
+
+def test_hf_gated_fail_open_on_url_error(monkeypatch):
+    monkeypatch.setattr(model_compat.time, "sleep", lambda *_a, **_k: None)
+    _patch_urlopen(monkeypatch, error=urllib.error.URLError("boom"))
+    assert model_compat.hf_gated("org/model", ["hf_x"]) is None
+
+
+def test_hf_missing_tokenizer_retries_429_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+    monkeypatch.setattr(model_compat.time, "sleep", lambda *_a, **_k: None)
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError("u", 429, "Too Many", {}, None)
+        return _Resp(json.dumps(_siblings("model.safetensors", "tokenizer.json")).encode())
+
+    monkeypatch.setattr(model_compat.urllib.request, "urlopen", fake_urlopen)
+    assert model_compat.hf_missing_tokenizer("org/model", ["hf_a", "hf_b"]) is None
+    assert calls["n"] == 2
 
 
 # ── unsupported serving registry (config-based, GPU-independent) ────────────
