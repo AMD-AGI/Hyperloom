@@ -1104,37 +1104,45 @@ class BaselineExecutor:
             if retry.get("status") == "succeeded":
                 retry["accuracy_source"] = "eval_unavailable"
             result = retry
-        self._maybe_stop_on_missing_baseline_accuracy(ctx, result, eval_already_off=eval_already_off)
+        self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
 
     def _maybe_stop_on_missing_baseline_accuracy(
         self,
         ctx: RunnerContext,
         result: dict[str, Any],
-        *,
-        eval_already_off: bool,
     ) -> None:
         """Halt the run when a genuine baseline produced no accuracy result.
 
         A baseline is supposed to establish the accuracy reference. If the
-        accuracy test was expected to run (serving eval not operator-disabled,
-        or any scriptable workload) but produced no result, the setup is
-        fundamentally broken and the whole run stops. When the operator
-        explicitly disabled the serving eval, accuracy is intentionally off and
-        no stop is issued. Throughput-level baseline failures are handled by the
-        Coordinator's existing ``baseline_failed`` streak logic.
+        accuracy test was expected to run but produced no usable result, the
+        setup is fundamentally broken and the whole run stops.
+
+        "No usable result" means a missing or non-positive accuracy: scriptable
+        workloads record ``accuracy=0.0`` (fail-closed) when the quality gate is
+        absent, and serving records no accuracy at all, so both are covered.
+
+        "Expected" means accuracy was not intentionally turned off. Scriptable
+        workloads always carry the quality gate. For serving, the operator can
+        opt out via ``disable_run_eval``, an explicit ``RUN_EVAL=false`` env, or
+        a YAML/reference-env ``RUN_EVAL=false`` -- all folded into the
+        authoritative ``run_eval_disabled`` on the result. The eval-failure
+        fallback also disables eval, but it is tagged
+        ``accuracy_source="eval_unavailable"`` and must still stop (eval was
+        expected and broke). Throughput-level baseline failures are handled by
+        the Coordinator's existing ``baseline_failed`` streak logic.
 
         Args:
             ctx (RunnerContext): The runner context (task kind + shared_state).
             result (dict): The final baseline result dict.
-            eval_already_off (bool): Whether the operator disabled the eval.
         """
         if not _should_establish_quality_ref(getattr(ctx.task, "kind", "")):
             return
         if result.get("status") != "succeeded":
             return
-        if result.get("accuracy") is not None:
-            return
+        acc = result.get("accuracy")
+        if acc is not None and float(acc) > 0.0:
+            return  # a usable baseline accuracy exists
         params = ctx.task.params or {}
         framework = (
             str(params.get("framework") or "").strip()
@@ -1145,10 +1153,13 @@ class BaselineExecutor:
         from ._accuracy_gate import request_baseline_accuracy_stop
 
         scriptable = framework_registry.is_scriptable(framework)
-        # Accuracy is "expected" unless the operator explicitly disabled the
-        # serving eval. Scriptable workloads always carry the quality gate, so a
-        # missing gate always counts as expected-but-failed.
-        if not (scriptable or not eval_already_off):
+        # Operator opt-out only when eval was disabled AND this is not the
+        # eval-failure fallback (which forces RUN_EVAL=false but still means the
+        # eval was expected and broke). Scriptable always runs its quality gate.
+        operator_disabled_eval = bool(result.get("run_eval_disabled")) and (
+            result.get("accuracy_source") != "eval_unavailable"
+        )
+        if not (scriptable or not operator_disabled_eval):
             return
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or self.shared_state
@@ -2107,6 +2118,11 @@ class BaselineExecutor:
             # promotes into ``SharedState.baseline_runtime_sec``, the explore
             # overtime-kill anchor. Omitted on failure paths.
             "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+            # Authoritative (materialized-config) view of whether the serving
+            # lm-eval ran this run. The accuracy-stop decision reads this rather
+            # than re-deriving from params, so a YAML/reference-env RUN_EVAL=false
+            # is honored as an intentional opt-out.
+            "run_eval_disabled": bool(run_eval_disabled),
         }
 
         # Parse accuracy eval results (GSM8K for serving, or the image-quality
