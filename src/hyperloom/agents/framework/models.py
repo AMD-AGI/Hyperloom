@@ -4,8 +4,8 @@
 
 ``ExploreRequest.gap_description`` feeds :mod:`framework_agent.keywords` for
 perf keyword extraction; ``search_modes`` is an ordered tuple of enabled
-candidate sources (e.g. ``("primus_cortex", "github")`` unions both, with
-primus-cortex hard-failing and GitHub best-effort).
+candidate sources (e.g. ``("primus_cortex", "github")`` unions both, with the
+PR Monitor-compatible source hard-failing and GitHub best-effort).
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ class Thresholds:
 
 @dataclass(frozen=True)
 class PrimusCortexConfig:
-    """Configuration for the internal primus-cortex-pr-monitor service.
+    """Configuration for a PR Monitor-compatible service.
 
     When present on :class:`ExploreRequest`, the agent routes PR candidate
     enumeration through this service. Errors are hard-failed by callers
@@ -152,7 +152,7 @@ class CommandSpec:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A single PR or git ref candidate (explicit, primus_cortex, or github).
+    """A single PR or git ref candidate (explicit, PR Monitor, or GitHub).
 
     ``score`` is the gap-relevance score; 0.0 when no gap-driven ranking happened.
     """
@@ -362,7 +362,7 @@ def _parse_keywords(raw: Any) -> tuple[str, ...]:
 
 
 def _parse_search_modes(raw: Any) -> tuple[str, ...]:
-    """Coerce a list of mode names; default to primus_cortex + github.
+    """Coerce a list of mode names; default to PR Monitor + GitHub.
 
     Args:
         raw (Any): ``None``/empty (defaults applied), a single mode string, or a

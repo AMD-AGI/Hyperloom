@@ -1,11 +1,11 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Primus Cortex PR Monitor client.
+"""PR Monitor-compatible candidate source client.
 
-Internal-network replacement for anonymous GitHub Search; talks to the
-``primus-cortex-pr-monitor`` REST service. Stdlib-only (``urllib.request``).
-Hard-fails on errors (network / non-200 / bad JSON) so misconfigured nodes
-don't silently fall back to an empty list (CLI surfaces exit code 2). Returns
+Optional replacement for anonymous GitHub Search; talks to a PR
+Monitor-compatible REST service. Stdlib-only (``urllib.request``). Hard-fails
+on errors (network / non-200 / bad JSON) so misconfigured nodes don't silently
+fall back to an empty list (CLI surfaces exit code 2). Returns
 :class:`GitHubPr` records shared with the GitHub backend.
 """
 
@@ -21,14 +21,14 @@ from ._shared import GitHubPr, _repo_slug
 
 
 class PrimusCortexError(RuntimeError):
-    """Raised when a primus-cortex request cannot be completed (CLI exit code 2)."""
+    """Raised when a PR Monitor request cannot be completed (CLI exit code 2)."""
 
 
 def _normalise_base_url(base_url: str) -> str:
     """Trim trailing slash on the configured base URL.
 
     Args:
-        base_url (str): The configured primus_cortex base URL.
+        base_url (str): The configured PR Monitor base URL.
 
     Returns:
         str: The base URL with any trailing slash removed.
@@ -37,7 +37,7 @@ def _normalise_base_url(base_url: str) -> str:
         PrimusCortexError: If ``base_url`` is empty.
     """
     if not base_url:
-        raise PrimusCortexError("primus_cortex.base_url is empty")
+        raise PrimusCortexError("pr_monitor.base_url is empty")
     return base_url.rstrip("/")
 
 
@@ -45,7 +45,7 @@ def _build_url(base_url: str, path: str, query: dict[str, Any] | None = None) ->
     """Compose a full URL, urlencoding the query (skipping empty values).
 
     Args:
-        base_url (str): The primus_cortex base URL.
+        base_url (str): The PR Monitor base URL.
         path (str): Request path; a leading slash is added when missing.
         query (dict[str, Any] | None): Query parameters; ``None``/empty values
             are skipped.
@@ -87,7 +87,7 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
         url,
         headers={
             "Accept": "application/json, text/plain;q=0.9, */*;q=0.5",
-            "User-Agent": "framework-agent-primus-cortex/0.1",
+            "User-Agent": "framework-agent-pr-monitor/0.1",
         },
     )
     try:
@@ -101,11 +101,11 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
             err_body = exc.read().decode("utf-8", errors="replace")[:512]
         except Exception:  # noqa: BLE001 - read can raise OSError on closed body
             err_body = ""
-        raise PrimusCortexError(f"primus_cortex HTTP {exc.code} at {url}: {err_body}") from exc
+        raise PrimusCortexError(f"pr_monitor HTTP {exc.code} at {url}: {err_body}") from exc
     except urllib.error.URLError as exc:
-        raise PrimusCortexError(f"primus_cortex unreachable at {url}: {exc.reason}") from exc
+        raise PrimusCortexError(f"pr_monitor unreachable at {url}: {exc.reason}") from exc
     except (TimeoutError, OSError) as exc:
-        raise PrimusCortexError(f"primus_cortex transport error at {url}: {exc}") from exc
+        raise PrimusCortexError(f"pr_monitor transport error at {url}: {exc}") from exc
 
 
 def _http_get_json(url: str, *, timeout_sec: float) -> Any:
@@ -123,16 +123,16 @@ def _http_get_json(url: str, *, timeout_sec: float) -> Any:
     """
     status, body, _ = _http_get(url, timeout_sec=timeout_sec)
     if status >= 400:
-        raise PrimusCortexError(f"primus_cortex HTTP {status} at {url}")
+        raise PrimusCortexError(f"pr_monitor HTTP {status} at {url}")
     text = body.decode("utf-8", errors="replace")
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        raise PrimusCortexError(f"primus_cortex returned non-JSON at {url}: {exc}; body[:200]={text[:200]!r}") from exc
+        raise PrimusCortexError(f"pr_monitor returned non-JSON at {url}: {exc}; body[:200]={text[:200]!r}") from exc
 
 
 def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
-    """Coerce a primus-cortex PR list item into the shared GitHubPr record.
+    """Coerce a PR Monitor list item into the shared GitHubPr record.
 
     Args:
         item (Any): A single PR list item, expected to be a JSON object.
@@ -146,10 +146,10 @@ def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
             ``number``.
     """
     if not isinstance(item, dict):
-        raise PrimusCortexError(f"primus_cortex item at {source_url} is not a JSON object: {type(item).__name__}")
+        raise PrimusCortexError(f"pr_monitor item at {source_url} is not a JSON object: {type(item).__name__}")
     number = item.get("number")
     if not isinstance(number, int):
-        raise PrimusCortexError(f"primus_cortex item at {source_url} has non-int 'number': {number!r}")
+        raise PrimusCortexError(f"pr_monitor item at {source_url} has non-int 'number': {number!r}")
     return GitHubPr(
         number=number,
         title=str(item.get("title") or ""),
@@ -158,7 +158,7 @@ def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
 
 
 def _extract_pr_list(payload: Any, *, source_url: str) -> list[dict[str, Any]]:
-    """Normalise a primus-cortex PR list response into ``list[dict]``.
+    """Normalise a PR Monitor list response into ``list[dict]``.
 
     Args:
         payload (Any): The decoded response; a list, or a dict carrying a list
@@ -183,11 +183,11 @@ def _extract_pr_list(payload: Any, *, source_url: str) -> list[dict[str, Any]]:
                 break
         else:
             raise PrimusCortexError(
-                f"primus_cortex response at {source_url} is a dict but has no list "
+                f"pr_monitor response at {source_url} is a dict but has no list "
                 f"field (tried items/prs/data/results); keys={list(payload.keys())!r}"
             )
     else:
-        raise PrimusCortexError(f"primus_cortex response at {source_url} is not list or dict: {type(payload).__name__}")
+        raise PrimusCortexError(f"pr_monitor response at {source_url} is not list or dict: {type(payload).__name__}")
     out: list[dict[str, Any]] = []
     for item in items:
         if isinstance(item, dict):
@@ -204,14 +204,14 @@ def list_perf_prs(
     label: str | None = None,
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """List PRs from primus-cortex.
+    """List PRs from a PR Monitor-compatible service.
 
     Returns :class:`GitHubPr` (same as the GitHub backend) so the dispatcher
     can union both sources without per-source branching.
 
     Args:
         repo_url: Repository URL to list PRs for.
-        base_url: Primus Cortex base URL.
+        base_url: PR Monitor base URL.
         limit: Maximum number of PRs to return.
         state: PR state filter (e.g. ``"open"``).
         label: Optional label filter.
@@ -252,7 +252,7 @@ def pr_get(
     Args:
         repo_slug (str): Repository slug in ``owner/name`` form.
         number (int): PR number to fetch.
-        base_url (str): primus_cortex service base URL.
+        base_url (str): PR Monitor service base URL.
         timeout_sec (float): Per-request timeout. Defaults to 10.0.
 
     Returns:
@@ -264,7 +264,7 @@ def pr_get(
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}")
     payload = _http_get_json(url, timeout_sec=timeout_sec)
     if not isinstance(payload, dict):
-        raise PrimusCortexError(f"primus_cortex pr_get at {url} did not return an object: {type(payload).__name__}")
+        raise PrimusCortexError(f"pr_monitor pr_get at {url} did not return an object: {type(payload).__name__}")
     return payload
 
 
@@ -280,7 +280,7 @@ def pr_files(
     Args:
         repo_slug (str): Repository slug in ``owner/name`` form.
         number (int): PR number to fetch files for.
-        base_url (str): primus_cortex service base URL.
+        base_url (str): PR Monitor service base URL.
         timeout_sec (float): Per-request timeout. Defaults to 10.0.
 
     Returns:
@@ -302,11 +302,11 @@ def pr_files(
                 break
         else:
             raise PrimusCortexError(
-                f"primus_cortex pr_files at {url} returned dict without list field "
+                f"pr_monitor pr_files at {url} returned dict without list field "
                 f"(tried files/items/data); keys={list(payload.keys())!r}"
             )
     else:
-        raise PrimusCortexError(f"primus_cortex pr_files at {url} returned non-list/dict: {type(payload).__name__}")
+        raise PrimusCortexError(f"pr_monitor pr_files at {url} returned non-list/dict: {type(payload).__name__}")
     return [item for item in items if isinstance(item, dict)]
 
 
@@ -327,7 +327,7 @@ def pr_patches(
     Args:
         repo_slug: ``owner/name`` repository slug.
         number: PR number to fetch patches for.
-        base_url: Primus Cortex base URL.
+        base_url: PR Monitor base URL.
         timeout_sec: Per-request timeout.
 
     Returns:
@@ -348,14 +348,14 @@ def pr_patches(
                 break
         else:
             raise PrimusCortexError(
-                f"primus_cortex pr_patches at {url} returned dict without list field "
+                f"pr_monitor pr_patches at {url} returned dict without list field "
                 f"(tried patches/items/data); keys={list(payload.keys())!r}"
             )
     elif isinstance(payload, str):
         return payload
     else:
         raise PrimusCortexError(
-            f"primus_cortex pr_patches at {url} returned non-list/dict/str: {type(payload).__name__}"
+            f"pr_monitor pr_patches at {url} returned non-list/dict/str: {type(payload).__name__}"
         )
 
     chunks: list[str] = []
@@ -401,7 +401,7 @@ def search_perf_prs_via_primus_search(
 
     Args:
         repo_url (str): Git URL of the repo; parsed to an ``owner/name`` slug.
-        base_url (str): primus_cortex service base URL.
+        base_url (str): PR Monitor service base URL.
         query (str): Free-text search query.
         limit (int): Maximum number of PRs to return. Defaults to 5.
         state (str): PR state filter. Defaults to ``"all"``.

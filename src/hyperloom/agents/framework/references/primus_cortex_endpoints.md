@@ -110,11 +110,11 @@ The `PrimusCortexError` class wraps all failure cases:
 
 | Cause | Message shape |
 |---|---|
-| HTTP 4xx/5xx | `primus_cortex HTTP <code> at <url>: <body[:512]>` |
-| URL unreachable (DNS / no route) | `primus_cortex unreachable at <url>: <reason>` |
-| Transport timeout / OSError | `primus_cortex transport error at <url>: <exc>` |
-| Non-JSON body | `primus_cortex returned non-JSON at <url>: ...` |
-| Malformed JSON shape | `primus_cortex response at <url> ...` |
+| HTTP 4xx/5xx | `pr_monitor HTTP <code> at <url>: <body[:512]>` |
+| URL unreachable (DNS / no route) | `pr_monitor unreachable at <url>: <reason>` |
+| Transport timeout / OSError | `pr_monitor transport error at <url>: <exc>` |
+| Non-JSON body | `pr_monitor returned non-JSON at <url>: ...` |
+| Malformed JSON shape | `pr_monitor response at <url> ...` |
 
 Callers should let `PrimusCortexError` propagate; the CLI's outer
 `except Exception` translates it into exit code 2 with the original
@@ -124,7 +124,7 @@ the operator must see the original error.
 ## Notes
 
 * HTTP requests are made via stdlib `urllib.request` (no `requests`
-  dependency). The User-Agent is `framework-agent-primus-cortex/0.1`.
+  dependency). The User-Agent is `framework-agent-pr-monitor/0.1`.
 * All requests are GET; framework-agent never POSTs to the PR Monitor service.
 * If no PR Monitor-compatible service is available, omit `primus_cortex` from
   `search_modes` and rely on the GitHub backend.

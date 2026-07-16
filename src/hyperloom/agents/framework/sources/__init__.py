@@ -4,8 +4,8 @@
 
 Routes :class:`ExploreRequest` to one or more backends per
 ``request.search_modes`` and merges into a deduplicated :class:`Candidate`
-list. Backends: ``primus_cortex`` (internal REST, hard-fail on errors) and
-``github`` (anonymous Search, best-effort, ``[]`` on failure).
+list. Backends: ``primus_cortex`` (PR Monitor-compatible REST, hard-fail on
+errors) and ``github`` (anonymous Search, best-effort, ``[]`` on failure).
 
 Contract: empty ``search_modes`` -> ``[]``; a mode requested without its
 config -> :class:`SourceConfigError`; per-mode errors propagate per the
@@ -154,7 +154,7 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
       3. Deduplicate by ref, preserving the first occurrence.
 
     Hard-fails when ``primus_cortex`` is requested without configuration,
-    or when the primus-cortex transport fails.
+    or when the PR Monitor transport fails.
 
     Args:
         request (ExploreRequest): Request carrying explicit refs, search modes,
@@ -285,7 +285,7 @@ def _rank_by_keyword_overlap(prs: list[GitHubPr], keywords: list[str]) -> list[G
 
 
 def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
-    """Query primus-cortex with gap-aware ranking.
+    """Query PR Monitor with gap-aware ranking.
 
     With non-empty keywords, prefer the free-text ``/v1/search/prs`` endpoint
     (over-fetch, then client-rerank by title overlap, trim to
