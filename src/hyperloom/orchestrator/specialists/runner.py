@@ -949,6 +949,10 @@ class SpecialistRunner:
         # present it overrides the legacy ``max_turns × per_turn`` ceiling.
         wall_budget_raw = (ctx.extra or {}).get("wall_budget_sec")
         wall_budget_sec = float(wall_budget_raw) if wall_budget_raw else None
+        # Ray-managed GPU execution (§12 T4): when the dispatcher acquired a
+        # GpuSpecialistLease, run the whole subprocess inside its num_gpus actor
+        # so any GPU command lands within Ray's assigned devices. ``None`` keeps
+        # the local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES).
         sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
             task_id=ctx.task.task_id,
             workspace=workspace,
@@ -960,6 +964,7 @@ class SpecialistRunner:
             max_turns=prep.max_turns,
             gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
             wall_budget_sec=wall_budget_sec,
+            gpu_lease=(ctx.extra or {}).get("gpu_specialist_lease"),
         )
         self._append_transcript(
             workspace,

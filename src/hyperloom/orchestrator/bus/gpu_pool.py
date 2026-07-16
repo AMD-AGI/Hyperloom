@@ -5,6 +5,17 @@
 Separate from the serving lanes: constrains specialists that request
 ``needs_gpu=true`` for wall-budgeted on-GPU work (servers on non-8888 ports,
 profiling, autotune, and real benchmark loops on their leased cards).
+
+Ray-managed GPU execution (ray_modify.plan.md §12 T5, decision 3): under
+single-node Ray execution the **physical** card assignment for a ``needs_gpu``
+specialist is Ray's — the specialist subprocess runs inside a
+``GpuSpecialistActor(num_gpus=…)`` that Ray masks to its assigned devices. This
+pool is then only **capacity / TTL accounting**: ``try_acquire`` still gates
+concurrency and records a lease (so the wall-budget / TTL views, prompt display,
+and the existing dispatch tests keep working), but the ``GpuLease.gpu_ids`` it
+returns are no longer the physical device pins (the dispatcher advertises the
+logical ``0..N-1`` view Ray exposes instead). Off the Ray path (multi-node /
+``INFERENCE_OPTIMIZER_RAY_EXEC`` off / tests) the ids remain the device pins.
 """
 
 from __future__ import annotations
@@ -176,7 +187,11 @@ class GpuLease:
 
 
 class SpecialistGpuPool:
-    """Capacity-limited GPU allocation for specialist tasks."""
+    """Capacity-limited GPU allocation for specialist tasks.
+
+    Under single-node Ray execution this is capacity/TTL accounting only; Ray
+    owns the physical card assignment (see the module docstring / §12 T5).
+    """
 
     def __init__(
         self,

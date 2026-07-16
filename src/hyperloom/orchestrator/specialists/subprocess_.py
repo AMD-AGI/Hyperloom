@@ -222,6 +222,47 @@ def _setup_worktree(
     return worktree_path, ""
 
 
+class _RayLeaseProcess:
+    """``Popen``-like adapter for a specialist that runs inside a Ray actor.
+
+    Ray-managed GPU execution (P2/T4): when a ``needs_gpu`` specialist runs
+    inside a :class:`~hyperloom.orchestrator.actions.executors._ray_serving.GpuSpecialistLease`
+    actor, the ``Popen`` object lives in the actor's worker, not here. This
+    exposes only the members the reap loop touches — ``poll`` / ``returncode`` /
+    ``pid`` — backed by the lease's actor methods, plus ``reap`` (reap the
+    subprocess tree via the actor; the lease itself is released by the
+    dispatcher's ``finally``). Single-node: the subprocess is on this same host,
+    so ``process.log`` and the worktree it writes are read locally.
+    """
+
+    def __init__(self, lease: Any, pid: int) -> None:
+        """Wrap a started lease + the launched pid.
+
+        Args:
+            lease: The started ``GpuSpecialistLease``.
+            pid: The launched subprocess pid.
+        """
+        self._lease = lease
+        self.pid = pid
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        """Return ``None`` while the actor's subprocess runs, else its exit code.
+
+        Returns:
+            ``None`` when still alive, otherwise the exit code (latched into
+            ``returncode``).
+        """
+        if self._lease.is_alive():
+            return None
+        self.returncode = self._lease.exit_code()
+        return self.returncode
+
+    def reap(self) -> None:
+        """Reap the subprocess tree via the actor (lease released separately)."""
+        self._lease.stop()
+
+
 # Dispatcher
 class SpecialistSubprocessDispatcher:
     """Spawn + reap one claude subprocess for a specialist task.
@@ -252,6 +293,7 @@ class SpecialistSubprocessDispatcher:
         max_turns: int,
         gpu_ids: tuple[int, ...] = (),
         wall_budget_sec: float | None = None,
+        gpu_lease: Any = None,
     ) -> SpecialistSubprocessResult:
         """Spawn a claude subprocess, reap it, return the parsed result.
 
@@ -280,6 +322,12 @@ class SpecialistSubprocessDispatcher:
                 (seconds). When provided it overrides the
                 ``max_turns × per_turn_max_seconds`` ceiling as the reaper's
                 hard kill deadline — turns are no longer the stop signal.
+            gpu_lease (Any): When set (Ray-managed GPU execution, §12 T4), a
+                started-on-demand ``GpuSpecialistLease``; the whole subprocess
+                runs inside its actor holding ``num_gpus`` (Ray sets the visible
+                devices, so any GPU command the specialist issues stays within
+                its lease). ``None`` keeps the local ``Popen`` path, with
+                ``gpu_ids`` pinned into ``*_VISIBLE_DEVICES`` as before.
 
         Returns:
             SpecialistSubprocessResult: Parsed outcome — done payload (if
@@ -320,7 +368,17 @@ class SpecialistSubprocessDispatcher:
         from ..roles._llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
-        if gpu_ids:
+        if gpu_lease is not None:
+            # Ray-managed GPU execution (§12 T4): Ray sets *_VISIBLE_DEVICES in
+            # the actor's worker; never let the caller env pin them (that would
+            # override Ray's card assignment). ``gpu_ids`` here is the logical
+            # 0..N-1 view the specialist sees under Ray's mask — kept only as the
+            # informational count env for specialist tooling.
+            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+                env.pop(var, None)
+            if gpu_ids:
+                env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = ",".join(str(g) for g in gpu_ids)
+        elif gpu_ids:
             visible = ",".join(str(g) for g in gpu_ids)
             env["HIP_VISIBLE_DEVICES"] = visible
             env["CUDA_VISIBLE_DEVICES"] = visible
@@ -332,25 +390,46 @@ class SpecialistSubprocessDispatcher:
                 env.pop(var, None)
 
         proc_started = time.monotonic()
-        log_fh = process_log.open("w", encoding="utf-8")
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=log_fh,
-                stderr=subprocess.STDOUT,
-                env=env,
-                cwd=str(worktree or workspace),
-                start_new_session=True,
-            )
-        except (FileNotFoundError, OSError) as exc:
-            log_fh.close()
-            return SpecialistSubprocessResult(
-                done_payload=None,
-                exit_code=None,
-                elapsed_seconds=0.0,
-                process_log_path=str(process_log),
-                error=f"failed to spawn claude subprocess: {exc!r}",
-            )
+        log_fh: Any = None
+        if gpu_lease is not None:
+            # The actor opens process.log inside its worker (same host on
+            # single-node), so the reaper below still reads it directly.
+            try:
+                pid = gpu_lease.start(
+                    cmd,
+                    env=env,
+                    cwd=str(worktree or workspace),
+                    log_path=str(process_log),
+                )
+            except Exception as exc:  # noqa: BLE001 — surface a start failure as a result
+                return SpecialistSubprocessResult(
+                    done_payload=None,
+                    exit_code=None,
+                    elapsed_seconds=0.0,
+                    process_log_path=str(process_log),
+                    error=f"failed to start specialist GPU actor: {exc!r}",
+                )
+            proc: Any = _RayLeaseProcess(gpu_lease, pid)
+        else:
+            log_fh = process_log.open("w", encoding="utf-8")
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    cwd=str(worktree or workspace),
+                    start_new_session=True,
+                )
+            except (FileNotFoundError, OSError) as exc:
+                log_fh.close()
+                return SpecialistSubprocessResult(
+                    done_payload=None,
+                    exit_code=None,
+                    elapsed_seconds=0.0,
+                    process_log_path=str(process_log),
+                    error=f"failed to spawn claude subprocess: {exc!r}",
+                )
 
         # Reap loop — poll done-file / exit / heartbeat staleness / timeout.
         # Prefer the explicit wall budget; fall back to ``max_turns × per_turn``.
@@ -368,7 +447,8 @@ class SpecialistSubprocessDispatcher:
                 started=proc_started,
             )
         finally:
-            log_fh.close()
+            if log_fh is not None:
+                log_fh.close()
 
         # Patches: scan worktree/patches/ (Arbor convention).
         patches = self._collect_patches(worktree, workspace)
@@ -490,7 +570,7 @@ class SpecialistSubprocessDispatcher:
     async def _reap_loop(
         self,
         *,
-        proc: subprocess.Popen,
+        proc: Any,
         workspace: Path,
         done_files: tuple[Path, ...],
         heartbeat_file: Path,
@@ -505,7 +585,9 @@ class SpecialistSubprocessDispatcher:
         runs are killed via :meth:`_kill`.
 
         Args:
-            proc (subprocess.Popen): The running claude subprocess.
+            proc (Any): The running claude subprocess — a ``subprocess.Popen``
+                (local) or a :class:`_RayLeaseProcess` (Ray GPU-specialist
+                actor). Only ``poll`` / ``returncode`` / ``pid`` are used.
             workspace (Path): Task workspace (reserved for context).
             done_files (tuple[Path, ...]): Candidate done-file paths to poll.
             heartbeat_file (Path): Heartbeat file whose mtime gauges liveness.
@@ -590,16 +672,22 @@ class SpecialistSubprocessDispatcher:
         return outcome
 
     @staticmethod
-    def _kill(proc: subprocess.Popen) -> None:
+    def _kill(proc: Any) -> None:
         """Tear down a claude subprocess.
 
         Kills the whole process group (SIGTERM, then SIGKILL after a 5s
         grace) so child SDK / curl invocations die with it. No-op if the
-        process already exited.
+        process already exited. For a :class:`_RayLeaseProcess` (Ray
+        GPU-specialist actor) the reap is delegated to the actor, which reaps
+        the whole tree inside its worker (the lease is released separately).
 
         Args:
-            proc (subprocess.Popen): The subprocess to terminate.
+            proc (Any): The subprocess to terminate — ``subprocess.Popen`` or
+                :class:`_RayLeaseProcess`.
         """
+        if isinstance(proc, _RayLeaseProcess):
+            proc.reap()
+            return
         if proc.poll() is not None:
             return
         try:

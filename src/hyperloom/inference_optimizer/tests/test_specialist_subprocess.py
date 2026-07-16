@@ -706,3 +706,98 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     )
     assert outcome["stale_heartbeat"] is True, outcome
     assert killed["v"] is True
+
+
+# ── P2/T4: needs_gpu specialist runs inside a GpuSpecialistLease actor ────────
+class _FakeGpuSpecialistLease:
+    """Fake GpuSpecialistLease: start() writes done.json + log, then 'exits'."""
+
+    def __init__(self, workspace: Path):
+        self._workspace = workspace
+        self.started: dict[str, Any] | None = None
+        self.env: dict[str, str] | None = None
+        self.alive = True
+        self.stopped = False
+
+    def start(self, cmd, *, env=None, cwd=None, log_path=None) -> int:
+        self.started = {"cmd": cmd, "cwd": cwd, "log_path": log_path}
+        self.env = dict(env or {})
+        Path(log_path).write_text("stream-json log line\n", encoding="utf-8")
+        # Graceful done — the reaper harvests this and exits.
+        (self._workspace / "specialist_done.json").write_text(
+            json.dumps({"proposal_set": []}), encoding="utf-8"
+        )
+        self.alive = False
+        return 9999
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def exit_code(self) -> int | None:
+        return None if self.alive else 0
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.alive = False
+
+
+@pytest.mark.asyncio
+async def test_run_routes_through_gpu_lease_and_strips_devices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With a gpu_lease, run() launches inside the actor (no local Popen) and
+    strips *_VISIBLE_DEVICES so Ray owns the card assignment (P2/T4)."""
+    workspace = tmp_path / "ws"
+    lease = _FakeGpuSpecialistLease(workspace)
+
+    # Any local Popen on the Ray path is a bug — make it explode.
+    import hyperloom.orchestrator.specialists.subprocess_ as sp
+
+    def _boom(*_a, **_k):
+        raise AssertionError("local Popen must not run when a gpu_lease is set")
+
+    monkeypatch.setattr(sp.subprocess, "Popen", _boom)
+    # Pretend the parent has serving GPU visibility that must NOT leak through.
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "6,7")
+
+    cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.05)
+    disp = SpecialistSubprocessDispatcher(config=cfg)
+    result = await disp.run(
+        task_id="t-gpu",
+        workspace=workspace,
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=(),
+        max_turns=1,
+        gpu_ids=(0, 1),
+        wall_budget_sec=60.0,
+        gpu_lease=lease,
+    )
+
+    assert lease.started is not None, "the subprocess must run inside the lease actor"
+    assert str(lease.started["log_path"]).endswith("process.log")
+    # Ray owns the visible devices — the caller env must not pin them.
+    assert "ROCR_VISIBLE_DEVICES" not in lease.env
+    assert "HIP_VISIBLE_DEVICES" not in lease.env
+    assert "CUDA_VISIBLE_DEVICES" not in lease.env
+    # The logical count is still advertised for specialist tooling.
+    assert lease.env.get("INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS") == "0,1"
+    assert result.done_payload is not None
+    assert result.exit_code == 0
+
+
+def test_kill_on_ray_lease_process_delegates_to_actor():
+    """_kill on a _RayLeaseProcess reaps via the actor, not killpg."""
+    from hyperloom.orchestrator.specialists.subprocess_ import _RayLeaseProcess
+
+    lease = _FakeGpuSpecialistLease(Path("/tmp"))
+    lease.alive = True
+    handle = _RayLeaseProcess(lease, pid=1234)
+    assert handle.poll() is None  # alive
+    SpecialistSubprocessDispatcher._kill(handle)
+    assert lease.stopped is True
+    # After reap the actor reports not-alive; poll latches the exit code.
+    assert handle.poll() == 0
