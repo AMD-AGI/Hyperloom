@@ -102,7 +102,6 @@ PID, and monitors `state.json` until a terminal `stop_reason`.
 | `TRACELENS_INTERNAL_ROOT` | Optional internal TraceLens extension |
 | `SGLANG_USE_AITER` / `SGLANG_AITER_MLA_PERSIST` | Enable + persist the aiter kernel path |
 | `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap / wait timeouts (infera PD only) |
-| `NODE_TLS_REJECT_UNAUTHORIZED` | TLS check toggle for internal endpoints |
 
 Platform-injected (do **not** set): `SAFE_API_URL`, `SAFE_API_KEY`,
 `SAFE_WORKSPACE`, `WORKLOAD_ID`, `DISPLAY_NAME`, and `USER_DATA_PATH`.
