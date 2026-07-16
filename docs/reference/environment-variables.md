@@ -65,15 +65,35 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 
 ## Workload configuration
 
-Use CLI flags for workload shape and runtime behavior:
+Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
+`TP` / `EP` env vars are ignored and overwritten (`GPU_TYPE` is a fallback when
+`--gpu-type` is omitted).
 
-`--model`, `--framework`, `--gpu-type`, `--model-class`, `--tp`, `--ep`,
-`--conc`, `--isl`, `--osl`, `--max-model-len`, `--precision`,
-`--profile-osl`, `--enable-roofline` / `--no-enable-roofline`, and
-`--enable-conc-sweep` / `--no-enable-conc-sweep`.
+- **Model / workload shape:** `--model`, `--model-class`, `--framework`,
+  `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
+  `--conc`, `--max-model-len`, `--profile-osl`.
+- **Goal / budget:** `--target-gain`, `--max-hours`, `--target-summary`,
+  `--target-tput`, `--compare-against-gpu`.
+- **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
+  `--cpus-per-node`, `--mem-per-node`, `--gpu-type`, `--mn-backend`
+  (`rayjob` / `infera`), `--mn-image`, `--server-args` (rayjob),
+  `--rayjob-extra-env` (repeatable; the supported way to inject server-side env
+  such as `SGLANG_USE_AITER=0` into RayJob pods — the sandbox's own `SGLANG_*`
+  env is not forwarded).
+- **PD disaggregation (infera):** `--pd-mode disaggregated`,
+  `--pd-prefill-nodes` / `--pd-prefill-tp` / `--pd-prefill-ep` /
+  `--pd-prefill-extra-args`, `--pd-decode-nodes` / `--pd-decode-tp` /
+  `--pd-decode-ep` / `--pd-decode-extra-args`, `--pd-transfer-backend`,
+  `--pd-ib-device`.
+- **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
+  `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
+  `--no-framework-agent`, `--no-kernel`, `--no-explore`.
+- **Agent models:** `--claude-model`, `--codex-model`.
+- **Session / resume:** `--resume`, `--resume-from`, `--session-dir`,
+  `--reset-state`.
+- **Quantization:** `--quantize`, `--quantize-scheme`.
 
-The CLI might still materialize internal envs for benchmark subprocesses, but
-those are not stable user configuration and should not be pre-set by launchers.
+Run `inference_optimizer optimize --help` for the exhaustive flag list.
 
 ---
 
@@ -107,15 +127,37 @@ endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
 
 ## Multi-node / prefill-decode (PD)
 
-Use CLI flags for multi-node and prefill-decode configuration:
+Use CLI flags for multi-node topology and prefill-decode configuration:
 
-`--nodes`, `--mn-backend`, `--rayjob-image`, `--rayjob-gpus-per-node`,
+`--nodes`, `--mn-backend`, `--mn-image`, `--gpus-per-node`,
+`--cpus-per-node`, `--mem-per-node`, `--tp`, `--ep`,
 `--pd-mode`, `--pd-prefill-nodes`, `--pd-decode-nodes`, `--pd-prefill-tp`,
 `--pd-decode-tp`, `--pd-transfer-backend`, and `--pd-ib-device`.
 
-The optimizer writes the resolved values into internal handoff envs when it
-creates RayJob / Dynamo workloads; callers should not depend on those env names
-as a public configuration API.
+When the optimizer provisions the cluster itself (Primus-SaFE flow), those
+flags are all you need — no environment variables are required.
+
+### External-mode variables (SaFE-less cluster)
+
+When SaFE is unavailable (`SAFE_API_URL` / `SAFE_API_KEY` not both set) and
+`HYPERLOOM_MN_EXT_SERVICE_URL` is set, the optimizer skips all
+provisioning and benchmarks an already-running cluster described by these
+variables. When both `SAFE_API_*` are present these are ignored.
+
+| Variable | Backend | Required | Description |
+|----------|---------|----------|-------------|
+| `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`). Its presence triggers external mode. |
+| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Private SSH key already authorized on the pods (SaFE injects one otherwise). |
+| `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |
+| `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs (comma-separated) for aggregated (non-PD) runs. At least one of `_PREFILL_IPS` / `_DECODE_IPS` / `_WORKER_IPS` is required. |
+| `HYPERLOOM_MN_EXT_SSH_PORT` | infera | No (default `2233`) | SSH base port; decode role is offset `+10`. |
+| `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera | No | `known_hosts` path; else a relaxed host-key check is used. |
+| `HYPERLOOM_MN_EXT_HEAD_IP` | rayjob | No (recommended) | Ray head IP (Dashboard `:8265`, GCS `:6379`). Enables per-round restarts; omit for benchmark-only. |
+| `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | No | Ray Dashboard auth token, only if the dashboard is authenticated. |
+
+Infera external mode requires `HYPERLOOM_MN_EXT_SSH_KEY` plus at least one
+`*_IPS` list, or the run fails fast at startup. RayJob external mode ignores
+the SSH / IP vars and uses `HYPERLOOM_MN_EXT_HEAD_IP` for restarts.
 
 ---
 

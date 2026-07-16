@@ -50,6 +50,29 @@ your override.
 Same for `WORKSPACE_PATH` — it is legacy-only and still used in narrow
 fallbacks, but new launchers should rename it to `USER_DATA_PATH`.
 
+### Required: rename multi-node image / GPU flags and envs
+
+The `optimize` CLI multi-node image and per-node GPU flags were renamed
+and the legacy names are no longer accepted (no alias). Any launcher that
+passes the old flags will fail with `unrecognized arguments`. The image
+and per-node GPU count are now set purely through flags; the previous
+`INFERENCE_OPTIMIZER_RAYJOB_IMAGE` env is no longer read, so move its value
+onto `--mn-image`.
+
+```diff
+# run launchers, k8s ConfigMaps, .env
+- --rayjob-image harbor/...
++ --mn-image harbor/...
+- --rayjob-gpus-per-node 8
++ --gpus-per-node 8
+- INFERENCE_OPTIMIZER_RAYJOB_IMAGE=harbor/...
++ --mn-image harbor/...
+```
+
+The new flags cover both multi-node backends (`rayjob` head+workers and
+`infera` worker/prefill/decode pods), which is why they dropped the
+`rayjob`-specific prefix.
+
 ### Recommended: review `--model-class` if you relied on live classification
 
 The live `classify` action was removed. Current Coordinator boot still infers

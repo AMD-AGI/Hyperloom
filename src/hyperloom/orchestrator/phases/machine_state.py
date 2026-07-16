@@ -399,6 +399,12 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # Enablement loop stall: >= _ENABLEMENT_MAX_STALL consecutive rounds made
         # no forward progress. A progressing round resets the streak.
         "enablement_stalled",
+        # The baseline could not produce an accuracy result even though the
+        # accuracy test was expected to run (broken eval / missing quality
+        # gate). Optimizing against an unvalidated baseline is unsafe, so the
+        # run halts. Post-baseline accuracy failures REVERT the offending
+        # change instead of stopping.
+        "baseline_accuracy_failed",
     }
 )
 

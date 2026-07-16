@@ -1090,6 +1090,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "cortex_finalize_recipe_and_journal": "writeback",
         "_lift_to_current_best": "writeback",
         "_promote_to_shared_state": "writeback",
+        "_should_run_prelude_bootstrap": "writeback",
         "_detect_resume_state": "writeback",
         "replay_for_resume": "writeback",
         "_materialize_stack_config_for_resume": "writeback",

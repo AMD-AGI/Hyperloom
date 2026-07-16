@@ -1249,7 +1249,7 @@ def test_cli_multi_node_error_and_early_return_paths(tmp_path: Path, monkeypatch
 
     state_file = tmp_path / "missing_state.json"
     monkeypatch.setattr(state_paths, "resolve_state_file", lambda: state_file)
-    for key in ("INFERENCE_OPTIMIZER_RAYJOB_IMAGE", "INFERENCE_OPTIMIZER_GPUS_PER_NODE"):
+    for key in ("INFERENCE_OPTIMIZER_MN_IMAGE", "INFERENCE_OPTIMIZER_GPUS_PER_NODE"):
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(SystemExit) as exc:
         opt_mn._provision_multi_node_rayjob_stack(argparse.Namespace(nodes=2, mn_backend="rayjob", mn_image="", gpus_per_node=None, rayjob_extra_env=[]))
@@ -1522,7 +1522,7 @@ def test_cli_multi_node_remaining_error_branches(tmp_path: Path, monkeypatch: py
     assert exc.value.code == 6
 
     state_file.write_text("{bad", encoding="utf-8")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAYJOB_IMAGE", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_MN_IMAGE", raising=False)
     with pytest.raises(SystemExit) as exc:
         opt_mn._provision_multi_node_rayjob_stack(
             argparse.Namespace(nodes=2, mn_backend="rayjob", mn_image="", gpus_per_node=None, rayjob_extra_env=[])
