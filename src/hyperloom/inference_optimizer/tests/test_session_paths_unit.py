@@ -45,8 +45,8 @@ def test_runs_dir_rejects_unknown_action():
     ],
 )
 def test_runs_dir_rejects_task_id_traversal(bad_task_id):
-    # SWSPLAT-33330: a legitimate task_id is a uuid hex; anything with a path
-    # separator or ``..`` must be rejected so it cannot relocate the sandbox.
+    # Legitimate task ids are single path components; anything path-like must
+    # be rejected so it cannot relocate the sandbox.
     with pytest.raises(ValueError):
         sp.runs_dir(SD, "baseline", bad_task_id)
 
