@@ -32,7 +32,9 @@ HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v0.8}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 
-DEFAULT_OPENAI_BASE_URL="https://global.primus-safe.amd.com/api/v1/llm-proxy/v1"
+# LLM gateway base URL. No internal endpoint is baked in; set OPENAI_BASE_URL /
+# ANTHROPIC_BASE_URL (or export DEFAULT_OPENAI_BASE_URL) to your own gateway.
+DEFAULT_OPENAI_BASE_URL="${DEFAULT_OPENAI_BASE_URL:-}"
 SAFE_API_KEY_PLACEHOLDER="ak-your-api-key-here"
 
 FRAMEWORKS="sglang,vllm"
@@ -60,6 +62,9 @@ if [ -z "$_SGLANG_ROCM_PYPI_VERSION_WAS_SET" ]; then
   esac
 fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.0}"
+# AMD-hosted ROCm wheel index for amd-sglang (an AMD-published dependency).
+# Declared explicitly; override to use a mirror or a fully public index.
+SGLANG_ROCM_PYPI_INDEX="${SGLANG_ROCM_PYPI_INDEX:-https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
 VLLM_VERSION="${VLLM_VERSION:-0.22.0}"
@@ -551,7 +556,7 @@ install_sglang_from_wheel() {
   "$py" -m pip uninstall -y sglang-kernel sgl-kernel sglang amd-sglang || true
   "$py" -m pip install \
     "amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]" \
-    -i "https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple" \
+    -i "${SGLANG_ROCM_PYPI_INDEX}" \
     --extra-index-url https://pypi.org/simple
 }
 
@@ -597,7 +602,7 @@ PY
 
   if [ "$DRY_RUN" -eq 1 ]; then
     if [ "$py_mm" = "3.10" ]; then
-      log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]' -i https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple --extra-index-url https://pypi.org/simple"
+      log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]' -i ${SGLANG_ROCM_PYPI_INDEX} --extra-index-url https://pypi.org/simple"
     else
       log "would clone/build SGLang source ${SGLANG_REPO}@${SGLANG_REF} under ${SGLANG_ROOT:-${deps_root}/sglang}"
       log "would install SGLang source with [srt_hip] runtime dependencies under current torch/triton constraints"
@@ -1146,8 +1151,8 @@ resolve_credentials() {
   fi
 
   # Single-gateway convenience: default the OpenAI endpoint only when no base URL is
-  # set at all, so a pure Anthropic split config is not polluted with the AMD default.
-  if [ -z "$openai_url" ] && [ -z "$anthropic_url" ]; then
+  # set at all AND a default was explicitly provided (no internal endpoint is baked in).
+  if [ -z "$openai_url" ] && [ -z "$anthropic_url" ] && [ -n "$DEFAULT_OPENAI_BASE_URL" ]; then
     openai_url="$DEFAULT_OPENAI_BASE_URL"
     warn "no LLM base URL set; defaulting OPENAI_BASE_URL to ${openai_url}"
   fi

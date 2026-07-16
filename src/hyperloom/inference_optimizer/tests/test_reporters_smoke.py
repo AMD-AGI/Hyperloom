@@ -25,7 +25,7 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "tick_count": 12,
             "host": "node-1",
             "code_revision": "deadbeef",
-            "session_dir": "/wekafs/sessions/test",
+            "session_dir": "/path/sessions/test",
         },
         "workload": {
             "model_name": "deepseek-ai/DeepSeek-R1",

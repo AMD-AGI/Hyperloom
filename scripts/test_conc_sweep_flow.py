@@ -25,7 +25,7 @@ the produced ``conc_sweep_summary.json`` artifact, completing the full flow.
 Usage::
 
     python scripts/test_conc_sweep_flow.py \\
-        --session-dir /primus/data/zgong/Hyperloom-Sessions/Qwen3-8B/20260715T033207Z \\
+        --session-dir /path/to/Hyperloom-Sessions/Qwen3-8B/<sid> \\
         --concs 8,4,2
 """
 
@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--session-dir",
         type=Path,
-        default=Path("/primus/data/zgong/Hyperloom-Sessions/Qwen3-8B/20260715T033207Z"),
+        default=Path("/path/to/Hyperloom-Sessions/Qwen3-8B/<sid>"),
         help="Real optimization session (baseline + accepted current_best).",
     )
     ap.add_argument("--concs", default="8,4,2", help="Descending CONC ladder (comma-separated).")
