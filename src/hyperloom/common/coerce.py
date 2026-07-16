@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Numeric coercion primitives (canonical ``to_float`` / ``to_int`` / ...).
+"""Value coercion primitives (canonical ``to_float`` / ``to_int`` / ``to_str_list`` / ...).
 
 Single home for the "best-effort coerce a value to a number, tolerate dirty
 input, reject ``bool``, fall back to a default" idiom.
@@ -151,6 +151,27 @@ def to_unix(value: Any, default: _T | None = None) -> float | _T | None:
     return default
 
 
+def to_str_list(value: Any) -> list[str]:
+    """Coerce *value* into a list of non-empty, stripped strings.
+
+    Args:
+        value: A string, list/tuple/set, other scalar, or ``None``.
+
+    Returns:
+        ``None`` -> ``[]``; a string -> ``[stripped]`` (dropped when blank); a
+        list/tuple/set -> each element ``str``-ified, stripped, kept only when
+        non-empty; any other scalar -> ``[stripped]`` when non-empty.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
 __all__ = [
     "to_float",
     "to_int",
@@ -158,4 +179,5 @@ __all__ = [
     "first_int",
     "optional_positive_int",
     "to_unix",
+    "to_str_list",
 ]

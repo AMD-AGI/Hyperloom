@@ -42,7 +42,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from .gbrain_remote_client import GbrainRemoteError, _GbrainMcp
 
@@ -1000,37 +1000,29 @@ class KGClient:
         content = _page_content(page, full=True)
         return content or None
 
+    def _degrade_safe(self, method: Callable[..., Any], default: Any, **kwargs: Any) -> Any:
+        """Call *method*, returning *default* on any known backend error."""
+        try:
+            return method(**kwargs)
+        except (GbrainRemoteError, OSError, TimeoutError, ValueError) as exc:
+            log.warning("kg %s degraded (returning default): %s", getattr(method, "__name__", "call"), exc)
+            return default
+
     def query_facts_safe(self, **kwargs: Any) -> list[Fact]:
         """Call :meth:`query_facts`, returning ``[]`` on any backend error."""
-        try:
-            return self.query_facts(**kwargs)
-        except (GbrainRemoteError, OSError, TimeoutError, ValueError) as exc:
-            log.warning("kg query_facts degraded (returning []): %s", exc)
-            return []
+        return self._degrade_safe(self.query_facts, [], **kwargs)
 
     def graph_traverse_safe(self, **kwargs: Any) -> list[GraphNode]:
         """Call :meth:`graph_traverse`, returning ``[]`` on any backend error."""
-        try:
-            return self.graph_traverse(**kwargs)
-        except (GbrainRemoteError, OSError, TimeoutError, ValueError) as exc:
-            log.warning("kg graph_traverse degraded (returning []): %s", exc)
-            return []
+        return self._degrade_safe(self.graph_traverse, [], **kwargs)
 
     def find_conflicts_safe(self, **kwargs: Any) -> list[dict[str, Any]]:
         """Call :meth:`find_conflicts`, returning ``[]`` on any backend error."""
-        try:
-            return self.find_conflicts(**kwargs)
-        except (GbrainRemoteError, OSError, TimeoutError, ValueError) as exc:
-            log.warning("kg find_conflicts degraded (returning []): %s", exc)
-            return []
+        return self._degrade_safe(self.find_conflicts, [], **kwargs)
 
     def emit_fact_safe(self, **kwargs: Any) -> bool:
         """Call :meth:`emit_fact`, returning ``False`` on any backend error."""
-        try:
-            return self.emit_fact(**kwargs)
-        except (GbrainRemoteError, OSError, TimeoutError, ValueError) as exc:
-            log.warning("kg emit_fact degraded (skipped): %s", exc)
-            return False
+        return self._degrade_safe(self.emit_fact, False, **kwargs)
 
 def _page_content(page: Any, *, full: bool = False) -> str:
     """Extract a page's body (or full raw markdown) from a get_page result.
