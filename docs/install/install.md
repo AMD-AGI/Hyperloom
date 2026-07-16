@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Run Hyperloom inside a Docker container or on bare-metal on an AMD GPU machine. Covers installing Hyperloom, configuring credentials, and running a demo."
-        "keywords": "Hyperloom, Docker, container, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Cursor, Dev Containers, quickstart, ROCm"
+        "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Cursor, Claude, Dev Containers, quickstart, ROCm"
 ---
 # Hyperloom Quickstart
 
@@ -91,7 +91,7 @@ It asks for these values with a fixed option order:
    - `baremetal`
 
 If Hyperloom is already installed inside a Docker container, choose `baremetal`
-because setup should run directly in the current container environment.
+to enable setup to run directly in the current container environment.
 
 ## Setup scenarios
 
