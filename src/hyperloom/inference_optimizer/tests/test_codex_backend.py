@@ -313,6 +313,33 @@ def test_extract_responses_output_empty():
     assert _extract_responses_output({}) == ("", [])
 
 
+def test_extract_responses_output_skips_non_text_content_block():
+    # A message whose content mixes a non-output_text block (skipped) with a
+    # real output_text block -> only the text survives.
+    resp = {
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {"type": "refusal", "text": "ignored"},
+                    {"type": "output_text", "text": "kept", "annotations": []},
+                ],
+            }
+        ]
+    }
+    assert _extract_responses_output(resp) == ("kept", [])
+
+
+@pytest.mark.asyncio
+async def test_web_search_wires_reasoning_effort(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_REASONING_EFFORT", "high")
+    reply = '```json\n{"intents": [{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}]}\n```'
+    b = _make_ws_backend([reply])
+    await b.run("p")
+    call = b._client.responses.calls[0]
+    assert call["kwargs"].get("reasoning") == {"effort": "high"}
+
+
 @pytest.mark.asyncio
 async def test_web_search_uses_responses_api_and_parses_envelope():
     reply = '```json\n{"intents": [{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}]}\n```'
@@ -354,4 +381,66 @@ async def test_web_search_disabled_uses_chat_completions():
 async def test_web_search_no_envelope_raises_no_intent_emitted():
     b = _make_ws_backend(["I searched but have nothing structured to say."])
     with pytest.raises(NoIntentEmitted):
+        await b.run("p")
+
+
+# --- API error translation to BackendError ---------------------------------
+
+
+class _RaisingEndpoint:
+    """Fake ``create`` that raises the given exception."""
+
+    def __init__(self, exc: BaseException):
+        self._exc = exc
+
+    async def create(self, **kwargs):
+        raise self._exc
+
+
+class _RaisingChatClient:
+    def __init__(self, exc: BaseException):
+        self.completions = _RaisingEndpoint(exc)
+        self.chat = FakeChat(self.completions)  # type: ignore[arg-type]
+        self.responses = _RaisingEndpoint(exc)
+
+
+def _chat_backend_raising(exc: BaseException) -> CodexBackend:
+    return CodexBackend(model="gpt-5.4", client_factory=lambda: _RaisingChatClient(exc))
+
+
+def _ws_backend_raising(exc: BaseException) -> CodexBackend:
+    return CodexBackend(
+        model="gpt-5.5", web_search=True, client_factory=lambda: _RaisingChatClient(exc)
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_timeout_translates_to_backend_error():
+    import asyncio
+
+    b = _chat_backend_raising(asyncio.TimeoutError())
+    with pytest.raises(BackendError, match="timed out"):
+        await b.run("p")
+
+
+@pytest.mark.asyncio
+async def test_chat_generic_error_translates_to_backend_error():
+    b = _chat_backend_raising(RuntimeError("boom"))
+    with pytest.raises(BackendError, match="Codex API call failed"):
+        await b.run("p")
+
+
+@pytest.mark.asyncio
+async def test_responses_timeout_translates_to_backend_error():
+    import asyncio
+
+    b = _ws_backend_raising(asyncio.TimeoutError())
+    with pytest.raises(BackendError, match="Responses API call timed out"):
+        await b.run("p")
+
+
+@pytest.mark.asyncio
+async def test_responses_generic_error_translates_to_backend_error():
+    b = _ws_backend_raising(RuntimeError("boom"))
+    with pytest.raises(BackendError, match="Responses API call failed"):
         await b.run("p")
