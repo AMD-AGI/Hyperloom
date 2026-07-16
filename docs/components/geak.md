@@ -35,6 +35,6 @@ GEAK's `e2e_workflow` recursively drives `kernel_workflow` to author and tune th
 individual hot kernels worth fixing. See
 [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
-## GEAK Documentation
+## GEAK documentation
 
-For detailed documentation on GEAK, please visit [ROCm Docs](https://rocm.docs.amd.com/projects/geak/en/latest/).
+For detailed documentation on GEAK, see [GEAK on ROCm Docs](https://rocm.docs.amd.com/projects/geak/en/latest/).

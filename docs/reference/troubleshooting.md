@@ -6,8 +6,7 @@ myst:
 ---
 # Troubleshooting Hyperloom
 
-A consolidated symptom → cause → fix index for the failures Hyperloom
-users hit most often. If a symptom isn't listed here, check the
+A consolidated symptom → cause → fix index for the most common Hyperloom failures. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
 [`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
 [`kernel/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/kernel/SKILL.md),
