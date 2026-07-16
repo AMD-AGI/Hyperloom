@@ -207,11 +207,11 @@ def test_build_prompt_full_renders_three_groups():
     )
     p = qs.build_quantization_prompt(
         cfg,
-        model_path="/wekafs/models/Qwen-Qwen3-32B",
+        model_path="/path/models/Qwen-Qwen3-32B",
         gpu_type="mi355x",
-        skill_path="@/wekafs/HyperloomV2/quantization_agent/SKILL.md",
+        skill_path="@/shared/quantization_agent/SKILL.md",
     )
-    assert "Use the skill at @/wekafs/HyperloomV2/quantization_agent/SKILL.md" in p
+    assert "Use the skill at @/shared/quantization_agent/SKILL.md" in p
     assert "on an MI355X target" in p
     assert "Quantization strategy:" in p
     assert "Apply mxfp4 as the global quantization scheme." in p
@@ -440,7 +440,7 @@ def test_prelude_preserves_source_model_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
     monkeypatch.delenv("MODEL_PATH", raising=False)
 
-    args = _Args(model="/wekafs/models/google-gemma-4-26B-A4B-it", quantize="fp8")
+    args = _Args(model="/path/models/google-gemma-4-26B-A4B-it", quantize="fp8")
     asyncio.run(cli_quantization._run_quantization_prelude(args))
 
     # Model path is rewritten to the generic quantized export dir ...

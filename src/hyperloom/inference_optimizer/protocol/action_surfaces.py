@@ -23,6 +23,15 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 )
 
 
+# Request-kind aliases that route to a kernel-owned handler. apply_patch is
+# an alias of integrate (both dispatch to integrate_handler); PolicyGate
+# resolves the alias to its canonical owned action so the phase-action gate
+# applies identically.
+KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
+    "apply_patch": "integrate",
+}
+
+
 # Coordinator-managed actions that agents should not directly propose.
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
     {
@@ -102,6 +111,7 @@ __all__ = [
     "GRID_INJECTABLE_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
+    "KERNEL_REQUEST_KIND_ALIASES",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]
