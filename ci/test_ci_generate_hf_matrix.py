@@ -452,6 +452,20 @@ class _FakeURLMap:
         return io.BytesIO(json.dumps({"results": []}).encode("utf-8"))
 
 
+def test_http_urlopen_rejects_non_http_scheme():
+    try:
+        gm._http_urlopen("file:///tmp/not-allowed", timeout=1)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "unsupported URL scheme" in str(exc)
+
+
+def test_http_urlopen_allows_relative_test_url(monkeypatch):
+    monkeypatch.setattr(gm.urllib.request, "urlopen", _FakeURLMap({"/api/test": {"ok": True}}))
+    with gm._http_urlopen("/api/test", timeout=1) as resp:
+        assert json.loads(resp.read().decode("utf-8")) == {"ok": True}
+
+
 def test_paginate_models(monkeypatch):
     routes = {
         "/api/v1/leaderboard": {
