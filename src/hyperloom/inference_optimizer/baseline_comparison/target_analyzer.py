@@ -55,7 +55,7 @@ from .types import BaselinePoint, BaselineQuery, BaselineSummary
 # InferenceX (https://inferencex.semianalysis.com) refers to models by short
 # human names (``MiniMax-M2.5``, ``DeepSeek-R1-0528``), but local weights
 # typically live at HuggingFace-style paths like
-# ``/wekafs/models/MiniMaxAI-MiniMax-M2.5``. The mapping below owns that
+# ``/path/models/MiniMaxAI-MiniMax-M2.5``. The mapping below owns that
 # translation.
 #
 # Hard rules:

@@ -44,7 +44,7 @@
 benchmark:
   framework: atom
   # benchmark_script: atom_mi355x.sh  # uncomment to force a specific Magpie script
-  model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
+  model: /path/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
   precision: fp8
   run_mode: local
 

@@ -51,7 +51,7 @@ def test_write_variant_abort_marker_creates_file_with_expected_fields(tmp_path):
         variant_name="max_num_seqs_128",
         error_class="mn_server_restart_failed",
         error_summary=(
-            "server /health did not return 200 within 1800s (url=http://10.245.131.67:8888/health, last_err=...)"
+            "server /health did not return 200 within 1800s (url=http://192.0.2.67:8888/health, last_err=...)"
         ),
         extra_args="--max-num-seqs 128",
     )
@@ -434,7 +434,7 @@ def _write_baseline_yaml_mtime(path: Path) -> None:
     cfg = {
         "benchmark": {
             "framework": "sglang",
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
@@ -460,7 +460,7 @@ def _empty_workspace(slot: Path) -> Path:
             {
                 "success": False,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
             }
         )
     )
@@ -562,7 +562,7 @@ def _write_baseline_yaml_overrides(path: Path) -> None:
     cfg = {
         "benchmark": {
             "framework": "sglang",
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
@@ -588,7 +588,7 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
             {
                 "success": True,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": tput / 256,
                     "output_throughput": tput,
@@ -1038,7 +1038,7 @@ def test_apply_compatibility_filter_uses_atom_help_when_framework_atom(
     """When ``$FRAMEWORK=atom`` the compatibility filter validates variant flags against atom --help, dropping a sglang-only flag with a reason mentioning ``atom --help``."""
     monkeypatch.setenv("FRAMEWORK", "atom")
     # MoE keyword so the model-class predicate doesn't drop the variant first.
-    monkeypatch.setenv("MODEL_PATH", "/wekafs/models/DeepSeek-R1-0528")
+    monkeypatch.setenv("MODEL_PATH", "/path/models/DeepSeek-R1-0528")
 
     # Pre-populate the cache so the predicate reads from it without mocking subprocess.
     _grid_runner._HELP_TEXT_CACHE["atom"] = "usage: atom-engine [--tensor-parallel-size INT] [--enable-deepep-moe]"
