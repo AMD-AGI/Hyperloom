@@ -206,17 +206,15 @@ class IntentRouter:
                 else "needs_review"
             )
 
-            # Defense-in-depth (log-only): a verdict_map that
-            # collapses to a permissive verdict while carrying non-approving
-            # sub-verdicts materialises the whole grid off a single approval.
-            # Record it to the process log for audit; behaviour is unchanged.
+            # Defensive audit (log-only): record verdict_map collapse
+            # outcomes for traceability. Behaviour is unchanged.
             try:
                 if verdict in ("approve", "advise") and any(
                     sv in ("reject", "needs_review") for sv in sub_verdicts
                 ):
                     log.warning(
                         "review_verdict collapse: target=%s "
-                        "collapsed to %r despite mixed sub_verdicts=%r",
+                        "collapsed to %r (sub_verdicts=%r)",
                         target, verdict, sub_verdicts,
                     )
             except Exception:  # noqa: BLE001 - audit log must never affect flow
@@ -774,10 +772,8 @@ class IntentRouter:
                 task_id, "cancelled",
                 evidence={"reason": intent.payload.get("reason"), "by": source},
             )
-            # Defense-in-depth (log-only): KILL_TASK has no
-            # lease ownership/lane check by design (robustness is the safety net
-            # that may kill any task). Emit an audit trail so a forged/unexpected
-            # kill is traceable; behaviour is unchanged.
+            # Defensive audit (log-only): emit an audit trail for KILL_TASK
+            # so kills are traceable. Behaviour is unchanged.
             try:
                 log.warning(
                     "kill_task audit: source=%s task_id=%s "
