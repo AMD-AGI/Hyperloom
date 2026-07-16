@@ -272,6 +272,29 @@ def _capability_for_action(
     }
 
 
+def _fold_search_ledger_keeps(row: dict[str, Any], search: dict[str, Any]) -> None:
+    """Promote a capability row to ``kept`` from its real ``*_search`` ledger.
+
+    ``<phase>_search.accepted`` is the forward-recorded ledger of variants this
+    session actually accepted (KEPT). Unlike ``optimization_stack`` (which can
+    carry seeded / warm-replayed entries that were never a real this-session
+    KEEP), the search ledger is genuine evidence, so it may set the status to
+    ``kept``. No accepted entries => the row's attempt-derived status stands.
+
+    Args:
+        row (dict[str, Any]): The capability row to update in place.
+        search (dict[str, Any]): The ``<phase>_search`` ledger from state.
+    """
+    accepted = [v for v in (search.get("accepted") or []) if isinstance(v, dict)]
+    if not accepted:
+        return
+    if row.get("keeps", 0) < len(accepted):
+        row["keeps"] = len(accepted)
+    if row.get("attempts", 0) < row["keeps"]:
+        row["attempts"] = row["keeps"]
+    row["status"] = "kept"
+
+
 def collect_capability_summary(
     state: dict[str, Any],
     geak_invocations: list[dict[str, Any]],
@@ -362,6 +385,7 @@ def collect_capability_summary(
                 (_to_float(v.get("gain_pct")) or 0.0 for v in backends_search["accepted"] if isinstance(v, dict)),
                 default=None,
             )
+        _fold_search_ledger_keeps(backends, backends_search)
 
     params = _capability_for_action(state, "params")
     params_search = state.get("params_search") or {}
@@ -372,6 +396,7 @@ def collect_capability_summary(
                 (_to_float(v.get("gain_pct")) or 0.0 for v in params_search["accepted"] if isinstance(v, dict)),
                 default=None,
             )
+        _fold_search_ledger_keeps(params, params_search)
 
     validate = _capability_for_action(state, "validate_stack")
     validate["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))
@@ -398,6 +423,7 @@ def collect_capability_summary(
                 (_to_float(v.get("gain_pct")) or 0.0 for v in accepted_entries),
                 default=None,
             )
+        _fold_search_ledger_keeps(explore, explore_search)
         keep_unstable_count = sum(
             1
             for entry in (explore_search.get("rejected") or [])
