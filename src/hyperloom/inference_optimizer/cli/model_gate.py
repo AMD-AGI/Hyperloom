@@ -1355,7 +1355,15 @@ def _run_compat_detector(
     Returns:
         str | None: The first non-None reason from the sub-chain, else ``None``.
     """
-    available = {"model_path": model_path, "data": data, "gpu_type": gpu_type}
+    # Resolve a HF repo-id to its local cache dir ONCE so every disk-reading
+    # detector (hf_quant_config.json, safetensors shards, tokenizer files, PEFT
+    # adapters, ...) sees a real directory. Without this, a repo-id launch makes
+    # Path(repo_id).is_dir() False and those detectors silently skip -- deferring
+    # "incompatible checkpoint" rejection to server init, the exact silent
+    # degradation the resolver is meant to remove. An already-local dir resolves
+    # to itself; an unresolvable id falls back to the raw path (prior behaviour).
+    resolved_mp = str(resolve_local_model_dir(model_path) or model_path)
+    available = {"model_path": resolved_mp, "data": data, "gpu_type": gpu_type}
     call_args = tuple(available[name] for name in spec.args)
     fns = spec.fn if isinstance(spec.fn, tuple) else (spec.fn,)
     for fn in fns:
