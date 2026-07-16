@@ -18,6 +18,14 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.orchestrator.state.shared_state import SharedState
+from .parser import (
+    DEFAULT_ISL,
+    DEFAULT_OSL,
+    DEFAULT_CONC,
+    DEFAULT_TP,
+    DEFAULT_EP,
+    DEFAULT_PRECISION,
+)
 from ..session.paths import _SESSION_SKELETON, workspace_root as _workspace_root_resolve
 from ..session.session_paths import agent_prompt_snapshot
 from .model_gate import _load_model_arch, _load_model_config_tags
@@ -110,25 +118,28 @@ def _seed_shared_state(
         plateau_overrides["force_exit_budget_pct"] = float(
             args.explore_force_exit_budget_pct
         )
-    # Resolve workload metadata from CLI flags then env.
-    def _int_env_or_arg(arg_name: str, env_name: str) -> int:
-        """Resolve an int workload knob from a CLI arg, falling back to env.
+    # Resolve int workload knobs from the CLI arg, applying the shared fallback
+    # default when unset. Inherited env is NOT a config source (issue #903); the
+    # CLI resolver (`_resolve_workload_knobs`) has already folded any resume
+    # state into ``args`` before this seed runs.
+    def _int_arg(arg_name: str, default: int) -> int:
+        """Resolve an int workload knob from ``args``, else the fallback default.
 
         Args:
             arg_name (str): Attribute name to read off ``args``.
-            env_name (str): Environment variable consulted when the arg is unset/0.
+            default (int): Fallback applied when the arg is unset/0.
 
         Returns:
-            int: The resolved value, or 0 when neither source yields a valid int.
+            int: The resolved value, or ``default`` when the arg is unset/invalid.
         """
         val = getattr(args, arg_name, None)
-        if val is None or val == 0:
-            raw = (os.environ.get(env_name, "") or "").strip()
-            return int(raw) if raw.isdigit() else 0
+        if val is None:
+            return int(default)
         try:
-            return int(val)
+            resolved = int(val)
         except (TypeError, ValueError):
-            return 0
+            return int(default)
+        return resolved if resolved > 0 else int(default)
 
     def _resolve_framework_version(args_in: Any) -> str:
         """Resolve ``framework_version`` for the recipe-snapshot canonical id.
@@ -237,17 +248,17 @@ def _seed_shared_state(
         framework=os.environ.get("FRAMEWORK", "sglang"),
         gpu_type=str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")),
         # Workload metadata mirrored from CLI/env.
-        tp=_int_env_or_arg("tp", "TP"),
-        ep=_int_env_or_arg("ep", "EP"),
+        tp=_int_arg("tp", DEFAULT_TP),
+        ep=_int_arg("ep", DEFAULT_EP),
         precision=(
-            str(getattr(args, "precision", None) or os.environ.get("PRECISION", "") or "").strip()
+            str(getattr(args, "precision", None) or DEFAULT_PRECISION).strip()
         ),
         framework_version=_resolve_framework_version(args),
-        conc=_int_env_or_arg("conc", "CONC"),
-        isl=_int_env_or_arg("isl", "ISL"),
-        osl=_int_env_or_arg("osl", "OSL"),
-        profile_osl=_int_env_or_arg("profile_osl", "PROFILE_OSL"),
-        max_model_len=_int_env_or_arg("max_model_len", "MAX_MODEL_LEN"),
+        conc=_int_arg("conc", DEFAULT_CONC),
+        isl=_int_arg("isl", DEFAULT_ISL),
+        osl=_int_arg("osl", DEFAULT_OSL),
+        profile_osl=_int_arg("profile_osl", 0),
+        max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
         continue_kernel_after_gemm=bool(
