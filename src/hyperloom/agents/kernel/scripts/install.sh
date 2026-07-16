@@ -67,7 +67,7 @@ HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
 # /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
 _open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
-HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/wekafs/hyperloom}"
+HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-/path/hyperloom}"
 # MAGPIE_PATH is the single override shared with the Python runtime; a standalone
 # run never clones upstream Magpie when MAGPIE_PATH is set.
 MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
@@ -925,7 +925,7 @@ write_env_file() {
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →
     # src/hyperloom/agents/kernel/tools/tracelens_analysis.py inherit the writable
-    # mirrors instead of falling back to the read-only /wekafs defaults.
+    # mirrors instead of falling back to the read-only /path defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
     if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
       echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"

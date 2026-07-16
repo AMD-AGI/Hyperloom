@@ -44,9 +44,9 @@ export KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODE
 # --- identity: end-to-end join key the optimizer reads from env ------------
 export CLAW_SESSION_ID="${CLAW_SESSION_ID:-$(cat /proc/sys/kernel/random/uuid)}"
 
-# --- shared filesystem (weka on core42, /mnt/vast on vultr, ...) ------------
+# --- shared filesystem (e.g. weka, /mnt/vast, ...) --------------------------
 # HL_SHARED_MOUNT is bind-mounted into the container and hosts all artifacts.
-export HL_SHARED_MOUNT="${HL_SHARED_MOUNT:-/wekafs}"
+export HL_SHARED_MOUNT="${HL_SHARED_MOUNT:-/path}"
 export USER_DATA_PATH="${HL_DATA_ROOT:-${HL_SHARED_MOUNT}/hyperloom-slurm}/${KEY}/${CLAW_SESSION_ID}"
 mkdir -p "$USER_DATA_PATH"
 
@@ -70,18 +70,17 @@ fi
 : "${OPENAI_BASE_URL:?export OPENAI_BASE_URL (or set it in proxy.env)}"
 export HF_TOKEN="${HF_TOKEN:-}"
 
-# --- copy the shared in-container runner to the shared mount ----------------
-# run_hyperloom.sbatch and run_hyperloom-spur.sbatch execute the SAME
-# _incontainer.sh.in inside the container; keep it single-sourced to avoid
-# drift. HL_KERNEL_BACKEND selects the python carrier's kernel-agent backend
-# (stock Slurm -> claude); it is forwarded into the container.
+# --- copy the in-container runner to the shared mount ----------------------
+# run_hyperloom.sbatch runs _incontainer.sh.in inside the container.
+# HL_KERNEL_BACKEND selects the python carrier's kernel-agent backend
+# (default claude); it is forwarded into the container.
 export HL_KERNEL_BACKEND="${HL_KERNEL_BACKEND:-claude}"
 INCONTAINER="$USER_DATA_PATH/_incontainer.sh"
 cp "$CONF_DIR/_incontainer.sh.in" "$INCONTAINER"
 chmod +x "$INCONTAINER"
 
 # --- launch the container --------------------------------------------------
-# Runtime auto-detect: pyxis/enroot (core42-style) or docker (vultr-style).
+# Runtime auto-detect: pyxis/enroot or docker.
 # Override with HL_CONTAINER_RUNTIME=pyxis|docker.
 RUNTIME="${HL_CONTAINER_RUNTIME:-auto}"
 if [ "$RUNTIME" = "auto" ]; then

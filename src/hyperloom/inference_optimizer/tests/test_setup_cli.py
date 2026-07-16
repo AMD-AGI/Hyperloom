@@ -69,7 +69,7 @@ def test_setup_cli_scrubs_ambient_llm_env_when_dotenv_exists(tmp_path: Path, mon
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("REPO_ROOT", "/stale/root")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-anthropic-key")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: stale")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
