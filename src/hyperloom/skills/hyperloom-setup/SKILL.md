@@ -1,21 +1,26 @@
 ---
 name: hyperloom-setup
-description: Configure Hyperloom after pip install --target by collecting LLM settings, choosing a bare-metal or Docker run mode, writing .env, and running the setup backend on baremetal hosts only.
+description: Configure Hyperloom in the current agent workspace after pip install --target . by collecting LLM settings, choosing a bare-metal or Docker run mode, writing .env, and running the setup backend on baremetal hosts only.
 ---
 
 # Hyperloom Setup
 
-Use this skill after the user installs Hyperloom into the current workspace:
+Use this skill after the user prepares a dedicated workspace, opens that
+directory in the agent, and installs Hyperloom into the current directory:
 
 ```bash
 pip install your_package.whl --target .
 ```
 
-The current directory should be the Hyperloom target directory, for example `~/hyperloom`. It is normal for this directory to contain many Python package folders; users do not need to inspect them.
+The current directory is the Hyperloom workspace and install target. It is normal
+for this directory to contain many Python package folders; users do not need to
+inspect them. Do not use an existing project directory unless the user accepts
+that setup may create or update `.env` in that directory.
 
-This skill resolves a run mode into `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`)
-for this session. In `baremetal` mode it runs the setup backend on the host; in
-`docker` mode it writes `.env` only. It does **not** start any container.
+This skill should normally run once per workspace. It resolves a run mode into
+`HYPERLOOM_RUN_MODE` (`baremetal` or `docker`) for this session. In `baremetal`
+mode it runs the setup backend on the host; in `docker` mode it writes `.env`
+only. It does **not** start any container.
 Whether to generate or run a Docker container is decided later by the example
 (workload) skill based on `HYPERLOOM_RUN_MODE`.
 
@@ -38,11 +43,29 @@ not start a container itself.
 
 ## Workflow
 
-You must run this as an interactive onboarding flow. Do not stop after listing required values. Ask the user each question, collect the answer, write `.env`, read it back for validation, and continue to the setup command.
+You must run this as an interactive onboarding flow. Do not stop after listing
+required values. Ask the user each question, collect the answer, warn before
+writing `.env`, write `.env`, read it back for validation, and continue to the
+setup command. If setup already completed for this workspace and the user is not
+changing provider, model, `USER_DATA_PATH`, run mode, Docker target host, or
+bare-metal framework setup choice, do not run setup again; continue with the
+demo skill using the existing `.env`.
 
 ## Step 1: Confirm Workspace
 
-Confirm the current directory contains a `hyperloom/` Python package directory. If it does not, ask the user for the target directory and switch there.
+Confirm the current directory is the dedicated Hyperloom workspace selected by
+the user and contains a `hyperloom/` Python package directory from `pip install
+--target .`.
+
+If `hyperloom/` is missing, do not search for or switch to another target
+directory. Tell the user to open the intended dedicated workspace in the agent
+and install Hyperloom into that current directory:
+
+```bash
+python3 -m pip install ./hyperloom_inference_optimizer-0.8.0-py3-none-any.whl --target .
+```
+
+Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
 
 ## Step 2: Ask Configuration Questions
 
@@ -166,6 +189,14 @@ value.
 ## Step 3: Write `.env`
 
 Create or update `.env` in the current directory.
+
+Before writing, explicitly tell the user:
+
+- `.env` will be created or updated in the current workspace.
+- If `.env` already exists, unrelated keys are preserved, but Hyperloom setup
+  keys selected in this run will be updated.
+- A dedicated workspace is recommended to avoid modifying an existing project's
+  `.env`.
 
 - For every value the user chose in this run (LLM mode, base URL, model, run
   mode, `USER_DATA_PATH`, Docker target host), write exactly what the user

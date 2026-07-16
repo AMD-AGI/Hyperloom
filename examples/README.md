@@ -1,23 +1,27 @@
 # Hyperloom Quickstart
 
 This README is the main entry point for setting up Hyperloom and launching the
-model demo skills. The recommended customer path is a packaged install with
-`pip install --target`; the source-clone path is kept at the end for developers
-and manual debugging.
+model demo skills. The recommended customer path is to prepare a dedicated
+workspace, open that directory in Cursor, Claude Code, or Codex, and install the
+wheel into the current directory with `pip install --target .`. The source-clone
+path is kept at the end for developers and manual debugging.
 
 ## Recommended Path: Install the Wheel
 
-Use this path for customer demos and clean validation. It installs Hyperloom into
-one target directory, and that directory is also the agent workspace you open in
-Cursor, Claude Code, or Codex.
+Use this path for customer demos and clean validation. The current directory is
+both the install target and the agent workspace. Prepare a dedicated clean
+directory first, then open that directory in Cursor, Claude Code, or Codex before
+running the install command.
 
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
 - Access to one LLM provider: Anthropic or DeepSeek.
 - For private Hyperloom releases, `gh` access to the GitHub release asset.
+- A dedicated workspace directory opened in the user's agent.
 
-Download the release wheel, then install it into a clean target directory:
+From the agent terminal in that workspace, download the release wheel and install
+it into the current directory:
 
 ```bash
 gh auth login
@@ -25,20 +29,18 @@ gh release download v0.8 \
   -R AMD-AGI/Hyperloom \
   -p 'hyperloom_inference_optimizer-0.8.0-py3-none-any.whl'
 
-rm -rf ~/hyperloom
-
 python3 -m pip install \
   ./hyperloom_inference_optimizer-0.8.0-py3-none-any.whl \
-  --target ~/hyperloom
+  --target .
 ```
 
-`pip install --target` creates the target directory automatically. It is normal
-for `~/hyperloom` to contain many Python package directories after install; users
-do not need to inspect them.
+It is normal for the current directory to contain many Python package directories
+after install; users do not need to inspect them. Do not use an existing project
+directory unless it is acceptable for Hyperloom to create or update `.env` there.
 
 ## Run `/hyperloom-setup`
 
-Open `~/hyperloom` in the user's agent and run:
+With the agent still opened in the same workspace, run:
 
 ```text
 /hyperloom-setup
@@ -50,8 +52,10 @@ In Cursor and Claude Code, use `/hyperloom-setup`; in Codex, use
 That command runs the setup skill installed from
 [`src/hyperloom/skills/hyperloom-setup/SKILL.md`](../src/hyperloom/skills/hyperloom-setup/SKILL.md).
 
-The setup skill is interactive. It creates `.env`, records the selected run
-scenario, and stops before launching an optimization.
+The setup skill is interactive. It creates or updates `.env` in the current
+workspace, records the selected run scenario, and stops before launching an
+optimization. Run `/hyperloom-setup` once per workspace; demo skills reuse the
+values already written to `.env`.
 
 It asks for these values with a fixed option order:
 
@@ -71,6 +75,8 @@ It asks for these values with a fixed option order:
 5. Secrets:
    - Setup writes placeholders in `.env`.
    - Edit secrets directly in `.env`; never paste API keys into chat.
+   - If `.env` already exists, setup preserves unrelated keys but updates the
+     Hyperloom setup keys selected in this run.
 6. `USER_DATA_PATH`:
    - Default: `<workspace>/session`
    - Custom path
@@ -154,7 +160,8 @@ LLM defaults:
 | Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-4-8` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic` | `DEEPSEEK_MODEL=deepseek-chat` |
 
-Setup writes the resolved values into `.env`.
+Setup creates or updates `.env` in the current workspace and writes the resolved
+values there.
 
 Common keys:
 
@@ -167,7 +174,10 @@ Bare-metal setup may also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the workload
 skill's `install.sh`.
 
-`.env` is the single source of truth; no extra script needs sourcing.
+`.env` in the current workspace is the single source of truth; no extra script
+needs sourcing. Setup only needs to run again when changing the LLM provider,
+base URL, model, `USER_DATA_PATH`, run mode, Docker target host, or bare-metal
+framework setup choice.
 
 ## Run a Demo
 
@@ -185,10 +195,10 @@ The demo reuses the values already in `.env`, so nothing is re-entered.
 
 ## Troubleshooting
 
-- If the target directory contains many package folders after `pip install
-  --target`, that is expected.
+- If the current workspace contains many package folders after `pip install
+  --target .`, that is expected.
 - If `/hyperloom-setup` is not visible, confirm the setup skill exists under
-  the target directory. It is installed to `.claude/skills/hyperloom-setup/`
+  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`
   (Claude Code), `.cursor/skills/hyperloom-setup/` (Cursor) and
   `.agents/skills/hyperloom-setup/` (Cursor/Codex); restart the agent if needed.
 - `ImportError: libamdhip64.so.7` or `libhipblas.so.3` means the installed

@@ -7,37 +7,42 @@ myst:
 # Hyperloom Quickstart
 
 These instructions allow you to setup and run Hyperloom inside a Docker container
-or on bare-metal on an AMD GPU machine. The recommended path is to install the
-packaged with `pip install --target`; the source-clone path is kept at the end
-for developers and manual debugging.
+or on bare-metal on an AMD GPU machine. The recommended path is to prepare a
+dedicated workspace, open that directory in Cursor, Claude Code, or Codex, and
+install the wheel into the current directory with `pip install --target .`. The
+source-clone path is kept at the end for developers and manual debugging.
 
 ## Recommended Path: Install using wheel
 
-This is the recommended path to install and get started with Hyperloom. It
-installs Hyperloom into one target directory, which also serves as the agent
-workspace you open in Cursor, Claude Code, or Codex.
+This is the recommended path to install and get started with Hyperloom. The
+current directory is both the install target and the agent workspace. Prepare a
+dedicated clean directory first, then open that directory in Cursor, Claude Code,
+or Codex before running the install command.
 
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
 - Access to one LLM provider: Anthropic or DeepSeek.
+- A dedicated workspace directory opened in the user's agent.
 
 ### Install Hyperloom
 
-pip install Hyperloom using the following command:
+From the agent terminal in that workspace, install Hyperloom using the following
+command:
 
 ```bash
 python3 -m pip install \
   ./hyperloom_inference_optimizer-0.8.0-py3-none-any.whl \
-  --target ~/hyperloom
+  --target .
 ```
 
-`pip install --target` creates the target directory automatically. It is normal
-for `~/hyperloom` to contain many Python package directories after install.
+It is normal for the current directory to contain many Python package directories
+after install. Do not use an existing project directory unless it is acceptable
+for Hyperloom to create or update `.env` there.
 
 ### Setup Hyperloom
 
-Open the `~/hyperloom` folder in your agent and run:
+With the agent still opened in the same workspace, run:
 
 ```text
 /hyperloom-setup
@@ -49,20 +54,40 @@ In Cursor and Claude Code, use `/hyperloom-setup`; in Codex, use
 This command runs the setup skill installed from
 [`src/hyperloom/skills/hyperloom-setup/SKILL.md`](../src/hyperloom/skills/hyperloom-setup/SKILL.md).
 
-The setup skill is interactive. It creates the `.env` file, records
-the selected run scenario, and stops before launching an optimization.
+The setup skill is interactive. It creates or updates `.env` in the current
+workspace, records the selected run scenario, and stops before launching an
+optimization. Run `/hyperloom-setup` once per workspace; demo skills reuse the
+values already written to `.env`.
 
-It will ask you for the following information during setup:
+It asks for these values with a fixed option order:
 
-- LLM mode: Anthropic or DeepSeek.
-- Non-secret LLM settings: base URL and model.
-- Secret placeholders in `.env`; edit secrets directly in `.env` and never
-  paste API keys into chat.
-- `USER_DATA_PATH` (defaults to `<workspace>/session`).
-- Setup scenario: `baremetal` or `baremetal + Docker` (recorded in `.env` as
-  `HYPERLOOM_RUN_MODE=baremetal` or `HYPERLOOM_RUN_MODE=docker`) - if you are
-  installing Hyperloom inside of a Docker container, select the `baremetal`
-  option.
+1. LLM mode:
+   - `Anthropic`
+   - `DeepSeek`
+2. Anthropic URL, when Anthropic is selected:
+   - `Use default (https://api.anthropic.com)`
+   - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
+   - `Custom`
+3. DeepSeek URL, when DeepSeek is selected:
+   - `Use default (https://api.deepseek.com/anthropic)`
+   - `Custom`
+4. Model:
+   - `Use default (<provider default>)`
+   - `Custom`
+5. Secrets:
+   - Setup writes placeholders in `.env`.
+   - Edit secrets directly in `.env`; never paste API keys into chat.
+   - If `.env` already exists, setup preserves unrelated keys but updates the
+     Hyperloom setup keys selected in this run.
+6. `USER_DATA_PATH`:
+   - Default: `<workspace>/session`
+   - Custom path
+7. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
+   - `docker`
+   - `baremetal`
+
+If Hyperloom is already installed inside a Docker container, choose `baremetal`
+because setup should run directly in the current container environment.
 
 ## Setup scenarios
 
@@ -137,7 +162,8 @@ LLM defaults:
 | Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-4-8` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic` | `DEEPSEEK_MODEL=deepseek-chat` |
 
-Setup writes the resolved values into `.env`.
+Setup creates or updates `.env` in the current workspace and writes the resolved
+values there.
 
 Common keys:
 
@@ -150,7 +176,10 @@ Bare-metal setup may also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the workload
 skill's `install.sh`.
 
-`.env` is the single source of truth; no extra script needs sourcing.
+`.env` in the current workspace is the single source of truth; no extra script
+needs sourcing. Setup only needs to run again when changing the LLM provider,
+base URL, model, `USER_DATA_PATH`, run mode, Docker target host, or bare-metal
+framework setup choice.
 
 ## Run a demo
 
@@ -169,10 +198,10 @@ The demo reuses the values already in `.env`, so nothing needs to be re-entered.
 
 ## Troubleshooting
 
-- The target directory contains many package folders after `pip install
-  --target` - this is the expected behavior.
+- The current workspace contains many package folders after `pip install
+  --target .` - this is the expected behavior.
 - If `/hyperloom-setup` is not visible, confirm the setup skill exists under
-  the target directory. It is installed to `.claude/skills/hyperloom-setup/`
+  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`
   (Claude Code), `.cursor/skills/hyperloom-setup/` (Cursor) and
   `.agents/skills/hyperloom-setup/` (Cursor/Codex); restart the agent if needed.
 - `ImportError: libamdhip64.so.7` or `libhipblas.so.3` means the installed
