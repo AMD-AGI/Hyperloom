@@ -123,7 +123,14 @@ def test_role_md_files_carry_phase_awareness():
 
 # SharedState renderers
 def test_shared_state_phase_status_summary_renders_compact_block():
+    from datetime import datetime, timezone
+
+    from hyperloom.orchestrator.phases import machine_state as _ps
+
     s = SharedState(max_minutes=60)
+    # Pin start_ts to the same clock as now_unix so the (charge-back) budget math
+    # is well-defined; session and phase both start at 1_000_000.
+    s.start_ts = datetime.fromtimestamp(1_000_000.0, tz=timezone.utc).isoformat()
     s.record_phase_transition(
         to_phase="EXPLORE",
         reason="prelude_done",
@@ -138,8 +145,11 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     assert "phase     : EXPLORE" in out
     assert "entered" in out
     assert "elapsed_sec=120" in out
-    # 60 min × 60s × 0.5 = 1800s cap; elapsed 120s → 1680s remaining.
-    assert "remaining_sec=1680" in out
+    # Wiring: the rendered remaining must match the budget helper it delegates to.
+    expected_rem = int(
+        _ps.phase_budget_remaining_seconds(s, budget_pct={"EXPLORE": 0.5}, now_unix=1_000_120.0)
+    )
+    assert f"remaining_sec={expected_rem}" in out
     # EXPLORE allowlist carries explore + specialist + recover only.
     assert "explore" in out and "specialist" in out
 

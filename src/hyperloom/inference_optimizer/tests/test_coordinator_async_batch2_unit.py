@@ -2144,3 +2144,34 @@ def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> 
     """Malformed (non-dict) stack entries are skipped without raising."""
     coord.shared_state.optimization_stack = ["bad", {"action": "gemm_tuning"}]
     assert coord._session_integrated_kernel_patch() is True
+
+
+@pytest.mark.asyncio
+async def test_run_action_now_sync_on_loop_thread_emits_audit(coord: Coordinator, monkeypatch, caplog) -> None:
+    # Defensive audit (log-only): invoking the run_action_now sync bridge on
+    # the coordinator loop thread must emit a log-only audit.
+    # run_coroutine_threadsafe is stubbed so the test never actually blocks.
+    import asyncio
+    import logging
+
+    coord._inline_fast_actions_enabled = True
+    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
+    coord._coordinator_loop = asyncio.get_running_loop()
+
+    class _ImmediateFuture:
+        def result(self, timeout=None):
+            return "(stubbed inline result)"
+
+    def _fake_schedule(coro, loop):
+        coro.close()
+        return _ImmediateFuture()
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _fake_schedule)
+
+    with caplog.at_level(
+        logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"
+    ):
+        out = coord._run_action_now_sync("report")
+
+    assert any("run_action_now:" in r.getMessage() for r in caplog.records)
+    assert "stubbed inline result" in out

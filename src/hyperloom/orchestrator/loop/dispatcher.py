@@ -10,6 +10,9 @@ import os
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
+    KERNEL_AGENT_OWNED_ACTIONS,
+)
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
@@ -330,6 +333,27 @@ class DispatcherCollaborator:
                                 )
                         continue
                     extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
+            # Defensive audit (log-only): flag a queued task whose kind has
+            # no registered executor. Kernel-owned kinds are legitimately
+            # unregistered under --no-kernel, so they are excluded to avoid a
+            # false positive. Dispatch is unchanged.
+            try:
+                _coord = object.__getattribute__(self, "_coord")
+                _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
+                if (
+                    isinstance(_execs, dict)
+                    and _execs
+                    and task.kind not in _execs
+                    and task.kind != "specialist"
+                    and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
+                ):
+                    log.warning(
+                        "dispatch audit: queued task_id=%s kind=%r "
+                        "has no registered executor (dispatch unchanged)",
+                        task.task_id, task.kind,
+                    )
+            except Exception:  # noqa: BLE001 - audit must never affect dispatch
+                pass
             spawned.append(
                 (
                     task,
@@ -926,6 +950,20 @@ class DispatcherCollaborator:
         loop = self._coordinator_loop
         if loop is None or loop.is_closed():
             return "(run_action_now unavailable: coordinator loop not running)"
+        # Defensive audit (log-only): detect and log if this sync bridge is
+        # invoked on the coordinator loop thread. Behaviour is unchanged.
+        try:
+            _running = asyncio.get_running_loop()
+            if _running is loop:
+                log.warning(
+                    "run_action_now: invoked on the coordinator "
+                    "loop thread (action=%r)",
+                    name,
+                )
+        except RuntimeError:
+            pass
+        except Exception:  # noqa: BLE001 - audit must never affect flow
+            pass
         coro = self._run_action_now(name, dict(params or {}))
         # Cap inline wait under backend timeout so a slow action can't wedge the turn.
         try:

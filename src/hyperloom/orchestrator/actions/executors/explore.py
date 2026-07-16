@@ -1293,12 +1293,18 @@ class ExploreExecutor:
                                     float(accuracy_value),
                                 )
                             else:
-                                # No eval result. Serving: skip the gate (no
-                                # accuracy data). Scriptable: fail closed.
-                                accuracy_ok = not scriptable
+                                # No eval result. Both scriptable and serving
+                                # fail closed: a gated variant (scriptable, or a
+                                # high-risk serving variant with a baseline) that
+                                # yields no accuracy verdict likely broke the eval
+                                # path, so the change is reverted. The former
+                                # serving throughput-only skip is removed. Baseline
+                                # is where a missing accuracy result halts the run;
+                                # post-baseline it is a per-variant REVERT.
+                                accuracy_ok = False
                         if not accuracy_ok:
                             outcome = "REVERT"
-                            reason = "accuracy_drop"
+                            reason = "accuracy_unavailable" if accuracy_value is None else "accuracy_drop"
                         else:
                             outcome = "KEEP"
 

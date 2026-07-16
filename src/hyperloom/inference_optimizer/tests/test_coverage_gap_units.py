@@ -1558,6 +1558,151 @@ def test_cli_multi_node_remaining_error_branches(tmp_path: Path, monkeypatch: py
     )
 
 
+def test_cli_multi_node_remaining_edge_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.cli import multi_node as opt_mn
+    import hyperloom.inference_optimizer.multi_node._internal.external_state as ext_state
+    import hyperloom.inference_optimizer.multi_node.cli as mn_cli
+    import hyperloom.inference_optimizer.multi_node.state_paths as state_paths
+
+    root = tmp_path / "gc"
+    root.mkdir()
+
+    class _BadStatDir:
+        name = "bad-stat"
+
+        def is_dir(self) -> bool:
+            return True
+
+        def stat(self):
+            raise OSError("stat failed")
+
+    real_iterdir = Path.iterdir
+
+    def _iterdir_with_bad_stat(self):
+        if self == root:
+            return iter([_BadStatDir()])
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _iterdir_with_bad_stat)
+    opt_mn._gc_old_profile_traces(str(root), retention_days=7)
+
+    state_file = tmp_path / "mn-state.json"
+    monkeypatch.setattr(state_paths, "resolve_state_file", lambda: state_file)
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        opt_mn._provision_multi_node_infera_stack(argparse.Namespace(nodes=2, mn_image="img:new", model=""))
+    assert exc.value.code == 2
+
+    monkeypatch.setattr(ext_state, "external_service_url", lambda: "http://frontend")
+    monkeypatch.setattr(ext_state, "external_has_ssh_control", lambda: True)
+    monkeypatch.setattr(
+        ext_state,
+        "build_external_state_from_env",
+        lambda: {"service_url": "http://frontend", "prefill_pod_ips": [], "decode_pod_ips": [], "worker_pod_ips": []},
+    )
+    monkeypatch.setattr(mn_cli, "_save_state", lambda _state: (_ for _ in ()).throw(OSError("readonly")))
+    with pytest.raises(SystemExit) as exc:
+        opt_mn._provision_multi_node_rayjob_stack(argparse.Namespace(nodes=2, mn_backend="rayjob"))
+    assert exc.value.code == 2
+
+
+def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import yaml
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+    from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
+
+    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+
+    bad_yaml = tmp_path / "bad.yaml"
+    bad_yaml.write_text("benchmark: [", encoding="utf-8")
+    info = sl.resolve_lifecycle_params(bad_yaml)
+    assert info["eligible"] is False
+    assert "could not read" in info["reason"]
+
+    invalid_port = tmp_path / "invalid-port.yaml"
+    invalid_port.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "xdit", "envs": {"PORT": "bad"}}}),
+        encoding="utf-8",
+    )
+    info = sl.resolve_lifecycle_params(invalid_port)
+    assert info["port"] == sl.REUSE_PORT_DEFAULT
+    assert "scriptable framework" in info["reason"]
+
+    profiler = tmp_path / "profiler.yaml"
+    profiler.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "benchmark_script": "vllm_mi300x.sh",
+                    "envs": {"PORT": 8888},
+                    "profiler": {"torch_profiler": {"enabled": True}},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    info = sl.resolve_lifecycle_params(profiler)
+    assert info["eligible"] is False
+    assert "torch_profiler" in info["reason"]
+
+
+def test_canonical_fingerprint_remaining_normalization_branches() -> None:
+    from hyperloom.orchestrator.actions.executors import _canonical_fingerprint as fp
+
+    with_controls = fp.canonical_fingerprint(
+        '--flag "unterminated',
+        {"B": 2},
+        remove_args="--old",
+        unset_envs=123,
+        args_mode="bad-mode",
+    )
+    without_controls = fp.canonical_fingerprint("--flag unterminated", {"B": 2})
+    assert len(with_controls) == 16
+    assert len(without_controls) == 16
+    assert with_controls != without_controls
+
+
+def test_conc_sweep_plot_helper_series_and_payload_loading(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+    payload = {
+        "baseline": {
+            "points": [
+                {"conc": 4, "output_throughput": 800},
+                {"conc": 2, "output_throughput": "600"},
+                {"conc": 0, "output_throughput": 100},
+                {"conc": "bad", "output_throughput": 100},
+                {"conc": 1, "output_throughput": None},
+            ]
+        },
+        "roofline_ceiling": {
+            "rows": [
+                {"conc": 8, "t_peak_tok_s": 1600},
+                {"conc": 4, "t_peak_tok_s": "1200"},
+                {"conc": 0, "t_peak_tok_s": 999},
+                {"conc": "bad", "t_peak_tok_s": 999},
+                {"conc": 1, "t_peak_tok_s": None},
+            ]
+        },
+    }
+    payload_file = tmp_path / "conc_sweep_summary.json"
+    payload_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert plot._load_payload(payload) is payload
+    assert plot._load_payload(payload_file) == payload
+
+    xs, ys = plot._arm_series(payload["baseline"]["points"], tp_eff=2.0)
+    assert xs == [200.0, 300.0]
+    assert ys == [400.0, 300.0]
+    assert plot._arm_series([{"conc": "bad", "output_throughput": -1}], tp_eff=1.0) == ([], [])
+
+    cx, cy = plot._ceiling_series(payload["roofline_ceiling"], tp_eff=4.0)
+    assert cx == [200.0, 300.0]
+    assert cy == [400.0, 300.0]
+    assert plot._ceiling_series({"rows": [{"conc": 0, "t_peak_tok_s": 0}]}, tp_eff=1.0) == ([], [])
+
+
 def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod

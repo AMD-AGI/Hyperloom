@@ -1,23 +1,27 @@
 # Hyperloom Quickstart
 
 This README is the main entry point for setting up Hyperloom and launching the
-model demo skills. The recommended customer path is a packaged install with
-`pip install --target`; the source-clone path is kept at the end for developers
-and manual debugging.
+model demo skills. The recommended customer path is to prepare a dedicated
+workspace, open that directory in Cursor, Claude Code, or Codex, and install the
+wheel into the current directory with `pip install --target .`. The source-clone
+path is kept at the end for developers and manual debugging.
 
 ## Recommended Path: Install the Wheel
 
-Use this path for customer demos and clean validation. It installs Hyperloom into
-one target directory, and that directory is also the agent workspace you open in
-Cursor, Claude Code, or Codex.
+Use this path for customer demos and clean validation. The current directory is
+both the install target and the agent workspace. Prepare a dedicated clean
+directory first, then open that directory in Cursor, Claude Code, or Codex before
+running the install command.
 
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
 - Access to one LLM provider: Anthropic or DeepSeek.
 - For private Hyperloom releases, `gh` access to the GitHub release asset.
+- A dedicated workspace directory opened in the user's agent.
 
-Download the release wheel, then install it into a clean target directory:
+From the agent terminal in that workspace, download the release wheel and install
+it into the current directory:
 
 ```bash
 gh auth login
@@ -25,20 +29,18 @@ gh release download v0.8 \
   -R AMD-AGI/Hyperloom \
   -p 'hyperloom_inference_optimizer-0.8.0-py3-none-any.whl'
 
-rm -rf ~/hyperloom
-
 python3 -m pip install \
   ./hyperloom_inference_optimizer-0.8.0-py3-none-any.whl \
-  --target ~/hyperloom
+  --target .
 ```
 
-`pip install --target` creates the target directory automatically. It is normal
-for `~/hyperloom` to contain many Python package directories after install; users
-do not need to inspect them.
+It is normal for the current directory to contain many Python package directories
+after install; users do not need to inspect them. Do not use an existing project
+directory unless it is acceptable for Hyperloom to create or update `.env` there.
 
 ## Run `/hyperloom-setup`
 
-Open `~/hyperloom` in the user's agent and run:
+With the agent still opened in the same workspace, run:
 
 ```text
 /hyperloom-setup
@@ -50,18 +52,40 @@ In Cursor and Claude Code, use `/hyperloom-setup`; in Codex, use
 That command runs the setup skill installed from
 [`src/hyperloom/skills/hyperloom-setup/SKILL.md`](../src/hyperloom/skills/hyperloom-setup/SKILL.md).
 
-The setup skill is interactive. It creates `.env`, records the selected run
-scenario, and stops before launching an optimization.
+The setup skill is interactive. It creates or updates `.env` in the current
+workspace, records the selected run scenario, and stops before launching an
+optimization. Run `/hyperloom-setup` once per workspace; demo skills reuse the
+values already written to `.env`.
 
-It asks for:
+It asks for these values with a fixed option order:
 
-- LLM mode: Anthropic or DeepSeek.
-- Non-secret LLM settings: base URL and model.
-- Secret placeholders in `.env`; edit secrets directly in `.env` and never
-  paste API keys into chat.
-- `USER_DATA_PATH` (defaults to `<workspace>/session`).
-- Setup scenario: `baremetal` or `baremetal + Docker` (recorded in `.env` as
-  `HYPERLOOM_RUN_MODE=baremetal` or `HYPERLOOM_RUN_MODE=docker`).
+1. LLM mode:
+   - `Anthropic`
+   - `DeepSeek`
+2. Anthropic URL, when Anthropic is selected:
+   - `Use default (https://api.anthropic.com)`
+   - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
+   - `Custom`
+3. DeepSeek URL, when DeepSeek is selected:
+   - `Use default (https://api.deepseek.com/anthropic)`
+   - `Custom`
+4. Model:
+   - `Use default (<provider default>)`
+   - `Custom`
+5. Secrets:
+   - Setup writes placeholders in `.env`.
+   - Edit secrets directly in `.env`; never paste API keys into chat.
+   - If `.env` already exists, setup preserves unrelated keys but updates the
+     Hyperloom setup keys selected in this run.
+6. `USER_DATA_PATH`:
+   - Default: `<workspace>/session`
+   - Custom path
+7. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
+   - `docker`
+   - `baremetal`
+
+If Hyperloom is already installed inside a Docker container, choose `baremetal`
+because setup should run directly in the current container environment.
 
 ## Setup Scenarios
 
@@ -82,7 +106,8 @@ Requirements:
 In this scenario, `/hyperloom-setup` runs the packaged setup backend on the host:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup
 ```
 
 The backend runs `install_baremetal.sh` in five phases:
@@ -134,9 +159,10 @@ LLM defaults:
 | Mode | Required secret | Default base URL | Default model |
 |------|-----------------|------------------|---------------|
 | Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-4-8` |
-| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic` | `DEEPSEEK_MODEL=deepseek-chat` |
+| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic` | `DEEPSEEK_MODEL=deepseek-v4-pro` |
 
-Setup writes the resolved values into `.env`.
+Setup creates or updates `.env` in the current workspace and writes the resolved
+values there.
 
 Common keys:
 
@@ -149,7 +175,10 @@ Bare-metal setup may also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
 `INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the workload
 skill's `install.sh`.
 
-`.env` is the single source of truth; no extra script needs sourcing.
+`.env` in the current workspace is the single source of truth; no extra script
+needs sourcing. Setup only needs to run again when changing the LLM provider,
+base URL, model, `USER_DATA_PATH`, run mode, Docker target host, or bare-metal
+framework setup choice.
 
 ## Run a Demo
 
@@ -159,18 +188,59 @@ and hands off to the matching demo skill. Pick a length:
 
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
-- [`8h`](hyperloom-qwen3-30b-a3b-8h/SKILL.md) — Qwen3-30B-A3B, medium-length run.
+- [`8h`](hyperloom-qwen3-14b-fp8-8h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
 - [`24h`](hyperloom-gpt-oss-120b-24h/SKILL.md) — gpt-oss-120b, long-horizon cyclic
   run.
 
 The demo reuses the values already in `.env`, so nothing is re-entered.
 
+## Use a Custom Model
+
+For a custom model, still start from one of the example demo skills above. Pick
+the demo whose runtime shape is closest to the model and experiment you want to
+run, then provide your model path when the skill asks for it. You can also set it
+before launching the demo:
+
+```bash
+export MODEL_PATH=/path/to/your/model
+```
+
+`MODEL_PATH` should point to a model directory that the selected serving
+framework can load; a local Hugging Face-style directory should contain
+`config.json`. When `MODEL_PATH` is set and valid, the demo skill uses that
+directory instead of downloading its default model.
+
+The demo skill is still a preset workload. Replacing the model path does not
+automatically retune tensor parallelism, concurrency, input/output lengths,
+precision, or the run budget. If the custom model is much larger, smaller, or
+uses a different architecture than the preset model, choose the closest preset or
+use the source/manual path to adjust the workload parameters explicitly.
+
+## What to Expect During a Demo
+
+Demo optimizations are long-running background jobs. The agent should not stream
+every debug log line, but it should make progress visible before and after
+launch.
+
+Before launch, expect a short plan that includes the resolved model path, run
+mode, framework, TP, concurrency, ISL/OSL, precision, run budget, and
+`USER_DATA_PATH`. After launch, expect the optimizer PID, run log path,
+launch-info JSON path, session directory, `state.json` path, and the initial
+health check result.
+
+During the run, the agent should report a concise status summary about every
+300 seconds. Useful fields include whether the process is still alive, the
+current phase, `stop_reason`, baseline throughput, current best throughput,
+cumulative gain, latest benchmark result or candidate decision, and the most
+relevant recent log lines. Secrets such as API keys, tokens, and custom headers
+must never be printed.
+
 ## Troubleshooting
 
-- If the target directory contains many package folders after `pip install
-  --target`, that is expected.
+- If the current workspace contains many package folders after `pip install
+  --target .`, that is expected.
 - If `/hyperloom-setup` is not visible, confirm the setup skill exists under
-  the target directory. It is installed to `.claude/skills/hyperloom-setup/`
+  the current workspace. It is installed to `.claude/skills/hyperloom-setup/`
   (Claude Code), `.cursor/skills/hyperloom-setup/` (Cursor) and
   `.agents/skills/hyperloom-setup/` (Cursor/Codex); restart the agent if needed.
 - `ImportError: libamdhip64.so.7` or `libhipblas.so.3` means the installed
@@ -251,18 +321,19 @@ so `.env`, logs, and session artifacts stay valid:
 
 ```bash
 export HYPERLOOM_IMAGE=docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix
+export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
   --device /dev/kfd \
   --device /dev/dri \
   --group-add video \
-  -v "$PWD:$PWD" \
+  -v "$REPO_ROOT:$REPO_ROOT" \
   "$HYPERLOOM_IMAGE" \
   tail -f /dev/null
 ```
 
 Then run all Hyperloom commands inside that container with
-`docker exec -w "$PWD" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" ...`,
-using `PYTHONPATH="$PWD/src"` so the source checkout is importable. Use the same
-launch prompt as bare metal above.
+`docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" ...`,
+using `PYTHONPATH="$REPO_ROOT/src"` so the source checkout is importable. Use the
+same launch prompt as bare metal above.

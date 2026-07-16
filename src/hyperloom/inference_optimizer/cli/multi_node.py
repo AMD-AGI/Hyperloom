@@ -550,7 +550,7 @@ def _dump_mn_input_params(args: argparse.Namespace, nodes_resolved: int) -> None
             "MODEL_CLASS", "PRECISION", "USER_DATA_PATH", "SAFE_WORKSPACE",
             "BENCHMARK_BASE_URL", "SKIP_VARIANTS", "RUN_EVAL",
             "GPU_TYPE", "ISL", "OSL", "CONC", "RANDOM_RANGE_RATIO",
-            "INFERENCEX_PATH", "TRACELENS_ROOT", "NODE_TLS_REJECT_UNAUTHORIZED",
+            "INFERENCEX_PATH", "TRACELENS_ROOT",
         )
         env: dict[str, str] = {}
         for k, v in sorted(os.environ.items()):

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .credentials import (
+    _is_deepseek_anthropic_url,
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
@@ -872,6 +873,12 @@ def _preflight(
     resolved_urls: tuple[str, str] | None = None
     anthropic_url, openai_url = _resolve_llm_endpoints()
     if anthropic_url or openai_url:
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if deepseek_key and _is_deepseek_anthropic_url(anthropic_url):
+            for alias in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+                if not os.environ.get(alias):
+                    os.environ[alias] = deepseek_key
+                    print(f"Preflight: filled {alias} from DEEPSEEK_API_KEY")
         for var, want in (
             ("ANTHROPIC_BASE_URL", anthropic_url),
             ("OPENAI_BASE_URL", openai_url),
@@ -895,7 +902,7 @@ def _preflight(
             geak_claude_model = (
                 os.environ.get("CLAUDE_MODEL", "").strip()
                 or os.environ.get("DEEPSEEK_MODEL", "").strip()
-                or ("deepseek-chat" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
+                or ("deepseek-v4-pro" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
                 or "claude-opus-4-8"
             )
             os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model

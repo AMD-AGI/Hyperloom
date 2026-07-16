@@ -17,8 +17,6 @@ Optional environment overrides:
 * ``INFERENCEX_BASE_URL``     — defaults to upstream public URL.
 * ``INFERENCEX_TIMEOUT_SEC``  — per-request timeout (default 5).
 * ``INFERENCEX_MAX_ATTEMPTS`` — default 2.
-* ``INFERENCEX_INSECURE``     — accept ``"1"``/``"true"`` to skip TLS
-  verification.
 """
 
 from __future__ import annotations
@@ -90,33 +88,6 @@ def _max_attempts() -> int:
         return DEFAULT_MAX_ATTEMPTS
 
 
-def _insecure() -> bool:
-    """Report whether TLS verification should be skipped.
-
-    Returns:
-        bool: ``True`` when ``INFERENCEX_INSECURE`` is one of
-            ``"1"``/``"true"``/``"yes"``, otherwise ``False``.
-    """
-    raw = os.environ.get("INFERENCEX_INSECURE", "").strip().lower()
-    return raw in ("1", "true", "yes")
-
-
-def _build_ssl_context() -> ssl.SSLContext | None:
-    """Build an SSL context honouring the insecure override.
-
-    Returns:
-        ssl.SSLContext | None: ``None`` for normal (verified) TLS, or a
-            context with hostname checking and certificate verification
-            disabled when :func:`_insecure` is set.
-    """
-    if not _insecure():
-        return None
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 def _fetch_raw(url: str) -> bytes:
     """Single HTTP GET with gzip support.
 
@@ -137,9 +108,8 @@ def _fetch_raw(url: str) -> bytes:
             "User-Agent": "src/hyperloom/inference_optimizer/baseline_comparison",
         },
     )
-    ctx = _build_ssl_context()
     try:
-        with urllib.request.urlopen(req, timeout=_timeout_sec(), context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=_timeout_sec()) as resp:
             status = resp.getcode()
             if status != 200:
                 raise InferenceXFetchError(f"HTTP {status}")
