@@ -1535,3 +1535,40 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
         assert await c.tasks.by_state("failed")
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_audit_skips_kernel_owned_kind_under_no_kernel(session_dir, caplog):
+    # Defensive audit (log-only): kernel-owned kinds are legitimately not
+    # registered under --no-kernel, so a leftover queued kernel-owned task must
+    # NOT be flagged by the dispatch audit (no false positive). Dispatch is
+    # unchanged (the task still fails on the missing runner).
+    import logging
+
+    c = Coordinator(session_dir, backends=_build_backends({}))
+
+    async def _noop_executor(ctx):
+        return {}
+
+    # Populate the registry with a non-kernel executor only (mimics the
+    # --no-kernel lean registry, where kernel-owned kinds are unregistered).
+    c.sub.register_executor("report", _noop_executor)
+    await c.tasks.create(
+        kind="kernel_opt",
+        params={},
+        idempotency_key="k-nokernel-audit-1",
+        requires_lanes=[],
+    )
+    try:
+        with caplog.at_level(
+            logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"
+        ):
+            await c.dispatcher._pump_dispatcher_once()
+        assert not any(
+            "dispatch audit" in r.getMessage() and "kernel_opt" in r.getMessage()
+            for r in caplog.records
+        )
+        # dispatch unchanged: the task still fails on the missing runner.
+        assert await c.tasks.by_state("failed")
+    finally:
+        await c.stop()
