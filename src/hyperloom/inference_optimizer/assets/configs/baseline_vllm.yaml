@@ -6,15 +6,17 @@
 benchmark:
   framework: vllm
   # benchmark_script: vllm_mi300x.sh  # uncomment to force a specific Magpie script
-  model: /wekafs/models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
+  model: /models/Qwen-Qwen3-8B  # OVERRIDDEN at runtime; see header.
   precision: bf16
   run_mode: local
 
   envs:
-    TP: 8
+    # Last-resort fallbacks only; the CLI always projects the resolved
+    # workload (flag > resume-state > default) into these envs before launch.
+    TP: 1
     CONC: 64
-    ISL: 256
-    OSL: 256
+    ISL: 1024
+    OSL: 1024
     RANDOM_RANGE_RATIO: 1
     MAX_MODEL_LEN: 8192
     # ROCR_VISIBLE_DEVICES injected at runtime by baseline.py

@@ -140,7 +140,7 @@ def test_baseline_family_uses_dedicated_projection():
             "result_dir": "/workspace/hyperloom",
             "extra_server_args": ["--tp", "8"],
             "extra_envs": {"CONC": "8"},
-            "model_path": "/wekafs/models/dsr1",
+            "model_path": "/path/models/dsr1",
             "gpu_type": "mi300x",
             "config_path": "/tmp/baseline_config.yaml",
             "disable_run_eval": False,

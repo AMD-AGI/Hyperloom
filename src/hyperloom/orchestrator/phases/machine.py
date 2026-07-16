@@ -19,6 +19,16 @@ class MachinePhase(PhaseHandler):
     def _ensure_phase_initialised(self) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
         state = self.shared_state
+        # Redistribute disabled phases' budget shares to the enabled work phases.
+        # Done here (not in Coordinator.__init__) because the enablement flags on
+        # shared_state are only authoritative after load_or_init. Idempotent, so
+        # the per-tick refresh below is a no-op once applied.
+        self._phase_budget_pct = _phase_state.redistribute_budget_pct(
+            self._phase_budget_pct,
+            explore_enabled=self._explore_enabled(),
+            kernel_enabled=self._kernel_enabled(),
+            framework_enabled=bool(state.framework_agent_phase_enabled),
+        )
         # Persist the phase budget so CLI flags land in state.json for resume parity.
         if not state.phase_budget_pct:
             state.phase_budget_pct = dict(self._phase_budget_pct)

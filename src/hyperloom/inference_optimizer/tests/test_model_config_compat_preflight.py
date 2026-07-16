@@ -1396,3 +1396,46 @@ def test_declared_standard_quant_with_scales_index_not_blocked(tmp_path):
             }}), encoding="utf-8",
         )
         assert cli._detect_incompatible_model_config(str(m)) is None, method
+
+
+def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypatch):
+    """A repo-id must be resolved to its local cache dir before the waterfall so
+    disk-reading detectors receive a real directory instead of the bare repo-id
+    (which Path().is_dir() would reject, silently skipping the check)."""
+    local_dir = tmp_path / "cache" / "models--org--repo"
+    local_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        cli_model_gate,
+        "resolve_local_model_dir",
+        lambda mp: local_dir if mp == "org/repo" else None,
+    )
+    seen: dict[str, str] = {}
+
+    def _fake_detector(model_path):
+        seen["model_path"] = model_path
+        return None
+
+    spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
+    cli_model_gate._run_compat_detector(
+        spec, model_path="org/repo", data={}, gpu_type=None
+    )
+    assert seen["model_path"] == str(local_dir)
+
+
+def test_run_compat_detector_falls_back_to_raw_when_unresolvable(monkeypatch):
+    """An unresolvable model path (e.g. an uncached repo-id) falls back to the
+    raw string so behaviour is unchanged from before the resolver."""
+    monkeypatch.setattr(
+        cli_model_gate, "resolve_local_model_dir", lambda mp: None
+    )
+    seen: dict[str, str] = {}
+
+    def _fake_detector(model_path):
+        seen["model_path"] = model_path
+        return None
+
+    spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
+    cli_model_gate._run_compat_detector(
+        spec, model_path="/raw/model/path", data={}, gpu_type=None
+    )
+    assert seen["model_path"] == "/raw/model/path"

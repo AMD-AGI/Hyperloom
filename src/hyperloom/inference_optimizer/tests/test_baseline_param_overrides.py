@@ -108,7 +108,7 @@ def _write_yaml(
     *,
     benchmark_script: str | None = None,
     framework: str = "sglang",
-    model: str = "/wekafs/models/Qwen-Qwen3-8B",
+    model: str = "/path/models/Qwen-Qwen3-8B",
 ) -> None:
     cfg: dict = {
         "benchmark": {
@@ -143,7 +143,7 @@ def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/wekafs/models/DeepSeek-R1",
+        model_path="/path/models/DeepSeek-R1",
         gpu_type="mi300x",
         benchmark_script="sglang_mi300x.sh",
     )
@@ -172,7 +172,7 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
 
 def test_kimi_materialize_enables_remote_client_trust(tmp_path):
     base = tmp_path / "base.yaml"
-    _write_yaml(base, model="/wekafs/models/moonshotai-Kimi-K2.6")
+    _write_yaml(base, model="/path/models/moonshotai-Kimi-K2.6")
     out = tmp_path / "out"
     out.mkdir()
 
@@ -180,7 +180,7 @@ def test_kimi_materialize_enables_remote_client_trust(tmp_path):
         materialized = materialize_config_with_envs(
             base,
             out,
-            model_path="/wekafs/models/moonshotai-Kimi-K2.6",
+            model_path="/path/models/moonshotai-Kimi-K2.6",
             gpu_type="mi300x",
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
@@ -228,7 +228,7 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
     _write_yaml(
         base,
         framework="vllm",
-        model="/wekafs/models/Qwen-Qwen3.6-35B-A3B",
+        model="/path/models/Qwen-Qwen3.6-35B-A3B",
     )
     out = tmp_path / "out"
     out.mkdir()
@@ -237,7 +237,7 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
         materialized = materialize_config_with_envs(
             base,
             out,
-            model_path="/wekafs/models/Qwen-Qwen3.6-35B-A3B",
+            model_path="/path/models/Qwen-Qwen3.6-35B-A3B",
             gpu_type="mi300x",
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
@@ -257,7 +257,7 @@ def _write_yaml_with_server_args(
     cfg: dict = {
         "benchmark": {
             "framework": framework,
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "bf16",
             "run_mode": "local",
             "envs": {
@@ -295,7 +295,7 @@ def test_materialize_dedups_duplicate_vllm_attention_backend(tmp_path):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/wekafs/models/Qwen-Qwen3-8B",
+        model_path="/path/models/Qwen-Qwen3-8B",
         gpu_type="mi300x",
         extra_server_args="--attention-backend ROCM_FLASH",
     )
@@ -322,7 +322,7 @@ def test_materialize_keeps_sglang_repeated_attention_backend(tmp_path):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/wekafs/models/Qwen-Qwen3-8B",
+        model_path="/path/models/Qwen-Qwen3-8B",
         gpu_type="mi300x",
         extra_server_args="--attention-backend triton",
     )
@@ -337,7 +337,7 @@ def _write_yaml_with_tp(path: Path, tp: int) -> None:
     cfg: dict = {
         "benchmark": {
             "framework": "sglang",
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": tp, "CONC": 8, "ISL": 256, "OSL": 256},
@@ -441,7 +441,7 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
             {
                 "success": True,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": tput / 256,
                     "output_throughput": tput,
@@ -493,7 +493,7 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
         {
             "output_dir": str(output_dir),
             "timeout_sec": 10,
-            "model_path": "/wekafs/models/DeepSeek-R1",
+            "model_path": "/path/models/DeepSeek-R1",
             "gpu_type": "mi300x",
             "benchmark_script": "sglang_mi300x.sh",
             "result_dir": str(tmp_path / "redirect_leak"),
@@ -536,7 +536,7 @@ def test_baseline_executor_falls_back_to_shared_state_model_path(
         default_config_path=base,
         session_dir=tmp_path,
         shared_state=SimpleNamespace(
-            model_path="/wekafs/models/PrimeIntellect-Qwen3-1.7B",
+            model_path="/path/models/PrimeIntellect-Qwen3-1.7B",
         ),
     )
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
@@ -550,7 +550,7 @@ def test_baseline_executor_falls_back_to_shared_state_model_path(
     assert result["status"] == "succeeded"
     assert (
         captured["cfg"]["benchmark"]["model"]
-        == "/wekafs/models/PrimeIntellect-Qwen3-1.7B"
+        == "/path/models/PrimeIntellect-Qwen3-1.7B"
     )
 
 
@@ -585,7 +585,7 @@ def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(
         task=task,
         extra={
             "shared_state": SimpleNamespace(
-                model_path="/wekafs/models/PrimeIntellect-Qwen3-1.7B",
+                model_path="/path/models/PrimeIntellect-Qwen3-1.7B",
             ),
         },
     )
@@ -599,7 +599,7 @@ def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(
     assert result["status"] == "succeeded"
     assert (
         captured["cfg"]["benchmark"]["model"]
-        == "/wekafs/models/PrimeIntellect-Qwen3-1.7B"
+        == "/path/models/PrimeIntellect-Qwen3-1.7B"
     )
 
 
@@ -643,7 +643,7 @@ def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     ``$INFERENCEX_PATH`` rather than a hash-named local mirror dir.
     """
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
-    monkeypatch.setenv("INFERENCEX_PATH", "/wekafs/hyperloom/InferenceX")
+    monkeypatch.setenv("INFERENCEX_PATH", "/path/hyperloom/InferenceX")
     base = tmp_path / "base.yaml"
     _write_yaml(base)
     output_dir = tmp_path / "ws"
@@ -670,7 +670,7 @@ def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == ("/wekafs/hyperloom/InferenceX"), (
+    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == ("/path/hyperloom/InferenceX"), (
         "MAGPIE_INFERENCEX_PATH must equal $INFERENCEX_PATH so Magpie loads the patched checkout (#210 root cause)"
     )
 
@@ -748,12 +748,12 @@ def _fw_args(materialized: Path, env_name: str = "EXTRA_VLLM_ARGS") -> str:
 def test_reference_base_seeds_lowest_priority(tmp_path):
     """Reference flags appear in the framework env at lowest priority."""
     base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm", model="/wekafs/models/X")
+    _write_yaml(base, framework="vllm", model="/path/models/X")
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
         base, out,
-        model_path="/wekafs/models/X",
+        model_path="/path/models/X",
         gpu_type="mi300x",
         reference_server_args="--block-size 128 --attention-backend TRITON_ATTN",
     )
@@ -765,12 +765,12 @@ def test_reference_base_seeds_lowest_priority(tmp_path):
 def test_reference_base_extra_args_override_wins(tmp_path):
     """A per-task extra_server_args override beats the reference base, deduped once."""
     base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm", model="/wekafs/models/X")
+    _write_yaml(base, framework="vllm", model="/path/models/X")
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
         base, out,
-        model_path="/wekafs/models/X",
+        model_path="/path/models/X",
         gpu_type="mi300x",
         reference_server_args="--block-size 128 --attention-backend TRITON_ATTN",
         extra_server_args="--attention-backend ROCM_FLASH",
@@ -788,12 +788,12 @@ def test_reference_base_extra_args_override_wins(tmp_path):
 def test_reference_envs_do_not_clobber_existing(tmp_path):
     """reference_envs use setdefault — never override a YAML/CLI-set env."""
     base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm", model="/wekafs/models/X")
+    _write_yaml(base, framework="vllm", model="/path/models/X")
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
         base, out,
-        model_path="/wekafs/models/X",
+        model_path="/path/models/X",
         gpu_type="mi300x",
         extra_envs={"VLLM_ROCM_USE_AITER": "1"},
         reference_envs={"VLLM_ROCM_USE_AITER": "0", "VLLM_FP8_PADDING": "1"},
@@ -807,20 +807,20 @@ def test_reference_envs_do_not_clobber_existing(tmp_path):
 def test_empty_reference_is_byte_identical(tmp_path):
     """0-degrade: empty reference args/envs == omitting the kwargs entirely."""
     base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm", model="/wekafs/models/X")
+    _write_yaml(base, framework="vllm", model="/path/models/X")
     out_a = tmp_path / "a"
     out_a.mkdir()
     out_b = tmp_path / "b"
     out_b.mkdir()
     m_with = materialize_config_with_envs(
         base, out_a,
-        model_path="/wekafs/models/X", gpu_type="mi300x",
+        model_path="/path/models/X", gpu_type="mi300x",
         reference_server_args="", reference_envs=None,
         out_name="x.yaml",
     )
     m_without = materialize_config_with_envs(
         base, out_b,
-        model_path="/wekafs/models/X", gpu_type="mi300x",
+        model_path="/path/models/X", gpu_type="mi300x",
         out_name="x.yaml",
     )
     assert yaml.safe_load(m_with.read_text()) == yaml.safe_load(m_without.read_text())

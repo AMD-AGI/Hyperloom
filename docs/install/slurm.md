@@ -1,3 +1,9 @@
+---
+myst:
+    html_meta:
+        "description": "Submit Hyperloom optimization jobs to a Slurm cluster on AMD Instinct GPUs. Covers credentials, cluster setup, job submission, monitoring, and troubleshooting."
+        "keywords": "Hyperloom, Slurm, cluster, AMD Instinct, MI300X, MI355X, sbatch, SGLang, vLLM, job submission, batch scheduler, ROCm"
+---
 # Quickstart — Slurm
 
 Slurm mode submits Hyperloom optimization jobs to a **Slurm** cluster, where each
@@ -26,14 +32,16 @@ The ready-to-use scripts ship under
 
 ## Prerequisites
 
+The following table lists the prerequisites and their implications for running Hyperloom on Slurm.
+
 | Aspect | Assumption | Consequence |
 |---|---|---|
 | Scheduler | Slurm (`sbatch` / `srun` / `sinfo` / `squeue` available) | — |
 | Container runtime | pyxis/enroot **or** docker | Auto-detected; override with `HL_CONTAINER_RUNTIME`. |
 | GPU | AMD Instinct (for example MI355X `gfx950` or MI300X), 8 per node | Image and `--gpu-type` must match the hardware variant. |
-| Slurm GPU gres | GPUs may or may not be registered as gres | If **not** registered you cannot use `--gpus`; see [Clusters without GPU gres](#clusters-without-gpu-gres). |
+| Slurm GPU gres | GPUs might or might not be registered as gres | If **not** registered you cannot use `--gpus`; see [Clusters without GPU gres](#clusters-without-gpu-gres). |
 | Shared filesystem | A cross-node mount (WekaFS, VAST/NFS, ...) | Holds source, artifacts, and the CA bundle. |
-| LLM gateway | Reachable directly or through a jump host | May need a host alias plus an internal CA. |
+| LLM gateway | Reachable directly or through a jump host | Might need a host alias plus an internal CA. |
 | Container registry | Public or private | A private registry unreachable from compute nodes requires a locally cached image. |
 
 ---
@@ -72,7 +80,8 @@ directory as `submit.sh`. Verify the key before submitting:
 
 ```bash
 set -a; . ./proxy.env; set +a
-curl -sS --resolve global.primus-safe.amd.com:443:<GATEWAY_JUMP_HOST_IP> \
+# Map your gateway hostname (the one in $OPENAI_BASE_URL) to its jump-host IP.
+curl -sS --resolve <your-gateway-host>:443:<GATEWAY_JUMP_HOST_IP> \
   "$OPENAI_BASE_URL/models" -H "Authorization: Bearer $OPENAI_API_KEY"
 ```
 
@@ -124,20 +133,20 @@ clones `main` from GitHub at runtime, which requires GitHub egress on the node.
 
 ```bash
 # Generic (pyxis/enroot or docker auto-detected; requests TP GPUs by default)
-./submit.sh dsv4pro_sglang
+./submit.sh deepseek_r1_sglang
 
-# Preset for an MI355X / docker / /mnt/vast cluster
-./submit-vultr.sh dsv4pro_sglang
+# Preset for a docker / /mnt/vast cluster
+./submit-vultr.sh deepseek_r1_sglang
 
 # Print the sbatch command without submitting
-./submit.sh --dry-run dsv4pro_sglang
+./submit.sh --dry-run deepseek_r1_sglang
 
 # claude-code backend (the image must ship the claude CLI)
-./submit.sh -b claude dsv4pro_sglang
+./submit.sh -b claude deepseek_r1_sglang
 ```
 
-Model keys shipped in `models.tsv`: `dsv4pro_sglang`, `dsv4pro_vllm`,
-`dsv4flash_vllm`, `dsv4flash_sglang`.
+Example model keys in `models.tsv`: `deepseek_r1_sglang`, `deepseek_r1_vllm`,
+`gptoss_vllm` (edit the file to add your own).
 
 Useful `submit.sh` options (run `./submit.sh --help` for the full list):
 
@@ -223,7 +232,7 @@ hard-allowlisted:
 | `HL_SHM_SIZE` | `64g` | docker `--shm-size`; raise it for high concurrency. |
 | `HL_CONTAINER_RUNTIME` | `auto` | Force `docker` or `pyxis`. |
 | `HL_GPU_TYPE_OVERRIDE` | — | Override `--gpu-type` (lowercase) when hardware differs from the table row. |
-| `HL_SHARED_MOUNT` | `/wekafs` | Shared FS bind-mounted into the container. |
+| `HL_SHARED_MOUNT` | `/path` | Shared FS bind-mounted into the container. |
 | `HL_DATA_ROOT` | `<shared-mount>/hyperloom-slurm` | Artifact root. |
 | `HL_CA_BUNDLE_HOST` | — | Combined CA bundle path (see [Build a combined CA bundle](#build-a-combined-ca-bundle)). |
 | `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL` | unset | Set `1` to relax the orchestration model allowlist (not recommended). |
@@ -231,6 +240,8 @@ hard-allowlisted:
 ---
 
 ## Troubleshooting
+
+The following items address common Slurm job and cluster configuration problems.
 
 - Job stuck `PD (Resources)` while the node is `idle`: the node has no GPU gres, so `--gpus` can never be satisfied. Submit with `-g 0` and confirm there is no `#SBATCH --gpus` (see [Clusters without GPU gres](#clusters-without-gpu-gres)).
 - `docker: ... no such host` when pulling the image: the private registry is unreachable from the node. Use a node-cached local image name, or `docker login` a reachable registry.
@@ -249,6 +260,8 @@ source → gpu-type casing → orchestration-model allowlist.**
 
 ## Known limitations
 
+The following are known limitations of the Slurm integration.
+
 - A source snapshot without `.git` (a plain rsync copy) leaves `code_revision`
   empty in `manifest.json`. Sync with `.git` if you need provenance.
 - The docker path exposes all node GPUs to the container, so TP=8 occupies a
@@ -257,6 +270,6 @@ source → gpu-type casing → orchestration-model allowlist.**
 - The installer pip-installs Magpie and clones InferenceX / GEAK / TraceLens from GitHub, so
   nodes need GitHub egress. A fully offline setup must bake these into the image
   and pre-stage model weights on the shared mount.
-- If the gateway's upstream lacks subscription credentials, real completions may
+- If the gateway's upstream lacks subscription credentials, real completions might
   return `missing subscription key` even though listing models and auth succeed;
   that is a gateway-side issue.

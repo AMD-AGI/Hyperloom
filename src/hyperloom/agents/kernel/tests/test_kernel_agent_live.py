@@ -5,7 +5,7 @@
 
 Run with:
   KERNEL_AGENT_RUN_LIVE=1 \
-  KERNEL_AGENT_ENV_FILE=/wekafs/xiaofei/AgentKernelArena/.env \
+  KERNEL_AGENT_ENV_FILE=/shared/user1/AgentKernelArena/.env \
   KERNEL_AGENT_LIVE_BACKENDS=forge \
   python3 -m unittest kernel-agent/tests/test_kernel_agent_live.py
 """
@@ -134,7 +134,7 @@ class KernelAgentLiveTests(unittest.TestCase):
         env_file = Path(
             os.environ.get(
                 "KERNEL_AGENT_ENV_FILE",
-                "/wekafs/xiaofei/AgentKernelArena/.env",
+                "/shared/user1/AgentKernelArena/.env",
             )
         )
         env = load_dotenv(env_file)

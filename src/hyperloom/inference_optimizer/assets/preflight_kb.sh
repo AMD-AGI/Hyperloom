@@ -16,9 +16,9 @@ set -u
 
 : "${CORTEX_KB_URL:=}"
 # PR_MONITOR_URL is injected by the CLI preflight (derived from --pr-monitor-url /
-# $PRIMUS_CORTEX_PR_API, normalised to end in /v1). This in-cluster default only
-# applies when the probe is run standalone without the CLI setting it.
-: "${PR_MONITOR_URL:=http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/v1}"
+# $PRIMUS_CORTEX_PR_API, normalised to end in /v1). When run standalone, leave it
+# empty to skip the PR branch instead of assuming a private in-cluster service.
+: "${PR_MONITOR_URL:=}"
 # Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
 # or empty, which is exactly the case the := default below would absorb.
@@ -106,7 +106,9 @@ else
     probe_curl "${CORTEX_KB_URL%/}/health" 15 3 "kb" || true
 fi
 
-if [ -n "${SKIP_PR_PROBE}" ]; then
+# No URL configured (operator didn't pass --pr-monitor-url / export
+# PR_MONITOR_URL) → there is no PR monitor to probe.
+if [ -n "${SKIP_PR_PROBE}" ] || [ -z "${PR_MONITOR_URL}" ]; then
     pr_skipped="true"
 else
     probe_curl "${PR_MONITOR_URL%/}/healthz" 5 3 "pr" || true

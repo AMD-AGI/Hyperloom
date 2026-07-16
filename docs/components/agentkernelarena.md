@@ -25,6 +25,6 @@ and others) overlap with the kernel types that Hyperloom's kernel agent handles
 through GEAK, but Hyperloom does not clone or invoke
 AgentKernelArena in the normal runtime path.
 
-## AgentKernelArena Documentation
+## AgentKernelArena documentation
 
-For detailed documentation on AgentKernelArena, please visit [ROCm Docs](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/).
+For detailed documentation on AgentKernelArena, see [AgentKernelArena on ROCm Docs](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/).

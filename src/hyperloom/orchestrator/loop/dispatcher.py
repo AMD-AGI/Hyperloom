@@ -10,6 +10,9 @@ import os
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
+    KERNEL_AGENT_OWNED_ACTIONS,
+)
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
@@ -26,6 +29,7 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..state.task_registry import Task
+from .coordinator_helpers import coerce_needs_gpu
 
 from .coordinator import (
     _format_inbox_event,
@@ -252,12 +256,7 @@ class DispatcherCollaborator:
             extra_context: dict[str, Any] = {}
             if task.kind == "specialist":
                 params = task.params or {}
-                needs_gpu_raw = params.get("needs_gpu", False)
-                needs_gpu = (
-                    needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
-                    if isinstance(needs_gpu_raw, str)
-                    else bool(needs_gpu_raw)
-                )
+                needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
                 # Explicit wall-clock budget (lane-tiered base × macro_cycle,
                 # capped at 4h).
                 extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(
@@ -334,6 +333,27 @@ class DispatcherCollaborator:
                                 )
                         continue
                     extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
+            # Defensive audit (log-only): flag a queued task whose kind has
+            # no registered executor. Kernel-owned kinds are legitimately
+            # unregistered under --no-kernel, so they are excluded to avoid a
+            # false positive. Dispatch is unchanged.
+            try:
+                _coord = object.__getattribute__(self, "_coord")
+                _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
+                if (
+                    isinstance(_execs, dict)
+                    and _execs
+                    and task.kind not in _execs
+                    and task.kind != "specialist"
+                    and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
+                ):
+                    log.warning(
+                        "dispatch audit: queued task_id=%s kind=%r "
+                        "has no registered executor (dispatch unchanged)",
+                        task.task_id, task.kind,
+                    )
+            except Exception:  # noqa: BLE001 - audit must never affect dispatch
+                pass
             spawned.append(
                 (
                     task,
@@ -930,6 +950,20 @@ class DispatcherCollaborator:
         loop = self._coordinator_loop
         if loop is None or loop.is_closed():
             return "(run_action_now unavailable: coordinator loop not running)"
+        # Defensive audit (log-only): detect and log if this sync bridge is
+        # invoked on the coordinator loop thread. Behaviour is unchanged.
+        try:
+            _running = asyncio.get_running_loop()
+            if _running is loop:
+                log.warning(
+                    "run_action_now: invoked on the coordinator "
+                    "loop thread (action=%r)",
+                    name,
+                )
+        except RuntimeError:
+            pass
+        except Exception:  # noqa: BLE001 - audit must never affect flow
+            pass
         coro = self._run_action_now(name, dict(params or {}))
         # Cap inline wait under backend timeout so a slow action can't wedge the turn.
         try:
@@ -999,7 +1033,10 @@ class DispatcherCollaborator:
             )
             return f"(run_action_now: {action_name!r} denied: {str(getattr(seq_denied, 'hint', seq_denied))[:200]})"
         lanes, ttl = self._registry_lanes_ttl(action_name)
-        content_fp = hashlib.sha1(json.dumps(params or {}, sort_keys=True, default=str).encode()).hexdigest()[:10]
+        content_fp = hashlib.sha1(
+            json.dumps(params or {}, sort_keys=True, default=str).encode(),
+            usedforsecurity=False,
+        ).hexdigest()[:10]
         key = f"inline:orchestration:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=action_name,

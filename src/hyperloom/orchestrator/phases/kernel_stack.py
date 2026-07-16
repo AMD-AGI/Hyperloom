@@ -14,6 +14,13 @@ from .base import PhaseHandler
 log = _logging.getLogger(__name__)
 
 
+def _stack_revert_status(stack_reverts: list[dict[str, Any]]) -> str:
+    """Aggregate stack revert status without hiding a partial inner revert."""
+    if any(isinstance(r, dict) and r.get("status") == "partial" for r in stack_reverts):
+        return "partial"
+    return "ok"
+
+
 class KernelStackPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -478,9 +485,10 @@ class KernelStackPhase(PhaseHandler):
                 if isinstance(bench_result, dict) and metric in bench_result:
                     result[metric] = bench_result.get(metric)
             if decision != "KEEP":
+                stack_reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
                 result["revert_result"] = {
-                    "status": "ok",
-                    "stack_reverts": [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)],
+                    "status": _stack_revert_status(stack_reverts),
+                    "stack_reverts": stack_reverts,
                 }
             else:
                 result["revert_result"] = {"status": "skipped", "reason": "KEEP decision"}
@@ -493,7 +501,7 @@ class KernelStackPhase(PhaseHandler):
                 "kernel_id": stack_id,
                 "error": repr(exc),
                 "apply_result": {"status": "failed", "stack_apply_results": apply_results},
-                "revert_result": {"status": "ok", "stack_reverts": reverts},
+                "revert_result": {"status": _stack_revert_status(reverts), "stack_reverts": reverts},
                 "stack_kernel_ids": kernel_ids,
                 "stack_validation": True,
             }
