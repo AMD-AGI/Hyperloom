@@ -41,6 +41,6 @@ workload environment helpers. The generated report feeds the roofline ceilings
 and bottleneck list used to score candidate optimizations. See
 [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
-## TraceLens Documentation
+## TraceLens documentation
 
-For detailed documentation on TraceLens, please visit [ROCm Docs](https://rocm.docs.amd.com/projects/tracelens/en/latest/).
+For detailed documentation on TraceLens, see [TraceLens on ROCm Docs](https://rocm.docs.amd.com/projects/tracelens/en/latest/).
