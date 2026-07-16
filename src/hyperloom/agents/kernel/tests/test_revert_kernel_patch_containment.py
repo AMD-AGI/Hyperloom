@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 from pathlib import Path
 
 apk = importlib.import_module(
@@ -59,7 +60,7 @@ def test_legit_manifest_reverts(tmp_path):
     assert manifest["status"] == "reverted"
 
 
-def test_tampered_backup_path_is_skipped(tmp_path):
+def test_tampered_backup_path_is_skipped(tmp_path, caplog):
     """A backup_path pointing outside the backup tree must not be copied."""
     backup_dir = tmp_path / "backup"
     backup_dir.mkdir(parents=True)
@@ -79,7 +80,8 @@ def test_tampered_backup_path_is_skipped(tmp_path):
             }
         },
     )
-    res = apk.revert_kernel_patch(mf)
+    with caplog.at_level(logging.WARNING, logger=apk.log.name):
+        res = apk.revert_kernel_patch(mf)
     assert res["status"] == "partial"
     assert res["skipped_untrusted_backups"] == [
         {
@@ -93,6 +95,7 @@ def test_tampered_backup_path_is_skipped(tmp_path):
     assert str(target) not in res["restored_paths"]
     manifest = json.loads(mf.read_text(encoding="utf-8"))
     assert manifest["status"] == "reverted_partial"
+    assert "untrusted backup_path" in caplog.text
 
 
 def test_tampered_artifact_backup_path_is_skipped(tmp_path):
@@ -127,7 +130,7 @@ def test_tampered_artifact_backup_path_is_skipped(tmp_path):
     assert str(target) not in res["restored_paths"]
 
 
-def test_source_backups_tampered_backup_path_is_skipped(tmp_path):
+def test_source_backups_tampered_backup_path_is_skipped(tmp_path, caplog):
     """source_backups copy source is confined to the backup tree."""
     backup_dir = tmp_path / "backup"
     backup_dir.mkdir(parents=True)
@@ -150,7 +153,8 @@ def test_source_backups_tampered_backup_path_is_skipped(tmp_path):
             ]
         },
     )
-    res = apk.revert_kernel_patch(mf)
+    with caplog.at_level(logging.WARNING, logger=apk.log.name):
+        res = apk.revert_kernel_patch(mf)
     assert res["status"] == "partial"
     assert res["skipped_untrusted_backups"] == [
         {
@@ -161,3 +165,4 @@ def test_source_backups_tampered_backup_path_is_skipped(tmp_path):
     ]
     assert target.read_text(encoding="utf-8") == "patched2\n"
     assert str(target) not in res["restored_paths"]
+    assert "untrusted backup_path" in caplog.text
