@@ -11,6 +11,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
+from hyperloom.orchestrator.trace import _row_utils as ru
+from hyperloom.orchestrator.trace import conversation_trace as ct
 from hyperloom.orchestrator.trace import langfuse_mapping as lm
 from hyperloom.orchestrator.trace import parse_usage as pu
 
@@ -140,3 +144,117 @@ def test_mean_proposal_score_edge_cases():
     assert lm._mean_proposal_score([123, {"score": "abc"}]) is None
     # A mix with one valid numeric score yields its mean.
     assert lm._mean_proposal_score([{"score": "8"}, {"nope": 1}]) == 8.0
+
+
+# --- _row_utils: coercion + closed-schema validation -----------------------
+
+_FIELDS = frozenset({"session_id", "component"})
+_COMPONENTS = frozenset({"orchestration"})
+
+
+def _row(**over):
+    base = {"session_id": "sess-1", "component": "orchestration"}
+    base.update(over)
+    return base
+
+
+def test_coerce_optional_str_variants():
+    assert ru.coerce_optional_str(None) is None
+    assert ru.coerce_optional_str("   ") is None  # empty after strip
+    assert ru.coerce_optional_str("  hi  ") == "hi"
+    assert ru.coerce_optional_str(42) == "42"
+
+
+def test_coerce_optional_int_variants():
+    assert ru.coerce_optional_int(None) is None
+    assert ru.coerce_optional_int("7") == 7
+    assert ru.coerce_optional_int("nan") is None  # bad type -> None, distinct from 0
+    assert ru.coerce_optional_int(object()) is None
+
+
+def test_validate_closed_row_extra_or_missing_field_raises():
+    with pytest.raises(ValueError, match="closed schema"):
+        ru.validate_closed_row(
+            _row(unexpected=1), fields=_FIELDS, valid_components=_COMPONENTS,
+            error_cls=ValueError, label="llm_calls",
+        )
+    with pytest.raises(ValueError, match="closed schema"):
+        ru.validate_closed_row(
+            {"component": "orchestration"}, fields=_FIELDS,
+            valid_components=_COMPONENTS, error_cls=ValueError, label="llm_calls",
+        )
+
+
+def test_validate_closed_row_bad_session_id_raises():
+    with pytest.raises(KeyError, match="non-empty 'session_id'"):
+        ru.validate_closed_row(
+            _row(session_id="  "), fields=_FIELDS, valid_components=_COMPONENTS,
+            error_cls=KeyError, label="conversations",
+        )
+
+
+def test_validate_closed_row_bad_component_raises():
+    with pytest.raises(ValueError, match="not one of"):
+        ru.validate_closed_row(
+            _row(component="nope"), fields=_FIELDS, valid_components=_COMPONENTS,
+            error_cls=ValueError, label="conversations",
+        )
+
+
+def test_validate_closed_row_accepts_valid_row():
+    # Happy path returns None without raising.
+    assert ru.validate_closed_row(
+        _row(), fields=_FIELDS, valid_components=_COMPONENTS,
+        error_cls=ValueError, label="llm_calls",
+    ) is None
+
+
+# --- conversation_trace: redaction + tolerant I/O --------------------------
+
+def test_redact_secrets_empty_returns_unchanged():
+    assert ct.redact_secrets("") == ""
+
+
+def test_redact_secrets_strips_bearer_and_env_shapes():
+    out = ct.redact_secrets("Authorization: Bearer abcd1234efgh and API_KEY=supersecretvalue")
+    assert "[REDACTED]" in out
+    assert "supersecretvalue" not in out
+    assert "abcd1234efgh" not in out
+
+
+def test_coerce_text_none_and_non_str():
+    assert ct._coerce_text(None) == ""
+    assert ct._coerce_text(123) == "123"
+    assert ct._coerce_text("hi") == "hi"
+
+
+def test_append_conversation_swallows_oserror(tmp_path, monkeypatch):
+    # append_jsonl raising OSError must be logged and swallowed (no raise).
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ct, "append_jsonl", _boom)
+    rec = ct.ConversationRecord(session_id="s1", component="orchestration", prompt="p", response="r")
+    # target set -> skips the Langfuse mirror branch; OSError swallowed.
+    ct.append_conversation(session_dir=tmp_path, record=rec, target=tmp_path / "conv.jsonl")
+
+
+def test_append_conversation_langfuse_mirror_failure_swallowed(tmp_path, monkeypatch):
+    written = {}
+
+    def _ok(dest, row, **k):
+        written["row"] = row
+
+    monkeypatch.setattr(ct, "append_jsonl", _ok)
+
+    # Force the Langfuse mirror import/get_emitter to blow up; must be swallowed.
+    import hyperloom.orchestrator.trace.langfuse_emitter as le
+
+    def _boom(_dir):
+        raise RuntimeError("langfuse down")
+
+    monkeypatch.setattr(le, "get_emitter", _boom)
+
+    rec = ct.ConversationRecord(session_id="s1", component="orchestration", prompt="p", response="r")
+    ct.append_conversation(session_dir=tmp_path, record=rec)  # target=None -> mirror path
+    assert written["row"]["component"] == "orchestration"
