@@ -21,7 +21,7 @@ quality and reducing the manual effort traditionally required for GPU optimizati
 
 Hyperloom combines:
 
-- Trace analysis, identify bottleneck kernels and bridge planning through
+- Trace analysis, identifying bottleneck kernels and bridge planning through
   [TraceLens](https://github.com/AMD-AGI/TraceLens) Agent (backend support
    from [Magpie](https://github.com/AMD-AGI/Magpie) and
    [Intellikit](https://github.com/AMDResearch/intellikit))
