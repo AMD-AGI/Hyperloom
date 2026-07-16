@@ -218,6 +218,38 @@ def test_heartbeat_refreshes_body(tmp_path):
 
 
 @pytest.mark.skipif(
+    not hasattr(os, "O_NOFOLLOW"),
+    reason="O_NOFOLLOW is POSIX-only",
+)
+def test_acquire_refuses_symlinked_lock_path(tmp_path):
+    """SWSPLAT-33431: if the lock path is a symlink, acquire must refuse it
+    (O_NOFOLLOW) rather than follow the link and lock/write an attacker file."""
+    lock_path = session_paths.optimizer_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_target"
+    outside.write_text("victim", encoding="utf-8")
+    os.symlink(outside, lock_path)
+    with pytest.raises(OSError):
+        SessionLock(tmp_path).acquire()
+    # The symlink target must be untouched (not opened/truncated/locked).
+    assert outside.read_text(encoding="utf-8") == "victim"
+
+
+def test_acquire_plain_file_still_works(tmp_path):
+    """A regular (non-symlink) lock file acquires normally with O_NOFOLLOW."""
+    lock = SessionLock(tmp_path)
+    lock.acquire()
+    try:
+        assert session_lock.read_owner(tmp_path) is not None
+    finally:
+        lock.release()
+    # Re-acquire on the now-existing regular file also works.
+    again = SessionLock(tmp_path)
+    again.acquire()
+    again.release()
+
+
+@pytest.mark.skipif(
     session_lock.fcntl is None,
     reason="flock error-path requires POSIX fcntl",
 )
