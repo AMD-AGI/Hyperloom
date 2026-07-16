@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -91,6 +92,15 @@ def test_build_specialist_executor_subprocess_with_knowledge_plane(monkeypatch, 
         knowledge_plane=_KP(),
     )
     assert callable(executor)
+
+
+def test_mcp_servers_from_explicit_config(tmp_path):
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps({"mcpServers": {"cortex_kb": {"type": "http"}, "pr_monitor": {"type": "http"}}}),
+        encoding="utf-8",
+    )
+    assert set(cli_executors._mcp_servers_from_config(str(cfg))) == {"cortex_kb", "pr_monitor"}
 
 
 def test_build_specialist_executor_subprocess_kp_missing_methods(monkeypatch, tmp_path):

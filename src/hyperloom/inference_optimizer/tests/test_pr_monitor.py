@@ -138,6 +138,22 @@ def test_specialist_runner_keeps_cortex_kb_when_mcp_wired():
         assert t in tools
 
 
+def test_specialist_runner_keeps_forced_cortex_kb_from_explicit_mcp_config():
+    plane = KnowledgePlane.from_clients(
+        pr_monitor=PRMonitorClient.from_args(enabled=False),
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+        cortex_kb_mcp_headers={"Authorization": "Bearer t"},
+    )
+    runner = SpecialistRunner(
+        backend_factory=lambda d: None,
+        knowledge_plane=plane,
+        forced_mcp_servers=("cortex_kb",),
+    )
+    tools = runner._resolve_tools()
+    for t in CORTEX_KB_READONLY_MCP_TOOLS:
+        assert t in tools
+
+
 def test_specialist_runner_without_plane_keeps_default_tools():
     runner = SpecialistRunner(backend_factory=lambda d: None)
     tools = runner._resolve_tools()

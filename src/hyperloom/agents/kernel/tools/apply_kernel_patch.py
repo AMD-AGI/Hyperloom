@@ -35,6 +35,8 @@ PYTHON_SOURCE_SUFFIXES = {".py"}
 COMPILED_ARTIFACT_SUFFIXES = {".so", ".co", ".hsaco"}
 TEXT_ARTIFACT_SUFFIXES = {".txt", ".md", ".markdown", ".log", ".patch", ".diff"}
 _UNSAFE_COMMAND_TOKENS = {";", "&&", "||", "|", ">", ">>", "<", "<<", "`"}
+_UNSAFE_COMMAND_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
+_SHELL_COMMAND_NAMES = {"bash", "dash", "sh", "zsh", "ksh"}
 # Fallback when ``inference_optimizer`` is not on ``sys.path`` (standalone CLI).
 _FALLBACK_KNOWN_TARGET_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
@@ -65,10 +67,15 @@ def _coerce_rebuild_command(rebuild_command: list[str] | str | None) -> list[str
         argv = [str(part) for part in rebuild_command]
     if not argv:
         return []
-    if any(part in _UNSAFE_COMMAND_TOKENS for part in argv):
+    if any(part in _UNSAFE_COMMAND_TOKENS for part in argv) or any(
+        _UNSAFE_COMMAND_CHARS_RE.search(part) for part in argv
+    ):
         raise ValueError("rebuild_command must be argv-like and cannot contain shell control operators")
     if any(("\n" in part or "\r" in part or "\x00" in part) for part in argv):
         raise ValueError("rebuild_command contains invalid control characters")
+    exe = Path(argv[0]).name.lower()
+    if exe in _SHELL_COMMAND_NAMES and any(part in {"-c", "-lc"} for part in argv[1:]):
+        raise ValueError("rebuild_command must not invoke a shell command string")
     return argv
 
 _CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None

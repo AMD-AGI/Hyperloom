@@ -339,6 +339,7 @@ class SpecialistRunner:
         default_tools: tuple[str, ...] = DEFAULT_SPECIALIST_TOOLS,
         default_max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS,
         knowledge_plane: Any = None,
+        forced_mcp_servers: tuple[str, ...] = (),
     ):
         """Create a runner.
 
@@ -353,6 +354,8 @@ class SpecialistRunner:
             default_tools: Default tool whitelist for specialists.
             default_max_turns: Default per-task max turn budget.
             knowledge_plane: KnowledgePlane gating ``mcp__pr_monitor__*`` tools.
+            forced_mcp_servers: MCP server names known to be present in an
+                operator-supplied config; these override KnowledgePlane gating.
 
         Raises:
             ValueError: If neither or both of ``backend_factory`` and
@@ -373,6 +376,7 @@ class SpecialistRunner:
         self.default_tools = tuple(default_tools)
         self.default_max_turns = int(default_max_turns)
         self.knowledge_plane = knowledge_plane
+        self.forced_mcp_servers = frozenset(str(name) for name in forced_mcp_servers)
 
     def _resolve_tools(
         self,
@@ -397,9 +401,9 @@ class SpecialistRunner:
         tools = list(task_allowed_tools) if task_allowed_tools else list(self.default_tools)
         plane = self.knowledge_plane
         if plane is not None:
-            if not bool(plane.pr_monitor_enabled):
+            if "pr_monitor" not in self.forced_mcp_servers and not bool(plane.pr_monitor_enabled):
                 tools = [t for t in tools if not t.startswith("mcp__pr_monitor__")]
-            if not bool(plane.cortex_enabled):
+            if "cortex_kb" not in self.forced_mcp_servers and not bool(plane.cortex_enabled):
                 tools = [t for t in tools if not t.startswith("mcp__cortex_kb__")]
         tools = [t for t in tools if t not in SPECIALIST_TOOL_DENYLIST]
         return tuple(tools)
