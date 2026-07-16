@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Understand the Hyperloom optimization loop: runtime contracts, phase order (PRELUDE through CLOSE), orchestration model, feedback loops, and session artifacts."
-        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate"
+        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate"
 ---
 # Hyperloom optimization loop
 
@@ -12,7 +12,7 @@ and old DFS demo mechanics; the live action catalog, phase allowlist,
 PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
-![Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT when the time budget exceeds 24 hours. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.](../images/optimization-loop.svg)
+![Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR when the time budget exceeds 24 hours. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.](../images/Hyperloom_optimization_loop.png)
 
 ## Runtime contract
 
@@ -34,12 +34,12 @@ observable session artifacts and subprocess JSON bridges are.
 The Coordinator advances through the live phase chain:
 
 ```text
-PRELUDE -> FRAMEWORK_AGENT -> EXPLORE -> KERNEL_AGENT -> SWEEP -> CLOSE
+PRELUDE -> FRAMEWORK_PR -> EXPLORE -> KERNEL Phase -> SWEEP -> CLOSE
 ```
 
 For a normal single-pass run (`--max-hours < 24`) the chain is traversed
 once. Cyclic macro-cycling is always enabled; with a large or unbounded budget
-(`--max-hours >= 24`), SWEEP can `cycle_reloop` back to `FRAMEWORK_AGENT` /
+(`--max-hours >= 24`), SWEEP can `cycle_reloop` back to `FRAMEWORK_PR` /
 `EXPLORE` for another pass instead of closing.
 
 `machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
@@ -63,9 +63,9 @@ PRELUDE establishes the session baseline:
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
 
-## FRAMEWORK_AGENT
+## FRAMEWORK_PR
 
-When enabled, the `FRAMEWORK_AGENT` phase (framework-PR enablement) is managed
+When enabled, the `FRAMEWORK_PR` phase (framework-PR enablement) is managed
 by the Coordinator. It covers discovery/ranking/audit through `fa phase-discover`,
 plus authoring-specialist dispatch (`framework_agent_authoring_enabled` is on by
 default), enablement repair, and Critic review of each candidate — discovery is
@@ -102,9 +102,9 @@ for archived reporting only. New sessions write the merged
 After each KEEP, the runtime revalidates the full stack end to end so
 the reported cumulative gain is not just a sum of per-round deltas.
 
-## KERNEL_AGENT
+## KERNEL Phase
 
-The `KERNEL_AGENT` phase is the bridge to kernel-agent work. Orchestration can
+The `KERNEL Phase` is the bridge to kernel-agent work. Orchestration may
 send kernel requests, but the Coordinator owns the request handlers and safety
 gates.
 
