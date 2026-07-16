@@ -675,9 +675,8 @@ def test_system_prompt_files_exist_and_nonempty(name):
 
 
 def test_core_state_fields_includes_closing_phase_and_baseline_config():
-    # closing_phase (global wind-down flag) and
-    # baseline_config_path (launch config path later used as config_path) are
-    # Coordinator-only facts locked against LLM update_state.
+    # closing_phase and baseline_config_path are Coordinator-only fact fields
+    # locked against non-coordinator update_state.
     assert "closing_phase" in CORE_STATE_FIELDS
     assert "baseline_config_path" in CORE_STATE_FIELDS
 

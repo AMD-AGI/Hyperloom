@@ -639,11 +639,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "last_kernel_opt",
         "last_kernel_opt_dispatch_skip",
         "kernel_opt_attempts",
-        # closing-phase wind-down flag and the
-        # baseline launch-config path are Coordinator-only. Locked so an LLM
-        # UPDATE_STATE cannot force a global wind-down denial of every later
-        # intent, nor inject a config_path that flows into a launch after
-        # PolicyGate path-containment already ran.
+        # closing_phase and baseline_config_path are Coordinator-only fact
+        # fields, locked here so non-coordinator roles cannot mutate them via
+        # UPDATE_STATE.
         "closing_phase",
         "baseline_config_path",
     }
@@ -1089,9 +1087,8 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # resolve a request-kind alias (e.g. apply_patch ->
-        # integrate) to its canonical owned action so the phase-action gate
-        # applies identically and the alias cannot bypass it.
+        # resolve a request-kind alias (e.g. apply_patch -> integrate) to its
+        # canonical owned action so the phase-action gate applies identically.
         gated_kind = KERNEL_REQUEST_KIND_ALIASES.get(kind, kind)
         # R1 phase_incompatible: treat REQUEST kind as the action name for kernel_agent-owned + coordinator-internal kinds.
         if (target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS) or gated_kind in COORDINATOR_INTERNAL_ACTIONS:
