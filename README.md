@@ -34,7 +34,7 @@ Hyperloom combines:
   prior campaign artifacts.
 
 For an overview of the various phases that Hyperloom covers while optimizing,
-please have a look at the [optimization loop](docs/conceptual/optimization-loop.md)
+please have a look at the [optimization loop.](docs/conceptual/optimization-loop.md)
 
 If you encounter any problem or bugs while running Hyperloom, feel free to open an
 [issue](https://github.com/AMD-AGI/Hyperloom/issues/new/choose), or provide us with
