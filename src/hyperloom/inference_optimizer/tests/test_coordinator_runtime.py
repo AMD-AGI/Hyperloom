@@ -1464,3 +1464,76 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
         assert persisted.last_tick_exception["stage"] == "advance_phase"
     finally:
         await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
+    # SWSPLAT-33474 (defense-in-depth, log-only): killing a queued/running task
+    # must still cancel it (behaviour unchanged) AND emit a log-only audit
+    # record so a forged or unexpected kill is traceable.
+    import logging
+
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    try:
+        task = await c.tasks.create(
+            kind="long_running",
+            params={},
+            idempotency_key="k-audit-kill-1",
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"
+        ):
+            await c._handle_intent(
+                "robustness",
+                Intent(
+                    type=IntentType.KILL_TASK,
+                    payload={"task_id": task.task_id, "reason": "stalled", "scope": "task"},
+                ),
+            )
+        after = await c.tasks.get(task.task_id)
+        assert after.state == "cancelled"
+        assert any(
+            "SWSPLAT-33474" in r.getMessage() and task.task_id in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
+    # SWSPLAT-33426 (defense-in-depth, log-only): a queued task whose kind has no
+    # registered executor (a strong forged coordinator.db row signal) is flagged
+    # in the process log; dispatch itself is unchanged (the task still fails on
+    # the missing runner).
+    import logging
+
+    delegate = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "long_running",
+            "params": {},
+            "idempotency_key": "k-audit-dispatch-1",
+        },
+    )
+    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
+    c = Coordinator(session_dir, backends=_build_backends(plans))
+
+    async def _noop_executor(ctx):
+        return {}
+
+    # A fresh SubAgentRunner has an empty registry; the audit only fires once the
+    # registry is populated, so register one unrelated executor first.
+    c.sub.register_executor("report", _noop_executor)
+    try:
+        with caplog.at_level(
+            logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"
+        ):
+            await c.tick(1)
+        assert any(
+            "SWSPLAT-33426" in r.getMessage() and "long_running" in r.getMessage()
+            for r in caplog.records
+        )
+        assert await c.tasks.by_state("failed")
+    finally:
+        await c.stop()
