@@ -169,7 +169,7 @@ async def test_anthropic_rca_engine_calls_messages_endpoint_and_returns_text():
     engine = AnthropicRcaEngine(
         base_url="https://api.deepseek.com/anthropic",
         api_key="deepseek-token",
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         client=client,
         throttle=RcaThrottle(RcaThrottleConfig(max_calls_per_tick=10, cooldown_seconds=0.0)),
     )
@@ -190,12 +190,12 @@ async def test_anthropic_rca_engine_calls_messages_endpoint_and_returns_text():
     assert seen["path"] == "/anthropic/v1/messages"
     assert seen["headers"]["x-api-key"] == "deepseek-token"
     assert seen["headers"]["anthropic-version"] == "2023-06-01"
-    assert seen["json"]["model"] == "deepseek-chat"
+    assert seen["json"]["model"] == "deepseek-v4-pro"
     assert usage is not None
     assert usage["input_tokens"] == 11
     assert usage["output_tokens"] == 7
     assert usage["calls"] == 1
-    assert usage["model"] == "deepseek-chat"
+    assert usage["model"] == "deepseek-v4-pro"
 
 
 @pytest.mark.asyncio

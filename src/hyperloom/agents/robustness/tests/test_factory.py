@@ -102,7 +102,7 @@ async def test_config_discover_uses_deepseek_anthropic_defaults(monkeypatch, tmp
     assert config.llm_provider == "anthropic"
     assert config.llm_base_url == "https://api.deepseek.com/anthropic"
     assert config.llm_api_key == "deepseek-token"
-    assert config.llm_model == "deepseek-chat"
+    assert config.llm_model == "deepseek-v4-pro"
 
 
 @pytest.mark.asyncio
@@ -190,13 +190,13 @@ async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path):
         llm_base_url="https://api.deepseek.com/anthropic",
         llm_api_key="secret",
         llm_provider="anthropic",
-        llm_model="deepseek-chat",
+        llm_model="deepseek-v4-pro",
     )
     bundle = build_reactor_components(config)
     try:
         engine = bundle.components.rca
         assert isinstance(engine, AnthropicRcaEngine)
-        assert engine.model == "deepseek-chat"
+        assert engine.model == "deepseek-v4-pro"
         await engine.aclose()
     finally:
         await bundle.aclose()

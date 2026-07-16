@@ -33,6 +33,17 @@ _AMBIENT_LLM_ENV_KEYS = {
     "DEEPSEEK_MODEL",
     "GEAK_CLAUDE_MODEL",
 }
+_AMBIENT_RUNTIME_ENV_KEYS = {
+    "USER_DATA_PATH",
+    "HYPERLOOM_RUNTIME_DIR",
+    "KERNEL_AGENT_ENV",
+    "HYPERLOOM_ROOT",
+    "HYPERLOOM_KERNEL_AGENT_ROOT",
+    "KERNEL_AGENT_ROOT",
+    "FRAMEWORK_AGENT_ROOT",
+    "HYPERLOOM_SKILL_PATH",
+    "PYTHONPATH",
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -65,18 +76,24 @@ def _setup_dotenv_is_authoritative(env_file: Path) -> bool:
     return "HYPERLOOM_RUN_MODE=" in dotenv_text
 
 
-def _scrub_ambient_llm_env(env: dict[str, str], env_file: Path) -> None:
+def _scrub_ambient_setup_env(env: dict[str, str], env_file: Path) -> None:
     """Keep the setup skill's freshly-written .env authoritative.
 
     Ambient shell variables left behind by local Claude / LiteLLM setup must not
     override the setup-written .env and get persisted back into it by
-    install_baremetal.sh. Only scrub when the .env already exists so standalone
-    non-interactive installer use can still rely on process env.
+    install_baremetal.sh. Runtime path variables from an earlier Hyperloom
+    workspace must not make a new ``pip --target .`` workspace write artifacts
+    into the old session root. Only scrub when the .env already exists so
+    standalone non-interactive installer use can still rely on process env.
     """
     if not _setup_dotenv_is_authoritative(env_file):
         return
     for key in list(env):
-        if key in _AMBIENT_LLM_ENV_KEYS or key.startswith(_AMBIENT_LLM_ENV_PREFIXES):
+        if (
+            key in _AMBIENT_LLM_ENV_KEYS
+            or key in _AMBIENT_RUNTIME_ENV_KEYS
+            or key.startswith(_AMBIENT_LLM_ENV_PREFIXES)
+        ):
             env.pop(key, None)
 
 
@@ -90,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path.cwd().resolve()
     env_file = root / ".env"
     env = os.environ.copy()
-    _scrub_ambient_llm_env(env, env_file)
+    _scrub_ambient_setup_env(env, env_file)
     env["REPO_ROOT"] = str(root)
     env["HYPERLOOM_SKILL_PATH"] = str(_PACKAGE_SKILL)
     if _setup_dotenv_is_authoritative(env_file):
