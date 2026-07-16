@@ -29,6 +29,7 @@ import logging
 import os
 import socket
 import ssl
+import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -40,6 +41,14 @@ log = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://inferencex.semianalysis.com/api/v1"
 DEFAULT_TIMEOUT_SEC = 5.0
 DEFAULT_MAX_ATTEMPTS = 2
+
+
+
+
+def _require_http_url(url: str) -> None:
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in {"http", "https"}:
+        raise InferenceXFetchError(f"unsupported URL scheme: {scheme!r}")
 
 
 class InferenceXFetchError(Exception):
@@ -130,6 +139,7 @@ def _fetch_raw(url: str) -> bytes:
         InferenceXFetchError: On any non-200 status, network failure, or
             transport-level decode error.
     """
+    _require_http_url(url)
     req = urllib.request.Request(
         url,
         headers={
@@ -139,7 +149,7 @@ def _fetch_raw(url: str) -> bytes:
     )
     ctx = _build_ssl_context()
     try:
-        with urllib.request.urlopen(req, timeout=_timeout_sec(), context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=_timeout_sec(), context=ctx) as resp:  # nosec B310 - URL scheme checked above.
             status = resp.getcode()
             if status != 200:
                 raise InferenceXFetchError(f"HTTP {status}")

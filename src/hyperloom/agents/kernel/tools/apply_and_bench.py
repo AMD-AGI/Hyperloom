@@ -227,12 +227,12 @@ def _wait_health(proc: subprocess.Popen, port: int, out_dir: Path, tries: int = 
             _log(out_dir, "server died during startup")
             return False
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5)
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5)  # nosec B310 - fixed loopback health check.
             _log(out_dir, "server healthy")
             return True
         except Exception:
             try:
-                urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=5)
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=5)  # nosec B310 - fixed loopback health check.
                 _log(out_dir, "server healthy (v1/models)")
                 return True
             except Exception:

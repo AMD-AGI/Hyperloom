@@ -20,6 +20,14 @@ from typing import Any
 from ._shared import GitHubPr, _repo_slug
 
 
+
+
+def _require_http_url(url: str) -> None:
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in {"http", "https"}:
+        raise PrimusCortexError(f"unsupported PR Monitor URL scheme: {scheme!r}")
+
+
 class PrimusCortexError(RuntimeError):
     """Raised when a PR Monitor request cannot be completed (CLI exit code 2)."""
 
@@ -83,6 +91,7 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
         PrimusCortexError: On HTTP errors, unreachable hosts, timeouts, or other
             transport failures.
     """
+    _require_http_url(url)
     req = urllib.request.Request(
         url,
         headers={
@@ -91,7 +100,7 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - URL scheme checked above.
             status = int(getattr(resp, "status", 200) or 200)
             body = resp.read()
             content_type = resp.headers.get("Content-Type", "") if resp.headers else ""
