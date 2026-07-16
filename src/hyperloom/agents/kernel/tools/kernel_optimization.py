@@ -1734,7 +1734,7 @@ def build_prompt(
     )
     # Multi-node sandbox is GPU-less: direct the LLM to delegate compile + execution
     # to a GPU-bearing pod. Honours $MULTI_NODE_STATE_FILE.
-    mn_state_file = Path(os.environ.get("MULTI_NODE_STATE_FILE", "/tmp/multi_node_state.json"))
+    mn_state_file = Path(os.environ.get("MULTI_NODE_STATE_FILE", str(Path(tempfile.gettempdir()) / "multi_node_state.json")))
     is_multinode_run = False
     try:
         if mn_state_file.is_file():
@@ -2905,7 +2905,7 @@ def _select_source_artifact(
         ):
             return str(path), "source_file", ""
 
-    extraction_root = run_dir or Path(attempt.get("optimized_path") or "/tmp").parent
+    extraction_root = run_dir or Path(attempt.get("optimized_path") or tempfile.gettempdir()).parent
     for path in candidates:
         if path.suffix.lower() not in {".txt", ".md", ".markdown", ".log", ".patch", ".diff"}:
             continue

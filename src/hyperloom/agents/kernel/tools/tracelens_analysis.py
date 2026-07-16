@@ -322,7 +322,7 @@ def _is_editable_source(path: str | None, kernel_kind: str | None) -> bool:
     if low.endswith(".py"):
         if kernel_kind == "triton_inductor_generated":
             return False
-        if "torchinductor" in path or path.startswith("/tmp/"):
+        if "torchinductor" in path or path.startswith("/tmp/"):  # nosec B108 - marker for generated compiler artifacts.
             return False
         return True
     return False
@@ -1419,7 +1419,7 @@ def source_type_for(name: str, source_file: str) -> str:
     return "unknown"
 
 
-_RUNTIME_GENERATED_SOURCE_MARKERS = (
+_RUNTIME_GENERATED_SOURCE_MARKERS = (  # nosec B108 - marker strings, not filesystem writes.
     "/tmp/torchinductor",
     "/torchinductor_",
     "/.cache/torch/inductor",
