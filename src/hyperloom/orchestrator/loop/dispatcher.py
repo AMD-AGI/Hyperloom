@@ -222,6 +222,12 @@ class DispatcherCollaborator:
                 continue
             lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
+                # SQLite lane gate. Under single-node Ray execution (§12 T7,
+                # decision 1) the authoritative GPU mutex is Ray's custom
+                # resources (``serving_slot`` + ``num_gpus`` on the leases below),
+                # not this gate — but it is kept as a cheap, resume-safe
+                # scheduling / observability view (its acquire/release events feed
+                # the lane timeline). The two layers are redundant.
                 try:
                     expanded = _expand_lanes(lanes_needed)
                 except ValueError:
@@ -346,7 +352,15 @@ class DispatcherCollaborator:
                         maybe_gpu_specialist_lease,
                     )
 
-                    gpu_specialist_lease = maybe_gpu_specialist_lease(num_gpus=gpu_count)
+                    # Whole-machine / bench-capable specialists (gpu_research_lane)
+                    # also hold the ``serving_slot`` so Ray makes them mutually
+                    # exclusive with serving (§12 T6); the serving-disjoint pool
+                    # takes ``num_gpus`` only and can run on cards disjoint from
+                    # serving.
+                    gpu_specialist_lease = maybe_gpu_specialist_lease(
+                        num_gpus=gpu_count,
+                        serving_slot=whole_machine_lane,
+                    )
                     if gpu_specialist_lease is not None:
                         extra_context["gpu_ids"] = list(range(gpu_count))
                         extra_context["gpu_specialist_lease"] = gpu_specialist_lease
