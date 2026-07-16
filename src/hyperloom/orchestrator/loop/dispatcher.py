@@ -10,6 +10,9 @@ import os
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
+    KERNEL_AGENT_OWNED_ACTIONS,
+)
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
@@ -335,11 +338,19 @@ class DispatcherCollaborator:
                         continue
                     extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
             # Defensive audit (log-only): flag a queued task whose kind has
-            # no registered executor. Dispatch is unchanged.
+            # no registered executor. Kernel-owned kinds are legitimately
+            # unregistered under --no-kernel, so they are excluded to avoid a
+            # false positive. Dispatch is unchanged.
             try:
                 _coord = object.__getattribute__(self, "_coord")
                 _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
-                if isinstance(_execs, dict) and _execs and task.kind not in _execs and task.kind != "specialist":
+                if (
+                    isinstance(_execs, dict)
+                    and _execs
+                    and task.kind not in _execs
+                    and task.kind != "specialist"
+                    and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
+                ):
                     log.warning(
                         "dispatch audit: queued task_id=%s kind=%r "
                         "has no registered executor (dispatch unchanged)",
