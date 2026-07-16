@@ -538,6 +538,28 @@ pipe),因此天然适配 P0 的 `ServingActor.start/is_alive/stop` 模型。
   `maybe_serving_group_manager` 四门,均用 fake ray + 注入 PG/rank 工厂);9808 项 collect 无
   import 错。ruff/mypy 交 CI。
 
+### ⏸ P5 —— 删旧路径(**本轮暂缓;owner 确认 defer:前置门槛未达 + 旧路径非死代码**)
+
+结论:P5/T8 的破坏性删除**本轮不执行**——不是"漏做",而是**前置条件未满足 + 删除目标非死代码**,
+现在删会破坏测试套件与逃生阀。owner 已确认暂缓,本段记录阻塞状态与解除条件。
+
+- **门槛未达**:T8 明写前置"单节点闭环回归绿",即 T3 真机 `RAY_EXEC=1` baseline+conc_sweep
+  验收。本轮全程无 GPU,T3 未跑(§11 P1 段 T3 仍"待真机")。Ray 路径未经真机端到端验证前删
+  本地回落属冒险。
+- **"旧本地路径"是负重代码,非死代码**:
+  - pytest 下 `_should_use_ray_backend()` 返 False(`PYTEST_CURRENT_TEST` 门)、`maybe_*_lease`
+    返 None → **全部 ~9808 项测试都走本地 subprocess 路径**;删掉即 CI 全红(CI 无 Ray 集群)。
+  - `RAY_EXEC=0` 是**保留的紧急逃生阀**(决策 2 修订)→ 本地路径。
+  - SQLite `SpecialistGpuPool` 物理 id 分配 + 手工 ROCR 掩码(`_grid_server_args` /
+    `_workload_envs` / `subprocess_.py`)仍被本地路径 + 多节点回落(决策 4)使用。
+  - P1–P4 刻意保留全部本地回落(逃生阀 + hermetic 测试),因此当前**没有实质的单节点死代码**
+    可安全删除;`SpecialistGpuPool` 已在 T5 降级为记账(彻底删亦待此)。
+- **解除条件(Unblock)**:①T3 真机 `RAY_EXEC=1` 全 pipeline 回归绿;②另行决策**退役
+  `RAY_EXEC=0` 逃生阀**(现由决策 2 修订保留)并把测试套件改造成可在 Ray 下运行(mock Ray 或
+  要求集群)。二者满足后方可删单节点本地 GPU 分配/ROCR 掩码 + `SpecialistGpuPool`,兑现 §5 净
+  收敛(多节点分支保留)。
+- 本轮 P5 交付:仅**记录**上述阻塞状态与解除条件(本段 + §12 T8),不动代码。
+
 ### ⏭ 进行中 / 待办 —— 见 §12
 
 ---
@@ -579,8 +601,12 @@ pipe),因此天然适配 P0 的 `ServingActor.start/is_alive/stop` 模型。
   (文档化):单节点 Ray 下权威互斥是 Ray 自定义资源;dispatcher 不再以 SQLite lane 作为 GPU
   互斥真相源。lane 门**保留**(便宜、支持 resume、可观测),acquire/release/expiry 事件仍写入
   喂 lane timeline;两层冗余。彻底删 lane 门待 P5(避免动 resume/大量测试)。
-- [ ] **T8 (P5)** 单节点闭环回归绿 + `RAY_EXEC` 默认已为单节点 ON 后,清理单节点旧本地
-  GPU 分配/手工 ROCR 掩码死代码(多节点分支保留)。
+- [ ] **T8 (P5, 暂缓 — owner 确认 defer;门槛未达)** 前置"单节点闭环回归绿"(T3 真机
+  `RAY_EXEC=1`)**未跑**;且"单节点旧本地 GPU 分配/手工 ROCR 掩码"当前是**逃生阀
+  (`RAY_EXEC=0`)+ hermetic 测试(pytest 走本地)+ 多节点回落**的负重路径,**非死代码**——现在删
+  即 CI 全红 + 失去逃生阀。**解除条件**:①T3 真机全 pipeline 回归绿;②另行决策退役 `RAY_EXEC=0`
+  逃生阀 + 测试套件可在 Ray 下运行。二者达成后再删单节点本地 GPU 分配/ROCR 掩码 + `SpecialistGpuPool`,
+  兑现 §5 净收敛(多节点分支保留)。详见 §11 P5 段。
 - [ ] **T9** 每步:ruff + mypy + 相关单测;涉及 GPU 的用真机 smoke/flow 脚本验收。
 
 > 多节点(原 P4/§4.3 收敛、`ServingGroupManager`、`magpie_remote_env` 降级)按决策 4/5
