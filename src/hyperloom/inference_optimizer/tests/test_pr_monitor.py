@@ -136,7 +136,7 @@ def test_specialist_runner_without_plane_keeps_default_tools():
         assert t in tools
 
 
-def test_mcp_config_writes_cortex_kb_server_with_headers(tmp_path):
+def test_mcp_config_skips_cortex_kb_server_with_auth_headers(tmp_path):
     from hyperloom.orchestrator.specialists.mcp_config import (
         SPECIALIST_MCP_CONFIG_FILENAME,
         write_specialist_mcp_config,
@@ -149,12 +149,12 @@ def test_mcp_config_writes_cortex_kb_server_with_headers(tmp_path):
         cortex_kb_mcp_headers={"Authorization": "Bearer secret"},
     )
     assert path is not None and path.name == SPECIALIST_MCP_CONFIG_FILENAME
-    cfg = json.loads(path.read_text())
+    text = path.read_text()
+    cfg = json.loads(text)
     servers = cfg["mcpServers"]
     assert servers["pr_monitor"] == {"type": "http", "url": "http://pr.test/mcp/"}
-    assert servers["cortex_kb"]["type"] == "http"
-    assert servers["cortex_kb"]["url"] == "http://gbrain.test/mcp"
-    assert servers["cortex_kb"]["headers"] == {"Authorization": "Bearer secret"}
+    assert "cortex_kb" not in servers
+    assert "secret" not in text
 
 
 def test_mcp_config_omits_cortex_kb_when_url_absent(tmp_path):
