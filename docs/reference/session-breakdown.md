@@ -8,7 +8,7 @@ myst:
 
 ```{note}
 This page is for **integrators and downstream consumers** — teams building
-dashboards, reporting pipelines, or services (such as `claw-stats-service`)
+dashboards, reporting pipelines, or services
 that read Hyperloom session output programmatically. If you just ran an
 optimization and want to check your results, read the three headline fields
 described in [Run a Hyperloom optimization](../how-to/optimize.md#output-and-artifacts)
@@ -17,7 +17,7 @@ first.
 
 `session_breakdown.json` is the single external contract between
 the `inference_optimizer` runtime (producer) and any downstream
-consumer (`claw-stats-service`, results service, notebooks, custom
+consumer (results service, notebooks, custom
 dashboards). One file per session, written to
 `$SESSION_DIR/session_breakdown.json` at session end (and on
 operator demand using [`dump_session_breakdown.py`](operator-scripts.md)).

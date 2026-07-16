@@ -7,7 +7,7 @@ Schema target: `hyperloom.session_breakdown.v1.1` (additive over v1).
 
 ## Problem
 
-v1 breakdown is the contract for dashboards, stats-service, and offline analysis, but
+v1 breakdown is the contract for dashboards, reporting services, and offline analysis, but
 collectors intentionally **summarize** search and kernel activity:
 
 | Area | On disk / in `state.json` | v1 export gap |

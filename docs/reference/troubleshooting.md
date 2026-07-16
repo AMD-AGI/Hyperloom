@@ -42,7 +42,7 @@ configured upstream gateway.
    bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
-   upstream gateway (for example, `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1`).
+   upstream gateway (for example, `https://<your-gateway-host>/api/v1/llm-proxy/v1`).
 
 See [Hyperloom authentication and credentials](authentication.md) for credential setup and gateway configuration.
 

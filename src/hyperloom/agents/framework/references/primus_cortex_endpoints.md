@@ -10,9 +10,10 @@
 https://your-pr-monitor.example
 ```
 
-The base URL is wired into `ExploreRequest.primus_cortex.base_url`
-or the `PRIMUS_CORTEX_PR_API` env var. The framework-agent client
-trims a trailing slash before composing paths.
+The base URL is deployment-specific (no host is hardcoded). It is wired
+into `ExploreRequest.primus_cortex.base_url` or the `PRIMUS_CORTEX_PR_API`
+env var. The framework-agent client trims a trailing slash before
+composing paths.
 
 `GET /v1/healthz` returns `{"status": "ok"}` and is the recommended
 liveness probe before kicking off a run.

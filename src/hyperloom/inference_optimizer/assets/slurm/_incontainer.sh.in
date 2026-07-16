@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared in-container runner for run_hyperloom.sbatch and run_hyperloom-spur.sbatch.
+# In-container runner invoked by run_hyperloom.sbatch.
 #
 # The outer sbatch copies this file verbatim to $USER_DATA_PATH/_incontainer.sh
 # and runs it inside the vllm/sglang ROCm container. It relies entirely on env
@@ -76,8 +76,8 @@ case "$BACKEND" in
     # Workload envs the Coordinator reuses for baseline -> params -> sweep.
     export TP EP=1 CONC ISL OSL PRECISION="$PREC" NODES=1
     # Kernel-agent conversation backend is orthogonal to the scheduler; the
-    # launcher sets a per-cluster default via HL_KERNEL_BACKEND (spur -> codex,
-    # stock Slurm -> claude). Override HL_KERNEL_BACKEND to flip it.
+    # launcher sets a per-cluster default via HL_KERNEL_BACKEND (codex or
+    # claude). Override HL_KERNEL_BACKEND to flip it.
     case "${HL_KERNEL_BACKEND:-claude}" in
       codex)  KERNEL_BACKEND_FLAG=--kernel-codex ;;
       claude) KERNEL_BACKEND_FLAG=--kernel-claude ;;

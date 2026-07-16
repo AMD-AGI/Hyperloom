@@ -4,8 +4,8 @@ description: |
   Build a single self-contained `session_breakdown.json` capturing every
   fact a dashboard needs about one hyperloom optimization session. Use
   when the user mentions session-breakdown, kernel attribution,
-  stats-service, capability summary, or wants to surface hyperloom data
-  to an external consumer (claw-stats-service, results service, notebook).
+  a stats/reporting service, capability summary, or wants to surface hyperloom
+  data to an external consumer (a results/stats service, notebook, dashboard).
 globs:
   - "**/breakdown/**"
   - "**/session_breakdown*"
@@ -45,10 +45,10 @@ The JSON has 14 top-level sections plus envelope:
 
 ## Who reads it
 
-- **`claw-stats-service`** — primary consumer. Replaces the
-  MAE-synthesized `raw_report` / `fact_sheet`. Read order in
-  stats-service should be: prefer `session_breakdown.json` if present,
-  fall back to legacy MAE output otherwise.
+- **A downstream stats/reporting service** — primary consumer. Replaces the
+  MAE-synthesized `raw_report` / `fact_sheet`. Recommended read order:
+  prefer `session_breakdown.json` if present, fall back to legacy MAE
+  output otherwise.
 - **`hyperloom-results-service`** — `ci/publish_artifacts.py` POSTs this
   JSON when `HYPERLOOM_RESULTS_SERVICE_URL` is set.
 - **Offline / notebook analysis** — single file, easy to load, no DB

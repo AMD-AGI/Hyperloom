@@ -666,7 +666,17 @@ def _is_safe_litellm_gateway() -> bool:
         os.environ.get("ANTHROPIC_BASE_URL", "")
         or os.environ.get("OPENAI_BASE_URL", "")
     ).lower()
-    markers = ("primus-safe", "core42", "litellm", "llm-proxy")
+    # Generic protocol markers by default (no operator/brand strings shipped);
+    # a specific deployment can add its own gateway host substrings via
+    # HYPERLOOM_STRICT_GATEWAY_MARKERS (comma-separated). SAFE_API_KEY is the
+    # strong signal and is checked regardless.
+    markers = tuple(
+        m.strip().lower()
+        for m in os.environ.get(
+            "HYPERLOOM_STRICT_GATEWAY_MARKERS", "litellm,llm-proxy"
+        ).split(",")
+        if m.strip()
+    )
     return bool(os.environ.get("SAFE_API_KEY")) or any(m in base_url for m in markers)
 
 
@@ -1943,6 +1953,7 @@ def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
         "--include=*.h",
         "--include=*.hpp",
         "--include=*.py",
+        "--",
         keyword,
         str(root),
     ]

@@ -925,7 +925,7 @@ write_env_file() {
     # mirrored) values resolved by ensure_tracelens(). This is what lets
     # setsid nohup python -m hyperloom.inference_optimizer.cli optimize →
     # src/hyperloom/agents/kernel/tools/tracelens_analysis.py inherit the writable
-    # mirrors instead of falling back to the read-only /wekafs defaults.
+    # mirrors instead of falling back to the read-only /path defaults.
     [ -n "${TRACELENS_ROOT:-}" ] && echo "export TRACELENS_ROOT='${TRACELENS_ROOT}'"
     if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
       echo "export TRACELENS_INTERNAL_ROOT='${TRACELENS_INTERNAL_ROOT}'"
