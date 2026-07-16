@@ -7,8 +7,10 @@ per-variant yaml env injection."""
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
@@ -20,6 +22,17 @@ from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 
 def _variant(name: str, args: str = "", envs: dict | None = None) -> gr.GridVariant:
     return gr.GridVariant(name=name, extra_server_args=args, extra_envs=envs or {})
+
+
+def test_validate_magpie_python_override_requires_python(tmp_path):
+    py = tmp_path / "python3"
+    py.write_text("", encoding="utf-8")
+    bash = tmp_path / "bash"
+    bash.write_text("", encoding="utf-8")
+    assert gr._validate_magpie_python_override(str(py)) == str(py)
+    with pytest.raises(ValueError, match="Python interpreter"):
+        gr._validate_magpie_python_override(str(bash))
+    assert gr._validate_magpie_python_override(sys.executable).endswith(Path(sys.executable).name)
 
 
 # -- apply_compatibility_filter -------------------------------------------

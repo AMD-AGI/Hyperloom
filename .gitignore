@@ -32,7 +32,6 @@ inference_optimizer/runs/
 .optimization_strategies.md
 optimization_report.md
 bench.py
-ci/claw-integration.md
 src/hyperloom/framework-agent/kb/framework_optimization/lessons.jsonl
 
 # IDE / editor
@@ -72,11 +71,6 @@ pr.md
 # claude files
 *.claude
 CLAUDE.md
-
-# Large HF candidate pools are hosted off-repo on a shared mount (read by the cron at
-# runtime) — keep only the small InferenceX daily set tracked in git.
-ci/candidates/*.json
-!ci/candidates/inferencex_daily_fixed.json
 
 # temp file
 code_functions_guidance_v2
