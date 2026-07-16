@@ -15,7 +15,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.agents.framework import kb
 from hyperloom.agents.framework.kb import (
     _build_llm_prompt,
     _iter_message_text,

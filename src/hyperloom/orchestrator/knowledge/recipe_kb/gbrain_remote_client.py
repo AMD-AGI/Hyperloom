@@ -31,6 +31,7 @@ import logging
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Mapping
 
@@ -59,6 +60,14 @@ _EXTRA_SERVER_ARGS_KEY = "extra_server_args"
 # rather than blocking the foreground loop. Override via
 # ``GBRAIN_RECIPE_SCAN_BUDGET_SEC``.
 _RECIPE_SCAN_BUDGET_SEC = 20.0
+
+
+
+
+def _require_http_url(url: str) -> None:
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in {"http", "https"}:
+        raise GbrainRemoteError(f"unsupported gbrain URL scheme: {scheme!r}")
 
 
 class GbrainRemoteError(RemoteRecipeClientError):
@@ -277,8 +286,10 @@ class _GbrainMcp:
             "method": "tools/call",
             "params": {"name": tool, "arguments": arguments},
         }
+        url = self._base + "/mcp"
+        _require_http_url(url)
         req = urllib.request.Request(
-            self._base + "/mcp",
+            url,
             data=json.dumps(envelope).encode(),
             headers={
                 "Content-Type": "application/json",
@@ -288,7 +299,7 @@ class _GbrainMcp:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # nosec B310 - URL scheme checked above.
                 raw = self._read_body(resp, allow_bare_result=tool in _BARE_RESULT_TOOLS)
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise GbrainRemoteError(f"gbrain {tool} transport error: {exc!r}") from exc

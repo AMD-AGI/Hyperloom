@@ -6,12 +6,13 @@
 ``ExploreRequest.gap_description`` feeds :mod:`framework_agent.keywords` for
 perf keyword extraction; ``search_modes`` is an ordered tuple of enabled
 candidate sources (e.g. ``("primus_cortex", "github")`` unions both, with
-primus-cortex hard-failing and GitHub best-effort).
+primus_cortex hard-failing and GitHub best-effort).
 """
 
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -82,7 +83,7 @@ class Thresholds:
 
 @dataclass(frozen=True)
 class PrimusCortexConfig:
-    """Configuration for the internal primus-cortex-pr-monitor service.
+    """Configuration for the primus_cortex service.
 
     When present on :class:`ExploreRequest`, the agent routes PR candidate
     enumeration through this service. Errors are hard-failed by callers
@@ -153,7 +154,7 @@ class CommandSpec:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A single PR or git ref candidate (explicit, primus_cortex, or github).
+    """A single PR or git ref candidate (explicit, primus_cortex, or GitHub).
 
     ``score`` is the gap-relevance score; 0.0 when no gap-driven ranking happened.
     """
@@ -220,7 +221,7 @@ class PrFilter:
     """Server-side and client-side filter applied to enumerated PR candidates.
 
     Path filters require Stage 2 enrichment (changed_files populated).
-    Labels are case-insensitive. Dates flow through to primus-cortex's
+    Labels are case-insensitive. Dates flow through to primus_cortex's
     REST query when supported.
     """
 
@@ -363,7 +364,7 @@ def _parse_keywords(raw: Any) -> tuple[str, ...]:
 
 
 def _parse_search_modes(raw: Any) -> tuple[str, ...]:
-    """Coerce a list of mode names; default to primus_cortex + github.
+    """Coerce a list of mode names; default to primus_cortex + GitHub.
 
     Args:
         raw (Any): ``None``/empty (defaults applied), a single mode string, or a
@@ -451,7 +452,7 @@ class ExploreRequest:
         repo_url = str(raw.get("repo_url") or "").strip()
         if not repo_url:
             raise ValueError("repo_url is required")
-        work_dir = Path(str(raw.get("work_dir") or "/tmp/framework-agent")).expanduser()
+        work_dir = Path(str(raw.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent"))).expanduser()
         baseline_raw = raw.get("baseline")
         if not isinstance(baseline_raw, dict):
             raise ValueError("baseline object is required")

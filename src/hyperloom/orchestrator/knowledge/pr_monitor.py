@@ -11,14 +11,12 @@ the PR Monitor directly via MCP.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 
-# MCP URL passed to specialist LLM backend; trailing slash mandatory. No
-# internal cluster DNS is hardcoded: supply it via ``--pr-monitor-mcp-url`` or
-# the ``PR_MONITOR_MCP_URL`` env var (empty disables the in-cluster fallback).
-DEFAULT_PR_MONITOR_MCP_URL: str = os.environ.get("PR_MONITOR_MCP_URL", "")
+# MCP URL passed to specialist LLM backend. Empty means PR Monitor MCP is not
+# advertised unless the operator explicitly configures --pr-monitor-mcp-url.
+DEFAULT_PR_MONITOR_MCP_URL: str = ""
 
 
 @dataclass

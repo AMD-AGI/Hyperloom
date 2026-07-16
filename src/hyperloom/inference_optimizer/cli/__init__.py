@@ -72,6 +72,7 @@ from .credentials import (
 from .multi_node import (
     _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
     _dump_mn_input_params as _dump_mn_input_params,
+    _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
     _run_quantization_prelude as _run_quantization_prelude,
@@ -536,8 +537,6 @@ def _probe_llm_catalog(
 ) -> set[str] | frozenset[str] | None:
     """Probe ``<base_url>/models`` with retry (gateway flakes); return set of model ids or None.
 
-    TLS verification is on by default; ``INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1`` skips it (warns).
-
     Args:
         base_url (str): The gateway base URL; ``""`` returns ``None``.
         api_key (str): Optional bearer key sent in the ``Authorization``
@@ -561,24 +560,6 @@ def _probe_llm_catalog(
         )
         return None
 
-    insecure = os.environ.get(
-        "INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE",
-        "",
-    ).strip().lower() in ("1", "true", "yes")
-    if insecure:
-        print(
-            "Preflight: WARNING — INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1 "
-            "is set; catalog probe will skip TLS verification while sending "
-            "an Authorization: Bearer header. Use only against trusted internal "
-            "gateways with self-signed certs."
-        )
-        try:
-            import urllib3  # type: ignore[import-not-found]
-
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        except Exception:  # noqa: BLE001
-            pass
-
     probe_url = base_url.rstrip("/") + "/models"
     headers = _catalog_probe_headers(base_url=base_url, api_key=api_key)
 
@@ -592,7 +573,6 @@ def _probe_llm_catalog(
                 probe_url,
                 headers=headers,
                 timeout=_CATALOG_REQUEST_TIMEOUT_SEC,
-                verify=not insecure,
             )
         except Exception as exc:  # noqa: BLE001
             last_err = f"{type(exc).__name__}: {exc}"
@@ -1328,6 +1308,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
+    # Multi-node topology handoff: export the CLI-flag-resolved backend / image /
+    # gpus-per-node so downstream subprocesses (kernel agent, benchmark, KB
+    # topology, external-mode state synthesis) read a single stable source. These
+    # are internal handoff envs, not a public config API; users pass --mn-backend
+    # / --mn-image / --gpus-per-node instead.
+    if nodes_resolved >= 2:
+        os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
+        os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
+        mn_image_resolved = str(getattr(args, "mn_image", "") or "").strip()
+        if mn_image_resolved:
+            os.environ["INFERENCE_OPTIMIZER_MN_IMAGE"] = mn_image_resolved
     operator_server_args = str(getattr(args, "server_args", "") or "").strip()
     if operator_server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args

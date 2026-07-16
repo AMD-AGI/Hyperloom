@@ -21,6 +21,7 @@ import shlex
 import subprocess
 import pathlib
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -238,7 +239,7 @@ def _build_sglang_cmd(
     ]
     if node_rank == 0:
         # rank-0 HTTP port = internal prefill/decode port in PD mode, else public.
-        cmd.extend(["--host", "0.0.0.0", "--port", str(pd_port)])
+        cmd.extend(["--host", "0.0.0.0", "--port", str(pd_port)])  # nosec B104 - rank-0 server must accept pod traffic.
     if ep > 1:
         cmd.extend(["--expert-parallel-size", str(ep)])
     role = pd_role.strip().lower()
@@ -292,7 +293,7 @@ def _build_vllm_cmd(
         "--tensor-parallel-size",
         str(tp),
         "--host",
-        "0.0.0.0",
+        "0.0.0.0",  # nosec B104 - vLLM rank-0 server must accept pod traffic.
         "--port",
         str(pd_port),
         "--distributed-executor-backend",
@@ -592,7 +593,7 @@ def _rank0_pid_from_log(log_dir: str) -> int | None:
     Args:
         log_dir (str): The log directory; its parent is probed for the
             ``multi_node_pids/rank_0.pid`` file before falling back to the
-            default ``/tmp`` location.
+            default temp-directory location.
 
     Returns:
         int | None: The rank-0 PID, or ``None`` if it cannot be read.
@@ -600,7 +601,7 @@ def _rank0_pid_from_log(log_dir: str) -> int | None:
     try:
         pid_path = pathlib.Path(log_dir).parent / "multi_node_pids" / "rank_0.pid"
         if not pid_path.is_file():
-            pid_path = pathlib.Path("/tmp/multi_node_pids/rank_0.pid")
+            pid_path = pathlib.Path(tempfile.gettempdir()) / "multi_node_pids" / "rank_0.pid"
         return int(pid_path.read_text().strip())
     except Exception:  # noqa: BLE001
         return None
@@ -694,7 +695,7 @@ def _wait_health(
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{_INFERENCE_PORT}/health",
                 timeout=3,
-            ) as resp:
+            ) as resp:  # nosec B310 - fixed loopback health check.
                 if 200 <= resp.status < 300:
                     return True
         except (urllib.error.URLError, OSError):

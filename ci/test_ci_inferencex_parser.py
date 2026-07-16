@@ -94,58 +94,6 @@ def test_parse_model_entry_empty():
     assert parsed["isl_osl_configs"] == []
 
 
-# ── find_benchmark ──
-
-
-def _bench(hw="b200", isl=1024, osl=1024, prec="fp8", out_tput=100, **kw):
-    b = {"hardware": hw, "isl": isl, "osl": osl, "precision": prec, "metrics": {"output_tput_per_gpu": out_tput}}
-    b.update(kw)
-    return b
-
-
-def test_find_benchmark_basic_best_tput():
-    benches = [_bench(out_tput=100), _bench(out_tput=200)]
-    assert ix.find_benchmark(benches, "b200", 1024, 1024)["metrics"]["output_tput_per_gpu"] == 200
-
-
-def test_find_benchmark_no_match():
-    assert ix.find_benchmark([_bench(hw="h100")], "b200", 1024, 1024) is None
-
-
-def test_find_benchmark_precision_filter():
-    benches = [_bench(prec="fp8"), _bench(prec="bf16", out_tput=999)]
-    got = ix.find_benchmark(benches, "b200", 1024, 1024, precision="fp8")
-    assert got["precision"] == "fp8"
-
-
-def test_find_benchmark_image_tp_conc_preference():
-    benches = [
-        _bench(out_tput=300, image="other", decode_tp=2, conc=64),
-        _bench(out_tput=10, image="want-img", decode_tp=8, conc=32),
-    ]
-    got = ix.find_benchmark(benches, "b200", 1024, 1024, image="want-img", tp=8, conc=32)
-    assert got["image"] == "want-img"
-
-
-def test_find_benchmark_tput_per_gpu_fallback():
-    b = {"hardware": "b200", "isl": 1024, "osl": 1024, "precision": "fp8", "metrics": {"tput_per_gpu": 55}}
-    assert ix.find_benchmark([b], "b200", 1024, 1024)["metrics"]["tput_per_gpu"] == 55
-
-
-# ── format_benchmark_for_prompt ──
-
-
-def test_format_benchmark_for_prompt_match():
-    text = ix.format_benchmark_for_prompt([_bench()], "b200", 1024, 1024, "fp8")
-    assert "Hardware: b200" in text
-    assert "Output Throughput/GPU" in text
-
-
-def test_format_benchmark_for_prompt_no_data():
-    text = ix.format_benchmark_for_prompt([], "b200", 1024, 1024, "fp8")
-    assert "No InferenceX data" in text
-
-
 # ── find_benchmark_script ──
 
 

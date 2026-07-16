@@ -18,6 +18,12 @@ subtrees:
     title: Quickstart — Docker and Bare metal
   - file: install/slurm.md
     title: Quickstart — Slurm
+  - file: install/multi-node/hyperloom-remote-demo.md
+    title: Quickstart — Remote multi-node
+    subtrees:
+    - entries:
+      - file: install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md
+        title: Qwen3-30B-A3B multi-node workload
 
 - caption: Overview
   entries:
@@ -53,6 +59,16 @@ subtrees:
     title: Environment variables
   - file: reference/authentication.md
     title: Authentication and credentials
+  - file: reference/operations.md
+    title: Operations and self-hosting
+  - file: reference/upgrade.md
+    title: Upgrade guide
+  - file: reference/session-breakdown.md
+    title: Session output schema
+  - file: reference/integrate-kb.md
+    title: Knowledge base integration
+  - file: reference/operator-scripts.md
+    title: Operator scripts
   - file: reference/troubleshooting.md
     title: Troubleshooting
 

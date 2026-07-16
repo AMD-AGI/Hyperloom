@@ -55,6 +55,8 @@ hl_build_prompt() {
   python3 - <<'PY'
 import os
 tpl = open("ci/prompt_template.md").read()
+tpl = tpl.replace("/shared/Hyperloom/src/hyperloom/inference_optimizer/SKILL.md",
+                  os.environ["REPO_ROOT"] + "/src/hyperloom/inference_optimizer/SKILL.md")
 vals = dict(
     model_hf=os.environ["REPO_ID"], model_path=os.environ.get("MODEL_PATH", os.environ["REPO_ID"]),
     gpu_type=os.environ["GPU_TYPE"], gpu_type_lc=os.environ["GPU_TYPE"].lower(),
@@ -63,7 +65,7 @@ vals = dict(
     isl=os.environ["ISL"], osl=os.environ["OSL"], nodes="1",
     random_range_ratio="1.0", target_gain=os.environ["TARGET_GAIN"],
     max_hours=os.environ["MAX_HOURS"], kernel_agent_build_geak_rag_index="1",
-    oob_path="", tracelens_root="", multinode_section="", inferenceX_data="(none)",
+    oob_path="", tracelens_root="", multinode_section="",
 )
 print(tpl.format(**vals))
 PY
