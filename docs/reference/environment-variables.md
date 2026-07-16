@@ -115,9 +115,7 @@ Use CLI flags for multi-node topology and prefill-decode configuration:
 `--pd-decode-tp`, `--pd-transfer-backend`, and `--pd-ib-device`.
 
 When the optimizer provisions the cluster itself (Primus-SaFE flow), those
-flags are all you need; it writes the resolved values into internal handoff
-envs when it creates RayJob / Infera workloads, and callers should not depend
-on those env names as a public configuration API.
+flags are all you need — no environment variables are required.
 
 ### External-mode variables (SaFE-less cluster)
 
@@ -138,8 +136,8 @@ variables. When both `SAFE_API_*` are present these are ignored.
 | `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | No | Ray Dashboard auth token, only if the dashboard is authenticated. |
 
 Infera external mode requires `HYPERLOOM_MN_EXT_SSH_KEY` plus at least one
-`*_IPS` list, or `optimize` exits fast (`sys.exit(2)`). RayJob external mode
-ignores the SSH / IP vars and uses `HYPERLOOM_MN_EXT_HEAD_IP` for restarts.
+`*_IPS` list, or the run fails fast at startup. RayJob external mode ignores
+the SSH / IP vars and uses `HYPERLOOM_MN_EXT_HEAD_IP` for restarts.
 
 ---
 
