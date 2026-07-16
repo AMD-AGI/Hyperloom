@@ -126,6 +126,41 @@ export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 If `hyperloom/inference_optimizer/assets/install.sh` is not present (source
 checkout layout), use `src/hyperloom/inference_optimizer/assets/install.sh`.
 
+## User-visible Progress
+
+Keep the user informed with concise status updates throughout the demo. Do not
+dump full debug logs into chat; report the important values and paths so the user
+can tell that work is progressing.
+
+Before launch, report the launch plan:
+
+- model path and whether it is an existing local model or a downloaded default;
+- run mode (`baremetal` or `docker`) and target host/container when applicable;
+- framework, TP, concurrency, ISL, OSL, precision, max hours, and required demo
+  flags;
+- `USER_DATA_PATH` and where runtime artifacts will be written.
+
+After the runtime install, report whether it succeeded and the path to
+`kernel-agent.env.sh`. After starting the optimizer, report:
+
+- optimizer PID;
+- run log path;
+- launch-info JSON path;
+- resolved session directory;
+- `state.json` path;
+- initial health check result.
+
+During monitoring, print a short summary at each 300-second check:
+
+- process alive/stopped;
+- phase and `stop_reason`;
+- baseline throughput, current best throughput, and cumulative gain when present;
+- latest benchmark result or candidate decision when available;
+- the most relevant recent log lines, excluding secrets.
+
+When the run finishes, report the final status, final report path, best result,
+and the stop reason. Never print API keys, tokens, or custom header values.
+
 ## Launch Requirements
 
 1. Run the pre-launch runtime install above and source

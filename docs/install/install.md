@@ -218,6 +218,25 @@ precision, or the run budget. If the custom model is much larger, smaller, or
 uses a different architecture than the preset model, choose the closest preset or
 use the source/manual path to adjust the workload parameters explicitly.
 
+## What to expect during a demo
+
+Demo optimizations are long-running background jobs. The agent should not stream
+every debug log line, but it should make progress visible before and after
+launch.
+
+Before launch, expect a short plan that includes the resolved model path, run
+mode, framework, TP, concurrency, ISL/OSL, precision, run budget, and
+`USER_DATA_PATH`. After launch, expect the optimizer PID, run log path,
+launch-info JSON path, session directory, `state.json` path, and the initial
+health check result.
+
+During the run, the agent should report a concise status summary about every
+300 seconds. Useful fields include whether the process is still alive, the
+current phase, `stop_reason`, baseline throughput, current best throughput,
+cumulative gain, latest benchmark result or candidate decision, and the most
+relevant recent log lines. Secrets such as API keys, tokens, and custom headers
+must never be printed.
+
 ## Troubleshooting
 
 - The current workspace contains many package folders after `pip install
