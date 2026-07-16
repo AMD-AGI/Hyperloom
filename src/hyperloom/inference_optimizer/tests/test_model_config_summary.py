@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+from hyperloom.inference_optimizer.model_config_utils import (
+    _sparse_kv_block_size,
+    summarize_model_config,
+)
 
 
 def _write_config(model_dir: Path, payload: dict) -> Path:
@@ -457,3 +460,31 @@ def test_shared_expert_via_nested_text_config(tmp_path: Path) -> None:
     assert out["is_moe"] is True
     assert out["has_shared_expert"] is True
     assert out["num_shared_experts"] == 1
+
+
+def test_sparse_kv_block_size_top_level(tmp_path: Path) -> None:
+    m = _write_config(
+        tmp_path / "m",
+        {"model_type": "minimax_m3", "sparse_attention_config": {"sparse_block_size": 128}},
+    )
+    assert _sparse_kv_block_size(str(m)) == 128
+
+
+def test_sparse_kv_block_size_nested_text_config(tmp_path: Path) -> None:
+    m = _write_config(
+        tmp_path / "m",
+        {"text_config": {"sparse_attention_config": {"sparse_block_size": 64}}},
+    )
+    assert _sparse_kv_block_size(str(m)) == 64
+
+
+def test_sparse_kv_block_size_dense_model_is_none(tmp_path: Path) -> None:
+    m = _write_config(tmp_path / "m", {"model_type": "llama"})
+    assert _sparse_kv_block_size(str(m)) is None
+
+
+def test_sparse_kv_block_size_unreadable_config_is_none(tmp_path: Path) -> None:
+    # No config.json (e.g. an uncached hub-id) -> None, so the caller injects
+    # nothing and preserves prior behaviour.
+    assert _sparse_kv_block_size(str(tmp_path / "nope")) is None
+    assert _sparse_kv_block_size("") is None
