@@ -83,8 +83,8 @@ class WriteEnvFilePythonPathTest(unittest.TestCase):
         # re-imports a PYTHONPATH that lacks REPO_ROOT (the re-install bug).
         if preexisting_dotenv_pythonpath is not None:
             dotenv.write_text(
-                "SAFE_API_KEY=ak-from-dotenv\n"
-                "OPENAI_BASE_URL=https://gateway.example.com/v1\n"
+                "ANTHROPIC_API_KEY=ak-from-dotenv\n"
+                "ANTHROPIC_BASE_URL=https://api.anthropic.com\n"
                 f"PYTHONPATH={preexisting_dotenv_pythonpath}\n",
                 encoding="utf-8",
             )
@@ -96,8 +96,8 @@ class WriteEnvFilePythonPathTest(unittest.TestCase):
         # exercises the PYTHONPATH composition in write_env_file.
         script = f"""
 set -euo pipefail
-export SAFE_API_KEY=ak-test-key
-export OPENAI_BASE_URL=https://gateway.example.com/v1
+export ANTHROPIC_API_KEY=ak-test-key
+export ANTHROPIC_BASE_URL=https://api.anthropic.com
 export REPO_ROOT={repo_root!s}
 export USER_DATA_PATH={workdir!s}
 export HYPERLOOM_RUNTIME_DIR={runtime_dir!s}

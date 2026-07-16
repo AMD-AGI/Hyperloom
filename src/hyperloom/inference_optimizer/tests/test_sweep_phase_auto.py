@@ -218,7 +218,7 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
     assert state.next_pending_keep_kernel_id() == "k001"
 
 
-def _patch_stack_validation_internals(monkeypatch, *, new_tput: float):
+def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_status: str = "ok"):
     """Stub apply/revert/bench so the real stack-validation decision path runs."""
     import hyperloom.orchestrator.kernel.request_handlers as krh
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
@@ -228,7 +228,7 @@ def _patch_stack_validation_internals(monkeypatch, *, new_tput: float):
         return {"status": "ok", "kernel_id": kernel_id, "manifest_path": None}
 
     def _fake_revert(applied):
-        return {"status": "ok"}
+        return {"status": revert_status}
 
     class _FakeBaselineExecutor:
         def __init__(self, *, session_dir):
@@ -296,6 +296,23 @@ async def test_stack_validation_reverts_when_no_gain_over_current_best(
     assert result["gain_pct"] == pytest.approx(9.0)
     assert result["stack_incremental_gain_pct"] == pytest.approx(-0.9090909, rel=1e-3)
     assert result["revert_result"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_stack_validation_surfaces_partial_inner_revert(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A tampered inner manifest can make one stack revert partial; surface it."""
+    c = _stack_validation_coordinator(tmp_path)
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="partial")
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert result["decision"] == "REVERT"
+    assert result["revert_result"]["status"] == "partial"
+    assert all(r["status"] == "partial" for r in result["revert_result"]["stack_reverts"])
 
 
 @pytest.mark.asyncio

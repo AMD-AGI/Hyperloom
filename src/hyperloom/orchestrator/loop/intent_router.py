@@ -205,6 +205,20 @@ class IntentRouter:
                 else "advise" if "advise" in sub_verdicts
                 else "needs_review"
             )
+
+            # Defensive audit (log-only): record verdict_map collapse
+            # outcomes for traceability. Behaviour is unchanged.
+            try:
+                if verdict in ("approve", "advise") and any(
+                    sv in ("reject", "needs_review") for sv in sub_verdicts
+                ):
+                    log.warning(
+                        "review_verdict collapse: target=%s "
+                        "collapsed to %r (sub_verdicts=%r)",
+                        target, verdict, sub_verdicts,
+                    )
+            except Exception:  # noqa: BLE001 - audit log must never affect flow
+                pass
         await self._coord._handle_single_verdict(
             source=source,
             pending=pending,
@@ -754,6 +768,16 @@ class IntentRouter:
                 task_id, "cancelled",
                 evidence={"reason": intent.payload.get("reason"), "by": source},
             )
+            # Defensive audit (log-only): emit an audit trail for KILL_TASK
+            # so kills are traceable. Behaviour is unchanged.
+            try:
+                log.warning(
+                    "kill_task audit: source=%s task_id=%s "
+                    "prior_state=%s reason=%r",
+                    source, task_id, task.state, intent.payload.get("reason"),
+                )
+            except Exception:  # noqa: BLE001 - audit log must never affect flow
+                pass
         await self.bus.append_and_seq(Message.new(
             source, "*", "kill",
             {"task_id": task_id, "reason": intent.payload.get("reason")},

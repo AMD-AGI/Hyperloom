@@ -35,27 +35,28 @@ In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
 
 ```bash
+export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
   --device /dev/kfd \
   --device /dev/dri \
   --group-add video \
-  -v "$PWD:$PWD" \
+  -v "$REPO_ROOT:$REPO_ROOT" \
   "$HYPERLOOM_IMAGE" \
   tail -f /dev/null
 ```
 
-Mount the Hyperloom workspace at the same path (`-v "$PWD:$PWD"`) so paths in `.env`, logs, and session artifacts stay valid. If `USER_DATA_PATH` or a pre-downloaded model directory is outside the workspace, add matching `-v host_path:host_path` mounts before starting the container.
+Mount the Hyperloom workspace at the same absolute path (`-v "$REPO_ROOT:$REPO_ROOT"`) so paths in `.env`, logs, and session artifacts stay valid. If `USER_DATA_PATH` or a pre-downloaded model directory is outside the workspace, add matching `-v host_path:host_path` mounts before starting the container.
 
 Then run the setup backend inside the container:
 
 ```bash
-docker exec -w "$PWD" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
-  'PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
+docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
+  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
 ```
 
-After that, run all remaining commands for this demo inside the same container with `docker exec -w "$PWD" ...`; do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host in Docker mode. When the demo is finished, ask the user whether to stop the container. If they say yes, run:
+After that, run all remaining commands for this demo inside the same container with `docker exec -w "$REPO_ROOT" ...`; do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host in Docker mode. When the demo is finished, ask the user whether to stop the container. If they say yes, run:
 
 ```bash
 docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
@@ -80,11 +81,20 @@ Required optimize CLI flags:
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
-If `MODEL_PATH` is set, inspect that path first: use it when it already contains `config.json`; otherwise download `Qwen/Qwen3-8B` into that exact directory. If `MODEL_PATH` is unset, ask the user whether they want to provide a target model path. If they provide one, export `MODEL_PATH` to that path; if not, use `.cache/hyperloom-models/Qwen3-8B`. Do not assume the Hugging Face CLI exists; resolve or download the model with Python:
+Before resolving or downloading any model, always ask the user which model path to use. Present the currently resolved option when `MODEL_PATH` is already set, and always offer a custom local path plus the demo default. Do not continue until the user chooses one.
+
+Use this decision flow:
+
+- If the user chooses the existing `MODEL_PATH`, inspect that path and use it only when it contains `config.json`; otherwise ask again for a valid path or the demo default.
+- If the user provides a custom local path, export `MODEL_PATH` to that path and require `config.json` before launch.
+- If the user chooses the demo default, set `MODEL_PATH=${REPO_ROOT}/.cache/hyperloom-models/Qwen3-8B` and download `Qwen/Qwen3-8B` there when `config.json` is not already present.
+
+Do not assume the Hugging Face CLI exists; resolve or download the selected model with Python:
 
 ```bash
 python -m pip install -U huggingface_hub
-export MODEL_PATH="${MODEL_PATH:-$(pwd)/.cache/hyperloom-models/Qwen3-8B}"
+export REPO_ROOT="$(pwd -P)"
+export MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/.cache/hyperloom-models/Qwen3-8B}"
 python - <<'PY'
 import os
 from pathlib import Path
@@ -114,23 +124,63 @@ For Docker mode, run this inside the container. For bare-metal mode, run it on
 the host:
 
 ```bash
-set -a; . ./.env; set +a
+export REPO_ROOT="$(pwd -P)"
+set -a; . "${REPO_ROOT}/.env"; set +a
 export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true
-bash hyperloom/inference_optimizer/assets/install.sh
+INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+  INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
+fi
+bash "$INSTALL_SH"
 . "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ```
 
 If `hyperloom/inference_optimizer/assets/install.sh` is not present (source
 checkout layout), use `src/hyperloom/inference_optimizer/assets/install.sh`.
 
+## User-visible Progress
+
+Keep the user informed with concise status updates throughout the demo. Do not
+dump full debug logs into chat; report the important values and paths so the user
+can tell that work is progressing.
+
+Before launch, report the launch plan:
+
+- model path and whether it is an existing local model or a downloaded default;
+- run mode (`baremetal` or `docker`) and target host/container when applicable;
+- framework, TP, concurrency, ISL, OSL, precision, max hours, and required demo
+  flags;
+- `USER_DATA_PATH` and where runtime artifacts will be written.
+
+After the runtime install, report whether it succeeded and the path to
+`kernel-agent.env.sh`. After starting the optimizer, report:
+
+- optimizer PID;
+- run log path;
+- launch-info JSON path;
+- resolved session directory;
+- `state.json` path;
+- initial health check result.
+
+During monitoring, print a short summary at each 300-second check:
+
+- process alive/stopped;
+- phase and `stop_reason`;
+- baseline throughput, current best throughput, and cumulative gain when present;
+- latest benchmark result or candidate decision when available;
+- the most relevant recent log lines, excluding secrets.
+
+When the run finishes, report the final status, final report path, best result,
+and the stop reason. Never print API keys, tokens, or custom header values.
+
 ## Launch Requirements
 
 1. Run the pre-launch runtime install above and source
    `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
-2. Keep `PYTHONPATH="$PWD:${PYTHONPATH:-}"` in the launch shell so robustness
+2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so robustness
    and critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run in background with `setsid nohup`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.

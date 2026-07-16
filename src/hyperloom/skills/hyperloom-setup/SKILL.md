@@ -1,21 +1,26 @@
 ---
 name: hyperloom-setup
-description: Configure Hyperloom after pip install --target by collecting LLM settings, choosing a bare-metal or Docker run mode, writing .env, and running the setup backend on baremetal hosts only.
+description: Configure Hyperloom in the current agent workspace after pip install --target . by collecting LLM settings, choosing a bare-metal or Docker run mode, writing .env, and running the setup backend on baremetal hosts only.
 ---
 
 # Hyperloom Setup
 
-Use this skill after the user installs Hyperloom into the current workspace:
+Use this skill after the user prepares a dedicated workspace, opens that
+directory in the agent, and installs Hyperloom into the current directory:
 
 ```bash
 pip install your_package.whl --target .
 ```
 
-The current directory should be the Hyperloom target directory, for example `~/hyperloom`. It is normal for this directory to contain many Python package folders; users do not need to inspect them.
+The current directory is the Hyperloom workspace and install target. It is normal
+for this directory to contain many Python package folders; users do not need to
+inspect them. Do not use an existing project directory unless the user accepts
+that setup may create or update `.env` in that directory.
 
-This skill resolves a run mode into `HYPERLOOM_RUN_MODE` (`baremetal` or `docker`)
-for this session. In `baremetal` mode it runs the setup backend on the host; in
-`docker` mode it writes `.env` only. It does **not** start any container.
+This skill should normally run once per workspace. It resolves a run mode into
+`HYPERLOOM_RUN_MODE` (`baremetal` or `docker`) for this session. In `baremetal`
+mode it runs the setup backend on the host; in `docker` mode it writes `.env`
+only. It does **not** start any container.
 Whether to generate or run a Docker container is decided later by the example
 (workload) skill based on `HYPERLOOM_RUN_MODE`.
 
@@ -38,11 +43,29 @@ not start a container itself.
 
 ## Workflow
 
-You must run this as an interactive onboarding flow. Do not stop after listing required values. Ask the user each question, collect the answer, write `.env`, read it back for validation, and continue to the setup command.
+You must run this as an interactive onboarding flow. Do not stop after listing
+required values. Ask the user each question, collect the answer, warn before
+writing `.env`, write `.env`, read it back for validation, and continue to the
+setup command. If setup already completed for this workspace and the user is not
+changing provider, model, `USER_DATA_PATH`, run mode, Docker target host, or
+bare-metal framework setup choice, do not run setup again; continue with the
+demo skill using the existing `.env`.
 
 ## Step 1: Confirm Workspace
 
-Confirm the current directory contains a `hyperloom/` Python package directory. If it does not, ask the user for the target directory and switch there.
+Confirm the current directory is the dedicated Hyperloom workspace selected by
+the user and contains a `hyperloom/` Python package directory from `pip install
+--target .`.
+
+If `hyperloom/` is missing, do not search for or switch to another target
+directory. Tell the user to open the intended dedicated workspace in the agent
+and install Hyperloom into that current directory:
+
+```bash
+python3 -m pip install ./hyperloom_inference_optimizer-0.8.0-py3-none-any.whl --target .
+```
+
+Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
 
 ## Step 2: Ask Configuration Questions
 
@@ -60,12 +83,12 @@ value.
    descriptions, vendor examples, or base URLs to this first question.
 
 2. Ask the base URL as a structured follow-up after the mode is chosen.
-   - For `Anthropic`, offer three options:
+   - For `Anthropic`, present exactly these three option labels in this order:
      - `Use default (https://api.anthropic.com)` — this remains the recommended
        default.
      - `Use AMD gateway (https://llm-api.amd.com/anthropic)`.
      - `Custom`.
-   - For `DeepSeek`, offer two options:
+   - For `DeepSeek`, present exactly these two option labels in this order:
      - `Use default (https://api.deepseek.com/anthropic)`.
      - `Custom`.
    - If the user picks `Custom`, ask a plain-text follow-up for the URL.
@@ -84,14 +107,16 @@ value.
 
    For `Anthropic`:
    - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask `ANTHROPIC_BASE_URL`: options `Use default (https://api.anthropic.com)` /
+   - Ask `ANTHROPIC_BASE_URL` with exactly these option labels in this order:
+     `Use default (https://api.anthropic.com)` /
      `Use AMD gateway (https://llm-api.amd.com/anthropic)` / `Custom`.
    - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-4-8)` / `Custom`.
 
    For `DeepSeek`:
    - Write `DEEPSEEK_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask `DEEPSEEK_BASE_URL`: options `Use default (https://api.deepseek.com/anthropic)` / `Custom`.
-   - Ask `DEEPSEEK_MODEL`: options `Use default (deepseek-chat)` / `Custom`.
+   - Ask `DEEPSEEK_BASE_URL` with exactly these option labels in this order:
+     `Use default (https://api.deepseek.com/anthropic)` / `Custom`.
+   - Ask `DEEPSEEK_MODEL`: options `Use default (deepseek-v4-pro)` / `Custom`.
 5. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
    - Offer `<workspace>/session` (the current workspace directory plus a
@@ -106,12 +131,19 @@ value.
    this question if `HYPERLOOM_RUN_MODE` is already set in the shell environment
    (see [Run Mode Resolution](#run-mode-resolution)); just confirm it and use it
    for this run.
-   - `baremetal`: run the setup backend directly on this host. Choose this when
-     the host provides ROCm (the framework may already be present, or setup can
-     install it).
+
+   Present exactly these two option labels in this order:
+
+   1. `docker`
+   2. `baremetal`
+
    - `docker`: record docker as the run mode; the example (workload) skill will
      generate a ROCm container later. Choose this when the host does not have the
      framework installed but Docker with GPU access is available.
+   - `baremetal`: run the setup backend directly on this host. Choose this when
+     the host provides ROCm, or when Hyperloom is already installed inside a
+     Docker container and setup should run directly in that current container
+     environment.
    - If the user is unsure and is already inside a framework image or shell with
      a working framework, recommend `baremetal`; otherwise recommend `docker`.
 
@@ -158,6 +190,14 @@ value.
 
 Create or update `.env` in the current directory.
 
+Before writing, explicitly tell the user:
+
+- `.env` will be created or updated in the current workspace.
+- If `.env` already exists, unrelated keys are preserved, but Hyperloom setup
+  keys selected in this run will be updated.
+- A dedicated workspace is recommended to avoid modifying an existing project's
+  `.env`.
+
 - For every value the user chose in this run (LLM mode, base URL, model, run
   mode, `USER_DATA_PATH`, Docker target host), write exactly what the user
   selected. This wins over any pre-existing value in `.env` or the shell
@@ -189,22 +229,22 @@ Common keys (all modes):
 
 ### AMD APIM subscription header
 
-For `Anthropic` or `DeepSeek`, if the chosen base URL host is `llm-api.amd.com`,
-that gateway requires the API key to also be sent as an
-`Ocp-Apim-Subscription-Key` header. Add the custom-headers key, reusing the same
-key value:
+Only for `Anthropic`, if the chosen base URL host is `llm-api.amd.com`, that
+gateway requires the API key to also be sent as an
+`Ocp-Apim-Subscription-Key` header. Write the custom-headers key as a reference
+to the same API key, so the user only fills one secret:
 
-- `Anthropic`: `ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: <ANTHROPIC_API_KEY>"`
-- `DeepSeek`: `ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: <DEEPSEEK_API_KEY>"`
+```bash
+ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}"
+```
 
-The value **must** be wrapped in double quotes: the setup backend loads `.env`
-with a shell `source`, so an unquoted value containing a space and a colon
-(`Ocp-Apim-Subscription-Key: ...`) is parsed as a command and fails with exit
-127. Any `.env` value containing spaces or `:` must be double-quoted.
+The value **must** be wrapped in double quotes: the setup backend and launch
+scripts may load `.env` with a shell `source`, so an unquoted value containing a
+space and a colon (`Ocp-Apim-Subscription-Key: ...`) is parsed as a command and
+fails with exit 127.
 
-Write the placeholder header with `<PLEASE_FILL_IN>` when the key itself is
-still a placeholder, so the header value tracks the real key after the user
-edits `.env`. Skip this entirely when the base URL host is not `llm-api.amd.com`.
+Do not add custom headers for DeepSeek. Skip this key entirely when the selected
+Anthropic base URL host is not `llm-api.amd.com`.
 
 After writing `.env`, tell the user to edit the file directly and replace each `<PLEASE_FILL_IN>` placeholder. Wait for the user to confirm before running setup.
 
@@ -229,20 +269,23 @@ framework the user chose in Step 2.
 For `none`:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none
 ```
 
 For `sglang`:
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
 ```
 
 For `vllm` (installs into an isolated venv; `--install-framework vllm` already
 defaults to isolated, the flag below is explicit):
 
 ```bash
-PYTHONPATH="$PWD" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
 ### `docker`
@@ -299,8 +342,16 @@ mode, ask the user whether they want to run a demo optimization now, and if so
 which length:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
-- `8h` — medium-length run.
+- `8h` — medium-length Qwen3-14B-FP8 run.
 - `24h` — long-horizon cyclic run.
+
+If the user wants to run a custom model, keep using one of these demo presets.
+Ask the user for a local model path, confirm that the directory exists and
+contains `config.json`, then export `MODEL_PATH=<that path>` before loading the
+selected demo skill. Explain that the model path is replaced, but the selected
+demo still owns the workload preset: tensor parallelism, concurrency,
+input/output lengths, precision, target gain, and run budget are not retuned
+unless the user explicitly asks to adjust them.
 
 If the user declines, stop here. If `HYPERLOOM_RUN_MODE` is `baremetal` and
 `FRAMEWORK` is unset, do not offer a demo; tell the user to install a serving
@@ -313,7 +364,7 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 `.claude/skills/`, `.cursor/skills/`); load the matching one by name:
 
 - `3h` → `hyperloom-qwen3-8b-3h`
-- `8h` → `hyperloom-qwen3-30b-a3b-8h`
+- `8h` → `hyperloom-qwen3-14b-fp8-8h`
 - `24h` → `hyperloom-gpt-oss-120b-24h`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,
