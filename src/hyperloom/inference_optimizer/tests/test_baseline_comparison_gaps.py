@@ -10,9 +10,7 @@ Covers uncovered branches in ``baseline_comparison``: whitespace-only input to
 from __future__ import annotations
 
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
-    _format_report_md,
     _row_to_point,
-    to_inferencex_name,
 )
 from hyperloom.inference_optimizer.baseline_comparison.types import (
     BaselinePoint,
