@@ -1943,6 +1943,7 @@ def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
         "--include=*.h",
         "--include=*.hpp",
         "--include=*.py",
+        "--",
         keyword,
         str(root),
     ]
