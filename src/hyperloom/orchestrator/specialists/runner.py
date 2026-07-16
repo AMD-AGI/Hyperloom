@@ -1205,7 +1205,16 @@ class SpecialistRunner:
                 validated.append(resolved)
             else:
                 missing.append(str(p))
+        dropped_scanned_outside: list[str] = []
         for p in patches_written:
+            if not _patch_path_within_bases(Path(str(p)), search_bases):
+                dropped_scanned_outside.append(str(p))
+                log.warning(
+                    "specialist: scanned patch %r resolves outside the "
+                    "specialist worktree/workspace; dropping",
+                    p,
+                )
+                continue
             if p not in validated:
                 validated.append(p)
         _seen: set[str] = set()
@@ -1217,6 +1226,8 @@ class SpecialistRunner:
         if missing:
             # Record dangling patch claims for the session_breakdown audit.
             notes.append("patches_claimed_but_missing:" + ",".join(missing[:8]))
+        if dropped_scanned_outside:
+            notes.append("patches_scanned_outside_workspace:" + ",".join(dropped_scanned_outside[:8]))
 
         # Stamp the dispatch scope onto every proposal for cross-domain Critic enrichment.
         for _proposal in done_payload.get("proposal_set") or []:
