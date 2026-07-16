@@ -53,7 +53,7 @@ def _write_baseline_yaml(path: Path) -> None:
     cfg = {
         "benchmark": {
             "framework": "sglang",
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
@@ -79,7 +79,7 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
             {
                 "success": True,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": tput / 256,
                     "output_throughput": tput,
@@ -1254,7 +1254,7 @@ def _write_atom_baseline_yaml(path: Path) -> None:
     cfg = {
         "benchmark": {
             "framework": "atom",
-            "model": "/wekafs/models/Qwen-Qwen3-32B",
+            "model": "/path/models/Qwen-Qwen3-32B",
             "precision": "fp8",
             "run_mode": "local",
             "envs": {"TP": 4, "CONC": 64, "ISL": 1024, "OSL": 1024},
@@ -1284,7 +1284,7 @@ async def test_explore_executor_atom_empty_grid_seeds_default_grid(
     _write_atom_baseline_yaml(base)
 
     # Sandbox MODEL_PATH so compatibility_filter doesn't auto-drop MoE/MLA variants.
-    monkeypatch.setenv("MODEL_PATH", "/wekafs/models/Qwen-Qwen3-32B")
+    monkeypatch.setenv("MODEL_PATH", "/path/models/Qwen-Qwen3-32B")
     monkeypatch.setenv("FRAMEWORK", "atom")
 
     received_grid: list[list[str]] = []

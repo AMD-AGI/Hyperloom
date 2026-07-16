@@ -2327,7 +2327,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "absolute path to public TraceLens checkout (must be visible "
-            "from every pod, typically /wekafs/...). Defaults to "
+            "from every pod, typically /path/...). Defaults to "
             "$TRACELENS_ROOT."
         ),
     )

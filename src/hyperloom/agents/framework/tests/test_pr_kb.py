@@ -46,7 +46,7 @@ def test_normalise_repo():
 
 def test_repo_slug_parity_with_worker():
     """Consumer repo_slug must match the PR KB writer byte-for-byte."""
-    worker = Path("/wekafs/zhanglei/Primus-Claw/pr-kb/pr_kb/slug.py")
+    worker = Path("/path/zhanglei/Primus-Claw/pr-kb/pr_kb/slug.py")
     if not worker.is_file():
         pytest.skip("worker slug.py not present")
     import importlib.util
