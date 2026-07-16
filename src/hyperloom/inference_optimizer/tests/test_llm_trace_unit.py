@@ -63,3 +63,28 @@ def test_llm_trace_handles_unusable_reviewed_ids_and_io_failure(tmp_path: Path, 
 
     monkeypatch.setattr(Path, "mkdir", _raise_mkdir)
     llm_trace.append_llm_call(session_dir=tmp_path, record=record)
+
+
+def test_coerce_optional_str_list_variants():
+    # Bare string is wrapped into a single-element list.
+    assert llm_trace._coerce_optional_str_list("abc") == ["abc"]
+    # None -> None; non-iterable -> None; all-empty -> None.
+    assert llm_trace._coerce_optional_str_list(None) is None
+    assert llm_trace._coerce_optional_str_list(123) is None
+    assert llm_trace._coerce_optional_str_list(["", "  "]) is None
+    assert llm_trace._coerce_optional_str_list(["x", "", " y "]) == ["x", "y"]
+
+
+def test_llm_trace_langfuse_mirror_failure_swallowed(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(llm_trace, "_now_iso", lambda **_: "2026-01-01T00:00:00Z")
+
+    import hyperloom.orchestrator.trace.langfuse_emitter as le
+
+    def _boom(_dir):
+        raise RuntimeError("langfuse down")
+
+    monkeypatch.setattr(le, "get_emitter", _boom)
+
+    record = llm_trace.LLMCallRecord(session_id="s3", component="forge")
+    # Must not raise even though the Langfuse mirror blows up.
+    llm_trace.append_llm_call(session_dir=tmp_path, record=record)
