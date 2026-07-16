@@ -217,6 +217,108 @@ def _wait_gpu_free(threshold_mb: float, timeout_s: float) -> list[float]:
         time.sleep(2.0)
 
 
+def _gpu_total_used_mb() -> float | None:
+    """Return total used VRAM (MiB) summed across all GPUs, or None.
+
+    Returns:
+        float | None: Sum of per-GPU used VRAM in MiB, or None when rocm-smi is
+        unavailable / unparseable.
+    """
+    used = _gpu_vram_used_mb()
+    if used is None:
+        return None
+    return sum(used)
+
+
+def _gpu_used_mb_for_pgids(pgids: set[int]) -> float | None:
+    """Return VRAM (MiB) held by processes in ``pgids`` per rocm-smi --showpids.
+
+    Attributes VRAM to THIS workload by matching each listed pid's process group
+    (a killed launcher is a pg leader via setsid, so its GPU child shares the
+    pgid). This is what scopes the post-kill reclaim wait to our own memory
+    instead of a co-tenant's unrelated allocation on another GPU. Must be sampled
+    BEFORE the kill (a dead pid leaves --showpids immediately while its VRAM
+    reclaims asynchronously).
+
+    Args:
+        pgids: Process-group ids owned by this workload.
+
+    Returns:
+        float | None: MiB our process groups hold (0.0 when none match), or None
+        when rocm-smi is missing / non-zero / unparseable (caller uses fallback).
+    """
+    if not pgids:
+        return 0.0
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showpids", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    total_b = 0.0
+    # --showpids --json shape: {"system": {"PID<pid>": "name, #gpus, vram_b, ..."}}.
+    for fields in data.values():
+        if not isinstance(fields, dict):
+            continue
+        for key, val in fields.items():
+            if not key.startswith("PID"):
+                continue
+            try:
+                pid = int(key[3:])
+            except ValueError:
+                continue
+            try:
+                if os.getpgid(pid) not in pgids:
+                    continue
+            except OSError:
+                continue
+            parts = [x.strip() for x in str(val).split(",")]
+            if len(parts) >= 3:
+                try:
+                    total_b += float(parts[2])
+                except (TypeError, ValueError):
+                    pass
+    return total_b / (1024.0 * 1024.0)
+
+
+def _wait_gpu_reclaimed(target_used_mb: float, slack_mb: float, timeout_s: float) -> float | None:
+    """Wait until total used VRAM falls to ``target_used_mb`` (our footprint freed).
+
+    ``target_used_mb`` is the pre-kill total minus this workload's footprint, so
+    unrelated static allocations on other GPUs are already baked in and never
+    extend the wait. Best-effort: returns None immediately when rocm-smi is
+    unavailable.
+
+    Args:
+        target_used_mb: Total used-VRAM (MiB) expected once our memory is freed.
+        slack_mb: Tolerance above target (driver rounding / idle baseline noise).
+        timeout_s: Max seconds to wait for reclamation.
+
+    Returns:
+        float | None: None on a clean reclaim (or rocm-smi unavailable);
+        otherwise the residual total used VRAM (MiB) still above target+slack.
+    """
+    deadline = time.time() + max(0.0, timeout_s)
+    while True:
+        total = _gpu_total_used_mb()
+        if total is None:
+            return None
+        if total <= target_used_mb + slack_mb:
+            return None
+        if time.time() >= deadline:
+            return round(total, 1)
+        time.sleep(2.0)
+
+
 def _kill_remote(
     pid_dir: str,
     grace_sec: int,
@@ -225,6 +327,7 @@ def _kill_remote(
     port_timeout_s: float = 60.0,
     gpu_free_threshold_mb: float = 2048.0,
     gpu_free_timeout_s: float = 120.0,
+    gpu_fallback_timeout_s: float = 45.0,
 ) -> dict:
     """Kill the rank_*/prefill_*/decode_*/router* PID-file processes under ``pid_dir`` on this pod; returns a per-PID summary.
 
@@ -242,8 +345,13 @@ def _kill_remote(
             them; worker nodes drain instantly).
         death_timeout_s: Max seconds to wait for signalled pids to disappear.
         port_timeout_s: Max seconds to wait for ``drain_ports`` to free.
-        gpu_free_threshold_mb: Per-GPU used-VRAM ceiling considered "free".
-        gpu_free_timeout_s: Max seconds to wait for VRAM reclamation.
+        gpu_free_threshold_mb: Reclaim-target slack (MiB), and the per-GPU
+            used-VRAM ceiling for the fallback path.
+        gpu_free_timeout_s: Max seconds to wait for our footprint to be reclaimed
+            (primary, workload-scoped path).
+        gpu_fallback_timeout_s: Max seconds for the coarse per-card fallback wait
+            used only when our footprint cannot be attributed (rocm-smi/showpids
+            unavailable); time-boxed so a co-tenant's GPU cannot stall teardown.
 
     Returns:
         dict: Summary with ``killed``, ``stale``, ``missing`` lists plus
@@ -269,6 +377,24 @@ def _kill_remote(
         + list(p.glob("decode_*.pid"))
         + list(p.glob("router*.pid"))
     )
+
+    # Pre-kill GPU snapshot: record OUR process groups + system-wide used VRAM
+    # so the post-kill wait targets only our reclaim. Sampled now because a dead
+    # pid drops out of rocm-smi --showpids before its VRAM is actually freed.
+    pre_pgids: set[int] = set()
+    for pf in pid_files:
+        try:
+            t = pf.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if t.isdigit() and int(t) > 0:
+            try:
+                pre_pgids.add(os.getpgid(int(t)))
+            except OSError:
+                pass
+    gpu_total_before_mb = _gpu_total_used_mb()
+    gpu_footprint_mb = _gpu_used_mb_for_pgids(pre_pgids)
+
     for pid_file in pid_files:
         try:
             text = pid_file.read_text(encoding="utf-8").strip()
@@ -373,10 +499,25 @@ def _kill_remote(
             summary["ports_busy"] = [str(port) for port in busy]
             _log(f"WARN ports still bound after {port_timeout_s:.0f}s: {busy}")
     if killed_pids:
-        gpu_busy = _wait_gpu_free(gpu_free_threshold_mb, gpu_free_timeout_s)
-        if gpu_busy:
-            summary["gpu_busy"] = [str(mb) for mb in gpu_busy]
-            _log(f"WARN GPUs still hold VRAM after {gpu_free_timeout_s:.0f}s (MiB): {gpu_busy}")
+        if gpu_total_before_mb is not None and gpu_footprint_mb:
+            # Primary: wait only for OUR footprint to be reclaimed system-wide;
+            # a co-tenant's static VRAM on other GPUs is already in the target.
+            target_mb = gpu_total_before_mb - gpu_footprint_mb
+            residual = _wait_gpu_reclaimed(target_mb, gpu_free_threshold_mb, gpu_free_timeout_s)
+            if residual is not None:
+                summary["gpu_busy"] = [str(residual)]
+                _log(
+                    f"WARN {residual:.0f} MiB used VRAM still above reclaim target "
+                    f"{target_mb:.0f}+{gpu_free_threshold_mb:.0f} MiB after {gpu_free_timeout_s:.0f}s"
+                )
+        else:
+            # Fallback (footprint unattributable): coarse per-card threshold wait,
+            # time-boxed at gpu_fallback_timeout_s so an unrelated co-tenant GPU
+            # cannot stall teardown.
+            busy = _wait_gpu_free(gpu_free_threshold_mb, gpu_fallback_timeout_s)
+            if busy:
+                summary["gpu_busy"] = [str(mb) for mb in busy]
+                _log(f"WARN GPUs still hold VRAM after {gpu_fallback_timeout_s:.0f}s (MiB): {busy}")
 
     return summary
 

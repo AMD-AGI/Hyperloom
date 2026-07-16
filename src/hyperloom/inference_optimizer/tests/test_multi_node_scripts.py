@@ -159,8 +159,10 @@ def test_kill_remote_sigterms_then_process_exits(tmp_path, monkeypatch):
     monkeypatch.setattr("os.getpgid", _getpgid)
     monkeypatch.setattr("os.killpg", _killpg)
     monkeypatch.setattr("time.sleep", lambda _s: None)
-    # Neutralize the post-kill GPU-VRAM reclaim wait so the test never shells
-    # out to rocm-smi (which would block up to gpu_free_timeout on a GPU box).
+    # Neutralize the post-kill GPU-VRAM reclaim path so the test never shells
+    # out to rocm-smi (primary footprint + fallback per-card both stubbed).
+    monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: None)
+    monkeypatch.setattr(km, "_gpu_used_mb_for_pgids", lambda _pgids: None)
     monkeypatch.setattr(km, "_gpu_vram_used_mb", lambda: None)
 
     out = km._kill_remote(str(d), grace_sec=0)
@@ -269,6 +271,133 @@ def test_pid_alive_true_for_running(monkeypatch, tmp_path):
 
     monkeypatch.setattr("builtins.open", _fake_open)
     assert km._pid_alive(4242) is True
+
+
+def test_gpu_total_used_mb_sums_cards(monkeypatch):
+    """Total used VRAM is the per-card sum; None passes through."""
+    km = _load_script_module("km_gpu_total", "kill_multinode.py")
+    monkeypatch.setattr(km, "_gpu_vram_used_mb", lambda: [284.0, 284.0, 252265.2])
+    assert km._gpu_total_used_mb() == 252833.2
+    monkeypatch.setattr(km, "_gpu_vram_used_mb", lambda: None)
+    assert km._gpu_total_used_mb() is None
+
+
+def test_gpu_used_mb_for_pgids_attributes_by_process_group(monkeypatch):
+    """VRAM is summed only for pids whose process group is ours (child included)."""
+    km = _load_script_module("km_gpu_pgids", "kill_multinode.py")
+    payload = {
+        "system": {
+            "PID100": "launcher, 0, 0, 0, unknown",  # our pg leader, no VRAM
+            "PID101": "engine, 1, 104857600, 0, unknown",  # child in our pg -> 100 MiB
+            "PID900": "other, 1, 209715200, 0, unknown",  # co-tenant, different pg
+        }
+    }
+    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload)))
+    pgmap = {100: 50, 101: 50, 900: 90}  # pids 100+101 share pgid 50 (ours)
+    monkeypatch.setattr("os.getpgid", lambda pid: pgmap[pid])
+    assert km._gpu_used_mb_for_pgids({50}) == 100.0
+    # No matching pgid -> 0.0 (attributable, just nothing of ours running yet).
+    assert km._gpu_used_mb_for_pgids({999}) == 0.0
+    # Empty input short-circuits.
+    assert km._gpu_used_mb_for_pgids(set()) == 0.0
+
+
+def test_gpu_used_mb_for_pgids_none_when_rocm_smi_unavailable(monkeypatch):
+    """rocm-smi missing/bad -> None so the caller uses the fallback path."""
+    km = _load_script_module("km_gpu_pgids_none", "kill_multinode.py")
+
+    def _boom(*a, **k):
+        raise FileNotFoundError("rocm-smi")
+
+    monkeypatch.setattr(km.subprocess, "run", _boom)
+    assert km._gpu_used_mb_for_pgids({1}) is None
+
+
+def test_wait_gpu_reclaimed_returns_none_when_below_target(monkeypatch):
+    """Total already at/below target+slack -> clean reclaim (None)."""
+    km = _load_script_module("km_reclaim_ok", "kill_multinode.py")
+    monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: 3000.0)
+    # target 2000 + slack 2048 = 4048 >= 3000 -> None.
+    assert km._wait_gpu_reclaimed(2000.0, 2048.0, 5.0) is None
+
+
+def test_wait_gpu_reclaimed_reports_residual_at_timeout(monkeypatch):
+    """Total stuck above target+slack -> residual reported at timeout."""
+    km = _load_script_module("km_reclaim_stuck", "kill_multinode.py")
+    monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: 260000.0)
+    monkeypatch.setattr(km.time, "sleep", lambda _s: None)
+    residual = km._wait_gpu_reclaimed(2000.0, 2048.0, 0.0)
+    assert residual == 260000.0
+
+
+def test_wait_gpu_reclaimed_none_when_rocm_smi_unavailable(monkeypatch):
+    """rocm-smi unavailable -> skip the wait (None)."""
+    km = _load_script_module("km_reclaim_skip", "kill_multinode.py")
+    monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: None)
+    assert km._wait_gpu_reclaimed(2000.0, 2048.0, 999.0) is None
+
+
+def _prep_killable_pid_dir(km, monkeypatch, tmp_path, pid=7777, pgid=770000):
+    """Create a pid dir with one live-looking pid and stub signals so it 'dies'."""
+    d = tmp_path / "pids"
+    d.mkdir()
+    (d / "rank_0.pid").write_text(str(pid), encoding="utf-8")
+    state = {"dead": False}
+
+    def _kill(p, sig):
+        if sig == 0:
+            if state["dead"]:
+                raise ProcessLookupError()
+            return None
+
+    def _killpg(pg, sig):
+        if sig == signal.SIGTERM:
+            state["dead"] = True
+
+    monkeypatch.setattr("os.kill", _kill)
+    monkeypatch.setattr("os.getpgid", lambda _p: pgid)
+    monkeypatch.setattr("os.killpg", _killpg)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    return d
+
+
+def test_kill_remote_primary_reclaim_when_footprint_known(monkeypatch, tmp_path):
+    """When our footprint is attributable, the workload-scoped reclaim wait runs."""
+    km = _load_script_module("km_primary", "kill_multinode.py")
+    d = _prep_killable_pid_dir(km, monkeypatch, tmp_path)
+    monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: 260000.0)
+    monkeypatch.setattr(km, "_gpu_used_mb_for_pgids", lambda _pgids: 250000.0)
+    calls = {"primary": 0, "fallback": 0}
+
+    def _reclaim(target, slack, timeout):
+        calls["primary"] += 1
+        assert timeout == 120.0  # primary uses gpu_free_timeout_s default
+        return None
+
+    monkeypatch.setattr(km, "_wait_gpu_reclaimed", _reclaim)
+    monkeypatch.setattr(km, "_wait_gpu_free", lambda *a: calls.__setitem__("fallback", calls["fallback"] + 1) or [])
+    out = km._kill_remote(str(d), grace_sec=0)
+    assert calls == {"primary": 1, "fallback": 0}
+    assert out["gpu_busy"] == []
+
+
+def test_kill_remote_fallback_45s_when_footprint_unknown(monkeypatch, tmp_path):
+    """When footprint can't be attributed, fall back to the 45s per-card wait."""
+    km = _load_script_module("km_fallback", "kill_multinode.py")
+    d = _prep_killable_pid_dir(km, monkeypatch, tmp_path)
+    monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: None)  # rocm-smi unavailable
+    monkeypatch.setattr(km, "_gpu_used_mb_for_pgids", lambda _pgids: None)
+    seen = {}
+
+    def _fallback(threshold, timeout):
+        seen["threshold"] = threshold
+        seen["timeout"] = timeout
+        return []
+
+    monkeypatch.setattr(km, "_wait_gpu_free", _fallback)
+    monkeypatch.setattr(km, "_wait_gpu_reclaimed", lambda *a: pytest.fail("primary must not run"))
+    km._kill_remote(str(d), grace_sec=0)
+    assert seen == {"threshold": 2048.0, "timeout": 45.0}
 
 
 def test_pd_decode_dist_init_port_derives_from_prefill():
