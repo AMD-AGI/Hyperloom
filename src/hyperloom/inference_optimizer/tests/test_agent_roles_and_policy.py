@@ -672,3 +672,26 @@ def test_system_prompt_files_exist_and_nonempty(name):
     text = p.read_text(encoding="utf-8")
     assert len(text) > 200, f"system prompt too short: {p}"
     assert name.capitalize() in text or name in text.lower()
+
+
+def test_core_state_fields_includes_closing_phase_and_baseline_config():
+    # SWSPLAT-33402 / SWSPLAT-33398: closing_phase (global wind-down flag) and
+    # baseline_config_path (launch config path later used as config_path) are
+    # Coordinator-only facts locked against LLM update_state.
+    assert "closing_phase" in CORE_STATE_FIELDS
+    assert "baseline_config_path" in CORE_STATE_FIELDS
+
+
+def test_gate_update_state_closing_phase_and_baseline_config_rejected(gate):
+    # A non-core-mutating role must not force wind-down or inject a launch
+    # config path via update_state.
+    for field_name, value in (("closing_phase", True), ("baseline_config_path", "/etc/evil.yaml")):
+        with pytest.raises(PolicyDenied) as exc:
+            gate.validate_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.UPDATE_STATE,
+                    payload={"changes": {field_name: value}},
+                ),
+            )
+        assert exc.value.rule == "state_field", field_name
