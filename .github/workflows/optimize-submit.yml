@@ -161,12 +161,6 @@ on:
         description: 'Override prompt prefix for this run. Leave empty to use ci/prompt_prefix.txt (recommended; same prefix for schedule + dispatch).'
         required: false
         default: ''
-      target_gpu:
-        description: 'Reference GPU for InferenceX comparison in the summary table'
-        required: false
-        default: 'mi300x'
-        type: choice
-        options: [mi300x, b200, h100, mi355x, mi325x]
       wait_for_completion:
         description: 'Wait for tasks to finish (default true). Uncheck for fire-and-forget.'
         type: boolean
@@ -506,7 +500,6 @@ jobs:
       #   env:
       #     HYPERLOOM_RESULTS_SERVICE_URL:   ${{ secrets.HYPERLOOM_RESULTS_SERVICE_URL }}
       #     HYPERLOOM_RESULTS_SERVICE_TOKEN: ${{ secrets.HYPERLOOM_RESULTS_SERVICE_TOKEN }}
-      #     INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
       #     INPUT_ISL:        ${{ github.event.inputs.isl }}
       #     INPUT_OSL:        ${{ github.event.inputs.osl }}
       #   run: |
@@ -519,7 +512,6 @@ jobs:
       #     python3 build_summary.py \
       #       --artifacts-dir "${{ github.workspace }}/task-artifacts" \
       #       --manifests-dir "${{ github.workspace }}/submit-output" \
-      #       --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
       #       --isl           "${INPUT_ISL:-1024}" \
       #       --osl           "${INPUT_OSL:-1024}" \
       #       --out-dir       "${{ github.workspace }}/single-summary"
@@ -995,14 +987,12 @@ jobs:
       - name: Build summary table
         working-directory: ci
         env:
-          INPUT_TARGET_GPU: ${{ github.event.inputs.target_gpu }}
           INPUT_ISL:        ${{ github.event.inputs.isl }}
           INPUT_OSL:        ${{ github.event.inputs.osl }}
         run: |
           python3 build_summary.py \
             --artifacts-dir "${{ github.workspace }}/task-artifacts-merged" \
             --manifests-dir "${{ github.workspace }}/manifests" \
-            --target-gpu    "${INPUT_TARGET_GPU:-mi300x}" \
             --isl           "${INPUT_ISL:-1024}" \
             --osl           "${INPUT_OSL:-1024}" \
             --out-dir       "${{ github.workspace }}/summary-out"
@@ -1147,8 +1137,6 @@ jobs:
                           if (r.get("gain_pct") or 0) > 0
                           and r.get("baseline_tok_per_gpu")
                           and r.get("optimized_tok_per_gpu"))
-          beat_ifx = sum(1 for r in rows
-                         if (r.get("vs_inferenceX_pct") or 0) > 0)
 
           run_url = (f"https://github.com/{os.environ.get('GITHUB_REPOSITORY','?')}"
                      f"/actions/runs/{os.environ.get('GITHUB_RUN_ID','?')}")
@@ -1213,8 +1201,7 @@ jobs:
                "text": f"**Hyperloom optimize-submit [{batch_tag}] done**",
                "size": "Medium", "weight": "Bolder", "wrap": True},
               {"type": "TextBlock",
-               "text": f"{succeeded}/{n} succeeded · {with_gain} with gain · "
-                       f"{beat_ifx} beat InferenceX",
+               "text": f"{succeeded}/{n} succeeded · {with_gain} with gain",
                "wrap": True, "isSubtle": True},
               {"type": "TextBlock",
                "text": (f"GHA: [{os.environ.get('GITHUB_RUN_ID','?')}]({run_url})"

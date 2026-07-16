@@ -23,9 +23,7 @@ import yaml
 from claw_client import ClawClient
 from inferenceX_parser import (
     fetch_benchmarks,
-    find_benchmark,
     find_benchmark_script,
-    format_benchmark_for_prompt,
     get_latest_commit,
     get_nfs_root,
     merge_model_config,
@@ -83,16 +81,6 @@ def render_prompt(
         The rendered prompt string.
     """
     isl, osl = merged["isl_osl_configs"][0]
-    ifx_text = format_benchmark_for_prompt(
-        merged["inferenceX_benchmarks"],
-        merged["target_gpu"],
-        isl,
-        osl,
-        merged["precision"],
-        image=merged.get("image"),
-        tp=merged.get("tp"),
-        conc=merged.get("conc"),
-    )
 
     # Do NOT inject SAFE_API_KEY / SAFE_BASE_URL into the prompt body: the agent
     # already has them in its sandbox env, and rendering them leaks the key.
@@ -129,7 +117,6 @@ def render_prompt(
         gpu_type=merged["gpu_type"],
         gpu_type_lc=str(merged["gpu_type"]).lower(),
         target_gpu=merged["target_gpu"],
-        inferenceX_data=ifx_text,
         oob_path=merged.get("oob_path", ""),
         tracelens_root=merged.get("tracelens_root", ""),
         nodes=nodes,
@@ -465,20 +452,6 @@ def run_model(
             if report_content:
                 break
 
-    ifx_ref = None
-    if merged.get("inferenceX_benchmarks"):
-        isl, osl = merged["isl_osl_configs"][0]
-        ifx_ref = find_benchmark(
-            merged["inferenceX_benchmarks"],
-            merged["target_gpu"],
-            isl,
-            osl,
-            merged["precision"],
-            image=merged.get("image"),
-            tp=merged.get("tp"),
-            conc=merged.get("conc"),
-        )
-
     result = build_model_result(
         model_name,
         merged["inferenceX_key"],
@@ -487,7 +460,6 @@ def run_model(
         status,
         timestamp,
         result_dir,
-        ifx_ref,
     )
     result["target_gpu"] = merged.get("target_gpu", "")
     if report_content and not result.get("report_content"):
@@ -906,8 +878,6 @@ def _send_webhook(webhook: str, summary: dict):
 
     gain = r.get("gain_pct")
     gain_color = "Good" if gain and gain > 0 else "Attention" if gain else None
-    vs_ifx = r.get("vs_inferenceX_pct")
-    vs_color = "Good" if vs_ifx and vs_ifx > 0 else "Attention" if vs_ifx else None
 
     rows = [
         {
@@ -926,16 +896,6 @@ def _send_webhook(webhook: str, summary: dict):
             gain_color,
         ),
     ]
-    if r.get("inferenceX_tok_per_gpu"):
-        rows.append(_row("InferenceX (output tok/s/GPU)", _val("inferenceX_tok_per_gpu")))
-        rows.append(
-            _row(
-                "**vs InferenceX**",
-                f"**{'--' if vs_ifx is not None and abs(vs_ifx) < 0.05 else f'{vs_ifx:+.1f}%' if vs_ifx is not None else 'N/A'}**",
-                vs_color,
-            )
-        )
-
     status_emoji = {"completed": "\u2705", "failed": "\u274c", "timeout": "\u23f1"}.get(status, "\u2753")
 
     card = {

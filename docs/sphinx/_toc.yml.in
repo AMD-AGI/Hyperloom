@@ -18,6 +18,12 @@ subtrees:
     title: Quickstart — Docker and Bare metal
   - file: install/slurm.md
     title: Quickstart — Slurm
+  - file: install/multi-node/hyperloom-remote-demo.md
+    title: Quickstart — Remote multi-node
+    subtrees:
+    - entries:
+      - file: install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md
+        title: Qwen3-30B-A3B multi-node workload
 
 - caption: Overview
   entries:
