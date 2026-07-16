@@ -129,3 +129,32 @@ def test_build_kernel_metadata_metadata_is_json_serializable_when_promoted() -> 
     parsed = json.loads(encoded)
     assert parsed["launcher_source_file"] == "/sgl-workspace/aiter/aiter/ops/moe_op.py"
     assert parsed["source_promoted_from_launcher"] is True
+
+
+# Multi-node dispatch gate is env-only ($INFERENCE_OPTIMIZER_NODES); a
+# co-tenant-writable state file must never influence the rendered prompt.
+
+
+def test_build_prompt_multinode_gate_on_when_env_nodes_ge_2(monkeypatch) -> None:
+    """$INFERENCE_OPTIMIZER_NODES>=2 appends the MULTI-NODE SANDBOX dispatch guidance."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    prompt = ko.build_prompt(_candidate(), _build_args())
+    assert "MULTI-NODE SANDBOX" in prompt
+    assert "kernel-bench" in prompt
+
+
+def test_build_prompt_multinode_gate_off_when_single_node(monkeypatch) -> None:
+    """Unset / single-node env must NOT append multi-node dispatch guidance."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    prompt = ko.build_prompt(_candidate(), _build_args())
+    assert "MULTI-NODE SANDBOX" not in prompt
+
+
+def test_build_prompt_multinode_gate_ignores_planted_state_file(monkeypatch, tmp_path) -> None:
+    """A planted MULTI_NODE_STATE_FILE (nodes>=2) must NOT force multi-node guidance."""
+    planted = tmp_path / "multi_node_state.json"
+    planted.write_text('{"nodes": 8}', encoding="utf-8")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(planted))
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    prompt = ko.build_prompt(_candidate(), _build_args())
+    assert "MULTI-NODE SANDBOX" not in prompt
