@@ -18,7 +18,9 @@
 set -euo pipefail
 
 BOOTSTRAP_MARKER="${BOOTSTRAP_MARKER:-/opt/hyperloom/.bootstrap_done}"
-HYPERLOOM_VENV="${HYPERLOOM_VENV:-/opt/venv}"
+# Empty unless the operator pins a venv root explicitly; resolved below so the
+# script works on both venv images (/opt/venv) and system-python images.
+HYPERLOOM_VENV="${HYPERLOOM_VENV:-}"
 LOG_DIR="${LOG_DIR:-/var/log/hyperloom}"
 ENV_FILE="${ENV_FILE:-/etc/profile.d/hyperloom-env.sh}"
 
@@ -37,14 +39,29 @@ if [ "$FORCE" -eq 0 ] && [ -f "$BOOTSTRAP_MARKER" ]; then
     exit 0
 fi
 
-# --- 1. Verify the framework venv. The RayJob image (sglang/vllm) ships
-#        /opt/venv with the framework already installed; we only fail loud
-#        if it's missing.
-if [ ! -x "$HYPERLOOM_VENV/bin/python3" ]; then
-    echo "bootstrap.sh: ERROR — $HYPERLOOM_VENV/bin/python3 not found." >&2
-    echo "             expected the framework image to ship a venv at /opt/venv." >&2
+# --- 1. Resolve the framework Python. Older BYOI images ship a venv at
+#        /opt/venv; newer images expose the framework on the system python3.
+#        Honor an explicit HYPERLOOM_VENV override, else prefer /opt/venv,
+#        else fall back to system python3 (venv root = <dir>/.. so the
+#        "$HYPERLOOM_VENV/bin/python3" contract still holds, e.g. /usr).
+if [ -z "$HYPERLOOM_VENV" ]; then
+    if [ -x /opt/venv/bin/python3 ]; then
+        HYPERLOOM_VENV=/opt/venv
+    else
+        _sys_py="$(command -v python3 || true)"
+        if [ -n "$_sys_py" ]; then
+            HYPERLOOM_VENV="$(dirname "$(dirname "$_sys_py")")"
+        fi
+    fi
+fi
+
+if [ -z "$HYPERLOOM_VENV" ] || [ ! -x "$HYPERLOOM_VENV/bin/python3" ]; then
+    echo "bootstrap.sh: ERROR — no framework python3 found." >&2
+    echo "             looked for /opt/venv/bin/python3 and system python3;" >&2
+    echo "             set HYPERLOOM_VENV to the venv root (<root>/bin/python3)." >&2
     exit 1
 fi
+echo "bootstrap.sh: framework python -> $HYPERLOOM_VENV/bin/python3"
 
 # --- 2. Render /etc/profile.d/hyperloom-env.sh so every later REST job
 #        can ``source`` it and inherit the same PATH + credentials. We
