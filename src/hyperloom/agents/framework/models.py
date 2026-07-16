@@ -363,7 +363,7 @@ def _parse_keywords(raw: Any) -> tuple[str, ...]:
 
 
 def _parse_search_modes(raw: Any) -> tuple[str, ...]:
-    """Coerce a list of mode names; default to PR Monitor + GitHub.
+    """Coerce a list of mode names; default to primus_cortex + GitHub.
 
     Args:
         raw (Any): ``None``/empty (defaults applied), a single mode string, or a
