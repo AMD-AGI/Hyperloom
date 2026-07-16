@@ -342,6 +342,14 @@ which length:
 - `8h` — medium-length run.
 - `24h` — long-horizon cyclic run.
 
+If the user wants to run a custom model, keep using one of these demo presets.
+Ask the user for a local model path, confirm that the directory exists and
+contains `config.json`, then export `MODEL_PATH=<that path>` before loading the
+selected demo skill. Explain that the model path is replaced, but the selected
+demo still owns the workload preset: tensor parallelism, concurrency,
+input/output lengths, precision, target gain, and run budget are not retuned
+unless the user explicitly asks to adjust them.
+
 If the user declines, stop here. If `HYPERLOOM_RUN_MODE` is `baremetal` and
 `FRAMEWORK` is unset, do not offer a demo; tell the user to install a serving
 framework first (see Step 5).

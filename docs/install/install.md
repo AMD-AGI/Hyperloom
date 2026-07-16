@@ -196,6 +196,28 @@ on the length you would like the demo to run for:
 
 The demo reuses the values already in `.env`, so nothing needs to be re-entered.
 
+## Use a custom model
+
+For a custom model, still start from one of the example demo skills above. Pick
+the demo whose runtime shape is closest to the model and experiment you want to
+run, then provide your model path when the skill asks for it. You can also set it
+before launching the demo:
+
+```bash
+export MODEL_PATH=/path/to/your/model
+```
+
+`MODEL_PATH` should point to a model directory that the selected serving
+framework can load; a local Hugging Face-style directory should contain
+`config.json`. When `MODEL_PATH` is set and valid, the demo skill uses that
+directory instead of downloading its default model.
+
+The demo skill is still a preset workload. Replacing the model path does not
+automatically retune tensor parallelism, concurrency, input/output lengths,
+precision, or the run budget. If the custom model is much larger, smaller, or
+uses a different architecture than the preset model, choose the closest preset or
+use the source/manual path to adjust the workload parameters explicitly.
+
 ## Troubleshooting
 
 - The current workspace contains many package folders after `pip install
