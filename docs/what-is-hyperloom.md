@@ -27,7 +27,7 @@ AMD GPUs.
 
 The following diagram and steps describe how Hyperloom processes a workload from submission to validated delivery.
 
-```{image} ../images/Hyperloom_architecture.png
+```{image} /images/Hyperloom_architecture.png
 :alt: Hyperloom architecture diagram showing the multi-stage optimization pipeline from workload profiling through kernel optimization to validated delivery
 ```
 
