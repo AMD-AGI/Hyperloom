@@ -2305,11 +2305,10 @@ class IntegratePatchExecutor:
             }
 
         accuracy_pass: bool | None = None
-        # lm-eval writes to ``$EVAL_RESULT_DIR`` (== ``RESULT_DIR`` = the grid
-        # slot, i.e. the parent of ``VariantResult.workspace``), not inside the
-        # ``benchmark_*`` workspace. Grade from that slot so the eval output is
-        # found; honor an explicit ``result_dir`` override the same way the grid
-        # subprocess does.
+        # lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside
+        # the ``benchmark_*`` workspace. Grade from the slot so the recursive
+        # search finds eval output while honoring an explicit ``result_dir``
+        # override the same way the grid subprocess does.
         eval_search_root = override_result_dir or (
             str(Path(bench["workspace"]).parent) if bench.get("workspace") else ""
         )
