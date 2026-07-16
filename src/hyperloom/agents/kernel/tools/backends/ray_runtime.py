@@ -11,6 +11,7 @@ Conventions:
 
 from __future__ import annotations
 
+import json
 import os
 import resource
 import subprocess
@@ -21,6 +22,28 @@ from typing import Optional, Tuple
 # Minimum soft RLIMIT_NOFILE the Ray raylet needs to stay up. Override via
 # RAY_MIN_NOFILE.
 DEFAULT_MIN_NOFILE = 65536
+
+# Custom Ray resource declared on the single-node head so serving-family work
+# (serving / benchmark / profile / gpu_research) can hold a whole-machine
+# ``serving_slot`` as the authoritative physical mutex (ray_modify.plan.md §12
+# T6, decision 1). Capacity 1 => at most one serving-family task holds the node
+# at a time; GPU specialists request ``num_gpus`` only (serving-disjoint) and do
+# not take the slot. Declared here (rather than only in the orchestrator) so
+# whichever caller starts the local head first — kernel-agent or orchestrator —
+# declares it; a tiny unused resource is harmless to GEAK. Only single-node
+# local heads are affected: multi-node connects to an external cluster and this
+# ``ray start`` path is skipped.
+RAY_SERVING_SLOT = "serving_slot"
+_HEAD_CUSTOM_RESOURCES = {RAY_SERVING_SLOT: 1}
+
+
+def _resources_start_args() -> list[str]:
+    """Return the ``ray start`` argv for the head node's custom resources.
+
+    Returns:
+        ``["--resources", "<json>"]`` declaring :data:`_HEAD_CUSTOM_RESOURCES`.
+    """
+    return ["--resources", json.dumps(_HEAD_CUSTOM_RESOURCES)]
 
 
 def _fd_limit_warn(msg: str) -> None:
@@ -187,6 +210,8 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         cmd.append(f"--num-gpus={num_gpus}")
+    # Declare the ``serving_slot`` custom resource (§12 T6 authoritative mutex).
+    cmd.extend(_resources_start_args())
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:
@@ -258,6 +283,8 @@ def force_restart_local_cluster(
     start_cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         start_cmd.append(f"--num-gpus={num_gpus}")
+    # Re-declare the ``serving_slot`` custom resource after a fresh head (§12 T6).
+    start_cmd.extend(_resources_start_args())
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:

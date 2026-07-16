@@ -290,19 +290,24 @@ def make_serving_actor(num_gpus: float, *, serving_slot: bool = True):
     return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()
 
 
-def make_gpu_specialist_actor(num_gpus: float):
-    """Create a GpuSpecialistActor handle holding ``num_gpus`` (serving-disjoint).
+def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
+    """Create a GpuSpecialistActor handle holding ``num_gpus``.
 
     Args:
-        num_gpus: GPUs the specialist actor leases (does not take
-            ``serving_slot`` — it is disjoint from serving, see §4.5).
+        num_gpus: GPUs the specialist actor leases.
+        serving_slot: Whether to also hold the whole-machine ``serving_slot``
+            resource. ``False`` (default) for the serving-disjoint
+            ``gpu_specialist_pool`` — it runs on cards disjoint from serving.
+            ``True`` for the whole-machine / bench-capable ``gpu_research_lane``
+            specialists that are mutually exclusive with serving (§4.5 / §12 T6).
 
     Returns:
-        A Ray actor handle for the GpuSpecialistActor (a ServingActor without
-        the serving slot).
+        A Ray actor handle for the GpuSpecialistActor (a ServingActor,
+        optionally without the serving slot).
     """
     actor_cls: Any = _serving_actor_body()
-    return actor_cls.options(num_gpus=num_gpus).remote()
+    resources = {"serving_slot": 1} if serving_slot else None
+    return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()
 
 
 class ServingLease:
@@ -316,17 +321,20 @@ class ServingLease:
     same lease, satisfying the hard invariant that a GPU process must live
     inside a Ray lease that covers its whole lifetime.
 
-    Single-node only (the caller gates on ``not is_multi_node()``). For P1 the
-    lease holds ``num_gpus`` alone; the ``serving_slot`` custom resource is
-    introduced in P3 (once ``ray start --resources`` declares it), so requesting
-    it now would leave the actor PENDING forever.
+    Single-node only (the caller gates on ``not is_multi_node()``). Since P3 the
+    lease also holds the whole-machine ``serving_slot`` custom resource (declared
+    on the head by ``ensure_ray_cluster``, §12 T6): it is the authoritative
+    physical mutex making serving ⊥ serving ⊥ profile ⊥ benchmark ⊥ gpu_research
+    — a second serving-family lease PENDs on ``serving_slot`` until this one is
+    released. GPU specialists request ``num_gpus`` only (serving-disjoint) and do
+    not take the slot.
     """
 
     def __init__(
         self,
         *,
         num_gpus: float,
-        serving_slot: bool = False,
+        serving_slot: bool = True,
         ensure_log_path: Any = None,
     ) -> None:
         """Configure the lease (the actor is created lazily on first use).
@@ -334,7 +342,8 @@ class ServingLease:
         Args:
             num_gpus: GPUs the lease holds (typically the serving ``TP``).
             serving_slot: Whether to also hold the ``serving_slot`` custom
-                resource. Defaults to ``False`` for P1 (see class docstring).
+                resource. Defaults to ``True`` (serving-family whole-machine
+                mutex, §12 T6); ``ensure_ray_cluster`` declares the resource.
             ensure_log_path: Optional path forwarded to the cluster ensure.
         """
         self._num_gpus = float(num_gpus)
@@ -447,7 +456,7 @@ class ServingLease:
 def maybe_serving_lease(
     *,
     num_gpus: float,
-    serving_slot: bool = False,
+    serving_slot: bool = True,
     ensure_log_path: Any = None,
 ) -> ServingLease | None:
     """Return a :class:`ServingLease` when single-node Ray execution is active.
@@ -463,8 +472,10 @@ def maybe_serving_lease(
 
     Args:
         num_gpus: GPUs the lease holds (typically the serving ``TP``).
-        serving_slot: Whether to also hold the ``serving_slot`` resource
-            (P3; defaults ``False`` for P1).
+        serving_slot: Whether to also hold the whole-machine ``serving_slot``
+            resource. Defaults ``True`` — every serving-family caller
+            (baseline / conc_sweep / sweep / explore) is mutually exclusive on
+            the node (§12 T6).
         ensure_log_path: Optional path forwarded to the cluster ensure.
 
     Returns:
@@ -485,29 +496,45 @@ def maybe_serving_lease(
 class GpuSpecialistLease:
     """A held Ray GPU lease that runs a ``needs_gpu`` specialist subprocess (§12 T4).
 
-    Wraps a :func:`make_gpu_specialist_actor` actor holding ``num_gpus``
-    (serving-disjoint — it takes no ``serving_slot``). The specialist's *entire*
-    subprocess (the agent runtime and every Bash / GPU command it spawns) runs
-    inside the actor, so any GPU command lands within Ray's assigned visible
-    devices — the specialist can no longer reach a card outside its lease
-    (ray_modify.plan.md §4.2 / §8). Unlike a benchmark round the process is
-    long-lived and reaper-polled, so this exposes ``start`` / ``is_alive`` /
-    ``exit_code`` / ``stop`` (mirroring a ``Popen`` for the reap loop) rather
-    than a single blocking call; ``close`` releases the lease.
+    Wraps a :func:`make_gpu_specialist_actor` actor holding ``num_gpus``. The
+    specialist's *entire* subprocess (the agent runtime and every Bash / GPU
+    command it spawns) runs inside the actor, so any GPU command lands within
+    Ray's assigned visible devices — the specialist can no longer reach a card
+    outside its lease (ray_modify.plan.md §4.2 / §8). Unlike a benchmark round
+    the process is long-lived and reaper-polled, so this exposes ``start`` /
+    ``is_alive`` / ``exit_code`` / ``stop`` (mirroring a ``Popen`` for the reap
+    loop) rather than a single blocking call; ``close`` releases the lease.
+
+    Serving-disjoint (``gpu_specialist_pool``) specialists request ``num_gpus``
+    only and run on cards disjoint from serving; whole-machine / bench-capable
+    (``gpu_research_lane``) specialists set ``serving_slot=True`` so they are
+    mutually exclusive with serving on the node's ``serving_slot`` (§12 T6).
 
     Single-node only (callers gate via :func:`maybe_gpu_specialist_lease`). The
     physical card assignment is Ray's (``num_gpus``); the Coordinator's SQLite
     pool is now only capacity/TTL accounting (decision 3 / §12 T5).
     """
 
-    def __init__(self, *, num_gpus: float, ensure_log_path: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        num_gpus: float,
+        serving_slot: bool = False,
+        ensure_log_path: Any = None,
+    ) -> None:
         """Configure the lease (the actor is created on :meth:`start`).
 
         Args:
             num_gpus: GPUs the specialist actor leases.
+            serving_slot: Whether to also hold the whole-machine ``serving_slot``
+                resource — ``True`` for whole-machine / bench-capable
+                ``gpu_research_lane`` specialists (mutually exclusive with
+                serving, §12 T6); ``False`` (default) for the serving-disjoint
+                pool.
             ensure_log_path: Optional path forwarded to the cluster ensure.
         """
         self._num_gpus = float(num_gpus)
+        self._serving_slot = bool(serving_slot)
         self._ensure_log_path = ensure_log_path
         self._actor: Any = None
         self._pid: int | None = None
@@ -540,7 +567,9 @@ class GpuSpecialistLease:
         from ._ray_backend import get_ray_backend  # noqa: PLC0415
 
         get_ray_backend().ensure(log_path=self._ensure_log_path)
-        self._actor = make_gpu_specialist_actor(self._num_gpus)
+        self._actor = make_gpu_specialist_actor(
+            self._num_gpus, serving_slot=self._serving_slot
+        )
         self._pid = int(
             ray.get(self._actor.start.remote(cmd, env=env, cwd=cwd, log_path=log_path))
         )
@@ -616,6 +645,7 @@ class GpuSpecialistLease:
 def maybe_gpu_specialist_lease(
     *,
     num_gpus: float,
+    serving_slot: bool = False,
     ensure_log_path: Any = None,
 ) -> GpuSpecialistLease | None:
     """Return a :class:`GpuSpecialistLease` when single-node Ray execution is active.
@@ -628,6 +658,10 @@ def maybe_gpu_specialist_lease(
 
     Args:
         num_gpus: GPUs the specialist would lease.
+        serving_slot: Whether the specialist also holds the whole-machine
+            ``serving_slot`` (whole-machine / bench-capable ``gpu_research_lane``
+            specialists — mutually exclusive with serving, §12 T6). ``False``
+            (default) for the serving-disjoint pool.
         ensure_log_path: Optional path forwarded to the cluster ensure.
 
     Returns:
@@ -640,7 +674,11 @@ def maybe_gpu_specialist_lease(
 
     if not _should_use_ray_backend() or is_multi_node():
         return None
-    return GpuSpecialistLease(num_gpus=num_gpus, ensure_log_path=ensure_log_path)
+    return GpuSpecialistLease(
+        num_gpus=num_gpus,
+        serving_slot=serving_slot,
+        ensure_log_path=ensure_log_path,
+    )
 
 
 __all__ = [

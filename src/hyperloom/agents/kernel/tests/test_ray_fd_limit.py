@@ -6,6 +6,7 @@ Ensure the child raylet does not inherit the low container default."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -285,3 +286,41 @@ def test_force_restart_local_cluster_binds_dashboard_to_loopback(monkeypatch):
     assert starts, "ray start was not invoked"
     assert "--dashboard-host=127.0.0.1" in starts[0]
     assert "--dashboard-host=0.0.0.0" not in starts[0]
+
+
+def _assert_declares_serving_slot(start_cmd: tuple) -> None:
+    """The head must declare the ``serving_slot`` custom resource (§12 T6)."""
+    assert "--resources" in start_cmd, start_cmd
+    idx = start_cmd.index("--resources")
+    payload = json.loads(start_cmd[idx + 1])
+    assert payload.get("serving_slot") == 1, payload
+
+
+def test_ensure_ray_cluster_declares_serving_slot(monkeypatch):
+    """The single-node head declares serving_slot=1 (authoritative serving mutex)."""
+    events: list = []
+    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_fake_ray_start(monkeypatch, events)
+
+    ray_runtime.ensure_ray_cluster(num_gpus=4)
+
+    starts = [cmd for kind, cmd in events if kind == "ray_start"]
+    assert starts, "ray start was not invoked"
+    _assert_declares_serving_slot(starts[0])
+    # num_gpus is still passed alongside the custom resource.
+    assert "--num-gpus=4" in starts[0]
+
+
+def test_force_restart_local_cluster_declares_serving_slot(monkeypatch):
+    """A version-mismatch restart re-declares serving_slot on the fresh head."""
+    events: list = []
+    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_fake_ray_start(monkeypatch, events)
+
+    ray_runtime.force_restart_local_cluster()
+
+    starts = [cmd for kind, cmd in events if kind == "ray_start"]
+    assert starts, "ray start was not invoked"
+    _assert_declares_serving_slot(starts[0])

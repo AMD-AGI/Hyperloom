@@ -518,7 +518,7 @@ def test_gpu_specialist_lease_lifecycle(monkeypatch: pytest.MonkeyPatch):
     fake = _FakeRayP2()
     monkeypatch.setitem(sys.modules, "ray", fake)
     actor = _FakeGpuActor()
-    monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda n: actor)
+    monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda n, *, serving_slot=False: actor)
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
 
     lease = rs.GpuSpecialistLease(num_gpus=2)
@@ -570,6 +570,63 @@ def test_maybe_gpu_specialist_lease_multi_node_none(
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
     assert rs.maybe_gpu_specialist_lease(num_gpus=2) is None
+
+
+# ── P3: serving_slot custom resource (T6) ────────────────────────────────────
+def test_serving_slot_declared_in_ray_start_args():
+    """ensure_ray_cluster's head declares the serving_slot custom resource."""
+    from hyperloom.agents.kernel.tools.backends import ray_runtime as rr
+
+    args = rr._resources_start_args()
+    assert args[0] == "--resources"
+    import json as _json
+
+    assert _json.loads(args[1]) == {"serving_slot": 1}
+
+
+def test_maybe_serving_lease_holds_serving_slot_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Serving-family leases hold the whole-machine serving_slot (§12 T6)."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    lease = rs.maybe_serving_lease(num_gpus=2)
+    assert isinstance(lease, ServingLease)
+    assert lease._serving_slot is True
+
+
+def test_maybe_gpu_specialist_lease_serving_slot_passthrough(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Serving-disjoint pool takes no slot; whole-machine specialists take it."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    disjoint = rs.maybe_gpu_specialist_lease(num_gpus=2)
+    assert disjoint is not None and disjoint._serving_slot is False
+    whole = rs.maybe_gpu_specialist_lease(num_gpus=8, serving_slot=True)
+    assert whole is not None and whole._serving_slot is True
+
+
+def test_gpu_specialist_lease_start_passes_serving_slot(monkeypatch: pytest.MonkeyPatch):
+    """The lease forwards serving_slot to the actor factory on start."""
+    fake = _FakeRayP2()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    actor = _FakeGpuActor()
+    seen: dict = {}
+
+    def _fake_make(n, *, serving_slot=False):
+        seen["num_gpus"] = n
+        seen["serving_slot"] = serving_slot
+        return actor
+
+    monkeypatch.setattr(rs, "make_gpu_specialist_actor", _fake_make)
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+
+    lease = rs.GpuSpecialistLease(num_gpus=8, serving_slot=True)
+    assert lease.start(["claude"]) == 4242
+    assert seen == {"num_gpus": 8.0, "serving_slot": True}
 
 
 def test_run_magpie_local_path_untouched(
