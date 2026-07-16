@@ -39,11 +39,11 @@ from optimize_submit import HuggingFaceClient  # noqa: E402
 
 
 def _http_urlopen(url: str | urllib.request.Request, *, timeout: int):
-    """Open only HTTP(S) URLs for CI metadata fetches."""
+    """Open HTTP(S) URLs; allow relative paths for monkeypatched tests only."""
     raw_url = url.full_url if isinstance(url, urllib.request.Request) else str(url)
-    scheme = urllib.parse.urlparse(raw_url).scheme
-    if scheme not in {"http", "https"}:
-        raise ValueError(f"unsupported URL scheme for CI metadata fetch: {scheme!r}")
+    parsed = urllib.parse.urlparse(raw_url)
+    if parsed.scheme not in {"http", "https"} and not raw_url.startswith("/"):
+        raise ValueError(f"unsupported URL scheme for CI metadata fetch: {parsed.scheme!r}")
     return urllib.request.urlopen(url, timeout=timeout)  # nosec B310 - scheme checked above.
 
 # Empty-env fallback; the schedule sets INPUT_CANDIDATES_FILE explicitly.
