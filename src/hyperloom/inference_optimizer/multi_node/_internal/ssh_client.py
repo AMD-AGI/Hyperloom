@@ -28,6 +28,7 @@ import contextlib
 import os
 import shlex
 import subprocess
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -222,7 +223,7 @@ def ssh_run_script(
     port: int = DEFAULT_SSH_PORT,
     user: str = "root",
     timeout: int = 600,
-    remote_path: str = "/tmp/mn_infera_launch",
+    remote_path: str = str(Path(tempfile.gettempdir()) / "mn_infera_launch"),
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Ship ``script_text`` to the pod (base64 over the command line) and run it.

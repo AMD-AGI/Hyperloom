@@ -220,7 +220,7 @@ The installer is idempotent and re-installs only what's missing.
 `incomplete (not a git checkout)`, or
 `TraceLens_generate_perf_report_pytorch_inference: command not found`.
 
-**Cause**: TraceLens-internal isn't installed, or the legacy
+**Cause**: `TraceLens-internal` isn't installed, or the legacy
 training-mode CLI is being looked for (no longer accepted as of v0.4).
 
 **Fix**:

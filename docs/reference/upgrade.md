@@ -11,7 +11,7 @@ Per-version migration steps. This page is a companion to
 changed*, this page answers *what you have to do about it*.
 
 If you are starting fresh, skip this page and follow the
-[installation instructions](../install/install).
+[installation instructions](../install/install.md).
 
 ---
 
@@ -43,8 +43,8 @@ your override.
 
 ```diff
 # .env, run launchers, k8s ConfigMaps
-- INFERENCE_OPTIMIZER_SESSION_DIR=/path/hyperloom/sessions/me
-+ USER_DATA_PATH=/path/hyperloom/sessions/me
+- INFERENCE_OPTIMIZER_SESSION_DIR=/shared/hyperloom-sessions/me
++ USER_DATA_PATH=/shared/hyperloom-sessions/me
 ```
 
 Same for `WORKSPACE_PATH` — it is legacy-only and still used in narrow

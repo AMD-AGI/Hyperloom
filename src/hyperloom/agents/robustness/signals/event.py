@@ -226,7 +226,7 @@ def _idempotency_replay_symptoms(
             )
         except (TypeError, ValueError):
             continue
-        payload_hash = hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+        payload_hash = hashlib.sha1(canonical.encode("utf-8"), usedforsecurity=False).hexdigest()
         bucket = (action_name, payload_hash)
         grouped.setdefault(bucket, set()).add(key)
         samples.setdefault(bucket, {"action_name": action_name, "first_key": key})

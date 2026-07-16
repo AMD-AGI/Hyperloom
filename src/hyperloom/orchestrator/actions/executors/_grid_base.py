@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -54,7 +55,7 @@ def variant_fingerprint(
         args_mode=args_mode,
     )
 
-_MAGPIE_CWD_DEFAULT = "/tmp"
+_MAGPIE_CWD_DEFAULT = tempfile.gettempdir()
 
 _VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
 

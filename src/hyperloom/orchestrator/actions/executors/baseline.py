@@ -491,8 +491,8 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
             "inferencex_local",
         )
     )
-    src_hash = hashlib.sha1(real_src.encode("utf-8")).hexdigest()[:16]
-    key_hash = hashlib.sha1(str(mirror_key or "").encode("utf-8")).hexdigest()[:16]
+    src_hash = hashlib.sha1(real_src.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+    key_hash = hashlib.sha1(str(mirror_key or "").encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     dest_name = src_hash if not mirror_key else f"{src_hash}-{key_hash}"
     dest = local_root / dest_name
     try:
@@ -769,7 +769,7 @@ class BaselineExecutor:
         session_dir: Path | str | None = None,
         shared_state: Any | None = None,
         default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
-        cwd: Path | str = "/tmp",
+        cwd: Path | str | None = None,
     ):
         """Initialize the baseline executor with launch defaults.
 
@@ -784,7 +784,7 @@ class BaselineExecutor:
                 eager-fallback one-shot is consumed in memory before saving so
                 Coordinator cannot later re-persist a stale True value.
             default_timeout_sec (int): Default (warm-start) subprocess timeout.
-            cwd (Path | str): Working directory for the Magpie subprocess.
+            cwd (Path | str | None): Working directory for the Magpie subprocess.
         """
         from ._grid_runner import _resolve_session_dir
 
@@ -798,7 +798,7 @@ class BaselineExecutor:
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.shared_state = shared_state
         self.default_timeout_sec = default_timeout_sec
-        self.cwd = Path(cwd)
+        self.cwd = Path(cwd if cwd is not None else tempfile.gettempdir())
 
     def _resolve_default_config(self) -> Path:
         """Hook for subclasses (ProfileExecutor) to swap the resolver.
@@ -1603,7 +1603,7 @@ class BaselineExecutor:
             r = urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/health",
                 timeout=timeout,
-            )
+            )  # nosec B310 - fixed loopback health check.
             return r.status == 200
         except Exception:  # noqa: BLE001
             return False

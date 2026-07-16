@@ -5,7 +5,7 @@ benchmarks a long-lived remote server, restarts it with new settings each round,
 and improves throughput.
 
 **How you run it:** hand the agent (or Primus-Claw) the **workload skill** at
-`examples/hyperloom-remote-mn-qwen3-30b/SKILL.md` — it carries the exact
+`docs/install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md` — it carries the exact
 `optimize` flags and environment for either backend, and the agent launches and
 monitors the run for you. This page explains what that skill contains and what
 each variable means.
@@ -65,7 +65,7 @@ from the environment (platform-injected under SaFE).
 Give the agent the pinned skill:
 
 ```text
-Use the skill at examples/hyperloom-remote-mn-qwen3-30b/SKILL.md
+Use the skill at docs/install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md
 ```
 
 It contains two ready-to-run blocks — **Workload A (infera + PD)** and
@@ -100,7 +100,8 @@ PID, and monitors `state.json` until a terminal `stop_reason`.
 |-----|---------|
 | `RANDOM_RANGE_RATIO` | Benchmark sequence-length jitter (env has a fallback; `ISL`/`OSL`/`CONC`/`GPU_TYPE`/`PRECISION` are flags — see FLAGS above) |
 | `INFERENCEX_PATH` / `MAGPIE_PATH` / `TRACELENS_ROOT` | Tool checkouts under `${NFS_SHARED_ROOT}` |
-| `TRACELENS_INTERNAL_ROOT` | Optional internal TraceLens extension |
+| `TRACELENS_INTERNAL_ROOT` | Optional `TraceLens-internal` checkout |
+| `SGLANG_USE_AITER` / `SGLANG_AITER_MLA_PERSIST` | Enable + persist the aiter kernel path |
 | `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap / wait timeouts (infera PD only) |
 
 Platform-injected (do **not** set): `SAFE_API_URL`, `SAFE_API_KEY`,
@@ -152,7 +153,7 @@ of the SSH/IPs vars.
 ## Further reading
 
 - **Workload skill (copy-paste flags/env):**
-  `examples/hyperloom-remote-mn-qwen3-30b/SKILL.md`
+  `docs/install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md`
 - **Primus-SaFE:** [github.com/AMD-AGI/Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)
 - **Multi-node CLI, SSH & external-mode semantics:**
   `src/hyperloom/inference_optimizer/multi_node/SKILL.md`

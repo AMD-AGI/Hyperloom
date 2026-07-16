@@ -807,7 +807,7 @@ PY
 # --- 3. InferenceX checkout: fresh clone from upstream ---
 #
 # Previously this function scanned a list of shared-filesystem candidates
-# (`/path/hyperloom/InferenceX`, `/path/fully-local/.../InferenceX`,
+# (`/shared/hyperloom/InferenceX`, `/shared/fully-local/.../InferenceX`,
 # etc.) and pointed every install at whichever it found first. That
 # multi-install / shared-checkout layout is the upstream source of the
 # concurrent-write races in bugs.md §C #1 — every fresh Magpie
