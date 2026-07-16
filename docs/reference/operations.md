@@ -12,7 +12,7 @@ disaster-recovery runbook.
 
 ```{note}
 This topic is intended for Site reliability and platform engineers self-hosting
-Hyperloom on their own AMD GPU infrastructure (Kubernetes, bare metal, or a managed platform as a service (PaaS)). For the hosted [Primus-Claw experience](https://crusoe.example-internal-host.invalid/hyperloom/) AMD owns operations; this document does not apply.
+Hyperloom on their own AMD GPU infrastructure (Kubernetes, bare metal, or a managed platform as a service (PaaS)). For the hosted Primus-Claw experience AMD owns operations; this document does not apply.
 ```
 
 For application-level configuration see
@@ -140,7 +140,7 @@ Back up the following artifacts from each session.
 | Artifact                                | Source path                                                       | Retention                                                                                                |
 |-----------------------------------------|-------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
 | Session manifest + state                | `$SESSION_DIR/manifest.json`, `$SESSION_DIR/state.json`           | Until the session ends; not normally needed afterwards.                                                  |
-| `session_breakdown.json` (downstream contract) | `$SESSION_DIR/session_breakdown.json`                       | Permanent. This is the canonical record consumed by `claw-stats-service` and downstream notebooks.   |
+| `session_breakdown.json` (downstream contract) | `$SESSION_DIR/session_breakdown.json`                       | Permanent. This is the canonical record consumed by downstream dashboards and notebooks.   |
 | Local recipe KB                         | `${HYPERLOOM_LOCAL_KB_ROOT:-$USER_DATA_PATH/kb}`                  | Permanent. Backup before cleanup of `USER_DATA_PATH`.                                                |
 | Robustness findings                     | `$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl`      | 30 days minimum; longer if your incident process needs it.                                               |
 | Kernel-opt attempts                     | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl` | 14 days unless an attempt was promoted; keep promoted attempts permanently.                       |

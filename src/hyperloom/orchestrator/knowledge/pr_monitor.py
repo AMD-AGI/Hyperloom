@@ -10,12 +10,14 @@ the PR Monitor directly via MCP.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 
-# MCP URL passed to specialist LLM backend; trailing slash mandatory. In-cluster
-# fallback used only when --pr-monitor-mcp-url is not supplied.
-DEFAULT_PR_MONITOR_MCP_URL: str = "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local/mcp/"
+# MCP URL passed to specialist LLM backend; trailing slash mandatory. No
+# internal cluster DNS is hardcoded: supply it via ``--pr-monitor-mcp-url`` or
+# the ``PR_MONITOR_MCP_URL`` env var (empty disables the in-cluster fallback).
+DEFAULT_PR_MONITOR_MCP_URL: str = os.environ.get("PR_MONITOR_MCP_URL", "")
 
 
 @dataclass

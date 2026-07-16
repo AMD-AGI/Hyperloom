@@ -70,8 +70,8 @@ jobs:
           SCRIPT="$GITHUB_WORKSPACE/inference_optimization/InferenceX/utils/check_image_versions.py"
           for INFERENCEX_CONFIG in \
             "${NFS_ROOT}/InferenceX/.github/configs/amd-master.yaml" \
-            /wekafs/hyperloom/InferenceX/.github/configs/amd-master.yaml \
-            /wekafs/InferenceX/.github/configs/amd-master.yaml \
+            /path/hyperloom/InferenceX/.github/configs/amd-master.yaml \
+            /path/InferenceX/.github/configs/amd-master.yaml \
             /hyperloom/InferenceX/.github/configs/amd-master.yaml; do
             if [ -f "$INFERENCEX_CONFIG" ]; then
               pip install requests packaging pyyaml --quiet
