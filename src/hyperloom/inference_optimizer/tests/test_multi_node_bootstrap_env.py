@@ -1,9 +1,12 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Multi-node bootstrap.sh env-forwarding coverage.
+"""Multi-node bootstrap.sh credential-minimization coverage.
 
-Both custom-header env vars must be forwarded to remote workers
-(OpenAI/Codex reads OPENAI_CUSTOM_HEADERS, Claude reads ANTHROPIC_CUSTOM_HEADERS).
+bootstrap.sh renders ``/etc/profile.d/hyperloom-env.sh`` with the framework
+venv PATH only. Credential-bearing env (``*_API_KEY`` / ``*_BASE_URL`` /
+``*_CUSTOM_HEADERS`` — the latter carry subscription keys) must NOT be written
+into that world-readable (0644) file; later Ray Dashboard REST jobs inherit
+them from the head-pod container env instead.
 """
 
 from __future__ import annotations
@@ -48,7 +51,8 @@ def _run_bootstrap(tmp_path: Path, extra_env: dict[str, str]) -> str:
     return env_file.read_text(encoding="utf-8")
 
 
-def test_bootstrap_forwards_both_custom_headers(tmp_path: Path) -> None:
+def test_bootstrap_does_not_leak_custom_headers(tmp_path: Path) -> None:
+    """Custom-header creds must never be written to the world-readable env file."""
     rendered = _run_bootstrap(
         tmp_path,
         {
@@ -56,12 +60,17 @@ def test_bootstrap_forwards_both_custom_headers(tmp_path: Path) -> None:
             "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: anthropic-key",
         },
     )
-    assert "export OPENAI_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: openai-key'" in rendered
-    assert "export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: anthropic-key'" in rendered
-
-
-def test_bootstrap_omits_unset_custom_headers(tmp_path: Path) -> None:
-    rendered = _run_bootstrap(tmp_path, {"OPENAI_CUSTOM_HEADERS": "X-Team: hyperloom"})
-    assert "export OPENAI_CUSTOM_HEADERS='X-Team: hyperloom'" in rendered
-    # An unset var is not emitted as an empty placeholder.
+    assert "OPENAI_CUSTOM_HEADERS" not in rendered
     assert "ANTHROPIC_CUSTOM_HEADERS" not in rendered
+    assert "openai-key" not in rendered
+    assert "anthropic-key" not in rendered
+
+
+def test_bootstrap_renders_path_only(tmp_path: Path) -> None:
+    """The rendered env file carries the venv PATH export and nothing else."""
+    rendered = _run_bootstrap(tmp_path, {"OPENAI_CUSTOM_HEADERS": "X-Team: hyperloom"})
+    assert "OPENAI_CUSTOM_HEADERS" not in rendered
+    assert "X-Team: hyperloom" not in rendered
+    # Only the framework venv PATH is exported (no credential re-exports).
+    assert f'export PATH="{tmp_path / "venv" / "bin"}:${{PATH}}"' in rendered
+    assert rendered.count("export ") == 1
