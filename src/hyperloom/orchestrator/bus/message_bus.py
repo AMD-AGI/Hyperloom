@@ -209,7 +209,7 @@ class MessageBus:
         if topic is not None:
             clauses.append("topic = ?")
             params.append(topic)
-        sql = f"SELECT * FROM events WHERE {' AND '.join(clauses)} ORDER BY seq DESC LIMIT ?"
+        sql = f"SELECT * FROM events WHERE {' AND '.join(clauses)} ORDER BY seq DESC LIMIT ?"  # nosec B608 - clauses are selected from fixed templates.
         params.append(n)
         rows = await self.db.fetchall(sql, params)
         return [Message.from_row(r) for r in rows]

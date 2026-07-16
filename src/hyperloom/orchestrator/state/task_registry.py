@@ -513,7 +513,7 @@ class TaskRegistry:
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(family_kinds))
             cur.execute(
-                f"SELECT task_id, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",
+                f"SELECT task_id, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 family_kinds,
             )
             rows = [(r["task_id"], r["history"]) for r in cur.fetchall()]
