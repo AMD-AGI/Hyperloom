@@ -261,7 +261,7 @@ testpaths = [
 # self-location hacks (so they keep working both as package members and as
 # directly-executed CLI scripts), not via a package-relative or pythonpath
 # import, so no pythonpath entry is added or removed for it here.
-pythonpath = ["src", "."]
+pythonpath = ["src", ".", "ci"]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",

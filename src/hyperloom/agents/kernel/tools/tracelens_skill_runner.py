@@ -880,7 +880,10 @@ async def run_tracelens_skill(
     )
 
     resolved_model = (model or "").strip()
-    if _should_use_openai_tool_runner() and sdk_query_factory is None and sdk_options_cls is None:
+    if _should_use_openai_tool_runner() and (
+        openai_client_factory is not None
+        or (sdk_query_factory is None and sdk_options_cls is None)
+    ):
         openai_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
         return await _run_tracelens_skill_openai(
             prompt=prompt,
