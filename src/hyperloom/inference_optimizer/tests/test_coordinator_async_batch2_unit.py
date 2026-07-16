@@ -1119,7 +1119,7 @@ async def test_promote_baseline_materialized_parse_raises(
     monkeypatch,
 ) -> None:
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"
-    from hyperloom.orchestrator.loop import coordinator as mod
+    import hyperloom.orchestrator.loop.writeback as mod
     def _boom(path):
         raise RuntimeError("parse failed")
 
