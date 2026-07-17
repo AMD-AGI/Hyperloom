@@ -16,6 +16,7 @@ from .coordinator import (
     _format_inbox_event,
 )
 import logging as _logging
+
 log = _logging.getLogger(__name__)
 
 
@@ -568,9 +569,7 @@ class ConversationCollaborator:
 
         return "\n".join(sections)
 
-    async def _augment_critic_inbox_with_pending(
-        self, rendered: list["Message"]
-    ) -> list["Message"]:
+    async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present.
 
         The rendered tail can drop proposals that scrolled past the capped
@@ -587,11 +586,7 @@ class ConversationCollaborator:
             not already present; unchanged on any error (best-effort).
         """
         try:
-            pending = [
-                p
-                for p in self.state.pending_proposals.values()
-                if not getattr(p, "decided", False)
-            ]
+            pending = [p for p in self.state.pending_proposals.values() if not getattr(p, "decided", False)]
         except Exception:  # noqa: BLE001 — never break prompt composition
             return rendered
         if not pending:

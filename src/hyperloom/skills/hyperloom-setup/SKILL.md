@@ -62,7 +62,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-python3 -m pip install ./hyperloom_inference_optimizer-0.8.0-py3-none-any.whl --target .
+python3 -m pip install ./hyperloom_inference_optimizer-*-py3-none-any.whl --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -178,13 +178,13 @@ value.
 
 8. Only when the user chose `baremetal`, ask whether to install a serving
    framework (used as the `--install-framework` value in Step 4):
-   - `none`: use an already-installed SGLang/vLLM framework stack on the host.
-   - `sglang`: install SGLang ROCm framework components (shared with the host torch).
+   - `none`: use an already-installed vLLM/SGLang framework stack on the host.
    - `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
      pins its own torch, so it runs in an isolated env and never touches the
      host torch/SGLang stack.
+   - `sglang`: install SGLang ROCm framework components (shared with the host torch).
    - If the user is unsure, recommend `none` when a framework is already present;
-     otherwise recommend `sglang`.
+     otherwise recommend `vllm (isolated)`.
 
 ## Step 3: Write `.env`
 
@@ -258,7 +258,7 @@ If any required secret is missing or still a placeholder, stop and ask the user 
 ## Step 4: Run Setup Backend
 
 In `baremetal` mode, run the backend on the host. The `--install-framework` value
-is the framework the user chose in Step 2 (`none` / `sglang` / `vllm`). In
+is the framework the user chose in Step 2 (`none` / `vllm` / `sglang`). In
 `docker` mode, skip the backend on the host (see below).
 
 ### `baremetal`
@@ -273,19 +273,19 @@ export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none
 ```
 
-For `sglang`:
-
-```bash
-export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
-```
-
 For `vllm` (installs into an isolated venv; `--install-framework vllm` already
 defaults to isolated, the flag below is explicit):
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+```
+
+For `sglang`:
+
+```bash
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
 ```
 
 ### `docker`
@@ -319,7 +319,7 @@ mode, skip this until the demo skill runs setup inside the container. Read
   no serving framework was importable on the host (e.g. `--install-framework
   none` without SGLang/vLLM installed). Tell the user that demo skills needing
   a framework will not run until one is installed, and offer to re-run setup
-  with `--install-framework sglang` or `vllm`. Do not invent a `FRAMEWORK`
+  with `--install-framework vllm` or `sglang`. Do not invent a `FRAMEWORK`
   value.
 
 ## Step 6: Report Result

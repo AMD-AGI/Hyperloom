@@ -161,4 +161,5 @@ class CursorStore:
                 processed_at=now,
             )
 
+
 __all__ = ["CursorState", "CursorStore"]

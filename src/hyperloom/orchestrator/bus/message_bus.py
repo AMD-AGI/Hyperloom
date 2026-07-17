@@ -15,27 +15,44 @@ from hyperloom.common.timeutil import now_iso
 from .storage.connection import SqliteConnection
 
 
-TOPIC_ALLOWLIST = frozenset({
-    # Optimization-loop topics
-    "proposal",
-    "observation", "event", "decision",
-    "alert",
-    "historical_warning", "reflection_tick",
-    "do_postmortem", "do_strategic_review", "do_emergency_rca",
-    "synthesize_for_kb", "graceful_stop", "heartbeat",
-    "delegated_result", "intent_emitted", "rca_done",
-    # Robustness KILL_TASK audit broadcast (write-only; must be allow-listed).
-    "kill",
-    # Storage-layer events
-    "lease_expired", "lease_acquire_failed",
-    # Agent-to-agent RPC (REQUEST / RESPONSE intents).
-    "request", "response",
-    # Critic Review Protocol verdict broadcast.
-    "review_verdict", "advice", "strategy_change",
-    # Dynamic-specialist dispatch audit trail (write-only; must be allow-listed).
-    "dynamic_specialist_dispatched", "dynamic_specialist_status",
-    "dynamic_specialist_results", "dynamic_specialist_error",
-})
+TOPIC_ALLOWLIST = frozenset(
+    {
+        # Optimization-loop topics
+        "proposal",
+        "observation",
+        "event",
+        "decision",
+        "alert",
+        "historical_warning",
+        "reflection_tick",
+        "do_postmortem",
+        "do_strategic_review",
+        "do_emergency_rca",
+        "synthesize_for_kb",
+        "graceful_stop",
+        "heartbeat",
+        "delegated_result",
+        "intent_emitted",
+        "rca_done",
+        # Robustness KILL_TASK audit broadcast (write-only; must be allow-listed).
+        "kill",
+        # Storage-layer events
+        "lease_expired",
+        "lease_acquire_failed",
+        # Agent-to-agent RPC (REQUEST / RESPONSE intents).
+        "request",
+        "response",
+        # Critic Review Protocol verdict broadcast.
+        "review_verdict",
+        "advice",
+        "strategy_change",
+        # Dynamic-specialist dispatch audit trail (write-only; must be allow-listed).
+        "dynamic_specialist_dispatched",
+        "dynamic_specialist_status",
+        "dynamic_specialist_results",
+        "dynamic_specialist_error",
+    }
+)
 
 
 _now_iso = now_iso
@@ -243,5 +260,6 @@ class MessageBus:
         """
         row = await self.db.fetchone("SELECT * FROM events WHERE msg_id = ?", (msg_id,))
         return Message.from_row(row) if row else None
+
 
 __all__ = ["Message", "MessageBus", "TOPIC_ALLOWLIST"]

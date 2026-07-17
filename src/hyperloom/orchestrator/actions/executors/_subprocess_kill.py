@@ -227,7 +227,7 @@ _SERVER_READY_MARKERS: tuple[str, ...] = (
 # the scanner for diagnostics; the stall gate itself keys on raw log activity
 # (any new bytes) — see :func:`_communicate_with_soft_deadline`.
 _SERVER_PROGRESS_MARKERS: tuple[str, ...] = (
-    "gen throughput (token/s):",   # sglang
+    "gen throughput (token/s):",  # sglang
     "Avg generation throughput:",  # vLLM
 )
 
@@ -350,6 +350,7 @@ _SERVER_LOG_TAIL_BYTES: int = 65536
 # ``benchmark_<framework>_<timestamp>/server.log`` subdir instead.
 _NESTED_SERVER_LOG_GLOB: str = "benchmark_*/server.log"
 
+
 def _server_log_tail_has_marker(path: str) -> str | None:
     """Return the death marker present in the tail of the single file ``path``,
     else None.
@@ -440,11 +441,7 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     candidates = [path]
     try:
         base_dir = os.path.dirname(path) or "."
-        candidates.extend(
-            p
-            for p in glob.glob(os.path.join(base_dir, _NESTED_SERVER_LOG_GLOB))
-            if p != path
-        )
+        candidates.extend(p for p in glob.glob(os.path.join(base_dir, _NESTED_SERVER_LOG_GLOB)) if p != path)
     except OSError:
         pass
     for candidate in candidates:
@@ -468,9 +465,7 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     return None
 
 
-def _scan_server_log_increment(
-    path: str, from_offset: int
-) -> tuple[int, bool, bool]:
+def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, bool]:
     """Incrementally scan the bytes appended to ``server.log`` since
     ``from_offset`` for ready / generation-progress markers.
 
@@ -733,9 +728,7 @@ def _communicate_with_soft_deadline(
     watchdog_active = bool(server_log_path) and (
         server_dead_grace_sec is not None and float(server_dead_grace_sec) > 0.0
     )
-    stall_active = bool(server_log_path) and (
-        detok_stall_grace_sec is not None and float(detok_stall_grace_sec) > 0.0
-    )
+    stall_active = bool(server_log_path) and (detok_stall_grace_sec is not None and float(detok_stall_grace_sec) > 0.0)
     soft_active = soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
     if capture is None and not soft_active and not watchdog_active and not stall_active:
         return proc.communicate(timeout=hard_timeout)
@@ -757,9 +750,7 @@ def _communicate_with_soft_deadline(
         soft_active
         and bool(server_log_path)
         and not server_already_ready
-        and os.environ.get(
-            "INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY", "1"
-        ).strip().lower()
+        and os.environ.get("INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY", "1").strip().lower()
         not in {"0", "false", "no", "off"}
     )
     # The server.log increment scan feeds both the stall watchdog and the
@@ -837,9 +828,7 @@ def _communicate_with_soft_deadline(
         if soft_active and deadline_sec is not None:
             if soft_from_ready:
                 if server_ready_since is not None:
-                    slice_sec = min(
-                        slice_sec, deadline_sec - (now - server_ready_since)
-                    )
+                    slice_sec = min(slice_sec, deadline_sec - (now - server_ready_since))
             else:
                 slice_sec = min(slice_sec, deadline_sec - elapsed)
         if hard_timeout is not None:

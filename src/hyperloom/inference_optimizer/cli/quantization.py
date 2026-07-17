@@ -17,6 +17,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+
 def _quantization_enabled_via_env() -> bool:
     """Return ``True`` iff the deterministic quantization master switch is on.
 
@@ -35,6 +36,7 @@ def _quantization_enabled_via_env() -> bool:
         "yes",
         "on",
     )
+
 
 async def _run_quantization_prelude(args: argparse.Namespace) -> None:
     """Run the quantization-agent once before the optimization loop.

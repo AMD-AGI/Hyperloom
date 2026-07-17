@@ -28,7 +28,6 @@ from ._common import (
 )
 
 
-
 # Action labels whose ``<action>_attempts`` lists feed the timeline + capability tallies.
 _AUDIT_ACTIONS = (
     "baseline",
@@ -745,4 +744,3 @@ def collect_phase_segments(
             "once the fleet is fully v0.8 to fail closed"
         )
     return segments
-

@@ -96,6 +96,7 @@ class SourceData:
     sources_used: list[str] = field(default_factory=list)
     degraded_reason: str | None = None
 
+
 @runtime_checkable
 class Source(Protocol):
     """Async source contract the DegradeRouter consumes."""

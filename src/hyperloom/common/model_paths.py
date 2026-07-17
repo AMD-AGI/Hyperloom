@@ -30,7 +30,7 @@ def _identity_leaf(seg: str) -> str:
     """
     s = seg.strip().strip("/").split("/")[-1]
     if s.startswith("models--"):
-        s = s[len("models--"):]
+        s = s[len("models--") :]
     return s.replace("--", "/")
 
 

@@ -20,6 +20,7 @@ from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
 # Public surface re-exported via integrate_patch (backward-compat guard)
 
+
 def test_reexport_from_integrate_patch():
     """All names extracted from integrate_patch must still be importable from it."""
     assert ip._P_LEVELS is ng._P_LEVELS
@@ -32,6 +33,7 @@ def test_reexport_from_integrate_patch():
 
 
 # _strip_path_prefix
+
 
 def test_strip_path_prefix_zero():
     assert ng._strip_path_prefix("a/b/c.py", 0) == "a/b/c.py"
@@ -53,6 +55,7 @@ def test_strip_path_prefix_p_levels_sane():
 
 # _is_within
 
+
 def test_is_within_same():
     p = Path("/foo/bar")
     assert ng._is_within(p, p)
@@ -71,6 +74,7 @@ def test_is_within_parent():
 
 
 # _is_git_tree
+
 
 class _CP:
     def __init__(self, returncode=0, stdout="", stderr=""):
@@ -100,6 +104,7 @@ def test_is_git_tree_false_nonzero(monkeypatch):
 def test_is_git_tree_false_on_filenotfound(monkeypatch):
     def _raise(*a, **k):
         raise FileNotFoundError("git")
+
     monkeypatch.setattr(ng.subprocess, "run", _raise)
     assert ng._is_git_tree(Path("/wherever")) is False
 
@@ -107,6 +112,7 @@ def test_is_git_tree_false_on_filenotfound(monkeypatch):
 def test_is_git_tree_false_on_timeout(monkeypatch):
     def _raise(*a, **k):
         raise subprocess.TimeoutExpired("git", 10)
+
     monkeypatch.setattr(ng.subprocess, "run", _raise)
     assert ng._is_git_tree(Path("/wherever")) is False
 
@@ -202,16 +208,12 @@ def test_backup_names_unique_across_patches_same_basename(tmp_path):
     backup_root = tmp_path / "shared_backups"
     accumulated: list = []
 
-    ok, err, backups_a, *_ = ng._apply_patch_no_git(
-        tmp_path, patch_a, backup_root, seq_offset=len(accumulated)
-    )
+    ok, err, backups_a, *_ = ng._apply_patch_no_git(tmp_path, patch_a, backup_root, seq_offset=len(accumulated))
     if not ok:
         pytest.skip(f"patch CLI unavailable: {err}")
     accumulated.extend(backups_a)
 
-    ok, err, backups_b, *_ = ng._apply_patch_no_git(
-        tmp_path, patch_b, backup_root, seq_offset=len(accumulated)
-    )
+    ok, err, backups_b, *_ = ng._apply_patch_no_git(tmp_path, patch_b, backup_root, seq_offset=len(accumulated))
     if not ok:
         pytest.skip(f"patch CLI unavailable: {err}")
     accumulated.extend(backups_b)
@@ -222,16 +224,12 @@ def test_backup_names_unique_across_patches_same_basename(tmp_path):
     # Backup files must be distinct: no path collision.
     bak_paths_a = {r["backup_path"] for r in backups_a if r.get("backup_path")}
     bak_paths_b = {r["backup_path"] for r in backups_b if r.get("backup_path")}
-    assert bak_paths_a.isdisjoint(bak_paths_b), (
-        f"backup paths collide between patches: {bak_paths_a & bak_paths_b}"
-    )
+    assert bak_paths_a.isdisjoint(bak_paths_b), f"backup paths collide between patches: {bak_paths_a & bak_paths_b}"
 
     # The patch_a backup must retain the original content.
     for bak_path in bak_paths_a:
         content = Path(bak_path).read_text(encoding="utf-8")
-        assert content == "original_a\n", (
-            f"patch_a backup was overwritten by patch_b: {bak_path!r}"
-        )
+        assert content == "original_a\n", f"patch_a backup was overwritten by patch_b: {bak_path!r}"
 
 
 def test_seq_offset_zero_gives_deterministic_names(tmp_path):
@@ -283,9 +281,7 @@ def test_revert_action_delete_removes_new_file(tmp_path):
     """A record with revert_action='delete' causes the target to be removed."""
     target = tmp_path / "created.py"
     target.write_text("content\n", encoding="utf-8")
-    records = [
-        {"target": str(target), "existed": False, "backup_path": None, "revert_action": "delete"}
-    ]
+    records = [{"target": str(target), "existed": False, "backup_path": None, "revert_action": "delete"}]
     ng._revert_patches_no_git(records)
     assert not target.exists(), "revert_action='delete' must remove the target"
 
@@ -340,6 +336,7 @@ def test_rename_patch_tracked_as_two_records(tmp_path):
 
 
 # ApplyFeedback structure tests
+
 
 def test_apply_feedback_dry_run_failure_returns_fourth_item(tmp_path, monkeypatch):
     """When all dry-run levels fail, _apply_patch_no_git returns a 4-tuple with
@@ -431,13 +428,7 @@ def test_read_patch_source_context_returns_snippet(tmp_path):
     target = tmp_path / "mod.py"
     target.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
 
-    patch_text = (
-        "--- a/mod.py\n"
-        "+++ b/mod.py\n"
-        "@@ -2,2 +2,2 @@\n"
-        "-line2\n"
-        "+line2_patched\n"
-    )
+    patch_text = "--- a/mod.py\n+++ b/mod.py\n@@ -2,2 +2,2 @@\n-line2\n+line2_patched\n"
     ctx = af.read_patch_source_context(patch_text, tmp_path, radius=6)
     assert "mod.py" in ctx
     assert "line" in ctx
@@ -446,17 +437,13 @@ def test_read_patch_source_context_returns_snippet(tmp_path):
 def test_read_patch_source_context_returns_empty_for_missing_file(tmp_path):
     """read_patch_source_context returns '' when target file doesn't exist."""
 
-    patch_text = (
-        "--- a/nonexistent.py\n"
-        "+++ b/nonexistent.py\n"
-        "@@ -1 +1 @@\n"
-        "-x\n+y\n"
-    )
+    patch_text = "--- a/nonexistent.py\n+++ b/nonexistent.py\n@@ -1 +1 @@\n-x\n+y\n"
     ctx = af.read_patch_source_context(patch_text, tmp_path, radius=6)
     assert ctx == ""
 
 
 # _bak_name — filename sanitisation
+
 
 def test_bak_name_sanitises_unsafe_chars():
     name = ng._bak_name("my:patch", Path("a/b/c.py"), 7)
@@ -466,6 +453,7 @@ def test_bak_name_sanitises_unsafe_chars():
 
 
 # _apply_patch_no_git — patch CLI unavailable during dry-run
+
 
 def test_apply_patch_dry_run_cli_missing(tmp_path, monkeypatch):
     """A FileNotFoundError during the dry-run yields a nogit ApplyFeedback."""
@@ -576,6 +564,7 @@ ESCAPE_DIFF = """\
 
 def test_apply_rejects_target_escaping_root(tmp_path, monkeypatch):
     """A patch whose resolved target escapes framework_root is rejected."""
+
     def _fake_run(cmd, *a, **k):
         return _CP(0, "", "")
 
@@ -589,6 +578,7 @@ def test_apply_rejects_target_escaping_root(tmp_path, monkeypatch):
 
 
 # _apply_patch_no_git — backup copy failure
+
 
 def test_apply_backup_failure_returns_error(tmp_path, monkeypatch):
     """When shutil.copy2 fails during backup, the apply aborts with an error."""
@@ -612,6 +602,7 @@ def test_apply_backup_failure_returns_error(tmp_path, monkeypatch):
 
 
 # _apply_patch_no_git — real apply failure collects .rej hunks
+
 
 def test_apply_real_failure_collects_rej(tmp_path):
     """When dry-run passes for a level but the real apply fails, we surface a
@@ -676,6 +667,7 @@ def test_apply_real_apply_cli_vanishes(tmp_path):
 
 # _collect_rej_files
 
+
 def test_collect_rej_files_reads_and_removes(tmp_path):
     """A recent .rej file is read into the summary and then removed."""
     rej = tmp_path / "foo.py.rej"
@@ -707,13 +699,12 @@ def test_collect_rej_files_no_rej_returns_empty(tmp_path):
 
 # _revert_patches_no_git — error paths are swallowed
 
+
 def test_revert_restore_error_is_logged_not_raised(tmp_path, monkeypatch):
     """A copy failure during restore is logged, never raised."""
     bak = tmp_path / "b.bak"
     bak.write_text("data\n", encoding="utf-8")
-    records = [
-        {"target": str(tmp_path / "t.py"), "existed": True, "backup_path": str(bak), "revert_action": "restore"}
-    ]
+    records = [{"target": str(tmp_path / "t.py"), "existed": True, "backup_path": str(bak), "revert_action": "restore"}]
 
     def _boom(*a, **k):
         raise OSError("perm denied")
@@ -732,6 +723,7 @@ def test_revert_delete_removes_existing(tmp_path):
 
 
 # Deterministic branch coverage via a fake dry-run-succeeds patch runner
+
 
 def _fake_ok_run(cmd, *a, **k):
     """A subprocess.run stand-in that reports every patch invocation as success."""
@@ -779,10 +771,7 @@ def test_modification_target_escape_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
     patch_file = tmp_path / "evil.patch"
     patch_file.write_text(
-        "--- ../../../etc/evil.py\n"
-        "+++ ../../../etc/evil.py\n"
-        "@@ -1 +1 @@\n"
-        "-x\n+y\n",
+        "--- ../../../etc/evil.py\n+++ ../../../etc/evil.py\n@@ -1 +1 @@\n-x\n+y\n",
         encoding="utf-8",
     )
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
@@ -809,10 +798,7 @@ def test_create_target_escape_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
     patch_file = tmp_path / "evil_create.patch"
     patch_file.write_text(
-        "--- /dev/null\n"
-        "+++ b/../../../etc/evil.py\n"
-        "@@ -0,0 +1 @@\n"
-        "+pwn\n",
+        "--- /dev/null\n+++ b/../../../etc/evil.py\n@@ -0,0 +1 @@\n+pwn\n",
         encoding="utf-8",
     )
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
@@ -847,6 +833,7 @@ def test_patch_file_unreadable_after_dry_run(tmp_path, monkeypatch):
 
 def test_collect_rej_files_scan_exception_is_swallowed(tmp_path, monkeypatch):
     """An exception during the rglob scan is logged and yields ''."""
+
     def _boom(*a, **k):
         raise RuntimeError("fs blew up")
 
@@ -872,14 +859,13 @@ def test_collect_rej_files_stat_oserror_skips(tmp_path, monkeypatch):
 
 # Escape / continue edge branches in the create / delete / rename arms
 
+
 def test_create_devnull_both_sides_skipped(tmp_path, monkeypatch):
     """A degenerate /dev/null -> /dev/null header is skipped (create continue)."""
     monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
     patch_file = tmp_path / "noop.patch"
     patch_file.write_text(
-        "--- /dev/null\n"
-        "+++ /dev/null\n"
-        "@@ -0,0 +0,0 @@\n",
+        "--- /dev/null\n+++ /dev/null\n@@ -0,0 +0,0 @@\n",
         encoding="utf-8",
     )
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
@@ -892,10 +878,7 @@ def test_delete_target_escape_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(ng.subprocess, "run", _fake_ok_run)
     patch_file = tmp_path / "evil_del.patch"
     patch_file.write_text(
-        "--- ../../../etc/evil.py\n"
-        "+++ /dev/null\n"
-        "@@ -1 +0,0 @@\n"
-        "-x\n",
+        "--- ../../../etc/evil.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
         encoding="utf-8",
     )
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")
@@ -927,10 +910,7 @@ def test_rename_new_target_escape_rejected(tmp_path, monkeypatch):
     old_file.write_text("moved\n", encoding="utf-8")
     patch_file = tmp_path / "rename_evil.patch"
     patch_file.write_text(
-        "--- a/old_name.py\n"
-        "+++ b/../../../etc/evil.py\n"
-        "@@ -1 +1 @@\n"
-        "-moved\n+moved\n",
+        "--- a/old_name.py\n+++ b/../../../etc/evil.py\n@@ -1 +1 @@\n-moved\n+moved\n",
         encoding="utf-8",
     )
     ok, err, backups, *_ = ng._apply_patch_no_git(tmp_path, patch_file, tmp_path / "bak")

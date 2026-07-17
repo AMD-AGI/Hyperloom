@@ -129,8 +129,7 @@ class _FakeCompletions:
         self._b = behaviour
         self.calls = []
 
-    async def create(self, *, model, messages, max_completion_tokens,
-                     stream=False, stream_options=None):
+    async def create(self, *, model, messages, max_completion_tokens, stream=False, stream_options=None):
         self.calls.append(model)
         r = self._b.get(model)
         if isinstance(r, BaseException):

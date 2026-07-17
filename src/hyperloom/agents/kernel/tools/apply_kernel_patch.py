@@ -83,9 +83,7 @@ def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[s
     if any(part in _UNSAFE_COMMAND_TOKENS for part in argv) or any(
         _UNSAFE_COMMAND_CHARS_RE.search(part) for part in argv
     ):
-        raise ValueError(
-            "rebuild_command must be argv-like and cannot contain shell control operators"
-        )
+        raise ValueError("rebuild_command must be argv-like and cannot contain shell control operators")
     if any(("\n" in part or "\r" in part or "\x00" in part) for part in argv):
         raise ValueError("rebuild_command contains invalid control characters")
     exe = Path(argv[0]).name.lower()
@@ -312,6 +310,8 @@ def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
 
 # Shared source-completeness heuristic (see _io_utils.source_text_looks_complete).
 _source_text_looks_complete = source_text_looks_complete
+
+
 def _validate_patch_source(patch: Path, target: Path) -> None:
     """Validate that ``patch`` is a complete drop-in replacement for ``target``.
 
@@ -1872,9 +1872,7 @@ def _apply_kernel_patch_snapshot(
         if desc["op"] == "write":
             write_paths.append(dest)
 
-    rebuild_strategies = _multi_root_strategies(
-        write_paths, allow_unknown_target=allow_unknown_target
-    )
+    rebuild_strategies = _multi_root_strategies(write_paths, allow_unknown_target=allow_unknown_target)
     compiled = bool(rebuild_strategies)
 
     artifacts: list[dict[str, str]] = []
@@ -1907,8 +1905,12 @@ def _apply_kernel_patch_snapshot(
         backup_dir=backup_dir,
     )
     if applied["status"] != "ok":
-        return {"status": "failed", "error": applied.get("error"), "path": applied.get("path"),
-                "manifest_path": str(manifest_path)}
+        return {
+            "status": "failed",
+            "error": applied.get("error"),
+            "path": applied.get("path"),
+            "manifest_path": str(manifest_path),
+        }
 
     manifest["source_backups"] = applied["source_backups"]
     # Keep a singular source_backup for the primary (legacy manifest readers).
@@ -1926,19 +1928,28 @@ def _apply_kernel_patch_snapshot(
         if desc["op"] == "delete":
             if dest.exists():
                 revert_kernel_patch(manifest_path)
-                return {"status": "failed", "error": f"post-verify: {desc['path']} not deleted",
-                        "manifest_path": str(manifest_path)}
+                return {
+                    "status": "failed",
+                    "error": f"post-verify: {desc['path']} not deleted",
+                    "manifest_path": str(manifest_path),
+                }
             continue
         src = snap / desc["path"]
         if src.is_symlink():
             if not dest.is_symlink() or os.readlink(dest) != os.readlink(src):
                 revert_kernel_patch(manifest_path)
-                return {"status": "failed", "error": f"post-verify symlink mismatch: {desc['path']}",
-                        "manifest_path": str(manifest_path)}
+                return {
+                    "status": "failed",
+                    "error": f"post-verify symlink mismatch: {desc['path']}",
+                    "manifest_path": str(manifest_path),
+                }
         elif dest.read_bytes() != src.read_bytes():
             revert_kernel_patch(manifest_path)
-            return {"status": "failed", "error": f"post-verify content mismatch: {desc['path']}",
-                    "manifest_path": str(manifest_path)}
+            return {
+                "status": "failed",
+                "error": f"post-verify content mismatch: {desc['path']}",
+                "manifest_path": str(manifest_path),
+            }
 
     cache_clear_paths = [p for p in write_paths if p.suffix.lower() in PYTHON_SOURCE_SUFFIXES]
     cache_clear = {"status": "skipped", "reason": "no python source target"}
@@ -1954,23 +1965,31 @@ def _apply_kernel_patch_snapshot(
         try:
             for p in write_paths:
                 mn_apply = _dispatch_multinode_apply(
-                    target_file=p, patch_path=snap / Path(p).relative_to(repo_root),
-                    kernel_id=kernel_id, backup_dir_on_pod=pod_backup_dir,
+                    target_file=p,
+                    patch_path=snap / Path(p).relative_to(repo_root),
+                    kernel_id=kernel_id,
+                    backup_dir_on_pod=pod_backup_dir,
                 )
                 per_node_all.extend(mn_apply.get("per_node", []) or [])
         except Exception as exc:  # noqa: BLE001
             revert_kernel_patch(manifest_path)
-            return {"status": "failed",
-                    "error": f"multi-node apply fan-out failed; repo restored: {exc}",
-                    "manifest_path": str(manifest_path)}
+            return {
+                "status": "failed",
+                "error": f"multi-node apply fan-out failed; repo restored: {exc}",
+                "manifest_path": str(manifest_path),
+            }
         for entry in per_node_all:
             host = (entry.get("host") or "").strip()
             bp = (entry.get("backup_path") or "").strip()
             if host and bp:
                 backup_map[host] = bp
-        multinode_info = {"status": "ok", "target_path": str(target),
-                          "backup_dir_on_pod": pod_backup_dir,
-                          "host_backup_map": backup_map, "per_node": per_node_all}
+        multinode_info = {
+            "status": "ok",
+            "target_path": str(target),
+            "backup_dir_on_pod": pod_backup_dir,
+            "host_backup_map": backup_map,
+            "per_node": per_node_all,
+        }
         manifest["multinode"] = multinode_info
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -1985,9 +2004,13 @@ def _apply_kernel_patch_snapshot(
         jit_build_backup = _invalidate_aiter_jit_build(target, backup_dir)
         if jit_build_backup.get("status") == "failed":
             revert_kernel_patch(manifest_path)
-            return {"status": "failed", "error_class": "aiter_jit_invalidation_failed",
-                    "error": f"aiter jit/build/ invalidation failed: {jit_build_backup.get('error')}",
-                    "manifest_path": str(manifest_path), "jit_build_backup": jit_build_backup}
+            return {
+                "status": "failed",
+                "error_class": "aiter_jit_invalidation_failed",
+                "error": f"aiter jit/build/ invalidation failed: {jit_build_backup.get('error')}",
+                "manifest_path": str(manifest_path),
+                "jit_build_backup": jit_build_backup,
+            }
         if jit_build_backup.get("status") == "ok":
             manifest["jit_build_backup"] = jit_build_backup
             manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1995,9 +2018,13 @@ def _apply_kernel_patch_snapshot(
         cpp_itfs_cache_backup = _invalidate_aiter_cpp_itfs_cache(target, backup_dir)
         if cpp_itfs_cache_backup.get("status") == "failed":
             revert_kernel_patch(manifest_path)
-            return {"status": "failed", "error_class": "aiter_cpp_itfs_invalidation_failed",
-                    "error": f"aiter cpp_itfs runtime cache invalidation failed: {cpp_itfs_cache_backup.get('error')}",
-                    "manifest_path": str(manifest_path), "cpp_itfs_cache_backup": cpp_itfs_cache_backup}
+            return {
+                "status": "failed",
+                "error_class": "aiter_cpp_itfs_invalidation_failed",
+                "error": f"aiter cpp_itfs runtime cache invalidation failed: {cpp_itfs_cache_backup.get('error')}",
+                "manifest_path": str(manifest_path),
+                "cpp_itfs_cache_backup": cpp_itfs_cache_backup,
+            }
         if cpp_itfs_cache_backup.get("status") == "ok":
             manifest["cpp_itfs_cache_backup"] = cpp_itfs_cache_backup
             manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -2011,9 +2038,13 @@ def _apply_kernel_patch_snapshot(
             rebuild_records.append(rec)
             if rec["status"] != "ok":
                 revert = revert_kernel_patch(manifest_path)
-                return {"status": "failed",
-                        "error": "rebuild failed; original source/artifacts restored",
-                        "manifest_path": str(manifest_path), "rebuild": rec, "revert": revert}
+                return {
+                    "status": "failed",
+                    "error": "rebuild failed; original source/artifacts restored",
+                    "manifest_path": str(manifest_path),
+                    "rebuild": rec,
+                    "revert": revert,
+                }
         rebuild = rebuild_records[-1] if rebuild_records else rebuild
 
     manifest["status"] = "applied"
@@ -2026,10 +2057,17 @@ def _apply_kernel_patch_snapshot(
         manifest["cpp_itfs_cache_backup"] = cpp_itfs_cache_backup
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     result: dict[str, Any] = {
-        "status": "ok", "manifest_path": str(manifest_path), "target_file": str(target),
-        "backup_dir": str(backup_dir), "compiled": compiled, "artifact_count": len(artifacts),
-        "cache_clear": cache_clear, "rebuild": rebuild, "jit_build_backup": jit_build_backup,
-        "cpp_itfs_cache_backup": cpp_itfs_cache_backup, "touched": applied["touched"],
+        "status": "ok",
+        "manifest_path": str(manifest_path),
+        "target_file": str(target),
+        "backup_dir": str(backup_dir),
+        "compiled": compiled,
+        "artifact_count": len(artifacts),
+        "cache_clear": cache_clear,
+        "rebuild": rebuild,
+        "jit_build_backup": jit_build_backup,
+        "cpp_itfs_cache_backup": cpp_itfs_cache_backup,
+        "touched": applied["touched"],
     }
     if multinode_info:
         result["multinode"] = multinode_info

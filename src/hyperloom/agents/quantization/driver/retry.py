@@ -278,8 +278,7 @@ async def quantize_via_prompt(
         return _build_failed_bootstrap_result(
             workspace_path,
             OutcomeId.quark_root_missing,
-            "quark_root is not configured; set $QUARK_ROOT or pass quark_root= "
-            f"(clone from {DEFAULT_QUARK_GIT_URL})",
+            f"quark_root is not configured; set $QUARK_ROOT or pass quark_root= (clone from {DEFAULT_QUARK_GIT_URL})",
         )
     quark_root_path = Path(quark_root).expanduser()
     if not quark_root_path.is_dir():

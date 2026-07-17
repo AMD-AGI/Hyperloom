@@ -52,10 +52,19 @@ _PEAK_TFLOPS: dict[str, dict[str, float]] = {
 
 #: Precision tag -> canonical peak-table key.
 _PRECISION_ALIASES: dict[str, str] = {
-    "bf16": "bf16", "bfloat16": "bf16", "fp16": "fp16", "float16": "fp16",
-    "fp8": "fp8", "float8_e4m3fn": "fp8", "float8_e5m2": "fp8", "fp8_e4m3": "fp8",
-    "mxfp4": "mxfp4", "fp4": "mxfp4", "float4": "mxfp4",
-    "fp32": "fp32", "float32": "fp32",
+    "bf16": "bf16",
+    "bfloat16": "bf16",
+    "fp16": "fp16",
+    "float16": "fp16",
+    "fp8": "fp8",
+    "float8_e4m3fn": "fp8",
+    "float8_e5m2": "fp8",
+    "fp8_e4m3": "fp8",
+    "mxfp4": "mxfp4",
+    "fp4": "mxfp4",
+    "float4": "mxfp4",
+    "fp32": "fp32",
+    "float32": "fp32",
 }
 
 
@@ -288,13 +297,8 @@ def _infer_geometry_from_safetensors(model_dir: Path) -> DenoiserGeometry | None
     if not hidden:
         return None
 
-    diffusers_naming = any(
-        k.startswith(("transformer_blocks.", "single_transformer_blocks."))
-        for k in keys
-    )
-    model_class = (
-        "FluxTransformer2DModel" if diffusers_naming else "HunyuanImageTransformer2DModel"
-    )
+    diffusers_naming = any(k.startswith(("transformer_blocks.", "single_transformer_blocks.")) for k in keys)
+    model_class = "FluxTransformer2DModel" if diffusers_naming else "HunyuanImageTransformer2DModel"
     defaults = dict(_CLASS_DEFAULTS.get(model_class, {}))
     basename = model_dir.name.lower()
     for hint_key, hint in _BASENAME_HINTS.items():
@@ -343,24 +347,14 @@ def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
     intermediate = _resolve_intermediate(cfg, hidden)
 
     # layer split
-    n_double = int(
-        cfg.get("num_layers")
-        or cfg.get("num_mmdit_layers")
-        or cfg.get("n_layers")
-        or 0
-    )
+    n_double = int(cfg.get("num_layers") or cfg.get("num_mmdit_layers") or cfg.get("n_layers") or 0)
     n_single = int(cfg.get("num_single_layers") or cfg.get("num_single_dit_layers") or 0)
     # Z-Image adds refiner layers on top of n_layers.
     n_double += int(cfg.get("n_refiner_layers") or 0)
 
     # MoE
     num_experts = int(cfg.get("num_experts") or cfg.get("num_routed_experts") or 0)
-    active = int(
-        cfg.get("num_activated_experts")
-        or cfg.get("num_experts_per_tok")
-        or cfg.get("top_k")
-        or 0
-    )
+    active = int(cfg.get("num_activated_experts") or cfg.get("num_experts_per_tok") or cfg.get("top_k") or 0)
     moe_inter = int(cfg.get("moe_intermediate_dim") or cfg.get("moe_intermediate_size") or 0)
     if num_experts and not active:
         active = 2  # documented fallback when the config omits top-k
@@ -477,7 +471,7 @@ def _unet_forward_flops(g: DenoiserGeometry, height: int, width: int) -> float:
     total = 0.0
     for lvl, cout in enumerate(chans):
         # spatial halves at each deeper level
-        sp = max(lat // (2 ** lvl), 1)
+        sp = max(lat // (2**lvl), 1)
         s_tokens = sp * sp
         cin = chans[lvl - 1] if lvl > 0 else cout
         # resnets: two 3x3 convs each; first resnet maps cin->cout, rest cout->cout
@@ -592,9 +586,7 @@ def analytic_ceiling(
     total_flops / (peak * 1e12) * 1e3. ``ideal_ms`` is absent when the
     (gpu, precision) peak is unknown.
     """
-    est = estimate_image_flops(
-        model_dir, height=height, width=width, num_steps=num_steps, cfg_batch=cfg_batch
-    )
+    est = estimate_image_flops(model_dir, height=height, width=width, num_steps=num_steps, cfg_batch=cfg_batch)
     if est is None:
         return None
     pk = peak_tflops(gpu_type, precision)

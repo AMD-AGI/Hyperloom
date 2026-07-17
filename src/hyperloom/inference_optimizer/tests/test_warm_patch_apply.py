@@ -1,4 +1,5 @@
 """Tests for baseline executor warm-replay patch application (_apply_warm_patches)."""
+
 from __future__ import annotations
 
 import subprocess
@@ -19,11 +20,15 @@ def fake_repo(tmp_path):
     subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=str(repo), capture_output=True, check=True,
+        cwd=str(repo),
+        capture_output=True,
+        check=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=str(repo), capture_output=True, check=True,
+        cwd=str(repo),
+        capture_output=True,
+        check=True,
     )
     # Create a file to patch
     (repo / "vllm").mkdir()
@@ -31,7 +36,9 @@ def fake_repo(tmp_path):
     subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
     subprocess.run(
         ["git", "commit", "-m", "init"],
-        cwd=str(repo), capture_output=True, check=True,
+        cwd=str(repo),
+        capture_output=True,
+        check=True,
     )
     return repo
 
@@ -58,13 +65,15 @@ index 0000000..1111111 100644
 def test_apply_single_patch(fake_repo, output_dir):
     """Successfully apply a single patch."""
     params = {
-        "patches": [{
-            "patch_file": "vllm/fp8.py",
-            "patch_content": VALID_PATCH,
-            "patch_ref": "",
-            "measured_gain_pct": 24.9,
-            "repo": "ROCm/vllm",
-        }],
+        "patches": [
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": VALID_PATCH,
+                "patch_ref": "",
+                "measured_gain_pct": 24.9,
+                "repo": "ROCm/vllm",
+            }
+        ],
         "blocked_patches": [],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
@@ -78,13 +87,15 @@ def test_apply_single_patch(fake_repo, output_dir):
 def test_blocked_patch_skipped(fake_repo, output_dir):
     """Patches in blocked_patches should be skipped."""
     params = {
-        "patches": [{
-            "patch_file": "vllm/fp8.py",
-            "patch_content": VALID_PATCH,
-            "patch_ref": "",
-            "measured_gain_pct": 24.9,
-            "repo": "ROCm/vllm",
-        }],
+        "patches": [
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": VALID_PATCH,
+                "patch_ref": "",
+                "measured_gain_pct": 24.9,
+                "repo": "ROCm/vllm",
+            }
+        ],
         "blocked_patches": [{"patch_file": "vllm/fp8.py"}],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
@@ -112,13 +123,15 @@ def test_empty_target_repo_returns_empty(output_dir):
 def test_invalid_patch_skipped(fake_repo, output_dir):
     """A malformed patch should be skipped, not crash."""
     params = {
-        "patches": [{
-            "patch_file": "bad.py",
-            "patch_content": "this is not a valid diff",
-            "patch_ref": "",
-            "measured_gain_pct": 5.0,
-            "repo": "x/y",
-        }],
+        "patches": [
+            {
+                "patch_file": "bad.py",
+                "patch_content": "this is not a valid diff",
+                "patch_ref": "",
+                "measured_gain_pct": 5.0,
+                "repo": "x/y",
+            }
+        ],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert result == []
@@ -129,13 +142,15 @@ def test_patch_ref_fallback(fake_repo, output_dir, tmp_path):
     ref_file = tmp_path / "my.patch"
     ref_file.write_text(VALID_PATCH)
     params = {
-        "patches": [{
-            "patch_file": "vllm/fp8.py",
-            "patch_content": "",
-            "patch_ref": str(ref_file),
-            "measured_gain_pct": 10.0,
-            "repo": "ROCm/vllm",
-        }],
+        "patches": [
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": "",
+                "patch_ref": str(ref_file),
+                "measured_gain_pct": 10.0,
+                "repo": "ROCm/vllm",
+            }
+        ],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert len(result) == 1
@@ -146,13 +161,15 @@ def test_patch_ref_fallback(fake_repo, output_dir, tmp_path):
 def test_patch_ref_missing_file_skipped(fake_repo, output_dir):
     """Non-existent patch_ref should be skipped."""
     params = {
-        "patches": [{
-            "patch_file": "vllm/fp8.py",
-            "patch_content": "",
-            "patch_ref": "/nonexistent/path.patch",
-            "measured_gain_pct": 10.0,
-            "repo": "ROCm/vllm",
-        }],
+        "patches": [
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": "",
+                "patch_ref": "/nonexistent/path.patch",
+                "measured_gain_pct": 10.0,
+                "repo": "ROCm/vllm",
+            }
+        ],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert result == []
@@ -161,13 +178,15 @@ def test_patch_ref_missing_file_skipped(fake_repo, output_dir):
 def test_no_content_no_ref_skipped(fake_repo, output_dir):
     """Entry with neither content nor ref should be skipped."""
     params = {
-        "patches": [{
-            "patch_file": "vllm/fp8.py",
-            "patch_content": "",
-            "patch_ref": "",
-            "measured_gain_pct": 10.0,
-            "repo": "ROCm/vllm",
-        }],
+        "patches": [
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": "",
+                "patch_ref": "",
+                "measured_gain_pct": 10.0,
+                "repo": "ROCm/vllm",
+            }
+        ],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert result == []
@@ -176,13 +195,15 @@ def test_no_content_no_ref_skipped(fake_repo, output_dir):
 def test_git_apply_timeout_skipped(fake_repo, output_dir):
     """Timeout during git apply should be skipped gracefully."""
     params = {
-        "patches": [{
-            "patch_file": "vllm/fp8.py",
-            "patch_content": VALID_PATCH,
-            "patch_ref": "",
-            "measured_gain_pct": 10.0,
-            "repo": "ROCm/vllm",
-        }],
+        "patches": [
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": VALID_PATCH,
+                "patch_ref": "",
+                "measured_gain_pct": 10.0,
+                "repo": "ROCm/vllm",
+            }
+        ],
     }
     with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=30)):
         result = _apply_warm_patches(params, str(fake_repo), output_dir)
@@ -195,13 +216,15 @@ def test_patch_ref_read_oserror_skipped(fake_repo, output_dir, tmp_path):
     ref_file.write_text("dummy")
     ref_file.chmod(0o000)
     params = {
-        "patches": [{
-            "patch_file": "vllm/fp8.py",
-            "patch_content": "",
-            "patch_ref": str(ref_file),
-            "measured_gain_pct": 10.0,
-            "repo": "ROCm/vllm",
-        }],
+        "patches": [
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": "",
+                "patch_ref": str(ref_file),
+                "measured_gain_pct": 10.0,
+                "repo": "ROCm/vllm",
+            }
+        ],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     # Skipped or read-succeeds depending on privileges; must not crash.
@@ -239,12 +262,14 @@ def test_non_diff_patch_content_is_skipped(fake_repo, output_dir):
     # SWSPLAT-42326: KB-sourced patch_content that is not a unified diff must be
     # skipped before git apply (never applied), leaving the tree untouched.
     params = {
-        "patches": [{
-            "patch_file": "vllm/fp8.py",
-            "patch_content": "this is not a diff; just prose",
-            "patch_ref": "",
-            "repo": "ROCm/vllm",
-        }],
+        "patches": [
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": "this is not a diff; just prose",
+                "patch_ref": "",
+                "repo": "ROCm/vllm",
+            }
+        ],
         "blocked_patches": [],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
@@ -255,16 +280,16 @@ def test_non_diff_patch_content_is_skipped(fake_repo, output_dir):
 def test_tree_escaping_patch_content_is_skipped(fake_repo, output_dir):
     # SWSPLAT-42326: a patch whose header path escapes the tree (absolute path)
     # must be skipped, not git-applied.
-    escaping = VALID_PATCH.replace("a/vllm/fp8.py", "/etc/evil").replace(
-        "b/vllm/fp8.py", "/etc/evil"
-    )
+    escaping = VALID_PATCH.replace("a/vllm/fp8.py", "/etc/evil").replace("b/vllm/fp8.py", "/etc/evil")
     params = {
-        "patches": [{
-            "patch_file": "vllm/fp8.py",
-            "patch_content": escaping,
-            "patch_ref": "",
-            "repo": "ROCm/vllm",
-        }],
+        "patches": [
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": escaping,
+                "patch_ref": "",
+                "repo": "ROCm/vllm",
+            }
+        ],
         "blocked_patches": [],
     }
     result = _apply_warm_patches(params, str(fake_repo), output_dir)

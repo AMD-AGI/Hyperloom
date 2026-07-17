@@ -34,8 +34,7 @@ def _hermetic_env(monkeypatch):
     monkeypatch.delenv("GPU_TYPE", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setattr(cli_model_gate, "_autodetect_gpu_type", lambda: None)
-    for key in ("CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "PRECISION",
-                "RUN_EVAL", "FRAMEWORK", _CK_ENV):
+    for key in ("CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "PRECISION", "RUN_EVAL", "FRAMEWORK", _CK_ENV):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -48,9 +47,7 @@ def patcher_calls(monkeypatch):
         calls.append(True)
         return True
 
-    monkeypatch.setattr(
-        _workload_envs, "ensure_sglang_patched_for_ck_blockscale", _fake
-    )
+    monkeypatch.setattr(_workload_envs, "ensure_sglang_patched_for_ck_blockscale", _fake)
     return calls
 
 
@@ -75,9 +72,7 @@ def _write_yaml(path: Path, *, framework: str) -> None:
         yaml.safe_dump(cfg, f)
 
 
-def _materialize(
-    tmp_path: Path, *, framework: str = "sglang", extra_envs: dict | None = None
-) -> dict:
+def _materialize(tmp_path: Path, *, framework: str = "sglang", extra_envs: dict | None = None) -> dict:
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework=framework)
     out = tmp_path / "out"

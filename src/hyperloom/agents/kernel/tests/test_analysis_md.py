@@ -39,19 +39,32 @@ def _sample_kwargs():
         idle_threshold=80.0,
         hot_kernels=[
             {
-                "name": "k", "time_us": 100.0, "gpu_pct": 50.0, "efficiency_percent": 40.0,
-                "arithmetic_intensity": 12.0, "bound_type": "compute_bound",
-                "category": "GEMM", "source_file": "f.py",
+                "name": "k",
+                "time_us": 100.0,
+                "gpu_pct": 50.0,
+                "efficiency_percent": 40.0,
+                "arithmetic_intensity": 12.0,
+                "bound_type": "compute_bound",
+                "category": "GEMM",
+                "source_file": "f.py",
             }
         ],
         p_items=[
             {
-                "rank": 0, "category": "GEMM",
+                "rank": 0,
+                "category": "GEMM",
                 "rows": [
                     {
-                        "name": "k", "time_us": 100.0, "gpu_pct": 50.0, "e2e_pct": None,
-                        "call_count": 3, "flops_per_byte": None, "efficiency_percent": 40.0,
-                        "bound_type": "compute_bound", "args": ["(4,4)"], "source_file": "f.py",
+                        "name": "k",
+                        "time_us": 100.0,
+                        "gpu_pct": 50.0,
+                        "e2e_pct": None,
+                        "call_count": 3,
+                        "flops_per_byte": None,
+                        "efficiency_percent": 40.0,
+                        "bound_type": "compute_bound",
+                        "args": ["(4,4)"],
+                        "source_file": "f.py",
                         "kernel_path": None,
                     }
                 ],
@@ -130,9 +143,17 @@ def _bypass_md():
 def _deterministic_md(tmp_path):
     cands = [
         {
-            "name": "gemm_kernel", "duration_us": 500.0, "gpu_pct": 60.0, "efficiency_percent": 45.0,
-            "tracelens_category": "GEMM", "bound_type": "compute_bound", "source_file": "f.py",
-            "tracelens_pitem_rank": 0, "impact_score": 1.2, "call_count": 3, "shapes": ["(4,4)"],
+            "name": "gemm_kernel",
+            "duration_us": 500.0,
+            "gpu_pct": 60.0,
+            "efficiency_percent": 45.0,
+            "tracelens_category": "GEMM",
+            "bound_type": "compute_bound",
+            "source_file": "f.py",
+            "tracelens_pitem_rank": 0,
+            "impact_score": 1.2,
+            "call_count": 3,
+            "shapes": ["(4,4)"],
             "kernel_path": "launch.py",
         }
     ]

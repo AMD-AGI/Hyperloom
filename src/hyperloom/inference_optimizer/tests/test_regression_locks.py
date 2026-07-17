@@ -120,7 +120,11 @@ async def test_programmatic_handler_advances_target_cursor(session_dir, monkeypa
 
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/tmp/trace.json"}},
+            payload={
+                "target_agent": "kernel_agent",
+                "kind": "trace_analyze",
+                "params": {"trace_input": "/tmp/trace.json"},
+            },
         )
         await c._handle_intent("orchestration", intent)
 

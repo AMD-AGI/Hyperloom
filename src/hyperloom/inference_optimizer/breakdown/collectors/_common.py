@@ -19,7 +19,6 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json, read_jsonl
 
 
-
 # Shared helpers
 def _load_json_safe(path: Path | None, warnings: list[str]) -> Any | None:
     """Parse a JSON file, recording any failure instead of raising.
@@ -372,4 +371,3 @@ def _scan_profile_reports(session_dir: Path) -> list[tuple[Path, Path]]:
         if report is not None:
             out.append((task_dir, report))
     return out
-

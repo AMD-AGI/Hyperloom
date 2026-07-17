@@ -31,10 +31,7 @@ def _heartbeat() -> Intent:
 
 def _build_backends() -> dict[str, Backend]:
     plan = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {
-        name: MockBackend(plan, name=name)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
-    }
+    return {name: MockBackend(plan, name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")}
 
 
 @pytest.fixture
@@ -122,9 +119,7 @@ async def test_needs_review_with_evidence_reauthors_once(coord: Coordinator) -> 
     assert fb["required_evidence"] == _ADVISORY["required_evidence"]
     assert fb["advice_text"] == _ADVISORY["advice_text"]
     assert fb["risks"] == _ADVISORY["risks"]
-    assert (
-        coord.shared_state.specialist_reauthor_attempts[_CANDIDATE["candidate_id"]] == 1
-    )
+    assert coord.shared_state.specialist_reauthor_attempts[_CANDIDATE["candidate_id"]] == 1
 
 
 @pytest.mark.asyncio
@@ -164,10 +159,7 @@ async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
     notes = created[0]["params"]["notes"]
     assert "profile showing the kernel is the bottleneck" in notes
     assert "narrow the patch to the MoE gemm path" in notes
-    assert (
-        coord.shared_state.specialist_reauthor_attempts[_CANDIDATE["candidate_id"]]
-        == _AUTHORED_LANE_MAX_ATTEMPTS
-    )
+    assert coord.shared_state.specialist_reauthor_attempts[_CANDIDATE["candidate_id"]] == _AUTHORED_LANE_MAX_ATTEMPTS
 
 
 @pytest.mark.asyncio
@@ -239,9 +231,7 @@ async def test_authoring_integrate_patch_reauthors_and_records_old_task(
         from_agent="coordinator",
         action_name="integrate_patch",
         predicted_gain_pct=0.0,
-        payload={
-            "params": {"framework_agent_authoring": True, "specialist_task_id": "spec-old"}
-        },
+        payload={"params": {"framework_agent_authoring": True, "specialist_task_id": "spec-old"}},
     )
 
     await coord._maybe_reauthor_from_critic_feedback(pending, dict(_ADVISORY))

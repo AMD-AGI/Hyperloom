@@ -397,7 +397,10 @@ async def _run_mode_kernels(args: argparse.Namespace) -> int:
         print(f"config not found: {config}", file=sys.stderr)
         return 2
 
-    root = args.output_root or Path(tempfile.gettempdir()) / f"ab_kernel_usage_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    root = (
+        args.output_root
+        or Path(tempfile.gettempdir()) / f"ab_kernel_usage_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    )
     root.mkdir(parents=True, exist_ok=True)
 
     base, a_extra, b_extra = _arm_extras(args.base_extra_args, args.arm_b_suffix)
@@ -553,7 +556,10 @@ async def _run_mode_magpie(args: argparse.Namespace) -> int:
         print(f"config not found: {config}", file=sys.stderr)
         return 2
 
-    root = args.output_root or Path(tempfile.gettempdir()) / f"ab_torch_compile_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    root = (
+        args.output_root
+        or Path(tempfile.gettempdir()) / f"ab_torch_compile_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    )
     root.mkdir(parents=True, exist_ok=True)
 
     base, a_extra, b_extra = _arm_extras(args.base_extra_args, args.arm_b_suffix)

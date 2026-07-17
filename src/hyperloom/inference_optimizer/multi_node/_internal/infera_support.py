@@ -77,10 +77,7 @@ def idle_worker_entrypoint(*, role: str, ssh_port_base: int = 2222) -> str:
         str: Shell command executed as the pod entryPoint (before base64).
     """
     role_base = int(ssh_port_base) + ssh_role_port_offset(role)
-    return (
-        f"export MN_SSH_PORT=$(( {role_base} + ${{LWS_WORKER_INDEX:-0}} )); "
-        f"exec {_INFERA_IDLE_SCRIPT}"
-    )
+    return f"export MN_SSH_PORT=$(( {role_base} + ${{LWS_WORKER_INDEX:-0}} )); exec {_INFERA_IDLE_SCRIPT}"
 
 
 def _service_roles_for(pd_mode: str) -> list[str]:

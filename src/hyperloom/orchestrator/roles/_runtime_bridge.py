@@ -76,13 +76,11 @@ def invoke_runtime_cli(
         )
     except subprocess.TimeoutExpired as exc:
         raise BackendError(
-            f"{agent_label} runtime.cli {call.phase} timed out after "
-            f"{timeout_sec}s (cwd={call.cwd})"
+            f"{agent_label} runtime.cli {call.phase} timed out after {timeout_sec}s (cwd={call.cwd})"
         ) from exc
     except FileNotFoundError as exc:
         raise BackendError(
-            f"{agent_label} runtime.cli {call.phase} could not start "
-            f"(python={sys.executable!r}, cwd={call.cwd}): {exc}"
+            f"{agent_label} runtime.cli {call.phase} could not start (python={sys.executable!r}, cwd={call.cwd}): {exc}"
         ) from exc
 
     if proc.returncode != 0:

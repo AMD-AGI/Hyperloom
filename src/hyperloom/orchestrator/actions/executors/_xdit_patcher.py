@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 _XFUSER_REL = ("model_executor", "models", "runner_models", "base_model.py")
 
 # Sentinels the overlay bakes into base_model.py.
-_PROFILER_SENTINEL = "# hyperloom: retain active window"      # repeat=1
+_PROFILER_SENTINEL = "# hyperloom: retain active window"  # repeat=1
 _ANNOT_SENTINEL = "# hyperloom: per-denoise-step annotation"  # per-step
 
 # First image tag that bakes the adaptations (for the remediation message).
@@ -87,9 +87,9 @@ def _discover_xfuser_base_models() -> list[Path]:
 
 def _is_baked(src: Path) -> bool:
     """Return whether ``base_model.py`` carries BOTH baked adaptation sentinels."""
-    return file_contains_sentinel(
-        src, _PROFILER_SENTINEL, log, "_xdit_patcher"
-    ) and file_contains_sentinel(src, _ANNOT_SENTINEL, log, "_xdit_patcher")
+    return file_contains_sentinel(src, _PROFILER_SENTINEL, log, "_xdit_patcher") and file_contains_sentinel(
+        src, _ANNOT_SENTINEL, log, "_xdit_patcher"
+    )
 
 
 def verify_xdit_profiler_baked() -> bool:

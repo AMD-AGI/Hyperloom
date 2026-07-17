@@ -26,7 +26,9 @@ def _fake_repo(tmp_path: Path) -> Path:
     # content contains the op but the file name does not.
     (repo / "op_tests" / "test_activation.py").write_text("def test():\n    silu_and_mul(out, x)\n", encoding="utf-8")
     # multi-GPU harness must be demoted below the single-GPU one.
-    (repo / "op_tests" / "test_rmsnorm_multigpu.py").write_text("def test():\n    rmsnorm(x)  # multi_gpu\n", encoding="utf-8")
+    (repo / "op_tests" / "test_rmsnorm_multigpu.py").write_text(
+        "def test():\n    rmsnorm(x)  # multi_gpu\n", encoding="utf-8"
+    )
     # mentions the keyword but is not a test/bench file -> excluded.
     (repo / "op_tests" / "util_rmsnorm.py").write_text("def rmsnorm(x):\n    return x\n", encoding="utf-8")
     (repo / "csrc" / "kernels" / "rmsnorm_quant_kernels.cu").write_text("// rmsnorm\n", encoding="utf-8")
