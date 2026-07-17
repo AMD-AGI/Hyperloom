@@ -13,7 +13,6 @@ import re
 from collections.abc import Mapping
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_SERVER_ARGS_RE = re.compile(r"^EXTRA_[A-Z0-9_]+_ARGS$")
 
 BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
     {
@@ -88,32 +87,6 @@ WORKLOAD_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "SERVER_LOG",
         "TP",
     }
-)
-
-WORKLOAD_ENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
-    "AITER_",
-    "ATOM_",
-    "BENCH_",
-    "CUDA_",
-    "FLASHINFER_",
-    "HF_",
-    "HIP_",
-    "HSA_",
-    "HYPERLOOM_PROFILE_",
-    "MAGPIE_",
-    "MORI_",
-    "NCCL_",
-    "PROFILE_",
-    "PYTORCH_",
-    "RCCL_",
-    "ROCBLAS_",
-    "ROCM_",
-    "ROCR_",
-    "SGLANG_",
-    "TORCH_",
-    "TRITON_",
-    "VLLM_",
-    "XDIT_",
 )
 
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
