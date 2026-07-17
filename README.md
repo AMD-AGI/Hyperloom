@@ -21,12 +21,23 @@ quality and reducing the manual effort traditionally required for GPU optimizati
 
 Hyperloom combines:
 
-- Trace analysis through [TraceLens](https://github.com/AMD-AGI/TraceLens) and
-  [Magpie](https://github.com/AMD-AGI/Magpie).
+- Trace analysis, identifying bottleneck kernels and bridge planning through
+  [TraceLens](https://github.com/AMD-AGI/TraceLens) Agent (backend support
+   from [Magpie](https://github.com/AMD-AGI/Magpie) and
+   [Intellikit](https://github.com/AMDResearch/intellikit))
 - Kernel optimization through the
   [GEAK](https://github.com/AMD-AGI/GEAK) backend.
-- Agentic search space exploration through [Arbor](https://arxiv.org/abs/2606.12563), a tree-based cognition layer with dynamic agents, long-horizon campaigns, and self-evolving optimization guided by a curated knowledge base of hardware learnings, pitfalls, and prior campaign artifacts.
+- Agentic search space exploration through
+  [Arbor](https://arxiv.org/abs/2606.12563), a tree-based cognition layer
+  with dynamic agents, long-horizon campaigns, and self-evolving optimization
+  guided by a curated knowledge base of hardware learnings, pitfalls, and
+  prior campaign artifacts.
 
+For an overview of the various phases that Hyperloom covers while optimizing,
+please have a look at the [optimization loop.](docs/conceptual/optimization-loop.md)
+
+If you encounter any problem or bugs while running Hyperloom, feel free to open an
+[issue](https://github.com/AMD-AGI/Hyperloom/issues/new/choose).
 
 ## Get Started
 

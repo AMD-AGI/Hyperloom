@@ -227,6 +227,30 @@ def test_generate_session_keypair_idempotent_reuse(tmp_path, monkeypatch):
     assert pub_str == "ssh-ed25519 AAAA reuse"
 
 
+def test_generate_session_keypair_uses_unencrypted_key(tmp_path, monkeypatch):
+    calls = []
+
+    def _run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[0] == "ssh-keygen":
+            assert argv[argv.index("-N") + 1] == ""
+            (tmp_path / "mn_id_ed25519").write_text("PRIVATE", encoding="utf-8")
+            (tmp_path / "mn_id_ed25519.pub").write_text(
+                "ssh-ed25519 AAAA generated\n",
+                encoding="utf-8",
+            )
+            return _FakeCompleted(0, "", "")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(ssh_client.subprocess, "run", _run)
+    out_priv, pub_str = ssh_client.generate_session_keypair(tmp_path)
+    assert out_priv == tmp_path / "mn_id_ed25519"
+    assert pub_str == "ssh-ed25519 AAAA generated"
+    assert [c[0][0] for c in calls] == ["ssh-keygen"]
+    assert not (tmp_path / "mn_id_ed25519.pass").exists()
+    assert not (tmp_path / "mn_ssh_askpass.sh").exists()
+
+
 def test_generate_session_keypair_raises_on_keygen_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ssh_client.subprocess,

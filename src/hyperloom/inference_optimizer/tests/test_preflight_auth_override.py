@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
 import subprocess
 import sys
 from typing import Any
@@ -96,6 +97,60 @@ def test_derive_anthropic_base_url_strips_openai_v1_suffix():
         cli_credentials._derive_anthropic_base_url("https://gateway.example/api/v1/llm-proxy/v1/")
         == "https://gateway.example/api/v1/llm-proxy"
     )
+
+
+def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
+    monkeypatch.delenv("REPO_ROOT", raising=False)
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "LD_PRELOAD=/tmp/evil.so\nOPENAI_BASE_URL=https://evil.example/v1\n",
+        encoding="utf-8",
+    )
+    cli_preflight._load_dotenv_fallback()
+    assert "LD_PRELOAD" not in os.environ
+    assert os.environ.get("OPENAI_BASE_URL") != "https://evil.example/v1"
+
+
+def test_dotenv_fallback_filters_explicit_repo_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    (tmp_path / ".env").write_text(
+        "LD_PRELOAD=/tmp/evil.so\n"
+        "PYTHONSTARTUP=/tmp/pwn.py\n"
+        "OPENAI_BASE_URL=https://gateway.example/v1\n",
+        encoding="utf-8",
+    )
+    cli_preflight._load_dotenv_fallback()
+    assert "LD_PRELOAD" not in os.environ
+    assert "PYTHONSTARTUP" not in os.environ
+    assert os.environ["OPENAI_BASE_URL"] == "https://gateway.example/v1"
+
+
+def test_dotenv_fallback_parses_safe_lines_and_preserves_env_wins(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://operator.example/v1")
+    monkeypatch.delenv("HYPERLOOM_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    (tmp_path / ".env").write_text(
+        "\n"
+        "# comment\n"
+        "export HYPERLOOM_RUNTIME_DIR='/runtime from env'\n"
+        "OPENAI_BASE_URL=https://from-file.example/v1\n"
+        "TRACELENS_ROOT=/path/to/your/TraceLens\n"
+        "NO_EQUALS_LINE\n"
+        "BAD-NAME=drop\n",
+        encoding="utf-8",
+    )
+
+    cli_preflight._load_dotenv_fallback()
+
+    assert os.environ["HYPERLOOM_RUNTIME_DIR"] == "/runtime from env"
+    assert os.environ["OPENAI_BASE_URL"] == "https://operator.example/v1"
+    assert "TRACELENS_ROOT" not in os.environ
+    err = capsys.readouterr().err
+    assert "BAD-NAME" in err
 
 
 def test_preflight_resolves_urls_and_fans_out_auth_aliases(
@@ -1727,3 +1782,27 @@ def test_expected_framework_guard_unset_is_noop(monkeypatch):
     # No env pins -> guard is a no-op.
     cli._enforce_expected_framework("sglang")
     cli._enforce_expected_framework("anything")
+
+
+def test_resume_model_path_allows_huggingface_id(monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", raising=False)
+
+    assert cli._validate_resume_model_path("org/model-name_1") == "org/model-name_1"
+
+
+def test_resume_model_path_allows_configured_absolute_root(tmp_path, monkeypatch):
+    root = tmp_path / "models"
+    model = root / "M"
+    model.mkdir(parents=True)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", str(root))
+
+    assert cli._validate_resume_model_path(str(model)) == str(model.resolve())
+
+
+def test_resume_model_path_rejects_untrusted_absolute_path(tmp_path, monkeypatch):
+    model = tmp_path / "evil"
+    model.mkdir()
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", raising=False)
+
+    with pytest.raises(ValueError, match="outside allowed model roots"):
+        cli._validate_resume_model_path(str(model))

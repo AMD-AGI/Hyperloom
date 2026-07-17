@@ -29,6 +29,10 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env_safety import (
+    filter_untrusted_env_mapping,
+    is_allowed_workload_env_key,
+)
 from hyperloom.inference_optimizer.session.paths import asset_root
 from ._grid_runner import (
     compact_json_server_args,
@@ -40,6 +44,7 @@ from ._grid_runner import (
     server_args_env_name,
 )
 from ._grid_server_args import remove_server_args
+from ._grid_server_args import validate_server_args_shell_safe
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
@@ -49,6 +54,7 @@ from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
     _load_model_config_dict,
     _model_is_gemma2,
+    _sparse_kv_block_size,
 )
 
 log = logging.getLogger(__name__)
@@ -686,7 +692,13 @@ def materialize_config_with_envs(
         envs[_ref_fw_env] = (
             merge_server_args(ref_args, _ref_existing) if _ref_existing else ref_args
         )
-    for _rk, _rv in (reference_envs or {}).items():
+    safe_reference_envs, dropped_reference_envs = filter_untrusted_env_mapping(
+        reference_envs,
+        allow_predicate=is_allowed_workload_env_key,
+    )
+    for _rk in dropped_reference_envs:
+        log.warning("Dropping unsafe reference_envs key %s before benchmark materialization", _rk)
+    for _rk, _rv in safe_reference_envs.items():
         envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
@@ -706,7 +718,13 @@ def materialize_config_with_envs(
             envs[framework_env] = merge_server_args(existing, server_args)
         elif not replace_args:
             envs[framework_env] = server_args
-    for key, value in (extra_envs or {}).items():
+    safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
+        extra_envs,
+        allow_predicate=is_allowed_workload_env_key,
+    )
+    for _dk in dropped_extra_envs:
+        log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
+    for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     framework_env = server_args_env_name(bench.get("framework"))
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
@@ -810,6 +828,36 @@ def materialize_config_with_envs(
                     if _mimo_hf_existing
                     else _mimo_arch_override
                 )
+    # Sparse-attention KV-cache block size (config-derived, model-agnostic).
+    # Models like MiniMax-M3 (MSA) place the main K/V and the indexer side-cache
+    # in one KV-cache group whose sparse backends only accept the model's
+    # sparse_attention_config.sparse_block_size (e.g. 128). vLLM's default
+    # --block-size 16 (and the value Magpie bakes in when EXTRA_VLLM_ARGS is
+    # empty) has no common block size with it, so KV-cache init aborts with
+    # "No common block size for 16" -- baseline, roofline, and every
+    # explore/sweep variant crash at startup. Read the required size from the
+    # model config and pin --block-size at this shared choke point so it rides
+    # EXTRA_VLLM_ARGS on every path (the roofline path in particular seeds from
+    # the current-best delta and would otherwise drop the baseline's block size
+    # and fall back to the default). vLLM-only: --block-size is a vLLM flag
+    # (sglang rejects it; its sparse page size is set differently). Merge (never
+    # overwrite) and skip when a --block-size is already pinned so an explicit
+    # operator/explore choice wins; the later dedup_vllm_server_args collapses
+    # any duplicate last-wins anyway. Config unreadable (e.g. an uncached
+    # hub-id) -> None -> no injection, prior behaviour preserved.
+    if "vllm" in str(bench.get("framework") or "").lower():
+        _sparse_bs = _sparse_kv_block_size(str(model_path or bench.get("model") or ""))
+        if _sparse_bs:
+            from ._grid_runner import merge_server_args
+
+            _sp_fw_env = server_args_env_name(bench.get("framework"))
+            _sp_existing = str(envs.get(_sp_fw_env, "")).strip()
+            if "block-size" not in _sp_existing and "block_size" not in _sp_existing:
+                envs[_sp_fw_env] = (
+                    merge_server_args(_sp_existing, f"--block-size {_sparse_bs}")
+                    if _sp_existing
+                    else f"--block-size {_sparse_bs}"
+                )
     # sglang server-arg guards, applied at the FINAL framework env so any
     # operator-pinned flag is honored and never doubled. No-ops for vllm/atom.
     # Single choke point every benchmark path funnels through.
@@ -871,6 +919,7 @@ def materialize_config_with_envs(
     resolved_server_args = compact_json_server_args(
         resolved_server_args, bench.get("framework"),
     )
+    resolved_server_args = validate_server_args_shell_safe(resolved_server_args)
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
     # ── Client trust-remote-code (model-agnostic) ─────────────────────────

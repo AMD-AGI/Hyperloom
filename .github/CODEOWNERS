@@ -34,10 +34,7 @@
 /*.yml                                                          @AMD-AGI/SaFE
 /*.toml                                                         @AMD-AGI/SaFE
 
-# v0.6 product code (Coordinator + 4 agents)
+# v0.6 product code (Coordinator + agents)
 /inference_optimizer/                                           @AMD-AGI/SaFE
 /critic-agent/                                                  @AMD-AGI/SaFE
 /kernel-agent/                                                  @AMD-AGI/SaFE
-
-# CI orchestration that drives Claw Agents end-to-end
-/ci/                                                            @AMD-AGI/SaFE

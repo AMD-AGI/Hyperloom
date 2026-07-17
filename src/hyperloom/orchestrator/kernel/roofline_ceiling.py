@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes
+
 
 #: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase).
 #: ``hbm_bw_gbps`` is vendor peak; ``peak_tflops`` is DENSE peak (missing key
@@ -637,6 +639,11 @@ class ModelMeta:
     num_experts: int = 0
     experts_per_tok: int = 0
     expert_weight_bytes: int = 0
+    # Per-element bytes for the expert (routed FFN) weights. Some MoE checkpoints
+    # store experts at a *different* precision than the rest of the model (e.g.
+    # DeepSeek-V4 ``expert_dtype: fp4`` while ``quant_method: fp8``). 0 ⇒ same as
+    # ``weight_dtype_bytes`` (dense or uniform-precision MoE).
+    expert_weight_dtype_bytes: float = 0.0
     # Extra HF config fields for per-op PerfModel breakdown (0 = unavailable).
     hidden_size: int = 0
     intermediate_size: int = 0
@@ -699,9 +706,18 @@ def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
     if not cfg.is_file():
         return None
     try:
-        return json.loads(cfg.read_text(encoding="utf-8"))
+        data = json.loads(cfg.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(data, dict):
+        return None
+    # Multimodal wrappers (e.g. Kimi-K2 kimi_k25) nest the real decoder shape /
+    # MoE config under text_config/llm_config/language_config; flatten it (nested
+    # wins) so num_experts / hidden_size / moe_intermediate_size / kv-heads reach
+    # the ceiling readers instead of degrading to a dense full-weight roofline
+    # (num_experts=0 -> active_weight_bytes = full weight_bytes; PerfModel falls
+    # back to the legacy top-down formula).
+    return _merge_config_scopes(data)
 
 
 def _derive_kv_heads(cfg: dict[str, Any]) -> int:
@@ -743,13 +759,23 @@ def _compute_expert_decomposition(
     *,
     weight_bytes: int,
     dtype_bytes: float,
+    expert_dtype_bytes: float = 0.0,
 ) -> tuple[int, int, int, int]:
     """MoE decomposition for the batch-aware roofline; returns ``(active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok)``. Safe-degrades to ``(weight_bytes, 0, 0, 0)``. Handles num_experts / n_routed_experts / num_local_experts aliases.
+
+    ``expert_dtype_bytes`` sizes the routed-expert weights when they are stored
+    at a different precision than the rest of the model (e.g. DeepSeek-V4
+    ``expert_dtype: fp4`` under ``quant_method: fp8``); ``0`` falls back to
+    ``dtype_bytes``. Using the global dtype here over-counts expert bytes for
+    such checkpoints, tripping the ``total_expert_bytes >= weight_bytes``
+    safe-degrade and silently dropping the entire MoE from the ceiling.
 
     Args:
         cfg: Parsed HF ``config.json``.
         weight_bytes: Total weight bytes (the safe-degrade fallback).
-        dtype_bytes: Weight bytes-per-element.
+        dtype_bytes: Weight bytes-per-element (non-expert / fallback).
+        expert_dtype_bytes: Bytes-per-element for the routed-expert weights;
+            ``0`` falls back to ``dtype_bytes``.
 
     Returns:
         A tuple of ``(active_weight_bytes, total_expert_bytes, num_experts,
@@ -767,9 +793,10 @@ def _compute_expert_decomposition(
     hidden_size = int(cfg.get("hidden_size") or 0)
     num_layers = int(cfg.get("num_hidden_layers") or 0)
     moe_inter = int(cfg.get("moe_intermediate_size") or cfg.get("intermediate_size") or 0)
-    if hidden_size <= 0 or num_layers <= 0 or moe_inter <= 0 or dtype_bytes <= 0:
+    expert_bpe = expert_dtype_bytes if expert_dtype_bytes > 0 else dtype_bytes
+    if hidden_size <= 0 or num_layers <= 0 or moe_inter <= 0 or expert_bpe <= 0:
         return int(weight_bytes), 0, 0, 0
-    expert_bytes_per_layer = num_experts * 3 * hidden_size * moe_inter * dtype_bytes
+    expert_bytes_per_layer = num_experts * 3 * hidden_size * moe_inter * expert_bpe
     total_expert_bytes = int(num_layers * expert_bytes_per_layer)
     if total_expert_bytes <= 0 or total_expert_bytes >= int(weight_bytes):
         return int(weight_bytes), 0, 0, 0
@@ -826,10 +853,16 @@ def load_model_meta(
     if isinstance(quant_cfg, dict):
         quant_tag = str(quant_cfg.get("quant_method", "")).strip().lower()
     dtype_bytes = _resolve_dtype_bytes(quant_tag or cfg.get("torch_dtype") or cfg.get("dtype") or precision_hint)
+    # Routed experts may be stored at a distinct precision (DeepSeek-V4
+    # ``expert_dtype: fp4`` under fp8 attention). Fall back to the global dtype
+    # when the field is absent (uniform-precision MoE / dense).
+    expert_dtype_raw = str(cfg.get("expert_dtype") or "").strip()
+    expert_dtype_bytes = _resolve_dtype_bytes(expert_dtype_raw) if expert_dtype_raw else dtype_bytes
     active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok = _compute_expert_decomposition(
         cfg,
         weight_bytes=weight_bytes,
         dtype_bytes=dtype_bytes,
+        expert_dtype_bytes=expert_dtype_bytes,
     )
     intermediate_size = int(cfg.get("intermediate_size") or 0)
     moe_intermediate_size = int(cfg.get("moe_intermediate_size") or 0)
@@ -845,6 +878,7 @@ def load_model_meta(
         num_experts=num_experts,
         experts_per_tok=experts_per_tok,
         expert_weight_bytes=total_expert_bytes,
+        expert_weight_dtype_bytes=(expert_dtype_bytes if num_experts > 0 else 0.0),
         hidden_size=int(cfg.get("hidden_size") or 0),
         intermediate_size=intermediate_size,
         moe_intermediate_size=moe_intermediate_size,
@@ -1879,6 +1913,9 @@ def compute_roofline_from_perfmodel(
         return None
     f_peak = f_peak_tflops * 1e12
     bpe = float(meta.weight_dtype_bytes or 2.0)
+    # Routed-expert weights may be a distinct precision (e.g. DeepSeek-V4 fp4
+    # experts under fp8 attention); size the MoE reads with it. 0 ⇒ same as bpe.
+    expert_bpe = float(meta.expert_weight_dtype_bytes or bpe)
     # Activations (input/output) are at least bf16 even for quantized-weight models.
     act_bpe = max(bpe, 2.0)
 
@@ -1974,7 +2011,7 @@ def compute_roofline_from_perfmodel(
                 meta.moe_intermediate_size,
                 meta.num_experts,
                 meta.experts_per_tok,
-                bpe,
+                expert_bpe,
                 act_bpe,
             )
             t_moe, side_moe, t_mem_moe, t_cmp_moe = _roofline_time(fl_moe, by_moe)

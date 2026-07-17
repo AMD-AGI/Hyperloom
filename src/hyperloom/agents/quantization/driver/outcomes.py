@@ -16,7 +16,7 @@ from __future__ import annotations
 
 try:  # Python 3.11+
     from enum import StrEnum
-except ImportError:  # Python 3.10 fallback
+except ImportError:  # pragma: no cover - Python 3.10 StrEnum shim
     from enum import Enum
 
     class StrEnum(str, Enum):

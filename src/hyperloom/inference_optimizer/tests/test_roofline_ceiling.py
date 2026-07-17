@@ -27,6 +27,7 @@ from hyperloom.orchestrator.kernel.roofline_ceiling import (
     compute_kv_bytes_per_token,
     compute_peak_from_state,
     compute_roofline_breakdown_from_state,
+    compute_roofline_from_perfmodel,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,
     resolve_runtime_dtype,
@@ -240,6 +241,7 @@ def _write_synthetic_model(
     num_local_experts: int | None = None,
     quant_method: str | None = None,
     dtype: str | None = None,
+    expert_dtype: str | None = None,
 ) -> None:
     """Lay down a minimal HF-shaped model dir; optional kwargs emit MHA / MoE / quant / alias variants."""
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -271,6 +273,8 @@ def _write_synthetic_model(
         }
     if dtype is not None:
         config["dtype"] = dtype
+    if expert_dtype is not None:
+        config["expert_dtype"] = expert_dtype
     (model_dir / "config.json").write_text(json.dumps(config))
     (model_dir / "model.safetensors.index.json").write_text(
         json.dumps({"metadata": {"total_size": total_size}, "weight_map": {}})
@@ -322,6 +326,42 @@ class TestLoadModelMeta:
         meta = load_model_meta(tmp_path / "m")
         assert meta is not None
         assert meta.head_dim == 200
+
+    def test_nested_text_config_moe_is_read(self, tmp_path):
+        # Multimodal wrappers (e.g. Kimi-K2 kimi_k25) nest the decoder shape/MoE
+        # config under text_config; the ceiling reader must flatten it or it
+        # degrades to a dense full-weight roofline (num_experts=0 -> PerfModel
+        # falls back to legacy, active_weight_bytes = full weight_bytes).
+        d = tmp_path / "m"
+        d.mkdir()
+        (d / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "kimi_k25",
+                    "text_config": {
+                        "num_hidden_layers": 4,
+                        "num_attention_heads": 16,
+                        "num_key_value_heads": 8,
+                        "hidden_size": 2048,
+                        "num_experts": 64,
+                        "num_experts_per_tok": 8,
+                        "moe_intermediate_size": 1024,
+                        "torch_dtype": "bfloat16",
+                    },
+                }
+            )
+        )
+        (d / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": 10_000_000_000}, "weight_map": {}})
+        )
+        meta = load_model_meta(d)
+        assert meta is not None
+        assert meta.num_experts == 64
+        assert meta.experts_per_tok == 8
+        assert meta.hidden_size == 2048
+        assert meta.num_kv_heads == 8
+        # MoE decomposition applied -> per-token active bytes below full weights.
+        assert 0 < meta.active_weight_bytes < meta.weight_bytes
 
     def test_missing_safetensors_index_uses_safetensor_file_sizes(self, tmp_path):
         d = tmp_path / "m"
@@ -492,6 +532,107 @@ def _write_qwen3_moe_model(model_dir: Path, *, total_size: int) -> None:
     (model_dir / "model.safetensors.index.json").write_text(
         json.dumps({"metadata": {"total_size": total_size}, "weight_map": {}})
     )
+
+
+def _write_deepseek_v4_model(model_dir: Path, *, total_size: int, expert_dtype: str | None) -> None:
+    """Lay down a DeepSeek-V4-Pro-shaped MoE dir: fp8 attention + (optional) fp4 experts.
+
+    The routed-expert weights, sized at the *global* fp8 dtype, exceed the whole
+    on-disk checkpoint (1547 GB computed vs 865 GB real), which trips the
+    ``total_expert_bytes >= weight_bytes`` safe-degrade. Reading ``expert_dtype``
+    (fp4) is what keeps the decomposition alive.
+    """
+    model_dir.mkdir(parents=True, exist_ok=True)
+    config: dict = {
+        "architectures": ["DeepseekV4ForCausalLM"],
+        "model_type": "deepseek_v4",
+        "num_hidden_layers": 61,
+        "num_attention_heads": 128,
+        "num_key_value_heads": 1,
+        "hidden_size": 7168,
+        "head_dim": 512,
+        "moe_intermediate_size": 3072,
+        "n_routed_experts": 384,
+        "num_experts_per_tok": 6,
+        "torch_dtype": "bfloat16",
+        "quantization_config": {
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128],
+            "activation_scheme": "dynamic",
+        },
+    }
+    if expert_dtype is not None:
+        config["expert_dtype"] = expert_dtype
+    (model_dir / "config.json").write_text(json.dumps(config))
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": total_size}, "weight_map": {}})
+    )
+
+
+class TestSeparateExpertDtype:
+    """DeepSeek-V4 stores routed experts at ``expert_dtype`` (fp4) distinct from the fp8 attention; sizing experts with the global dtype over-counts and drops the whole MoE from the ceiling."""
+
+    _TOTAL = 864_704_792_696  # real DeepSeek-V4-Pro on-disk total_size (bytes)
+
+    def test_fp4_expert_dtype_keeps_moe_decomposition(self, tmp_path):
+        """expert_dtype=fp4 → total expert bytes (~774 GB) < checkpoint → decomposition survives."""
+        _write_deepseek_v4_model(tmp_path / "m", total_size=self._TOTAL, expert_dtype="fp4")
+        meta = load_model_meta(tmp_path / "m")
+        assert meta is not None
+        assert meta.num_experts == 384
+        assert meta.experts_per_tok == 6
+        assert meta.expert_weight_dtype_bytes == 0.5
+        assert 0 < meta.active_weight_bytes < meta.weight_bytes
+        assert 0 < meta.expert_weight_bytes < meta.weight_bytes
+
+    def test_global_fp8_dtype_trips_safe_degrade(self, tmp_path):
+        """Without expert_dtype the experts are sized at fp8 → computed bytes exceed the checkpoint → MoE silently dropped (the bug this fix targets)."""
+        _write_deepseek_v4_model(tmp_path / "m", total_size=self._TOTAL, expert_dtype=None)
+        meta = load_model_meta(tmp_path / "m")
+        assert meta is not None
+        # Safe-degrade path: no expert decomposition, active == total.
+        assert meta.num_experts == 0
+        assert meta.expert_weight_bytes == 0
+        assert meta.active_weight_bytes == meta.weight_bytes
+
+    def test_perfmodel_counts_moe_and_lowers_peak(self, tmp_path):
+        """With fp4 experts the PerfModel emits a moe_fused op and the peak drops far below the attention-only (safe-degraded) ceiling."""
+        state_kwargs = dict(
+            gpu_type="mi355x",
+            tp=8,
+            precision="fp8",
+            framework="vllm",
+            conc=64,
+            isl=1024,
+            osl=1024,
+        )
+        _write_deepseek_v4_model(tmp_path / "fp4", total_size=self._TOTAL, expert_dtype="fp4")
+        _write_deepseek_v4_model(tmp_path / "degraded", total_size=self._TOTAL, expert_dtype=None)
+
+        meta_fp4 = load_model_meta(tmp_path / "fp4")
+        assert meta_fp4 is not None
+        pm = compute_roofline_from_perfmodel(
+            meta=meta_fp4,
+            gpu_type="mi355x",
+            concurrency=64,
+            isl=1024,
+            osl=1024,
+            num_gpus=8,
+            precision_tag="fp8",
+        )
+        assert pm is not None
+        assert any(op.name == "moe_fused" for op in pm.ops)
+
+        fp4_peak = compute_peak_from_state(
+            SimpleNamespace(model_path=str(tmp_path / "fp4"), **state_kwargs)
+        )
+        degraded_peak = compute_peak_from_state(
+            SimpleNamespace(model_path=str(tmp_path / "degraded"), **state_kwargs)
+        )
+        assert fp4_peak > 0.0
+        # Counting the fp4 expert IO must pull the ceiling well below the
+        # attention-only (MoE-dropped) estimate that produced within% ~= 2.6%.
+        assert fp4_peak < degraded_peak * 0.5
 
 
 class TestMoEActiveWeightBytes:

@@ -585,6 +585,7 @@ PY
         result={
             "status": "ok",
             "bench_script": str(bench),
+            "output_dir": str(tmp_path),
             "final_overlay": "/tmp/overlay",
             "bench_client": "inferencex",
             "accepted_config": {

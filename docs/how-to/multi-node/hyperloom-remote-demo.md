@@ -4,11 +4,11 @@ Optimize inference on a **multi-node** GPU cluster (`--nodes >= 2`): Hyperloom
 benchmarks a long-lived remote server, restarts it with new settings each round,
 and improves throughput.
 
-**How you run it:** hand the agent (or Primus-Claw) the **workload skill** at
-`docs/install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md` — it carries the exact
-`optimize` flags and environment for either backend, and the agent launches and
-monitors the run for you. This page explains what that skill contains and what
-each variable means.
+**How you run it:** hand the agent (or Primus-Claw) the
+[**workload skill**](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md),
+which carries the exact `optimize` flags and environment for either backend,
+and the agent launches and monitors the run for you. This page explains what
+that skill contains and what each variable means.
 
 ## Two backends
 

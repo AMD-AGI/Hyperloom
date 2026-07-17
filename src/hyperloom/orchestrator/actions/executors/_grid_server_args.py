@@ -22,6 +22,37 @@ from hyperloom.common.coerce import optional_positive_int, to_str_list
 
 log = logging.getLogger(__name__)
 
+_UNSAFE_SERVER_ARG_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
+
+
+def validate_server_args_shell_safe(server_args: str | None) -> str:
+    """Reject server-arg strings that would be shell control syntax.
+
+    Magpie benchmark scripts expand ``EXTRA_*_ARGS`` through shell wrappers, so
+    this is the final sink-side guard against LLM/payload content escaping from
+    argv-like flags into shell control operators.
+    """
+    args = str(server_args or "").strip()
+    if not args:
+        return ""
+    if _UNSAFE_SERVER_ARG_CHARS_RE.search(args):
+        raise ValueError("extra_server_args contains shell control characters")
+    try:
+        tokens = shlex.split(args)
+    except ValueError as exc:
+        raise ValueError(f"extra_server_args is not shell-tokenizable: {exc}") from exc
+    expect_value = False
+    for token in tokens:
+        if token.startswith("-"):
+            expect_value = "=" not in token
+            continue
+        if expect_value:
+            expect_value = False
+            continue
+        raise ValueError("extra_server_args must be argv-like flags, not bare positional arguments")
+    return args
+
+
 def server_args_env_name(framework: str | None) -> str:
     """Return the Magpie env var used to append backend server args.
 
