@@ -308,20 +308,20 @@ def _parse_lws_ordinal(pod_id: str) -> int | None:
 
 def frontend_service_url(
     workload_id: str,
-    workspace: str,
+    namespace: str,
     service_info: dict[str, Any] | None = None,
     *,
     port: int = INFERA_FRONTEND_PORT,
 ) -> str:
     """Resolve the Infera frontend base URL for benchmarks.
 
-    Prefers the live SaFE service info (clusterIp / dns) when present; falls
-    back to the conventional ``http://<wid>.<workspace>.svc.cluster.local:<port>``.
+    Prefers the live service info (clusterIp / dns) when present; falls
+    back to the conventional ``http://<wid>.<namespace>.svc.cluster.local:<port>``.
 
     Args:
         workload_id: The Infera workload id.
-        workspace: The Kubernetes namespace / workspace name.
-        service_info: Optional live SaFE service info (internalDomain / dns /
+        namespace: The Kubernetes namespace the workload runs in.
+        service_info: Optional live service info (internalDomain / dns /
             clusterIp / port).
         port: Default frontend HTTP port used when none is in ``service_info``.
 
@@ -346,7 +346,7 @@ def frontend_service_url(
         if host:
             host = host.split("://", 1)[-1].rstrip("/")
             return f"http://{host}:{svc_port}"
-    return f"http://{workload_id}.{workspace}.svc.cluster.local:{port}"
+    return f"http://{workload_id}.{namespace}.svc.cluster.local:{port}"
 
 
 # sglang PD bootstrap rendezvous port (SaFE common.InferaBootstrapPort).
