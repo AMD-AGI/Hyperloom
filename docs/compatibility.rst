@@ -136,7 +136,7 @@ Hyperloom does not install ROCm or torch itself.
      - Recommended
      - Notes
    * - ROCm
-     - 7.2.x
+     - 7.2.0
      - Matches the validated framework stacks above.
    * - Python
      - 3.12
