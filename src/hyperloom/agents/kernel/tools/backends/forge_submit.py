@@ -13,6 +13,7 @@ import fcntl
 import logging
 import os
 import re
+import shlex
 import shutil
 import site
 import subprocess
@@ -654,7 +655,7 @@ def _remove_worktree(kernel_repo: str, source_file: str, wt: str, branch: str) -
 # emits 'allclose: True/False' and 'wall_ms: <v>'.
 _ADAPTER_TEMPLATE = '''#!/usr/bin/env python3
 """Auto-generated Forge driver-adapter wrapping a Hyperloom harness."""
-import argparse, os, re, subprocess, sys
+import argparse, os, re, shlex, subprocess, sys
 
 TEST_COMMAND = {test_command!r}
 WORKTREE = {worktree!r}
@@ -666,7 +667,10 @@ def _run_harness(command=None):
     # aiter perftest only logs "avg: N us/iter" (which bench-mode parses) when
     # AITER_LOG_MORE is set; otherwise the timing is buried in a pandas table.
     env.setdefault("AITER_LOG_MORE", "1")
-    p = subprocess.run(command or TEST_COMMAND, shell=True, cwd=WORKTREE, env=env,
+    # Run argv-only (shell=False): the test_command is tokenised, never handed
+    # to a shell, so it cannot smuggle shell control operators into the host.
+    argv = shlex.split(command or TEST_COMMAND)
+    p = subprocess.run(argv, shell=False, cwd=WORKTREE, env=env,
                        capture_output=True, text=True)
     return p.returncode, (p.stdout or "") + "\\n" + (p.stderr or "")
 
@@ -761,8 +765,33 @@ main()
 '''
 
 
+_UNSAFE_TEST_COMMAND_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
+
+
+def _validate_test_command_argv_like(test_command: str) -> str:
+    """Reject a test_command that would rely on shell control syntax.
+
+    The adapter runs the command argv-only (shell=False); this sink-side guard
+    rejects shell control operators up-front so a benchmark/test command that
+    silently depended on a shell fails loudly instead of misbehaving.
+    """
+    cmd = str(test_command or "").strip()
+    if not cmd:
+        return ""
+    if _UNSAFE_TEST_COMMAND_CHARS_RE.search(cmd):
+        raise ValueError(
+            "test_command must be argv-like and cannot contain shell control characters"
+        )
+    try:
+        shlex.split(cmd)
+    except ValueError as exc:
+        raise ValueError(f"test_command is not shell-tokenizable: {exc}") from exc
+    return cmd
+
+
 def _build_driver_adapter(test_command: str, worktree: str, output_dir: Path) -> str:
     """Write the driver-adapter script and return its path."""
+    test_command = _validate_test_command_argv_like(test_command)
     adapter = output_dir / "forge_driver_adapter.py"
     adapter.write_text(_ADAPTER_TEMPLATE.format(test_command=test_command, worktree=worktree))
     adapter.chmod(0o755)

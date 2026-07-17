@@ -111,8 +111,16 @@ _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 
 
 def _extract_review_json(text: str) -> dict[str, Any] | None:
-    """Pull the first valid ``{"review_verdicts": ...}`` object out of a reply."""
-    return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE)
+    """Pull the Critic's own ``{"review_verdicts": ...}`` object out of a reply.
+
+    Uses ``last=True`` so the model's final answer wins over any earlier
+    fenced block echoed from the (attacker-influenceable) proposal payload:
+    the genuine verdict is the last block the Critic emits, an echoed block
+    can only appear before it.
+    """
+    return extract_first_json_with_key(
+        text, "review_verdicts", _BARE_JSON_RE, last=True
+    )
 
 
 def _anthropic_text_from_content(content: Any) -> str:

@@ -58,6 +58,7 @@ from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
+    _num_gpus_for_config,
     _resolve_session_dir,
     apply_multi_node_invalid_variants,
     reorder_grid_for_multi_node,
@@ -66,6 +67,7 @@ from ._grid_runner import (
     sanitize_script_name,
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
+from ._ray_serving import maybe_serving_lease
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -997,7 +999,20 @@ class ExploreExecutor:
         else:
             decision_deadline_sec = None
 
-        if runnable:
+        # One Ray serving lease (actor) spans the WHOLE round; every variant
+        # reuses it. The per-variant server is still (re)booted via run_grid and
+        # reaped by teardown_lifecycle_server (a driver-side pgid kill, which is
+        # raylet-free) between variants, so switching server args never churns a
+        # Ray worker — only the actor's child server restarts inside the same
+        # long-lived worker. The lease/actor is closed exactly once at round end
+        # (the ``finally`` after the loop) instead of per variant: the old
+        # per-variant ``ray.kill`` made raylet reap a heavyweight GPU worker on
+        # every variant, which destabilised the single-node raylet and took the
+        # whole session down with it (ray_modify.plan.md §4.2 / §12 T1).
+        round_serving_lease = (
+            maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path)) if runnable else None
+        )
+        try:
             for idx, gv in enumerate(runnable):
                 fp = getattr(gv, "canonical_fp", "")
                 provenance = getattr(gv, "provenance", "llm_direct")
@@ -1038,6 +1053,14 @@ class ExploreExecutor:
                 round1_lifecycle = (
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
+                # Ray-managed GPU execution (§12 T1): reuse the round-level Ray
+                # lease (actor) for this variant's warmup + decision + stack-
+                # rebench rounds; they all reuse one persistent server, so no GPU
+                # process outlives the lease. ``None`` on the local path keeps the
+                # legacy behaviour. The actor is NOT closed per variant — only its
+                # child server is reaped in the ``finally`` below (raylet-free);
+                # the lease/actor is released once at round end.
+                variant_lease = round_serving_lease
                 try:
                     # Warm-decision warmup round. Boot the variant's server once
                     # and DISCARD the cold measurement so the decision round runs
@@ -1060,6 +1083,7 @@ class ExploreExecutor:
                             soft_deadline_sec=None,
                             server_lifecycle=round1_lifecycle,
                             base_args_mode=stack_base_args_mode,
+                            serving_lease=variant_lease,
                         )
                         w = warmup_results[0] if warmup_results else None
                         if w is None or getattr(w, "status", "") != "succeeded":
@@ -1141,6 +1165,7 @@ class ExploreExecutor:
                         base_args_mode=stack_base_args_mode,
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
+                        serving_lease=variant_lease,
                     )
                     if not results:
                         # run_grid returns one result per grid entry.
@@ -1437,6 +1462,7 @@ class ExploreExecutor:
                                 preclean_before_run=not lifecycle_eligible,
                                 soft_deadline_sec=decision_deadline_sec,
                                 server_already_ready=lifecycle_eligible,
+                                serving_lease=variant_lease,
                             )
                             stack_rebench_tput = rebench.tput
                             stack_rebench_workspace = rebench.workspace
@@ -1570,14 +1596,24 @@ class ExploreExecutor:
                     if cold_tput:
                         last_run_tput = cold_tput
                 finally:
-                    # Reap the persistent server on every exit path. Idempotent
-                    # + no-op when reuse was ineligible.
+                    # Reap THIS variant's persistent server on every exit path
+                    # (idempotent + no-op when reuse was ineligible). This is a
+                    # driver-side pgid kill (raylet-free), so the next variant
+                    # boots a fresh server inside the SAME long-lived actor. The
+                    # Ray lease/actor itself is released once at round end (§4.2:
+                    # the server is always reaped before the lease is dropped).
                     if lifecycle_eligible:
                         teardown_lifecycle_server(
                             pid_dir=slot,
                             framework=lifecycle_framework,
                             port=lifecycle_port,
                         )
+        finally:
+            # Release the round's Ray serving lease/actor exactly once (this was
+            # a per-variant ``ray.kill`` before — the raylet worker churn that
+            # destabilised the single-node cluster).
+            if round_serving_lease is not None:
+                round_serving_lease.close()
 
         # ----- Ledger compaction (dedup + accepted preservation) -----------
         accepted_fps_now = {_entry_fp(v) for v in (search.get("accepted") or [])}

@@ -256,3 +256,39 @@ def test_multiple_patches_partial_success(fake_repo, output_dir):
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert len(result) == 1
     assert result[0]["patch_file"] == "vllm/fp8.py"
+
+
+def test_non_diff_patch_content_is_skipped(fake_repo, output_dir):
+    # SWSPLAT-42326: KB-sourced patch_content that is not a unified diff must be
+    # skipped before git apply (never applied), leaving the tree untouched.
+    params = {
+        "patches": [{
+            "patch_file": "vllm/fp8.py",
+            "patch_content": "this is not a diff; just prose",
+            "patch_ref": "",
+            "repo": "ROCm/vllm",
+        }],
+        "blocked_patches": [],
+    }
+    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    assert result == []
+    assert "patched = True" not in (fake_repo / "vllm" / "fp8.py").read_text()
+
+
+def test_tree_escaping_patch_content_is_skipped(fake_repo, output_dir):
+    # SWSPLAT-42326: a patch whose header path escapes the tree (absolute path)
+    # must be skipped, not git-applied.
+    escaping = VALID_PATCH.replace("a/vllm/fp8.py", "/etc/evil").replace(
+        "b/vllm/fp8.py", "/etc/evil"
+    )
+    params = {
+        "patches": [{
+            "patch_file": "vllm/fp8.py",
+            "patch_content": escaping,
+            "patch_ref": "",
+            "repo": "ROCm/vllm",
+        }],
+        "blocked_patches": [],
+    }
+    result = _apply_warm_patches(params, str(fake_repo), output_dir)
+    assert result == []
