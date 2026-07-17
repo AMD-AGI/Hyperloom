@@ -717,6 +717,27 @@ def _apply_warm_patches(
                 )
                 continue
 
+        # Structural safety gate on untrusted KB-sourced patch_content before
+        # it is git-applied to the live checkout: reject non-diff blobs and any
+        # patch whose header path escapes the tree (absolute / ``..``). Stale /
+        # missing-target patches are left to git apply's own check so a
+        # legitimate warm patch is never dropped here.
+        from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
+
+        if not is_unified_diff(patch_content):
+            log.warning(
+                "baseline_executor: skipping warm patch %s — not a unified diff",
+                patch_file,
+            )
+            continue
+        _escape = patch_escapes_tree(patch_content)
+        if _escape is not None:
+            log.warning(
+                "baseline_executor: skipping warm patch %s — path escapes tree: %r",
+                patch_file, _escape,
+            )
+            continue
+
         # Write patch to temp file then apply.
         patch_path = patch_log_dir / f"{idx:03d}_{Path(patch_file).stem or 'patch'}.diff"
         patch_path.write_text(patch_content, encoding="utf-8")

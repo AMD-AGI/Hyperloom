@@ -591,8 +591,26 @@ def _build_variant_yaml(
     # ``overlay_pythonpath`` is unset.
     _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
     if _overlay:
-        _cur_pp = str(envs.get("PYTHONPATH", "") or "")
-        envs["PYTHONPATH"] = f"{_overlay}:{_cur_pp}" if _cur_pp else _overlay
+        # Structural containment on the overlay dir before it is prepended to
+        # PYTHONPATH: a legitimate authored-kernel overlay is a single existing
+        # directory (never a ``:``-joined list, never a ``..`` traversal or
+        # control char). Reject anything that would smuggle extra PYTHONPATH
+        # entries or escape via traversal; a real overlay dir is unaffected.
+        _overlay_ok = (
+            ":" not in _overlay
+            and ".." not in Path(_overlay).parts
+            and not any(c in _overlay for c in ("\n", "\r", "\x00"))
+            and Path(_overlay).is_dir()
+        )
+        if _overlay_ok:
+            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
+            envs["PYTHONPATH"] = f"{_overlay}:{_cur_pp}" if _cur_pp else _overlay
+        else:
+            log.warning(
+                "grid: dropping unsafe overlay_pythonpath %r (not a single "
+                "existing directory / contains separator or traversal)",
+                _overlay,
+            )
 
     # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console
     # script) and `/opt/rocm/bin` (`hipcc`); force-prepend both so an
