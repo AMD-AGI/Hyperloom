@@ -59,36 +59,6 @@ _NON_SECRET_TOKEN_ENV_NAMES: frozenset[str] = frozenset(
     }
 )
 
-WORKLOAD_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
-    {
-        "CONC",
-        "EP",
-        "GPU_METRICS_CSV",
-        "HIP_VISIBLE_DEVICES",
-        "HF_HOME",
-        "HF_TOKEN",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "HSA_FORCE_FINE_GRAIN_PCIE",
-        "ISL",
-        "MAX_MODEL_LEN",
-        "MODEL_PATH",
-        "NUM_PROMPTS",
-        "NUM_WARMUPS",
-        "NO_PROXY",
-        "OSL",
-        "PORT",
-        "PROFILE",
-        "PROFILE_EXTRA_BODY",
-        "PROFILE_OSL",
-        "RANDOM_RANGE_RATIO",
-        "ROCR_VISIBLE_DEVICES",
-        "RUN_EVAL",
-        "SERVER_LOG",
-        "TP",
-    }
-)
-
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -192,18 +162,11 @@ def is_allowed_workload_env_key(key: object) -> bool:
     """Return whether an untrusted workload env override is safe to materialize.
 
     Workload env maps come from KB recipes and specialist proposals where
-    unknown-but-valid tuning knobs are common. Gate only the stable hazards:
-    invalid names, loader/shell startup hooks, and non-workload credentials.
+    unknown-but-valid tuning knobs are common. Do not apply a name allowlist or
+    denylist here; the only robust cross-framework rule is valid env-key syntax.
     """
     name = str(key or "").strip()
-    upper = name.upper()
-    if not valid_env_key(upper) or upper in BLOCKED_UNTRUSTED_ENV_NAMES:
-        return False
-    if upper in _NON_SECRET_TOKEN_ENV_NAMES:
-        return True
-    if _SECRET_KEY_RE.search(upper):
-        return upper in WORKLOAD_ENV_EXACT_ALLOWLIST or upper.startswith("HF_")
-    return True
+    return valid_env_key(name)
 
 
 def is_allowed_dotenv_key(key: object) -> bool:
