@@ -5,25 +5,25 @@ description: Run an advanced configurable Hyperloom optimization session with ex
 
 # Hyperloom Custom Advanced Run
 
-Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the
-optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If
-`HYPERLOOM_SKILL_PATH` is missing, fall back to
-`@hyperloom/inference_optimizer/SKILL.md` (wheel install) or
-`@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill
-provides an advanced workload configuration flow for users who want explicit
-control over model, framework, workload shape, optimization budget, and phase
-toggles.
+Use this skill after `/hyperloom-setup` has prepared the current Hyperloom
+workspace. Setup writes `.env` with the run mode, target host, framework, LLM
+configuration, and `USER_DATA_PATH`; this skill reuses those values and asks
+only for the advanced workload choices that differ from the fixed demo presets.
 
-## Run Mode
+## Setup Configuration
 
-Resolve the run mode before launching Hyperloom:
+Load `.env` from the current Hyperloom workspace before launching. Treat it as
+the source of truth for setup-owned values such as `HYPERLOOM_RUN_MODE`,
+`HYPERLOOM_DOCKER_TARGET_HOST`, `FRAMEWORK`, `USER_DATA_PATH`, and LLM provider
+settings. Do not ask the user to re-enter setup values that are already present.
 
-1. If `HYPERLOOM_RUN_MODE=baremetal` or it is unset, run this demo directly on
-   the host.
-2. If `HYPERLOOM_RUN_MODE=docker`, this skill owns the Docker setup. Ask the
-   user which image to use unless `HYPERLOOM_IMAGE` is already set. Use a ROCm
-   image that already contains the selected framework; do not install the
-   framework inside Docker.
+When `HYPERLOOM_RUN_MODE=baremetal` or it is unset, run this demo directly in
+the current environment.
+
+When `HYPERLOOM_RUN_MODE=docker`, this skill owns the Docker setup. Use
+`HYPERLOOM_IMAGE` when it is set. Otherwise choose a recommended ROCm image for
+the selected framework. The image must already contain the framework; do not
+install the framework inside Docker.
 
 In docker mode:
 - If `hyperloom-setup` already ran, do **not** re-run setup on the host.
@@ -40,9 +40,6 @@ Suggested Docker images:
 - `vllm`: `docker.io/primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`
 - `sglang` MI300X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix`
 - `sglang` MI355X: `docker.io/primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix`
-
-For `atom` or `xdit`, require a custom `HYPERLOOM_IMAGE` that already contains
-the selected framework.
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
@@ -85,10 +82,10 @@ docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
 
 ## Advanced Configuration
 
-Before launch, read the repository-root `.env` file if it exists and load the
-needed environment variables from it, such as LLM API keys/base URLs,
-`FRAMEWORK`, `USER_DATA_PATH`, and `HF_TOKEN`. Do not copy secret values into
-the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
+Before launch, load the `.env` file produced by `/hyperloom-setup`, including
+LLM API keys/base URLs, `FRAMEWORK`, `USER_DATA_PATH`, and `HF_TOKEN`. Do not
+copy secret values into the prompt, terminal output, reports, or logs. Do not
+modify `USER_DATA_PATH`.
 
 Use the agent's structured question UI when available. Do not continue until
 all required values are resolved.
@@ -99,7 +96,7 @@ Collect these required values:
   - existing `MODEL_PATH`, when set;
   - custom local path, which must contain `config.json`;
   - Hugging Face repo id plus a local cache directory.
-- Framework: `sglang`, `vllm`, `atom`, or `xdit`. Prefer the existing
+- Framework: `sglang` or `vllm`. Prefer the existing
   `FRAMEWORK` value when it is set; otherwise default to `sglang`.
 - Workload: `TP`, `EP`, `CONC`, `ISL`, `OSL`, `PRECISION`, and optional
   `MAX_MODEL_LEN` / `PROFILE_OSL`.
@@ -168,9 +165,6 @@ Guardrails:
   Hyperloom auto-detect from ROCm/system info.
 - Warn the user when both `--no-explore` and `--no-kernel` are selected; that
   collapses the run mostly to baseline and sweep validation.
-- Warn the user that `--framework atom` is single-node only.
-- For `--framework xdit`, report image/diffusion metrics instead of LLM serving
-  token metrics where applicable.
 - There is no generic `--skip-stage` flag and no `--no-sweep` flag. Compose
   phase behavior from the explicit flags above.
 
