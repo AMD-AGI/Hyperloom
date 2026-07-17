@@ -692,7 +692,25 @@ class FrameworkAgentExecutor:
         applied: list[Path] = []
         apply_errors: list[dict[str, str]] = []
         apply_feedbacks: list[ApplyFeedback] = []
+        # Structural safety gate on the (remote / untrusted) diff before it is
+        # applied to the live framework tree: reject non-diff blobs and any
+        # header path that escapes the tree (absolute / ``..``). Stale /
+        # missing-target diffs are left to git apply's own check so a legitimate
+        # candidate is never dropped here.
+        from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
         for patch in patch_paths:
+            try:
+                _ptext = Path(patch).read_text(encoding="utf-8", errors="replace")
+            except OSError as _exc:
+                apply_errors.append({"patch": str(patch), "stderr": f"unreadable: {_exc!r}"})
+                break
+            if not is_unified_diff(_ptext):
+                apply_errors.append({"patch": str(patch), "stderr": "not a unified diff"})
+                break
+            _escape = patch_escapes_tree(_ptext)
+            if _escape is not None:
+                apply_errors.append({"patch": str(patch), "stderr": f"path escapes tree: {_escape!r}"})
+                break
             if git_tree:
                 ok, err, fb = _git_apply_collect_feedback(framework_root, patch, three_way=False)
                 if not ok:
