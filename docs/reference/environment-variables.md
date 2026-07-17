@@ -289,20 +289,20 @@ discoverable rollup of LLM token spend derived from the per-call ledger
 `decision_trace.token_rollup`, so it always reconciles with that section. No
 env var controls it; it is always present (zeroed on pre-trace sessions).
 
-* `session_total` — whole-session total across every call, with two
+* `session_total`: whole-session total across every call, with two
   convenience figures: `total_in_out` (prompt + completion only) and
   `grand_total` (in + out + all cache-creation + cache-read tokens).
-* `by_component` — per-agent breakdown (orchestration / kernel / critic /
+* `by_component`: per-agent breakdown (orchestration / kernel / critic /
   specialist / proposal_scorer / geak / forge / …), each with the same
   convenience totals.
-* `by_phase` — per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE).
-* `attribution` — `attributed_to_decisions` vs `unattributed` split plus
+* `by_phase`: per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE).
+* `attribution`: `attributed_to_decisions` vs `unattributed` split plus
   `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
   to a KEEP/REVERT or dynamic_action decision (for example, specialist subprocess
   turns) are attributed; orchestration / kernel / critic / proposal_scorer
   turns are LLM-internal and land in `unattributed` (this is expected, not a
   gap in the data).
-* `timeline` — each `action_timeline` row annotated with the tokens that join
+* `timeline`: each `action_timeline` row annotated with the tokens that join
   to it on `task_id`. Rows whose action has no LLM spend show `tokens: null`
   (rather than a zero bucket) to make the sparsity explicit.
 
@@ -317,9 +317,9 @@ To get the single "total tokens for this run" number, read
 These are read by `os.environ` somewhere in the codebase but are
 internal-only — do not set them by hand:
 
-* `HYPERLOOM_KERNEL_AGENT_ROOT` — internal CLI-only handoff to the
+* `HYPERLOOM_KERNEL_AGENT_ROOT`: internal CLI-only handoff to the
   kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
-* Any `_INFERENCE_OPTIMIZER_*_INTERNAL_*` symbol — internal toggles for
+* Any `_INFERENCE_OPTIMIZER_*_INTERNAL_*` symbol: internal toggles for
   the test suite.
 
 If you find one of these in a log message, treat it as diagnostic
@@ -331,5 +331,5 @@ detail rather than something you should tune.
 
 Use these resources for related configuration and reference information:
 
-* [Hyperloom authentication and credentials](authentication.md) — Credential precedence and direct upstream gateway wiring.
-* [Troubleshooting Hyperloom](troubleshooting.md) — Symptom → variable reverse-lookup for common failures.
+* [Hyperloom authentication and credentials](authentication.md): Credential precedence and direct upstream gateway wiring.
+* [Troubleshooting Hyperloom](troubleshooting.md): Symptom → variable reverse-lookup for common failures.

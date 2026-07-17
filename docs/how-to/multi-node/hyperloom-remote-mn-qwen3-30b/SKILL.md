@@ -18,12 +18,12 @@ until a terminal `stop_reason` (`target_reached`, `global_converged`,
 
 ## Prerequisites
 
-- **`NFS_SHARED_ROOT`** — cluster-wide shared mount at the **same absolute path**
+- **`NFS_SHARED_ROOT`**: cluster-wide shared mount at the **same absolute path**
   on the sandbox and every GPU pod (model, tool checkouts, session artifacts).
   Required; local-only paths break multi-node restart and benchmarks.
-- **`--mn-image`** — operator-supplied: `<INFERA_SSHD_IMAGE>` (must include sshd)
+- **`--mn-image`**: operator-supplied: `<INFERA_SSHD_IMAGE>` (must include sshd)
   for infera, `<RAYJOB_IMAGE>` for rayjob.
-- **SaFE (Path A)** — `SAFE_API_URL`, `SAFE_API_KEY`, `SAFE_WORKSPACE` are
+- **SaFE (Path A)**: `SAFE_API_URL`, `SAFE_API_KEY`, `SAFE_WORKSPACE` are
   platform-injected; not passed on the CLI. For an external cluster with no SaFE,
   see `@../hyperloom-remote-demo.md` § Path B.
 

@@ -15,11 +15,11 @@ page, this page wins. Open an issue against the contradicting file.
 
 Hyperloom needs at most two classes of configuration:
 
-- **LLM gateway credentials** — at least one upstream base URL and one API
+- **LLM gateway credentials**: at least one upstream base URL and one API
    key (see [LLM gateway credentials](#llm-gateway-credentials)). On the AMD
    network the usual pair is `SAFE_API_KEY` + `OPENAI_BASE_URL`; split
    Anthropic/OpenAI entrypoints and third-party gateways are also supported.
-- **Path / workspace layout** — run bare-metal setup from the installed
+- **Path / workspace layout**: run bare-metal setup from the installed
    Hyperloom target directory. You normally only set `USER_DATA_PATH`
    (writable artifact root; default `/workspace/hyperloom`); setup writes the
    runtime env files and updates `.env`.
@@ -268,5 +268,5 @@ and all aliases pick up the new value on the next CLI launch.
 
 Use these resources for related configuration and reference information:
 
-* [Environment variables](environment-variables.md) — Every environment variable read by the code, including non-credential tunables.
-* [Troubleshooting Hyperloom](troubleshooting.md) — Common 401 / gateway / Ray-GPU symptoms.
+* [Environment variables](environment-variables.md): Every environment variable read by the code, including non-credential tunables.
+* [Troubleshooting Hyperloom](troubleshooting.md): Common 401 / gateway / Ray-GPU symptoms.
