@@ -42,9 +42,7 @@ _JOURNAL_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
 
 # Statuses meaning a real change was tested/applied then rolled back or rejected
 # on measured grounds → REVERT. Everything else is ``no_promote``.
-_JOURNAL_REVERT_STATUSES: frozenset[str] = frozenset(
-    {"reverted", "accuracy_unavailable_reject", "regression"}
-)
+_JOURNAL_REVERT_STATUSES: frozenset[str] = frozenset({"reverted", "accuracy_unavailable_reject", "regression"})
 
 # Change-kind vocabulary for coarse dashboard grouping.
 KIND_BACKEND: str = "backend"  # --attention-backend, kv_cache_dtype, ...

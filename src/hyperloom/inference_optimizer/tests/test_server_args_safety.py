@@ -33,7 +33,7 @@ def test_allows_speculative_config_json():
         "--chat-template /etc/passwd",
         "--lora-modules name=/evil",
         "--lora-paths /evil",
-        "--hf-overrides '{\"architectures\":[\"Evil\"]}'",
+        '--hf-overrides \'{"architectures":["Evil"]}\'',
         "--config /etc/passwd",
         "--revision evil-branch",
         "--custom-weight-path /evil",

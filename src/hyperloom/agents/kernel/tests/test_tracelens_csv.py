@@ -1037,15 +1037,32 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
 # carry the reusable / non-reusable subsets.
 def _contract_candidates():
     return [
-        {"kernel_id": "k001", "name": "fused_moe", "duration_us": 300.0, "gpu_pct": 30.0,
-         "source_file": "/repo/aiter/moe.py", "reusable_native_kernel": True},
-        {"kernel_id": "k002", "name": "aten::mm", "duration_us": 200.0, "gpu_pct": 20.0,
-         "source_file": "", "reusable_native_kernel": False},
+        {
+            "kernel_id": "k001",
+            "name": "fused_moe",
+            "duration_us": 300.0,
+            "gpu_pct": 30.0,
+            "source_file": "/repo/aiter/moe.py",
+            "reusable_native_kernel": True,
+        },
+        {
+            "kernel_id": "k002",
+            "name": "aten::mm",
+            "duration_us": 200.0,
+            "gpu_pct": 20.0,
+            "source_file": "",
+            "reusable_native_kernel": False,
+        },
         # No ``reusable_native_kernel`` key at all -> non-routable (``is not True``).
-        {"kernel_id": "k003", "name": "Cijk_vendor_gemm", "duration_us": 150.0, "gpu_pct": 15.0,
-         "source_file": ""},
-        {"kernel_id": "k004", "name": "aiter::rmsnorm", "duration_us": 100.0, "gpu_pct": 10.0,
-         "source_file": "/repo/aiter/rmsnorm.py", "reusable_native_kernel": True},
+        {"kernel_id": "k003", "name": "Cijk_vendor_gemm", "duration_us": 150.0, "gpu_pct": 15.0, "source_file": ""},
+        {
+            "kernel_id": "k004",
+            "name": "aiter::rmsnorm",
+            "duration_us": 100.0,
+            "gpu_pct": 10.0,
+            "source_file": "/repo/aiter/rmsnorm.py",
+            "reusable_native_kernel": True,
+        },
     ]
 
 
@@ -2659,8 +2676,7 @@ def test_classify_patchability_still_rejects_aiter_py_dispatcher(monkeypatch):
     src = "/sgl-workspace/aiter/aiter/tuned_gemm.py"
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
     reusable, reason = tla.classify_patchability(
-        {"name": "aten::mm", "source_file": src, "source_type": "python",
-         "library": "pytorch native"},
+        {"name": "aten::mm", "source_file": src, "source_type": "python", "library": "pytorch native"},
     )
     assert reusable is False
 

@@ -9,7 +9,6 @@ import json
 from types import SimpleNamespace
 
 
-
 # --------------------------------------------------------------------------- #
 # orchestrator.orchestration_memory.deterministic_memory_fallback             #
 # --------------------------------------------------------------------------- #
@@ -51,20 +50,10 @@ def test_uses_whole_machine_gpu_lane() -> None:
     assert sp.uses_whole_machine_gpu_lane({"framework_agent_authoring": True}) is True
 
     # Bench-capable (mode=patch & bench=true) specialists take it too.
-    assert (
-        sp.uses_whole_machine_gpu_lane(
-            {"scope": "freeform", "mode": "patch", "bench": True}
-        )
-        is True
-    )
+    assert sp.uses_whole_machine_gpu_lane({"scope": "freeform", "mode": "patch", "bench": True}) is True
 
     # Non-bench patch probes and research specialists keep the disjoint pool.
-    assert (
-        sp.uses_whole_machine_gpu_lane(
-            {"scope": "freeform", "mode": "patch", "bench": False}
-        )
-        is False
-    )
+    assert sp.uses_whole_machine_gpu_lane({"scope": "freeform", "mode": "patch", "bench": False}) is False
     assert sp.uses_whole_machine_gpu_lane({"scope": "freeform", "mode": "research"}) is False
     assert sp.uses_whole_machine_gpu_lane(None) is False
 
@@ -90,9 +79,7 @@ def test_parse_quality_gate_paths(tmp_path) -> None:
     assert res2["quality_gate"] is None
 
     # Valid quality_gate block.
-    (tmp_path / "benchmark_report.json").write_text(
-        json.dumps({"quality_gate": {"passed": True}}), encoding="utf-8"
-    )
+    (tmp_path / "benchmark_report.json").write_text(json.dumps({"quality_gate": {"passed": True}}), encoding="utf-8")
     res3 = ag.parse_quality_gate(tmp_path)
     assert res3["quality_gate"] == {"passed": True}
 

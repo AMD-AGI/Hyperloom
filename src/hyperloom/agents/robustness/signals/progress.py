@@ -245,6 +245,7 @@ class ProgressDetector:
             ),
         )
 
+
 __all__ = [
     "ProgressConfig",
     "ProgressDetector",

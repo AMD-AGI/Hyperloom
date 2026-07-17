@@ -146,9 +146,7 @@ def is_allowed_dotenv_key(key: object) -> bool:
     upper = name.upper()
     if not valid_env_key(upper) or upper in BLOCKED_UNTRUSTED_ENV_NAMES:
         return False
-    return upper in DOTENV_EXACT_ALLOWLIST or any(
-        upper.startswith(prefix) for prefix in DOTENV_PREFIX_ALLOWLIST
-    )
+    return upper in DOTENV_EXACT_ALLOWLIST or any(upper.startswith(prefix) for prefix in DOTENV_PREFIX_ALLOWLIST)
 
 
 def is_allowed_kernel_agent_env_key(key: object) -> bool:

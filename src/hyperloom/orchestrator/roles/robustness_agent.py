@@ -284,7 +284,6 @@ class RobustnessAgentBackend:
         if usage.get("model"):
             metadata["model"] = usage.get("model")
 
-
     def _build_runtime_env(self) -> dict[str, str]:
         """Build the subprocess environment for ``runtime.cli`` invocations.
 

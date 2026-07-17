@@ -346,7 +346,9 @@ class TestExecutor:
 
     @pytest.mark.asyncio
     async def test_skipped_when_no_session_dir_clears_stale_competitor_target(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         from hyperloom.inference_optimizer.session import session_paths
         from hyperloom.orchestrator.knowledge import research_hints

@@ -115,9 +115,7 @@ def test_validate_envelope_payload_rules() -> None:
         validate_envelope({"intents": [{"intent_type": "alert", "payload": "x"}]})
 
     with pytest.raises(IntentEnvelopeValidationError):
-        validate_envelope(
-            {"intents": [{"intent_type": "review_verdict", "payload": {"target_proposal_msg_id": "m1"}}]}
-        )
+        validate_envelope({"intents": [{"intent_type": "review_verdict", "payload": {"target_proposal_msg_id": "m1"}}]})
 
     with pytest.raises(IntentEnvelopeValidationError):
         validate_envelope(
@@ -137,7 +135,5 @@ def test_validate_envelope_payload_rules() -> None:
 
 
 def test_validate_envelope_happy() -> None:
-    env = validate_envelope(
-        {"intents": [{"intent_type": "send_message", "payload": {"topic": "hi", "body_md": "x"}}]}
-    )
+    env = validate_envelope({"intents": [{"intent_type": "send_message", "payload": {"topic": "hi", "body_md": "x"}}]})
     assert env.intents[0].intent_type == "send_message"

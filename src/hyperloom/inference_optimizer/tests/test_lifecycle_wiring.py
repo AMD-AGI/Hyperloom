@@ -276,7 +276,11 @@ async def test_handle_request_failed_handler_emits_error(session_dir, monkeypatc
 
         intent = Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json.gz"}},
+            payload={
+                "target_agent": "kernel_agent",
+                "kind": "trace_analyze",
+                "params": {"trace_input": "/tmp/t.json.gz"},
+            },
         )
         await c._handle_intent("orchestration", intent)
 

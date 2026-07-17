@@ -101,9 +101,7 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     # No premature headline: current_best / gain / stack are untouched.
     assert coord.shared_state.current_best["action"] == "baseline"
     assert coord.shared_state.cumulative_gain == pytest.approx(0.0)
-    assert not any(
-        e.get("action") == "geak_e2e" for e in coord.shared_state.optimization_stack
-    )
+    assert not any(e.get("action") == "geak_e2e" for e in coord.shared_state.optimization_stack)
     assert coord.shared_state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_SWEEP
 
     # The main-flow rebench was enqueued to validate the recovered candidate.
@@ -220,9 +218,7 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs(
 
     await coord._run_geak_kernel_phase(from_phase="KERNEL")
 
-    handoff = json.loads(
-        (tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8")
-    )
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["max_model_len"] == 2248
     assert handoff["mem_fraction"] == pytest.approx(0.9)
     assert handoff["accepted_flags"] == "--no-enable-prefix-caching"

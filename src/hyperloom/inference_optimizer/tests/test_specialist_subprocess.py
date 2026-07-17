@@ -41,19 +41,19 @@ from hyperloom.orchestrator.state.task_registry import Task
 
 def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
-    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sk-secret")
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA0000000000000000")
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
-    monkeypatch.setenv("KB_SERVICE_TOKEN", "kb-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-api-value")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: anthropic-api-value")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "aws-access-key-value")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-token-value")
+    monkeypatch.setenv("KB_SERVICE_TOKEN", "kb-token-value")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "/tmp/session")
     monkeypatch.setenv("LD_PRELOAD", "/tmp/evil.so")
     monkeypatch.setenv("PATH", "/usr/bin")
     env = _build_specialist_env()
     assert env["PATH"] == "/usr/bin"
-    assert env["ANTHROPIC_API_KEY"] == "sk-secret"
-    assert env["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: sk-secret"
-    assert env["AWS_ACCESS_KEY_ID"] == "AKIA0000000000000000"
+    assert env["ANTHROPIC_API_KEY"] == "anthropic-api-value"
+    assert env["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: anthropic-api-value"
+    assert env["AWS_ACCESS_KEY_ID"] == "aws-access-key-value"
     assert "GITHUB_TOKEN" not in env
     assert "KB_SERVICE_TOKEN" not in env
     assert "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR" not in env
@@ -62,12 +62,12 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
 
 def test_build_specialist_env_secret_inheritance_can_be_disabled(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", "0")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
-    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sk-secret")
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA0000000000000000")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-api-value")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: anthropic-api-value")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "aws-access-key-value")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret-value")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-token-value")
     env = _build_specialist_env()
     assert "ANTHROPIC_API_KEY" not in env
     assert "ANTHROPIC_CUSTOM_HEADERS" not in env
@@ -212,7 +212,7 @@ exit 3
 """
     elif behavior == "hang":
         # Sleep past any wall budget without writing done.json.
-        body += 'sleep 600\n'
+        body += "sleep 600\n"
     else:
         raise ValueError(f"unknown behavior {behavior!r}")
     script_path.write_text(body, encoding="utf-8")
@@ -764,9 +764,7 @@ class _FakeGpuSpecialistLease:
         self.env = dict(env or {})
         Path(log_path).write_text("stream-json log line\n", encoding="utf-8")
         # Graceful done — the reaper harvests this and exits.
-        (self._workspace / "specialist_done.json").write_text(
-            json.dumps({"proposal_set": []}), encoding="utf-8"
-        )
+        (self._workspace / "specialist_done.json").write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
         self.alive = False
         return 9999
 

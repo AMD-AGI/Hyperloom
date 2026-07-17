@@ -175,9 +175,7 @@ class PreludePhase(PhaseHandler):
             kept = [
                 p
                 for p in patches
-                if isinstance(p, dict)
-                and not p.get("expired")
-                and _norm(p.get("patch_file")) not in advisory_drop
+                if isinstance(p, dict) and not p.get("expired") and _norm(p.get("patch_file")) not in advisory_drop
             ]
             for p in patches:
                 if isinstance(p, dict) and _norm(p.get("patch_file")) in advisory_drop:

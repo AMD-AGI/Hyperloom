@@ -22,6 +22,7 @@ from hyperloom.orchestrator.actions.executors import _aiter_jit as aj
 # _resolve_lock_sweep_dir
 # ---------------------------------------------------------------------------
 
+
 def test_resolve_dir_trusts_explicit_arg(tmp_path):
     assert aj._resolve_lock_sweep_dir(tmp_path) == tmp_path
 
@@ -50,6 +51,7 @@ def test_resolve_dir_none_when_nothing_exists(monkeypatch):
 # ---------------------------------------------------------------------------
 # _resolve_aiter_jit_dir_dynamic
 # ---------------------------------------------------------------------------
+
 
 def test_resolve_dynamic_returns_empty_when_missing(monkeypatch):
     monkeypatch.setattr(aj.importlib.util, "find_spec", lambda name: None)
@@ -83,6 +85,7 @@ def test_resolve_dynamic_returns_paths(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # clean_stale_aiter_locks
 # ---------------------------------------------------------------------------
+
 
 def test_clean_no_dir_returns_zero_stats():
     stats = aj.clean_stale_aiter_locks(Path("/definitely/not/here/aiter"))
@@ -173,6 +176,7 @@ def test_clean_walk_oserror(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # _any_live_compiler
 # ---------------------------------------------------------------------------
+
 
 class _FakeProc:
     def __init__(self, info):
@@ -271,6 +275,7 @@ def test_any_live_compiler_skips_dead_process(monkeypatch):
 # ---------------------------------------------------------------------------
 # sweep_stale_aiter_locks_if_dead
 # ---------------------------------------------------------------------------
+
 
 def test_sweep_skips_when_compiler_alive(monkeypatch):
     monkeypatch.setattr(aj, "_any_live_compiler", lambda: True)

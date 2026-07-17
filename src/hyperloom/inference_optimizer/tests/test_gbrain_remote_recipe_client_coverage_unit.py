@@ -83,13 +83,13 @@ def test_mcp_call_multi_event_sse_selects_result_by_id(monkeypatch) -> None:
     # Per-event id selection skips a leading notification and returns the
     # result event whose id matches the request.
     body = (
-        'event: message\n'
+        "event: message\n"
         'data: {"jsonrpc":"2.0","method":"notifications/ping"}\n'
-        '\n'
-        'event: message\n'
+        "\n"
+        "event: message\n"
         'data: {"jsonrpc":"2.0","id":"1",'
         '"result":{"content":[{"text":"{\\"ok\\": true}"}]}}\n'
-        '\n'
+        "\n"
     )
     _patch_raw(monkeypatch, body)
     assert _mcp().call("get_backlinks", {"slug": "x"}) == {"ok": True}
@@ -147,10 +147,7 @@ def test_mcp_call_sse_large_content_text_read_by_line(monkeypatch) -> None:
 def test_mcp_call_multiline_data_field_joined(monkeypatch) -> None:
     # A data field split across multiple data: lines is joined with newlines (SSE spec).
     body = (
-        'event: message\n'
-        'data: {"jsonrpc":"2.0","id":"1","result":\n'
-        'data: {"content":[{"text":"{\\"ok\\": 1}"}]}}\n'
-        '\n'
+        'event: message\ndata: {"jsonrpc":"2.0","id":"1","result":\ndata: {"content":[{"text":"{\\"ok\\": 1}"}]}}\n\n'
     )
     _patch_raw(monkeypatch, body)
     assert _mcp().call("get_page", {}) == {"ok": 1}
@@ -159,17 +156,13 @@ def test_mcp_call_multiline_data_field_joined(monkeypatch) -> None:
 def test_mcp_call_native_kg_bare_list_result(monkeypatch) -> None:
     body = 'event: message\ndata: [{"from":"a","to":"b","link_type":"improves"}]\n\n'
     _patch_raw(monkeypatch, body)
-    assert _mcp().call("get_backlinks", {"slug": "b"}) == [
-        {"from": "a", "to": "b", "link_type": "improves"}
-    ]
+    assert _mcp().call("get_backlinks", {"slug": "b"}) == [{"from": "a", "to": "b", "link_type": "improves"}]
 
 
 def test_mcp_call_native_kg_bare_dict_result(monkeypatch) -> None:
     body = 'event: message\ndata: {"edges":[{"from":"a","to":"b"}]}\n\n'
     _patch_raw(monkeypatch, body)
-    assert _mcp().call("traverse_graph", {"start": "a"}) == {
-        "edges": [{"from": "a", "to": "b"}]
-    }
+    assert _mcp().call("traverse_graph", {"start": "a"}) == {"edges": [{"from": "a", "to": "b"}]}
 
 
 def test_mcp_call_event_stream_returns_parsed_content(monkeypatch) -> None:
@@ -181,10 +174,7 @@ def test_mcp_call_event_stream_returns_parsed_content(monkeypatch) -> None:
 def test_mcp_call_event_stream_short_read_on_brace_not_truncated(monkeypatch) -> None:
     # A socket short read landing on an internal ``}`` must keep reading
     # instead of truncating mid-JSON.
-    inner = (
-        '{"jsonrpc":"2.0","id":"1","result":'
-        '{"content":[{"text":"{\\"ok\\": true}"}]}}'
-    )
+    inner = '{"jsonrpc":"2.0","id":"1","result":{"content":[{"text":"{\\"ok\\": true}"}]}}'
     body = ("event: message\ndata: " + inner + "\n\n").encode()
     stop = body.index(b"}") + 1  # first read ends on an internal brace
 

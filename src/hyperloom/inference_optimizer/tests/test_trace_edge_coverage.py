@@ -52,10 +52,7 @@ def test_stream_json_response_dir_path_is_oserror(tmp_path):
 
 def test_stream_json_turn_usages_skips_blank_lines(tmp_path):
     p = tmp_path / "process.log"
-    p.write_text(
-        "\n"
-        '{"type": "assistant", "message": {"usage": {"input_tokens": 1}}}\n'
-    )
+    p.write_text('\n{"type": "assistant", "message": {"usage": {"input_tokens": 1}}}\n')
     out = pu.parse_claude_stream_json_turn_usages(p)
     assert len(out) == 1 and out[0]["input_tokens"] == 1
 
@@ -122,14 +119,16 @@ def test_utc_second_key_unparseable_is_empty():
 
 
 def test_decision_to_scores_non_numeric_gain_and_predicted():
-    scores = lm.decision_to_scores({
-        "decision": {
-            "outcome": "KEEP",
-            "change": "x",
-            "gain_pct": "not-a-number",
-            "predicted_gain_pct": "also-bad",
+    scores = lm.decision_to_scores(
+        {
+            "decision": {
+                "outcome": "KEEP",
+                "change": "x",
+                "gain_pct": "not-a-number",
+                "predicted_gain_pct": "also-bad",
+            }
         }
-    })
+    )
     # Only the categorical outcome score survives; bad numerics are dropped.
     assert [s["name"] for s in scores] == ["decision_outcome"]
 

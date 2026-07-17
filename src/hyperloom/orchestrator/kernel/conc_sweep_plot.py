@@ -208,16 +208,26 @@ def _render(
         ax.plot(bx, by, "o-", color=baseline_c, linewidth=2, markersize=6, label="baseline")
         for x, y in zip(bx, by):
             ax.annotate(
-                f"{y:.0f}", (x, y), textcoords="offset points", xytext=(0, 8),
-                ha="center", fontsize=7, color=baseline_c,
+                f"{y:.0f}",
+                (x, y),
+                textcoords="offset points",
+                xytext=(0, 8),
+                ha="center",
+                fontsize=7,
+                color=baseline_c,
             )
 
     if ox:
         ax.plot(ox, oy, "s-", color=optimized_c, linewidth=2, markersize=6, label="optimized")
         for x, y in zip(ox, oy):
             ax.annotate(
-                f"{y:.0f}", (x, y), textcoords="offset points", xytext=(0, -14),
-                ha="center", fontsize=7, color=optimized_c,
+                f"{y:.0f}",
+                (x, y),
+                textcoords="offset points",
+                xytext=(0, -14),
+                ha="center",
+                fontsize=7,
+                color=optimized_c,
             )
 
     ax.set_xlabel("Interactivity  (output_throughput / concurrency,  tok/s/user)", fontsize=10, color=fg)

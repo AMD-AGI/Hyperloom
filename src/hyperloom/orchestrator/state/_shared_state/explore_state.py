@@ -45,6 +45,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+
 def _shared_state_module():
     """Import parent shared_state lazily to avoid a module-level cycle."""
     from .. import shared_state
@@ -289,7 +290,7 @@ class _ExploreStateMixin:
                 "attempts": list(entry.get("attempts") or []),
             }
             if len(merged["attempts"]) > ss._GAPS_ATTEMPTS_HISTORY:
-                merged["attempts"] = merged["attempts"][-ss._GAPS_ATTEMPTS_HISTORY:]
+                merged["attempts"] = merged["attempts"][-ss._GAPS_ATTEMPTS_HISTORY :]
             self.gaps.append(merged)
         else:
             # Field-wise merge: incoming non-empty values win except ``first_seen_ts``.
@@ -304,7 +305,7 @@ class _ExploreStateMixin:
                 merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
                 # Capped tail; callers supply newest-last lists (convention).
                 if len(merged_attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-                    merged_attempts = merged_attempts[-ss._GAPS_ATTEMPTS_HISTORY:]
+                    merged_attempts = merged_attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
                 existing["attempts"] = merged_attempts
             merged = existing
         # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
@@ -352,7 +353,7 @@ class _ExploreStateMixin:
         ss = _shared_state_module()
         attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss._now_iso())})
         if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-            attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY:]
+            attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
         gap["attempts"] = attempts
         gap["last_updated_ts"] = ss._now_iso()
         return gap
@@ -548,7 +549,7 @@ class _ExploreStateMixin:
         for entry in update.get("winners_history") or []:
             if isinstance(entry, dict):
                 wh.append(dict(entry))
-        merged["winners_history"] = wh[-ss._WINNERS_HISTORY_CAP:]
+        merged["winners_history"] = wh[-ss._WINNERS_HISTORY_CAP :]
         sa: set[tuple[str, ...]] = set()
         for src in (prior.get("synergy_attempted"), update.get("synergy_attempted")):
             for c in src or []:
@@ -584,6 +585,7 @@ class _ExploreStateMixin:
 
         args = str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or "")
         envs = dict(variant.get("extra_envs") or {})
+
         def _list_field(key: str) -> list[str]:
             raw = variant.get(key)
             if isinstance(raw, str):
@@ -656,7 +658,7 @@ class _ExploreStateMixin:
                 "cycle": entry["cycle"],
             }
         )
-        search["winners_history"] = wh[-_shared_state_module()._WINNERS_HISTORY_CAP:]
+        search["winners_history"] = wh[-_shared_state_module()._WINNERS_HISTORY_CAP :]
         self.explore_search = search
 
     def record_discovered_flags(
@@ -688,4 +690,3 @@ class _ExploreStateMixin:
             entry["source_path"] = str(source_path)
         entry["ts"] = _shared_state_module()._now_iso()
         self.discovered_flags[fw] = entry
-

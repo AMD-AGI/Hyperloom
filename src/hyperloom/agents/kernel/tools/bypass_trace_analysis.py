@@ -239,11 +239,7 @@ def _should_enable_steady(*, steady_state_mode: str, framework: str, env_steady:
     full-trace (with the existing warning) when no window is found.
     """
     mode = (steady_state_mode or "").strip().lower()
-    return (
-        bool(env_steady)
-        or (framework or "").lower() == "xdit"
-        or mode not in _STEADY_OFF_VALUES
-    )
+    return bool(env_steady) or (framework or "").lower() == "xdit" or mode not in _STEADY_OFF_VALUES
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -279,13 +275,23 @@ def main(argv: list[str] | None = None) -> int:
     # --- analyze the trace (independent streaming reader) ---
     analyze: dict[str, Any]
     if args.dry_run:
-        analyze = {"status": "ok", "timeline": {}, "attribution": {}, "kernels": [], "ops": [], "aggregation_scope": "full_trace"}
+        analyze = {
+            "status": "ok",
+            "timeline": {},
+            "attribution": {},
+            "kernels": [],
+            "ops": [],
+            "aggregation_scope": "full_trace",
+        }
     else:
         try:
             # top_k=0 -> keep all device-kernel aggregates; candidate slicing uses top_k.
             analyze = _reader.analyze_trace(
-                args.trace_input, top_k=0, steady_state=enable_steady,
-                framework=args.framework, emit_launches=True,
+                args.trace_input,
+                top_k=0,
+                steady_state=enable_steady,
+                framework=args.framework,
+                emit_launches=True,
             )
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
@@ -301,7 +307,14 @@ def main(argv: list[str] | None = None) -> int:
                 "message": f"bypass reader could not analyze trace: {analyze.get('error', 'unknown')}",
             }
         )
-        analyze = {"status": "ok", "timeline": {}, "attribution": {}, "kernels": [], "ops": [], "aggregation_scope": "full_trace"}
+        analyze = {
+            "status": "ok",
+            "timeline": {},
+            "attribution": {},
+            "kernels": [],
+            "ops": [],
+            "aggregation_scope": "full_trace",
+        }
     elif not analyze.get("kernels"):
         trace_health_warnings.append(
             {
@@ -480,7 +493,9 @@ def main(argv: list[str] | None = None) -> int:
         analysis_md_path=str(analysis_md_path),
         kernel_candidates_path=str(candidates_path),
     )
-    atomic_write_json(kernel_roofline_path, kernel_roofline, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+    atomic_write_json(
+        kernel_roofline_path, kernel_roofline, ensure_ascii=False, sort_keys=False, trailing_newline=False
+    )
 
     # Optional rocprof-compute enrichment (opt-in; enriches the sidecar in
     # place). Skipped in --dry-run.
@@ -509,9 +524,7 @@ def main(argv: list[str] | None = None) -> int:
             # (trace-inferred), not the requested full schedule.
             _diff_steps = resolve_perstep_divisor(inferred_denoise_steps, requested_denoise_steps)
             # Workload totals cover all analyzed device kernels (not just top-k).
-            _workload_totals = _report.build_workload_roofline_totals(
-                analyze, target_platform=args.target_platform
-            )
+            _workload_totals = _report.build_workload_roofline_totals(analyze, target_platform=args.target_platform)
             _all_kernels = [k for k in (analyze.get("kernels") or []) if float(k.get("gpu_time_us") or 0.0) > 0]
             _diff_report = build_report_from_bypass(
                 candidates.get("hot_kernels", []),

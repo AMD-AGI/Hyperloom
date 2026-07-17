@@ -10,6 +10,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
+
 if TYPE_CHECKING:
     from ..state.task_registry import Task
 
@@ -17,6 +18,7 @@ from .coordinator import (
     PendingProposal,
 )
 import logging as _logging
+
 log = _logging.getLogger(__name__)
 
 
@@ -407,7 +409,8 @@ class ProposalsCollaborator:
         # Carry the proposer's predicted gain onto the task for predicted-vs-realized calibration.
         if pending.predicted_gain_pct:
             params.setdefault(
-                "predicted_gain_pct", float(pending.predicted_gain_pct),
+                "predicted_gain_pct",
+                float(pending.predicted_gain_pct),
             )
         # Filter the grid to the Critic-approved subset.
         if pending.action_name == "explore" and isinstance(params.get("grid"), list):
@@ -435,6 +438,7 @@ class ProposalsCollaborator:
                 )
         cb = self.shared_state.current_best or {}
         cb_args = str(cb.get("extra_server_args") or "") if isinstance(cb, dict) else ""
+
         def _list_control(value: Any) -> list[str]:
             if isinstance(value, str):
                 return [value] if value.strip() else []
@@ -486,8 +490,7 @@ class ProposalsCollaborator:
             # other eval server uses, else it launches on bare framework defaults
             # and crashes at startup regardless of the patch.
             cb_tput = cb.get("tput") if isinstance(cb, dict) else None
-            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 \
-                else self.shared_state.baseline_tput
+            base = cb_tput if isinstance(cb_tput, (int, float)) and cb_tput > 0 else self.shared_state.baseline_tput
             params.setdefault("base_tput", float(base or 0.0))
             params.setdefault("base_extra_args", cb_args)
             if cb_remove_args:
@@ -497,9 +500,7 @@ class ProposalsCollaborator:
             if cb_args_mode == "replace":
                 params.setdefault("base_args_mode", "replace")
             if self.shared_state.baseline_config_path:
-                params.setdefault(
-                    "config_path", self.shared_state.baseline_config_path
-                )
+                params.setdefault("config_path", self.shared_state.baseline_config_path)
         lanes, ttl = self._registry_lanes_ttl(pending.action_name)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=pending.action_name,
@@ -554,6 +555,7 @@ class ProposalsCollaborator:
             from ..trace.llm_trace import _now_iso
             from hyperloom.common.io import append_jsonl
             from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
+
             path = proposal_task_map_path(self.session_dir)
             row = {
                 "ts": _now_iso(),
@@ -563,6 +565,8 @@ class ProposalsCollaborator:
             append_jsonl(path, row, make_parents=True, sort_keys=True)
         except Exception:  # noqa: BLE001 — trace must never break the loop
             log.debug(
-                "full-trace: proposal_task_map append failed for "
-                "msg_id=%s task_id=%s", proposal_msg_id, task_id, exc_info=True,
+                "full-trace: proposal_task_map append failed for msg_id=%s task_id=%s",
+                proposal_msg_id,
+                task_id,
+                exc_info=True,
             )

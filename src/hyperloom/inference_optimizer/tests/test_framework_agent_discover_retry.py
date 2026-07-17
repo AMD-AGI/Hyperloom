@@ -58,9 +58,7 @@ class _CoordinatorStub:
     _stamp_framework_progress = Coordinator._stamp_framework_progress
     # Reverse-lookup called on every repo; here it resolves to the session
     # framework, so nothing is tagged (same-framework path).
-    _framework_agent_repo_url_origin_framework = staticmethod(
-        Coordinator._framework_agent_repo_url_origin_framework
-    )
+    _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path

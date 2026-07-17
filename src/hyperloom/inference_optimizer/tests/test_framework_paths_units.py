@@ -56,9 +56,7 @@ class TestResolveSourceFileAllowlist:
     def test_default_when_env_empty(self, monkeypatch):
         monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
         # The enablement ROCm/HIP roots are always merged (default-on capability).
-        assert fp.resolve_source_file_allowlist() == (
-            fp._DEFAULT_SOURCE_ROOTS + fp._ROCM_HIP_SOURCE_ROOTS
-        )
+        assert fp.resolve_source_file_allowlist() == (fp._DEFAULT_SOURCE_ROOTS + fp._ROCM_HIP_SOURCE_ROOTS)
 
     def test_merges_discovered_roots(self, monkeypatch):
         monkeypatch.setattr(
@@ -322,9 +320,7 @@ class TestSummariseFrameworkRootDiscovery:
 
     def test_buckets_xdit_ok(self):
         """Reports xdit=ok when /app/xDiT/ appears in the discovery string."""
-        out = fp.summarise_framework_root_discovery(
-            "/sgl-workspace/aiter/:/app/xDiT/"
-        )
+        out = fp.summarise_framework_root_discovery("/sgl-workspace/aiter/:/app/xDiT/")
         assert "xdit=ok" in out
         assert "aiter=ok" in out
 
@@ -373,7 +369,12 @@ class TestAtomPathPresentInAllThreeLocations:
         """The kernel-agent's tracelens_analysis ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
         ka_path = (
             Path(__file__).resolve().parents[4]
-            / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "tracelens_analysis.py"
+            / "src"
+            / "hyperloom"
+            / "agents"
+            / "kernel"
+            / "tools"
+            / "tracelens_analysis.py"
         )
         if not ka_path.is_file():
             pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
@@ -388,7 +389,12 @@ class TestAtomPathPresentInAllThreeLocations:
         """The orchestrator gate and kernel-agent classifier derive reusable roots from the same source, so their atom subsets must match."""
         ka_path = (
             Path(__file__).resolve().parents[4]
-            / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "tracelens_analysis.py"
+            / "src"
+            / "hyperloom"
+            / "agents"
+            / "kernel"
+            / "tools"
+            / "tracelens_analysis.py"
         )
         if not ka_path.is_file():
             pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
@@ -485,8 +491,7 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
 
 # apply_kernel_patch known-target roots
 _APPLY_TOOL_PATH = (
-    Path(__file__).resolve().parents[4]
-    / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "apply_kernel_patch.py"
+    Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "apply_kernel_patch.py"
 )
 
 

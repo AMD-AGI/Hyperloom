@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+
 if TYPE_CHECKING:
     from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
@@ -203,6 +204,7 @@ class AiterJitDetector:
             source="local",
             suggestion=("observe; if it persists, suggest cleaning <jit_dir>/build/ manually between runs"),
         )
+
 
 __all__ = [
     "AiterJitConfig",

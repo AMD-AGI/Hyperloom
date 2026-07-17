@@ -94,6 +94,7 @@ def test_synthesize_added_removed_dev_null():
 
 # --- files page parse + fetch ----------------------------------------------
 
+
 class _StubClient:
     def __init__(self, page):
         self._page = page
@@ -172,8 +173,14 @@ class _DiscoveryClient:
 
 def _req(repo="https://github.com/ROCm/vllm.git", gap="chunked prefill", n=5):
     return ExploreRequest.from_dict(
-        {"framework": "vllm", "repo_url": repo, "work_dir": "/tmp/x",
-         "baseline": {"throughput": 1.0}, "gap_description": gap, "max_search_candidates": n}
+        {
+            "framework": "vllm",
+            "repo_url": repo,
+            "work_dir": "/tmp/x",
+            "baseline": {"throughput": 1.0},
+            "gap_description": gap,
+            "max_search_candidates": n,
+        }
     )
 
 
@@ -261,29 +268,42 @@ def test_query_uses_search_tool():
 
 def test_gbrain_pr_kb_is_valid_search_mode():
     req = ExploreRequest.from_dict(
-        {"framework": "vllm", "repo_url": "https://github.com/ROCm/vllm.git",
-         "work_dir": "/tmp/x", "baseline": {"throughput": 1.0},
-         "search_modes": ["gbrain_pr_kb", "github"]}
+        {
+            "framework": "vllm",
+            "repo_url": "https://github.com/ROCm/vllm.git",
+            "work_dir": "/tmp/x",
+            "baseline": {"throughput": 1.0},
+            "search_modes": ["gbrain_pr_kb", "github"],
+        }
     )
     assert "gbrain_pr_kb" in req.search_modes
 
 
 def test_default_search_modes_stay_legacy():
     req = ExploreRequest.from_dict(
-        {"framework": "vllm", "repo_url": "https://github.com/ROCm/vllm.git",
-         "work_dir": "/tmp/x", "baseline": {"throughput": 1.0}}
+        {
+            "framework": "vllm",
+            "repo_url": "https://github.com/ROCm/vllm.git",
+            "work_dir": "/tmp/x",
+            "baseline": {"throughput": 1.0},
+        }
     )
     assert req.search_modes == ("primus_cortex", "github")
 
 
 def test_enumerate_candidates_dispatches_gbrain_pr_kb(monkeypatch):
-    monkeypatch.setattr(sources, "_run_pr_kb", lambda request: [
-        Candidate(ref="PR:5", repo=request.repo_url, source="gbrain_pr_kb")
-    ])
+    monkeypatch.setattr(
+        sources, "_run_pr_kb", lambda request: [Candidate(ref="PR:5", repo=request.repo_url, source="gbrain_pr_kb")]
+    )
     req = ExploreRequest.from_dict(
-        {"framework": "vllm", "repo_url": "https://github.com/ROCm/vllm.git",
-         "work_dir": "/tmp/x", "baseline": {"throughput": 1.0},
-         "search_perf_prs": True, "search_modes": ["gbrain_pr_kb"]}
+        {
+            "framework": "vllm",
+            "repo_url": "https://github.com/ROCm/vllm.git",
+            "work_dir": "/tmp/x",
+            "baseline": {"throughput": 1.0},
+            "search_perf_prs": True,
+            "search_modes": ["gbrain_pr_kb"],
+        }
     )
     out = sources.enumerate_candidates(req)
     assert [c.ref for c in out] == ["PR:5"]

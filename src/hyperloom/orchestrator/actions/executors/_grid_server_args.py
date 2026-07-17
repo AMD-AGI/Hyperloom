@@ -78,6 +78,7 @@ def server_args_env_name(framework: str | None) -> str:
             return framework_registry.extra_args_env(fw)
     return framework_registry.extra_args_env(framework_registry.DEFAULT_FRAMEWORK)
 
+
 def merge_server_args(*parts: str | None) -> str:
     """Merge server arg strings preserving left-to-right override semantics.
 
@@ -177,6 +178,7 @@ def compose_server_args(
     pruned = remove_server_args(combined_base, remove_args)
     return merge_server_args(pruned, variant_extra_args)
 
+
 def compact_json_server_args(
     server_args: str | None,
     framework: str | None,
@@ -242,6 +244,7 @@ def compact_json_server_args(
             i += 1
     return "".join(out)
 
+
 # Flags whose value can contain spaces / JSON; never tokenize-dedupe these.
 # If any is present, the dedup helpers leave the whole arg string untouched.
 _SPACE_VALUE_FLAGS = (
@@ -286,6 +289,7 @@ _VLLM_SINGLE_VALUE_FLAGS = frozenset(
         "--pipeline-parallel-size",
     }
 )
+
 
 def dedup_vllm_server_args(
     server_args: str | None,
@@ -357,6 +361,7 @@ def dedup_vllm_server_args(
     kept = [tok for idx, tok in enumerate(tokens) if idx not in drop]
     return " ".join(kept)
 
+
 def _shell_safe_dedupe(args: str) -> str:
     """Last-wins dedupe for single-token-valued flags only.
 
@@ -407,6 +412,7 @@ def _shell_safe_dedupe(args: str) -> str:
         out.extend(pairs[k])
     return " ".join(out)
 
+
 # sglang scheduler watchdog timeout injection: the first request's JIT compile
 # can exceed sglang's default watchdog, firing SIGQUIT mid-warmup. Inject a
 # longer timeout unless the user already pinned one.
@@ -418,6 +424,7 @@ _SGLANG_WATCHDOG_FLAG = "--watchdog-timeout"
 
 # Matches space- or equals-separated form without false-matching a longer flag.
 _SGLANG_WATCHDOG_RE = re.compile(r"--watchdog-timeout(?:[=\s]|$)")
+
 
 def resolve_sglang_watchdog_timeout() -> int:
     """Resolve the sglang scheduler watchdog timeout in seconds.
@@ -453,6 +460,7 @@ def resolve_sglang_watchdog_timeout() -> int:
         return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
     return val
 
+
 def inject_sglang_watchdog_timeout(
     server_args: str | None,
     framework: str | None,
@@ -480,6 +488,7 @@ def inject_sglang_watchdog_timeout(
     timeout = resolve_sglang_watchdog_timeout()
     return merge_server_args(args, f"{_SGLANG_WATCHDOG_FLAG} {timeout}")
 
+
 # sglang ``--context-length`` cap injection: sglang sizes ``max_total_tokens``
 # off the model's ``max_position_embeddings``, so a huge native window balloons
 # the aiter workspace_buffer past GPU memory. Cap to ISL+OSL+headroom (floored,
@@ -502,6 +511,7 @@ _SGLANG_ATTN_BACKEND_FLAG = "--attention-backend"
 _SGLANG_ATTN_BACKEND_RE = re.compile(r"--attention-backend(?:[=\s]|$)")
 
 _SGLANG_DUAL_CHUNK_BACKEND = "dual_chunk_flash_attn"
+
 
 def _resolve_nonneg_int_env(name: str, default: int) -> int:
     """Read a non-negative integer env override, else return ``default``.
@@ -539,6 +549,7 @@ def _resolve_nonneg_int_env(name: str, default: int) -> int:
         return default
     return val
 
+
 def resolve_sglang_context_cap(isl: int, osl: int) -> int:
     """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload.
 
@@ -563,6 +574,7 @@ def resolve_sglang_context_cap(isl: int, osl: int) -> int:
         DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
     )
     return max(int(isl) + int(osl) + headroom, floor)
+
 
 def inject_sglang_context_length(
     server_args: str | None,
@@ -621,6 +633,7 @@ def inject_sglang_context_length(
         f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",
     )
 
+
 def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
     """Pick the dual-chunk attention backend for the current hardware.
 
@@ -641,6 +654,7 @@ def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
     if override:
         return override
     return _SGLANG_DUAL_CHUNK_BACKEND
+
 
 def inject_sglang_attention_backend(
     server_args: str | None,
@@ -691,6 +705,7 @@ def inject_sglang_attention_backend(
         f"{_SGLANG_ATTN_BACKEND_FLAG} {backend}",
     )
 
+
 # sglang MoE runner backend injection: sglang's default routes MoE models
 # through aiter's CK 2-stage fused-MoE kernel, whose JIT build is broken in some
 # ROCm images. Inject the ROCm-capable ``triton`` backend for MoE models on AMD
@@ -704,6 +719,7 @@ _SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
 
 # Matches space- or equals-separated form without false-matching a longer flag.
 _SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
+
 
 def inject_sglang_moe_runner_backend(
     server_args: str | None,
@@ -755,6 +771,7 @@ def inject_sglang_moe_runner_backend(
         args,
         f"{_SGLANG_MOE_RUNNER_BACKEND_FLAG} {backend}",
     )
+
 
 def apply_runtime_benchmark_overrides(
     bench: dict[str, Any],

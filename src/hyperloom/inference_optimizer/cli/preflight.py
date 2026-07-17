@@ -101,6 +101,7 @@ def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | No
         else:
             os.environ[key] = original
 
+
 # /dev/shm threshold: below this, a launch can collide with stale vLLM/NCCL shm segments.
 _DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
 
@@ -455,13 +456,9 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
     """
     mods = list(_BENCH_SERVING_DEPS)
     probe = (
-        "import importlib.util, sys; "
-        "print('\\n'.join(m for m in sys.argv[1:] "
-        "if importlib.util.find_spec(m) is None))"
+        "import importlib.util, sys; print('\\n'.join(m for m in sys.argv[1:] if importlib.util.find_spec(m) is None))"
     )
-    result = subprocess.run(
-        [python_exe, "-c", probe, *mods], capture_output=True, text=True
-    )
+    result = subprocess.run([python_exe, "-c", probe, *mods], capture_output=True, text=True)
     if result.returncode != 0:
         # Probe itself failed unexpectedly; fall back to attempting all so a
         # genuinely missing client is not silently left uninstalled.
@@ -1022,10 +1019,7 @@ def _preflight(
     # bypass-only environment never resolves the Magpie venv / /opt/venv.
     magpie_python = benchmark_python
     if not _magpie_backend_active:
-        print(
-            f"Preflight: benchmark backend is "
-            f"{_resolve_active_backend_name()!r}; skipping Magpie install/import"
-        )
+        print(f"Preflight: benchmark backend is {_resolve_active_backend_name()!r}; skipping Magpie install/import")
         check = None
     else:
         check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)

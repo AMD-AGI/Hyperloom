@@ -1092,7 +1092,9 @@ class PolicyGate:
         # canonical owned action so the phase-action gate applies identically.
         gated_kind = KERNEL_REQUEST_KIND_ALIASES.get(kind, kind)
         # R1 phase_incompatible: treat REQUEST kind as the action name for kernel_agent-owned + coordinator-internal kinds.
-        if (target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS) or gated_kind in COORDINATOR_INTERNAL_ACTIONS:
+        if (
+            target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS
+        ) or gated_kind in COORDINATOR_INTERNAL_ACTIONS:
             self._validate_phase_action(role, gated_kind, intent_kind="request")
         self._validate_fp8_only_action(kind, intent_kind="request")
         # R4 / R5 — a REQUEST.kind cannot smuggle a KB write / external tool either.
@@ -2485,9 +2487,7 @@ def reset_policy_denial_streak(state, action_name: str) -> None:
         return
     prefix = f"{action_name}:"
     state.policy_denial_streak = {
-        k: v
-        for k, v in (state.policy_denial_streak or {}).items()
-        if not k.startswith(prefix)
+        k: v for k, v in (state.policy_denial_streak or {}).items() if not k.startswith(prefix)
     }
 
 
@@ -2504,10 +2504,7 @@ def to_policy_denial_summary(state, *, top_k: int = 6) -> str:
     if not state.policy_denial_history:
         return ""
     rows = list(state.policy_denial_history)[-top_k:]
-    lines = [
-        "=== Recent policy denials "
-        f"(newest last, total={len(state.policy_denial_history)}) ==="
-    ]
+    lines = [f"=== Recent policy denials (newest last, total={len(state.policy_denial_history)}) ==="]
     for r in rows:
         lines.append(
             f"  tick={r.get('tick')} action={r.get('action_name')!r} "

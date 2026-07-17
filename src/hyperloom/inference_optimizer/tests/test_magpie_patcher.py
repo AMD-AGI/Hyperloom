@@ -664,10 +664,7 @@ class TestApplyPatchAtomic:
     def test_unrecognized_when_legacy_block_missing(self, tmp_path):
         target = tmp_path / "benchmarker.py"
         target.write_text("def foo():\n    pass\n")
-        assert (
-            mp._apply_patch_atomic_reason(target)
-            == mp._ATOMIC_REASON_UNRECOGNIZED_SHAPE
-        )
+        assert mp._apply_patch_atomic_reason(target) == mp._ATOMIC_REASON_UNRECOGNIZED_SHAPE
         assert "Hyperloom #C1 patch" not in target.read_text()
 
     def test_io_error_when_read_fails(self, tmp_path, monkeypatch):
@@ -859,7 +856,7 @@ class TestStripEvalConcurrencyFlag:
 
     def test_returns_none_on_unrecognised_shape(self):
         # Marker present but value isn't $CONC -> regex miss -> None.
-        weird = '    run_eval --framework lm-eval --concurrent-requests 64 || exit $?\n'
+        weird = "    run_eval --framework lm-eval --concurrent-requests 64 || exit $?\n"
         assert mp._strip_eval_concurrency_flag(weird) is None
 
 
@@ -892,7 +889,7 @@ class TestApplyEvalFlagPatch:
         _write_bench_script(
             tmp_path,
             "sglang_mi300x.sh",
-            '    run_eval --framework lm-eval --concurrent-requests 64 || exit $?\n',
+            "    run_eval --framework lm-eval --concurrent-requests 64 || exit $?\n",
         )
         scripts_dir = tmp_path / "Magpie" / "scripts" / "benchmark"
         with caplog.at_level(logging.WARNING):
@@ -913,7 +910,7 @@ def test_status_eval_flag_false_on_unrecognised_shape(tmp_path: Path):
     _write_bench_script(
         tmp_path,
         "sglang_mi300x.sh",
-        '    run_eval --framework lm-eval --concurrent-requests 64 || exit $?\n',
+        "    run_eval --framework lm-eval --concurrent-requests 64 || exit $?\n",
     )
     status = magpie_scripts_patch_status(tmp_path)
     assert status.eval_flag_ok is False
