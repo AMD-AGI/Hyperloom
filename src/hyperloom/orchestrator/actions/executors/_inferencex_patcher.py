@@ -65,7 +65,7 @@ _BENCH_SERVING_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmar
 _EVAL_DEST_LEGACY = 'mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2'
 _EVAL_DEST_PATCHED = 'mv -f "$jf" "${RESULT_DIR:-.}/" || echo "WARN: failed to move ${jf}" >&2'
 _EVAL_DEST_SENTINEL = '"${RESULT_DIR:-.}/"'
-_EVAL_DEST_LOCK_PATH = "/tmp/hyperloom_benchmark_lib_eval_dest_patcher.lock"
+_EVAL_DEST_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_dest_patcher.lock")
 
 
 def _discover_inferencex_roots(
