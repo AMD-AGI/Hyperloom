@@ -1182,6 +1182,9 @@ class SourceBreakdown(TypedDict, total=False):
         framework_pct_of_total (float): Gain share from FRAMEWORK bake-ins.
         gemm_tuning_pct_of_total (float): Gain share from the FP8 GEMM tuner
             (0.0 on non-FP8 workloads or when the tuner produced no KEEP).
+        kernel_unattributed_pct_of_total (float): Kernel-lane gain that could
+            not be tied to any backend KEEP (e.g. no Forge/GEAK KEEP evidence);
+            kept unattributed rather than credited to a backend.
         backends_pct_of_total (float): Gain share from backend exploration.
         params_pct_of_total (float): Gain share from param exploration.
         sweep_pct_of_total (float): Gain share attributed to the sweep.
@@ -1197,6 +1200,8 @@ class SourceBreakdown(TypedDict, total=False):
     framework_pct_of_total: float
     # GEMM_TUNING (deterministic FP8 GEMM tuner) gain; always emitted (0.0 when skipped / no KEEP).
     gemm_tuning_pct_of_total: float
+    # Kernel-lane gain with no backend KEEP evidence; unattributed on purpose.
+    kernel_unattributed_pct_of_total: float
     backends_pct_of_total: float
     params_pct_of_total: float
     sweep_pct_of_total: float

@@ -232,8 +232,10 @@ def collect_attribution(
         gain = _to_float(k.get("e2e_gain_pct")) or 0.0
         if kid in forge_kept_kids:
             forge_total += gain
-    if forge_total == 0.0 and kernel_total > 0.0:
-        forge_total = kernel_total
+    # No Forge KEEP evidence => do NOT credit Forge. Kernel-lane gain that is
+    # not tied to a Forge KEEP stays unattributed instead of being reverse-
+    # inferred onto Forge (which may not have run at all this session).
+    kernel_unattributed = max(kernel_total - forge_total, 0.0)
 
     notes: list[str] = []
     if not state_provided:
@@ -257,6 +259,9 @@ def collect_attribution(
         "method": method,
         "source_breakdown": {
             "forge_pct_of_total": round(forge_total, 2),
+            # Kernel-lane gain with no Forge KEEP evidence; surfaced honestly
+            # instead of being credited to a backend that produced no KEEP.
+            "kernel_unattributed_pct_of_total": round(kernel_unattributed, 2),
             "explore_pct_of_total": round(family_totals.get("explore", 0.0), 2),
             "replay_warm_recipe_pct_of_total": round(
                 family_totals.get("replay_warm_recipe", 0.0), 2
