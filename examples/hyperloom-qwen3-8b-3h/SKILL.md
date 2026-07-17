@@ -76,8 +76,13 @@ Required optimize CLI flags:
 - `--precision bf16`
 - `--target-gain 30`
 - `--max-hours 3`
+- `--phase-budget-explore-pct 0.95`
+- `--explore-force-exit-budget-pct 0.01`
+- `--explore-force-exit-hours-remaining 0.05`
+- `--no-framework-agent`
 - `--no-kernel`
 - `--no-enable-conc-sweep`
+- `--no-enable-roofline`
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
@@ -184,9 +189,17 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    and critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run in background with `setsid nohup`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-5. Include `--no-kernel` in the `python -m hyperloom.inference_optimizer.cli optimize` command so the Kernel Agent phase is skipped.
-6. Include `--no-enable-conc-sweep` in the `python -m hyperloom.inference_optimizer.cli optimize` command so the SWEEP-phase post-optimization concurrency sweep is skipped.
-7. Report the session ID, log path, PID, and initial health check result.
-8. Monitor the process every 300 seconds until work is done.
-9. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
-10. If `stop_reason` in the current session `state.json` is final, stop and exit.
+5. Include `--phase-budget-explore-pct 0.95`,
+   `--explore-force-exit-budget-pct 0.01`, and
+   `--explore-force-exit-hours-remaining 0.05` in the optimize command so most
+   of the short run budget is reserved for EXPLORE while still exiting cleanly
+   near the deadline.
+6. Include `--no-framework-agent` in the optimize command so the
+   FRAMEWORK_AGENT phase is skipped.
+7. Include `--no-kernel` in the optimize command so the Kernel Agent phase is skipped.
+8. Include `--no-enable-conc-sweep` in the optimize command so the SWEEP-phase post-optimization concurrency sweep is skipped.
+9. Include `--no-enable-roofline` in the optimize command so PRELUDE uses the lighter profile path instead of roofline analysis.
+10. Report the session ID, log path, PID, and initial health check result.
+11. Monitor the process every 300 seconds until work is done.
+12. To recover an unexpected crash, only run `optimize --resume` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+13. If `stop_reason` in the current session `state.json` is final, stop and exit.
