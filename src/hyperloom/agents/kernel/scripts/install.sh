@@ -589,29 +589,39 @@ ensure_moreutils() {
   command -v ts >/dev/null 2>&1 || warn "ts still missing after apt-get install moreutils"
 }
 
+RAY_VERSION="${RAY_VERSION:-2.44.1}"
+# Ray 2.44.1's CLI currently fails during import with click >= 8.3.0.
+RAY_CLI_CLICK_MAX_VERSION="${RAY_CLI_CLICK_MAX_VERSION:-8.3.0}"
+RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
+CLICK_INSTALL_SPEC="click<${RAY_CLI_CLICK_MAX_VERSION}"
+
 ensure_ray() {
-  log "ensuring ray[default]==2.44.1 and click<8.3.0"
+  log "ensuring ${RAY_INSTALL_SPEC} and ${CLICK_INSTALL_SPEC}"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "click<8.3.0" "ray[default]==2.44.1"
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$CLICK_INSTALL_SPEC" "$RAY_INSTALL_SPEC"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    python3 - <<'PY'
+    RAY_VERSION="$RAY_VERSION" RAY_CLI_CLICK_MAX_VERSION="$RAY_CLI_CLICK_MAX_VERSION" python3 - <<'PY'
 import importlib.metadata as md
+import os
 import re
 import sys
 
 import ray
+
+RAY_VERSION = os.environ["RAY_VERSION"]
+RAY_CLI_CLICK_MAX_VERSION = os.environ["RAY_CLI_CLICK_MAX_VERSION"]
 
 def _version_tuple(version: str) -> tuple[int, int, int]:
     parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
     parts.extend([0] * (3 - len(parts)))
     return tuple(parts[:3])
 
-if ray.__version__ != "2.44.1":
-    raise SystemExit(f"ray version mismatch: {ray.__version__} != 2.44.1")
+if ray.__version__ != RAY_VERSION:
+    raise SystemExit(f"ray version mismatch: {ray.__version__} != {RAY_VERSION}")
 click_version = md.version("click")
-if _version_tuple(click_version) >= (8, 3, 0):
-    raise SystemExit(f"click version incompatible with Ray CLI: {click_version} >= 8.3.0")
+if _version_tuple(click_version) >= _version_tuple(RAY_CLI_CLICK_MAX_VERSION):
+    raise SystemExit(f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}")
 try:
     from ray.scripts.scripts import main as _ray_cli_main  # noqa: F401
 except Exception as exc:

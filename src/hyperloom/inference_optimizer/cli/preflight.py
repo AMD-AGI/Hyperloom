@@ -392,13 +392,22 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: installed {pip_spec}")
 
 
-_RAY_INSTALL_SPECS = ("ray[default]==2.44.1", "click<8.3.0")
+_RAY_VERSION = "2.44.1"
+# Ray 2.44.1's CLI currently fails during import with click >= 8.3.0.
+_RAY_CLI_CLICK_MAX_VERSION = "8.3.0"
+_RAY_INSTALL_SPEC = f"ray[default]=={_RAY_VERSION}"
+_CLICK_INSTALL_SPEC = f"click<{_RAY_CLI_CLICK_MAX_VERSION}"
+_RAY_INSTALL_SPECS = (_RAY_INSTALL_SPEC, _CLICK_INSTALL_SPEC)
 
 
-_RAY_SMOKE = r"""
+_RAY_SMOKE_TEMPLATE = r"""
 import importlib.metadata as md
 import re
 import sys
+
+RAY_VERSION = "__RAY_VERSION__"
+RAY_CLI_CLICK_MAX_VERSION = "__RAY_CLI_CLICK_MAX_VERSION__"
+RAY_CLI_CLICK_MAX_VERSION_TUPLE = __RAY_CLI_CLICK_MAX_VERSION_TUPLE__
 
 def _version_tuple(version: str) -> tuple[int, int, int]:
     parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
@@ -411,8 +420,8 @@ except Exception as exc:
     print(f"ray import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
-if ray.__version__ != "2.44.1":
-    print(f"ray version mismatch: {ray.__version__} != 2.44.1", file=sys.stderr)
+if ray.__version__ != RAY_VERSION:
+    print(f"ray version mismatch: {ray.__version__} != {RAY_VERSION}", file=sys.stderr)
     raise SystemExit(1)
 
 try:
@@ -421,8 +430,11 @@ except md.PackageNotFoundError:
     print("click is not installed", file=sys.stderr)
     raise SystemExit(1)
 
-if _version_tuple(click_version) >= (8, 3, 0):
-    print(f"click version incompatible with Ray CLI: {click_version} >= 8.3.0", file=sys.stderr)
+if _version_tuple(click_version) >= RAY_CLI_CLICK_MAX_VERSION_TUPLE:
+    print(
+        f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}",
+        file=sys.stderr,
+    )
     raise SystemExit(1)
 
 try:
@@ -431,6 +443,19 @@ except Exception as exc:
     print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(1)
 """
+
+
+def _version_tuple(version: str) -> tuple[int, int, int]:
+    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
+    parts.extend([0] * (3 - len(parts)))
+    return tuple(parts[:3])
+
+
+_RAY_SMOKE = (
+    _RAY_SMOKE_TEMPLATE.replace("__RAY_VERSION__", _RAY_VERSION)
+    .replace("__RAY_CLI_CLICK_MAX_VERSION__", _RAY_CLI_CLICK_MAX_VERSION)
+    .replace("__RAY_CLI_CLICK_MAX_VERSION_TUPLE__", repr(_version_tuple(_RAY_CLI_CLICK_MAX_VERSION)))
+)
 
 
 def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
@@ -462,7 +487,7 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
         print("Preflight: ray OK")
         return
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
-    print(f"Preflight: ray/click invalid ({reason}), installing ray[default]==2.44.1 + click<8.3.0 ...")
+    print(f"Preflight: ray/click invalid ({reason}), installing {_RAY_INSTALL_SPEC} + {_CLICK_INSTALL_SPEC} ...")
     subprocess.run(
         [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *_RAY_INSTALL_SPECS],
         check=True,
