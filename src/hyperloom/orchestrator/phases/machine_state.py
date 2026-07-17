@@ -948,10 +948,11 @@ def _budget_minutes(state: Any) -> float:
     rather than the whole run. When ``cycle_minutes`` is 0 this falls back to
     the total ``max_minutes`` (the whole-session anchor).
 
-    The per-cycle window only applies to long/unbounded runs (:func:`is_long_run`).
-    A short bounded run (``--max-hours < 24``) always anchors its phase budgets
-    on the whole session even when ``cycle_minutes`` is set, so its phases are
-    never silently compressed to the cycle window (DEFAULT_CYCLE_HOURS).
+    Used by :func:`_phase_budget_total_seconds` as the charge-back *base* (and
+    planning cap) for long/unbounded runs (:func:`is_long_run`). A short bounded
+    run (``--max-hours < 24``) does not use this — it charges back against the
+    remaining session time — so its phases are never silently compressed to the
+    cycle window (DEFAULT_CYCLE_HOURS).
     Note: ``session_remaining_seconds`` deliberately keeps using ``max_minutes``
     — the global deadline is per-run, not per-cycle.
     """
@@ -993,14 +994,22 @@ def _phase_budget_total_seconds(
 ) -> float | None:
     """Effective TOTAL budget (seconds) allotted to the current phase.
 
-    Short bounded runs (``max_minutes>0`` and not :func:`is_long_run`) use
-    "charge-back": the phase gets its share of the time still remaining in the
-    session, renormalized over the current phase and the phases yet to come. This
-    makes an earlier phase's overrun (e.g. a slow PRELUDE) transparently reduce
-    every later phase's budget instead of the fixed ``max_minutes*pct`` allotment.
+    Bounded runs (a wall-clock ``start_ts`` + ``max_minutes`` are set) use
+    "charge-back": the phase gets its share of the time still available,
+    renormalized over the current phase and the phases yet to come, so an earlier
+    phase's overrun (e.g. a slow PRELUDE) transparently reduces every later
+    phase's budget instead of a fixed ``base*pct`` allotment. The charge-back
+    *base* differs by session length (:func:`is_long_run`):
 
-    Long/cyclic and unbounded runs keep the legacy per-window allotment
-    (``_budget_minutes*60*pct``) so per-cycle budgeting is untouched.
+    - Short bounded runs charge back against the remaining SESSION time.
+    - Long bounded runs charge back against the remaining session time too, but
+      the per-cycle window (``cycle_minutes`` via :func:`_budget_minutes`) caps
+      the base as a planning ceiling — so one cycle never plans beyond one
+      macro-cycle window.
+
+    Unbounded runs (or a state with no parseable ``start_ts``) have no clock to
+    charge back against, so they fall back to the flat per-window allotment
+    (``_budget_minutes*60*pct``).
 
     Args:
         state (Any): Frozen SharedState view.
@@ -1018,22 +1027,31 @@ def _phase_budget_total_seconds(
     pct = float(budget.get(phase, 0.0))
     if pct <= 0.0:
         return None
+
     session_remaining = session_remaining_seconds(state, now_unix=now_unix)
-    if session_remaining is not None and not is_long_run(state):
-        # Charge-back (short bounded run). remaining_at_entry reconstructs the
-        # session time left when this phase started (session_remaining shrinks as
-        # phase_elapsed grows, so their sum is constant across the phase).
+    if session_remaining is not None:
+        # Charge-back. remaining_at_entry reconstructs the time left when this
+        # phase started (session_remaining shrinks as phase_elapsed grows, so
+        # their sum is constant across the phase).
         remaining_at_entry = max(0.0, session_remaining + phase_elapsed_seconds(state, now_unix=now_unix))
+        if is_long_run(state):
+            # Long bounded run: the per-cycle window caps the base as a planning
+            # ceiling so one cycle never plans beyond one macro-cycle window.
+            cycle_window = _budget_minutes(state) * 60.0
+            if cycle_window > 0.0:
+                remaining_at_entry = min(cycle_window, remaining_at_entry)
         # Normalize ONLY over the current phase and the phases still to come:
         # already-elapsed phases (notably PRELUDE) are excluded — their spend is
-        # already reflected in session_remaining — while CLOSE stays in so it
-        # keeps its reserved share. Do NOT normalize over all six phases.
+        # already reflected in the base — while CLOSE stays in so it keeps its
+        # reserved share. Do NOT normalize over all six phases.
         denom = sum(
             float(budget.get(p, 0.0)) for p in PHASE_NAMES[phase_index(phase) :] if float(budget.get(p, 0.0)) > 0.0
         )
         if denom <= 0.0:
             return None
         return remaining_at_entry * pct / denom
+    # No session clock (unbounded run, or ``start_ts`` unset): fall back to the
+    # flat per-window allotment — charge-back needs a wall-clock reference.
     mm = _budget_minutes(state)
     if mm <= 0:
         return None
@@ -1239,7 +1257,9 @@ def should_force_exit_explore(
     if phase_remaining is not None:
         # Fraction of the phase's EFFECTIVE total budget — same helper that
         # produced phase_remaining, so numerator and denominator stay in the same
-        # units (charge-back for short bounded runs, legacy window otherwise).
+        # units (charge-back against the session for short runs, against the
+        # cycle-window-capped base for long bounded runs, flat per-window for
+        # unbounded runs).
         phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
         if phase_total_sec and phase_total_sec > 0:
             remaining_pct = phase_remaining / phase_total_sec

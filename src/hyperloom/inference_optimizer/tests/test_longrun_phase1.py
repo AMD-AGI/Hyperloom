@@ -165,6 +165,9 @@ def test_per_cycle_budget_shrinks_phase_window():
     budget = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
     pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
 
+    # Long bounded runs charge back (base * pct / denom); the per-cycle window
+    # caps the base, so a 6h cycle plans a smaller EXPLORE than the 96h run.
+    denom = sum(budget[p] for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_EXPLORE) :] if budget[p] > 0)
     rem_run = ps.phase_budget_remaining_seconds(
         whole_run,
         budget_pct=budget,
@@ -175,10 +178,47 @@ def test_per_cycle_budget_shrinks_phase_window():
         budget_pct=budget,
         now_unix=now,
     )
-    # whole-run: 96h*pct; per-cycle: 6h*pct.
-    assert rem_run == pytest.approx(96 * 3600 * pct)
-    assert rem_cycle == pytest.approx(6 * 3600 * pct)
+    # whole-run base = full 96h session; per-cycle base = capped to the 6h window.
+    assert rem_run == pytest.approx(96 * 3600 * pct / denom)
+    assert rem_cycle == pytest.approx(6 * 3600 * pct / denom)
     assert rem_cycle < rem_run
+
+
+def test_long_run_chargeback_cap_and_tail():
+    now = 1_000_000.0
+    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
+    denom = sum(
+        ps.DEFAULT_PHASE_BUDGET_PCT[p]
+        for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_EXPLORE) :]
+        if ps.DEFAULT_PHASE_BUDGET_PCT[p] > 0
+    )
+    # A 48h long bounded run with a 24h cycle window: early on, remaining session
+    # (>24h) exceeds the window, so the window caps the charge-back base.
+    early_start = datetime.fromtimestamp(now - 1 * 3600.0, tz=timezone.utc).isoformat()
+    early = SharedState(
+        session_id="t",
+        phase=ps.PHASE_EXPLORE,
+        start_ts=early_start,
+        max_minutes=48 * 60,
+        cycle_minutes=24 * 60.0,
+        phase_started_unix=now,
+    )
+    total_early = ps._phase_budget_total_seconds(early, now_unix=now)
+    assert total_early == pytest.approx(24 * 3600 * pct / denom)  # capped at the window
+
+    # Near the tail (only 3h of session left, < the 24h window), the remaining
+    # session time — not the window — is the charge-back base.
+    tail_start = datetime.fromtimestamp(now - 45 * 3600.0, tz=timezone.utc).isoformat()
+    tail = SharedState(
+        session_id="t",
+        phase=ps.PHASE_EXPLORE,
+        start_ts=tail_start,
+        max_minutes=48 * 60,
+        cycle_minutes=24 * 60.0,
+        phase_started_unix=now,
+    )
+    total_tail = ps._phase_budget_total_seconds(tail, now_unix=now)
+    assert total_tail == pytest.approx(3 * 3600 * pct / denom)  # session tail < window
 
 
 def test_budget_minutes_falls_back_to_max_minutes_when_disabled():
