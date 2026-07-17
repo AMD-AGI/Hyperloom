@@ -100,9 +100,7 @@ Collect these required values:
   `FRAMEWORK` value when it is set; otherwise default to `sglang`.
 - Workload: `TP`, `EP`, `CONC`, `ISL`, `OSL`, `PRECISION`, and optional
   `MAX_MODEL_LEN` / `PROFILE_OSL`.
-- Objective and budget: `MAX_HOURS` plus exactly one of `TARGET_GAIN` or
-  `TARGET_TPUT`. Use `TARGET_GAIN=30` as the default when the user does not
-  choose a throughput target.
+- Objective and budget: `MAX_HOURS` plus `TARGET_GAIN`.
 
 ## Default Values
 
@@ -118,7 +116,7 @@ resolved values in the launch plan before starting the optimizer.
 - `PRECISION=bf16`.
 - `MAX_HOURS=8`, a medium-length full optimization default. The user may choose
   a shorter smoke run such as `3`, or a long-horizon run such as `24`.
-- `TARGET_GAIN=30` unless the user chooses `TARGET_TPUT`.
+- `TARGET_GAIN=30`.
 - `MAX_MODEL_LEN`: unset, so Hyperloom derives it from ISL/OSL and model
   metadata.
 - `PROFILE_OSL`: unset, so Hyperloom uses its profile-phase default.
@@ -261,9 +259,7 @@ export ISL="${ISL:-1024}"
 export OSL="${OSL:-1024}"
 export PRECISION="${PRECISION:-bf16}"
 export MAX_HOURS="${MAX_HOURS:-8}"
-if [ -z "${TARGET_TPUT:-}" ]; then
-  export TARGET_GAIN="${TARGET_GAIN:-30}"
-fi
+export TARGET_GAIN="${TARGET_GAIN:-30}"
 
 OPT_FLAGS=(
   --model "$MODEL_PATH"
@@ -280,7 +276,6 @@ OPT_FLAGS=(
 )
 
 [ -n "${TARGET_GAIN:-}" ] && OPT_FLAGS+=(--target-gain "$TARGET_GAIN")
-[ -n "${TARGET_TPUT:-}" ] && OPT_FLAGS+=(--target-tput "$TARGET_TPUT")
 [ -n "${MAX_MODEL_LEN:-}" ] && OPT_FLAGS+=(--max-model-len "$MAX_MODEL_LEN")
 [ -n "${PROFILE_OSL:-}" ] && OPT_FLAGS+=(--profile-osl "$PROFILE_OSL")
 [ -n "${MODEL_CLASS:-}" ] && OPT_FLAGS+=(--model-class "$MODEL_CLASS")
