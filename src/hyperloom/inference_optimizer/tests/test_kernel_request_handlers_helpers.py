@@ -284,3 +284,22 @@ def test_in_flight_kernel_ids_scans_running(tmp_path: Path) -> None:
     # malformed -> skipped
     (status_dir / "ko-4.json").write_text("{bad", encoding="utf-8")
     assert krh._in_flight_kernel_ids(tmp_path) == {"k7", "k8"}
+
+
+# -- _source_escapes_reusable_roots (SWSPLAT-42408) -----------------------
+def test_source_escapes_reusable_roots(monkeypatch) -> None:
+    # A trace-supplied kernel_file that keeps a root substring but uses ``..``
+    # to climb out of the framework tree must be flagged; a plain in-tree path
+    # (no ``..``) must not be, so no legitimate source is newly rejected.
+    monkeypatch.setattr(
+        krh, "_reusable_source_roots", lambda: ("/sgl-workspace/aiter/",)
+    )
+    # Legitimate in-tree path (no traversal) -> not an escape.
+    assert krh._source_escapes_reusable_roots("/sgl-workspace/aiter/foo.py") is False
+    # Traversal that escapes the tree while still embedding the root substring.
+    assert (
+        krh._source_escapes_reusable_roots("/sgl-workspace/aiter/../../etc/passwd")
+        is True
+    )
+    # No ``..`` at all -> never treated as an escape here (substring check owns it).
+    assert krh._source_escapes_reusable_roots("/etc/passwd") is False

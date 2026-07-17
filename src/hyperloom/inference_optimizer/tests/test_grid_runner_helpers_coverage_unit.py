@@ -328,6 +328,41 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     assert "ROCM_AITER_FA" in args, "last-wins should keep variant value"
 
 
+def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
+    # SWSPLAT-42358: a legitimate overlay is a single existing directory; it is
+    # prepended to PYTHONPATH unchanged.
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {}}}),
+        encoding="utf-8",
+    )
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    variant = _variant("v1")
+    variant.overlay_pythonpath = str(overlay)  # type: ignore[attr-defined]
+    out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+    envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
+    assert envs.get("PYTHONPATH", "").startswith(str(overlay))
+
+
+def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
+    # SWSPLAT-42358: a ``:``-joined / traversal / non-existent overlay is
+    # dropped (would otherwise smuggle extra PYTHONPATH entries or escape).
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {}}}),
+        encoding="utf-8",
+    )
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    for bad in (f"{overlay}:/etc", f"{overlay}/../evil", str(tmp_path / "missing")):
+        variant = _variant("v1")
+        variant.overlay_pythonpath = bad  # type: ignore[attr-defined]
+        out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+        envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
+        assert "PYTHONPATH" not in envs or bad not in envs.get("PYTHONPATH", ""), bad
+
+
 def test_shell_safe_dedupe_leaves_json_arg_untouched() -> None:
     """When a space/JSON-valued flag is present, dedupe must leave the whole
     string untouched (the unquoted $EXTRA_*_ARGS expansion downstream cannot

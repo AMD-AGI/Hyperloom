@@ -1449,6 +1449,28 @@ def test_multinode_entrypoint_shlex_quotes_malicious_value():
     assert f"--kernel-id {evil}" not in ep
 
 
+def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
+    """SWSPLAT-42404: a shell-metacharacter model must be shlex-quoted into the
+    head-pod launch entrypoint (single argv token, no command injection)."""
+    import shlex
+
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    evil = "m'; touch /tmp/pwned #"
+    ns = argparse.Namespace(
+        framework="sglang",
+        model=evil,
+        tp=8,
+        no_wait_health=False,
+        extra_args="",
+    )
+    ep = mn_cli._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
+    assert shlex.quote(evil) in ep
+    # The raw unquoted metacharacter model must NOT appear as a bare token.
+    assert f"launch_server.sh sglang {evil}" not in ep
+
+
 def test_multinode_op_args_shlex_quotes_malicious_value():
     """The Infera SSH op_args builder path (bench) must also shlex-quote."""
     import shlex

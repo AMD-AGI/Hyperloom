@@ -33,6 +33,26 @@ log = logging.getLogger(__name__)
 
 COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".hip"}
 PYTHON_SOURCE_SUFFIXES = {".py"}
+COMPILED_ARTIFACT_SUFFIXES = {".so", ".co", ".hsaco"}
+TEXT_ARTIFACT_SUFFIXES = {".txt", ".md", ".markdown", ".log", ".patch", ".diff"}
+# Fallback when ``inference_optimizer`` is not on ``sys.path`` (standalone CLI).
+_FALLBACK_KNOWN_TARGET_ROOTS: tuple[str, ...] = (
+    "/sgl-workspace/aiter/",
+    "/sgl-workspace/sglang/",
+    "/sgl-workspace/vllm/",
+    "/opt/venv/lib/python3.10/site-packages/aiter/",
+    "/opt/venv/lib/python3.10/site-packages/sglang/",
+    "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/usr/local/lib/python3.12/dist-packages/aiter/",
+    "/usr/local/lib/python3.12/dist-packages/sglang/",
+    "/usr/local/lib/python3.12/dist-packages/vllm/",
+    "/usr/local/lib/python3.10/dist-packages/aiter/",
+    "/usr/local/lib/python3.10/dist-packages/sglang/",
+    "/usr/local/lib/python3.10/dist-packages/vllm/",
+)
+
+_CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
+
 
 _UNSAFE_COMMAND_TOKENS = {";", "&&", "||", "|", ">", ">>", "<", "<<", "`"}
 _UNSAFE_COMMAND_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
@@ -71,25 +91,6 @@ def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[s
     if exe in _SHELL_COMMAND_NAMES and any(part in {"-c", "-lc"} for part in argv[1:]):
         raise ValueError("rebuild_command must not invoke a shell command string")
     return argv
-COMPILED_ARTIFACT_SUFFIXES = {".so", ".co", ".hsaco"}
-TEXT_ARTIFACT_SUFFIXES = {".txt", ".md", ".markdown", ".log", ".patch", ".diff"}
-# Fallback when ``inference_optimizer`` is not on ``sys.path`` (standalone CLI).
-_FALLBACK_KNOWN_TARGET_ROOTS: tuple[str, ...] = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-)
-
-_CACHED_KNOWN_TARGET_ROOTS: tuple[str, ...] | None = None
 
 
 def known_target_roots() -> tuple[str, ...]:
