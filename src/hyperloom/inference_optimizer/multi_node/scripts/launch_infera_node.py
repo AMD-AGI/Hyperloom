@@ -298,6 +298,7 @@ def _reap_stale_engines_by_cmdline() -> None:
     own engine cmdlines (IR-5: we only kill processes we launched). Never raises.
     """
     import signal as _sig
+
     kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
     pats = ("sglang.launch_server", "infera.engine.sglang", "infera.engine.vllm", "sglang::sched")
     me = os.getpid()
@@ -401,8 +402,11 @@ def _kill_prior(pid_file: Path) -> None:
         alive = [t for t in targets if _pid_alive(t)]
         if alive:
             raise RuntimeError(
-                "prior server pids " + str(alive) + " still alive "
-                + str(int(kill_wait_s)) + "s after SIGKILL (wedged, likely D-state on "
+                "prior server pids "
+                + str(alive)
+                + " still alive "
+                + str(int(kill_wait_s))
+                + "s after SIGKILL (wedged, likely D-state on "
                 "slow weight I/O); aborting relaunch to avoid VRAM double-stack -- "
                 "node may need a reboot/GPU reset"
             )
@@ -564,9 +568,7 @@ def _build_sglang_cmd(
         # flags actually take effect (full DP-attention; tp % dp == 0 holds).
         _dp_enable_flags = ("--enable-dp-attention", "--enable-dp-lm-head")
         has_dp_enable = any(tok in _dp_enable_flags for tok in extra_tokens)
-        has_dp_size = any(
-            tok == "--dp-size" or tok.startswith("--dp-size=") for tok in extra_tokens
-        )
+        has_dp_size = any(tok == "--dp-size" or tok.startswith("--dp-size=") for tok in extra_tokens)
         if has_dp_enable and not has_dp_size and int(a.tp) > 1:
             cmd.extend(["--dp-size", str(a.tp)])
     # Skip sglang's post-load warmup ONLY for PD-disaggregated legs. In PD the
@@ -752,6 +754,7 @@ def _start_gpu_sampler(out_csv: Path, pid_file: Path, interval_s: int) -> None:
     the next restart kills it. No-op if rocm-smi is unavailable.
     """
     import shutil
+
     rocm = shutil.which("rocm-smi") or "/opt/rocm/bin/rocm-smi"
     if not Path(rocm).exists():
         _log("rocm-smi not found; skipping GPU sampler")
@@ -770,7 +773,7 @@ def _start_gpu_sampler(out_csv: Path, pid_file: Path, interval_s: int) -> None:
         f'[ -s {q_csv} ] || echo "$H" > {q_csv}; '
         "while true; do "
         "TS=$(date +%s); "
-        f'{q_rocm} --showuse --showmemuse --showpower --showtemp --csv 2>/dev/null '
+        f"{q_rocm} --showuse --showmemuse --showpower --showtemp --csv 2>/dev/null "
         f'| tail -n +2 | sed "s/^/$TS,/" >> {q_csv}; '
         f"sleep {interval}; done"
     )

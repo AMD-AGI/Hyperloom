@@ -261,6 +261,7 @@ def _framework_config_levers_from_done(
             return levers
     return {}
 
+
 # Hard-trigger thresholds: EXPLORE rounds a domain may go without a specialist
 # dispatch / a KEEP before the Coordinator force-dispatches one.
 FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
@@ -281,6 +282,7 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
     "tput_tok_s",
 )
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome")
+
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
     """Return ``d[k]`` for the first ``k`` in ``keys`` present + non-None.
@@ -684,15 +686,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     _seed_memory = dict(_hist[-_n])
                     self.shared_state.orchestration_memory = _seed_memory
                     log.warning(
-                        "Coordinator: orchestration memory rolled back to history[-%d] "
-                        "(of %d snapshots)",
+                        "Coordinator: orchestration memory rolled back to history[-%d] (of %d snapshots)",
                         _n,
                         len(_hist),
                     )
                 else:
                     log.warning(
-                        "Coordinator: ORCH_MEMORY_ROLLBACK=%s out of range (history has %d); "
-                        "using live memory",
+                        "Coordinator: ORCH_MEMORY_ROLLBACK=%s out of range (history has %d); using live memory",
                         _rollback_raw,
                         len(_hist),
                     )
@@ -834,15 +834,23 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # name of the property returning the owning collaborator.
     _DELEGATED = {
         # router
-        "_handle_intent": "router", "_handle_propose_action": "router",
-        "_handle_review_verdict": "router", "_handle_single_verdict": "router",
-        "_handle_delegate": "router", "_handle_specialist_done": "router",
-        "_handle_request": "router", "_handle_response": "router",
-        "_handle_kill_task": "router", "_handle_prune_branch": "router",
-        "_handle_escalate_strategy_change": "router", "_handle_send_message": "router",
-        "_handle_alert": "router", "_handle_update_state": "router",
+        "_handle_intent": "router",
+        "_handle_propose_action": "router",
+        "_handle_review_verdict": "router",
+        "_handle_single_verdict": "router",
+        "_handle_delegate": "router",
+        "_handle_specialist_done": "router",
+        "_handle_request": "router",
+        "_handle_response": "router",
+        "_handle_kill_task": "router",
+        "_handle_prune_branch": "router",
+        "_handle_escalate_strategy_change": "router",
+        "_handle_send_message": "router",
+        "_handle_alert": "router",
+        "_handle_update_state": "router",
         # recorder (folded into writeback)
-        "_aggregate_research_evidence": "writeback", "_harvest_research_scout": "writeback",
+        "_aggregate_research_evidence": "writeback",
+        "_harvest_research_scout": "writeback",
         "_record_specialist_result": "writeback",
         # Phase handlers, grouped in the same call-chain order as
         # _COLLAB_MODULES/the @property block above:
@@ -1125,8 +1133,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 return object.__getattribute__(target, name)
             except AttributeError as exc:
                 raise AttributeError(
-                    f"{type(self).__name__!r} delegates {name!r} to {owner!r}, "
-                    f"but that collaborator does not define it"
+                    f"{type(self).__name__!r} delegates {name!r} to {owner!r}, but that collaborator does not define it"
                 ) from exc
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
@@ -1152,71 +1159,85 @@ class Coordinator(metaclass=_CoordinatorMeta):
     @property
     def phase_machine(self):
         from ..phases.machine import MachinePhase
+
         return self._collaborator("_phase_machine", MachinePhase)
 
     @property
     def phase_prelude(self):
         from ..phases.prelude import PreludePhase
+
         return self._collaborator("_phase_prelude", PreludePhase)
 
     @property
     def phase_sweep(self):
         from ..phases.sweep import SweepPhase
+
         return self._collaborator("_phase_sweep", SweepPhase)
 
     @property
     def phase_close(self):
         from ..phases.close import ClosePhase
+
         return self._collaborator("_phase_close", ClosePhase)
 
     @property
     def phase_internal(self):
         from ..phases.internal import InternalTasksPhase
+
         return self._collaborator("_phase_internal", InternalTasksPhase)
 
     @property
     def phase_kernel_stack(self):
         from ..phases.kernel_stack import KernelStackPhase
+
         return self._collaborator("_phase_kernel_stack", KernelStackPhase)
 
     @property
     def phase_kernel(self):
         from ..phases.kernel import KernelPhase
+
         return self._collaborator("_phase_kernel", KernelPhase)
 
     @property
     def phase_explore(self):
         from ..phases.explore import ExplorePhase
+
         return self._collaborator("_phase_explore", ExplorePhase)
 
     @property
     def phase_framework(self):
         from ..phases.framework import FrameworkPhase
+
         return self._collaborator("_phase_framework", FrameworkPhase)
 
     @property
     def conversation(self):
         from .conversation import ConversationCollaborator
+
         return self._collaborator("_conversation", ConversationCollaborator)
 
     @property
     def proposals(self):
         from .proposals import ProposalsCollaborator
+
         return self._collaborator("_proposals", ProposalsCollaborator)
 
     @property
     def dispatcher(self):
         from .dispatcher import DispatcherCollaborator
+
         return self._collaborator("_dispatcher", DispatcherCollaborator)
 
     @property
     def writeback(self):
         from .writeback import WritebackCollaborator
+
         return self._collaborator("_writeback", WritebackCollaborator)
 
     @property
     def maintenance(self):
         from .maintenance import MaintenanceCollaborator
+
         return self._collaborator("_maintenance", MaintenanceCollaborator)
 
     def _kb_hardware_slug(self) -> str:
@@ -1237,21 +1258,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         ss = self.shared_state
         return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
 
-
-
-
-
     # Advisory disk guard: when the session partition runs low, LRU-trim the
     # bulkiest churn (per-task runs/ workspaces); durable state is never touched.
     _DISK_FREE_MIN_GB: float = 20.0
     _DISK_USED_MAX_FRAC: float = 0.85
     _DISK_RUNS_KEEP_PER_ACTION: int = 50
     _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
-
-
-
-
-
 
     # Inline fast-action execution; deny report/session_breakdown (CLOSE artifacts).
     _INLINE_ACTION_DENY: frozenset[str] = frozenset(
@@ -1260,20 +1272,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             "session_breakdown",
         }
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     # Lifecycle
     async def stop(self) -> None:
@@ -1318,50 +1316,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:  # noqa: BLE001
             log.exception("cortex T4 SharedState.save failed")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     # Statuses that mean the candidate was ADOPTED; everything else is a negative
     # signal for the ranker.
     _FRAMEWORK_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
@@ -1369,45 +1323,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
 
-
-
-
-
-
-
-
-
     _CRITIC_PRIORS_DECISION_TAIL: int = 5
     _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     # Auto-roofline — PRELUDE bootstrap + 10% watermark refresh.
     _ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
@@ -1422,38 +1339,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # the pump force-stamps ``repeated_review_abort`` and stops re-selecting it.
     _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     # CLOSE phase sequencer; class-level wait-for-task timeouts (overridable per-instance in tests).
     CLOSE_REPORT_TIMEOUT_SEC: float = 600.0
     CLOSE_SESSION_BREAKDOWN_TIMEOUT_SEC: float = 300.0
@@ -1462,33 +1347,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
     # is skipped so report/breakdown always run.
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
 
-
     # optimization_stack actions warranting a post-opt roofline; pure
     # param-search (explore/sweep) is excluded.
-    _POST_OPT_ROOFLINE_ACTIONS = frozenset(
-        {"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"}
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    _POST_OPT_ROOFLINE_ACTIONS = frozenset({"integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
 
     async def tick(self, n: int = 1) -> None:
         """Run exactly ``n`` reactor passes for every agent; dispatcher pumps at pass end, lazy resume replay on tick 1.
@@ -1756,8 +1617,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     pass
         return self.shared_state.stop_reason
 
-
-
     # Reactor
     async def _reactor_pass(self, agent_name: str) -> None:
         """Run one reactor turn for ``agent_name`` and route its intents.
@@ -1846,13 +1705,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 cr = md.get("cache_read_input_tokens")
                 cc = md.get("cache_creation_input_tokens")
                 if it is not None or cr is not None or cc is not None:
-                    self._checkpoint_tracker.set_context_tokens(
-                        int(it or 0) + int(cr or 0) + int(cc or 0)
-                    )
+                    self._checkpoint_tracker.set_context_tokens(int(it or 0) + int(cr or 0) + int(cc or 0))
                 else:
-                    self._checkpoint_tracker.chars_add(
-                        len(prompt) + len(getattr(result, "raw_text", "") or "")
-                    )
+                    self._checkpoint_tracker.chars_add(len(prompt) + len(getattr(result, "raw_text", "") or ""))
             except Exception:  # noqa: BLE001 — accounting must never break routing
                 pass
         # Completed orchestration turn means SEED delivered; later turns send DELTA.
@@ -1910,7 +1765,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 exc_info=True,
             )
 
-
     async def _track_backend_error_streak(
         self,
         agent_name: str,
@@ -1946,109 +1800,16 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 },
             )
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     # Multi-node only: cap on specialist proposal_set entries auto-materialised
     # into a single explore grid per round.
     _MN_AUTO_EXPLORE_GRID_CAP = 6
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     # Phases whose long, serially-drained GPU grids must not starve the
     # per-phase cyclic budget exit. PRELUDE/SWEEP/CLOSE/RECOVER drain normally.
     _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"EXPLORE", "KERNEL_AGENT", "FRAMEWORK_AGENT"})
 
-
-
-
-
-
-
-
-
-
-
-
     # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes.
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 __all__ = [

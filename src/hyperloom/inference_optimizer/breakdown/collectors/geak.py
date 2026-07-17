@@ -24,7 +24,6 @@ from ._common import (
 )
 
 
-
 def _geak_accepted_kernels_from_journey(
     result: dict[str, Any],
     warnings: list[str],
@@ -79,19 +78,13 @@ def _geak_accepted_kernels_from_journey(
         br = k.get("backend_result") if isinstance(k.get("backend_result"), dict) else {}
         verification = br.get("verification") if isinstance(br.get("verification"), dict) else {}
         dispatch = k.get("dispatch") if isinstance(k.get("dispatch"), dict) else {}
-        backend = str(
-            verification.get("best_backend")
-            or (dispatch.get("backends") or [None])[0]
-            or ""
-        )
+        backend = str(verification.get("best_backend") or (dispatch.get("backends") or [None])[0] or "")
         accepted.append(
             {
                 "kernel_id": kid,
                 "name": str(k.get("name") or kid),
                 "gpu_pct": _to_float(k.get("gpu_pct")),
-                "micro_speedup": _to_float(
-                    k.get("micro_speedup") or verification.get("micro_speedup")
-                ),
+                "micro_speedup": _to_float(k.get("micro_speedup") or verification.get("micro_speedup")),
                 "e2e_gain_pct": _to_float(e2e.get("e2e_gain_pct")),
                 "validated": e2e.get("validated") if isinstance(e2e.get("validated"), bool) else None,
                 "decision": decision or "KEEP",
@@ -139,9 +132,7 @@ def _geak_reconstruct_from_disk(
         obj = read_json(
             p,
             default={},
-            on_error=lambda exc: warnings.append(
-                f"geak: reconstruct read failed for {p.name}: {exc}"
-            ),
+            on_error=lambda exc: warnings.append(f"geak: reconstruct read failed for {p.name}: {exc}"),
         )
         return obj if isinstance(obj, dict) else {}
 
@@ -214,10 +205,8 @@ def _geak_reconstruct_from_disk(
         kj = exp_root / "kernel_journey.json"
         try:
             if kj.is_file():
-                recon["accepted_kernels"] = (
-                    _geak_accepted_kernels_from_journey(
-                        {"kernel_journey_path": str(kj)}, warnings
-                    )
+                recon["accepted_kernels"] = _geak_accepted_kernels_from_journey(
+                    {"kernel_journey_path": str(kj)}, warnings
                 )
         except OSError as exc:
             warnings.append(f"geak: accepted kernels journey unreadable: {exc}")
@@ -240,9 +229,7 @@ def _geak_reconstruct_from_disk(
         except OSError:
             continue
     if newest > 0:
-        recon["last_artifact_ts"] = datetime.fromtimestamp(
-            newest, tz=timezone.utc
-        ).isoformat()
+        recon["last_artifact_ts"] = datetime.fromtimestamp(newest, tz=timezone.utc).isoformat()
 
     # 6) op-bench verdicts — each per-kernel ``opbench_result.json`` records
     #    whether the backend bake-off found a deployable winner
@@ -251,20 +238,23 @@ def _geak_reconstruct_from_disk(
     opbench_results: list[dict[str, Any]] = []
     if exp_root is not None:
         try:
-            task_dirs = [
-                d for d in (exp_root / "kernels").iterdir()
-                if d.is_dir() and not d.name.startswith("_")
-            ] if (exp_root / "kernels").is_dir() else []
+            task_dirs = (
+                [d for d in (exp_root / "kernels").iterdir() if d.is_dir() and not d.name.startswith("_")]
+                if (exp_root / "kernels").is_dir()
+                else []
+            )
             for task_dir in sorted(task_dirs, key=lambda p: p.name)[:12]:
                 ob = _load_json(task_dir / "opbench_result.json")
                 if ob:
-                    opbench_results.append({
-                        "task": ob.get("task") or task_dir.name,
-                        "winner_backend": ob.get("winner_backend"),
-                        "isolated_speedup": _to_float(ob.get("isolated_speedup")),
-                        "winner_editable": bool(ob.get("winner_editable")),
-                        "winner_kind": ob.get("winner_kind"),
-                    })
+                    opbench_results.append(
+                        {
+                            "task": ob.get("task") or task_dir.name,
+                            "winner_backend": ob.get("winner_backend"),
+                            "isolated_speedup": _to_float(ob.get("isolated_speedup")),
+                            "winner_editable": bool(ob.get("winner_editable")),
+                            "winner_kind": ob.get("winner_kind"),
+                        }
+                    )
         except OSError as exc:
             warnings.append(f"geak: reconstruct opbench scan failed: {exc}")
     if opbench_results:
@@ -285,7 +275,8 @@ def _geak_reconstruct_from_disk(
                 for p in logs[-4:]:
                     try:
                         log_tails[p.name] = p.read_text(
-                            encoding="utf-8", errors="replace",
+                            encoding="utf-8",
+                            errors="replace",
                         )[-1500:]
                     except OSError:
                         continue
@@ -305,10 +296,7 @@ def _geak_reconstruct_from_disk(
     #      * ``indeterminate``            — not enough on-disk signal to classify.
     has_journey = "kernel_journey" in stages
     ran_opbench = "opbench" in stages or bool(opbench_results)
-    any_deployable = any(
-        (r.get("isolated_speedup") or 0.0) > 1.0 and r.get("winner_editable")
-        for r in opbench_results
-    )
+    any_deployable = any((r.get("isolated_speedup") or 0.0) > 1.0 and r.get("winner_editable") for r in opbench_results)
     if flushed and flushed.get("status") and flushed.get("status") != "ok":
         likely_cause = "runner_reported_failure"
     elif ran_opbench and not any_deployable and not has_journey:
@@ -365,10 +353,7 @@ def collect_geak(
                 "engaged": True,
                 "status": "missing",
                 "error_class": "no_result",
-                "error": (
-                    "kernel_optimizer=geak but no geak_result "
-                    "recorded"
-                ),
+                "error": ("kernel_optimizer=geak but no geak_result recorded"),
                 "accepted_kernels": [],
                 "accepted_heads": [],
             }
@@ -397,9 +382,7 @@ def collect_geak(
             "flushed_result_status": recon.get("flushed_result_status"),
             "last_artifact_ts": recon.get("last_artifact_ts"),
             "accepted_kernels": recovered_kernels,
-            "accepted_kernels_source": (
-                "kernel_journey_backfill" if recovered_kernels else None
-            ),
+            "accepted_kernels_source": ("kernel_journey_backfill" if recovered_kernels else None),
             "accepted_heads": [],
             "kernels_optimized": len(recovered_kernels),
         }
@@ -485,4 +468,3 @@ def collect_geak(
         "kill_timeout_s": _to_int(result.get("kill_timeout_s")),
     }
     return section
-

@@ -25,9 +25,7 @@ from .schema import ensure_schema
 # Journal mode is env-overridable; WAL default. On networked filesystems
 # (WekaFS / NFS) WAL's ``-shm`` mapping can corrupt the DB, so set
 # ``INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE=DELETE`` on such mounts.
-_JOURNAL_MODE = (
-    os.environ.get("INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE", "WAL").strip() or "WAL"
-)
+_JOURNAL_MODE = os.environ.get("INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE", "WAL").strip() or "WAL"
 
 
 _PRAGMAS = (

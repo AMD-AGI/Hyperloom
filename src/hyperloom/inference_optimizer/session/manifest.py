@@ -399,10 +399,7 @@ def build_manifest(
             model_path = str(args.model)
             # Prefer the quantize prelude's pinned source identity over the
             # generic "quantized" export-dir basename.
-            model_name = (
-                (getattr(args, "model_display_name", "") or "").strip()
-                or Path(model_path).name
-            )
+            model_name = (getattr(args, "model_display_name", "") or "").strip() or Path(model_path).name
         if getattr(args, "framework", None):
             framework = str(args.framework)
         if getattr(args, "gpu_type", None):
@@ -458,9 +455,7 @@ def build_manifest(
         ),
         # Operator-supplied reference recipe source (audit only); the resolved
         # server_args / envs / model are authoritative in state.json.
-        "reference_script": (
-            getattr(args, "reference_script", None) if args is not None else None
-        ),
+        "reference_script": (getattr(args, "reference_script", None) if args is not None else None),
     }
 
 

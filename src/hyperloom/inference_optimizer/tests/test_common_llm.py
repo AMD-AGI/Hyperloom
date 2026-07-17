@@ -80,7 +80,15 @@ def test_anthropic_messages_posts_and_joins_text_blocks(monkeypatch: pytest.Monk
 
     def _post(url: str, *, headers: dict[str, str], content: str, timeout: float) -> _Response:
         captured.update({"url": url, "headers": headers, "body": json.loads(content), "timeout": timeout})
-        return _Response({"content": [{"type": "text", "text": "a"}, {"type": "image", "text": "skip"}, {"type": "text", "text": "b"}]})
+        return _Response(
+            {
+                "content": [
+                    {"type": "text", "text": "a"},
+                    {"type": "image", "text": "skip"},
+                    {"type": "text", "text": "b"},
+                ]
+            }
+        )
 
     monkeypatch.setattr("httpx.post", _post)
 

@@ -49,6 +49,7 @@ def _autodetect_gpu_type() -> str | None:
     """
     return _gpu_types._autodetect_gpu_type()
 
+
 def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
     """Resolve the current AMD GPU type, or None when not on AMD/unknown.
 
@@ -76,59 +77,98 @@ def _resolve_amd_gpu_type(explicit: str | None = None) -> str | None:
     detected = (_autodetect_gpu_type() or "").strip().lower()
     return detected if detected in _AMD_GPU_TYPES else None
 
+
 _SUPPORTED_ARCH_MARKERS = (
     "ForCausalLM",
     "LMHeadModel",
     "ForCausalLMWithValueHead",
 )
 
-_SUPPORTED_MODEL_TYPES = frozenset({
-    "llama", "mistral", "mixtral", "qwen2", "qwen2_moe", "qwen3", "qwen3_moe",
-    "gemma", "gemma2", "phi", "phi3", "phimoe",
-    "starcoder2", "codellama", "deepseek_v2", "deepseek_v3",
-    "falcon", "gpt_neox", "gpt2", "opt", "bloom",
-    "internlm", "internlm2", "yi", "baichuan",
-    "chatglm", "glm", "glm4",
-    "command-r", "cohere", "cohere2", "dbrx",
-    "mpt", "olmo", "olmo2", "jamba", "arctic",
-    "exaone", "granite", "granitemoeshared",
-    "stablelm", "persimmon",
-})
+_SUPPORTED_MODEL_TYPES = frozenset(
+    {
+        "llama",
+        "mistral",
+        "mixtral",
+        "qwen2",
+        "qwen2_moe",
+        "qwen3",
+        "qwen3_moe",
+        "gemma",
+        "gemma2",
+        "phi",
+        "phi3",
+        "phimoe",
+        "starcoder2",
+        "codellama",
+        "deepseek_v2",
+        "deepseek_v3",
+        "falcon",
+        "gpt_neox",
+        "gpt2",
+        "opt",
+        "bloom",
+        "internlm",
+        "internlm2",
+        "yi",
+        "baichuan",
+        "chatglm",
+        "glm",
+        "glm4",
+        "command-r",
+        "cohere",
+        "cohere2",
+        "dbrx",
+        "mpt",
+        "olmo",
+        "olmo2",
+        "jamba",
+        "arctic",
+        "exaone",
+        "granite",
+        "granitemoeshared",
+        "stablelm",
+        "persimmon",
+    }
+)
 
-_UNSUPPORTED_MODEL_TYPES = frozenset({
-    # RWKV6/Qwen2 hybrid identifiable by model_type alone in some checkpoints.
-    "rwkv6qwen2",
-    "gemma3",
-    "mllama",
-    "llava",
-    "llava_next",
-    "qwen2_vl",
-    "qwen2_5_vl",
-    "idefics",
-    "idefics2",
-    "idefics3",
-    "paligemma",
-    "pixtral",
-    "internvl_chat",
-    "phi3_v",
-})
+_UNSUPPORTED_MODEL_TYPES = frozenset(
+    {
+        # RWKV6/Qwen2 hybrid identifiable by model_type alone in some checkpoints.
+        "rwkv6qwen2",
+        "gemma3",
+        "mllama",
+        "llava",
+        "llava_next",
+        "qwen2_vl",
+        "qwen2_5_vl",
+        "idefics",
+        "idefics2",
+        "idefics3",
+        "paligemma",
+        "pixtral",
+        "internvl_chat",
+        "phi3_v",
+    }
+)
 
-_UNSUPPORTED_ARCHITECTURES = frozenset({
-    # RWKV6/Qwen2 hybrid linear-attention arch: fails ModelConfig validation at boot.
-    "RWKV6Qwen2ForCausalLM",
-    "Gemma3ForConditionalGeneration",
-    "InternVLChatModel",
-    "Phi3VForCausalLM",
-    "LlavaForConditionalGeneration",
-    "LlavaNextForConditionalGeneration",
-    "MllamaForConditionalGeneration",
-    "PaliGemmaForConditionalGeneration",
-    "Qwen2VLForConditionalGeneration",
-    "Qwen2_5_VLForConditionalGeneration",
-    "Idefics2ForConditionalGeneration",
-    "Idefics3ForConditionalGeneration",
-    "PixtralForConditionalGeneration",
-})
+_UNSUPPORTED_ARCHITECTURES = frozenset(
+    {
+        # RWKV6/Qwen2 hybrid linear-attention arch: fails ModelConfig validation at boot.
+        "RWKV6Qwen2ForCausalLM",
+        "Gemma3ForConditionalGeneration",
+        "InternVLChatModel",
+        "Phi3VForCausalLM",
+        "LlavaForConditionalGeneration",
+        "LlavaNextForConditionalGeneration",
+        "MllamaForConditionalGeneration",
+        "PaliGemmaForConditionalGeneration",
+        "Qwen2VLForConditionalGeneration",
+        "Qwen2_5_VLForConditionalGeneration",
+        "Idefics2ForConditionalGeneration",
+        "Idefics3ForConditionalGeneration",
+        "PixtralForConditionalGeneration",
+    }
+)
 
 _UNSUPPORTED_CONFIG_KEYS = (
     "vision_config",
@@ -153,10 +193,12 @@ _VERDICT_TEXT_COERCIBLE = "text_coercible"
 
 _VERDICT_VISION_ONLY = "vision_only"
 
-_TEXT_COERCIBLE_MODEL_TYPES = frozenset({
-    "kimi_k25",
-    "qwen3_5_moe",
-})
+_TEXT_COERCIBLE_MODEL_TYPES = frozenset(
+    {
+        "kimi_k25",
+        "qwen3_5_moe",
+    }
+)
 
 _MAXPOS_CONFIG_KEYS = (
     "max_position_embeddings",
@@ -172,9 +214,12 @@ _ROPE_CONFIG_KEYS = ("rope_scaling", "rope_parameters", "rope_theta")
 # shared-memory limit is 64KB → "out of resource: shared memory" at engine init.
 _AMD_UNSUPPORTED_MODEL_TYPES = frozenset({"deepseek_v32", "minimax_m1"})
 
-_AMD_UNSUPPORTED_ARCHITECTURES = frozenset({
-    "deepseekv32forcausallm", "minimaxm1forcausallm",
-})
+_AMD_UNSUPPORTED_ARCHITECTURES = frozenset(
+    {
+        "deepseekv32forcausallm",
+        "minimaxm1forcausallm",
+    }
+)
 
 _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 
@@ -182,20 +227,27 @@ _UNREGISTERED_CUSTOM_CONFIG_TYPES = frozenset({"kimi_k2"})
 # (hardware-agnostic): ModelConfig validation raises a ValidationError in engine
 # init regardless of GPU vendor. Matched case-insensitively against model_type
 # and architectures.
-_UNRECOGNIZED_MODEL_TYPES = frozenset({
-    "glm4_moe_lite", "mimo_v2_flash",
-})
-_UNRECOGNIZED_ARCHITECTURES = frozenset({
-    "glm4moeliteforcausallm",
-    "mimov2flashforcausallm",
-})
+_UNRECOGNIZED_MODEL_TYPES = frozenset(
+    {
+        "glm4_moe_lite",
+        "mimo_v2_flash",
+    }
+)
+_UNRECOGNIZED_ARCHITECTURES = frozenset(
+    {
+        "glm4moeliteforcausallm",
+        "mimov2flashforcausallm",
+    }
+)
 # Some model_type values only appear inside nested decoder configs carried by a
 # wrapper, so these are checked only against the nested text_config scope.
 # ministral3: Mistral3 multimodal wrapper (vLLM registry raises
 # KeyError('ministral3') for text_config.model_type).
-_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset({
-    "ministral3",
-})
+_NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES = frozenset(
+    {
+        "ministral3",
+    }
+)
 
 _PHI3_ROPE_TYPES = frozenset({"su", "longrope"})
 _STRICT_BOOL_CONFIG_KEYS = ("use_cache",)
@@ -207,20 +259,49 @@ _AMD_UNSUPPORTED_QUANT_METHODS = frozenset({"bitsandbytes", "bnb"})
 # Quant methods with a real vLLM/sglang loader. Anything else declared in
 # config.json is a private/third-party format that fails in engine init.
 # bitsandbytes/bnb are listed here but separately gated on AMD.
-_SUPPORTED_QUANT_METHODS = frozenset({
-    "fp8", "mxfp8", "mxfp4", "nvfp4", "blockwise_int8", "modelopt",
-    "modelopt_fp8", "modelopt_fp4", "modelopt_mixed", "w8a8_int8", "w8a8_fp8",
-    "w4afp8", "awq", "awq_marlin", "gptq", "gptq_marlin", "moe_wna16",
-    "compressed-tensors", "compressed_tensors", "qoq", "petit_nvfp4",
-    "fbgemm_fp8", "quark", "quark_int4fp8_moe", "auto-round", "modelslim",
-    "bitsandbytes", "bnb", "gguf", "torchao",
-})
+_SUPPORTED_QUANT_METHODS = frozenset(
+    {
+        "fp8",
+        "mxfp8",
+        "mxfp4",
+        "nvfp4",
+        "blockwise_int8",
+        "modelopt",
+        "modelopt_fp8",
+        "modelopt_fp4",
+        "modelopt_mixed",
+        "w8a8_int8",
+        "w8a8_fp8",
+        "w4afp8",
+        "awq",
+        "awq_marlin",
+        "gptq",
+        "gptq_marlin",
+        "moe_wna16",
+        "compressed-tensors",
+        "compressed_tensors",
+        "qoq",
+        "petit_nvfp4",
+        "fbgemm_fp8",
+        "quark",
+        "quark_int4fp8_moe",
+        "auto-round",
+        "modelslim",
+        "bitsandbytes",
+        "bnb",
+        "gguf",
+        "torchao",
+    }
+)
 # MLX mx.quantize uses a ``mode: affine/mlx`` block and emits per-tensor
 # ``.biases`` / ``.scales`` weights (plural — distinct from a standard ``.bias``).
 _MLX_QUANT_MODES = frozenset({"affine", "mlx"})
 
+
 def _load_model_arch(
-    workspace_root: Path, model_name: str, launched_model: str = "",
+    workspace_root: Path,
+    model_name: str,
+    launched_model: str = "",
 ) -> dict:
     """Best-effort loader for the advisory ``<workspace_root>/model_arch.json`` profile (prompts only).
 
@@ -242,6 +323,7 @@ def _load_model_arch(
             unreadable, invalid, or stale.
     """
     from hyperloom.common.model_paths import model_identities_match
+
     arch_path = workspace_root / "model_arch.json"
     try:
         raw = arch_path.read_text(encoding="utf-8")
@@ -256,15 +338,11 @@ def _load_model_arch(
         logging.warning("model_arch_invalid_json: %s (%s)", arch_path, exc)
         return {}
     if not isinstance(data, dict):
-        logging.warning(
-            "model_arch_not_a_dict: %s (got %s)", arch_path, type(data).__name__
-        )
+        logging.warning("model_arch_not_a_dict: %s (got %s)", arch_path, type(data).__name__)
         return {}
     declared = str(data.get("model_name") or "").strip()
     if not declared:
-        logging.warning(
-            "model_arch_missing_model_name: %s (cannot verify freshness)", arch_path
-        )
+        logging.warning("model_arch_missing_model_name: %s (cannot verify freshness)", arch_path)
         return {}
     if not model_identities_match(declared, model_name, launched_model):
         logging.warning(
@@ -277,6 +355,7 @@ def _load_model_arch(
         )
         return {}
     return data
+
 
 def _load_model_config_tags(model_path: str) -> dict:
     """Best-effort loader for KB architecture-identity tags (``architectures`` + ``model_type``) from config.json.
@@ -302,6 +381,7 @@ def _load_model_config_tags(model_path: str) -> dict:
         out["model_type"] = model_type
     return out
 
+
 def _arch_is_supported_text_generation(arch: str) -> bool:
     """True when an architecture class name denotes a supported text-generation
     (decoder-only causal LM) model.
@@ -317,6 +397,7 @@ def _arch_is_supported_text_generation(arch: str) -> bool:
     if not a:
         return False
     return any(marker in a for marker in _SUPPORTED_ARCH_MARKERS)
+
 
 def _config_declares_text_decoder(config: dict, architectures: list[str], model_type_l: str) -> bool:
     """True when config positively identifies a usable text decoder.
@@ -350,10 +431,7 @@ def _config_declares_text_decoder(config: dict, architectures: list[str], model_
             return True
 
         nested_model_type = str(nested.get("model_type") or "").strip().lower()
-        if (
-            nested_model_type in _SUPPORTED_MODEL_TYPES
-            or nested_model_type in _TEXT_COERCIBLE_MODEL_TYPES
-        ):
+        if nested_model_type in _SUPPORTED_MODEL_TYPES or nested_model_type in _TEXT_COERCIBLE_MODEL_TYPES:
             return True
 
         # Some multimodal configs expose a text_config with decoder dimensions
@@ -368,6 +446,7 @@ def _config_declares_text_decoder(config: dict, architectures: list[str], model_
             return True
 
     return False
+
 
 def _detect_unsupported_model(model_path: str) -> dict | None:
     """Best-effort classify a model's text-serving viability.
@@ -450,10 +529,7 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     _has_text_decoder = _config_declares_text_decoder(config, architectures, model_type_l)
     for key in _UNSUPPORTED_CONFIG_KEYS:
         if key in config:
-            verdict = (
-                _VERDICT_TEXT_COERCIBLE if _has_text_decoder
-                else _VERDICT_VISION_ONLY
-            )
+            verdict = _VERDICT_TEXT_COERCIBLE if _has_text_decoder else _VERDICT_VISION_ONLY
             return {
                 "architecture": architectures[0] if architectures else "",
                 "model_type": model_type,
@@ -483,10 +559,7 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
         return {
             "architecture": "",
             "model_type": model_type,
-            "signal": (
-                f"model_type '{model_type}' is not in the supported "
-                f"text-generation allowlist"
-            ),
+            "signal": (f"model_type '{model_type}' is not in the supported text-generation allowlist"),
             "verdict": _VERDICT_VISION_ONLY,
         }
 
@@ -496,6 +569,7 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
         "signal": "config.json has neither architectures nor model_type",
         "verdict": _VERDICT_VISION_ONLY,
     }
+
 
 def _load_model_max_position_embeddings(model_path: str) -> int | None:
     """Best-effort read of max sequence length from config.json (first positive among known keys, incl. nested ``text_config``), or None.
@@ -529,6 +603,7 @@ def _load_model_max_position_embeddings(model_path: str) -> int | None:
                 return val
     return None
 
+
 def _model_has_dual_chunk_attention(model_path: str) -> bool:
     """Best-effort detect a ``dual_chunk_attention_config`` in config.json.
 
@@ -549,9 +624,8 @@ def _model_has_dual_chunk_attention(model_path: str) -> bool:
     if data.get("dual_chunk_attention_config"):
         return True
     nested = data.get("text_config")
-    return isinstance(nested, dict) and bool(
-        nested.get("dual_chunk_attention_config")
-    )
+    return isinstance(nested, dict) and bool(nested.get("dual_chunk_attention_config"))
+
 
 def _model_is_moe(model_path: str) -> bool:
     """Best-effort detect a Mixture-of-Experts model from config.json.
@@ -595,6 +669,7 @@ def _model_is_moe(model_path: str) -> bool:
             return True
     return False
 
+
 def _detect_amd_unsupported_quant(model_path: str) -> str | None:
     """Return a reason when the model ships a quant format unsupported on ROCm.
 
@@ -630,12 +705,20 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
         except (OSError, json.JSONDecodeError, ValueError):
             hq = None
         if isinstance(hq, dict):
-            producer = str(
-                (hq.get("producer") or {}).get("name") or "",
-            ).strip().lower()
-            algo = str(
-                (hq.get("quantization") or {}).get("quant_algo") or "",
-            ).strip().lower()
+            producer = (
+                str(
+                    (hq.get("producer") or {}).get("name") or "",
+                )
+                .strip()
+                .lower()
+            )
+            algo = (
+                str(
+                    (hq.get("quantization") or {}).get("quant_algo") or "",
+                )
+                .strip()
+                .lower()
+            )
             if producer == "modelopt" and algo:
                 return (
                     f"NVIDIA ModelOpt '{algo.upper()}' quantization "
@@ -645,8 +728,7 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
                 )
             if algo in _AMD_UNSUPPORTED_QUANT_ALGOS:
                 return (
-                    f"'{algo.upper()}' quantization needs NVIDIA Blackwell "
-                    f"hardware; no AMD/ROCm runtime path exists."
+                    f"'{algo.upper()}' quantization needs NVIDIA Blackwell hardware; no AMD/ROCm runtime path exists."
                 )
     return None
 
@@ -726,10 +808,7 @@ def _detect_private_quant(model_path: str, data: dict) -> str | None:
         # quantization_config carries real quant params (bits/group_size/...) but
         # declares no quant_method: sglang can't pick a loader and raises
         # "Unknown quantization method: ''" in engine init.
-        if not method and any(
-            qc.get(k) is not None
-            for k in ("bits", "group_size", "weight_format", "weight_bits")
-        ):
+        if not method and any(qc.get(k) is not None for k in ("bits", "group_size", "weight_format", "weight_bits")):
             return (
                 "quantization_config declares quant params (e.g. bits/group_size) "
                 "but no quant_method; sglang/vLLM cannot select a loader and "
@@ -785,6 +864,7 @@ def _detect_phi3_rope_scaling_incompatible(data: dict) -> str | None:
         "AutoConfig.from_pretrained — before --json-model-override-args can "
         "apply, so the engine crashes in init."
     )
+
 
 def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
     """Return a reason when a Gemma2 config omits hidden_act.
@@ -905,13 +985,8 @@ def _detect_unrecognized_architecture(data: dict) -> str | None:
         arches = {a.lower() for a in _config_architectures(scope)}
         unrecognized_types = _UNRECOGNIZED_MODEL_TYPES
         if is_nested:
-            unrecognized_types = (
-                _UNRECOGNIZED_MODEL_TYPES | _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES
-            )
-        if (
-            model_type in unrecognized_types
-            or arches & _UNRECOGNIZED_ARCHITECTURES
-        ):
+            unrecognized_types = _UNRECOGNIZED_MODEL_TYPES | _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES
+        if model_type in unrecognized_types or arches & _UNRECOGNIZED_ARCHITECTURES:
             label = model_type or (next(iter(arches), "") if arches else "?")
             return (
                 f"model type '{label}' is not recognized by Transformers/"
@@ -1014,12 +1089,7 @@ def _detect_vocab_weight_shape_mismatch(model_path: str, data: dict) -> str | No
             if not any(name.endswith(suffix) for suffix in _VOCAB_WEIGHT_NAMES):
                 continue
             shape = meta.get("shape")
-            if not (
-                isinstance(shape, list)
-                and shape
-                and isinstance(shape[0], int)
-                and not isinstance(shape[0], bool)
-            ):
+            if not (isinstance(shape, list) and shape and isinstance(shape[0], int) and not isinstance(shape[0], bool)):
                 continue
             actual = shape[0]
             # Only block when the checkpoint has FEWER vocab rows than the config
@@ -1059,21 +1129,14 @@ def _detect_peft_adapter_only_checkpoint(model_path: str, data: dict) -> str | N
         return None
 
     keys = {str(k) for k in weight_map}
-    has_adapter_tensors = any(
-        marker in key for key in keys for marker in _PEFT_ADAPTER_WEIGHT_MARKERS
-    )
-    has_adapter_manifest = (
-        (mdir / "adapter_config.json").is_file()
-        or any("adapter" in str(v).lower() for v in weight_map.values())
+    has_adapter_tensors = any(marker in key for key in keys for marker in _PEFT_ADAPTER_WEIGHT_MARKERS)
+    has_adapter_manifest = (mdir / "adapter_config.json").is_file() or any(
+        "adapter" in str(v).lower() for v in weight_map.values()
     )
     if not has_adapter_tensors and not has_adapter_manifest:
         return None
 
-    has_base_weights = any(
-        key.endswith(suffix)
-        for key in keys
-        for suffix in _FULL_BASE_WEIGHT_NAMES
-    )
+    has_base_weights = any(key.endswith(suffix) for key in keys for suffix in _FULL_BASE_WEIGHT_NAMES)
     if has_base_weights:
         return None
 
@@ -1149,7 +1212,7 @@ def _detect_mistral_common_tokenizer_gap(model_path: str, data: dict) -> str | N
         "Mistral checkpoint ships tokenizer.json but none of the tokenizer "
         "metadata/files accepted by Transformers MistralCommonBackend "
         f"({', '.join(mistral_files)}); sglang server init fails with "
-        "\"No tokenizer file found\"."
+        '"No tokenizer file found".'
     )
 
 
@@ -1223,10 +1286,7 @@ def _detect_amd_unsupported_architecture(data: dict) -> str | None:
     """
     model_type = str(data.get("model_type") or "").strip().lower()
     arches = {a.lower() for a in _config_architectures(data)}
-    if (
-        model_type in _AMD_UNSUPPORTED_MODEL_TYPES
-        or arches & _AMD_UNSUPPORTED_ARCHITECTURES
-    ):
+    if model_type in _AMD_UNSUPPORTED_MODEL_TYPES or arches & _AMD_UNSUPPORTED_ARCHITECTURES:
         label = model_type or (next(iter(arches), "") if arches else "?")
         return (
             f"model architecture '{label}' has no AMD/ROCm runtime path "
@@ -1258,9 +1318,9 @@ def _detect_rope_without_max_position(data: dict) -> str | None:
         scopes.append(nested)
     has_rope = any(s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS)
     has_maxpos = any(
-        isinstance(s.get(k), int) and not isinstance(s.get(k), bool)
-        and s.get(k) > 0
-        for s in scopes for k in _MAXPOS_CONFIG_KEYS
+        isinstance(s.get(k), int) and not isinstance(s.get(k), bool) and s.get(k) > 0
+        for s in scopes
+        for k in _MAXPOS_CONFIG_KEYS
     )
     if has_rope and not has_maxpos:
         return (
@@ -1289,11 +1349,7 @@ def _detect_unregistered_custom_autoconfig(data: dict) -> str | None:
     """
     auto_map = data.get("auto_map")
     model_type = str(data.get("model_type") or "").strip().lower()
-    if (
-        isinstance(auto_map, dict)
-        and auto_map.get("AutoConfig")
-        and model_type in _UNREGISTERED_CUSTOM_CONFIG_TYPES
-    ):
+    if isinstance(auto_map, dict) and auto_map.get("AutoConfig") and model_type in _UNREGISTERED_CUSTOM_CONFIG_TYPES:
         return (
             f"model_type '{model_type}' ships a custom AutoConfig "
             f"({auto_map['AutoConfig']}) but is not registered in sglang/"
@@ -1348,7 +1404,11 @@ class DetectorSpec:
 
 
 def _run_compat_detector(
-    spec: DetectorSpec, *, model_path: str, data: dict, gpu_type: str | None,
+    spec: DetectorSpec,
+    *,
+    model_path: str,
+    data: dict,
+    gpu_type: str | None,
 ) -> str | None:
     """Invoke a spec's detector sub-chain, returning the first non-None reason.
 
@@ -1466,7 +1526,9 @@ _COMPAT_DETECTORS: tuple[DetectorSpec, ...] = (
 
 
 def _detect_incompatible_model_config(
-    model_path: str, gpu_type: str | None = None, framework: str | None = None,
+    model_path: str,
+    gpu_type: str | None = None,
+    framework: str | None = None,
 ) -> str | None:
     """Detect a statically-knowable model-config incompatibility.
 
@@ -1528,7 +1590,10 @@ def _detect_incompatible_model_config(
         if spec.skip_when_scriptable and is_scriptable_fw:
             continue
         reason = _run_compat_detector(
-            spec, model_path=model_path, data=data, gpu_type=gpu_type,
+            spec,
+            model_path=model_path,
+            data=data,
+            gpu_type=gpu_type,
         )
         if reason is not None:
             return reason
@@ -1543,6 +1608,7 @@ _CONTEXT_HEADROOM_ENV = "HYPERLOOM_CONTEXT_HEADROOM_TOKENS"
 _CONTEXT_HEADROOM_DEFAULT = 512
 
 _MAX_MODEL_LEN_HEADROOM = 4096
+
 
 def _context_headroom_tokens() -> int:
     """Resolve the context headroom (tokens); env override, else default.
@@ -1559,6 +1625,7 @@ def _context_headroom_tokens() -> int:
     except ValueError:
         return _CONTEXT_HEADROOM_DEFAULT
     return val if val >= 0 else _CONTEXT_HEADROOM_DEFAULT
+
 
 def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
     """Resolve ``MAX_MODEL_LEN`` = ISL+OSL+headroom, clamped to ``max_position_embeddings`` (never stretch context).
@@ -1577,6 +1644,7 @@ def _resolve_max_model_len(isl: int, osl: int, model_path: str) -> int:
     if maxpos:
         return min(desired, maxpos)
     return desired
+
 
 def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
     """Best-effort: push the just-written ``session_breakdown.json`` to Langfuse.
@@ -1604,8 +1672,7 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
         record_session_breakdown(session_dir)
     except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
         print(
-            f"WARNING: failed to emit session_breakdown to Langfuse on "
-            f"fail-fast: {exc!r}",
+            f"WARNING: failed to emit session_breakdown to Langfuse on fail-fast: {exc!r}",
             file=sys.stderr,
         )
 
@@ -1665,7 +1732,8 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         rdir = reports_dir(session_dir)
         rdir.mkdir(parents=True, exist_ok=True)
         (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+            json.dumps(summary, indent=2, sort_keys=True),
+            encoding="utf-8",
         )
         (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
     except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
@@ -1677,11 +1745,11 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
     # fail-fast exits before coordinator.run()'s finally.
     try:
         from ..breakdown import write_breakdown_json
+
         write_breakdown_json(session_dir)
     except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
         print(
-            f"WARNING: failed to write session_breakdown.json on context "
-            f"fail-fast: {exc!r}",
+            f"WARNING: failed to write session_breakdown.json on context fail-fast: {exc!r}",
             file=sys.stderr,
         )
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
@@ -1690,8 +1758,10 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
     print(f"ERROR: {reason}", file=sys.stderr)
     return True
 
+
 def _preflight_model_config_compat(
-    args: argparse.Namespace, session_dir: Path,
+    args: argparse.Namespace,
+    session_dir: Path,
 ) -> bool:
     """Fail fast when the model config is statically known to be incompatible.
 
@@ -1711,12 +1781,10 @@ def _preflight_model_config_compat(
             ``False`` otherwise.
     """
     model = str(getattr(args, "model", "") or "")
-    framework = (
-        str(getattr(args, "framework", "") or "")
-        or os.environ.get("FRAMEWORK", "")
-    ).strip().lower() or None
+    framework = (str(getattr(args, "framework", "") or "") or os.environ.get("FRAMEWORK", "")).strip().lower() or None
     detail = _detect_incompatible_model_config(
-        model, str(getattr(args, "gpu_type", "") or "") or None,
+        model,
+        str(getattr(args, "gpu_type", "") or "") or None,
         framework=framework,
     )
     if detail is None:
@@ -1744,7 +1812,8 @@ def _preflight_model_config_compat(
         rdir = reports_dir(session_dir)
         rdir.mkdir(parents=True, exist_ok=True)
         (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+            json.dumps(summary, indent=2, sort_keys=True),
+            encoding="utf-8",
         )
         (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
     except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
@@ -1754,11 +1823,11 @@ def _preflight_model_config_compat(
         )
     try:
         from ..breakdown import write_breakdown_json
+
         write_breakdown_json(session_dir)
     except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
         print(
-            f"WARNING: failed to write session_breakdown.json on config "
-            f"fail-fast: {exc!r}",
+            f"WARNING: failed to write session_breakdown.json on config fail-fast: {exc!r}",
             file=sys.stderr,
         )
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
@@ -1767,8 +1836,10 @@ def _preflight_model_config_compat(
     print(f"ERROR: {reason}", file=sys.stderr)
     return True
 
+
 def _preflight_unsupported_model_arch(
-    args: argparse.Namespace, session_dir: Path,
+    args: argparse.Namespace,
+    session_dir: Path,
 ) -> bool:
     """Gate multimodal/vision models before expensive bring-up.
 
@@ -1837,14 +1908,16 @@ def _preflight_unsupported_model_arch(
 
             state = SharedState.load_or_init(session_dir)
             state.degraded_mode = True
-            state.model_warnings = list(state.model_warnings or []) + [{
-                "kind": "multimodal_text_fallback",
-                "model_name": name,
-                "architecture": arch,
-                "model_type": mt,
-                "signal": str(hit.get("signal") or ""),
-                "detail": warning,
-            }]
+            state.model_warnings = list(state.model_warnings or []) + [
+                {
+                    "kind": "multimodal_text_fallback",
+                    "model_name": name,
+                    "architecture": arch,
+                    "model_type": mt,
+                    "signal": str(hit.get("signal") or ""),
+                    "detail": warning,
+                }
+            ]
             state.save(session_dir)
         except Exception as exc:  # noqa: BLE001 — never block the run on advisory write
             print(
@@ -1880,7 +1953,8 @@ def _preflight_unsupported_model_arch(
         rdir = reports_dir(session_dir)
         rdir.mkdir(parents=True, exist_ok=True)
         (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8",
+            json.dumps(summary, indent=2, sort_keys=True),
+            encoding="utf-8",
         )
         (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
     except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
@@ -1892,11 +1966,11 @@ def _preflight_unsupported_model_arch(
     # fail-fast exits before coordinator.run()'s finally.
     try:
         from ..breakdown import write_breakdown_json
+
         write_breakdown_json(session_dir)
     except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
         print(
-            f"WARNING: failed to write session_breakdown.json on unsupported-"
-            f"model fail-fast: {exc!r}",
+            f"WARNING: failed to write session_breakdown.json on unsupported-model fail-fast: {exc!r}",
             file=sys.stderr,
         )
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so

@@ -65,6 +65,7 @@ _KB_RELEVANT_VERDICTS: frozenset[str] = frozenset(
 _DEFAULT_BREAKER_THRESHOLD = 1
 _DEFAULT_BREAKER_COOLDOWN_SECONDS = 60.0
 
+
 @dataclass
 class WriteContext:
     """Per-write metadata threaded through every call."""

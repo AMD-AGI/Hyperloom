@@ -513,9 +513,7 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
 
     async def _fake_run_grid(*, grid: list[GridVariant], **kw):
         seen["run_grid_gpu"] = kw.get("gpu_type")
-        return [
-            _fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid
-        ]
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
         patch(
@@ -1178,6 +1176,7 @@ def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
 # Change 2 extras: _order_concs_desc / _build_arm_grid
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_order_concs_desc_deduplicates_and_sorts():
     assert _order_concs_desc([4, 1, 16, 4, 2]) == [16, 4, 2, 1]
 
@@ -1225,6 +1224,7 @@ def test_build_arm_grid_optimized_arm_carries_args():
 # ─────────────────────────────────────────────────────────────────────────────
 # Change 1: soft switch + arm-major orchestration
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_conc_sweep_single_server_enabled_default(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CONC_SWEEP_SINGLE_SERVER", raising=False)
@@ -1356,7 +1356,9 @@ def test_run_conc_sweep_partial_sweep_writes_incremental_checkpoint(
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
-        patch("hyperloom.orchestrator.kernel.conc_sweep._flush_partial_conc_sweep_report", side_effect=_intercept_flush),
+        patch(
+            "hyperloom.orchestrator.kernel.conc_sweep._flush_partial_conc_sweep_report", side_effect=_intercept_flush
+        ),
     ):
         asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16], write_reports=True))
 
@@ -1372,6 +1374,7 @@ def test_run_conc_sweep_partial_sweep_writes_incremental_checkpoint(
 # ─────────────────────────────────────────────────────────────────────────────
 # Change 5: _flush_conc_sweep_report / _flush_partial_conc_sweep_report
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
     rdir = session_dir / "reports"
@@ -1411,6 +1414,7 @@ def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytes
     }
     # Should not raise even if atomic_write_text itself raises.
     from hyperloom.common import io as _common_io
+
     monkeypatch.setattr(_common_io, "atomic_write_text", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
     _flush_conc_sweep_report(payload, session_dir)  # must not raise
 
@@ -1422,7 +1426,9 @@ def test_flush_partial_conc_sweep_report_marks_in_progress(session_dir: Path):
     json_path = rdir / "conc_sweep_summary.json"
     csv_path = rdir / "conc_sweep_raw.csv"
     state = _make_state()
-    result = _fake_variant("baseline_conc4", throughput=100.0, envs={"CONC": "4", "ISL": "512", "OSL": "512", "NUM_PROMPTS": "20"})
+    result = _fake_variant(
+        "baseline_conc4", throughput=100.0, envs={"CONC": "4", "ISL": "512", "OSL": "512", "NUM_PROMPTS": "20"}
+    )
     _flush_partial_conc_sweep_report(
         results=[result],
         state=state,
@@ -1452,6 +1458,7 @@ def test_flush_partial_conc_sweep_report_marks_in_progress(session_dir: Path):
 # Change 4: session deadline detection
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_run_conc_sweep_stops_on_closing_phase(
     session_dir: Path,
     baseline_yaml: Path,
@@ -1473,9 +1480,7 @@ def test_run_conc_sweep_stops_on_closing_phase(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(
-            run_conc_sweep(state, session_dir, concs=[1, 4, 16, 64])
-        )
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 4, 16, 64]))
 
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     skipped = [p for p in all_points if p["status"] == "skipped"]
@@ -1504,9 +1509,7 @@ def test_run_conc_sweep_session_deadline_via_remaining_minutes(
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(
-            run_conc_sweep(state, session_dir, concs=[1, 4, 16])
-        )
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 4, 16]))
 
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     # With remaining=0 and reserve=120s, all points should be skipped.
@@ -1518,6 +1521,7 @@ def test_run_conc_sweep_session_deadline_via_remaining_minutes(
 # ─────────────────────────────────────────────────────────────────────────────
 # Change 3: plotting
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_render_conc_sweep_curve_no_data_returns_none(tmp_path: Path):
     from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
@@ -1582,6 +1586,7 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
 ):
     """When matplotlib is missing, render_conc_sweep_curve returns None gracefully."""
     import builtins
+
     _real_import = builtins.__import__
 
     def _mock_import(name, *args, **kwargs):
@@ -1842,7 +1847,9 @@ def test_single_server_boot_retry_descend(
             boot_attempts.append(name)
             # Fail the very first (highest-conc) boot attempt only.
             if name.endswith("conc64"):
-                return [_fake_variant(name, throughput=None, status="failed", envs=grid[0].extra_envs, error="boot fail")]
+                return [
+                    _fake_variant(name, throughput=None, status="failed", envs=grid[0].extra_envs, error="boot fail")
+                ]
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (

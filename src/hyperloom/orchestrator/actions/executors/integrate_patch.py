@@ -234,7 +234,8 @@ def _root_contains_patch_targets(root: Path, patch_paths: list[Path]) -> bool:
 
 
 def _resolve_framework_root(
-    explicit: str | None, patch_paths: list[Path] | None = None,
+    explicit: str | None,
+    patch_paths: list[Path] | None = None,
 ) -> Path | None:
     """Pick the framework source root for patches.
 
@@ -580,8 +581,7 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
     if cp.returncode != 0:
         # Non-git directory or other git status errors: treat as clean.
         log.debug(
-            "integrate_patch: git status rc=%d in %s (not a git repo?), "
-            "treating as clean",
+            "integrate_patch: git status rc=%d in %s (not a git repo?), treating as clean",
             cp.returncode,
             framework_root,
         )
@@ -622,10 +622,7 @@ def _git_restore_stash_if_needed(
     if cp.returncode == 0:
         log.info("integrate_patch: restored user changes from %s", ref)
         return ""
-    return (
-        f"git stash pop {ref} rc={cp.returncode}: {(cp.stderr or '').strip()}; "
-        "user changes remain in git stash"
-    )
+    return f"git stash pop {ref} rc={cp.returncode}: {(cp.stderr or '').strip()}; user changes remain in git stash"
 
 
 def _with_stash_restore(
@@ -736,14 +733,8 @@ def _patch_touched_paths(
             continue
         lvl = _commit_strip_level(framework_root, pairs)
         for old, new in pairs:
-            rel_new = (
-                _strip_path_prefix(new, lvl)
-                if new and new != _PATCH_DEV_NULL else None
-            )
-            rel_old = (
-                _strip_path_prefix(old, lvl)
-                if old and old != _PATCH_DEV_NULL else None
-            )
+            rel_new = _strip_path_prefix(new, lvl) if new and new != _PATCH_DEV_NULL else None
+            rel_old = _strip_path_prefix(old, lvl) if old and old != _PATCH_DEV_NULL else None
             try:
                 new_exists = bool(rel_new) and (framework_root / rel_new).exists()
             except OSError:
@@ -884,9 +875,9 @@ def _resolve_patch_paths(
         resolved = p.resolve()
         if not any(_is_within(resolved, root) for root in allowed_roots):
             log.warning(
-                "integrate_patch: patch %r resolves outside the specialist "
-                "workspace (%s); dropping for safety",
-                c, specialist_workspace,
+                "integrate_patch: patch %r resolves outside the specialist workspace (%s); dropping for safety",
+                c,
+                specialist_workspace,
             )
             continue
         out.append(resolved)
@@ -1113,7 +1104,9 @@ def _stamp_framework_kb_provenance(
     if existing.startswith(_FRAMEWORK_KB_PROVENANCE_PREFIX):
         return  # cross-framework (or already-stamped) path already complies
     framework = str(getattr(shared_state, "framework", "") or "").strip().lower()
-    target["provenance"] = f"{_FRAMEWORK_KB_PROVENANCE_PREFIX}:{framework}" if framework else _FRAMEWORK_KB_PROVENANCE_PREFIX
+    target["provenance"] = (
+        f"{_FRAMEWORK_KB_PROVENANCE_PREFIX}:{framework}" if framework else _FRAMEWORK_KB_PROVENANCE_PREFIX
+    )
     target.setdefault("fa_pr_url", pr_url)
     target.setdefault("framework", framework)
 
@@ -1230,7 +1223,9 @@ class IntegratePatchExecutor:
                 setup_result = _run_setup_commands(
                     setup_cmds,
                     cwd=self.session_dir,
-                    log_dir=runs_dir(self.session_dir, "integrate_patch", str(getattr(ctx.task, "task_id", "") or "setup")),
+                    log_dir=runs_dir(
+                        self.session_dir, "integrate_patch", str(getattr(ctx.task, "task_id", "") or "setup")
+                    ),
                 )
 
         # Patch resolution.
@@ -1371,10 +1366,7 @@ class IntegratePatchExecutor:
                     "specialist_task_id": specialist_task_id,
                     "task_id": str(getattr(ctx.task, "task_id", "") or ""),
                     "patches": [str(p) for p in patch_paths],
-                    "artifacts": [
-                        {"target": str(s.target), "rel_target": s.rel_target}
-                        for s in artifact_specs
-                    ],
+                    "artifacts": [{"target": str(s.target), "rel_target": s.rel_target} for s in artifact_specs],
                     "config_changes": dict(config_changes),
                     "framework_source_root": str(framework_root or ""),
                     "workspace": str(output_root),
@@ -1389,8 +1381,7 @@ class IntegratePatchExecutor:
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
         if stash_state == "failed":
             log.error(
-                "integrate_patch: cannot stash user changes in %s: %s; "
-                "aborting to avoid data loss",
+                "integrate_patch: cannot stash user changes in %s: %s; aborting to avoid data loss",
                 framework_root,
                 stash_note,
             )
@@ -1516,34 +1507,44 @@ class IntegratePatchExecutor:
             if recorded and recorded.lower() == "reject":
                 artifacts_reverted = self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
-                return _with_stash_restore(framework_root, stash_state, stash_note, {
-                    "status": "rejected_by_critic",
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [str(p) for p in reverted],
-                    "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
-                    "reason": (
-                        f"Critic verdict 'reject' recorded for specialist "
-                        f"task {specialist_task_id!r}; integrate_patch "
-                        f"refuses to bench. Set HYPERLOOM_BYPASS_CRITIC=1 "
-                        f"out-of-band to force."
-                    ),
-                    "workspace": str(output_root),
-                })
+                return _with_stash_restore(
+                    framework_root,
+                    stash_state,
+                    stash_note,
+                    {
+                        "status": "rejected_by_critic",
+                        "specialist_task_id": specialist_task_id,
+                        "patches_applied": [],
+                        "patches_reverted": [str(p) for p in reverted],
+                        "artifacts_reverted": artifacts_reverted,
+                        "config_changes_applied": {},
+                        "reason": (
+                            f"Critic verdict 'reject' recorded for specialist "
+                            f"task {specialist_task_id!r}; integrate_patch "
+                            f"refuses to bench. Set HYPERLOOM_BYPASS_CRITIC=1 "
+                            f"out-of-band to force."
+                        ),
+                        "workspace": str(output_root),
+                    },
+                )
 
         # Optionally skip the bench.
         if params.get("apply_only"):
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "applied_no_bench",
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [str(p) for p in applied],
-                "patches_reverted": [],
-                "artifacts_applied": applied_artifacts,
-                "config_changes_applied": config_changes_applied,
-                "reason": "apply_only=True; benchmark skipped",
-                "workspace": str(output_root),
-            })
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "applied_no_bench",
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [str(p) for p in applied],
+                    "patches_reverted": [],
+                    "artifacts_applied": applied_artifacts,
+                    "config_changes_applied": config_changes_applied,
+                    "reason": "apply_only=True; benchmark skipped",
+                    "workspace": str(output_root),
+                },
+            )
 
         # Bench the patched config via run_grid.
         try:
@@ -1556,32 +1557,42 @@ class IntegratePatchExecutor:
         except FrameworkScriptMismatchError as exc:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "reverted",
-                "error_class": "framework_script_mismatch",
-                "error": str(exc),
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [str(p) for p in reverted],
-                "artifacts_reverted": artifacts_reverted,
-                "config_changes_applied": {},
-                "reason": str(exc),
-                "workspace": str(output_root),
-            })
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "reverted",
+                    "error_class": "framework_script_mismatch",
+                    "error": str(exc),
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_reverted": artifacts_reverted,
+                    "config_changes_applied": {},
+                    "reason": str(exc),
+                    "workspace": str(output_root),
+                },
+            )
         except Exception as exc:  # noqa: BLE001
             self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "reverted",
-                "error_class": "bench_exception",
-                "error": repr(exc),
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [str(p) for p in reverted],
-                "config_changes_applied": {},
-                "reason": f"bench raised: {exc!r}",
-                "workspace": str(output_root),
-            })
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "reverted",
+                    "error_class": "bench_exception",
+                    "error": repr(exc),
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "config_changes_applied": {},
+                    "reason": f"bench raised: {exc!r}",
+                    "workspace": str(output_root),
+                },
+            )
 
         # Enablement gate: runnability + minimal-correctness. A positive
         # ``output_throughput`` means the server booted; accuracy is compared
@@ -1650,31 +1661,36 @@ class IntegratePatchExecutor:
                         tps_delta_pct=0.0,
                         extra=extra,
                     )
-                    return _with_stash_restore(framework_root, stash_state, stash_note, {
-                        "status": "advanced",
-                        "specialist_task_id": specialist_task_id,
-                        # Paths applied this round (base + new); recorded by the
-                        # Coordinator into enablement_kept_patches for re-apply.
-                        "patches_applied": stacked_patches,  # base + new; recorded by the Coordinator for re-apply
-                        "patches_reverted": [str(p) for p in reverted],
-                        "artifacts_reverted": artifacts_reverted,
-                        "config_changes_applied": {},
-                        "output_throughput": new_tput,
-                        "enablement": True,
-                        "advanced": True,
-                        "runnable": False,
-                        "correctness_verified": False,
-                        "reason": (
-                            f"enablement progressed: {run_reason}; boot advanced "
-                            f"to a new gap ({after_signature.kind}) — patch recorded "
-                            f"as a base for the next round"
-                        ),
-                        "after_signature": after_signature.to_dict(),
-                        "enablement_launch_log": new_log,
-                        "setup_commands_applied": list(setup_result.get("applied") or []),
-                        "bench_result": bench_result,
-                        "workspace": str(output_root),
-                    })
+                    return _with_stash_restore(
+                        framework_root,
+                        stash_state,
+                        stash_note,
+                        {
+                            "status": "advanced",
+                            "specialist_task_id": specialist_task_id,
+                            # Paths applied this round (base + new); recorded by the
+                            # Coordinator into enablement_kept_patches for re-apply.
+                            "patches_applied": stacked_patches,  # base + new; recorded by the Coordinator for re-apply
+                            "patches_reverted": [str(p) for p in reverted],
+                            "artifacts_reverted": artifacts_reverted,
+                            "config_changes_applied": {},
+                            "output_throughput": new_tput,
+                            "enablement": True,
+                            "advanced": True,
+                            "runnable": False,
+                            "correctness_verified": False,
+                            "reason": (
+                                f"enablement progressed: {run_reason}; boot advanced "
+                                f"to a new gap ({after_signature.kind}) — patch recorded "
+                                f"as a base for the next round"
+                            ),
+                            "after_signature": after_signature.to_dict(),
+                            "enablement_launch_log": new_log,
+                            "setup_commands_applied": list(setup_result.get("applied") or []),
+                            "bench_result": bench_result,
+                            "workspace": str(output_root),
+                        },
+                    )
                 artifacts_reverted = self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
                 await self._maybe_write_framework_kb_record(
@@ -1683,51 +1699,58 @@ class IntegratePatchExecutor:
                     tps_delta_pct=0.0,
                     extra=extra,
                 )
-                return _with_stash_restore(framework_root, stash_state, stash_note, {
-                    "status": "reverted",
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [str(p) for p in reverted],
-                    "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
-                    "output_throughput": new_tput,
-                    "enablement": True,
-                    "runnable": False,
-                    "correctness_verified": correctness_ok is True,
-                    "reason": f"enablement not runnable: {run_reason}",
-                    "bench_result": bench_result,
-                    "workspace": str(output_root),
-                })
+                return _with_stash_restore(
+                    framework_root,
+                    stash_state,
+                    stash_note,
+                    {
+                        "status": "reverted",
+                        "specialist_task_id": specialist_task_id,
+                        "patches_applied": [],
+                        "patches_reverted": [str(p) for p in reverted],
+                        "artifacts_reverted": artifacts_reverted,
+                        "config_changes_applied": {},
+                        "output_throughput": new_tput,
+                        "enablement": True,
+                        "runnable": False,
+                        "correctness_verified": correctness_ok is True,
+                        "reason": f"enablement not runnable: {run_reason}",
+                        "bench_result": bench_result,
+                        "workspace": str(output_root),
+                    },
+                )
             provisional = correctness_ok is None
             reason = f"enablement runnable: {run_reason}"
             if provisional:
-                reason += (
-                    " (provisional: booted but eval produced no accuracy; "
-                    "correctness not verified)"
-                )
+                reason += " (provisional: booted but eval produced no accuracy; correctness not verified)"
             await self._maybe_write_framework_kb_record(
                 done_payload=done_payload,
                 outcome="integrated",
                 tps_delta_pct=0.0,
                 extra=extra,
             )
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "kept",
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [str(p) for p in applied],
-                "patches_reverted": [],
-                "artifacts_applied": applied_artifacts,
-                "config_changes_applied": config_changes_applied,
-                "output_throughput": new_tput,
-                "enablement": True,
-                "runnable": True,
-                "correctness_verified": correctness_ok is True,
-                "provisional": provisional,
-                "reason": reason,
-                "setup_commands_applied": list(setup_result.get("applied") or []),
-                "bench_result": bench_result,
-                "workspace": str(output_root),
-            })
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "kept",
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [str(p) for p in applied],
+                    "patches_reverted": [],
+                    "artifacts_applied": applied_artifacts,
+                    "config_changes_applied": config_changes_applied,
+                    "output_throughput": new_tput,
+                    "enablement": True,
+                    "runnable": True,
+                    "correctness_verified": correctness_ok is True,
+                    "provisional": provisional,
+                    "reason": reason,
+                    "setup_commands_applied": list(setup_result.get("applied") or []),
+                    "bench_result": bench_result,
+                    "workspace": str(output_root),
+                },
+            )
 
         # KEEP / REVERT decision. When ``base_tput`` is unset (direct/resume
         # invocation), fall back to the live ``SharedState`` anchor
@@ -1795,22 +1818,27 @@ class IntegratePatchExecutor:
                 tps_delta_pct=float(delta_pct or 0.0),
                 extra=extra,
             )
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": revert_status,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [str(p) for p in reverted],
-                "artifacts_reverted": artifacts_reverted,
-                "config_changes_applied": {},
-                "output_throughput": new_tput,
-                "delta_pct": delta_pct,
-                "accuracy_pass": accuracy_pass,
-                "base_tput": base_tput,
-                "keep_threshold_pct": keep_threshold_pct,
-                "reason": "; ".join(reasons) or "gate failed",
-                "bench_result": bench_result,
-                "workspace": str(output_root),
-            })
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": revert_status,
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_reverted": artifacts_reverted,
+                    "config_changes_applied": {},
+                    "output_throughput": new_tput,
+                    "delta_pct": delta_pct,
+                    "accuracy_pass": accuracy_pass,
+                    "base_tput": base_tput,
+                    "keep_threshold_pct": keep_threshold_pct,
+                    "reason": "; ".join(reasons) or "gate failed",
+                    "bench_result": bench_result,
+                    "workspace": str(output_root),
+                },
+            )
 
         # Confirmation rebench: a patch only KEEPs if a second full-stack run
         # still clears the stability floor and the accuracy gate.
@@ -1855,23 +1883,28 @@ class IntegratePatchExecutor:
                     tps_delta_pct=float(delta_pct or 0.0),
                     extra=extra,
                 )
-                return _with_stash_restore(framework_root, stash_state, stash_note, {
-                    "status": rb_revert_status,
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [str(p) for p in reverted],
-                    "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
-                    "output_throughput": new_tput,
-                    "delta_pct": delta_pct,
-                    "accuracy_pass": confirm["accuracy_pass"],
-                    "base_tput": base_tput,
-                    "keep_threshold_pct": keep_threshold_pct,
-                    "reason": "; ".join(reasons) or "stack rebench failed",
-                    "bench_result": bench_result,
-                    "stack_rebench": confirm,
-                    "workspace": str(output_root),
-                })
+                return _with_stash_restore(
+                    framework_root,
+                    stash_state,
+                    stash_note,
+                    {
+                        "status": rb_revert_status,
+                        "specialist_task_id": specialist_task_id,
+                        "patches_applied": [],
+                        "patches_reverted": [str(p) for p in reverted],
+                        "artifacts_reverted": artifacts_reverted,
+                        "config_changes_applied": {},
+                        "output_throughput": new_tput,
+                        "delta_pct": delta_pct,
+                        "accuracy_pass": confirm["accuracy_pass"],
+                        "base_tput": base_tput,
+                        "keep_threshold_pct": keep_threshold_pct,
+                        "reason": "; ".join(reasons) or "stack rebench failed",
+                        "bench_result": bench_result,
+                        "stack_rebench": confirm,
+                        "workspace": str(output_root),
+                    },
+                )
             # Confirmed: the rebench tput is the headline.
             if isinstance(confirm["tput"], (int, float)) and confirm["tput"] > 0:
                 new_tput = confirm["tput"]
@@ -1915,17 +1948,11 @@ class IntegratePatchExecutor:
 
             if framework_root is not None:
                 # HEAD is the clean base the snapshot files overlay onto.
-                _cp = _run_git_cp(
-                    ["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0
-                )
+                _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
                 if _cp is not None and getattr(_cp, "returncode", 1) == 0:
                     source_base_sha = (_cp.stdout or "").strip()
                 rel_paths = list(_patch_touched_paths(framework_root, applied))
-                rel_paths += [
-                    str(a.get("rel_target") or "")
-                    for a in (applied_artifacts or [])
-                    if isinstance(a, dict)
-                ]
+                rel_paths += [str(a.get("rel_target") or "") for a in (applied_artifacts or []) if isinstance(a, dict)]
                 dest = (
                     self.session_dir
                     / "optimization_stack"
@@ -1944,26 +1971,31 @@ class IntegratePatchExecutor:
                     source_snapshot_dir = str(snap.get("snapshot_dir") or "")
         except Exception:  # noqa: BLE001 — snapshot is best-effort durability
             log.exception("integrate_patch: source-layer snapshot failed")
-        return _with_stash_restore(framework_root, stash_state, stash_note, {
-            "status": "kept",
-            "specialist_task_id": specialist_task_id,
-            "patches_applied": [str(p) for p in applied],
-            "patches_reverted": [],
-            "artifacts_applied": applied_artifacts,
-            "config_changes_applied": config_changes_applied,
-            "output_throughput": new_tput,
-            "delta_pct": delta_pct,
-            "accuracy_pass": accuracy_pass,
-            "base_tput": base_tput,
-            "keep_threshold_pct": keep_threshold_pct,
-            "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
-            "bench_result": bench_result,
-            "workspace": str(output_root),
-            # Durable source-layer snapshot handles.
-            "source_snapshot": source_snapshot_dir,
-            "framework_root": str(framework_root or ""),
-            "base_sha": source_base_sha,
-        })
+        return _with_stash_restore(
+            framework_root,
+            stash_state,
+            stash_note,
+            {
+                "status": "kept",
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [str(p) for p in applied],
+                "patches_reverted": [],
+                "artifacts_applied": applied_artifacts,
+                "config_changes_applied": config_changes_applied,
+                "output_throughput": new_tput,
+                "delta_pct": delta_pct,
+                "accuracy_pass": accuracy_pass,
+                "base_tput": base_tput,
+                "keep_threshold_pct": keep_threshold_pct,
+                "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
+                "bench_result": bench_result,
+                "workspace": str(output_root),
+                # Durable source-layer snapshot handles.
+                "source_snapshot": source_snapshot_dir,
+                "framework_root": str(framework_root or ""),
+                "base_sha": source_base_sha,
+            },
+        )
 
     # Helpers
     @staticmethod
@@ -2064,16 +2096,22 @@ class IntegratePatchExecutor:
                 model_class=str(getattr(shared_state, "model_class", "") if shared_state is not None else "").strip(),
                 gpu_type=str(getattr(shared_state, "gpu_type", "") if shared_state is not None else "").strip(),
                 precision=str(getattr(shared_state, "precision", "") if shared_state is not None else "").strip(),
-                applicability=str(proposal.get("applicability") or (done_payload or {}).get("applicability") or "").strip(),
+                applicability=str(
+                    proposal.get("applicability") or (done_payload or {}).get("applicability") or ""
+                ).strip(),
                 provenance=str(proposal.get("provenance") or (done_payload or {}).get("provenance") or "").strip(),
                 accuracy_delta_pct=accuracy_delta_pct,
                 changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
                 source_framework=str(
                     proposal.get("source_framework") or (done_payload or {}).get("source_framework") or ""
-                ).strip().lower(),
+                )
+                .strip()
+                .lower(),
                 target_framework=str(
                     proposal.get("target_framework") or (done_payload or {}).get("target_framework") or ""
-                ).strip().lower(),
+                )
+                .strip()
+                .lower(),
             )
             log.info(
                 "integrate_patch: wrote framework KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
@@ -2442,9 +2480,7 @@ class IntegratePatchExecutor:
             base_extra_args=base_extra_args,
             variant=variant,
             base_tput=base_tput,
-            stable_threshold_pct=float(
-                params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)
-            ),
+            stable_threshold_pct=float(params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)),
             output_slot=output_root / "stack_rebench",
             variant_timeout_sec=int(params.get("variant_timeout_sec", self.variant_timeout_sec)),
             model_path=resolved_model or None,
@@ -2456,9 +2492,7 @@ class IntegratePatchExecutor:
         )
         # See ``_bench_patch``: lm-eval writes to the grid slot (the parent of
         # ``rebench.workspace``), so grade from there, honoring ``result_dir``.
-        rebench_eval_root = override_result_dir or (
-            str(Path(rebench.workspace).parent) if rebench.workspace else ""
-        )
+        rebench_eval_root = override_result_dir or (str(Path(rebench.workspace).parent) if rebench.workspace else "")
         accuracy_pass = (
             self._grade_accuracy(
                 rebench_eval_root,

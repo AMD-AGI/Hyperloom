@@ -242,5 +242,3 @@ async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
     await coord._maybe_reprofile_for_kernel()  # must not raise
 
     assert coord.shared_state.last_roofline_tput == 100.0
-
-

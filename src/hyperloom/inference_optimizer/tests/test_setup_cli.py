@@ -165,11 +165,7 @@ def test_setup_cli_scrubs_stale_workspace_runtime_env_when_dotenv_exists(tmp_pat
 
 
 def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_path: Path):
-    install_script = (
-        Path(setup.__file__).resolve().parent
-        / "assets"
-        / "install_baremetal.sh"
-    )
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("read_dotenv_var() {")
     end = script_text.index("\nwrite_runtime_dotenv() {")
@@ -206,7 +202,7 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
                 "OPENAI_BASE_URL_ARG=",
                 "log() { :; }",
                 "warn() { :; }",
-                "die() { echo \"$*\" >&2; exit 99; }",
+                'die() { echo "$*" >&2; exit 99; }',
                 "is_interactive() { return 1; }",
                 credential_functions,
                 "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS",
@@ -241,20 +237,12 @@ def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_pat
     assert "LLM_GATEWAY_KEY=" not in text
     resolved_env = (tmp_path / "resolved-env.txt").read_text(encoding="utf-8")
     assert resolved_env == (
-        "OPENAI_BASE_URL=\n"
-        "OPENAI_API_KEY=\n"
-        "OPENAI_CUSTOM_HEADERS=\n"
-        "SAFE_API_KEY=\n"
-        "LLM_GATEWAY_KEY=\n"
+        "OPENAI_BASE_URL=\nOPENAI_API_KEY=\nOPENAI_CUSTOM_HEADERS=\nSAFE_API_KEY=\nLLM_GATEWAY_KEY=\n"
     )
 
 
 def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_path: Path):
-    install_script = (
-        Path(setup.__file__).resolve().parent
-        / "assets"
-        / "install_baremetal.sh"
-    )
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("read_dotenv_var() {")
     end = script_text.index("\nwrite_runtime_dotenv() {")
@@ -291,7 +279,7 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
                 "OPENAI_BASE_URL_ARG=",
                 "log() { :; }",
                 "warn() { :; }",
-                "die() { echo \"$*\" >&2; exit 99; }",
+                'die() { echo "$*" >&2; exit 99; }',
                 "is_interactive() { return 1; }",
                 credential_functions,
                 "HYPERLOOM_SETUP_ENV_AUTHORITATIVE=1",
@@ -346,11 +334,7 @@ def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
         ),
         (
             "kernel",
-            Path(setup.__file__).resolve().parents[1]
-            / "agents"
-            / "kernel"
-            / "scripts"
-            / "install.sh",
+            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
             [],
         ),
     ]
@@ -370,7 +354,7 @@ def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
                     "DEEPSEEK_API_KEY=sk-deepseek",
                     "log() { :; }",
                     "warn() { :; }",
-                    "die() { echo \"$*\" >&2; exit 99; }",
+                    'die() { echo "$*" >&2; exit 99; }',
                     *stubs,
                     script_text[start:end],
                     "preflight_validate_credentials",
@@ -384,11 +368,7 @@ def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
 
 
 def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
-    install_script = (
-        Path(setup.__file__).resolve().parent
-        / "assets"
-        / "install_baremetal.sh"
-    )
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
     credential_start = script_text.index("resolve_credentials() {")
     credential_end = script_text.index("\nwrite_runtime_dotenv() {")
@@ -406,13 +386,7 @@ def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
 
 
 def test_kernel_install_no_longer_exports_openai_safe_credentials():
-    install_script = (
-        Path(setup.__file__).resolve().parents[1]
-        / "agents"
-        / "kernel"
-        / "scripts"
-        / "install.sh"
-    )
+    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
     write_start = script_text.index("write_env_file() {")
     write_end = script_text.index("\nensure_geak()", write_start)
@@ -430,11 +404,7 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
 
 
 def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):
-    install_script = (
-        Path(setup.__file__).resolve().parent
-        / "assets"
-        / "install.sh"
-    )
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("resolve_repo_root() {")
     end = script_text.index('\nREPO_ROOT="$(resolve_repo_root)"', start)
@@ -480,11 +450,7 @@ def test_packaged_install_sh_resolves_target_workspace_root(tmp_path: Path):
 
 
 def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
-    install_script = (
-        Path(setup.__file__).resolve().parent
-        / "assets"
-        / "install.sh"
-    )
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("setup_dotenv_is_authoritative() {")
     end = script_text.index("\nload_dotenv_no_clobber() {", start)
@@ -553,13 +519,7 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
 
 
 def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):
-    install_script = (
-        Path(setup.__file__).resolve().parents[1]
-        / "agents"
-        / "kernel"
-        / "scripts"
-        / "install.sh"
-    )
+    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
@@ -655,13 +615,7 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     """Writing kernel-agent env must NOT wipe the Anthropic creds the operator
     put in .env (an Anthropic-only setup must keep ANTHROPIC_API_KEY /
     ANTHROPIC_BASE_URL after install)."""
-    install_script = (
-        Path(setup.__file__).resolve().parents[1]
-        / "agents"
-        / "kernel"
-        / "scripts"
-        / "install.sh"
-    )
+    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
@@ -750,20 +704,15 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
 def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
     """Fresh-shell CLI starts from .env, so GEAK_CLAUDE_MODEL must be persisted
     there in addition to kernel-agent.env.sh."""
+
     def bash_path(path: Path) -> str:
         text = str(path)
         if path.drive:
-            rest = text[len(path.drive):].replace("\\", "/")
+            rest = text[len(path.drive) :].replace("\\", "/")
             return f"/mnt/{path.drive[0].lower()}{rest}"
         return text
 
-    install_script = (
-        Path(setup.__file__).resolve().parents[1]
-        / "agents"
-        / "kernel"
-        / "scripts"
-        / "install.sh"
-    )
+    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")

@@ -1475,6 +1475,7 @@ def test_create_infera_env_omits_credentials(monkeypatch):
     """create-infera must NOT bake *_API_KEY / SAFE_API_KEY / *_BASE_URL into the
     new inference pod's container env; only operator --extra-env is forwarded."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
     # cmd_create_infera and its ssh_client/workload_spec usage live in the
     # ``commands.infera`` sibling; patch it there.
     from hyperloom.inference_optimizer.multi_node.commands import infera as mn_infera
@@ -1484,9 +1485,7 @@ def test_create_infera_env_omits_credentials(monkeypatch):
         monkeypatch.setenv(k, f"secret-{k}")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example/v1")
 
-    monkeypatch.setattr(
-        mn_infera.ssh_client, "generate_session_keypair", lambda d: (Path("/tmp/k"), "pubkey")
-    )
+    monkeypatch.setattr(mn_infera.ssh_client, "generate_session_keypair", lambda d: (Path("/tmp/k"), "pubkey"))
 
     captured: dict = {}
 

@@ -144,9 +144,7 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     + r")\b)(?P<sep>\s*(?:=|:)\s*)(?P<quote>['\"]?)(?P<value>[^\s,'\"\]}]+)(?P=quote)",
     re.IGNORECASE,
 )
-_AUTHORIZATION_RE = re.compile(
-    r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)"
-)
+_AUTHORIZATION_RE = re.compile(r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _BEARER_RE = re.compile(r"(?i)\b(?P<prefix>bearer\s+)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _TOKEN_VALUE_RES = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{3,}\b"),
@@ -764,8 +762,10 @@ class SpecialistRunner:
                     f.write(json.dumps(row, sort_keys=True) + "\n")
         except Exception:  # noqa: BLE001 — trace must never break the run
             log.debug(
-                "full-trace: specialist intel append failed for "
-                "task_id=%s turn=%s", task_id, turn, exc_info=True,
+                "full-trace: specialist intel append failed for task_id=%s turn=%s",
+                task_id,
+                turn,
+                exc_info=True,
             )
 
     def _record_specialist_conversation(
@@ -1273,8 +1273,7 @@ class SpecialistRunner:
             if not _patch_path_within_bases(Path(str(p)), search_bases):
                 dropped_scanned_outside.append(str(p))
                 log.warning(
-                    "specialist: scanned patch %r resolves outside the "
-                    "specialist worktree/workspace; dropping",
+                    "specialist: scanned patch %r resolves outside the specialist worktree/workspace; dropping",
                     p,
                 )
                 continue

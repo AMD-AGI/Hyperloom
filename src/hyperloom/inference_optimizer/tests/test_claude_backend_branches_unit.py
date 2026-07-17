@@ -312,9 +312,7 @@ def test_validate_emit_intent_input_not_an_object_raises():
 
 def test_validate_emit_intent_input_unexpected_keys_raises():
     with pytest.raises(IntentValidationError, match="unexpected keys"):
-        mei.validate_emit_intent_input(
-            {"intent_type": "send_message", "payload": {}, "extra": 1}
-        )
+        mei.validate_emit_intent_input({"intent_type": "send_message", "payload": {}, "extra": 1})
 
 
 def test_validate_emit_intent_input_missing_top_level_key_raises():
@@ -330,9 +328,7 @@ def test_validate_emit_intent_input_missing_required_payload_field_raises():
 
 @pytest.mark.asyncio
 async def test_emit_intent_handler_ok():
-    res = await mei._emit_intent_handler(
-        {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
-    )
+    res = await mei._emit_intent_handler({"intent_type": "send_message", "payload": {"topic": "heartbeat"}})
     assert res["content"][0]["text"] == "ok"
     assert "is_error" not in res
 

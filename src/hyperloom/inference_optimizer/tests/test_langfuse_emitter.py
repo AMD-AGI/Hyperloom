@@ -668,32 +668,37 @@ def test_flush_emits_proposal_score_calibration(tmp_path, monkeypatch):
     sd = _seed_trace_dir(tmp_path)
     dtrace = sd / "reports" / "trace" / "decision_trace.jsonl"
     dtrace.write_text(
-        json.dumps({
-            "decision": {
-                "change": "tp_sweep", "component": "specialist:perf",
-                "operation_kind": "param", "outcome": "KEEP",
-                "gain_pct": 8.0, "task_id": "spec-1",
-                "variant_name": "v1",
-                "proposal_scores": [
-                    {"rater": "gpt-5.5", "score": 7.0, "reason": "ok"},
-                    {"rater": "claude", "score": 9.0, "reason": "good"},
-                ],
-            },
-            "phase": "EXPLORE", "tick": 5, "ts": "2026-06-09T16:00:00Z",
-        }) + "\n",
+        json.dumps(
+            {
+                "decision": {
+                    "change": "tp_sweep",
+                    "component": "specialist:perf",
+                    "operation_kind": "param",
+                    "outcome": "KEEP",
+                    "gain_pct": 8.0,
+                    "task_id": "spec-1",
+                    "variant_name": "v1",
+                    "proposal_scores": [
+                        {"rater": "gpt-5.5", "score": 7.0, "reason": "ok"},
+                        {"rater": "claude", "score": 9.0, "reason": "good"},
+                    ],
+                },
+                "phase": "EXPLORE",
+                "tick": 5,
+                "ts": "2026-06-09T16:00:00Z",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
     # Seed a specialist agent span so the decision step span has a parent.
-    em.record_llm_call(
-        _llm_row(phase="EXPLORE", component="specialist", role="specialist")
-    )
+    em.record_llm_call(_llm_row(phase="EXPLORE", component="specialist", role="specialist"))
     em.flush_session()
     names = sorted(s["name"] for s in client.observation_scores)
     assert "proposal_score" in names
-    pscore = [s for s in client.observation_scores
-              if s["name"] == "proposal_score"][0]
-    assert pscore["value"] == 8.0           # mean(7, 9)
+    pscore = [s for s in client.observation_scores if s["name"] == "proposal_score"][0]
+    assert pscore["value"] == 8.0  # mean(7, 9)
     assert pscore["data_type"] == "NUMERIC"
     # Realized gain emitted alongside for calibration error.
     assert "gain_pct" in names
@@ -706,21 +711,27 @@ def test_flush_emits_predicted_gain_calibration(tmp_path, monkeypatch):
     sd = _seed_trace_dir(tmp_path)
     dtrace = sd / "reports" / "trace" / "decision_trace.jsonl"
     dtrace.write_text(
-        json.dumps({
-            "decision": {
-                "change": "tp_sweep", "component": "specialist:perf",
-                "operation_kind": "param", "outcome": "KEEP",
-                "gain_pct": 6.0, "predicted_gain_pct": 12.5,
-                "task_id": "spec-1",
-            },
-            "phase": "EXPLORE", "tick": 5, "ts": "2026-06-09T16:00:00Z",
-        }) + "\n",
+        json.dumps(
+            {
+                "decision": {
+                    "change": "tp_sweep",
+                    "component": "specialist:perf",
+                    "operation_kind": "param",
+                    "outcome": "KEEP",
+                    "gain_pct": 6.0,
+                    "predicted_gain_pct": 12.5,
+                    "task_id": "spec-1",
+                },
+                "phase": "EXPLORE",
+                "tick": 5,
+                "ts": "2026-06-09T16:00:00Z",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     em = lfe.LangfuseEmitter(sd)
-    em.record_llm_call(
-        _llm_row(phase="EXPLORE", component="specialist", role="specialist")
-    )
+    em.record_llm_call(_llm_row(phase="EXPLORE", component="specialist", role="specialist"))
     em.flush_session()
     by_name = {s["name"]: s for s in client.observation_scores}
     # predicted + realized both emitted as NUMERIC on the same decision.
@@ -837,14 +848,32 @@ def test_flush_backfills_specialist_intel(tmp_path, monkeypatch):
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
     from hyperloom.inference_optimizer.session.session_paths import specialist_intel_path
+
     intel = specialist_intel_path(sd)
     intel.parent.mkdir(parents=True, exist_ok=True)
-    intel.write_text("\n".join(json.dumps(r) for r in [
-        {"ts": "2026-06-09T15:14:54Z", "tool": "WebSearch",
-         "task_id": "t1", "turn": 1, "query": "rocm flash attn"},
-        {"ts": "2026-06-09T15:14:55Z", "tool": "mcp__cortex_kb__lookup",
-         "task_id": "t1", "turn": 1, "query": "x"},
-    ]) + "\n", encoding="utf-8")
+    intel.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "ts": "2026-06-09T15:14:54Z",
+                    "tool": "WebSearch",
+                    "task_id": "t1",
+                    "turn": 1,
+                    "query": "rocm flash attn",
+                },
+                {
+                    "ts": "2026-06-09T15:14:55Z",
+                    "tool": "mcp__cortex_kb__lookup",
+                    "task_id": "t1",
+                    "turn": 1,
+                    "query": "x",
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     em = lfe.LangfuseEmitter(sd)
     em.flush_session()
     assert client.span_named("intel:WebSearch") is not None
@@ -860,16 +889,42 @@ def test_flush_backfills_forge_steps(tmp_path, monkeypatch):
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
     from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
+
     steps = forge_steps_path(sd)
     steps.parent.mkdir(parents=True, exist_ok=True)
-    steps.write_text("\n".join(json.dumps(r) for r in [
-        {"ts": "2026-06-09T15:14:54Z", "kind": "iteration", "kernel_id": "k1",
-         "iteration": 1, "decision": "KEEP", "wall_ms": 88.1},
-        {"ts": "2026-06-09T15:14:55Z", "kind": "iteration", "kernel_id": "k1",
-         "iteration": 2, "decision": "REVERT", "wall_ms": 90.0},
-        {"ts": "2026-06-09T15:14:56Z", "kind": "summary", "kernel_id": "k1",
-         "iterations": 2, "kept": 1, "termination_reason": "plateaued"},
-    ]) + "\n", encoding="utf-8")
+    steps.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "ts": "2026-06-09T15:14:54Z",
+                    "kind": "iteration",
+                    "kernel_id": "k1",
+                    "iteration": 1,
+                    "decision": "KEEP",
+                    "wall_ms": 88.1,
+                },
+                {
+                    "ts": "2026-06-09T15:14:55Z",
+                    "kind": "iteration",
+                    "kernel_id": "k1",
+                    "iteration": 2,
+                    "decision": "REVERT",
+                    "wall_ms": 90.0,
+                },
+                {
+                    "ts": "2026-06-09T15:14:56Z",
+                    "kind": "summary",
+                    "kernel_id": "k1",
+                    "iterations": 2,
+                    "kept": 1,
+                    "termination_reason": "plateaued",
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     em = lfe.LangfuseEmitter(sd)
     em.flush_session()
     assert client.span_named("forge:iter:1") is not None
@@ -886,14 +941,33 @@ def test_flush_backfills_gemm_tuning(tmp_path, monkeypatch):
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
     from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
+
     steps = gemm_tuning_steps_path(sd)
     steps.parent.mkdir(parents=True, exist_ok=True)
-    steps.write_text("\n".join(json.dumps(r) for r in [
-        {"ts": "2026-06-09T15:14:54Z", "kind": "gemm_tuning", "engine": "forge",
-         "backend": "forge", "decision": "KEEP", "best_speedup": 1.12},
-        {"ts": "2026-06-09T15:14:56Z", "kind": "gemm_tuning", "engine": "geak",
-         "backend": "geak", "decision": "REVERT"},
-    ]) + "\n", encoding="utf-8")
+    steps.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "ts": "2026-06-09T15:14:54Z",
+                    "kind": "gemm_tuning",
+                    "engine": "forge",
+                    "backend": "forge",
+                    "decision": "KEEP",
+                    "best_speedup": 1.12,
+                },
+                {
+                    "ts": "2026-06-09T15:14:56Z",
+                    "kind": "gemm_tuning",
+                    "engine": "geak",
+                    "backend": "geak",
+                    "decision": "REVERT",
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     em = lfe.LangfuseEmitter(sd)
     em.flush_session()
     forge_span = client.span_named("gemm_tuning:forge")
@@ -1007,7 +1081,13 @@ def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
     (sd / "reports" / "trace" / "decision_trace.jsonl").write_text(
         json.dumps(
             {
-                "decision": {"change": "x", "component": "kernel_agent", "outcome": "KEEP", "gain_pct": 5.0, "task_id": "k1"},
+                "decision": {
+                    "change": "x",
+                    "component": "kernel_agent",
+                    "outcome": "KEEP",
+                    "gain_pct": 5.0,
+                    "task_id": "k1",
+                },
                 "phase": "KERNEL",
                 "tick": 1,
                 "ts": "2026-06-09T16:00:00Z",

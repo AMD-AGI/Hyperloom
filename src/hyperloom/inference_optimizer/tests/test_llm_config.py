@@ -51,24 +51,15 @@ def test_parse_custom_headers_expands_env_references():
 
 
 def test_derive_openai_base_url_from_amd_anthropic_endpoint():
-    assert (
-        derive_openai_base_url("https://llm.example.invalid/anthropic")
-        == "https://llm.example.invalid/Unified/v1"
-    )
+    assert derive_openai_base_url("https://llm.example.invalid/anthropic") == "https://llm.example.invalid/Unified/v1"
 
 
 def test_derive_openai_base_url_is_case_insensitive():
     # AMD's default endpoint uses a capitalized "/Anthropic" segment (issue #929);
     # match case-insensitively so the OpenAI base URL is still derived.
-    assert (
-        derive_openai_base_url("https://llm-api.amd.com/Anthropic")
-        == "https://llm-api.amd.com/Unified/v1"
-    )
+    assert derive_openai_base_url("https://llm-api.amd.com/Anthropic") == "https://llm-api.amd.com/Unified/v1"
     # A lowercase "/unified" segment is normalized to the canonical "/Unified/v1".
-    assert (
-        derive_openai_base_url("https://llm-api.amd.com/unified")
-        == "https://llm-api.amd.com/Unified/v1"
-    )
+    assert derive_openai_base_url("https://llm-api.amd.com/unified") == "https://llm-api.amd.com/Unified/v1"
 
 
 def test_openai_kwargs_reads_openai_custom_headers():
@@ -198,9 +189,7 @@ def test_claude_sdk_env_options_does_not_copy_openai_custom_headers():
 def test_claude_sdk_env_options_disables_advisor_tool_by_default():
     """Claude Code's advisor-tool beta header (rejected by strict gateways) is
     disabled by default; an operator preset is preserved."""
-    opts = claude_sdk_env_options(
-        env={"_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic"}
-    )
+    opts = claude_sdk_env_options(env={"_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic"})
     assert opts["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
 
     preset = claude_sdk_env_options(

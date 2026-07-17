@@ -109,10 +109,7 @@ from ._grid_variant_filter import (
 )
 
 
-
 log = logging.getLogger(__name__)
-
-
 
 
 def _resolve_magpie_python() -> str:
@@ -256,40 +253,8 @@ def _resolve_session_dir() -> Path:
     return _sd()
 
 
-
-
 # SKIP_VARIANTS: comma/whitespace patterns matched (exact or fnmatch) against
 # ``GridVariant.name``. Order: params["skip_variants"] > $SKIP_VARIANTS > "".
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # Env-flag capability probe: a serving env flag can be defined in the build yet
@@ -407,18 +372,6 @@ def unsupported_capability_reason(variant: "GridVariant") -> str | None:
     return _probe_vllm_aiter_shared_expert_unsupported()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 # Sanitization for LLM-supplied overrides (benchmark_script / result_dir):
 # reject path separators / shell metacharacters, raising ``ValueError`` instead
 # of running an unsafe subprocess.
@@ -482,46 +435,6 @@ def sanitize_result_dir(value: Any) -> str | None:
             "metacharacters; pass an absolute or workspace-relative path"
         )
     return text
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _build_variant_yaml(
@@ -1323,6 +1236,7 @@ async def run_grid(
             is_multi_node as _mn_imn,
             mn_bench_warmup_enabled as _mn_warm,
         )
+
         if _mn_imn() and _mn_warm():
             _mn_warm_slot = slot / "mn_warmup"
             try:
@@ -1339,12 +1253,15 @@ async def run_grid(
                 )
                 log.info(
                     "grid_runner: MN warmup pass done (discarded) %d/%d name=%s",
-                    i + 1, len(grid), variant.name,
+                    i + 1,
+                    len(grid),
+                    variant.name,
                 )
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
                 log.warning(
                     "grid_runner: MN warmup pass failed (ignored) name=%s: %r",
-                    variant.name, exc,
+                    variant.name,
+                    exc,
                 )
 
         # Snapshot wall-clock before launch so the salvage path can mtime-gate

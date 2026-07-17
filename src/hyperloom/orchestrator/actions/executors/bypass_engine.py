@@ -90,19 +90,29 @@ def build_server_command(
     fw = framework.lower()
     if fw == "sglang":
         cmd = [
-            python_exe, "-m", "sglang.launch_server",
-            "--model-path", model,
-            "--host", "0.0.0.0",  # nosec B104 - bypass server must accept benchmark probes.
-            "--port", str(port),
+            python_exe,
+            "-m",
+            "sglang.launch_server",
+            "--model-path",
+            model,
+            "--host",
+            "0.0.0.0",  # nosec B104 - bypass server must accept benchmark probes.
+            "--port",
+            str(port),
             "--trust-remote-code",
-            "--tensor-parallel-size", str(tp),
+            "--tensor-parallel-size",
+            str(tp),
         ]
         return cmd + list(extra_args)
     if fw == "vllm":
         cmd = [
-            "vllm", "serve", model,
-            "--port", str(port),
-            "--tensor-parallel-size", str(tp),
+            "vllm",
+            "serve",
+            model,
+            "--port",
+            str(port),
+            "--tensor-parallel-size",
+            str(tp),
             "--trust-remote-code",
         ]
         if max_model_len:
@@ -112,16 +122,23 @@ def build_server_command(
             # (the legacy VLLM_TORCH_PROFILER_DIR env is ignored), without
             # which /start_profile returns 404 and no trace is written.
             cmd += [
-                "--profiler-config.profiler", "torch",
-                "--profiler-config.torch_profiler_dir", profile_dir,
+                "--profiler-config.profiler",
+                "torch",
+                "--profiler-config.torch_profiler_dir",
+                profile_dir,
             ]
         return cmd + list(extra_args)
     if fw == "atom":
         cmd = [
-            python_exe, "-m", "atom.entrypoints.openai_server",
-            "--model", model,
-            "-tp", str(tp),
-            "--server-port", str(port),
+            python_exe,
+            "-m",
+            "atom.entrypoints.openai_server",
+            "--model",
+            model,
+            "-tp",
+            str(tp),
+            "--server-port",
+            str(port),
         ]
         if max_model_len:
             cmd += ["--max-model-len", str(max_model_len)]
@@ -176,24 +193,40 @@ def build_client_command(
     prompts = num_prompts if num_prompts is not None else (conc if profile else conc * 10)
     warmups = num_warmups if num_warmups is not None else 2 * conc
     cmd = [
-        python_exe, bench_py,
-        "--model", model,
-        "--backend", "vllm",
-        "--base-url", base_url,
-        "--endpoint", "/v1/completions",
-        "--dataset-name", "random",
-        "--random-input-len", str(isl),
-        "--random-output-len", str(osl),
-        "--random-range-ratio", str(random_range_ratio),
-        "--num-prompts", str(prompts),
-        "--max-concurrency", str(conc),
-        "--request-rate", "inf",
+        python_exe,
+        bench_py,
+        "--model",
+        model,
+        "--backend",
+        "vllm",
+        "--base-url",
+        base_url,
+        "--endpoint",
+        "/v1/completions",
+        "--dataset-name",
+        "random",
+        "--random-input-len",
+        str(isl),
+        "--random-output-len",
+        str(osl),
+        "--random-range-ratio",
+        str(random_range_ratio),
+        "--num-prompts",
+        str(prompts),
+        "--max-concurrency",
+        str(conc),
+        "--request-rate",
+        "inf",
         "--ignore-eos",
         "--save-result",
-        "--num-warmups", str(warmups),
-        "--percentile-metrics", "ttft,tpot,itl,e2el",
-        "--result-dir", result_dir,
-        "--result-filename", f"{result_filename}.json",
+        "--num-warmups",
+        str(warmups),
+        "--percentile-metrics",
+        "ttft,tpot,itl,e2el",
+        "--result-dir",
+        result_dir,
+        "--result-filename",
+        f"{result_filename}.json",
     ]
     if profile:
         cmd.append("--profile")
@@ -237,12 +270,19 @@ def build_eval_command(
         "tokenizer_backend=huggingface,trust_remote_code=true"
     )
     cmd = [
-        python_exe, "-m", "lm_eval",
-        "--model", "local-completions",
-        "--tasks", tasks,
-        "--model_args", model_args,
-        "--batch_size", batch_size,
-        "--output_path", out_dir,
+        python_exe,
+        "-m",
+        "lm_eval",
+        "--model",
+        "local-completions",
+        "--tasks",
+        tasks,
+        "--model_args",
+        model_args,
+        "--batch_size",
+        batch_size,
+        "--output_path",
+        out_dir,
     ]
     if limit:
         cmd += ["--limit", limit]
@@ -315,8 +355,7 @@ def lifecycle_files_present(pid_dir: str, framework: str, port: int) -> bool:
     from an unrelated listener.
     """
     return (
-        lifecycle_pid_file(pid_dir, framework, port).exists()
-        and lifecycle_meta_file(pid_dir, framework, port).exists()
+        lifecycle_pid_file(pid_dir, framework, port).exists() and lifecycle_meta_file(pid_dir, framework, port).exists()
     )
 
 
@@ -333,9 +372,7 @@ def write_lifecycle_files(
     import json as _json
 
     Path(pid_dir).mkdir(parents=True, exist_ok=True)
-    lifecycle_pid_file(pid_dir, framework, port).write_text(
-        f"{pid} {pgid}\n", encoding="utf-8"
-    )
+    lifecycle_pid_file(pid_dir, framework, port).write_text(f"{pid} {pgid}\n", encoding="utf-8")
     lifecycle_meta_file(pid_dir, framework, port).write_text(
         _json.dumps(
             {

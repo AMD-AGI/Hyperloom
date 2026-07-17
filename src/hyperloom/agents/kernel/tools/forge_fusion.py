@@ -54,9 +54,7 @@ def _inject_author_gateway_env() -> None:
     if openai_base and not os.environ.get("ANTHROPIC_BASE_URL"):
         # Strip trailing /v1 (claude appends its own).
         os.environ["ANTHROPIC_BASE_URL"] = openai_base[:-3] if openai_base.endswith("/v1") else openai_base
-    token = str(
-        os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-    ).strip()
+    token = str(os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
     if token:
         os.environ.setdefault("ANTHROPIC_API_KEY", token)
         os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)
@@ -70,7 +68,10 @@ def _git_toplevel(path: str) -> str:
     try:
         r = subprocess.run(
             ["git", "-C", str(Path(path).parent), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -228,26 +229,28 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     changed = [c.get("path") for c in (artifacts.get("changes") or []) if c.get("path")]
     src_file = str((m.get("fusion") or {}).get("source_file") or "")
 
-    result.update({
-        "status": "ok" if kept else "complete",
-        "micro_decision": "candidate" if kept else "no_improvement",
-        "decision": "KEEP" if kept else "REVERT",
-        "kept": kept,
-        "kernel_speedup": speedup,
-        # Fused arm = all confirmed flags ON; baseline arm = same flags OFF.
-        "env_flags": {f: "1" for f in best_flags},
-        "baseline_env_flags": {f: "0" for f in best_flags},
-        "artifact_files": changed,
-        "patch": artifacts.get("patch"),
-        # For integrate's patch-apply path.
-        "source_file": src_file,
-        "kernel_repo": _git_toplevel(src_file) if src_file else "",
-        "best_pattern": loop.get("best_pattern"),
-        "verdict": m.get("verdict"),
-        # A KEPT fusion passed kernel parity + serving smoke; the orchestrator
-        # still confirms the real e2e gain via integrate.
-        "requires_e2e_validation": kept,
-    })
+    result.update(
+        {
+            "status": "ok" if kept else "complete",
+            "micro_decision": "candidate" if kept else "no_improvement",
+            "decision": "KEEP" if kept else "REVERT",
+            "kept": kept,
+            "kernel_speedup": speedup,
+            # Fused arm = all confirmed flags ON; baseline arm = same flags OFF.
+            "env_flags": {f: "1" for f in best_flags},
+            "baseline_env_flags": {f: "0" for f in best_flags},
+            "artifact_files": changed,
+            "patch": artifacts.get("patch"),
+            # For integrate's patch-apply path.
+            "source_file": src_file,
+            "kernel_repo": _git_toplevel(src_file) if src_file else "",
+            "best_pattern": loop.get("best_pattern"),
+            "verdict": m.get("verdict"),
+            # A KEPT fusion passed kernel parity + serving smoke; the orchestrator
+            # still confirms the real e2e gain via integrate.
+            "requires_e2e_validation": kept,
+        }
+    )
     return result
 
 
@@ -293,8 +296,7 @@ def _emit(result: dict[str, Any], output_dir: str) -> None:
     """Write result.json (disk fallback) + print the stdout sentinel."""
     if output_dir:
         try:
-            (Path(output_dir) / "result.json").write_text(
-                json.dumps(result, indent=2), encoding="utf-8")
+            (Path(output_dir) / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
         except OSError:
             pass
     print(f"\n{RESULT_BEGIN}\n{json.dumps(result, sort_keys=True)}\n{RESULT_END}", flush=True)
@@ -312,11 +314,21 @@ def main(argv: list[str] | None = None) -> int:
         payload = _load_input_json(args.input_json)
         cmd = _build_cmd(payload)
     except Exception as exc:  # noqa: BLE001 - structured wrapper failure
-        print(json.dumps({
-            "status": "failed", "engine": "forge_fusion", "micro_decision": "failed",
-            "decision": "REVERT", "kept": False,
-            "error_class": exc.__class__.__name__, "error": repr(exc),
-        }, sort_keys=True), flush=True)
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "engine": "forge_fusion",
+                    "micro_decision": "failed",
+                    "decision": "REVERT",
+                    "kept": False,
+                    "error_class": exc.__class__.__name__,
+                    "error": repr(exc),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
         return 2
 
     _inject_author_gateway_env()

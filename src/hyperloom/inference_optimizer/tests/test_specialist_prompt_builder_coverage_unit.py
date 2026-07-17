@@ -32,26 +32,28 @@ _DOMAIN_KEYS = (
 def test_build_for_each_domain_and_framework(domain_key, framework):
     domain = get_domain(domain_key)
     assert domain is not None
-    sys_p, user_p = build_specialist_prompts(SpecialistPromptInputs(
-        task_id="t1",
-        domain=domain,
-        framework=framework,
-        gpu_type="MI300X",
-        tp=2,
-        hbm_gb=192.0,
-        peak_tflops=1300.0,
-        precision="fp8",
-        conc=64,
-        isl=1024,
-        osl=512,
-        max_model_len=8192,
-        arch_notes="MoE 8x7B",
-        target_gap_notes="competitor at 2x",
-        gap_canonical_id="gap.x",
-        gap_layer="kernel_agent",
-        gap_symptom="slow",
-        gap_evidence={"k": 1},
-    ))
+    sys_p, user_p = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="t1",
+            domain=domain,
+            framework=framework,
+            gpu_type="MI300X",
+            tp=2,
+            hbm_gb=192.0,
+            peak_tflops=1300.0,
+            precision="fp8",
+            conc=64,
+            isl=1024,
+            osl=512,
+            max_model_len=8192,
+            arch_notes="MoE 8x7B",
+            target_gap_notes="competitor at 2x",
+            gap_canonical_id="gap.x",
+            gap_layer="kernel_agent",
+            gap_symptom="slow",
+            gap_evidence={"k": 1},
+        )
+    )
     assert sys_p
     assert "## 2. HARDWARE CONTEXT" in user_p
     assert "concurrency: 64" in user_p

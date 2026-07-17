@@ -261,8 +261,8 @@ def _classify_subprocess_error(
     return "subprocess_nonzero"
 
 
-BASELINE_DEFAULT_TIMEOUT_SEC = 7800           # WARM-start cap, 130 min
-BASELINE_COLD_START_TIMEOUT_SEC = 9000        # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
+BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
+BASELINE_COLD_START_TIMEOUT_SEC = 9000  # COLD-start cap, 150 min (includes ~20 min cuda graph capture)
 # COLD_START_KERNEL_THRESHOLD and AITER_JIT_PROBE_PATHS live in ``_aiter_jit``;
 # re-exported below for callers/tests that import them from this module.
 
@@ -315,7 +315,9 @@ def _should_establish_quality_ref(task_kind: str | None) -> bool:
 
 
 def _resolve_reference_base(
-    session_dir: Path, *, model_path: str,
+    session_dir: Path,
+    *,
+    model_path: str,
 ) -> tuple[str, dict[str, str]]:
     """Read the model-gated reference base server args/envs from SharedState.
 
@@ -329,11 +331,13 @@ def _resolve_reference_base(
     try:
         from ...state.shared_state import SharedState
         from hyperloom.inference_optimizer.reference_script import models_compatible
+
         # The baseline executor is a module-level singleton instantiated before
         # $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR is pinned, so its cached
         # session_dir can point at the workspace root. Prefer the live pin when
         # present; otherwise honor the caller-supplied path.
         from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+
         _pinned = os.environ.get(ENV_CURRENT_SESSION_DIR)
         if _pinned:
             session_dir = Path(_pinned)
@@ -345,9 +349,9 @@ def _resolve_reference_base(
         ref_model = str(getattr(state, "reference_model", "") or "").strip()
         if not models_compatible(ref_model, str(model_path or "")):
             log.warning(
-                "reference recipe is for model %r but run model is %r; "
-                "skipping reference base (flags may not apply).",
-                ref_model, Path(str(model_path or "")).name,
+                "reference recipe is for model %r but run model is %r; skipping reference base (flags may not apply).",
+                ref_model,
+                Path(str(model_path or "")).name,
             )
             return ("", {})
         return (ref_args, ref_envs)
@@ -627,7 +631,10 @@ def _git_head_sha(repo_path: str) -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=repo_path, capture_output=True, timeout=5, check=True,
+            cwd=repo_path,
+            capture_output=True,
+            timeout=5,
+            check=True,
         )
         return result.stdout.decode().strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
@@ -645,11 +652,17 @@ def _revert_patches(repo_path: str, pre_sha: str) -> None:
     try:
         subprocess.run(
             ["git", "reset", "--hard", pre_sha],
-            cwd=repo_path, capture_output=True, timeout=15, check=True,
+            cwd=repo_path,
+            capture_output=True,
+            timeout=15,
+            check=True,
         )
         subprocess.run(
             ["git", "clean", "-fd"],
-            cwd=repo_path, capture_output=True, timeout=15, check=False,
+            cwd=repo_path,
+            capture_output=True,
+            timeout=15,
+            check=False,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         log.warning("baseline_executor: patch revert failed: %s", exc)
@@ -673,9 +686,7 @@ def _apply_warm_patches(
     if not patches or not target_repo:
         return []
 
-    blocked = {
-        p.get("patch_file", "") for p in (params.get("blocked_patches") or [])
-    }
+    blocked = {p.get("patch_file", "") for p in (params.get("blocked_patches") or [])}
 
     applied: list[dict[str, str]] = []
     patch_log_dir = output_dir / "warm_patches"
@@ -688,7 +699,8 @@ def _apply_warm_patches(
 
         if patch_file in blocked:
             log.info(
-                "baseline_executor: skipping blocked patch %s", patch_file,
+                "baseline_executor: skipping blocked patch %s",
+                patch_file,
             )
             continue
 
@@ -708,12 +720,14 @@ def _apply_warm_patches(
                 except OSError as exc:
                     log.warning(
                         "baseline_executor: cannot read patch_ref %s: %s",
-                        patch_ref, exc,
+                        patch_ref,
+                        exc,
                     )
                     continue
             else:
                 log.warning(
-                    "baseline_executor: patch_ref not found: %s", patch_ref,
+                    "baseline_executor: patch_ref not found: %s",
+                    patch_ref,
                 )
                 continue
 
@@ -739,13 +753,15 @@ def _apply_warm_patches(
         except subprocess.CalledProcessError as exc:
             log.warning(
                 "baseline_executor: git apply failed for patch %s: %s",
-                patch_file, exc.stderr.decode(errors="replace")[:500] if exc.stderr else str(exc),
+                patch_file,
+                exc.stderr.decode(errors="replace")[:500] if exc.stderr else str(exc),
             )
             continue
         except (subprocess.TimeoutExpired, OSError) as exc:  # pragma: no cover
             log.warning(
                 "baseline_executor: patch apply error for %s: %s",
-                patch_file, exc,
+                patch_file,
+                exc,
             )
             continue
 
@@ -944,7 +960,8 @@ class BaselineExecutor:
                 log.warning(
                     "baseline_executor: reaped %d stale aiter JIT lock(s) "
                     "under %s (compiler_alive=%s) before cold start.",
-                    sweep["deleted"], sweep.get("dir"),
+                    sweep["deleted"],
+                    sweep.get("dir"),
                     sweep.get("compiler_alive"),
                 )
                 # Locks gone — re-probe so the log line below reflects reality.
@@ -1085,15 +1102,11 @@ class BaselineExecutor:
         # the param, or an extra_envs RUN_EVAL that is PRESENT and falsey. An
         # absent RUN_EVAL must NOT count.
         _extra_envs = params.get("extra_envs") or {}
-        _explicit_run_eval = "RUN_EVAL" in _extra_envs and str(
-            _extra_envs["RUN_EVAL"]
-        ).strip().lower() in _RUN_EVAL_FALSE_VALUES
+        _explicit_run_eval = (
+            "RUN_EVAL" in _extra_envs and str(_extra_envs["RUN_EVAL"]).strip().lower() in _RUN_EVAL_FALSE_VALUES
+        )
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval
-        if (
-            result.get("status") != "succeeded"
-            and not eval_already_off
-            and self._is_eval_rooted_failure(result)
-        ):
+        if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
             log.warning(
                 "baseline_executor: failure looks eval-rooted (InferenceX "
                 "run_eval aborted the benchmark); retrying once with "
@@ -1146,11 +1159,7 @@ class BaselineExecutor:
         if acc is not None and float(acc) > 0.0:
             return  # a usable baseline accuracy exists
         params = ctx.task.params or {}
-        framework = (
-            str(params.get("framework") or "").strip()
-            or os.environ.get("FRAMEWORK", "").strip()
-            or None
-        )
+        framework = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
         from hyperloom.inference_optimizer import framework_registry
         from ._accuracy_gate import request_baseline_accuracy_stop
 
@@ -1258,7 +1267,8 @@ class BaselineExecutor:
         if applied_patches:
             log.info(
                 "baseline_executor: applied %d warm-replay code patches (pre_sha=%s): %s",
-                len(applied_patches), _pre_patch_sha[:8],
+                len(applied_patches),
+                _pre_patch_sha[:8],
                 [p["patch_file"] for p in applied_patches],
             )
 
@@ -1294,7 +1304,8 @@ class BaselineExecutor:
         ref_envs = dict(params.get("reference_envs") or {})
         if not ref_args and not ref_envs:
             ref_args, ref_envs = _resolve_reference_base(
-                self.session_dir, model_path=resolved_model,
+                self.session_dir,
+                model_path=resolved_model,
             )
         # Accuracy eval (GSM8K) opt-out: the ``disable_run_eval`` param and the
         # in-executor eval-failure fallback both force ``RUN_EVAL=false``.
@@ -1786,20 +1797,19 @@ class BaselineExecutor:
                 # the single-node materialized YAML does. Prefer explicit params,
                 # else the model-gated SharedState value.
                 from ._grid_runner import merge_server_args
+
                 _mn_ref_args = str(params.get("reference_server_args") or "").strip()
                 _mn_ref_envs = dict(params.get("reference_envs") or {})
                 if not _mn_ref_args and not _mn_ref_envs:
                     _mn_ref_args, _mn_ref_envs = _resolve_reference_base(
-                        self.session_dir, model_path=resolved_model,
+                        self.session_dir,
+                        model_path=resolved_model,
                     )
                 # Base on effective_extra_server_args (carries the one-shot
                 # cuda-graph eager-fallback flag when armed) so the MN per-round
                 # restart keeps that fallback too.
                 _mn_task_args = effective_extra_server_args
-                _mn_server_args = (
-                    merge_server_args(_mn_ref_args, _mn_task_args)
-                    if _mn_ref_args else _mn_task_args
-                )
+                _mn_server_args = merge_server_args(_mn_ref_args, _mn_task_args) if _mn_ref_args else _mn_task_args
                 _mn_env = {str(k): str(v) for k, v in _mn_ref_envs.items()}
                 # PD knobs auto-resolved by the helper from $PD_* env, falling
                 # back to state.json.
@@ -1836,6 +1846,7 @@ class BaselineExecutor:
             is_multi_node as _mn_imn,
             mn_bench_warmup_enabled as _mn_warm,
         )
+
         if _mn_imn() and _mn_warm() and not ctx_extra.get("mn_round_restarted"):
             _mn_warm_dir = output_dir / "mn_warmup"
             try:
@@ -2149,8 +2160,7 @@ class BaselineExecutor:
             # ``results*.json`` and reading it would promote a stale score into
             # baseline_accuracy. Reading eval output strictly follows running eval.
             log.info(
-                "baseline_executor: RUN_EVAL disabled this run (serving); skipping "
-                "accuracy parse (no lm-eval executed)"
+                "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"
             )
         else:
             from ._accuracy_gate import parse_eval_results

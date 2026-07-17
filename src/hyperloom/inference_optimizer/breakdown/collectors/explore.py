@@ -31,7 +31,6 @@ from ._common import (
 )
 
 
-
 # Explore search ledger
 def _shape_ledger(
     ledger: dict[str, Any] | None,
@@ -372,4 +371,3 @@ def collect_sweep(
         "all_variants": variants_on_disk,
         "config_path": ls.get("config_path"),
     }
-

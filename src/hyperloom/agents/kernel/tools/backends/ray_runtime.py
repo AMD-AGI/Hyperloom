@@ -308,8 +308,11 @@ SAFE_ENV_KEYS = (
     "GEAK_WORK_DIR",
     # e2e optimizer runner path + repo root so a Ray worker can locate
     # interface/run_e2e.py and the e2e_workflow/ checkout.
-    "GEAK_ROOT", "GEAK_E2E_RUNNER",
-    "GEAK_CLAUDE_EFFORT", "GEAK_CLAUDE_MODEL", "GEAK_E2E_TIMEOUT_S",
+    "GEAK_ROOT",
+    "GEAK_E2E_RUNNER",
+    "GEAK_CLAUDE_EFFORT",
+    "GEAK_CLAUDE_MODEL",
+    "GEAK_E2E_TIMEOUT_S",
     # Scoring/profiler/run knobs read by GEAK itself; stripped at the Ray
     # boundary without this allowlist entry.
     "GEAK_SCORE_TARGET",

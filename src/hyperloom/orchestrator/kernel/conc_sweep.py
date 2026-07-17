@@ -657,8 +657,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         # Framework does not support server_lifecycle — fall through to
         # Option B (per-variant server restart via normal run_grid).
         log.info(
-            "conc_sweep single-server: arm=%s not lifecycle-eligible (%s); "
-            "using per-variant server restart (Option B)",
+            "conc_sweep single-server: arm=%s not lifecycle-eligible (%s); using per-variant server restart (Option B)",
             arm_name,
             lc_reason,
         )
@@ -749,14 +748,17 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
             except Exception:  # noqa: BLE001
                 pass
-            failed_boots.append(br or VariantResult(
-                name=boot_variant.name,
-                extra_server_args=boot_variant.extra_server_args,
-                extra_envs=dict(boot_variant.extra_envs),
-                status="failed",
-                error="single_server_boot_failed",
-                error_class="single_server_boot_failed",
-            ))
+            failed_boots.append(
+                br
+                or VariantResult(
+                    name=boot_variant.name,
+                    extra_server_args=boot_variant.extra_server_args,
+                    extra_envs=dict(boot_variant.extra_envs),
+                    status="failed",
+                    error="single_server_boot_failed",
+                    error_class="single_server_boot_failed",
+                )
+            )
             boot_idx += 1
             continue
 
@@ -827,7 +829,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
 
     # Server is up: sweep remaining CONCs by reuse.
     try:
-        reuse_grid = grid[boot_idx + 1:]
+        reuse_grid = grid[boot_idx + 1 :]
         for r_idx, variant in enumerate(reuse_grid):
             # Check task-level budget before each reuse point.
             _reuse_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
@@ -1148,9 +1150,9 @@ def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> None
             json_path,
             json.dumps(payload, indent=2, ensure_ascii=False, default=str),
         )
-        all_points: list[dict[str, Any]] = list(
-            (payload.get("baseline") or {}).get("points") or []
-        ) + list((payload.get("optimized") or {}).get("points") or [])
+        all_points: list[dict[str, Any]] = list((payload.get("baseline") or {}).get("points") or []) + list(
+            (payload.get("optimized") or {}).get("points") or []
+        )
         _write_csv(csv_path, all_points)
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -1336,8 +1338,7 @@ async def run_conc_sweep(
     from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
 
     resolved_gpu = _gpu_runner_type(
-        os.environ.get("GPU_TYPE", "").strip().lower()
-        or str(getattr(state, "gpu_type", "") or "").strip().lower()
+        os.environ.get("GPU_TYPE", "").strip().lower() or str(getattr(state, "gpu_type", "") or "").strip().lower()
     )
     try:
         base_yaml_path = materialize_config_with_envs(
@@ -1404,10 +1405,13 @@ async def run_conc_sweep(
         ]
         for arm_name, arm_args, arm_envs in arms_order:
             skip_grid_fn = lambda _an=arm_name, _aa=arm_args, _ae=arm_envs: _build_arm_grid(  # noqa: E731
-                _an, concs_desc,
-                isl=isl, osl=osl,
+                _an,
+                concs_desc,
+                isl=isl,
+                osl=osl,
                 num_prompts_factor=num_prompts_factor,
-                arm_args=_aa, arm_envs=_ae,
+                arm_args=_aa,
+                arm_envs=_ae,
             )
 
             # Check overall budget before starting each arm.

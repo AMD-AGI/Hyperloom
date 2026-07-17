@@ -22,7 +22,6 @@ from ._common import (
 )
 
 
-
 # Roofline (single-path + watermark refresh model)
 def collect_roofline(
     state: dict[str, Any],
@@ -356,4 +355,3 @@ def _normalize_kernel_roofline_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "reusable_native_kernel": bool(raw.get("reusable_native_kernel")),
         "rocprof_roofline": raw.get("rocprof_roofline"),
     }
-

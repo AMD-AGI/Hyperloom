@@ -21,9 +21,7 @@ import json
 import logging
 from pathlib import Path
 
-apk = importlib.import_module(
-    "hyperloom.agents.kernel.tools.apply_kernel_patch"
-)
+apk = importlib.import_module("hyperloom.agents.kernel.tools.apply_kernel_patch")
 
 
 def _write_manifest(backup_dir: Path, manifest: dict) -> Path:
@@ -112,11 +110,7 @@ def test_tampered_artifact_backup_path_is_skipped(tmp_path):
 
     mf = _write_manifest(
         backup_dir,
-        {
-            "artifacts": [
-                {"path": str(target), "backup_path": str(secret)}
-            ]
-        },
+        {"artifacts": [{"path": str(target), "backup_path": str(secret)}]},
     )
     res = apk.revert_kernel_patch(mf)
     assert res["status"] == "partial"

@@ -324,6 +324,7 @@ async def test_eval_gap_exceeded_accepted_by_operator_promotes_to_accepted(
 
     # Stub the operator prompt to answer "y".
     from hyperloom.agents.quantization.driver import retry as retry_mod
+
     monkeypatch.setattr(retry_mod, "_ask_operator", lambda msg: True)
 
     runner = _StubRunner([gap_exceeded])
@@ -360,6 +361,7 @@ async def test_eval_gap_exceeded_rejected_stays_partial(tmp_path, quark_root, bu
         return None
 
     from hyperloom.agents.quantization.driver import retry as retry_mod
+
     monkeypatch.setattr(retry_mod, "_ask_operator", lambda msg: False)
 
     runner = _StubRunner([gap_exceeded])
@@ -532,6 +534,7 @@ def test_decide_next_step_checkpoint_aborted_never_retries(tmp_path):
 
 def test_decide_next_step_eval_gap_accepted_promotes(tmp_path, monkeypatch):
     from hyperloom.agents.quantization.driver import retry as rmod
+
     monkeypatch.setattr(rmod, "_ask_operator", lambda msg: True)
     d = _decide_next_step(
         OutcomeId.eval_gap_exceeded,

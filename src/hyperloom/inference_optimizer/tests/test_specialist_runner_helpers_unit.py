@@ -40,11 +40,7 @@ def test_safe_redact():
 
 
 def test_safe_redact_headers_and_token_shapes():
-    line = (
-        "Authorization: Bearer sk-live-secret "
-        "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig "
-        "aws=AKIA1234567890ABCDEF"
-    )
+    line = "Authorization: Bearer sk-live-secret jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig aws=AKIA1234567890ABCDEF"
     out = sr._safe_redact(line)
     assert "Authorization: Bearer [REDACTED]" in out
     assert "sk-live-secret" not in out
@@ -86,9 +82,7 @@ def test_classify_unknown():
 
 
 def test_build_empty_specialist_done():
-    out = build_empty_specialist_done(
-        gap_canonical_id="g1", domain="kernel_agent", reason="no idea", confidence=2.0
-    )
+    out = build_empty_specialist_done(gap_canonical_id="g1", domain="kernel_agent", reason="no idea", confidence=2.0)
     assert out["empty"] is True
     assert out["proposal_set"] == []
     assert out["confidence"] == 1.0

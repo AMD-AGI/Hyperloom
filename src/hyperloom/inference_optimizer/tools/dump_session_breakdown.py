@@ -91,10 +91,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--include-transcripts",
         action="store_true",
-        help=(
-            "Inline specialist transcript bodies under "
-            "specialist_runs[i].transcripts[j].body."
-        ),
+        help=("Inline specialist transcript bodies under specialist_runs[i].transcripts[j].body."),
     )
     parser.add_argument(
         "--verbose",

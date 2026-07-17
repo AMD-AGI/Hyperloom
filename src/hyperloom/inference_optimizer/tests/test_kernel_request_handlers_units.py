@@ -37,10 +37,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._parse_forge_gemm_sentinel(text) == payload
         assert krh._parse_forge_gemm_sentinel("no sentinel") is None
         assert (
-            krh._parse_forge_gemm_sentinel(
-                "FORGE_GEMM_TUNE_RESULT_BEGIN\nnot-json\nFORGE_GEMM_TUNE_RESULT_END"
-            )
-            is None
+            krh._parse_forge_gemm_sentinel("FORGE_GEMM_TUNE_RESULT_BEGIN\nnot-json\nFORGE_GEMM_TUNE_RESULT_END") is None
         )
 
     @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
@@ -232,9 +229,7 @@ class TestForgeGemmHelperCoverage:
         return path
 
     def test_resolve_forge_untuned_csv_fp8_blockscale(self, tmp_path):
-        expected = self._write_aiter_csv(
-            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
-        )
+        expected = self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "auto") == str(expected)
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
 
@@ -250,12 +245,8 @@ class TestForgeGemmHelperCoverage:
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == ""
 
     def test_resolve_forge_untuned_csv_picks_newest_nonempty(self, tmp_path):
-        old = self._write_aiter_csv(
-            tmp_path, "old", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n1,2,3\n"
-        )
-        new = self._write_aiter_csv(
-            tmp_path, "new", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n4,5,6\n"
-        )
+        old = self._write_aiter_csv(tmp_path, "old", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n1,2,3\n")
+        new = self._write_aiter_csv(tmp_path, "new", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n4,5,6\n")
         import os
 
         os.utime(old, (1, 1))
@@ -273,21 +264,15 @@ class TestForgeGemmHelperCoverage:
     @staticmethod
     def _write_model_config(model_dir: Path, hidden_size: int) -> str:
         model_dir.mkdir(parents=True, exist_ok=True)
-        (model_dir / "config.json").write_text(
-            json.dumps({"hidden_size": hidden_size}), encoding="utf-8"
-        )
+        (model_dir / "config.json").write_text(json.dumps({"hidden_size": hidden_size}), encoding="utf-8")
         return str(model_dir)
 
     def test_resolve_forge_untuned_csv_rejects_model_mismatch(self, tmp_path):
         # CSV carries K=7168 shapes but the model has hidden_size=2048: reject it
         # so forge derives per-model shapes from config.json.
-        self._write_aiter_csv(
-            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
-        )
+        self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
         model_path = self._write_model_config(tmp_path / "model", hidden_size=2048)
-        assert (
-            krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", model_path) == ""
-        )
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", model_path) == ""
 
     def test_resolve_forge_untuned_csv_accepts_model_match(self, tmp_path):
         # A CSV whose K column includes the model hidden_size is accepted.
@@ -298,33 +283,25 @@ class TestForgeGemmHelperCoverage:
             "M,N,K\n16,6144,2048\n16,2048,8192\n",
         )
         model_path = self._write_model_config(tmp_path / "model", hidden_size=2048)
-        assert krh._resolve_forge_untuned_csv(
-            tmp_path, "fp8", "blockscale", model_path
-        ) == str(expected)
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", model_path) == str(expected)
 
     def test_resolve_forge_untuned_csv_no_model_path_keeps_legacy(self, tmp_path):
         # Without a model_path the resolver cannot validate; returns newest non-empty CSV.
-        expected = self._write_aiter_csv(
-            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
-        )
+        expected = self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
 
     def test_resolve_forge_untuned_csv_unreadable_config_keeps_csv(self, tmp_path):
         # Missing/unreadable config.json: cannot validate, so keep the CSV.
-        expected = self._write_aiter_csv(
-            tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
+        expected = self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
+        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", str(tmp_path / "no_such_model")) == str(
+            expected
         )
-        assert krh._resolve_forge_untuned_csv(
-            tmp_path, "fp8", "blockscale", str(tmp_path / "no_such_model")
-        ) == str(expected)
 
     def test_csv_matches_model_helpers(self, tmp_path):
         csv_mismatch = self._write_aiter_csv(
             tmp_path, "h1", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n"
         )
-        csv_match = self._write_aiter_csv(
-            tmp_path, "h2", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,6144,2048\n"
-        )
+        csv_match = self._write_aiter_csv(tmp_path, "h2", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,6144,2048\n")
         model_path = self._write_model_config(tmp_path / "m", hidden_size=2048)
         assert krh._model_hidden_size(model_path) == 2048
         assert krh._csv_k_values(csv_mismatch) == {7168}
@@ -366,7 +343,7 @@ class TestForgeGemmHelperCoverage:
 
     def test_normalize_forge_shapes_json_existing_path(self, tmp_path):
         f = tmp_path / "shapes.json"
-        f.write_text("[{\"M\":1,\"N\":2,\"K\":3}]", encoding="utf-8")
+        f.write_text('[{"M":1,"N":2,"K":3}]', encoding="utf-8")
         assert krh._normalize_forge_shapes_json(str(f), tmp_path) == str(f)
 
     def test_normalize_forge_shapes_json_inline_string(self, tmp_path):
@@ -433,20 +410,11 @@ class TestForgeGemmHelperCoverage:
 
     def test_parse_forge_fusion_sentinel(self):
         payload = {"status": "ok", "decision": "KEEP", "kept": True}
-        text = (
-            "noise\nFORGE_FUSION_RESULT_BEGIN\n"
-            + json.dumps(payload)
-            + "\nFORGE_FUSION_RESULT_END\n"
-        )
+        text = "noise\nFORGE_FUSION_RESULT_BEGIN\n" + json.dumps(payload) + "\nFORGE_FUSION_RESULT_END\n"
 
         assert krh._parse_forge_fusion_sentinel(text) == payload
         assert krh._parse_forge_fusion_sentinel("no marker") is None
-        assert (
-            krh._parse_forge_fusion_sentinel(
-                "FORGE_FUSION_RESULT_BEGIN\nnot-json\nFORGE_FUSION_RESULT_END"
-            )
-            is None
-        )
+        assert krh._parse_forge_fusion_sentinel("FORGE_FUSION_RESULT_BEGIN\nnot-json\nFORGE_FUSION_RESULT_END") is None
 
     def test_resolve_fusion_decode_trace_prefers_payload_and_newest(self, tmp_path):
         state = SharedState()
@@ -466,9 +434,7 @@ class TestForgeGemmHelperCoverage:
         os.utime(payload_new, (10, 10))
         state.last_profile_trace = str(state_dir)
 
-        assert krh._resolve_fusion_decode_trace(
-            state, {"trace_path": str(payload_dir)}
-        ) == str(payload_new)
+        assert krh._resolve_fusion_decode_trace(state, {"trace_path": str(payload_dir)}) == str(payload_new)
         assert krh._resolve_fusion_decode_trace(state, {}) == str(state_trace)
         assert krh._resolve_fusion_decode_trace(state, {"trace_path": "/missing"}) == str(state_trace)
 
@@ -572,9 +538,7 @@ class TestForgeGemmHelperCoverage:
         }
 
     @pytest.mark.asyncio
-    async def test_run_forge_fusion_success_writes_input_and_defaults(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_run_forge_fusion_success_writes_input_and_defaults(self, tmp_path, monkeypatch):
         trace_dir = tmp_path / "trace"
         trace_dir.mkdir()
         trace_file = trace_dir / "decode.trace.json.gz"
@@ -603,9 +567,7 @@ class TestForgeGemmHelperCoverage:
             }
             return (
                 0,
-                "FORGE_FUSION_RESULT_BEGIN\n"
-                + json.dumps(result)
-                + "\nFORGE_FUSION_RESULT_END\n",
+                "FORGE_FUSION_RESULT_BEGIN\n" + json.dumps(result) + "\nFORGE_FUSION_RESULT_END\n",
                 "",
             )
 
@@ -622,8 +584,7 @@ class TestForgeGemmHelperCoverage:
         assert result["workspace"] == str(tmp_path / "runs" / "fusion" / "fusion_task")
         assert calls[0][1] == krh._forge_fusion_wrapper_timeout_sec(123)
         input_payload = json.loads(
-            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json")
-            .read_text(encoding="utf-8")
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
         )
         assert input_payload["trace_path"] == str(trace_file)
         assert input_payload["model_path"] == "/models/zaya"
@@ -644,9 +605,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._forge_fusion_wrapper_timeout_sec(123) == 153
 
     @pytest.mark.asyncio
-    async def test_run_forge_fusion_invalid_timeout_env_uses_default(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_run_forge_fusion_invalid_timeout_env_uses_default(self, tmp_path, monkeypatch):
         trace = tmp_path / "decode.trace.json.gz"
         trace.write_text("{}", encoding="utf-8")
         SharedState(
@@ -664,9 +623,7 @@ class TestForgeGemmHelperCoverage:
             result = {"status": "complete", "decision": "REVERT", "kept": False}
             return (
                 0,
-                "FORGE_FUSION_RESULT_BEGIN\n"
-                + json.dumps(result)
-                + "\nFORGE_FUSION_RESULT_END\n",
+                "FORGE_FUSION_RESULT_BEGIN\n" + json.dumps(result) + "\nFORGE_FUSION_RESULT_END\n",
                 "",
             )
 
@@ -677,8 +634,7 @@ class TestForgeGemmHelperCoverage:
         assert result["status"] == "complete"
         assert calls == [krh._forge_fusion_wrapper_timeout_sec(7200)]
         input_payload = json.loads(
-            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json")
-            .read_text(encoding="utf-8")
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
         )
         assert input_payload["timeout"] == 7200
 
@@ -1261,9 +1217,7 @@ class TestRunGemmTuningHandler:
         monkeypatch.setattr(krh, "_run_forge_gemm_tuning", fake_forge)
         monkeypatch.setattr(krh, "_run_subprocess", fail_geak_subprocess)
 
-        result = asyncio.run(
-            krh.run_gemm_tuning_handler({"task_id": "legacy-geak"}, session_dir=tmp_path)
-        )
+        result = asyncio.run(krh.run_gemm_tuning_handler({"task_id": "legacy-geak"}, session_dir=tmp_path))
 
         assert called["session_dir"] == tmp_path
         assert result["backend"] == "forge"
@@ -1308,9 +1262,7 @@ class TestRunGemmTuningHandler:
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(krh, "_run_subprocess", fake_run)
 
-        result = asyncio.run(
-            krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path)
-        )
+        result = asyncio.run(krh.run_gemm_tuning_handler({"task_id": "forge"}, session_dir=tmp_path))
 
         cmd = captured["cmd"]  # type: ignore[assignment]
         input_path = cmd[cmd.index("--input-json") + 1]
@@ -1885,9 +1837,7 @@ class TestTracelensRootResolution:
         assert err is not None
         assert "incomplete" in err
 
-    def test_trace_analyze_handler_selfheals_default_root_then_fails_if_unrecovered(
-        self, tmp_path, monkeypatch
-    ):
+    def test_trace_analyze_handler_selfheals_default_root_then_fails_if_unrecovered(self, tmp_path, monkeypatch):
         # Default root missing: handler attempts self-heal before failing.
         # Stub the heal to a no-op so the handler returns the structured error.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
@@ -1900,14 +1850,16 @@ class TestTracelensRootResolution:
 
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
-            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path)
+            krh.trace_analyze_handler(
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
+            )
         )
         assert called["n"] == 1  # self-heal was attempted
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
- # an incomplete default checkout (dir present, no .git) must still
+        # an incomplete default checkout (dir present, no .git) must still
         # trigger self-heal.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
@@ -1925,14 +1877,16 @@ class TestTracelensRootResolution:
 
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
-            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path)
+            krh.trace_analyze_handler(
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
+            )
         )
         assert called["n"] == 1  # self-heal attempted despite the dir existing
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
- # an incomplete non-default operator override (dir present, no .git)
+        # an incomplete non-default operator override (dir present, no .git)
         # must fail fast — never adopted, never auto-cloned.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
@@ -1942,11 +1896,14 @@ class TestTracelensRootResolution:
         monkeypatch.setenv("TRACELENS_ROOT", str(override))
         heal_called = {"n": 0}
         monkeypatch.setattr(
-            krh, "_maybe_selfheal_tracelens_root",
+            krh,
+            "_maybe_selfheal_tracelens_root",
             lambda *_a, **_k: heal_called.__setitem__("n", heal_called["n"] + 1),
         )
         out = asyncio.run(
-            krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path)
+            krh.trace_analyze_handler(
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
+            )
         )
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
@@ -1979,7 +1936,7 @@ class TestTracelensRootResolution:
         assert called["n"] == 0
 
     def test_selfheal_runs_on_default_path_even_when_env_set(self, tmp_path, monkeypatch):
- # the default path is persisted as TRACELENS_ROOT in
+        # the default path is persisted as TRACELENS_ROOT in
         # kernel-agent.env.sh, so "env set" must NOT be treated as an override.
         # A missing default path must still attempt self-heal.
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
@@ -2047,8 +2004,7 @@ class TestKernelOptArtifactBundleRecording:
         subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
         subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
         subprocess.run(
-            ["git", "-C", str(repo), "-c", "user.email=a@b.c", "-c", "user.name=t",
-             "commit", "-qm", "base"],
+            ["git", "-C", str(repo), "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "base"],
             check=True,
         )
         # The live tree is already dirty; snapshot materialization must start from HEAD.

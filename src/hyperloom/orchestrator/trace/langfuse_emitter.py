@@ -1002,8 +1002,11 @@ class LangfuseEmitter:
                     "pmc_diagnosis": row.get("pmc_diagnosis"),
                 }
             self.record_kb_span(
-                name=name, agent="forge", output=row,
-                metadata=metadata, ts=row.get("ts"),
+                name=name,
+                agent="forge",
+                output=row,
+                metadata=metadata,
+                ts=row.get("ts"),
             )
 
     def _flush_gemm_tuning(self) -> None:

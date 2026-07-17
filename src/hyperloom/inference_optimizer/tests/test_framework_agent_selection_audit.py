@@ -246,9 +246,7 @@ def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
         {"candidate_id": "c3", "status": "critic_denied"},
     ]
     priors = coord._collect_framework_agent_candidate_priors()
-    assert priors["recent_decisions"] == [
-        {"candidate_id": "c1", "verdict": "approve", "rationale": "looks good"}
-    ]
+    assert priors["recent_decisions"] == [{"candidate_id": "c1", "verdict": "approve", "rationale": "looks good"}]
     statuses = {o["status"] for o in priors["recent_outcomes"]}
     assert statuses == {"kept", "critic_denied"}
 
@@ -487,9 +485,7 @@ def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = 
 def test_materialize_pr_diff_success(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
     dest = tmp_path / "out" / "cand.patch"
-    ok, err = fpr_mod._materialize_pr_diff_via_worktree(
-        tmp_path / "root", {"pr_number": 1015}, dest, timeout_sec=30.0
-    )
+    ok, err = fpr_mod._materialize_pr_diff_via_worktree(tmp_path / "root", {"pr_number": 1015}, dest, timeout_sec=30.0)
     assert ok is True and err == ""
     assert dest.read_text().startswith("diff --git")
 
@@ -512,9 +508,7 @@ def test_materialize_pr_diff_empty_diff(monkeypatch, tmp_path) -> None:
 
 def test_materialize_pr_diff_no_head_resolvable(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
-    ok, err = fpr_mod._materialize_pr_diff_via_worktree(
-        tmp_path / "root", {}, tmp_path / "c.patch", timeout_sec=30.0
-    )
+    ok, err = fpr_mod._materialize_pr_diff_via_worktree(tmp_path / "root", {}, tmp_path / "c.patch", timeout_sec=30.0)
     assert ok is False and "cannot resolve PR head" in err
 
 
@@ -647,11 +641,7 @@ async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -> None:
-    done = {
-        "proposal_set": [
-            {"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}
-        ]
-    }
+    done = {"proposal_set": [{"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}]}
     before = len(coord.state.pending_proposals)
     await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
@@ -666,9 +656,7 @@ async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(
-        coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False
-    )
+    monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False)
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
     await coord._maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     assert not coord.state.pending_proposals
@@ -814,10 +802,9 @@ def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
 # Lenient ranker: an "applicable: false" reply never vetoes the phase
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-async def test_ranker_applicable_false_falls_back_to_discovery_order(
-    coord: Coordinator, monkeypatch
-) -> None:
+async def test_ranker_applicable_false_falls_back_to_discovery_order(coord: Coordinator, monkeypatch) -> None:
     cands = [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
     monkeypatch.setattr(coord.phase_framework, "_unprocessed_framework_agent_candidates", lambda: cands)
     _install_ranker(

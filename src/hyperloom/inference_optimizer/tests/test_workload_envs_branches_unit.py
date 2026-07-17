@@ -398,9 +398,7 @@ def test_sparse_model_respects_operator_pinned_block_size(monkeypatch, tmp_path)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
     src = _write(tmp_path / "cfg.yaml", framework="vllm")
-    bench = _materialize(
-        src, tmp_path / "out", model_path=model_dir, extra_server_args="--block-size 64"
-    )
+    bench = _materialize(src, tmp_path / "out", model_path=model_dir, extra_server_args="--block-size 64")
     assert "--block-size 64" in bench["envs"]["EXTRA_VLLM_ARGS"]
     assert "--block-size 128" not in bench["envs"]["EXTRA_VLLM_ARGS"]
 

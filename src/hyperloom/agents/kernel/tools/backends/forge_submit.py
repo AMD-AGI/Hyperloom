@@ -32,10 +32,9 @@ def _ensure_forge_on_path() -> str:
     env var is unset, does nothing and relies on an installed `kernel_agents`.
     Returns the path inserted, or "".
     """
-    root = (os.environ.get("FORGE_PATH")
-            or os.environ.get("KERNEL_FORGE_ROOT")
-            or os.environ.get("KERNEL_FORGE_PATH")
-            or "").strip()
+    root = (
+        os.environ.get("FORGE_PATH") or os.environ.get("KERNEL_FORGE_ROOT") or os.environ.get("KERNEL_FORGE_PATH") or ""
+    ).strip()
     if not root:
         return ""
     for cand in (os.path.join(root, "src"), root, os.path.dirname(root)):
@@ -132,20 +131,17 @@ def _default_branch(repo: str) -> str:
     Prefers the remote's advertised default, then falls back to common local
     branch names.
     """
-    p = _run(["git", "-C", repo, "symbolic-ref", "--short",
-              "refs/remotes/origin/HEAD"], timeout=30)
+    p = _run(["git", "-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout=30)
     ref = (p.stdout or "").strip()
     if ref.startswith("origin/"):
-        return ref[len("origin/"):]
+        return ref[len("origin/") :]
     for name in ("main", "master"):
-        if _run(["git", "-C", repo, "rev-parse", "--verify", name],
-                timeout=30).returncode == 0:
+        if _run(["git", "-C", repo, "rev-parse", "--verify", name], timeout=30).returncode == 0:
             return name
     return ""
 
 
-def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path,
-                      branch: str) -> tuple[str, str, str] | None:
+def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, branch: str) -> tuple[str, str, str] | None:
     """Create a git worktree of kernel_repo at output_dir/worktree (R1/W1).
 
     Returns (worktree_dir, worktree_kernel_file, base_commit) or None when the
@@ -319,8 +315,11 @@ def _prepare_worktree_nogit(
     ]:
         proc = _run(cmd, timeout=120)
         if proc.returncode != 0:
-            log.warning("forge: non-git scaffold git init step failed: %s -> %s",
-                        cmd, proc.stderr.strip() or proc.stdout.strip())
+            log.warning(
+                "forge: non-git scaffold git init step failed: %s -> %s",
+                cmd,
+                proc.stderr.strip() or proc.stdout.strip(),
+            )
             shutil.rmtree(scratch_dir, ignore_errors=True)
             return None
 
@@ -398,8 +397,7 @@ def _editable_roots() -> list[str]:
             # Layout 0: bare absolute path on a line (no quotes, no import).
             for line in txt.splitlines():
                 line = line.strip()
-                if line.startswith("/") and not line.startswith("#") \
-                        and "import" not in line and os.path.isdir(line):
+                if line.startswith("/") and not line.startswith("#") and "import" not in line and os.path.isdir(line):
                     roots.add(os.path.realpath(line))
             # Layout 1: quoted absolute paths directly in the file.
             for m in re.findall(r"['\"](/[^'\"]+)['\"]", txt):
@@ -524,8 +522,7 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
         return None
 
     try:
-        orig_branch = _run(["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"],
-                           timeout=30).stdout.strip()
+        orig_branch = _run(["git", "-C", repo, "rev-parse", "--abbrev-ref", "HEAD"], timeout=30).stdout.strip()
         orig_head = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
         if not orig_head:
             return _skip()
@@ -536,14 +533,12 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
             if not default_branch:
                 return _skip()
             stale = orig_branch
-            co = _run(["git", "-C", repo, "checkout", "-f", default_branch],
-                      timeout=120)
+            co = _run(["git", "-C", repo, "checkout", "-f", default_branch], timeout=120)
             if co.returncode != 0:
                 return _skip()
             _run(["git", "-C", repo, "branch", "-D", stale], timeout=30)
             orig_branch = default_branch
-            orig_head = _run(["git", "-C", repo, "rev-parse", "HEAD"],
-                             timeout=30).stdout.strip()
+            orig_head = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
             if not orig_head:
                 return _skip()
         # Drop any stale temp branch from a prior crashed run.
@@ -567,19 +562,25 @@ def _prepare_inplace(source_file: str, kernel_repo: str, branch: str) -> tuple[s
         _run(["git", "-C", repo, "add", "-u"], timeout=60)
         dirty = _run(["git", "-C", repo, "diff", "--cached", "--quiet"], timeout=30)
         if dirty.returncode != 0:
-            _run(["git", "-C", repo, "commit", "-m",
-                  "forge: pre-existing dirty baseline"], timeout=60)
-            base_commit = _run(["git", "-C", repo, "rev-parse", "HEAD"],
-                               timeout=30).stdout.strip() or orig_head
+            _run(["git", "-C", repo, "commit", "-m", "forge: pre-existing dirty baseline"], timeout=60)
+            base_commit = _run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip() or orig_head
         else:
             base_commit = orig_head
     except Exception:
         _release_repo_lock(lock_fd)
         raise
 
-    restore = {"repo": repo, "orig_branch": orig_branch, "orig_head": orig_head,
-               "branch": branch, "source_file": source_file, "backup": backup,
-               "relpath": relpath, "lock_fd": lock_fd, "base_commit": base_commit}
+    restore = {
+        "repo": repo,
+        "orig_branch": orig_branch,
+        "orig_head": orig_head,
+        "branch": branch,
+        "source_file": source_file,
+        "backup": backup,
+        "relpath": relpath,
+        "lock_fd": lock_fd,
+        "base_commit": base_commit,
+    }
     return repo, source_file, restore
 
 
@@ -955,13 +956,27 @@ if __name__ == "__main__":
 
 
 _ACTIVATION_OP_HINTS = (
-    "silu", "gelu", "relu", "act_and_mul", "silu_and_mul", "gelu_and_mul",
-    "activation", "swiglu", "geglu", "swish",
+    "silu",
+    "gelu",
+    "relu",
+    "act_and_mul",
+    "silu_and_mul",
+    "gelu_and_mul",
+    "activation",
+    "swiglu",
+    "geglu",
+    "swish",
 )
 
 _ATTENTION_OP_HINTS = (
-    "attention", "mha", "prefill", "decode", "paged_attention",
-    "flash_attn", "sdpa", "grouped_query",
+    "attention",
+    "mha",
+    "prefill",
+    "decode",
+    "paged_attention",
+    "flash_attn",
+    "sdpa",
+    "grouped_query",
 )
 
 
@@ -1190,8 +1205,7 @@ main()
 '''
 
 
-def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Path,
-                          inplace: bool = False) -> str | None:
+def _autogen_forge_driver(candidate: dict, worktree_kernel: str, output_dir: Path, inplace: bool = False) -> str | None:
     """Auto-generate a Forge-native driver when no harness is supplied.
 
     Op templates keyed by candidate['operation'] / kernel name:
@@ -1333,15 +1347,12 @@ def _shapes_from_candidate(candidate: dict) -> dict:
     # Honor an explicit pre-named dim dict if one was supplied.
     if not primary:
         shapes = candidate.get("input_shapes") or []
-        if shapes and isinstance(shapes[0], dict) and any(
-                k in shapes[0] for k in ("M", "N", "K", "E", "TOPK")):
-            primary = {k: v for k, v in shapes[0].items()
-                       if k in ("M", "N", "K", "E", "TOPK")}
+        if shapes and isinstance(shapes[0], dict) and any(k in shapes[0] for k in ("M", "N", "K", "E", "TOPK")):
+            primary = {k: v for k, v in shapes[0].items() if k in ("M", "N", "K", "E", "TOPK")}
     return {"primary": primary, "minimal": primary, "validation": [primary] if primary else []}
 
 
-def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | None,
-                  improved: bool) -> Path:
+def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | None, improved: bool) -> Path:
     """Write optimization_report.md with the locked anchors (doc Section 6.4).
 
     Only claims a KEEP-worthy result when the loop actually kept a validated
@@ -1363,15 +1374,18 @@ def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | 
         # "speedup" and the "Nx" form so the report scanners never treat it as a
         # KEEP-worthy figure.
         if baseline_ms and best_ms and best_ms > 0:
-            lines.append(f"# observed timing (not kept): baseline_ms={baseline_ms:.4f} "
-                         f"best_ms={best_ms:.4f} ratio={baseline_ms / best_ms:.4f}")
+            lines.append(
+                f"# observed timing (not kept): baseline_ms={baseline_ms:.4f} "
+                f"best_ms={best_ms:.4f} ratio={baseline_ms / best_ms:.4f}"
+            )
     report = output_dir / "optimization_report.md"
     report.write_text("\n".join(lines) + "\n")
     return report
 
 
-def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_file: str,
-                           source_file: str, output_dir: Path) -> tuple[str, list[str]]:
+def _export_best_artifacts(
+    workspace: str, base_commit: str, worktree_kernel_file: str, source_file: str, output_dir: Path
+) -> tuple[str, list[str]]:
     """Export the best-kept state — ALL files the agent changed, not just the kernel.
 
     The loop now commits every tracked edit (``runner._git_commit`` uses
@@ -1431,8 +1445,9 @@ def _export_best_artifacts(workspace: str, base_commit: str, worktree_kernel_fil
     return str(primary), changed
 
 
-def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
-                gpu_ids: str = "", skipped: bool = False) -> dict:
+def _normalized(
+    returncode: int, stdout: str, stderr: str, elapsed_s: float, gpu_ids: str = "", skipped: bool = False
+) -> dict:
     """Shape the result like geak_submit return dicts.
 
     ``skipped=True`` marks a forge self-skip: forge bailed before any real
@@ -1448,8 +1463,7 @@ def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float,
         "stdout_tail": (stdout or "")[-4000:],
         "stderr_tail": (stderr or "")[-4000:],
         "stdout": stdout or "",
-        "gpu_ids": gpu_ids or (os.environ.get("HIP_VISIBLE_DEVICES")
-                               or os.environ.get("CUDA_VISIBLE_DEVICES") or ""),
+        "gpu_ids": gpu_ids or (os.environ.get("HIP_VISIBLE_DEVICES") or os.environ.get("CUDA_VISIBLE_DEVICES") or ""),
         "elapsed_s": round(elapsed_s, 2),
         "cmd": ["forge_submit.submit"],
     }
@@ -1473,6 +1487,7 @@ def _ensure_flydsl_aiter_compat(protocol_path: str = "") -> bool:
         path = protocol_path
         if not path:
             import importlib.util
+
             spec = importlib.util.find_spec("flydsl.compiler.protocol")
             path = spec.origin if (spec and spec.origin) else ""
         if not path or not os.path.isfile(path):
@@ -1488,9 +1503,11 @@ def _ensure_flydsl_aiter_compat(protocol_path: str = "") -> bool:
         if "def extract_to_ir_values" not in text:
             return False  # unexpected flydsl layout
         with open(path, "a") as f:
-            f.write("\n\n# Forge compat shim: aiter imports fly_values, renamed to\n"
-                    "# extract_to_ir_values in flydsl>=0.2 (same List[ir.Value] result).\n"
-                    "fly_values = extract_to_ir_values\n")
+            f.write(
+                "\n\n# Forge compat shim: aiter imports fly_values, renamed to\n"
+                "# extract_to_ir_values in flydsl>=0.2 (same List[ir.Value] result).\n"
+                "fly_values = extract_to_ir_values\n"
+            )
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -1511,11 +1528,9 @@ def _apply_fellow_env(env: dict) -> None:
     # claude CLI discovery: the child may inherit a stripped PATH, so resolve
     # claude's absolute path here, export FORGE_CLAUDE_BIN, and prepend its dir
     # to the child PATH.
-    claude_bin = (env.get("FORGE_CLAUDE_BIN", "").strip()
-                  or shutil.which("claude"))
+    claude_bin = env.get("FORGE_CLAUDE_BIN", "").strip() or shutil.which("claude")
     if not claude_bin:
-        for cand in ("/usr/local/bin/claude", "/usr/bin/claude",
-                     str(Path.home() / ".local/bin/claude")):
+        for cand in ("/usr/local/bin/claude", "/usr/bin/claude", str(Path.home() / ".local/bin/claude")):
             if os.path.isfile(cand) and os.access(cand, os.X_OK):
                 claude_bin = cand
                 break
@@ -1549,6 +1564,7 @@ def _apply_fellow_env(env: dict) -> None:
         # or GBRAIN_TOKEN absent) so operators can tell forge ran without
         # cross-KB kernel knowledge.
         import sys as _sys
+
         _sys.stderr.write(
             "[forge_submit] gbrain KB disabled (forge runs without cross-KB "
             f"knowledge): GBRAIN_BASE_URL={'set' if _gbrain_url else 'MISSING'} "
@@ -1560,6 +1576,7 @@ def _apply_fellow_env(env: dict) -> None:
     if not env.get("ANTHROPIC_API_KEY", "").strip():
         try:
             import json as _json
+
             _cfg = _json.loads((Path.home() / ".claude" / "config.json").read_text())
             _key = str(_cfg.get("primaryApiKey") or "").strip()
             if _key:
@@ -1586,8 +1603,7 @@ def _driver_is_compile_only(driver_path: str) -> bool:
     return "compile_only: True" in txt
 
 
-def _baseline_correctness_ok(driver: str, workspace: str, gpu_target: str,
-                             timeout_s: int) -> tuple[bool, str]:
+def _baseline_correctness_ok(driver: str, workspace: str, gpu_target: str, timeout_s: int) -> tuple[bool, str]:
     """Run the driver on the UNMODIFIED kernel to confirm the harness is valid.
 
     A structurally broken auto-generated harness fails correctness even on the
@@ -1609,33 +1625,55 @@ def _baseline_correctness_ok(driver: str, workspace: str, gpu_target: str,
     env.setdefault("AITER_LOG_MORE", "1")
     if gpu_target:
         env["GPU_TARGET"] = gpu_target
-    gate_timeout = min(timeout_s,
-                       int(os.environ.get("FORGE_BASELINE_GATE_TIMEOUT", "300")))
+    gate_timeout = min(timeout_s, int(os.environ.get("FORGE_BASELINE_GATE_TIMEOUT", "300")))
     try:
-        proc = subprocess.run([sys.executable, driver], cwd=workspace, env=env,
-                              capture_output=True, text=True, timeout=gate_timeout)
+        proc = subprocess.run(
+            [sys.executable, driver], cwd=workspace, env=env, capture_output=True, text=True, timeout=gate_timeout
+        )
     except subprocess.TimeoutExpired:
         return False, f"baseline correctness timed out after {gate_timeout}s"
     except Exception as exc:  # noqa: BLE001
         return False, f"baseline correctness run error: {exc}"
     out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
-    negative = any(k in out for k in (
-        "correctness failed", "allclose: false", "error:", "traceback",
-        "no metric in harness output", "keyerror", "correctness: failed"))
+    negative = any(
+        k in out
+        for k in (
+            "correctness failed",
+            "allclose: false",
+            "error:",
+            "traceback",
+            "no metric in harness output",
+            "keyerror",
+            "correctness: failed",
+        )
+    )
     # A compile-only driver is not a positive baseline signal; those are
     # filtered separately (see _driver_is_compile_only).
-    positive = ("snr:" in out) or any(k in out for k in (
-        "allclose: true", "all correctness checks passed", "correctness passed"))
+    positive = ("snr:" in out) or any(
+        k in out for k in ("allclose: true", "all correctness checks passed", "correctness passed")
+    )
     if proc.returncode == 0 and positive and not negative:
         return True, "baseline correctness ok"
     return False, f"baseline correctness not confirmed (rc={proc.returncode})"
 
 
-def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
-                      shapes: dict, snr_threshold: float, max_iters: int,
-                      max_hours: float, branch: str, gpu_target: str,
-                      fellow: str, program_md_file: str, experiments_dir: Path,
-                      forge_log: Path, timeout_s: int) -> tuple:
+def _run_loop_via_cli(
+    *,
+    worktree_kernel: str,
+    driver: str,
+    workspace: str,
+    shapes: dict,
+    snr_threshold: float,
+    max_iters: int,
+    max_hours: float,
+    branch: str,
+    gpu_target: str,
+    fellow: str,
+    program_md_file: str,
+    experiments_dir: Path,
+    forge_log: Path,
+    timeout_s: int,
+) -> tuple:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
     Shells out to ``kernel-agents forge-loop`` (like the GEAK backend shells
@@ -1648,6 +1686,7 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
     PYTHONPATH) and runs ``python -m kernel_agents.cli forge-loop``.
     """
     import json as _json
+
     result_json = experiments_dir.parent / "forge_cli_result.json"
     forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
@@ -1665,19 +1704,34 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
         # disabled before the loop imports aiter.
         _ensure_flydsl_aiter_compat()
     cmd = [
-        sys.executable, "-m", "kernel_agents.cli", "forge-loop",
-        "--kernel", worktree_kernel,
-        "--driver", driver,
-        "--workspace", workspace,
-        "--shapes-json", _json.dumps(shapes),
-        "--snr-threshold", str(snr_threshold),
-        "--max-iters", str(max_iters),
-        "--max-hours", str(max_hours),
-        "--git-branch", branch,
-        "--gpu-target", gpu_target,
-        "--fellow", fellow,
-        "--experiments-dir", str(experiments_dir),
-        "--result-json", str(result_json),
+        sys.executable,
+        "-m",
+        "kernel_agents.cli",
+        "forge-loop",
+        "--kernel",
+        worktree_kernel,
+        "--driver",
+        driver,
+        "--workspace",
+        workspace,
+        "--shapes-json",
+        _json.dumps(shapes),
+        "--snr-threshold",
+        str(snr_threshold),
+        "--max-iters",
+        str(max_iters),
+        "--max-hours",
+        str(max_hours),
+        "--git-branch",
+        branch,
+        "--gpu-target",
+        gpu_target,
+        "--fellow",
+        fellow,
+        "--experiments-dir",
+        str(experiments_dir),
+        "--result-json",
+        str(result_json),
     ]
     if program_md_file and Path(program_md_file).exists():
         cmd += ["--program-md-file", str(program_md_file)]
@@ -1685,8 +1739,7 @@ def _run_loop_via_cli(*, worktree_kernel: str, driver: str, workspace: str,
     loop_exc = None
     out = ""
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout_s, env=env, cwd=workspace)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=env, cwd=workspace)
         out = (proc.stdout or "") + "\n" + (proc.stderr or "")
         if proc.returncode != 0:
             loop_exc = RuntimeError(f"forge-loop exited rc={proc.returncode}")
@@ -1775,6 +1828,7 @@ def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | Non
         if not sidecar.exists():
             return None, None
         import json as _json
+
         parsed = _json.loads(sidecar.read_text())
     except Exception:  # noqa: BLE001 — best-effort: a bad sidecar is not fatal
         return None, None
@@ -1787,11 +1841,18 @@ def _forge_trace_from_sidecar(output_dir: Path) -> tuple[dict | None, dict | Non
     return usage, steps
 
 
-def submit(source_file: str, prompt_file: Path, output_dir: Path,
-           test_command: str = "", source_type: str = "unknown",
-           candidate: dict | None = None, num_gpus: int = 1,
-           timeout_s: int = 1800, prefer_ray: bool = True,
-           kernel_repo: str = "") -> dict:
+def submit(
+    source_file: str,
+    prompt_file: Path,
+    output_dir: Path,
+    test_command: str = "",
+    source_type: str = "unknown",
+    candidate: dict | None = None,
+    num_gpus: int = 1,
+    timeout_s: int = 1800,
+    prefer_ray: bool = True,
+    kernel_repo: str = "",
+) -> dict:
     """Run Forge's autonomous loop on one kernel; emit Hyperloom-contract artifacts.
 
     Hyperloom prepares an isolated git worktree / in-place edit, then runs the
@@ -1808,8 +1869,9 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
     # Re-derive source_type from the file extension when it's unknown: an aiter
     # .cu/.cuh kernel can arrive as "unknown" and be wrongly skipped. A real
     # device-source extension means hip_cpp.
-    if (source_type or "").strip().lower() in ("", "unknown") and \
-            str(source_file).lower().endswith((".cu", ".cuh", ".hip")):
+    if (source_type or "").strip().lower() in ("", "unknown") and str(source_file).lower().endswith(
+        (".cu", ".cuh", ".hip")
+    ):
         source_type = "hip_cpp"
     # Curated kernel_kind refines the fellow choice: an aiter CK .cu is best
     # tuned by the ck-fellow, not generic HIP; aiter_asm is a prebuilt assembly
@@ -1817,21 +1879,34 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
     kernel_kind = str((candidate or {}).get("kernel_kind") or "").strip().lower()
     if kernel_kind == "aiter_asm":
         return _normalized(
-            2, "",
+            2,
+            "",
             "forge: aiter_asm prebuilt assembly compute-core (.co) is not "
             "editable from source; skipping (no rewritable kernel, no tuner)",
-            time.time() - started, skipped=True)
+            time.time() - started,
+            skipped=True,
+        )
     fellow = _fellow_for_source_type(source_type)
     if kernel_kind == "aiter_ck" and fellow in ("hip-fellow", None):
         ck_fellow = _fellow_for_source_type("ck")
         if ck_fellow is not None:
             fellow = ck_fellow
-    log.info("forge dispatch: source_file=%s source_type=%s kernel_kind=%s fellow=%s op=%s",
-             source_file, source_type, kernel_kind or "-", fellow,
-             (candidate or {}).get("operation", ""))
+    log.info(
+        "forge dispatch: source_file=%s source_type=%s kernel_kind=%s fellow=%s op=%s",
+        source_file,
+        source_type,
+        kernel_kind or "-",
+        fellow,
+        (candidate or {}).get("operation", ""),
+    )
     if fellow is None:
-        return _normalized(2, "", f"forge stage-1 supports triton only; got source_type={source_type}",
-                           time.time() - started, skipped=True)
+        return _normalized(
+            2,
+            "",
+            f"forge stage-1 supports triton only; got source_type={source_type}",
+            time.time() - started,
+            skipped=True,
+        )
 
     session_id = output_dir.parent.name or "forge"
     kernel_id = Path(source_file).stem
@@ -1847,8 +1922,13 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
     if inplace:
         prep = _prepare_inplace(source_file, repo, branch)
         if prep is None:
-            return _normalized(2, "", "forge: editable-finder package but repo is not a usable git "
-                               "checkout; skipping", time.time() - started, skipped=True)
+            return _normalized(
+                2,
+                "",
+                "forge: editable-finder package but repo is not a usable git checkout; skipping",
+                time.time() - started,
+                skipped=True,
+            )
         workspace, worktree_kernel, restore_info = prep
         base_commit = restore_info.get("base_commit") or ""
     else:
@@ -1858,13 +1938,24 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
             # ephemeral scratch worktree with git init. Disable with
             # FORGE_DISABLE_NOGIT=1.
             if os.environ.get("FORGE_DISABLE_NOGIT", "").strip().lower() in ("1", "true", "yes"):
-                return _normalized(2, "", "forge: kernel_repo is not a clean git checkout or source_file "
-                                   "not tracked; skipping (live repo untouched; FORGE_DISABLE_NOGIT set)",
-                                   time.time() - started, skipped=True)
+                return _normalized(
+                    2,
+                    "",
+                    "forge: kernel_repo is not a clean git checkout or source_file "
+                    "not tracked; skipping (live repo untouched; FORGE_DISABLE_NOGIT set)",
+                    time.time() - started,
+                    skipped=True,
+                )
             wt_info = _prepare_worktree_nogit(source_file, kernel_repo, output_dir, branch)
             if wt_info is None:
-                return _normalized(2, "", "forge: kernel_repo is not a clean git checkout or source_file "
-                                   "not tracked; skipping (live repo untouched)", time.time() - started, skipped=True)
+                return _normalized(
+                    2,
+                    "",
+                    "forge: kernel_repo is not a clean git checkout or source_file "
+                    "not tracked; skipping (live repo untouched)",
+                    time.time() - started,
+                    skipped=True,
+                )
             nogit_scratch = True
         workspace, worktree_kernel, base_commit = wt_info
 
@@ -1881,15 +1972,19 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         else:
             driver = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
             if driver is None:
-                log.warning("forge driver: autogen failed for op=%r kernel=%s",
-                            candidate.get("operation"), worktree_kernel)
+                log.warning(
+                    "forge driver: autogen failed for op=%r kernel=%s", candidate.get("operation"), worktree_kernel
+                )
                 return _normalized(
-                    2, "",
+                    2,
+                    "",
                     "forge: no test_command and could not auto-generate a driver for "
                     f"operation={candidate.get('operation')!r} kernel={worktree_kernel!r} "
                     f"(auto-gen supports gemm/matmul/activation/attention and HIP C++ "
                     "compile-only; other ops need a benchmark/test_command)",
-                    time.time() - started, skipped=True)
+                    time.time() - started,
+                    skipped=True,
+                )
             log.info("forge driver: autogen -> %s", driver)
         gpu_target = _resolve_gpu_target(candidate)
         # Baseline-correctness gate: verify the unmodified kernel passes up
@@ -1897,43 +1992,54 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # budget reverting. Only gates the harness-adapter path (test_command
         # present); disable via FORGE_BASELINE_GATE=0.
         if test_command and os.environ.get("FORGE_BASELINE_GATE", "1") != "0":
-            gate_ok, gate_detail = _baseline_correctness_ok(
-                driver, workspace, gpu_target, timeout_s)
+            gate_ok, gate_detail = _baseline_correctness_ok(driver, workspace, gpu_target, timeout_s)
             if not gate_ok:
-                autogen_fallback = _autogen_forge_driver(
-                    candidate, worktree_kernel, output_dir, inplace=inplace)
+                autogen_fallback = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
                 if autogen_fallback:
                     log.info(
-                        "forge driver: harness gate failed (%s), "
-                        "falling back to autogen driver -> %s",
-                        gate_detail, autogen_fallback)
+                        "forge driver: harness gate failed (%s), falling back to autogen driver -> %s",
+                        gate_detail,
+                        autogen_fallback,
+                    )
                     driver = autogen_fallback
                 else:
                     return _normalized(
-                        2, "",
+                        2,
+                        "",
                         f"forge skipped: harness baseline correctness invalid "
                         f"({gate_detail}); not spinning the agent on an "
                         "unverifiable harness",
-                        time.time() - started, skipped=True)
+                        time.time() - started,
+                        skipped=True,
+                    )
         # Compile-only drivers cannot produce a real correctness/timing signal,
         # so any KEEP they yield rests on synthesized metrics. Skip forge for
         # such kernels unless FORGE_ALLOW_COMPILE_ONLY=1.
-        if (os.environ.get("FORGE_ALLOW_COMPILE_ONLY", "0").strip().lower()
-                not in ("1", "true", "yes") and _driver_is_compile_only(driver)):
+        if os.environ.get("FORGE_ALLOW_COMPILE_ONLY", "0").strip().lower() not in (
+            "1",
+            "true",
+            "yes",
+        ) and _driver_is_compile_only(driver):
             # Log the skip so session stats / RCA can see why forge attempt
             # counts dropped.
             log.warning(
                 "forge skipped (compile-only, no real harness): source_file=%s "
                 "source_type=%s kernel_kind=%s op=%s -- falling through to next "
                 "backend (set FORGE_ALLOW_COMPILE_ONLY=1 to override)",
-                source_file, source_type, kernel_kind or "-",
-                (candidate or {}).get("operation", ""))
+                source_file,
+                source_type,
+                kernel_kind or "-",
+                (candidate or {}).get("operation", ""),
+            )
             return _normalized(
-                2, "",
+                2,
+                "",
                 "forge skipped: only a compile-only driver is available (no real "
                 "correctness/timing harness); not driving a KEEP decision off "
                 "synthesized metrics (set FORGE_ALLOW_COMPILE_ONLY=1 to override)",
-                time.time() - started, skipped=True)
+                time.time() - started,
+                skipped=True,
+            )
         # GPU_TARGET is passed via the forge-loop child env (not the parent
         # os.environ, which would leak to sibling ladder backends).
         shapes = _shapes_from_candidate(candidate)
@@ -1948,8 +2054,12 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         if fellow != "triton-fellow":
             _compiled_cap = int(os.environ.get("FORGE_COMPILED_MAX_ITERS", "3"))
             if _compiled_cap < max_iters:
-                log.info("forge: capping compiled/ASM fellow %s iters %d -> %d "
-                         "(low-yield kernel, see F3)", fellow, max_iters, _compiled_cap)
+                log.info(
+                    "forge: capping compiled/ASM fellow %s iters %d -> %d (low-yield kernel, see F3)",
+                    fellow,
+                    max_iters,
+                    _compiled_cap,
+                )
                 max_iters = _compiled_cap
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
@@ -1957,42 +2067,52 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         # can never freeze the orchestrator. Fellow stability env defaults are
         # applied inside _run_loop_via_cli, scoped to the child env only.
         baseline_ms, best_ms, improved, loop_output, loop_exc = _run_loop_via_cli(
-            worktree_kernel=worktree_kernel, driver=driver, workspace=workspace,
-            shapes=shapes, snr_threshold=snr_threshold, max_iters=max_iters,
-            max_hours=max(0.05, timeout_s / 3600.0), branch=branch,
-            gpu_target=gpu_target, fellow=fellow,
-            program_md_file=str(prompt_file), experiments_dir=experiments_dir,
-            forge_log=forge_log, timeout_s=timeout_s)
-        _, changed_files = _export_best_artifacts(
-            workspace, base_commit, worktree_kernel, source_file, output_dir)
+            worktree_kernel=worktree_kernel,
+            driver=driver,
+            workspace=workspace,
+            shapes=shapes,
+            snr_threshold=snr_threshold,
+            max_iters=max_iters,
+            max_hours=max(0.05, timeout_s / 3600.0),
+            branch=branch,
+            gpu_target=gpu_target,
+            fellow=fellow,
+            program_md_file=str(prompt_file),
+            experiments_dir=experiments_dir,
+            forge_log=forge_log,
+            timeout_s=timeout_s,
+        )
+        _, changed_files = _export_best_artifacts(workspace, base_commit, worktree_kernel, source_file, output_dir)
         if changed_files:
             try:
-                (output_dir / "optimized_versions" / "changed_files.txt").write_text(
-                    "\n".join(changed_files) + "\n")
+                (output_dir / "optimized_versions" / "changed_files.txt").write_text("\n".join(changed_files) + "\n")
             except OSError:
                 pass
         _write_report(output_dir, baseline_ms, best_ms, improved)
         if loop_exc and baseline_ms is None:
             # Hard failure with no measurement -> surface as forge failure.
-            return _normalized(1, "", f"forge cli loop failed: {loop_exc}",
-                               time.time() - started)
-        gbrain_active = bool(os.environ.get("GBRAIN_BASE_URL", "").strip()
-                             and os.environ.get("GBRAIN_TOKEN", "").strip())
-        msg = (f"forge done (cli): baseline={baseline_ms} best={best_ms} "
-               f"improved={improved} fellow={fellow} gpu={gpu_target} "
-               f"gbrain={'on' if gbrain_active else 'off'}")
+            return _normalized(1, "", f"forge cli loop failed: {loop_exc}", time.time() - started)
+        gbrain_active = bool(
+            os.environ.get("GBRAIN_BASE_URL", "").strip() and os.environ.get("GBRAIN_TOKEN", "").strip()
+        )
+        msg = (
+            f"forge done (cli): baseline={baseline_ms} best={best_ms} "
+            f"improved={improved} fellow={fellow} gpu={gpu_target} "
+            f"gbrain={'on' if gbrain_active else 'off'}"
+        )
         # Surface the run's LLM token spend + key-step timeline from the CLI
         # sidecar as the canonical markers (FORGE_LLM_USAGE / FORGE_STEPS) so
         # the tracer can attribute forge's cost + decision process.
         forge_usage, forge_steps = _forge_trace_from_sidecar(output_dir)
         if forge_usage:
             import json as _json_usage
+
             msg += "\nFORGE_LLM_USAGE " + _json_usage.dumps(forge_usage, sort_keys=True)
         if forge_steps:
             import json as _json_steps
+
             msg += "\nFORGE_STEPS " + _json_steps.dumps(forge_steps, sort_keys=True)
-        res = _normalized(0, msg + "\n" + (loop_output or "")[-3000:], "",
-                          time.time() - started)
+        res = _normalized(0, msg + "\n" + (loop_output or "")[-3000:], "", time.time() - started)
         if forge_usage:
             res["llm_usage"] = forge_usage
         if forge_steps:
@@ -2001,8 +2121,7 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
         res["output_dir"] = str(output_dir)
         return res
     except Exception as exc:  # noqa: BLE001
-        return _normalized(1, "", f"forge submit failed: {type(exc).__name__}: {exc}",
-                           time.time() - started)
+        return _normalized(1, "", f"forge submit failed: {type(exc).__name__}: {exc}", time.time() - started)
     finally:
         if inplace:
             _restore_inplace(restore_info)
@@ -2011,5 +2130,3 @@ def submit(source_file: str, prompt_file: Path, output_dir: Path,
             shutil.rmtree(workspace, ignore_errors=True)
         else:
             _remove_worktree(kernel_repo, source_file, workspace, branch)
-
-

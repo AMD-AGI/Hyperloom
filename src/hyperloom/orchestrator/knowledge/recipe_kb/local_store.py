@@ -688,6 +688,7 @@ class LocalRecipeStore:
             "attempt_at": stamped_at,
         }
 
+
 # search filter helpers
 def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> bool:
     """Key-value match against the top-level identity fields of an arbor-shape recipe.

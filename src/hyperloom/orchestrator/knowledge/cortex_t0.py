@@ -14,7 +14,11 @@ from typing import Any, Callable, Mapping
 
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB, recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
-from hyperloom.inference_optimizer.session.session_paths import cortex_lessons_json, cortex_pitfalls_json, cortex_warm_json
+from hyperloom.inference_optimizer.session.session_paths import (
+    cortex_lessons_json,
+    cortex_pitfalls_json,
+    cortex_warm_json,
+)
 
 
 log = logging.getLogger(__name__)
@@ -253,11 +257,7 @@ def _donor_is_trustworthy(
             return False
         return tv != dv
 
-    if (
-        _shape_conflict(target_conc, "conc")
-        or _shape_conflict(target_isl, "isl")
-        or _shape_conflict(target_osl, "osl")
-    ):
+    if _shape_conflict(target_conc, "conc") or _shape_conflict(target_isl, "isl") or _shape_conflict(target_osl, "osl"):
         return False
     return True
 
@@ -572,9 +572,7 @@ def _enhance_warm_start_with_kg(
 
         # Cross-recipe negatives → hard (own arch) vs advisory (related).
         already_blocked = {
-            _arch_norm(b.get("patch_file"))
-            for b in (ctx.get("blocked_patches") or [])
-            if isinstance(b, dict)
+            _arch_norm(b.get("patch_file")) for b in (ctx.get("blocked_patches") or []) if isinstance(b, dict)
         }
         hard: list[dict[str, Any]] = []
         advisory: list[dict[str, Any]] = []
@@ -591,24 +589,28 @@ def _enhance_warm_start_with_kg(
                 if patch in already_blocked:
                     continue
                 already_blocked.add(patch)
-                hard.append({
-                    "patch_file": patch,
-                    "reason": f"{fact.predicate}: {fact.properties.get('error') or fact.properties.get('reason', '')}",
-                    "confidence": fact.confidence,
-                    "block_type": "hard",
-                    "source": "kg",
-                })
+                hard.append(
+                    {
+                        "patch_file": patch,
+                        "reason": f"{fact.predicate}: {fact.properties.get('error') or fact.properties.get('reason', '')}",
+                        "confidence": fact.confidence,
+                        "block_type": "hard",
+                        "source": "kg",
+                    }
+                )
             else:
                 if patch in seen_adv or patch in own_arch:
                     continue
                 seen_adv.add(patch)
-                advisory.append({
-                    "patch_file": patch,
-                    "reason": f"{fact.predicate} on related arch {fact.object}",
-                    "confidence": round(fact.confidence * 0.6, 3),
-                    "block_type": "advisory",
-                    "source": "kg",
-                })
+                advisory.append(
+                    {
+                        "patch_file": patch,
+                        "reason": f"{fact.predicate} on related arch {fact.object}",
+                        "confidence": round(fact.confidence * 0.6, 3),
+                        "block_type": "advisory",
+                        "source": "kg",
+                    }
+                )
         if hard:
             ctx.setdefault("blocked_patches", []).extend(hard)
         if advisory:
@@ -633,12 +635,14 @@ def _enhance_warm_start_with_kg(
             if not knob or knob in blocked_now or knob in seen_rec:
                 continue
             seen_rec.add(knob)
-            recommended.append({
-                "knob": knob,
-                "expected_gain": fact.gain,
-                "confidence": fact.confidence,
-                "source": "kg_graph",
-            })
+            recommended.append(
+                {
+                    "knob": knob,
+                    "expected_gain": fact.gain,
+                    "confidence": fact.confidence,
+                    "source": "kg_graph",
+                }
+            )
         if recommended:
             recommended.sort(key=lambda r: -(r.get("expected_gain") or 0.0))
             ctx["recommended_knobs"] = recommended
@@ -740,24 +744,28 @@ def _extract_patches_from_prs_tested(
             if gain > 0:
                 # Cap patch_content at 50KB to avoid state.json bloat.
                 pc = patch_content if len(patch_content) <= 50_000 else ""
-                patches.append({
-                    "patch_file": str(pr.get("patch_file") or ""),
-                    "patch_content": pc,
-                    "patch_ref": str(pr.get("patch_ref") or ""),
-                    "measured_gain_pct": gain,
-                    "repo": str(pr.get("repo") or ""),
-                })
+                patches.append(
+                    {
+                        "patch_file": str(pr.get("patch_file") or ""),
+                        "patch_content": pc,
+                        "patch_ref": str(pr.get("patch_ref") or ""),
+                        "measured_gain_pct": gain,
+                        "repo": str(pr.get("repo") or ""),
+                    }
+                )
         elif outcome in ("REVERT", "FAILED"):
             # Only block when applicable_arch is specified (an unconstrained
             # REVERT is too broad to block all models).
             if not applicable_arch:
                 continue
-            blocked.append({
-                "patch_file": str(pr.get("patch_file") or ""),
-                "reason": f"{outcome} on {', '.join(applicable_arch)} ({pr.get('measured_gain_pct', '?')}%)",
-                "blocked_arch": list(applicable_arch),
-                "error_class": str(pr.get("error_class") or ""),
-            })
+            blocked.append(
+                {
+                    "patch_file": str(pr.get("patch_file") or ""),
+                    "reason": f"{outcome} on {', '.join(applicable_arch)} ({pr.get('measured_gain_pct', '?')}%)",
+                    "blocked_arch": list(applicable_arch),
+                    "error_class": str(pr.get("error_class") or ""),
+                }
+            )
 
     if patches:
         patches.sort(key=lambda p: -(p.get("measured_gain_pct") or 0))
@@ -1114,15 +1122,19 @@ def run_t0_anchor(
     _tgt_osl = getattr(shared_state, "osl", None)
     # A true-self (identity ``exact``) champion always replays; a cross-model
     # borrow must clear the trustworthiness gate before it becomes the donor.
-    if warm_point and _has_replayable_config(warm_point) and (
-        warm_tier == "exact"
-        or _donor_is_trustworthy(
-            warm_point,
-            target_arch_slug=_arch_slug,
-            target_model_type=_model_type_val,
-            target_conc=_tgt_conc,
-            target_isl=_tgt_isl,
-            target_osl=_tgt_osl,
+    if (
+        warm_point
+        and _has_replayable_config(warm_point)
+        and (
+            warm_tier == "exact"
+            or _donor_is_trustworthy(
+                warm_point,
+                target_arch_slug=_arch_slug,
+                target_model_type=_model_type_val,
+                target_conc=_tgt_conc,
+                target_isl=_tgt_isl,
+                target_osl=_tgt_osl,
+            )
         )
     ):
         config_donor = warm_point

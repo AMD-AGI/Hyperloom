@@ -212,7 +212,7 @@ exit 3
 """
     elif behavior == "hang":
         # Sleep past any wall budget without writing done.json.
-        body += 'sleep 600\n'
+        body += "sleep 600\n"
     else:
         raise ValueError(f"unknown behavior {behavior!r}")
     script_path.write_text(body, encoding="utf-8")

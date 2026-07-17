@@ -76,9 +76,7 @@ def write_specialist_mcp_config(
     kb_url = (cortex_kb_mcp_url or "").strip()
     if kb_url:
         kb_headers = {
-            str(k): str(v)
-            for k, v in (cortex_kb_mcp_headers or {}).items()
-            if str(k).strip() and str(v).strip()
+            str(k): str(v) for k, v in (cortex_kb_mcp_headers or {}).items() if str(k).strip() and str(v).strip()
         }
         has_auth = any(k.lower() == "authorization" for k in kb_headers)
         if has_auth and not _allow_persistent_mcp_auth_headers():
@@ -88,9 +86,7 @@ def write_specialist_mcp_config(
             )
         else:
             if has_auth:
-                log.warning(
-                    "specialist_mcp_config: writing cortex_kb auth headers by explicit operator opt-in"
-                )
+                log.warning("specialist_mcp_config: writing cortex_kb auth headers by explicit operator opt-in")
             kb_server: dict[str, Any] = {
                 "type": "http",
                 "url": kb_url,

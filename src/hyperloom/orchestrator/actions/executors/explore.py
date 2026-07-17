@@ -987,9 +987,7 @@ class ExploreExecutor:
         # Decision-round overtime anchor: the WARM measure time when warm-decision
         # is active and available, else the cold baseline wall-clock (legacy).
         decision_anchor_sec = (
-            baseline_warm_runtime_sec
-            if (use_warm_decision and baseline_warm_runtime_sec > 0)
-            else baseline_runtime_sec
+            baseline_warm_runtime_sec if (use_warm_decision and baseline_warm_runtime_sec > 0) else baseline_runtime_sec
         )
         # The soft deadline is anchored on the warm client-only measure time and
         # enforced from the server-ready marker, so both the measured runtime and
@@ -1011,9 +1009,7 @@ class ExploreExecutor:
                     run_remove_args = list(
                         dict.fromkeys(stack_remove_args + to_str_list(getattr(gv, "remove_args", [])))
                     )
-                run_unset_envs = list(
-                    dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", [])))
-                )
+                run_unset_envs = list(dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", []))))
                 run_extra_envs = dict(stack_extra_envs)
                 run_extra_envs.update(gv.extra_envs)
                 run_gv = GridVariant(
@@ -1069,8 +1065,7 @@ class ExploreExecutor:
                         if w is None or getattr(w, "status", "") != "succeeded":
                             werr = (getattr(w, "error", "") or "")[-200:] if w is not None else "no_result"
                             log.warning(
-                                "explore: variant %s warmup round failed (%s); "
-                                "skipping decision round.",
+                                "explore: variant %s warmup round failed (%s); skipping decision round.",
                                 gv.name,
                                 werr,
                             )
@@ -1195,7 +1190,9 @@ class ExploreExecutor:
                             ),
                             "overtime_anchor_sec": round(decision_anchor_sec, 2),
                             "overtime_anchor_kind": (
-                                "warm" if decision_anchor_sec == baseline_warm_runtime_sec and baseline_warm_runtime_sec > 0 else "cold"
+                                "warm"
+                                if decision_anchor_sec == baseline_warm_runtime_sec and baseline_warm_runtime_sec > 0
+                                else "cold"
                             ),
                             "overtime_kill_ratio": overtime_kill_ratio,
                         }
@@ -1244,7 +1241,9 @@ class ExploreExecutor:
                             "skipping KEEP/REVERT ladder.",
                             gv.name,
                             variant_runtime,
-                            "warm" if (decision_anchor_sec == baseline_warm_runtime_sec and baseline_warm_runtime_sec > 0) else "cold",
+                            "warm"
+                            if (decision_anchor_sec == baseline_warm_runtime_sec and baseline_warm_runtime_sec > 0)
+                            else "cold",
                             decision_anchor_sec,
                             wall_clock_ratio if wall_clock_ratio is not None else -1.0,
                             overtime_kill_ratio,
@@ -1345,7 +1344,9 @@ class ExploreExecutor:
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
                             remove_args=run_remove_args,
-                            args_mode="replace" if stack_base_args_mode == "replace" else getattr(gv, "args_mode", "append"),
+                            args_mode="replace"
+                            if stack_base_args_mode == "replace"
+                            else getattr(gv, "args_mode", "append"),
                         )
                         next_stack_args = compose_server_args(
                             inherited_args="",

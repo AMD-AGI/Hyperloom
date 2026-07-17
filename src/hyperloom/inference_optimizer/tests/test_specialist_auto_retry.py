@@ -141,6 +141,7 @@ def test_freeform_patch_prompt_carries_mandate_and_patch_protocol():
 
 # _maybe_auto_retry_specialist — lane assignment mirrors first dispatch
 
+
 def _make_explore_phase_stub(registry_lanes, registry_ttl, gpu_ttl, captured_tasks):
     """Return a minimal ExplorePhase-like stub with a fake TaskRegistry.
 
@@ -154,11 +155,13 @@ def _make_explore_phase_stub(registry_lanes, registry_ttl, gpu_ttl, captured_tas
     fake_task.task_id = "retry-task-1"
 
     async def _fake_create(kind, params, idempotency_key, requires_lanes, lease_ttl_sec):
-        captured_tasks.append({
-            "kind": kind,
-            "requires_lanes": list(requires_lanes or []),
-            "lease_ttl_sec": lease_ttl_sec,
-        })
+        captured_tasks.append(
+            {
+                "kind": kind,
+                "requires_lanes": list(requires_lanes or []),
+                "lease_ttl_sec": lease_ttl_sec,
+            }
+        )
         return fake_task, False  # (task, was_existing=False)
 
     fake_tasks = MagicMock()
@@ -214,12 +217,8 @@ async def test_auto_retry_needs_gpu_acquires_gpu_research_lane():
     assert retried is True, "infra failure + needs_gpu task must be retried"
     assert captured, "create_or_return_existing must have been called"
     lanes = captured[0]["requires_lanes"]
-    assert "gpu_research_lane" in lanes, (
-        f"retry must hold gpu_research_lane; got {lanes}"
-    )
-    assert captured[0]["lease_ttl_sec"] == 7200, (
-        "retry TTL must be re-sourced via _gpu_lease_ttl_sec"
-    )
+    assert "gpu_research_lane" in lanes, f"retry must hold gpu_research_lane; got {lanes}"
+    assert captured[0]["lease_ttl_sec"] == 7200, "retry TTL must be re-sourced via _gpu_lease_ttl_sec"
 
 
 @pytest.mark.asyncio
@@ -234,13 +233,15 @@ async def test_auto_retry_bench_specialist_acquires_both_lanes():
         captured_tasks=captured,
     )
 
-    task = _make_stale_task({
-        "needs_gpu": True,
-        "mode": "patch",
-        "bench": True,
-        "scope": "freeform",
-        "task_description": "start a server and rebench",
-    })
+    task = _make_stale_task(
+        {
+            "needs_gpu": True,
+            "mode": "patch",
+            "bench": True,
+            "scope": "freeform",
+            "task_description": "start a server and rebench",
+        }
+    )
     result = _make_stale_result()
 
     retried = await phase._maybe_auto_retry_specialist(task, result)
@@ -269,6 +270,4 @@ async def test_auto_retry_non_gpu_specialist_no_gpu_research_lane():
 
     assert retried is True
     lanes = captured[0]["requires_lanes"]
-    assert "gpu_research_lane" not in lanes, (
-        f"non-GPU specialist retry must NOT hold gpu_research_lane; got {lanes}"
-    )
+    assert "gpu_research_lane" not in lanes, f"non-GPU specialist retry must NOT hold gpu_research_lane; got {lanes}"
