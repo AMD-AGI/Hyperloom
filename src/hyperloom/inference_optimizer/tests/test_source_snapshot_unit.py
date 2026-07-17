@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit coverage for the per-KEEP source-layer snapshot contract
 (``hyperloom.orchestrator.source_snapshot``): ``_safe_rel`` path sanitation,

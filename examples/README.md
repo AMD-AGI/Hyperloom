@@ -17,8 +17,9 @@ running the install command.
 
 - Python 3.10+ and `pip`.
 - Access to one LLM provider: Anthropic or DeepSeek.
-- `gh` access to the published GitHub release asset, or a locally downloaded
-  Hyperloom wheel.
+- `gh` (GitHub CLI), authenticated, to download the published GitHub release
+  asset (the wheel is distributed as a Release asset, not via PyPI), or a
+  locally downloaded Hyperloom wheel.
 - A dedicated workspace directory opened in the user's agent.
 
 From the agent terminal in that workspace, download the release wheel and install
