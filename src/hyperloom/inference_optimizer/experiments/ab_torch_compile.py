@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """A/B: torch.compile OFF vs ON via Magpie, selectable by ``--mode``.
 

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Integration test: ``fa explore`` (plan mode) e2e — runs the CLI as a subprocess (argparse + JSON-IO + explorer) against the in-process ``fake_primus`` fixture (no internet)."""
 

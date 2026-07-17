@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 """Behavioral tests for geak_runner's graceful-stop / flush contract.
 
 Drive the real call_geak() against a fake runner script so the process-group

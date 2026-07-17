@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Cross-subprocess persistence tests: independent Classifier/ActionLadder/RcaThrottle instances against one state file prove consecutive-tick rules and cooldowns survive subprocess restarts."""
 

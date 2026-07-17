@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """End-to-end reactor tests plus L1/L2 finalizer integration. The subprocess-transport JSON-IO contract is exercised in test_runtime_cli.py."""
 

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Supplemental coverage for kernel_request_handlers pure helpers: precision /
 budget / timeout resolution, backend order, tool-stdout shaping, roofline name

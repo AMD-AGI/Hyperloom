@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Phase state-machine handler: initialisation, exit-condition scan/transition,
 and the per-phase entry dispatcher (``_on_phase_entered``)."""

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for the GEAK post-optimization sweep and the sweep/kernel helpers
 it shares with the native concurrency sweep.

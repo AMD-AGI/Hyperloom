@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Model / GPU gate for the CLI: GPU-type resolution, arch / config loading,
 unsupported-model detection, and the pre-flight gates that run before a session
