@@ -302,6 +302,38 @@ def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
     return None
 
 
+def _defang_prompt_structure(text: str) -> str:
+    """Neutralise prompt-structure sequences in an untrusted string leaf.
+
+    Robustness ``alert`` payloads can carry attacker-influenceable server.log
+    excerpts (``evidence.samples``) that reach the orchestration-LLM prompt.
+    This defangs — without dropping content — the sequences such an excerpt
+    could use to escape its quoted context and read as instructions: markdown
+    code fences, ``data:`` URLs, and angle-bracket role/tag markers. The text
+    stays human-readable; it just can no longer act as prompt structure.
+    """
+    out = str(text or "")
+    out = out.replace("```", "`\u200b``").replace("~~~", "~\u200b~~")
+    out = out.replace("data:", "data\u200b:").replace("DATA:", "DATA\u200b:")
+    out = out.replace("<", "\u2039").replace(">", "\u203a")
+    return out
+
+
+def _defang_alert_payload(value: Any) -> Any:
+    """Recursively defang string leaves of an alert payload (keys untouched).
+
+    Only string *values* are neutralised so dict structure / keys that
+    downstream rendering relies on are preserved; numbers/bools pass through.
+    """
+    if isinstance(value, str):
+        return _defang_prompt_structure(value)
+    if isinstance(value, dict):
+        return {k: _defang_alert_payload(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_defang_alert_payload(v) for v in value]
+    return value
+
+
 def _format_inbox_event(m: "Message") -> str:
     """Render one inbox ``Message`` as a compact, high-signal line.
 
@@ -374,6 +406,13 @@ def _format_inbox_event(m: "Message") -> str:
         kind = payload.get("kind")
         if kind is not None:
             return f"{head} kind={kind!r} payload={payload}"
+
+    if topic == "alert":
+        # Alert payloads can embed attacker-influenceable server.log excerpts;
+        # defang string leaves so a log line can't inject prompt structure.
+        # Only the alert topic is treated this way — proposal/other topics keep
+        # their exact payload so the Critic inbox parser still literal_evals it.
+        return f"{head} payload={_defang_alert_payload(payload)}"
 
     return f"{head} payload={payload}"
 
