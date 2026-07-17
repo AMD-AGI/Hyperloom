@@ -589,17 +589,44 @@ ensure_moreutils() {
   command -v ts >/dev/null 2>&1 || warn "ts still missing after apt-get install moreutils"
 }
 
+RAY_VERSION="${RAY_VERSION:-2.44.1}"
+# Ray 2.44.1's CLI currently fails during import with click >= 8.3.0.
+RAY_CLI_CLICK_MAX_VERSION="${RAY_CLI_CLICK_MAX_VERSION:-8.3.0}"
+RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
+CLICK_INSTALL_SPEC="click<${RAY_CLI_CLICK_MAX_VERSION}"
+
 ensure_ray() {
-  log "ensuring ray[default]==2.44.1 and click<8.3.0"
+  log "ensuring ${RAY_INSTALL_SPEC} and ${CLICK_INSTALL_SPEC}"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "click<8.3.0" "ray[default]==2.44.1"
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$CLICK_INSTALL_SPEC" "$RAY_INSTALL_SPEC"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    python3 - <<'PY'
-import ray, sys
-if ray.__version__ != "2.44.1":
-    raise SystemExit(f"ray version mismatch: {ray.__version__} != 2.44.1")
-print(f"[kernel-agent] ray version: {ray.__version__}")
+    RAY_VERSION="$RAY_VERSION" RAY_CLI_CLICK_MAX_VERSION="$RAY_CLI_CLICK_MAX_VERSION" python3 - <<'PY'
+import importlib.metadata as md
+import os
+import re
+import sys
+
+import ray
+
+RAY_VERSION = os.environ["RAY_VERSION"]
+RAY_CLI_CLICK_MAX_VERSION = os.environ["RAY_CLI_CLICK_MAX_VERSION"]
+
+def _version_tuple(version: str) -> tuple[int, int, int]:
+    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
+    parts.extend([0] * (3 - len(parts)))
+    return tuple(parts[:3])
+
+if ray.__version__ != RAY_VERSION:
+    raise SystemExit(f"ray version mismatch: {ray.__version__} != {RAY_VERSION}")
+click_version = md.version("click")
+if _version_tuple(click_version) >= _version_tuple(RAY_CLI_CLICK_MAX_VERSION):
+    raise SystemExit(f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}")
+try:
+    from ray.scripts.scripts import main as _ray_cli_main  # noqa: F401
+except Exception as exc:
+    raise SystemExit(f"ray CLI import failed: {type(exc).__name__}: {exc}") from exc
+print(f"[kernel-agent] ray version: {ray.__version__}, click version: {click_version}")
 PY
   fi
 }
@@ -654,13 +681,27 @@ ensure_fd_limit_for_ray() {
   return 0
 }
 
+ray_head_has_serving_slot() {
+  python3 - <<'PY' >/dev/null 2>&1
+import ray
+
+ray.init(address="auto", ignore_reinit_error=True, log_to_driver=False, logging_level="error")
+try:
+    resources = ray.cluster_resources()
+finally:
+    ray.shutdown()
+raise SystemExit(0 if "serving_slot" in resources else 1)
+PY
+}
+
 # Idempotently bring up a Ray head node. Kernel backends submit Ray tasks with
 # `num_gpus>=1`; if no head is running (or one is running with --num-gpus=0)
 # kernel optimization will hang forever even when GPUs are idle. We:
-#   1. detect a live Ray head via `ray status` (any successful return = live)
-#   2. if absent, force-stop any half-started Ray and start a fresh head with
-#      all visible GPUs advertised
-#   3. tolerate the no-GPU case (CPU-only dev box) so `--check-only` stays
+#   1. detect a live Ray head via `ray status`
+#   2. reuse it only when it declares the Hyperloom `serving_slot` resource
+#   3. otherwise force-stop stale/incompatible local Ray and start a fresh head
+#      with all visible GPUs advertised
+#   4. tolerate the no-GPU case (CPU-only dev box) so `--check-only` stays
 #      non-fatal in environments without ROCm
 ensure_ray_started() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
@@ -675,10 +716,14 @@ ensure_ray_started() {
     return 0
   fi
   if ray status >/dev/null 2>&1; then
-    log "ray head already running"
-    return 0
+    if ray_head_has_serving_slot; then
+      log "ray head already running with serving_slot"
+      return 0
+    fi
+    warn "ray head already running without serving_slot; restarting local Ray head"
+  else
+    log "no live ray head detected; starting one"
   fi
-  log "no live ray head detected; starting one"
   # issue #433: raise fd limit BEFORE starting the head so the raylet inherits
   # a ceiling high enough to stay up (container default 1024 makes it abort).
   ensure_fd_limit_for_ray
