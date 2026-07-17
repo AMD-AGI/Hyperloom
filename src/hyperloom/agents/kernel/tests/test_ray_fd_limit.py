@@ -325,3 +325,88 @@ def test_force_restart_local_cluster_declares_serving_slot(monkeypatch):
     starts = [cmd for kind, cmd in events if kind == "ray_start"]
     assert starts, "ray start was not invoked"
     _assert_declares_serving_slot(starts[0])
+
+
+import pytest  # noqa: E402
+
+
+_ISO_ENV_VARS = ("HL_RAY_HEAD_PORT", "RAY_ADDRESS")
+
+
+def _arg_value(start_cmd: tuple, flag: str):
+    """Return the ``=value`` of a ``--flag=value`` token in a ray start argv."""
+    for tok in start_cmd:
+        if tok.startswith(f"{flag}="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+class TestLocalHeadPortIsolation:
+    """Free-port isolation for spur host-network co-location.
+
+    Co-scheduled sessions share only the host network, so the sole collision is
+    Ray's fixed default ports (GCS 6379 / dashboard 8265 / client 10001): the
+    later head connects to the earlier head's GCS and aborts with a session-name
+    mismatch. Each head is bound to FREE probed ports; rendezvous is via the
+    container-private ``/tmp/ray/ray_current_cluster`` (no ``--temp-dir``, no
+    ``RAY_ADDRESS`` pin), so ``ray.init(address="auto")`` still discovers it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_ray_env(self, monkeypatch):
+        """Scrub override/address env so each case is deterministic."""
+        for var in _ISO_ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+
+    def test_free_tcp_port_is_bindable(self):
+        """The probed port is a real, currently-free loopback TCP port."""
+        import socket
+
+        port = ray_runtime._free_tcp_port()
+        assert isinstance(port, int) and 0 < port < 65536
+        # It was released, so we can immediately bind it ourselves.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", port))
+
+    def test_isolated_ports_are_free_and_distinct(self):
+        """GCS / dashboard / client all get distinct probed ports by default."""
+        gcs, extra = ray_runtime._isolated_head_port_args()
+        dash = int(_arg_value(tuple(extra), "--dashboard-port"))
+        client = int(_arg_value(tuple(extra), "--ray-client-server-port"))
+        assert len({gcs, dash, client}) == 3
+        for p in (gcs, dash, client):
+            assert 0 < p < 65536
+
+    def test_no_ray_address_pinned(self, monkeypatch):
+        """We must NOT set RAY_ADDRESS: ray.init(address='auto') does discovery."""
+        import os as _os
+
+        ray_runtime._isolated_head_port_args()
+        assert "RAY_ADDRESS" not in _os.environ
+
+    def test_head_port_override_pins_gcs_only(self, monkeypatch):
+        """HL_RAY_HEAD_PORT pins the GCS port; dashboard/client stay probed."""
+        monkeypatch.setenv("HL_RAY_HEAD_PORT", "6500")
+        gcs, extra = ray_runtime._isolated_head_port_args()
+        assert gcs == 6500
+        assert _arg_value(tuple(extra), "--dashboard-port") is not None
+        assert _arg_value(tuple(extra), "--ray-client-server-port") is not None
+
+    def test_ensure_ray_cluster_binds_isolated_ports(self, monkeypatch):
+        """End-to-end: ensure_ray_cluster emits probed GCS/dashboard/client ports."""
+        events: list = []
+        fake = _FakeResource(soft=1048576, hard=1048576, events=events)
+        monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+        _install_fake_ray_start(monkeypatch, events)
+
+        ray_runtime.ensure_ray_cluster(num_gpus=8)
+
+        start = [cmd for kind, cmd in events if kind == "ray_start"][0]
+        assert _arg_value(start, "--port") is not None
+        assert _arg_value(start, "--dashboard-port") is not None
+        assert _arg_value(start, "--ray-client-server-port") is not None
+        # No --temp-dir (issue #55244); dashboard bound to loopback (security).
+        assert not any(t.startswith("--temp-dir=") for t in start)
+        assert "--dashboard-host=127.0.0.1" in start
+        assert "--num-gpus=8" in start
+        _assert_declares_serving_slot(start)

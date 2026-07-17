@@ -47,6 +47,59 @@ def _resources_start_args() -> list[str]:
     return ["--resources", json.dumps(_HEAD_CUSTOM_RESOURCES)]
 
 
+# --- Local-head port isolation (spur host-network co-location) ---------------
+# Many optimizer sessions can be co-scheduled on ONE compute node (SLURM packs
+# sub-node ``--gpus`` requests), and spur runs the container on the host network
+# stack (the bridge has no egress). Only the HOST NETWORK is shared between
+# co-located containers: each keeps a PRIVATE filesystem (no ``/tmp`` bind mount)
+# and a PRIVATE PID namespace (no ``--pid=host``). So the ONLY thing that
+# collides is Ray's FIXED default host ports (GCS 6379, dashboard 8265, client
+# 10001): the later head connects to the earlier head's GCS over 127.0.0.1:6379
+# and aborts with a session-name mismatch (``node._write_cluster_info_to_kv``),
+# hanging the kernel agent and failing every serving-lease "cluster ensure".
+#
+# Fix: bind each head to FREE, probed ports instead of the fixed defaults. No
+# cross-process coordination is needed -- Ray records the chosen GCS address in
+# the container-private ``/tmp/ray/ray_current_cluster``, so the serving lease's
+# later ``ensure()`` discovers it via ``ray status`` / ``ray.init(address=
+# "auto")`` without knowing the port. We deliberately do NOT pass ``--temp-dir``
+# (that reintroduces Ray issue #55244, where ``address="auto"`` still looks in
+# the default ``/tmp/ray`` rather than the custom dir); the default dir is
+# already container-private here. ``HL_RAY_HEAD_PORT`` pins the GCS port for
+# operators/debugging.
+_HL_RAY_HEAD_PORT_ENV = "HL_RAY_HEAD_PORT"
+
+
+def _free_tcp_port() -> int:
+    """Reserve and return a currently-free loopback TCP port.
+
+    Binds an ephemeral socket, reads the OS-assigned port, and releases it.
+    There is an inherent (tiny) TOCTOU window before ``ray start`` rebinds it;
+    on a host-network node with per-session ports this is far less likely than
+    the guaranteed 6379 collision it replaces.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _isolated_head_port_args() -> Tuple[int, list[str]]:
+    """Return ``(gcs_port, extra_start_args)`` bound to FREE probed ports.
+
+    Isolates the GCS / dashboard / Ray-client ports so co-located sessions never
+    share Ray's fixed defaults. ``HL_RAY_HEAD_PORT`` pins the GCS port (dashboard
+    and client are still probed to avoid their own collisions).
+    """
+    port_override = os.environ.get(_HL_RAY_HEAD_PORT_ENV, "").strip()
+    gcs_port = int(port_override) if port_override.isdigit() else _free_tcp_port()
+    return gcs_port, [
+        f"--dashboard-port={_free_tcp_port()}",
+        f"--ray-client-server-port={_free_tcp_port()}",
+    ]
+
+
 def _fd_limit_warn(msg: str) -> None:
     """Emit an fd-limit warning to stderr with a stable prefix.
 
@@ -202,15 +255,22 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     Raises:
         RuntimeError: If starting the Ray head node fails.
     """
+    # ``ray status`` reads the container-private /tmp/ray/ray_current_cluster,
+    # so a head already started by this session (kernel agent or serving lease)
+    # is reused regardless of which free port it bound.
     if ray_status_ok():
         return False
     # Raise the open-files limit before the raylet starts.
     ensure_fd_limit(log_path=log_path)
     # Bind the dashboard/jobs API to loopback (avoids exposing the
-    # unauthenticated Ray Jobs RCE surface); GCS (:6379) is unaffected.
-    cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=127.0.0.1"]
+    # unauthenticated Ray Jobs RCE surface).
+    gcs_port, iso_args = _isolated_head_port_args()
+    cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         cmd.append(f"--num-gpus={num_gpus}")
+    # Free, probed GCS/dashboard/client ports so co-located host-network sessions
+    # never collide on Ray's fixed defaults (6379/8265/10001).
+    cmd.extend(iso_args)
     # Declare the ``serving_slot`` custom resource (§12 T6 authoritative mutex).
     cmd.extend(_resources_start_args())
     if log_path is not None:
@@ -281,9 +341,12 @@ def force_restart_local_cluster(
     ensure_fd_limit(log_path=log_path)
     stop_cmd = ["ray", "stop", "--force"]
     # Bind the dashboard/jobs API to loopback (see ensure_ray_cluster).
-    start_cmd = ["ray", "start", "--head", "--port=6379", "--dashboard-host=127.0.0.1"]
+    gcs_port, iso_args = _isolated_head_port_args()
+    start_cmd = ["ray", "start", "--head", f"--port={gcs_port}", "--dashboard-host=127.0.0.1"]
     if num_gpus is not None:
         start_cmd.append(f"--num-gpus={num_gpus}")
+    # Free, probed GCS/dashboard/client ports (see ensure_ray_cluster).
+    start_cmd.extend(iso_args)
     # Re-declare the ``serving_slot`` custom resource after a fresh head (§12 T6).
     start_cmd.extend(_resources_start_args())
     if log_path is not None:

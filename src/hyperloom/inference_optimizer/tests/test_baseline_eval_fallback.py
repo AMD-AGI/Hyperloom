@@ -399,6 +399,7 @@ class _StopRecorder:
 
     def __init__(self) -> None:
         self.stop_reason = ""
+        self.baseline_accuracy = 0.0
 
     def set_stop_reason(self, value, **_kwargs):
         self.stop_reason = value
@@ -487,6 +488,57 @@ def test_no_stop_when_not_genuine_baseline():
 def test_no_stop_when_baseline_failed():
     reason = _stopped("sglang", {"status": "failed", "error": "boom"})
     assert reason == ""
+
+
+# --- session-level salvage (sibling attempt already measured accuracy) -------
+def _write_gsm8k_results(measure_round: Path, score: float) -> None:
+    """Write a minimal lm-eval ``results*.json`` under a measure round dir."""
+    d = measure_round / "benchmark_vllm_x"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "results_x.json").write_text(
+        json.dumps({"results": {"gsm8k": {"exact_match,strict-match": score}}}),
+        encoding="utf-8",
+    )
+
+
+def test_salvage_sibling_attempt_accuracy_prevents_stop(tmp_path):
+    # A sibling attempt already produced a valid gsm8k result; the deciding
+    # attempt's own RESULT_DIR is empty. The run must NOT stop -- the accuracy
+    # is salvaged from the sibling and promoted onto the result.
+    runs_baseline = tmp_path / "runs" / "baseline"
+    good = runs_baseline / "786a793e" / "measure_round"
+    _write_gsm8k_results(good, 0.9128)
+    deciding = runs_baseline / "retry2_bootsafe"
+    deciding.mkdir(parents=True, exist_ok=True)
+
+    executor = BaselineExecutor()
+    rec = _StopRecorder()
+    result = {
+        "status": "succeeded",
+        "run_eval_disabled": False,
+        "output_dir": str(deciding),
+    }
+    executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
+
+    assert rec.stop_reason == ""
+    assert result["accuracy"] == pytest.approx(0.9128)
+    assert rec.baseline_accuracy == pytest.approx(0.9128)
+    assert "baseline_accuracy_salvaged_from_sibling_attempt" in result.get("nonfatal_warnings", [])
+
+
+def test_salvage_ignores_discarded_warmup_and_stops(tmp_path):
+    # Only a discarded warmup round carries a score; parse_eval_results excludes
+    # warmup output, so there is nothing to salvage and the run stops.
+    runs_baseline = tmp_path / "runs" / "baseline"
+    _write_gsm8k_results(runs_baseline / "786a793e" / "warmup_round", 0.9)
+    deciding = runs_baseline / "retry2_bootsafe"
+    deciding.mkdir(parents=True, exist_ok=True)
+
+    reason = _stopped(
+        "vllm",
+        {"status": "succeeded", "run_eval_disabled": False, "output_dir": str(deciding)},
+    )
+    assert reason == "baseline_accuracy_failed"
 
 
 def test_eval_already_off_does_not_retry(tmp_path):

@@ -703,6 +703,20 @@ PY
 #      with all visible GPUs advertised
 #   4. tolerate the no-GPU case (CPU-only dev box) so `--check-only` stays
 #      non-fatal in environments without ROCm
+_free_tcp_port() {
+  # Print a currently-free loopback TCP port (probe via an ephemeral bind).
+  # Echoes 0 on failure so callers fall back to Ray's default port.
+  python3 - <<'PY' 2>/dev/null || echo 0
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+finally:
+    s.close()
+PY
+}
+
 ensure_ray_started() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     return 0
@@ -740,7 +754,20 @@ PY
   if [ "${RAY_NUM_GPUS:-}" != "" ]; then
     num_gpus="$RAY_NUM_GPUS"
   fi
-  log "starting ray head with --num-gpus=${num_gpus}"
+  # Bind the head to FREE, probed ports instead of Ray's fixed defaults (GCS
+  # 6379, client 10001). On spur many sessions share a node's host network, so
+  # the fixed ports collide: a later head attaches to an earlier/leftover head's
+  # GCS and aborts with a session-name mismatch (ray-session-isolation). No
+  # rendezvous is needed -- Ray records the chosen address in the container-
+  # private /tmp/ray/ray_current_cluster, which ``ray status`` /
+  # ``ray.init(address="auto")`` read. HL_RAY_HEAD_PORT pins the GCS port.
+  local ray_port_args=()
+  local ray_gcs_port ray_client_port
+  ray_gcs_port="${HL_RAY_HEAD_PORT:-$(_free_tcp_port)}"
+  ray_client_port="$(_free_tcp_port)"
+  [ -n "$ray_gcs_port" ] && [ "$ray_gcs_port" != "0" ] && ray_port_args+=(--port="$ray_gcs_port")
+  [ -n "$ray_client_port" ] && [ "$ray_client_port" != "0" ] && ray_port_args+=(--ray-client-server-port="$ray_client_port")
+  log "starting ray head with --num-gpus=${num_gpus} port=${ray_gcs_port}"
   # Declare the ``serving_slot`` custom resource so serving-family GPU work
   # (baseline / profile / explore / sweep / gpu_research) routed through the
   # Ray execution backend can hold the whole-machine mutex (ray_modify.plan.md
@@ -748,6 +775,7 @@ PY
   # PENDING forever, since ensure_ray_cluster connects to this existing head
   # instead of starting its own with the resource.
   if ! ray start --head --disable-usage-stats \
+       "${ray_port_args[@]}" \
        --num-gpus="$num_gpus" --include-dashboard=false \
        --resources='{"serving_slot": 1}' >/dev/null; then
     warn "ray start failed; kernel optimization will hang. Check ROCm visibility."
