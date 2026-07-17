@@ -230,6 +230,29 @@ def _reusable_source_roots() -> tuple[str, ...]:
     return tuple(out)
 
 
+def _source_escapes_reusable_roots(source_file: str) -> bool:
+    """True only for a source_file that the substring check accepts but which
+    actually escapes the framework tree via ``..`` traversal.
+
+    Deliberately narrow: this adds *rejection* on top of the existing substring
+    match to close a trace-supplied ``kernel_file`` that embeds ``..`` to climb
+    out of the tree (the substring can still be present in the un-normalised
+    string). It never rejects a path the substring check would not already
+    accept, so no legitimate in-tree source is newly refused.
+    """
+    raw = str(source_file or "")
+    if ".." not in Path(raw).parts:
+        return False
+    # Contains a ``..`` segment: only escape if, after normalisation, it no
+    # longer lands under any reusable root.
+    try:
+        sf = Path(raw).resolve()
+    except (OSError, RuntimeError):
+        return True
+    lower = str(sf).lower()
+    return not any(root in lower for root in _reusable_source_roots())
+
+
 _APPLY_TOOL_MODULE: Any | None = None
 # forge is the only per-kernel backend. The default phase-level backend is the
 # whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
@@ -813,7 +836,13 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
             "source_file": source_file,
         }
     lower_file = source_file.lower()
-    if not any(root in lower_file for root in _reusable_source_roots()):
+    # Substring accept (unchanged for legitimate in-tree sources) plus a narrow
+    # traversal-escape rejection: a trace-supplied kernel_file that keeps a root
+    # substring but uses ``..`` to climb out of the tree is refused.
+    if (
+        not any(root in lower_file for root in _reusable_source_roots())
+        or _source_escapes_reusable_roots(source_file)
+    ):
         return {
             "status": "failed",
             "error_class": "unstable_source_path",

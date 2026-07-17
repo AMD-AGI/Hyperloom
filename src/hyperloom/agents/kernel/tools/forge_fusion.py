@@ -60,7 +60,10 @@ def _inject_author_gateway_env() -> None:
         os.environ.setdefault("ANTHROPIC_API_KEY", token)
         os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
-    os.environ.setdefault("IS_SANDBOX", "1")
+    # Only set it when actually running as root so we do not defeat the guard
+    # for non-root sessions that never needed the escape hatch.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        os.environ.setdefault("IS_SANDBOX", "1")
     apply_llm_stability_env(os.environ)
 
 

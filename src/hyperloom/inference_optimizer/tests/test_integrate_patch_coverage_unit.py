@@ -131,6 +131,60 @@ async def test_rejected_by_critic(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
+    # SWSPLAT-42420: a queued/resume-dispatched task is NOT re-validated by
+    # PolicyGate. With a live SharedState but no recorded verdict (a forged
+    # coordinator.db row), integrate_patch must refuse to apply the patch.
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    class _SS:
+        def get_specialist_patch_verdict(self, tid):
+            return ""  # no verdict on record
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    res = await ex(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo)},
+            extra={"shared_state": _SS()},
+        )
+    )
+    assert res["status"] == "rejected_by_critic"
+    # patch not applied: the source file is untouched.
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_forged_task_bypass_env_allows_without_verdict(tmp_path, monkeypatch):
+    # The out-of-band operator override still forces through with no verdict.
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    monkeypatch.setenv("HYPERLOOM_BYPASS_CRITIC", "1")
+
+    class _SS:
+        def get_specialist_patch_verdict(self, tid):
+            return ""
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    res = await ex(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo), "apply_only": True},
+            extra={"shared_state": _SS()},
+        )
+    )
+    # With bypass set, the verdict gate does not reject; apply_only short-circuits the bench.
+    assert res["status"] != "rejected_by_critic"
+
+
+@pytest.mark.asyncio
 async def test_keep_path(tmp_path, monkeypatch):
     session = tmp_path / "s"
     session.mkdir()

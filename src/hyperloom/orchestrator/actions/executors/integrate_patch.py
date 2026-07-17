@@ -1494,10 +1494,19 @@ class IntegratePatchExecutor:
         # Layer config_changes onto the launch env (via ``extra_envs``).
         config_changes_applied = dict(config_changes)
 
-        # Defensive double-check on the Critic verdict for paths that bypass
-        # PolicyGate. No-ops when SharedState is absent. The override is
-        # out-of-band only (HYPERLOOM_BYPASS_CRITIC=1); an in-band
-        # params.bypass_critic is ignored so an LLM cannot self-approve.
+        # Critic-verdict gate for paths that bypass PolicyGate (notably a
+        # queued/resume-dispatched task, which is NOT re-validated by
+        # PolicyGate). Require a permissive verdict on record — mirroring
+        # PolicyGate._validate_integrate_patch_critic_gate — so a forged
+        # coordinator.db row with no genuine Critic verdict cannot apply a patch
+        # to an arbitrary framework_source_root. specialist_patch_verdicts is a
+        # Coordinator-only CORE_STATE_FIELD an LLM/forged row cannot write, and
+        # a legitimate integrate_patch always has its verdict persisted before
+        # the queued task is created (see intent_router._handle_single_verdict),
+        # so a genuine resume-dispatched task is unaffected. No-ops when
+        # SharedState is absent. Override is out-of-band only
+        # (HYPERLOOM_BYPASS_CRITIC=1); an in-band params.bypass_critic is
+        # ignored so an LLM cannot self-approve.
         if shared_state is not None and os.environ.get("HYPERLOOM_BYPASS_CRITIC") != "1":
             if params.get("bypass_critic"):
                 log.warning(
@@ -1507,14 +1516,21 @@ class IntegratePatchExecutor:
                     specialist_task_id,
                 )
             try:
+                from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS as _PERMISSIVE
+            except Exception:  # noqa: BLE001 - avoid a hard import-cycle dependency
+                _PERMISSIVE = frozenset({"approve", "advise"})
+            try:
                 recorded = shared_state.get_specialist_patch_verdict(
                     specialist_task_id,
                 )
             except AttributeError:
                 recorded = ""
-            if recorded and recorded.lower() == "reject":
+            if (recorded or "").lower() not in _PERMISSIVE:
                 artifacts_reverted = self._revert_artifacts(applied_artifacts)
                 reverted = self._revert_patches(framework_root, applied)
+                _detail = (
+                    f"verdict {recorded!r}" if recorded else "no Critic verdict on record"
+                )
                 return _with_stash_restore(framework_root, stash_state, stash_note, {
                     "status": "rejected_by_critic",
                     "specialist_task_id": specialist_task_id,
@@ -1523,10 +1539,10 @@ class IntegratePatchExecutor:
                     "artifacts_reverted": artifacts_reverted,
                     "config_changes_applied": {},
                     "reason": (
-                        f"Critic verdict 'reject' recorded for specialist "
-                        f"task {specialist_task_id!r}; integrate_patch "
-                        f"refuses to bench. Set HYPERLOOM_BYPASS_CRITIC=1 "
-                        f"out-of-band to force."
+                        f"integrate_patch requires a permissive Critic verdict "
+                        f"(approve/advise) for specialist task "
+                        f"{specialist_task_id!r}; {_detail}. Refusing to bench. "
+                        f"Set HYPERLOOM_BYPASS_CRITIC=1 out-of-band to force."
                     ),
                     "workspace": str(output_root),
                 })

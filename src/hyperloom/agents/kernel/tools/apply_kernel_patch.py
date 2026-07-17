@@ -13,6 +13,7 @@ import logging
 import os
 import py_compile
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,44 @@ log = logging.getLogger(__name__)
 
 COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".hip"}
 PYTHON_SOURCE_SUFFIXES = {".py"}
+
+_UNSAFE_COMMAND_TOKENS = {";", "&&", "||", "|", ">", ">>", "<", "<<", "`"}
+_UNSAFE_COMMAND_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
+_SHELL_COMMAND_NAMES = {"bash", "dash", "sh", "zsh", "ksh"}
+
+
+def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[str]:
+    """Return a rebuild argv, never a shell command string.
+
+    A string rebuild_command is tokenised with shlex and run argv-only
+    (shell=False) instead of ``bash -lc <str>``, so it cannot inject shell
+    control operators. A legitimate argv (already a list, or a plain-command
+    string like ``ninja -C build``) is unaffected; only commands that rely on
+    shell syntax are rejected.
+    """
+    if not rebuild_command:
+        return []
+    if isinstance(rebuild_command, str):
+        try:
+            argv = shlex.split(rebuild_command)
+        except ValueError as exc:
+            raise ValueError(f"invalid rebuild_command: {exc}") from exc
+    else:
+        argv = [str(part) for part in rebuild_command]
+    if not argv:
+        return []
+    if any(part in _UNSAFE_COMMAND_TOKENS for part in argv) or any(
+        _UNSAFE_COMMAND_CHARS_RE.search(part) for part in argv
+    ):
+        raise ValueError(
+            "rebuild_command must be argv-like and cannot contain shell control operators"
+        )
+    if any(("\n" in part or "\r" in part or "\x00" in part) for part in argv):
+        raise ValueError("rebuild_command contains invalid control characters")
+    exe = Path(argv[0]).name.lower()
+    if exe in _SHELL_COMMAND_NAMES and any(part in {"-c", "-lc"} for part in argv[1:]):
+        raise ValueError("rebuild_command must not invoke a shell command string")
+    return argv
 COMPILED_ARTIFACT_SUFFIXES = {".so", ".co", ".hsaco"}
 TEXT_ARTIFACT_SUFFIXES = {".txt", ".md", ".markdown", ".log", ".patch", ".diff"}
 # Fallback when ``inference_optimizer`` is not on ``sys.path`` (standalone CLI).
@@ -1653,10 +1692,8 @@ def apply_kernel_patch(
         )
 
     command: list[str] = []
-    if isinstance(rebuild_command, str):
-        command = ["/bin/bash", "-lc", rebuild_command]
-    elif rebuild_command:
-        command = list(rebuild_command)
+    if rebuild_command:
+        command = _coerce_rebuild_command(rebuild_command)
     elif not skip_rebuild:
         command = list(strategy["rebuild_command"])
 
@@ -1936,10 +1973,8 @@ def _apply_kernel_patch_snapshot(
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     command: list[str] = []
-    if isinstance(rebuild_command, str):
-        command = ["/bin/bash", "-lc", rebuild_command]
-    elif rebuild_command:
-        command = list(rebuild_command)
+    if rebuild_command:
+        command = _coerce_rebuild_command(rebuild_command)
 
     rebuild: dict[str, Any] = {"status": "skipped", "reason": "source-only patch or skip_rebuild=true"}
     jit_build_backup: dict[str, Any] = {"status": "skipped", "reason": "rebuild not run"}
