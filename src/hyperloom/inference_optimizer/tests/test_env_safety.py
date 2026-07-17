@@ -62,13 +62,7 @@ def test_assert_forward_env_keys_raises():
         env_safety.assert_forward_env_keys({"LD_PRELOAD": "/tmp/x.so"})
 
 
-def test_common_env_safety_filters_workload_dotenv_and_kernel_agent_keys():
-    assert common_env_safety.is_allowed_workload_env_key("SGLANG_USE_AITER_FP8_PER_TOKEN")
-    assert common_env_safety.is_allowed_workload_env_key("HF_TOKEN")
-    assert common_env_safety.is_allowed_workload_env_key("EXTRA_SGLANG_ARGS")
-    assert not common_env_safety.is_allowed_workload_env_key("OPENAI_API_KEY")
-    assert not common_env_safety.is_allowed_workload_env_key("LD_PRELOAD")
-
+def test_common_env_safety_filters_dotenv_and_kernel_agent_keys_only():
     assert common_env_safety.is_allowed_dotenv_key("OPENAI_API_KEY")
     assert common_env_safety.is_allowed_dotenv_key("HF_TOKEN")
     assert common_env_safety.is_allowed_dotenv_key("HTTPS_PROXY")
@@ -85,15 +79,27 @@ def test_common_env_safety_filters_workload_dotenv_and_kernel_agent_keys():
     allowed, dropped = common_env_safety.filter_untrusted_env_mapping(
         {
             "bench_foo": 1,
+            "custom_tuning_knob": "enabled",
+            "ANTHROPIC_API_KEY": "anthropic-secret",
+            "LD_PRELOAD": "/tmp/agent-provided.so",
             "OPENAI_API_KEY": "secret",
+            "PYTHONPATH": "/tmp/agent-provided",
+            "SAFE_API_KEY": "safe-secret",
             "bad key": "nope",
             "": "empty",
         },
-        allow_predicate=common_env_safety.is_allowed_workload_env_key,
+        allow_predicate=common_env_safety.valid_env_key,
     )
-    assert allowed == {"bench_foo": "1"}
+    assert allowed == {
+        "bench_foo": "1",
+        "custom_tuning_knob": "enabled",
+        "ANTHROPIC_API_KEY": "anthropic-secret",
+        "LD_PRELOAD": "/tmp/agent-provided.so",
+        "OPENAI_API_KEY": "secret",
+        "PYTHONPATH": "/tmp/agent-provided",
+        "SAFE_API_KEY": "safe-secret",
+    }
     assert dropped == {
-        "OPENAI_API_KEY": "not_allowed",
         "bad key": "invalid_env_key",
         "<empty>": "invalid_env_key",
     }
