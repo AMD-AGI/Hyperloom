@@ -530,6 +530,8 @@ async def test_select_best_framework_agent_candidate_single(coord: Coordinator) 
 async def test_select_best_framework_agent_candidate_uses_ranker_choice(coord: Coordinator, monkeypatch) -> None:
     """When the ranker returns a candidate, it is used over discovery order."""
     ss = coord.shared_state
+    # Arm off so the ranking set is exactly the discovered PR candidates.
+    ss.framework_local_explore_enabled = False
     ss.framework_agent_batches = [
         {"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}, {"candidate_id": "c3"}]}
     ]

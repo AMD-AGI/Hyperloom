@@ -307,10 +307,16 @@ class _LeaseFakeRay:
         class RayActorError(Exception):
             pass
 
+        class GetTimeoutError(Exception):
+            pass
+
     def __init__(self):
         self.killed: list = []
 
-    def get(self, ref):
+    def cluster_resources(self) -> dict:
+        return {"CPU": 64.0, "GPU": 8.0, "serving_slot": 1.0}
+
+    def get(self, ref, **_kw):
         if isinstance(
             ref,
             (_LeaseFakeRay.exceptions.RayTaskError, _LeaseFakeRay.exceptions.RayActorError),
@@ -512,10 +518,19 @@ class _FakeRayP2:
         class RayTaskError(Exception):
             pass
 
+        class GetTimeoutError(Exception):
+            pass
+
+        class RayActorError(Exception):
+            pass
+
     def __init__(self):
         self.killed: list = []
 
-    def get(self, ref):
+    def cluster_resources(self) -> dict:
+        return {"CPU": 64.0, "GPU": 8.0, "serving_slot": 1.0}
+
+    def get(self, ref, timeout=None):
         _tag, fn, a, k = ref
         return fn(*a, **k)
 
@@ -824,7 +839,16 @@ class _RaisingRay:
         class RayTaskError(Exception):
             pass
 
-    def get(self, ref):
+        class RayActorError(Exception):
+            pass
+
+        class GetTimeoutError(Exception):
+            pass
+
+    def cluster_resources(self) -> dict:
+        return {}  # empty -> any feasibility check would fail fast
+
+    def get(self, ref, **_kw):
         raise RuntimeError("actor dead")
 
     def kill(self, actor):
@@ -1151,3 +1175,245 @@ def test_managed_process_start_with_log_path(tmp_path: Path):
     finally:
         mgr.stop()
     assert log.exists()
+
+
+# ── Robustness: infeasible cluster + sched-timeout + dead-actor poll ──────────
+
+
+class _InfeasibleFakeRay:
+    """Fake ray for infeasibility tests: cluster_resources returns no serving_slot."""
+
+    class exceptions:  # noqa: N801
+        class RayTaskError(Exception):
+            pass
+
+        class RayActorError(Exception):
+            pass
+
+        class GetTimeoutError(Exception):
+            pass
+
+    def __init__(self, *, gpus: float = 8.0, has_serving_slot: bool = False):
+        self._gpus = gpus
+        self._has_serving_slot = has_serving_slot
+        self.killed: list = []
+
+    def cluster_resources(self) -> dict:
+        res: dict = {"CPU": 64.0}
+        if self._gpus > 0:
+            res["GPU"] = self._gpus
+        if self._has_serving_slot:
+            res["serving_slot"] = 1.0
+        return res
+
+    def get(self, ref, **_kw):
+        if isinstance(ref, _InfeasibleFakeRay.exceptions.RayTaskError):
+            raise ref
+        return ref
+
+    def kill(self, actor):
+        self.killed.append(actor)
+
+
+def test_serving_lease_infeasible_no_slot_degrades(monkeypatch: pytest.MonkeyPatch):
+    """No serving_slot in cluster -> run_session_kill returns rc!=0 with reason."""
+    fake = _InfeasibleFakeRay(gpus=8.0, has_serving_slot=False)
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+
+    lease = rs.ServingLease(num_gpus=1, serving_slot=True)
+    rc, _out, err = lease.run_session_kill(["echo", "hi"], timeout=5)
+    assert rc == 1
+    assert "ray_ensure_error" in err
+    assert "serving_slot" in err
+
+
+def test_serving_lease_infeasible_no_gpu_degrades(monkeypatch: pytest.MonkeyPatch):
+    """Cluster GPU count < requested -> run_session_kill returns rc!=0."""
+    fake = _InfeasibleFakeRay(gpus=2.0, has_serving_slot=True)
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+
+    lease = rs.ServingLease(num_gpus=8, serving_slot=False)
+    rc, _out, err = lease.run_session_kill(["echo", "hi"], timeout=5)
+    assert rc == 1
+    assert "ray_ensure_error" in err
+    assert "GPU" in err or "gpu" in err.lower()
+
+
+def test_gpu_specialist_lease_infeasible_raises(monkeypatch: pytest.MonkeyPatch):
+    """Infeasible cluster -> GpuSpecialistLease.start raises RayInfeasibleError."""
+    fake = _InfeasibleFakeRay(gpus=0.0, has_serving_slot=False)
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+
+    lease = rs.GpuSpecialistLease(num_gpus=4)
+    with pytest.raises(rs.RayInfeasibleError, match="GPU"):
+        lease.start(["agent"])
+
+
+class _SchedTimeoutFakeRay:
+    """Fake ray that raises GetTimeoutError on the specialist actor.start call."""
+
+    class exceptions:  # noqa: N801
+        class GetTimeoutError(Exception):
+            pass
+
+        class RayActorError(Exception):
+            pass
+
+        class RayTaskError(Exception):
+            pass
+
+    def __init__(self, *, gpus: float = 8.0):
+        self._gpus = gpus
+        self.killed: list = []
+
+    def cluster_resources(self) -> dict:
+        return {"CPU": 64.0, "GPU": self._gpus, "serving_slot": 1.0}
+
+    def get(self, ref, timeout=None):
+        # Simulate a GetTimeoutError if a timeout is provided (the start call).
+        if timeout is not None:
+            raise _SchedTimeoutFakeRay.exceptions.GetTimeoutError("timed out")
+        return ref
+
+    def kill(self, actor):
+        self.killed.append(actor)
+
+
+def test_gpu_specialist_lease_sched_timeout_raises_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """GetTimeoutError on actor.start -> RaySchedTimeoutError + close() called."""
+    fake = _SchedTimeoutFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    actor = _FakeGpuActor()
+    monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda n, *, serving_slot=False: actor)
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+
+    lease = rs.GpuSpecialistLease(num_gpus=4)
+    with pytest.raises(rs.RaySchedTimeoutError):
+        lease.start(["agent"])
+    # close() must have been called after the timeout (actor in killed list).
+    assert actor in fake.killed
+
+
+class _NoTimeoutCapturingFakeRay:
+    """Fake ray that captures whether a timeout kwarg was passed to get()."""
+
+    class exceptions:  # noqa: N801
+        class RayTaskError(Exception):
+            pass
+
+        class RayActorError(Exception):
+            pass
+
+    def __init__(self, result=(0, "ok", "")):
+        self._result = result
+        self.get_kwargs: list[dict] = []
+        self.killed: list = []
+
+    def get(self, ref, **kwargs):
+        self.get_kwargs.append(dict(kwargs))
+        if isinstance(ref, _NoTimeoutCapturingFakeRay.exceptions.RayTaskError):
+            raise ref
+        if isinstance(ref, _NoTimeoutCapturingFakeRay.exceptions.RayActorError):
+            raise ref
+        return ref
+
+    def kill(self, actor):
+        self.killed.append(actor)
+
+
+def test_serving_lease_coordinator_no_timeout(monkeypatch: pytest.MonkeyPatch):
+    """ServingLease.run_session_kill calls ray.get(ref) with NO timeout kwarg."""
+    fake = _NoTimeoutCapturingFakeRay(result=(0, "ok", ""))
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    lease = rs.ServingLease(num_gpus=1)
+    lease._actor = _FakeActor((0, "ok", ""))  # pre-set: skip ensure()
+    rc, out, _err = lease.run_session_kill(["echo", "ok"], timeout=5)
+    assert rc == 0
+    # The ray.get() for the benchmark call must have no timeout keyword.
+    assert all("timeout" not in kw for kw in fake.get_kwargs), (
+        f"ServingLease must not pass timeout to ray.get; got kwargs: {fake.get_kwargs}"
+    )
+
+
+# ── Robustness: _RayLeaseProcess.poll dead-actor detection ───────────────────
+
+
+class _DeadActorLease:
+    """Lease whose is_alive returns False and exit_code returns None (actor dead)."""
+
+    def is_alive(self) -> bool:
+        return False
+
+    def exit_code(self):
+        return None
+
+    def stop(self):
+        pass
+
+
+class _NormalExitLease:
+    """Lease whose is_alive returns False and exit_code returns a real rc."""
+
+    def is_alive(self) -> bool:
+        return False
+
+    def exit_code(self):
+        return 0
+
+    def stop(self):
+        pass
+
+
+def test_ray_lease_process_poll_dead_actor_returns_sentinel():
+    """is_alive=False + exit_code=None -> poll latches _RAY_ACTOR_DIED_RC (not None)."""
+    from hyperloom.orchestrator.specialists.subprocess_ import _RayLeaseProcess
+    from hyperloom.orchestrator.actions.executors._ray_serving import _RAY_ACTOR_DIED_RC
+
+    proc = _RayLeaseProcess(_DeadActorLease(), 9999)
+    rc = proc.poll()
+    assert rc is not None, "poll must not return None for a dead actor"
+    assert rc == _RAY_ACTOR_DIED_RC
+    assert proc.returncode == _RAY_ACTOR_DIED_RC
+
+
+def test_ray_lease_process_poll_normal_exit_returns_real_rc():
+    """is_alive=False + exit_code=0 -> poll returns 0 (not the sentinel)."""
+    from hyperloom.orchestrator.specialists.subprocess_ import _RayLeaseProcess
+    from hyperloom.orchestrator.actions.executors._ray_serving import _RAY_ACTOR_DIED_RC
+
+    proc = _RayLeaseProcess(_NormalExitLease(), 9998)
+    rc = proc.poll()
+    assert rc == 0
+    assert rc != _RAY_ACTOR_DIED_RC
+
+
+def test_ray_lease_process_poll_alive_returns_none():
+    """is_alive=True -> poll returns None (subprocess still running)."""
+    from hyperloom.orchestrator.specialists.subprocess_ import _RayLeaseProcess
+
+    class _AliveLease:
+        def is_alive(self):
+            return True
+
+    proc = _RayLeaseProcess(_AliveLease(), 9997)
+    assert proc.poll() is None
+    assert proc.returncode is None
+
+
+def test_ray_lease_process_poll_latched_returns_early():
+    """Once returncode is set, poll returns it without re-querying the lease."""
+    from hyperloom.orchestrator.specialists.subprocess_ import _RayLeaseProcess
+    from hyperloom.orchestrator.actions.executors._ray_serving import _RAY_ACTOR_DIED_RC
+
+    class _NeverCallLease:
+        def is_alive(self):
+            raise AssertionError("should not be called after latch")
+
+    proc = _RayLeaseProcess(_NeverCallLease(), 9996)
+    proc.returncode = _RAY_ACTOR_DIED_RC  # pre-latched
+    assert proc.poll() == _RAY_ACTOR_DIED_RC
