@@ -1097,9 +1097,19 @@ ensure_forge_claude_cli() {
       return 0
     fi
   fi
-  if command -v npm >/dev/null 2>&1 && ! command -v claude >/dev/null 2>&1; then
-    run npm config set prefix /usr/local
-    run npm install -g @anthropic-ai/claude-code
+  # Claude Code CLI install. $HYPERLOOM_CLAUDE_CODE_VERSION pins a specific npm
+  # version and FORCE-reinstalls it (overriding one already baked into the base
+  # image) — needed because newer claude-code releases reject models the gateway
+  # still serves (e.g. retired Opus 4). When unset, keep the legacy behaviour:
+  # install the latest only when the CLI is absent.
+  if command -v npm >/dev/null 2>&1; then
+    if [ -n "${HYPERLOOM_CLAUDE_CODE_VERSION:-}" ]; then
+      run npm config set prefix /usr/local
+      run npm install -g "@anthropic-ai/claude-code@${HYPERLOOM_CLAUDE_CODE_VERSION}"
+    elif ! command -v claude >/dev/null 2>&1; then
+      run npm config set prefix /usr/local
+      run npm install -g @anthropic-ai/claude-code
+    fi
   fi
   # ~/.claude authenticates the Claude Code CLI for Anthropic-compatible flows.
   local _claude_key="${_ANTHROPIC_KEY_VAL:-${_DEEPSEEK_KEY_VAL:-}}"
