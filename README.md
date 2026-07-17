@@ -1,5 +1,11 @@
 # ROCm Hyperloom
 
+[![Tests](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml)
+[![Lint](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml)
+[![Version](https://img.shields.io/badge/version-0.8.0-blue)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
+
 ROCm™ Hyperloom is an autonomous agentic system designed to optimize end-to-end inference workloads
 (targeting both host code and GPU kernels) on AMD GPUs. Using advanced AI agents and profiling tools,
 Hyperloom analyzes your workload, identifies performance bottlenecks, implements targeted optimizations,
