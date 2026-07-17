@@ -12,7 +12,7 @@ and old DFS demo mechanics; the live action catalog, phase allowlist,
 PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
-![Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR when the time budget exceeds 24 hours. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.](../images/Hyperloom_optimization_loop.png)
+![Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.](../images/Hyperloom_optimization_loop.png)
 
 ## Runtime contract
 
@@ -37,10 +37,12 @@ The Coordinator advances through the live phase chain:
 PRELUDE -> FRAMEWORK_PR -> EXPLORE -> KERNEL Phase -> SWEEP -> CLOSE
 ```
 
-For a normal single-pass run (`--max-hours < 24`) the chain is traversed
-once. Cyclic macro-cycling is always enabled; with a large or unbounded budget
-(`--max-hours >= 24`), SWEEP can `cycle_reloop` back to `FRAMEWORK_PR` /
-`EXPLORE` for another pass instead of closing.
+Cyclic macro-cycling is always enabled. After SWEEP, the Coordinator can
+`cycle_reloop` back to `FRAMEWORK_PR` / `EXPLORE` for another pass while
+budget and leverage remain, regardless of whether the session is shorter than
+24 hours. The 24-hour threshold now only selects long-run budget accounting:
+short bounded runs keep charge-back phase budgeting, while long / unbounded
+runs use the fixed per-cycle budget window.
 
 `machine_state.PHASE_ALLOWED_ACTIONS` and `PolicyGate` enforce which
 actions can run in each phase. Coordinator-owned actions such as

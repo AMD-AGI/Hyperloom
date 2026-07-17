@@ -420,9 +420,9 @@ class DispatcherCollaborator:
 
             budget_min = min(base × (macro_cycle + 1), 240)
 
-        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >=24h
-        gate), so <24h bounded runs always get the base value (cpu 10 / gpu 60)
-        and never degrade.
+        ``macro_cycle`` grows whenever a new macro-cycle opens, including short
+        bounded runs. As cycles progress, specialists get more room to complete
+        larger attempts, up to the 4h cap.
 
         Args:
             needs_gpu: Whether the specialist holds a GPU lease (selects the
