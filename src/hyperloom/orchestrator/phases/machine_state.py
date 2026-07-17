@@ -442,10 +442,12 @@ def is_valid_phase_exit_reason(value: str) -> bool:
 # Default phase budgets (% of wall-clock). IR-6 force-exit is the hard EXPLORE backstop; FRAMEWORK uses a time wall.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
-    # FRAMEWORK self-caps so it does not monopolise the run.
-    PHASE_FRAMEWORK_AGENT: 0.15,
-    PHASE_EXPLORE: 0.375,
-    PHASE_KERNEL_AGENT: 0.305,
+    # FRAMEWORK self-caps so it does not monopolise the run. The larger share
+    # (vs. the historical 0.15) funds the local-exploration arm, which authors
+    # source patches when PR discovery is empty instead of skipping the phase.
+    PHASE_FRAMEWORK_AGENT: 0.20,
+    PHASE_EXPLORE: 0.35,
+    PHASE_KERNEL_AGENT: 0.28,
     PHASE_SWEEP: 0.12,
     PHASE_CLOSE: 0.02,
 }

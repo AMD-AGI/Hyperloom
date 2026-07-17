@@ -681,6 +681,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "Default: framework phase enabled.",
     )
     opt.add_argument(
+        "--no-framework-local-explore",
+        dest="no_framework_local_explore",
+        action="store_true",
+        default=False,
+        help="Disable the FRAMEWORK_AGENT local-exploration arm. By default, "
+        "when PR discovery is empty/exhausted (or the ranker prefers it), the "
+        "phase dispatches a write-capable specialist that authors a throughput "
+        "patch from the live source + profiling evidence (and may web-search "
+        "the latest upstream code) instead of skipping the phase. Disabling "
+        "restores the historical behavior of exiting after "
+        "DISCOVER_FAILURE_RETRY_LIMIT (3) empty/failed discoveries. Requires "
+        "the authoring track (has no effect under diff-only mode).",
+    )
+    opt.add_argument(
         "--kernel-codex",
         action="store_true",
         default=True,
