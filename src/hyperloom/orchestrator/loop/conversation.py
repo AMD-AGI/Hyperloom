@@ -739,7 +739,7 @@ class ConversationCollaborator:
                 )
         if not lines:
             return ""
-        if phase == _phase_state.PHASE_EXPLORE and _phase_state.is_cyclic_phases_enabled():
+        if phase == _phase_state.PHASE_EXPLORE:
             lines.append(
                 "Note: in cyclic mode a detected EXPLORE plateau "
                 "deterministically advances EXPLORE → KERNEL_AGENT (non-terminal "
@@ -774,7 +774,7 @@ class ConversationCollaborator:
     def _bottleneck_redirect_advisory_block(self) -> str:
         """Render the R3 cyclic bottleneck-redirect advisory (EXPLORE only).
 
-        Active only in cyclic mode when a prior cycle's plateau flagged
+        Applies when a prior cycle's plateau flagged
         ``pending_bottleneck_switch``. Names the bottleneck we plateaued on, the
         current dominant roofline direction, and a suggested specialist domain so
         Orchestration redirects the new cycle's dispatch. Advisory, never gates.
@@ -784,8 +784,6 @@ class ConversationCollaborator:
             applicable.
         """
         state = self.shared_state
-        if not _phase_state.is_cyclic_phases_enabled():
-            return ""
         if (getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_EXPLORE:
             return ""
         sat = getattr(state, "saturated_directions", {}) or {}

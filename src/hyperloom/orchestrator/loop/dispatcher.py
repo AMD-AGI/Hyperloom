@@ -70,7 +70,7 @@ class DispatcherCollaborator:
 
     def _cycle_idem_suffix(self) -> str:
         """Idempotency-key suffix scoping a per-cycle internal singleton to the
-        current macro-cycle. Empty for cycle 0 / non-cyclic runs.
+        current macro-cycle. Empty for cycle 0 (the first macro-cycle).
 
         Returns:
             ``"-c<cycle>"`` for macro-cycle > 0, else an empty string.
@@ -90,11 +90,14 @@ class DispatcherCollaborator:
             await self.cursors.advance(agent_name, seq=top.seq, msg_id=top.msg_id)
 
     def _dispatch_paused_for_phase_budget(self) -> bool:
-        """True when the current phase's cyclic budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
+        """True when the current phase's budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
 
         Pausing new spawns lets in-flight tasks finish and the pump return so
-        the tick can advance the phase. Scoped to cyclic long-runs and the
-        discretionary search phases.
+        the tick can advance the phase. Scoped to the discretionary search
+        phases. Applies to every session budget: the pause is driven purely by
+        the phase budget remaining (charge-back for short bounded runs, the
+        per-cycle window for long/unbounded runs), keeping dispatch consistent
+        with the phase-advance gates that consume the same helper.
 
         Returns:
             ``True`` when new phase-scoped dispatch should pause for budget.
@@ -104,8 +107,6 @@ class DispatcherCollaborator:
         if phase not in self._BUDGET_GATED_DISPATCH_PHASES:
             return False
         try:
-            if not _phase_state.is_cyclic_phases_enabled() or not _phase_state.is_long_run(state):
-                return False
             remaining = _phase_state.phase_budget_remaining_seconds(
                 state,
                 budget_pct=self._phase_budget_pct,

@@ -1921,23 +1921,20 @@ class IntegratePatchExecutor:
             tps_delta_pct=float(delta_pct or 0.0),
             extra=extra,
         )
-        # In cyclic mode, commit the KEEP so a later REVERT checkout fallback
-        # can't wipe this win (best-effort, non-fatal).
+        # Commit the KEEP so a later REVERT checkout fallback can't wipe this
+        # win (best-effort, non-fatal).
         try:
-            from ...phases.machine_state import is_cyclic_phases_enabled
-
-            if is_cyclic_phases_enabled():
-                touched = _patch_touched_paths(framework_root, applied)
-                ok, note = _git_commit_kept(
-                    framework_root,
-                    f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
-                    touched,
+            touched = _patch_touched_paths(framework_root, applied)
+            ok, note = _git_commit_kept(
+                framework_root,
+                f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
+                touched,
+            )
+            if not ok:
+                log.warning(
+                    "integrate_patch: commit-on-KEEP failed (%s); win remains uncommitted in the working tree",
+                    note,
                 )
-                if not ok:
-                    log.warning(
-                        "integrate_patch: commit-on-KEEP failed (%s); win remains uncommitted in the working tree",
-                        note,
-                    )
         except Exception:  # noqa: BLE001 — commit durability is best-effort
             log.exception("integrate_patch: commit-on-KEEP raised")
         # Durability: snapshot the KEEP's realized source layer into a

@@ -569,17 +569,22 @@ def test_dispatch_pause_phase_not_gated(coord: Coordinator) -> None:
     assert coord._dispatch_paused_for_phase_budget() is False
 
 
-def test_dispatch_pause_not_long_run(coord: Coordinator, monkeypatch) -> None:
+def test_dispatch_pause_short_run_budget_spent(coord: Coordinator, monkeypatch) -> None:
+    # is_long_run no longer gates the pause: a short bounded run whose charge-back
+    # phase budget is spent pauses new dispatch just like a long/unbounded run,
+    # keeping dispatch consistent with the phase-advance gates.
     coord.shared_state.phase = "EXPLORE"
-    monkeypatch.setattr(coord_mod._phase_state, "is_cyclic_phases_enabled", lambda: True)
     monkeypatch.setattr(coord_mod._phase_state, "is_long_run", lambda _s: False)
-    assert coord._dispatch_paused_for_phase_budget() is False
+    monkeypatch.setattr(
+        coord_mod._phase_state,
+        "phase_budget_remaining_seconds",
+        lambda _s, budget_pct=None: 0.0,
+    )
+    assert coord._dispatch_paused_for_phase_budget() is True
 
 
 def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.phase = "EXPLORE"
-    monkeypatch.setattr(coord_mod._phase_state, "is_cyclic_phases_enabled", lambda: True)
-    monkeypatch.setattr(coord_mod._phase_state, "is_long_run", lambda _s: True)
     monkeypatch.setattr(
         coord_mod._phase_state,
         "phase_budget_remaining_seconds",
@@ -590,8 +595,6 @@ def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
 
 def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.phase = "KERNEL"
-    monkeypatch.setattr(coord_mod._phase_state, "is_cyclic_phases_enabled", lambda: True)
-    monkeypatch.setattr(coord_mod._phase_state, "is_long_run", lambda _s: True)
     monkeypatch.setattr(
         coord_mod._phase_state,
         "phase_budget_remaining_seconds",
