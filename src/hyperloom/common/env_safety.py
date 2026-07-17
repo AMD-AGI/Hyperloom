@@ -158,17 +158,6 @@ def is_blocked_untrusted_env_key(key: object) -> bool:
     )
 
 
-def is_allowed_workload_env_key(key: object) -> bool:
-    """Return whether an untrusted workload env override is safe to materialize.
-
-    Workload env maps come from KB recipes and specialist proposals where
-    unknown-but-valid tuning knobs are common. Do not apply a name allowlist or
-    denylist here; the only robust cross-framework rule is valid env-key syntax.
-    """
-    name = str(key or "").strip()
-    return valid_env_key(name)
-
-
 def is_allowed_dotenv_key(key: object) -> bool:
     name = str(key or "").strip()
     upper = name.upper()
@@ -222,7 +211,6 @@ __all__ = [
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_kernel_agent_env_key",
-    "is_allowed_workload_env_key",
     "is_blocked_untrusted_env_key",
     "scrub_child_process_env",
     "valid_env_key",

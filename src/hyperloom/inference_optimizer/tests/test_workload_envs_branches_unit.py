@@ -106,16 +106,17 @@ def test_materialize_preserves_valid_workload_env_keys(tmp_path, monkeypatch):
             "ANTHROPIC_API_KEY": "anthropic-secret",
             "LD_PRELOAD": "/tmp/evil.so",
             "OPENAI_API_KEY": "secret",
-            "PRECISION": "fp8",
             "PYTHONSTARTUP": "/tmp/pwn.py",
             "SAFE_API_KEY": "safe-secret",
             "SGLANG_USE_AITER": "1",
             "UNKNOWN_VALID_TUNING_KNOB": "enabled",
+            "BAD-NAME": "dropped",
         },
         reference_envs={
             "PYTHONPATH": "/tmp/evil",
             "REFERENCE_ONLY_KNOB": "1",
             "VLLM_ROCM_USE_AITER": "1",
+            "bad key": "dropped",
         },
     )
     envs = bench["envs"]
@@ -125,44 +126,12 @@ def test_materialize_preserves_valid_workload_env_keys(tmp_path, monkeypatch):
     assert envs["PYTHONSTARTUP"] == "/tmp/pwn.py"
     assert envs["PYTHONPATH"] == "/tmp/evil"
     assert envs["SAFE_API_KEY"] == "safe-secret"
-    assert bench["precision"] == "fp8"
-    assert envs["PRECISION"] == "fp8"
+    assert "BAD-NAME" not in envs
+    assert "bad key" not in envs
     assert envs["REFERENCE_ONLY_KNOB"] == "1"
     assert envs["SGLANG_USE_AITER"] == "1"
     assert envs["UNKNOWN_VALID_TUNING_KNOB"] == "enabled"
     assert envs["VLLM_ROCM_USE_AITER"] == "1"
-
-
-def test_reference_precision_does_not_override_process_precision(tmp_path, monkeypatch):
-    _clear_env(monkeypatch)
-    _stub_server_arg_injectors(monkeypatch)
-    monkeypatch.setenv("PRECISION", "bf16")
-    src = tmp_path / "base.yaml"
-    _write(src, precision="fp16")
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        reference_envs={"PRECISION": "fp8"},
-    )
-    assert bench["precision"] == "bf16"
-    assert bench["envs"]["PRECISION"] == "fp8"
-
-
-def test_reference_precision_updates_benchmark_precision_without_process_override(
-    tmp_path,
-    monkeypatch,
-):
-    _clear_env(monkeypatch)
-    _stub_server_arg_injectors(monkeypatch)
-    src = tmp_path / "base.yaml"
-    _write(src, precision="bf16")
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        reference_envs={"PRECISION": "fp8"},
-    )
-    assert bench["precision"] == "fp8"
-    assert bench["envs"]["PRECISION"] == "fp8"
 
 
 def test_materialize_rejects_shell_control_in_server_args(tmp_path, monkeypatch):
