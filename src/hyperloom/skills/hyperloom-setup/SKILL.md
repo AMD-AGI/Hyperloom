@@ -339,19 +339,22 @@ Do not print secret values back to the user.
 
 When setup completed in `baremetal` mode, or when `.env` is written in `docker`
 mode, ask the user whether they want to run a demo optimization now, and if so
-which length:
+which option:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
 - `8h` — medium-length Qwen3-14B-FP8 run.
-- `24h` — long-horizon cyclic run.
+- `24h` — long-horizon Qwen3-30B-A3B-Instruct-2507 cyclic run.
+- `custom advanced` — user-selected model, framework, workload, budget, phase
+  toggles, and advanced CLI flags.
 
-If the user wants to run a custom model, keep using one of these demo presets.
-Ask the user for a local model path, confirm that the directory exists and
-contains `config.json`, then export `MODEL_PATH=<that path>` before loading the
-selected demo skill. Explain that the model path is replaced, but the selected
-demo still owns the workload preset: tensor parallelism, concurrency,
-input/output lengths, precision, target gain, and run budget are not retuned
-unless the user explicitly asks to adjust them.
+If the user wants to run a custom model with a preset workload, keep using one
+of the fixed demo presets. Ask the user for a local model path, confirm that the
+directory exists and contains `config.json`, then export `MODEL_PATH=<that path>`
+before loading the selected demo skill. Explain that the model path is replaced,
+but the selected fixed demo still owns the workload preset: tensor parallelism,
+concurrency, input/output lengths, precision, target gain, and run budget are
+not retuned. If the user wants to choose those workload values explicitly, load
+the `custom advanced` demo skill instead.
 
 If the user declines, stop here. If `HYPERLOOM_RUN_MODE` is `baremetal` and
 `FRAMEWORK` is unset, do not offer a demo; tell the user to install a serving
@@ -365,8 +368,11 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 
 - `3h` → `hyperloom-qwen3-8b-3h`
 - `8h` → `hyperloom-qwen3-14b-fp8-8h`
-- `24h` → `hyperloom-gpt-oss-120b-24h`
+- `24h` → `hyperloom-qwen3-30b-a3b-instruct-2507-24h`
+- `custom advanced` → `hyperloom-custom-advanced`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,
-`FRAMEWORK`, `USER_DATA_PATH`), so the user re-enters nothing. It resolves the
-optimizer skill from `.env` `HYPERLOOM_SKILL_PATH` (written by Step 3).
+`FRAMEWORK`, `USER_DATA_PATH`). Fixed presets do not ask the user to re-enter
+workload settings. The custom advanced skill reuses setup values, then asks for
+workload and phase choices. It resolves the optimizer skill from `.env`
+`HYPERLOOM_SKILL_PATH` (written by Step 3).
