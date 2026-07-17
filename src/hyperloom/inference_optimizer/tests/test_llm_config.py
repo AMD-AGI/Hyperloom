@@ -63,9 +63,10 @@ def test_derive_openai_base_url_is_case_insensitive():
         derive_openai_base_url("https://llm-api.amd.com/Anthropic")
         == "https://llm-api.amd.com/Unified/v1"
     )
+    # A lowercase "/unified" segment is normalized to the canonical "/Unified/v1".
     assert (
         derive_openai_base_url("https://llm-api.amd.com/unified")
-        == "https://llm-api.amd.com/unified/v1"
+        == "https://llm-api.amd.com/Unified/v1"
     )
 
 

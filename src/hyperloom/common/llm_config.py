@@ -111,13 +111,15 @@ def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
     parts = urlsplit(base)
     path = parts.path.rstrip("/")
     # Match case-insensitively: AMD's default endpoint uses "/Anthropic" (issue #929).
-    # Keep the original path for slicing so any prefix casing is preserved.
+    # Keep the original path for slicing so any prefix casing is preserved, and
+    # always emit the canonical "/Unified/v1" segment.
     path_lower = path.lower()
     if path_lower.endswith("/anthropic"):
         prefix = path[: -len("/anthropic")]
         return urlunsplit(parts._replace(path=f"{prefix}/Unified/v1"))
     if path_lower.endswith("/unified"):
-        return urlunsplit(parts._replace(path=f"{path}/v1"))
+        prefix = path[: -len("/unified")]
+        return urlunsplit(parts._replace(path=f"{prefix}/Unified/v1"))
     return base
 
 
