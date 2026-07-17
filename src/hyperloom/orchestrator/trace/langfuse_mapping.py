@@ -427,26 +427,30 @@ def decision_to_scores(decision_row: dict[str, Any]) -> list[dict[str, Any]]:
     predicted = dec.get("predicted_gain_pct")
     if predicted is not None:
         try:
-            scores.append({
-                "name": "predicted_gain_pct",
-                "value": float(predicted),
-                "data_type": "NUMERIC",
-                "comment": comment,
-                "metadata": meta,
-            })
+            scores.append(
+                {
+                    "name": "predicted_gain_pct",
+                    "value": float(predicted),
+                    "data_type": "NUMERIC",
+                    "comment": comment,
+                    "metadata": meta,
+                }
+            )
         except (TypeError, ValueError):
             pass
     # Calibration signal: the proposal_scorer's pre-decision rating (mean across
     # raters) as its own NUMERIC score.
     pred = _mean_proposal_score(dec.get("proposal_scores"))
     if pred is not None:
-        scores.append({
-            "name": "proposal_score",
-            "value": pred,
-            "data_type": "NUMERIC",
-            "comment": comment,
-            "metadata": meta,
-        })
+        scores.append(
+            {
+                "name": "proposal_score",
+                "value": pred,
+                "data_type": "NUMERIC",
+                "comment": comment,
+                "metadata": meta,
+            }
+        )
     return scores
 
 

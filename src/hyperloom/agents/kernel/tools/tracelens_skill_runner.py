@@ -55,6 +55,7 @@ class _OpenAIToolScope:
     output_dir: Path
     read_roots: tuple[Path, ...]
 
+
 # Per-message stream-idle timeout (seconds). The in-process Claude SDK query has
 # no client-side read timeout, so a stalled gateway stream would block forever;
 # we bound the wait for each next SDK message (inactivity, not total). Env-overridable.
@@ -81,6 +82,7 @@ def _resolve_stream_idle_timeout_sec() -> float:
     if value <= 0:
         return 0.0
     return max(30.0, value)
+
 
 # Strips a ``Kernel N:`` label prefix from a kernel-name cell piece.
 _KERNEL_LABEL_RE = re.compile(r"^\s*Kernel\s+\d+\s*:\s*", re.IGNORECASE)
@@ -352,7 +354,9 @@ def _import_sdk() -> tuple[Any, Any]:
 
 def _should_use_openai_tool_runner() -> bool:
     """Return true when only an OpenAI-compatible provider is configured."""
-    has_openai = bool((os.environ.get("OPENAI_API_KEY") or "").strip() or (os.environ.get("OPENAI_BASE_URL") or "").strip())
+    has_openai = bool(
+        (os.environ.get("OPENAI_API_KEY") or "").strip() or (os.environ.get("OPENAI_BASE_URL") or "").strip()
+    )
     has_anthropic = bool(
         (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
@@ -469,8 +473,12 @@ def _execute_openai_tool(name: str, arguments_json: str, *, scope: _OpenAIToolSc
         return json.dumps({"ok": False, "error": f"invalid JSON arguments: {exc}"})
     try:
         if name == "read_file":
-            path = _resolve_tool_path(str(args.get("path") or ""), cwd=scope.tracelens_root, allowed_roots=scope.read_roots)
-            return json.dumps({"ok": True, "path": str(path), "content": path.read_text(encoding="utf-8", errors="replace")})
+            path = _resolve_tool_path(
+                str(args.get("path") or ""), cwd=scope.tracelens_root, allowed_roots=scope.read_roots
+            )
+            return json.dumps(
+                {"ok": True, "path": str(path), "content": path.read_text(encoding="utf-8", errors="replace")}
+            )
         if name == "write_file":
             path = _resolve_tool_path(
                 str(args.get("path") or ""),
@@ -481,7 +489,9 @@ def _execute_openai_tool(name: str, arguments_json: str, *, scope: _OpenAIToolSc
             path.write_text(str(args.get("content") or ""), encoding="utf-8")
             return json.dumps({"ok": True, "path": str(path), "bytes": path.stat().st_size})
         if name == "list_dir":
-            path = _resolve_tool_path(str(args.get("path") or "."), cwd=scope.tracelens_root, allowed_roots=scope.read_roots)
+            path = _resolve_tool_path(
+                str(args.get("path") or "."), cwd=scope.tracelens_root, allowed_roots=scope.read_roots
+            )
             entries = sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
             return json.dumps({"ok": True, "path": str(path), "entries": entries[:500]})
         if name == "run_shell":
@@ -882,8 +892,7 @@ async def run_tracelens_skill(
 
     resolved_model = (model or "").strip()
     if _should_use_openai_tool_runner() and (
-        openai_client_factory is not None
-        or (sdk_query_factory is None and sdk_options_cls is None)
+        openai_client_factory is not None or (sdk_query_factory is None and sdk_options_cls is None)
     ):
         openai_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
         return await _run_tracelens_skill_openai(

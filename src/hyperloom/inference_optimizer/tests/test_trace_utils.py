@@ -56,10 +56,7 @@ def test_stream_json_response_dir_path_is_oserror(tmp_path):
 
 def test_stream_json_turn_usages_skips_blank_lines(tmp_path):
     p = tmp_path / "process.log"
-    p.write_text(
-        "\n"
-        '{"type": "assistant", "message": {"usage": {"input_tokens": 1}}}\n'
-    )
+    p.write_text('\n{"type": "assistant", "message": {"usage": {"input_tokens": 1}}}\n')
     out = pu.parse_claude_stream_json_turn_usages(p)
     assert len(out) == 1 and out[0]["input_tokens"] == 1
 
@@ -126,14 +123,16 @@ def test_utc_second_key_unparseable_is_empty():
 
 
 def test_decision_to_scores_non_numeric_gain_and_predicted():
-    scores = lm.decision_to_scores({
-        "decision": {
-            "outcome": "KEEP",
-            "change": "x",
-            "gain_pct": "not-a-number",
-            "predicted_gain_pct": "also-bad",
+    scores = lm.decision_to_scores(
+        {
+            "decision": {
+                "outcome": "KEEP",
+                "change": "x",
+                "gain_pct": "not-a-number",
+                "predicted_gain_pct": "also-bad",
+            }
         }
-    })
+    )
     # Only the categorical outcome score survives; bad numerics are dropped.
     assert [s["name"] for s in scores] == ["decision_outcome"]
 
@@ -176,41 +175,60 @@ def test_coerce_optional_int_variants():
 def test_validate_closed_row_extra_or_missing_field_raises():
     with pytest.raises(ValueError, match="closed schema"):
         ru.validate_closed_row(
-            _row(unexpected=1), fields=_FIELDS, valid_components=_COMPONENTS,
-            error_cls=ValueError, label="llm_calls",
+            _row(unexpected=1),
+            fields=_FIELDS,
+            valid_components=_COMPONENTS,
+            error_cls=ValueError,
+            label="llm_calls",
         )
     with pytest.raises(ValueError, match="closed schema"):
         ru.validate_closed_row(
-            {"component": "orchestration"}, fields=_FIELDS,
-            valid_components=_COMPONENTS, error_cls=ValueError, label="llm_calls",
+            {"component": "orchestration"},
+            fields=_FIELDS,
+            valid_components=_COMPONENTS,
+            error_cls=ValueError,
+            label="llm_calls",
         )
 
 
 def test_validate_closed_row_bad_session_id_raises():
     with pytest.raises(KeyError, match="non-empty 'session_id'"):
         ru.validate_closed_row(
-            _row(session_id="  "), fields=_FIELDS, valid_components=_COMPONENTS,
-            error_cls=KeyError, label="conversations",
+            _row(session_id="  "),
+            fields=_FIELDS,
+            valid_components=_COMPONENTS,
+            error_cls=KeyError,
+            label="conversations",
         )
 
 
 def test_validate_closed_row_bad_component_raises():
     with pytest.raises(ValueError, match="not one of"):
         ru.validate_closed_row(
-            _row(component="nope"), fields=_FIELDS, valid_components=_COMPONENTS,
-            error_cls=ValueError, label="conversations",
+            _row(component="nope"),
+            fields=_FIELDS,
+            valid_components=_COMPONENTS,
+            error_cls=ValueError,
+            label="conversations",
         )
 
 
 def test_validate_closed_row_accepts_valid_row():
     # Happy path returns None without raising.
-    assert ru.validate_closed_row(
-        _row(), fields=_FIELDS, valid_components=_COMPONENTS,
-        error_cls=ValueError, label="llm_calls",
-    ) is None
+    assert (
+        ru.validate_closed_row(
+            _row(),
+            fields=_FIELDS,
+            valid_components=_COMPONENTS,
+            error_cls=ValueError,
+            label="llm_calls",
+        )
+        is None
+    )
 
 
 # --- conversation_trace: redaction + tolerant I/O --------------------------
+
 
 def test_redact_secrets_empty_returns_unchanged():
     assert ct.redact_secrets("") == ""

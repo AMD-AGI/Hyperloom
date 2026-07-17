@@ -19,9 +19,7 @@ def safe_available() -> bool:
     Returns:
         bool: Whether the normal SaFE create flow should be used.
     """
-    return bool(os.environ.get("SAFE_API_URL", "").strip()) and bool(
-        os.environ.get("SAFE_API_KEY", "").strip()
-    )
+    return bool(os.environ.get("SAFE_API_URL", "").strip()) and bool(os.environ.get("SAFE_API_KEY", "").strip())
 
 
 def external_service_url() -> str:
@@ -69,14 +67,14 @@ def build_external_state_from_env() -> dict[str, Any]:
     try:
         from .infera_support import ssh_role_port_offset
     except Exception:  # noqa: BLE001
+
         def ssh_role_port_offset(role: str) -> int:  # type: ignore[misc]
             return 10 if (role or "").lower() == "decode" else 0
 
     def _pods(ips: list[str], role: str) -> list[dict[str, Any]]:
         base = ssh_port + ssh_role_port_offset(role)
         return [
-            {"podIP": ip, "podId": f"external-{role}-{i}", "role": role, "sshPort": base}
-            for i, ip in enumerate(ips)
+            {"podIP": ip, "podId": f"external-{role}-{i}", "role": role, "sshPort": base} for i, ip in enumerate(ips)
         ]
 
     prefill, decode, worker = (

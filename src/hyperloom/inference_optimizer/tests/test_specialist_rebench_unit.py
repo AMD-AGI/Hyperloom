@@ -45,9 +45,7 @@ def test_current_leased_cards_precedence(monkeypatch) -> None:
 
 def test_parse_env_pairs() -> None:
     assert sr._parse_env_pairs(None) == {}
-    assert sr._parse_env_pairs(
-        ["A=1", "B=x=y", "malformed", "=nope", "  C =3"]
-    ) == {"A": "1", "B": "x=y", "C": "3"}
+    assert sr._parse_env_pairs(["A=1", "B=x=y", "malformed", "=nope", "  C =3"]) == {"A": "1", "B": "x=y", "C": "3"}
 
 
 @pytest.mark.asyncio
@@ -161,9 +159,7 @@ def test_main_failure_return_code(tmp_path, monkeypatch, capsys) -> None:
         return {"ok": False, "error": "x"}
 
     monkeypatch.setattr(sr, "run_specialist_rebench", _fake)
-    rc = sr.main(
-        ["--output", str(tmp_path / "o"), "--env", "A=1", "--extra-args=--foo bar"]
-    )
+    rc = sr.main(["--output", str(tmp_path / "o"), "--env", "A=1", "--extra-args=--foo bar"])
     assert rc == 1
 
 

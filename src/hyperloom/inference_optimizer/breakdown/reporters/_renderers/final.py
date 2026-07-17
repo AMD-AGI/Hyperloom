@@ -54,9 +54,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
     )
     # Headline is unvalidated when a GEAK candidate is pending with no positive validated gain.
-    headline_unvalidated = pending_awaiting and not (
-        isinstance(gain_v, (int, float)) and gain_v > 0
-    )
+    headline_unvalidated = pending_awaiting and not (isinstance(gain_v, (int, float)) and gain_v > 0)
 
     facts: list[str] = []
     warnings: list[str] = []
@@ -105,9 +103,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             )
     if geak_pending and geak_pending.get("status") == "awaiting_rebench":
         self_gain = geak_pending.get("self_reported_gain_pct")
-        self_gain_str = (
-            fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
-        )
+        self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
         facts.append(
             f"GEAK candidate (self-reported {self_gain_str}) is AWAITING a "
             "main-flow rebench — excluded from the headline gain and final stack "

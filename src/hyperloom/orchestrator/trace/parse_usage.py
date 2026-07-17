@@ -220,9 +220,7 @@ def parse_claude_stream_json_turn_usages(
     except FileNotFoundError:
         return []
     except OSError as exc:
-        log.warning(
-            "parse_usage: failed reading stream-json log %s: %r", path, exc
-        )
+        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
         return []
     return usages
 
@@ -262,24 +260,21 @@ def parse_claude_stream_json_tool_calls(
                 if not isinstance(message, dict):
                     continue
                 for block in message.get("content") or []:
-                    if (
-                        not isinstance(block, dict)
-                        or block.get("type") != "tool_use"
-                    ):
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
                         continue
                     name = str(block.get("name") or "").strip()
                     if not name:
                         continue
-                    calls.append({
-                        "tool": name,
-                        "query": _summarize_tool_input(block.get("input")),
-                    })
+                    calls.append(
+                        {
+                            "tool": name,
+                            "query": _summarize_tool_input(block.get("input")),
+                        }
+                    )
     except FileNotFoundError:
         return []
     except OSError as exc:
-        log.warning(
-            "parse_usage: failed reading stream-json log %s: %r", path, exc
-        )
+        log.warning("parse_usage: failed reading stream-json log %s: %r", path, exc)
         return []
     return calls
 

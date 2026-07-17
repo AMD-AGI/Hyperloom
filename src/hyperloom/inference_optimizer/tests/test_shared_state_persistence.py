@@ -318,6 +318,7 @@ def test_save_renders_current_setting_sh(tmp_path, monkeypatch):
     out = sd / "current_setting.sh"
     assert out.exists()
     from hyperloom.inference_optimizer.reference_script import parse_reference_script
+
     r = parse_reference_script(str(out), framework="vllm")
     assert "--block-size 128" in r.server_args
     assert "TRITON_ATTN" in r.server_args

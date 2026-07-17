@@ -385,7 +385,6 @@ def _explain_stop_reason(stop_reason):
     return _STOP_REASON_EXPLANATIONS.get(str(stop_reason or "").strip(), "")
 
 
-
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -506,9 +505,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     _fw = summary.get("framework")
     lines.append("## Throughput")
     lines.append("")
-    lines.append(
-        f"- baseline            : `{framework_registry.format_primary_metric(_fw, summary['baseline_tput'])}`"
-    )
+    lines.append(f"- baseline            : `{framework_registry.format_primary_metric(_fw, summary['baseline_tput'])}`")
     if cb_tput is not None:
         lines.append(
             f"- current_best        : `{framework_registry.format_primary_metric(_fw, cb_tput)}` "

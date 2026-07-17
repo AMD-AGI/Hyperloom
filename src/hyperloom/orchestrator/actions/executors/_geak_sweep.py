@@ -10,6 +10,7 @@ in ``result.json``. Each grid point relaunches the optimized server through
 ``bench_e2e.sh`` (same per-variant-server semantics as the native sweep),
 benches at ``(CONC, ISL, OSL)``, and parses ``bench_summary.json``.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -62,12 +63,12 @@ def _write_benchmark_report(
         report["error"] = error
     try:
         (out_dir / "benchmark_report.json").write_text(
-            json.dumps(report, indent=2), encoding="utf-8",
+            json.dumps(report, indent=2),
+            encoding="utf-8",
         )
     except OSError as exc:
         # Best-effort: a failed write must never break the sweep.
-        log.warning("geak_sweep: could not write %s: %s",
-                    out_dir / "benchmark_report.json", exc)
+        log.warning("geak_sweep: could not write %s: %s", out_dir / "benchmark_report.json", exc)
 
 
 def _serving_gpus(tp: int) -> str:
@@ -82,7 +83,8 @@ def _parse_isl_osl(spec: str) -> tuple[int, int]:
 def _pareto_front(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Max output_throughput, min ttft_mean_ms (bench_summary has no e2el)."""
     succ = [
-        e for e in entries
+        e
+        for e in entries
         if e["status"] == "succeeded"
         and isinstance(e.get("output_throughput"), (int, float))
         and isinstance(e.get("ttft_mean_ms"), (int, float))
@@ -93,10 +95,14 @@ def _pareto_front(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for other in succ:
             if other is cand:
                 continue
-            if (other["output_throughput"] >= cand["output_throughput"]
-                    and other["ttft_mean_ms"] <= cand["ttft_mean_ms"]
-                    and (other["output_throughput"] > cand["output_throughput"]
-                         or other["ttft_mean_ms"] < cand["ttft_mean_ms"])):
+            if (
+                other["output_throughput"] >= cand["output_throughput"]
+                and other["ttft_mean_ms"] <= cand["ttft_mean_ms"]
+                and (
+                    other["output_throughput"] > cand["output_throughput"]
+                    or other["ttft_mean_ms"] < cand["ttft_mean_ms"]
+                )
+            ):
                 dominated = True
                 break
         if not dominated:
@@ -131,8 +137,11 @@ async def sweep_via_geak(
     env_str = str(cfg.get("env") or "")
 
     if not bench_script or not Path(bench_script).is_file():
-        return {"status": "failed", "error_class": "missing_bench_script",
-                "error": f"GEAK bench script not found: {bench_script}"}
+        return {
+            "status": "failed",
+            "error_class": "missing_bench_script",
+            "error": f"GEAK bench script not found: {bench_script}",
+        }
 
     model = os.environ.get("MODEL_PATH", "").strip()
     backend = (os.environ.get("FRAMEWORK", "") or "sglang").strip()
@@ -184,22 +193,24 @@ async def sweep_via_geak(
             out_dir = output_root / variant_name
             out_dir.mkdir(parents=True, exist_ok=True)
             env = scrub_child_process_env(dict(os.environ))
-            env.update({
-                "BACKEND": backend,
-                "OUT_DIR": str(out_dir),
-                "GPU": gpus,
-                "TP": str(tp),
-                "MODEL": model,
-                "ISL": str(isl),
-                "OSL": str(osl),
-                "CONC": str(conc),
-                "REPEATS": str(repeats),
-                "PROFILE": "0",
-                "OVERLAY_PYTHONPATH": overlay,
-                "EXTRA_SERVER_ARGS": flags,
-                "EXTRA_ENV": env_str,
-                "BENCH_CLIENT": bench_client,
-            })
+            env.update(
+                {
+                    "BACKEND": backend,
+                    "OUT_DIR": str(out_dir),
+                    "GPU": gpus,
+                    "TP": str(tp),
+                    "MODEL": model,
+                    "ISL": str(isl),
+                    "OSL": str(osl),
+                    "CONC": str(conc),
+                    "REPEATS": str(repeats),
+                    "PROFILE": "0",
+                    "OVERLAY_PYTHONPATH": overlay,
+                    "EXTRA_SERVER_ARGS": flags,
+                    "EXTRA_ENV": env_str,
+                    "BENCH_CLIENT": bench_client,
+                }
+            )
             # setdefault: forwarded config/trust apply unless already pinned.
             for _k, _v in protocol_env.items():
                 env.setdefault(_k, _v)
@@ -207,13 +218,21 @@ async def sweep_via_geak(
 
             def _run() -> subprocess.CompletedProcess:
                 return subprocess.run(
-                    cmd, capture_output=True, text=True,
-                    timeout=variant_timeout_sec, env=env, cwd=str(out_dir),
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=variant_timeout_sec,
+                    env=env,
+                    cwd=str(out_dir),
                 )
 
-            entry: dict[str, Any] = {"conc": conc, "isl": isl, "osl": osl,
-                                     "variant_name": variant_name,
-                                     "workspace": str(out_dir)}
+            entry: dict[str, Any] = {
+                "conc": conc,
+                "isl": isl,
+                "osl": osl,
+                "variant_name": variant_name,
+                "workspace": str(out_dir),
+            }
             ttft = tpot = e2el = None
             tput = None
             succeeded = False
@@ -227,12 +246,14 @@ async def sweep_via_geak(
                 e2el = summ.get("e2el_ms_median")
                 if proc.returncode == 0 and isinstance(tput, (int, float)) and tput > 0:
                     succeeded = True
-                    entry.update({
-                        "status": "succeeded",
-                        "output_throughput": tput,
-                        "ttft_mean_ms": ttft,
-                        "tpot_mean_ms": tpot,
-                    })
+                    entry.update(
+                        {
+                            "status": "succeeded",
+                            "output_throughput": tput,
+                            "ttft_mean_ms": ttft,
+                            "tpot_mean_ms": tpot,
+                        }
+                    )
                 else:
                     err = (proc.stderr or "")[-500:] or "no throughput"
                     entry.update({"status": "failed", "error": err})
@@ -244,7 +265,11 @@ async def sweep_via_geak(
             # sweep collector parses this point like the native sweep;
             # bench_summary.json is kept as the raw artifact.
             _write_benchmark_report(
-                out_dir, conc=conc, isl=isl, osl=osl, success=succeeded,
+                out_dir,
+                conc=conc,
+                isl=isl,
+                osl=osl,
+                success=succeeded,
                 output_throughput_tok_s=tput if isinstance(tput, (int, float)) else None,
                 mean_ttft_ms=ttft if isinstance(ttft, (int, float)) else None,
                 mean_tpot_ms=tpot if isinstance(tpot, (int, float)) else None,

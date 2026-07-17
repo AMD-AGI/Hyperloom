@@ -89,7 +89,7 @@ def _remap_aiter_meta(path: str) -> str:
     live = _aiter_csrc_root()
     if not live:
         return path
-    tail = path[path.find("aiter_meta/csrc/") + len("aiter_meta/csrc/"):]
+    tail = path[path.find("aiter_meta/csrc/") + len("aiter_meta/csrc/") :]
     remapped = live.rstrip("/") + "/" + tail
     return remapped if os.path.exists(remapped) else path
 

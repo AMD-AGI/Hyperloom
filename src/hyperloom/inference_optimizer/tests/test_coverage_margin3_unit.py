@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -163,9 +162,7 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch) -> None:
         raise FileNotFoundError("rocm-smi")
 
     fake_torch = SimpleNamespace(
-        cuda=SimpleNamespace(
-            get_device_properties=lambda _idx: SimpleNamespace(gcnArchName="gfx950:sramecc+:xnack-")
-        )
+        cuda=SimpleNamespace(get_device_properties=lambda _idx: SimpleNamespace(gcnArchName="gfx950:sramecc+:xnack-"))
     )
     monkeypatch.setattr(subprocess, "run", _rocm_missing)
     monkeypatch.setitem(sys.modules, "torch", fake_torch)

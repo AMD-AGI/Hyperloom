@@ -35,10 +35,17 @@ _FAILURE_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("cuda_graph_capture", ("capture cuda graph", "cuda graph capture", "stream capture")),
     ("port_conflict", ("address already in use", "port is already in use", "eaddrinuse")),
     ("detokenizer_stall", ("detokenizer", "decode stalled", "watchdog timeout")),
-    ("server_init_dead", (
-        "engine core init failed", "engine process failed", "worker died",
-        "failed to launch", "server failed to start", "traceback (most recent call last)",
-    )),
+    (
+        "server_init_dead",
+        (
+            "engine core init failed",
+            "engine process failed",
+            "worker died",
+            "failed to launch",
+            "server failed to start",
+            "traceback (most recent call last)",
+        ),
+    ),
 )
 
 
@@ -105,9 +112,7 @@ def estimate_steady_state_from_log(server_log: Path, *, warmup_skip_frac: float 
     samples = parse_server_log_throughput(text)
     return {
         "sample_count": len(samples),
-        "steady_state_output_throughput": steady_state_mean(
-            samples, warmup_skip_frac=warmup_skip_frac
-        ),
+        "steady_state_output_throughput": steady_state_mean(samples, warmup_skip_frac=warmup_skip_frac),
     }
 
 

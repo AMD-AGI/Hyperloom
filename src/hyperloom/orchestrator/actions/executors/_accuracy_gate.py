@@ -52,8 +52,7 @@ def request_baseline_accuracy_stop(shared_state: Any, *, context: str) -> bool:
     if not callable(setter):
         return False
     log.warning(
-        "baseline accuracy test produced no result (%s); stopping run "
-        "(broken baseline setup)",
+        "baseline accuracy test produced no result (%s); stopping run (broken baseline setup)",
         context,
     )
     setter(BASELINE_ACCURACY_STOP_REASON)
@@ -114,6 +113,7 @@ def accuracy_keep_block(
             False,
         )
     return False, "", True
+
 
 # Flags indicating accuracy risk; matching variants must pass the gate.
 _HIGH_RISK_CLI_PATTERNS: tuple[str, ...] = (
@@ -182,10 +182,7 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
             success, or ``{"quality_gate": None, "error": str}`` otherwise.
     """
     workspace = Path(workspace)
-    reports = [
-        Path(f)
-        for f in glob.glob(str(workspace / "**" / "benchmark_report.json"), recursive=True)
-    ]
+    reports = [Path(f) for f in glob.glob(str(workspace / "**" / "benchmark_report.json"), recursive=True)]
     if not reports:
         return {"quality_gate": None, "error": f"no benchmark_report.json in {workspace}"}
     latest = max(reports, key=lambda p: p.stat().st_mtime)
@@ -330,11 +327,7 @@ def parse_eval_results(
     # Drop nested warmup results using a workspace-relative check so a parse
     # rooted AT the warmup slot itself still finds its own output.
     discarded_warmup_dirs = {"warmup_round", "mn_warmup"}
-    result_files = [
-        p
-        for p in result_files
-        if discarded_warmup_dirs.isdisjoint(p.relative_to(workspace).parts)
-    ]
+    result_files = [p for p in result_files if discarded_warmup_dirs.isdisjoint(p.relative_to(workspace).parts)]
     if not result_files:
         return {"accuracy": None, "error": f"no results*.json in {workspace}"}
 

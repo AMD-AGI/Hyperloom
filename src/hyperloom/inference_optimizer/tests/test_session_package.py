@@ -244,6 +244,7 @@ def test_loose_can_be_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 def test_truncation_is_flagged_in_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.breakdown import session_package as sp
+
     monkeypatch.setattr(sp, "_MAX_TOTAL_BYTES", 5)
     sd = tmp_path / "session"
     _build_session(sd)

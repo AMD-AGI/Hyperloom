@@ -407,10 +407,15 @@ def test_construct_prefers_explicit_openai_key_over_anthropic_token(monkeypatch,
 
 
 def test_reviewed_msg_ids_from_bundle_dedups_and_orders():
-    bundle = {"proposals": [
-        {"msg_id": "m1"}, {"msg_id": "m2"}, {"msg_id": "m1"},  # dup dropped
-        {"no_id": True}, {"msg_id": ""},  # skipped
-    ]}
+    bundle = {
+        "proposals": [
+            {"msg_id": "m1"},
+            {"msg_id": "m2"},
+            {"msg_id": "m1"},  # dup dropped
+            {"no_id": True},
+            {"msg_id": ""},  # skipped
+        ]
+    }
     assert _reviewed_msg_ids_from_bundle(bundle) == ["m1", "m2"]
 
 
@@ -491,17 +496,17 @@ async def test_single_proposal_yields_matching_verdict(
     # The critic's token row records the reviewed proposal msg_id(s).
     import json as _json
     from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+
     token_rows = [
         _json.loads(line)
-        for line in llm_calls_path(fake_session_dir)
-        .read_text(encoding="utf-8").splitlines()
+        for line in llm_calls_path(fake_session_dir).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     critic_rows = [r for r in token_rows if r["component"] == "critic"]
     assert critic_rows
     assert critic_rows[0]["reviewed_msg_ids"] == ["abc1"]
 
- # Default kb_mode injected into the runtime env.
+    # Default kb_mode injected into the runtime env.
     env = runtime_calls[0].env
     assert env["CRITIC_KB_CLIENT_MODE"] == "inmemory"
     assert env["CRITIC_SESSION_MEMORY_DIR"].endswith("critic-session-memory")
@@ -802,7 +807,7 @@ async def test_kb_live_without_url_raises(
         kb_mode="live",
         kb_env={},
     )
- # No KB_BASE_URL in env either: ensure it's truly absent.
+    # No KB_BASE_URL in env either: ensure it's truly absent.
     saved = os.environ.pop("KB_BASE_URL", None)
     try:
         with pytest.raises(BackendError, match="KB_BASE_URL"):
@@ -1750,9 +1755,7 @@ async def test_anthropic_protocol_non_2xx_raises(
     judge_bundle = {
         "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
-        "proposals": [
-            {"msg_id": "p1", "from_agent": "orchestration", "action_name": "baseline", "payload": {}}
-        ],
+        "proposals": [{"msg_id": "p1", "from_agent": "orchestration", "action_name": "baseline", "payload": {}}],
         "review_constraints": {},
     }
     backend, _ = _make_anthropic_backend(

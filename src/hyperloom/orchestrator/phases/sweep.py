@@ -45,11 +45,7 @@ class SweepPhase(PhaseHandler):
         prev_conc = prev_conc if isinstance(prev_conc, dict) else {}
         prev_validated = prev_conc.get("cumulative_gain_validated_at_record")
         cur_validated = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
-        if (
-            prev_conc
-            and isinstance(prev_validated, (int, float))
-            and cur_validated <= float(prev_validated) + 1e-6
-        ):
+        if prev_conc and isinstance(prev_validated, (int, float)) and cur_validated <= float(prev_validated) + 1e-6:
             log.info(
                 "SWEEP entry (from=%s): skipping auto-conc-sweep — no validated gain since last "
                 "conc_sweep (validated=%.4f%% unchanged since %s).",
@@ -124,7 +120,9 @@ class SweepPhase(PhaseHandler):
         session_rem = _rem_fn() if callable(_rem_fn) else None
         if session_rem is not None:
             session_rem_sec = int(max(0.0, session_rem * 60.0) - _CLOSE_RESERVE_SEC)
-            clamped_budget = min(configured_budget, max(0, session_rem_sec)) if configured_budget > 0 else max(0, session_rem_sec)
+            clamped_budget = (
+                min(configured_budget, max(0, session_rem_sec)) if configured_budget > 0 else max(0, session_rem_sec)
+            )
         else:
             clamped_budget = configured_budget
         params: dict[str, Any] = {
@@ -212,8 +210,7 @@ class SweepPhase(PhaseHandler):
         # Hand the GEAK e2e result to the sweep so it reuses GEAK's bench_e2e.sh
         # + overlay instead of relaunching via Magpie.
         ps_result = getattr(state, "geak_result", None) or {}
-        if isinstance(ps_result, dict) and ps_result.get("status") == "ok" \
-                and ps_result.get("bench_script"):
+        if isinstance(ps_result, dict) and ps_result.get("status") == "ok" and ps_result.get("bench_script"):
             params["geak_result"] = ps_result
         cb = state.current_best or {}
         if isinstance(cb, dict):

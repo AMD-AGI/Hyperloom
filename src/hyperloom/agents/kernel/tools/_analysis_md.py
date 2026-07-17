@@ -24,9 +24,7 @@ SYSTEM_SIGNALS_HEADING = "## System-Level Signals"
 TOP_HOT_KERNELS_HEADING = "## Top Hot Kernels"
 
 #: Column header row for the shared Top Hot Kernels table.
-TOP_HOT_KERNELS_COLUMNS = (
-    "| Rank | Operation | Time (us) | GPU% | Eff% | AI | Bound | Category | Source File |"
-)
+TOP_HOT_KERNELS_COLUMNS = "| Rank | Operation | Time (us) | GPU% | Eff% | AI | Bound | Category | Source File |"
 _TOP_HOT_KERNELS_SEP = "|------|-----------|-----------|------|------|----|-------|----------|-------------|"
 
 #: Column header row for the shared per-P-item Data table.
@@ -194,8 +192,6 @@ def render_report(
         body += (
             "\n---\n\n"
             "_Additional route-specific detail below (not part of the shared "
-            "cross-route sections above)._\n\n"
-            + extra_sections.strip()
-            + "\n"
+            "cross-route sections above)._\n\n" + extra_sections.strip() + "\n"
         )
     return body

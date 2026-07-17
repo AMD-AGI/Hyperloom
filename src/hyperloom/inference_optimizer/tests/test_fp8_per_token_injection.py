@@ -239,9 +239,7 @@ def _materialize_envs(
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
 
-def test_materialize_injects_for_sglang_fp8_dynamic_on_gfx942(
-    tmp_path, fp8_dynamic_model
-):
+def test_materialize_injects_for_sglang_fp8_dynamic_on_gfx942(tmp_path, fp8_dynamic_model):
     """The fast-path env must be materialized for this workload."""
     envs = _materialize_envs(tmp_path, model=fp8_dynamic_model)
     assert envs.get(_ENV) == "1"

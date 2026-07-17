@@ -26,7 +26,6 @@ from ._common import (
 )
 
 
-
 # Kernel backend invocations
 def _kernel_agent_run_dirs(session_dir: Path) -> list[Path]:
     """All ``<sd>/kernel-agent/runs/<sid>/`` dirs plus the two legacy layouts.
@@ -1156,8 +1155,7 @@ def collect_conc_sweep_summary(
         recovered = _recover_conc_sweep_summary_from_runs(session_dir, warnings)
         if _conc_sweep_successful_pairs(recovered) > 0:
             warnings.append(
-                "conc_sweep_summary: reports/conc_sweep_summary.json absent; "
-                "recovered from runs/conc_sweep"
+                "conc_sweep_summary: reports/conc_sweep_summary.json absent; recovered from runs/conc_sweep"
             )
             return recovered
         return {}
@@ -1454,4 +1452,3 @@ def collect_source_files(
         if lst:
             out[key] = lst
     return out
-

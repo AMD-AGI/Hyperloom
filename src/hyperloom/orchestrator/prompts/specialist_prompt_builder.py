@@ -564,7 +564,7 @@ def _focus_static_recon_specialist(
         f"GPU ({inp.gpu_type or '?'}) + precision ({inp.precision or '?'}) but",
         "are silently disabled in the LIVE framework source.",
         "",
-        *( [model_info_line, ""] if model_info_line else [] ),
+        *([model_info_line, ""] if model_info_line else []),
         *shared_expert_advisory,
         *checklist_lines,
         "**How to hunt (read the LIVE source under the source roots / hint",
@@ -798,7 +798,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "Fan-out: to parallelize independent single-shot sub-tasks (e.g. bench "
         + "N candidates of one lever at once, or read several subsystems), you "
-        + "MAY ``Task(subagent_type=\"hyperloom-leaf\")``. Leaves are single-turn, "
+        + 'MAY ``Task(subagent_type="hyperloom-leaf")``. Leaves are single-turn, '
         + "inherit your VISIBLE_DEVICES (so they share your GPU and cannot "
         + "oversubscribe), and cannot fan out further. Use leaves for breadth; do "
         + "multi-round depth (e.g. coordinate-descent autotune) yourself.",
@@ -910,8 +910,7 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         + "you can get numbers directly comparable to the ``integrate_patch`` "
         + "gate in one call:",
         "    python -m hyperloom.orchestrator.specialists.rebench \\",
-        "        --config <magpie.yaml> --output ./scratch/rebench "
-        + "[--extra-args '<server args>']",
+        "        --config <magpie.yaml> --output ./scratch/rebench " + "[--extra-args '<server args>']",
         "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
         + "— you may instead write your own bench/autotune script. Throughput "
         + "does NOT have to come from rebench.",
@@ -1063,8 +1062,7 @@ def _section_execution_budget(inp: SpecialistPromptInputs) -> list[str]:
     rows = [
         "## 2a. EXECUTION BUDGET (wall-clock)",
         "",
-        f"- Hard wall-clock budget for this entire dispatch: "
-        f"**{inp.wall_budget_sec:.0f}s (~{mins:.0f} min)**.",
+        f"- Hard wall-clock budget for this entire dispatch: **{inp.wall_budget_sec:.0f}s (~{mins:.0f} min)**.",
     ]
     if inp.started_at_iso:
         rows.append(f"- Dispatch started at: {inp.started_at_iso} (UTC).")

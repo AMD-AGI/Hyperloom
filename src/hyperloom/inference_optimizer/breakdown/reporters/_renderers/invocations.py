@@ -134,5 +134,3 @@ def render_forge(breakdown: dict[str, Any]) -> RenderedSection:
         title="Forge Invocations",
         key="forge_invocations",
     )
-
-
