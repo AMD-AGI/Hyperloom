@@ -34,6 +34,11 @@ log = _logging.getLogger(__name__)
 class FrameworkPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
+    # Marker for the candidate-free local-exploration arm (a synthetic
+    # "candidate" whose id is ``local_explore:<n>``): the ranker may pick it,
+    # and it routes to a write-capable authoring specialist instead of a PR.
+    _LOCAL_EXPLORE_KIND = "local_explore"
+
     async def _on_enter_framework(self, *, from_phase: str) -> None:
         """FRAMEWORK entry hook: trigger the per-batch pump once on entry (best-effort; later batches driven from the main tick).
 
@@ -129,6 +134,16 @@ class FrameworkPhase(PhaseHandler):
 
             ok = await self._discover_next_framework_batch()
             if not ok:
+                # Prefer self-driven local exploration over skipping the whole
+                # phase. Discovery is retried automatically on later ticks (once
+                # the local-explore specialist completes and no PR candidate
+                # remains), so with the local-explore arm enabled the phase now
+                # exits via plateau / budget / force-exit rather than a
+                # discover-failure streak. Falls back to the historical
+                # discover-exhaustion exit when the arm is disabled.
+                if await self._maybe_dispatch_local_explore(reason="discover_exhausted"):
+                    state.save(self.session_dir)
+                    return
                 failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0)
                 if failures >= _fa_client.DISCOVER_FAILURE_RETRY_LIMIT:
                     # Transient discover failures exhausted — real exit.
@@ -163,6 +178,9 @@ class FrameworkPhase(PhaseHandler):
             state.framework_agent_empty_discoveries = 0
             next_candidate = await self._select_best_framework_agent_candidate()
             if next_candidate is None:
+                if await self._maybe_dispatch_local_explore(reason="no_new_candidates"):
+                    state.save(self.session_dir)
+                    return
                 self._record_framework_agent_phase_done(
                     reason="discover_returned_no_new_candidates",
                     failure_count=int(
@@ -172,6 +190,13 @@ class FrameworkPhase(PhaseHandler):
                 state.framework_agent_phase_done = True
                 state.save(self.session_dir)
                 return
+        # Local-exploration arm: a candidate-free authoring specialist chosen by
+        # the ranker (resident arm) has no upstream diff to judge, so it skips
+        # the PR semantic audit and dispatches directly.
+        if str(next_candidate.get("kind") or "") == self._LOCAL_EXPLORE_KIND:
+            await self._enqueue_framework_agent_local_explore_specialist(next_candidate)
+            state.save(self.session_dir)
+            return
         # Run semantic audit before the Critic/apply. A confident verdict routes
         # the candidate; an unknown / unavailable audit falls back to both-tracks.
         audit = await self._audit_framework_agent_candidate(next_candidate)
@@ -244,6 +269,16 @@ class FrameworkPhase(PhaseHandler):
             self._framework_candidate_key(c)
             for c in self._unprocessed_framework_agent_candidates()
         }
+        # The local-exploration arm's synthetic candidate id never appears in a
+        # PR batch, so it is "in flight" while it lacks a terminal progress row.
+        processed_ids = self._framework_processed_candidate_keys()
+
+        def _cand_pins_pump(cand_id: str) -> bool:
+            """True when an authoring cand_id keeps the pump serialized."""
+            if not cand_id or cand_id in unprocessed_ids:
+                return True
+            return cand_id.startswith("local_explore:") and cand_id not in processed_ids
+
         try:
             queued = await self.tasks.queued()
             running = await self.tasks.running()
@@ -255,8 +290,7 @@ class FrameworkPhase(PhaseHandler):
             params = getattr(t, "params", None) or {}
             if not params.get("framework_agent_authoring"):
                 continue
-            cand_id = str(params.get("framework_agent_candidate_id") or "")
-            if not cand_id or cand_id in unprocessed_ids:
+            if _cand_pins_pump(str(params.get("framework_agent_candidate_id") or "")):
                 return True
         # An authored patch awaiting Critic review (or a candidate awaiting its
         # pre-screen verdict) keeps the phase open, but only while the proposal
@@ -268,15 +302,13 @@ class FrameworkPhase(PhaseHandler):
                 action = getattr(p, "action_name", "")
                 payload = getattr(p, "payload", None) or {}
                 if action == "framework_agent":
-                    cand_id = str(payload.get("framework_agent_candidate_id") or "")
-                    if not cand_id or cand_id in unprocessed_ids:
+                    if _cand_pins_pump(str(payload.get("framework_agent_candidate_id") or "")):
                         return True
                 elif action == "integrate_patch":
                     iparams = payload.get("params") or {}
                     if not iparams.get("framework_agent_authoring"):
                         continue
-                    cand_id = str(iparams.get("framework_agent_candidate_id") or "")
-                    if not cand_id or cand_id in unprocessed_ids:
+                    if _cand_pins_pump(str(iparams.get("framework_agent_candidate_id") or "")):
                         return True
         except Exception:  # noqa: BLE001 — defensive
             pass
@@ -340,6 +372,50 @@ class FrameworkPhase(PhaseHandler):
                 return True
         return False
 
+    @staticmethod
+    def _framework_audit_use_llm_mode() -> str:
+        """Resolve the phase-audit LLM policy from the environment.
+
+        ``INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_USE_LLM`` selects:
+          - ``off`` — never run the LLM refine (hermetic static verdict only);
+          - ``on`` — always run the evidence-gated LLM refine;
+          - ``auto`` (default) — only escalate to the LLM when the static
+            verdict is uncertain (see :meth:`_framework_audit_verdict_uncertain`).
+
+        Returns:
+            One of ``"on"`` / ``"off"`` / ``"auto"``.
+        """
+        val = (os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_USE_LLM", "") or "").strip().lower()
+        if val in ("on", "1", "true", "yes", "always"):
+            return "on"
+        if val in ("off", "0", "false", "no", "never"):
+            return "off"
+        return "auto"
+
+    @staticmethod
+    def _framework_audit_verdict_uncertain(audit: dict[str, Any] | None) -> bool:
+        """True when a static audit verdict is too weak to route on confidently.
+
+        The ``auto`` LLM policy re-runs the audit with ``use_llm=True`` only in
+        this case, so the extra chat-completion is spent only where the cheap
+        static pass could not decide (``unknown`` status or ``confidence < 0.5``).
+
+        Args:
+            audit: The static-layer verdict dict.
+
+        Returns:
+            ``True`` when the verdict is ``unknown`` or low-confidence.
+        """
+        if not isinstance(audit, dict) or not audit:
+            return True
+        status = str(audit.get("semantic_status") or "").strip().lower()
+        if status in ("", "unknown"):
+            return True
+        try:
+            return float(audit.get("confidence") or 0.0) < 0.5
+        except (TypeError, ValueError):
+            return True
+
     async def _audit_framework_agent_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
         """Run ``fa phase-audit`` for a candidate; degrade to ``unknown`` on any failure.
 
@@ -380,7 +456,7 @@ class FrameworkPhase(PhaseHandler):
             # portability into this session's framework; a blank cand_framework
             # (the common same-framework case) resolves to session_framework.
             is_cross_fw_candidate = bool(cand_framework) and cand_framework != session_framework
-            audit = await _fa_client.phase_audit(
+            audit_kwargs: dict[str, Any] = dict(
                 candidate=candidate,
                 framework=cand_framework or session_framework,
                 framework_source_roots=roots,
@@ -390,13 +466,27 @@ class FrameworkPhase(PhaseHandler):
                 repo_url=str(candidate.get("repo") or ""),
                 diff_url=str(candidate.get("diff_url") or ""),
                 primus_cortex_url=os.environ.get("PRIMUS_CORTEX_PR_API", "").strip(),
-                use_llm=False,
                 timeout_sec=getattr(
                     self,
                     "framework_audit_timeout_sec",
                     _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC,
                 ),
             )
+            # Selectable LLM deep-read: "off" keeps the hermetic static verdict;
+            # "on" always runs the evidence-gated LLM refine; "auto" (default)
+            # only escalates to the LLM when the cheap static pass is uncertain.
+            llm_mode = self._framework_audit_use_llm_mode()
+            audit = await _fa_client.phase_audit(**audit_kwargs, use_llm=(llm_mode == "on"))
+            if llm_mode == "auto" and self._framework_audit_verdict_uncertain(audit):
+                try:
+                    refined = await _fa_client.phase_audit(**audit_kwargs, use_llm=True)
+                    if isinstance(refined, dict) and refined.get("recommended_next_step") is not None:
+                        audit = refined
+                except Exception as refine_exc:  # noqa: BLE001 — refine is best-effort
+                    log.debug(
+                        "FRAMEWORK: auto LLM audit refine failed (%r); keeping static verdict",
+                        refine_exc,
+                    )
         except Exception as exc:  # noqa: BLE001 — audit is advisory; never wedge the pump
             log.warning("FRAMEWORK: phase-audit failed (%r); routing as unknown", exc)
             audit = dict(unknown)
@@ -1902,17 +1992,276 @@ class FrameworkPhase(PhaseHandler):
         unprocessed = self._unprocessed_framework_agent_candidates()
         if not unprocessed:
             return None
-        if len(unprocessed) == 1:
-            return unprocessed[0]
+        # Resident local-exploration arm: offer a candidate-free "author from
+        # live source" option alongside the discovered PRs so the ranker can
+        # choose it when the PR leads look weak / already-present / off the
+        # current bottleneck. Only injected when a PR batch already exists (the
+        # no-batch path stays the discovery trigger).
+        ranking_set = list(unprocessed)
+        pseudo = self._make_local_explore_pseudo_candidate()
+        if pseudo is not None:
+            ranking_set.append(pseudo)
+        if len(ranking_set) == 1:
+            return ranking_set[0]
         try:
-            chosen = await self._rank_framework_agent_candidates_llm(unprocessed)
+            chosen = await self._rank_framework_agent_candidates_llm(ranking_set)
         except Exception:  # noqa: BLE001 — ranking is advisory; never wedge the pump
             log.debug("FRAMEWORK: agent candidate ranking failed", exc_info=True)
             chosen = None
         if chosen is not None:
             return chosen
-        # Deterministic fallback: discovery order.
+        # Deterministic fallback: discovery order (never the pseudo-candidate).
         return unprocessed[0]
+
+    def _framework_local_explore_arm_enabled(self) -> bool:
+        """True when the candidate-free local-exploration arm may run.
+
+        Requires the authoring capability (``framework_agent_authoring_enabled``)
+        and the dedicated toggle (``framework_local_explore_enabled``, default
+        on; ``--no-framework-local-explore`` opts out).
+
+        Returns:
+            ``True`` when both toggles allow the arm.
+        """
+        state = self.shared_state
+        return bool(getattr(state, "framework_agent_authoring_enabled", False)) and bool(
+            getattr(state, "framework_local_explore_enabled", True)
+        )
+
+    def _compose_framework_local_explore_gap(self) -> tuple[str, list[str]]:
+        """Compose the ``(gap, keywords)`` steering the local-exploration arm.
+
+        Reuses the same bottleneck-aware composer as PR discovery so the
+        specialist attacks the current hot path.
+
+        Returns:
+            A ``(gap_description, keywords)`` tuple (``("", [])`` on failure).
+        """
+        state = self.shared_state
+        try:
+            from ..actions.executors._framework_gap_composer import compose_gap
+
+            return compose_gap(
+                framework=str(getattr(state, "framework", "") or ""),
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                model_class=str(getattr(state, "model_class", "") or ""),
+                precision=str(getattr(state, "precision", "") or ""),
+                profile_kernel_breakdown_path=getattr(state, "last_profile_kernel_breakdown", None),
+            )
+        except Exception:  # noqa: BLE001 — advisory only
+            log.debug("FRAMEWORK: local-explore gap compose failed", exc_info=True)
+            return "", []
+
+    def _next_local_explore_candidate_id(self) -> str:
+        """Return the next unique local-exploration candidate id.
+
+        The sequence is the count of local-exploration progress rows already
+        recorded, so the id is stable while an attempt is in flight (no new row
+        yet) and increments once it reaches a terminal row — yielding a fresh
+        attempt each round until the phase plateaus.
+
+        Returns:
+            An id of the form ``local_explore:<n>``.
+        """
+        progress = getattr(self.shared_state, "framework_agent_phase_progress", None) or []
+        n = sum(
+            1
+            for p in progress
+            if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith("local_explore:")
+        )
+        return f"local_explore:{n}"
+
+    def _make_local_explore_pseudo_candidate(self) -> dict[str, Any] | None:
+        """Build the synthetic local-exploration candidate, or ``None`` when disabled.
+
+        Returns:
+            A candidate dict tagged ``kind="local_explore"`` for the ranker, or
+            ``None`` when the arm is disabled.
+        """
+        if not self._framework_local_explore_arm_enabled():
+            return None
+        gap, keywords = self._compose_framework_local_explore_gap()
+        cand_id = self._next_local_explore_candidate_id()
+        title = (
+            f"local source exploration ({gap})"
+            if gap
+            else "local source exploration (author a throughput patch from live source + profile)"
+        )
+        return {
+            "kind": self._LOCAL_EXPLORE_KIND,
+            "candidate_id": cand_id,
+            "title": title,
+            "repo": "(local source)",
+            "framework": str(getattr(self.shared_state, "framework", "") or "").strip().lower(),
+            "gap_description": gap,
+            "gap_keywords": keywords,
+            "gap_canonical_id": "local_explore",
+        }
+
+    async def _maybe_dispatch_local_explore(self, *, reason: str) -> bool:
+        """Dispatch a local-exploration specialist when the arm is enabled.
+
+        Used as the discovery-exhaustion fallback: rather than marking the phase
+        done, author a patch from the live source. No-op (returns ``False``)
+        when the arm is disabled so callers fall back to the historical exit.
+
+        Args:
+            reason: Short provenance tag recorded on the dispatch log line.
+
+        Returns:
+            ``True`` when a specialist was dispatched, else ``False``.
+        """
+        if not self._framework_local_explore_arm_enabled():
+            return False
+        pseudo = self._make_local_explore_pseudo_candidate()
+        if pseudo is None:
+            return False
+        tid = await self._enqueue_framework_agent_local_explore_specialist(pseudo, reason=reason)
+        return bool(tid)
+
+    async def _enqueue_framework_agent_local_explore_specialist(
+        self,
+        candidate: dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> str:
+        """Dispatch a candidate-free authoring specialist (no upstream PR lead).
+
+        The specialist reads the live framework source + profiling evidence (and
+        may web-search the latest upstream code) and authors the best throughput
+        win, flowing through the same autosubmit -> Critic -> integrate_patch ->
+        bench -> KEEP/REVERT path as the PR-authoring track. Empty deliverables
+        stamp an ``author_empty`` progress row (counts as a no-KEEP for plateau).
+
+        Args:
+            candidate: The synthetic ``local_explore`` candidate (carries the
+                candidate id + composed gap).
+            reason: Short provenance tag for the dispatch log line.
+
+        Returns:
+            The dispatched specialist ``task_id`` (empty on a livelock-break
+            short-circuit).
+        """
+        state = self.shared_state
+        cand_id = self._framework_candidate_key(candidate) or self._next_local_explore_candidate_id()
+        gap = str(candidate.get("gap_description") or "").strip()
+        gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.local_explore.{cand_id}"
+        framework = str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower()
+        notes_lines = [
+            "FRAMEWORK LOCAL-EXPLORATION TASK (no upstream PR lead).",
+            "",
+            "PR discovery surfaced nothing worth integrating, so author the best",
+            "throughput win for THIS model / hardware / workload directly from the",
+            "live source + profiling evidence. You are NOT starting from a PR diff.",
+            "",
+            f"- target bottleneck / gap: {gap or '(compose from the profile + workload)'}",
+            f"- framework: {framework or '(session framework)'}",
+            "",
+            "How to work:",
+            "- Read the live framework source (your framework_source_roots) and the",
+            "  latest profiling breakdown to locate the serving hot path",
+            "  (MoE / FP8 / attention / GEMM / KV-cache / scheduling).",
+            "- You MAY use WebSearch / WebFetch to compare the live tree against the",
+            "  LATEST upstream code (e.g. the framework's main branch) and port a",
+            "  newer optimisation when the local checkout is behind.",
+            "- You MAY read /opt/rocm and the HIP source for understanding, and you",
+            "  MAY edit framework Python and aiter source (aiter JIT-recompiles via",
+            "  ninja/hipcc, so edits take effect on the next launch). Do NOT edit",
+            "  compiled /opt/rocm libraries that need a full rebuild to take effect —",
+            "  leave those to the kernel agent.",
+            "",
+            "Deliverable — EITHER is valid (pick what actually moves throughput):",
+            "- a unified-diff source patch in your worktree (``patches_written``), OR",
+            "- when the win is reachable via serving flags / env vars, a",
+            "  ``proposal_set`` entry carrying ``extra_args`` / ``extra_envs``.",
+            "The Coordinator applies + benches it and decides KEEP/REVERT; you do",
+            "not benchmark. A config-lever deliverable is a full result, not empty.",
+        ]
+        try:
+            mem_block = self._render_framework_memory_for_prompt(self._build_framework_working_memory())
+        except Exception:  # noqa: BLE001 — advisory only
+            mem_block = ""
+        if mem_block:
+            notes_lines.extend(["", mem_block])
+        notes = "\n".join(notes_lines)
+        params: dict[str, Any] = {
+            "domain": "serving_specialist",
+            "gap_canonical_id": gap_cid,
+            "gap_symptom": (gap or "Author a framework source patch from live source + profile evidence"),
+            "gap_layer": "framework",
+            "framework": framework,
+            # Same provenance markers as the PR-authoring track so the
+            # autosubmit -> integrate_patch -> authored-outcome bridge applies.
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": cand_id,
+            "framework_batch_id": "",
+            "framework_audit": {},
+            "framework_local_explore": True,
+            "source": "coordinator_internal",
+            "readonly": False,
+            "notes": notes,
+            **self._framework_gpu_params(),
+        }
+        try:
+            await self._warm_specialist_params(params)
+        except Exception:  # noqa: BLE001 — best-effort warmup
+            log.debug("FRAMEWORK local-explore: warm specialist params failed", exc_info=True)
+        idem = f"framework_agent_local_explore:{cand_id}"
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        spec_task, _spec_existing = await self.tasks.create_or_return_existing(
+            kind="specialist",
+            params=params,
+            idempotency_key=idem,
+            requires_lanes=lanes,
+            allowed_tools=[
+                "Read",
+                "Grep",
+                "Glob",
+                "Write",
+                "Edit",
+                "Bash",
+                "WebSearch",
+                "WebFetch",
+            ],
+            side_effects=["writes_results", "writes_patches"],
+            lease_ttl_sec=ttl,
+        )
+        # Livelock break (cross-resume): a specialist that finished before a
+        # resume is returned by idempotency key without re-running; stamp its
+        # empty outcome so the pump advances instead of re-dispatching.
+        from ..state.task_registry import TERMINAL_STATES as _TERMINAL_STATES
+
+        if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
+            already_rows = self._framework_processed_candidate_keys()
+            authoring_inflight = await self._framework_agent_authoring_inflight()
+            if cand_id and cand_id not in already_rows and not authoring_inflight:
+                try:
+                    self._record_framework_agent_authoring_empty_outcome(
+                        task=spec_task,
+                        done_payload={},
+                    )
+                except Exception:  # noqa: BLE001 — never wedge the pump
+                    log.exception(
+                        "FRAMEWORK local-explore: livelock-break empty-outcome stamp failed candidate=%s",
+                        cand_id,
+                    )
+                return ""
+        spec_tid = str(getattr(spec_task, "task_id", "") or "")
+        try:
+            if spec_tid and cand_id:
+                if not isinstance(getattr(state, "framework_agent_specialist_candidate_map", None), dict):
+                    state.framework_agent_specialist_candidate_map = {}
+                state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
+                state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — best-effort provenance
+            log.debug("FRAMEWORK local-explore: specialist->candidate map write failed", exc_info=True)
+        log.info(
+            "FRAMEWORK: dispatched local-exploration specialist candidate=%s gap=%s reason=%s",
+            cand_id,
+            gap_cid,
+            reason or "resident",
+        )
+        return spec_tid
 
     async def _rank_framework_agent_candidates_llm(
         self,
@@ -1967,6 +2316,17 @@ class FrameworkPhase(PhaseHandler):
             appl = str((audit or {}).get("applicability") or "") if audit else ""
             extra = f" [audit_applicability={appl}]" if appl else ""
             ctx_lines.append(f"{i}. id={cid} repo={repo} title={title!r}{extra}")
+        if any(str(c.get("kind") or "") == self._LOCAL_EXPLORE_KIND for c in listed):
+            ctx_lines.append("")
+            ctx_lines.append(
+                "One option above is a LOCAL-EXPLORATION arm (its id starts with "
+                "'local_explore:'): instead of integrating an upstream PR, a "
+                "write-capable specialist authors a patch directly from the live "
+                "source + profiling evidence (it may also compare against the "
+                "latest upstream code via web search). Prefer it when the "
+                "discovered PRs look weak, already-present, or off the current "
+                "bottleneck."
+            )
         # Step C — soft guidance: fold this session's already-tried / failed
         # candidates into the prompt as negative samples so the ranker stops
         # re-picking equivalents. Purely derived from the ledgers (zero extra

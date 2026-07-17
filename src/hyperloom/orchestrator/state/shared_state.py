@@ -550,6 +550,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     )
     # Default True: FRAMEWORK pump dispatches a write-capable serving_specialist per candidate alongside diff-only track. False restores diff-only.
     framework_agent_authoring_enabled: bool = True
+    # Default True: when PR discovery is empty/exhausted (or the ranker prefers
+    # it), the FRAMEWORK pump dispatches a candidate-free authoring specialist
+    # that authors a throughput patch from the live source + profile evidence
+    # instead of skipping the phase. Requires framework_agent_authoring_enabled;
+    # --no-framework-local-explore opts out (restores discover-exhaustion exit).
+    framework_local_explore_enabled: bool = True
     # Default OFF. When True the Coordinator may run explore-style config-grid
     # exploration inside FRAMEWORK_AGENT (reusing ExploreExecutor) before the
     # phase advances. Coordinator-driven, never the LLM.
