@@ -56,6 +56,19 @@ def test_derive_openai_base_url_from_amd_anthropic_endpoint():
     )
 
 
+def test_derive_openai_base_url_is_case_insensitive():
+    # AMD's default endpoint uses a capitalized "/Anthropic" segment (issue #929);
+    # match case-insensitively so the OpenAI base URL is still derived.
+    assert (
+        derive_openai_base_url("https://llm-api.amd.com/Anthropic")
+        == "https://llm-api.amd.com/Unified/v1"
+    )
+    assert (
+        derive_openai_base_url("https://llm-api.amd.com/unified")
+        == "https://llm-api.amd.com/unified/v1"
+    )
+
+
 def test_openai_kwargs_reads_openai_custom_headers():
     """The OpenAI/Codex client applies OPENAI_CUSTOM_HEADERS verbatim."""
     kwargs = openai_client_kwargs(
