@@ -646,8 +646,8 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
 
 
 # _ensure_ray
-def test_ensure_ray_skips_when_importable(monkeypatch, capsys):
-    """`import ray` returns rc=0 → no pip install fires (probe uses the interpreter)."""
+def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
+    """Ray/click smoke passes -> no pip install fires (probe uses the interpreter)."""
     runner = _RecordingRun([_Completed(returncode=0)])
     monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
 
@@ -655,30 +655,39 @@ def test_ensure_ray_skips_when_importable(monkeypatch, capsys):
 
     assert len(runner.calls) == 1
     probe = runner.calls[0]
-    # Probe imports ray with the SAME interpreter, not shutil.which on PATH.
-    assert probe == ["/opt/venv/bin/python", "-c", "import ray"]
+    # Probe validates Ray with the SAME interpreter, not shutil.which on PATH.
+    assert probe[0:2] == ["/opt/venv/bin/python", "-c"]
+    assert "ray.__version__" in probe[2]
+    assert "ray.scripts.scripts" in probe[2]
     assert "ray OK" in capsys.readouterr().out
 
 
-def test_ensure_ray_installs_when_not_importable(monkeypatch, capsys):
-    """When `import ray` fails, pip install runs with the SAME interpreter.
+def test_ensure_ray_installs_when_smoke_fails(monkeypatch, capsys):
+    """When Ray/click smoke fails, pip install runs with the SAME interpreter.
 
     Guards the bypass-only regression: a stray ``ray`` on PATH must not stop
-    the install when the active interpreter cannot import ray.
+    the install when the active interpreter cannot run Ray correctly.
     """
-    runner = _RecordingRun([_Completed(returncode=1), _Completed(returncode=0)])
+    runner = _RecordingRun(
+        [
+            _Completed(returncode=1, stderr="click version incompatible with Ray CLI: 8.4.2 >= 8.3.0"),
+            _Completed(returncode=0),
+            _Completed(returncode=0),
+        ]
+    )
     monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
 
     cli_preflight._ensure_ray("/opt/venv/bin/python", ["--break-system-packages"])
 
-    assert len(runner.calls) == 2
+    assert len(runner.calls) == 3
     install_call = runner.calls[1]
     assert install_call[0] == "/opt/venv/bin/python"
     assert install_call[1:4] == ["-m", "pip", "install"]
     assert "--break-system-packages" in install_call
     assert any(arg.startswith("ray[default]==") for arg in install_call)
+    assert "click<8.3.0" in install_call
     captured = capsys.readouterr().out
-    assert "ray not importable" in captured
+    assert "ray/click invalid" in captured
     assert "ray installed OK" in captured
 
 

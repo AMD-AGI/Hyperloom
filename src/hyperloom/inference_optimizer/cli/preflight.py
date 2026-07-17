@@ -392,16 +392,64 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: installed {pip_spec}")
 
 
+_RAY_INSTALL_SPECS = ("ray[default]==2.44.1", "click<8.3.0")
+
+
+_RAY_SMOKE = r"""
+import importlib.metadata as md
+import re
+import sys
+
+def _version_tuple(version: str) -> tuple[int, int, int]:
+    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
+    parts.extend([0] * (3 - len(parts)))
+    return tuple(parts[:3])
+
+try:
+    import ray
+except Exception as exc:
+    print(f"ray import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+if ray.__version__ != "2.44.1":
+    print(f"ray version mismatch: {ray.__version__} != 2.44.1", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    click_version = md.version("click")
+except md.PackageNotFoundError:
+    print("click is not installed", file=sys.stderr)
+    raise SystemExit(1)
+
+if _version_tuple(click_version) >= (8, 3, 0):
+    print(f"click version incompatible with Ray CLI: {click_version} >= 8.3.0", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    from ray.scripts.scripts import main as _ray_cli_main  # noqa: F401
+except Exception as exc:
+    print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+"""
+
+
+def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [python_exe, "-c", _RAY_SMOKE],
+        capture_output=True,
+        text=True,
+    )
+
+
 def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
     """Probe-then-install Ray using the interpreter that will import it.
 
     Ray is used broadly (multi-node scheduling, kernel/profile/recover
-    executors), not only by Magpie. The probe imports ``ray`` with
-    ``python_exe`` instead of a PATH-only ``which ray`` lookup on purpose: a
-    bypass-only host may have a stray ``ray`` executable on ``PATH`` from an
-    unrelated venv while ``python_exe`` still cannot ``import ray``, so a
-    PATH-only check would false-positive and the Ray-backed executors would
-    then fail at runtime.
+    executors), not only by Magpie. The smoke test imports ``ray`` with
+    ``python_exe``, checks the pinned Ray/click compatibility contract, and
+    imports Ray's CLI module. A PATH-only ``which ray`` lookup, or even a bare
+    ``import ray``, can false-positive when the CLI is broken by an incompatible
+    click version.
 
     Args:
         python_exe (str): The interpreter that will import Ray (and run the
@@ -409,15 +457,20 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
         pip_extra (list[str]): Extra arguments threaded into the ``pip
             install`` invocation (e.g. ``--break-system-packages``).
     """
-    check = subprocess.run([python_exe, "-c", "import ray"], capture_output=True)
+    check = _ray_smoke(python_exe)
     if check.returncode == 0:
         print("Preflight: ray OK")
         return
-    print("Preflight: ray not importable, installing ray[default]==2.44.1 + click<8.3.0 ...")
+    reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
+    print(f"Preflight: ray/click invalid ({reason}), installing ray[default]==2.44.1 + click<8.3.0 ...")
     subprocess.run(
-        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, "ray[default]==2.44.1", "click<8.3.0"],
+        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *_RAY_INSTALL_SPECS],
         check=True,
     )
+    check = _ray_smoke(python_exe)
+    if check.returncode != 0:
+        reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
+        raise RuntimeError(f"Ray install completed but smoke test still failed: {reason}")
     print("Preflight: ray installed OK")
 
 

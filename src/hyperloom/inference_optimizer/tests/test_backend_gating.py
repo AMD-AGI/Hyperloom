@@ -55,11 +55,11 @@ def test_preflight_resolves_interpreter_via_backend_not_magpie():
     # Ray installs with the backend interpreter, not a hardcoded Magpie one.
     assert "benchmark_python" in src
     assert "_ensure_ray(benchmark_python, pip_extra)" in src
-    # Ray availability is probed by importing with the SAME interpreter (not
-    # shutil.which, which only inspects PATH and would false-positive on a
-    # bypass-only host that has a stray ``ray`` on PATH but cannot import it).
+    # Ray availability is probed with the SAME interpreter (not shutil.which,
+    # which only inspects PATH and would false-positive on a bypass-only host
+    # that has a stray ``ray`` on PATH but cannot run Ray correctly).
     ray_src = inspect.getsource(preflight_mod._ensure_ray)
-    assert '[python_exe, "-c", "import ray"]' in ray_src
+    assert "_ray_smoke(python_exe)" in ray_src
     assert "shutil.which" not in ray_src
     # Magpie interpreter is no longer resolved unconditionally in _preflight;
     # it comes through resolve_benchmark_interpreter for the Magpie backend.
@@ -90,6 +90,21 @@ def test_install_sh_gates_magpie_calls():
     # InferenceX stays unconditional (after the fi).
     inferencex_idx = text.index("ensure_inferencex\n", fi_idx)
     assert inferencex_idx > fi_idx
+
+
+def test_kernel_install_validates_ray_cli_and_serving_slot():
+    install_sh = Path(preflight_mod.__file__).resolve().parents[2] / "agents" / "kernel" / "scripts" / "install.sh"
+    text = install_sh.read_text(encoding="utf-8")
+
+    assert '"click<8.3.0"' in text
+    assert "click version incompatible with Ray CLI" in text
+    assert "from ray.scripts.scripts import main" in text
+
+    assert "ray_head_has_serving_slot() {" in text
+    assert '"serving_slot" in resources' in text
+    assert "ray head already running with serving_slot" in text
+    assert "ray head already running without serving_slot; restarting local Ray head" in text
+    assert "--resources='{\"serving_slot\": 1}'" in text
 
 
 def test_lifecycle_delegates_to_bypass_backend(tmp_path, monkeypatch):

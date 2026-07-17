@@ -76,7 +76,8 @@ Required optimize CLI flags:
 - `--precision bf16`
 - `--target-gain 30`
 - `--max-hours 3`
-- `--phase-budget-explore-pct 0.95`
+- `--max-minutes-explore-pct 0.46`
+- `--max-minutes-sweep-pct 0.01`
 - `--explore-force-exit-budget-pct 0.01`
 - `--explore-force-exit-hours-remaining 0.05`
 - `--no-framework-agent`
@@ -189,11 +190,13 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    and critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run in background with `setsid nohup`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-5. Include `--phase-budget-explore-pct 0.95`,
+5. Include `--max-minutes-explore-pct 0.46`,
+   `--max-minutes-sweep-pct 0.01`,
    `--explore-force-exit-budget-pct 0.01`, and
-   `--explore-force-exit-hours-remaining 0.05` in the optimize command so most
-   of the short run budget is reserved for EXPLORE while still exiting cleanly
-   near the deadline.
+   `--explore-force-exit-hours-remaining 0.05` in the optimize command. With
+   FRAMEWORK_AGENT and KERNEL_AGENT disabled, Hyperloom redistributes their
+   shares so most of the short run budget is reserved for EXPLORE while still
+   leaving SWEEP/CLOSE time to exit cleanly near the deadline.
 6. Include `--no-framework-agent` in the optimize command so the
    FRAMEWORK_AGENT phase is skipped.
 7. Include `--no-kernel` in the optimize command so the Kernel Agent phase is skipped.
