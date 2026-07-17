@@ -13,64 +13,25 @@ Hyperloom is validated against.
    This matrix tracks the currently validated combinations. Other ROCm versions
    or framework builds might work but, are not regularly tested.
 
-.. raw:: html
++-------------------+-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
+| Hyperloom Version | Component             | GPU Support         | ROCm Version Support | OS Support                 | Python | GitHub                                        |
++===================+=======================+=====================+======================+============================+========+===============================================+
+| 0.9.0             | TraceLens 0.1.0       | N/A                 | N/A                  | N/A                        | >= 3.6 | `AMD-AGI/TraceLens`_                          |
++                   +-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
+|                   | GEAK 4.0              | MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | > 3.8  | `AMD-AGI/GEAK`_                               |
++                   +-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
+|                   | IntelliKit 0.1.0      | MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10| `AMDResearch/intellikit`_                     |
++                   +-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
+|                   | AgentKernelArena 0.1.0| MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10| `AMD-AGI/AgentKernelArena`_                   |
++                   +-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
+|                   | Magpie 0.1.0          | MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10| `AMD-AGI/Magpie`_                             |
++-------------------+-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
 
-   <table>
-     <thead>
-       <tr>
-         <th>Hyperloom Version</th>
-         <th>Component</th>
-         <th>GPU Support</th>
-         <th>ROCm Version Support</th>
-         <th>OS Support</th>
-         <th>Python</th>
-         <th>GitHub</th>
-       </tr>
-     </thead>
-     <tbody>
-       <tr>
-         <td rowspan="5">0.9.0</td>
-         <td>TraceLens 0.1.0</td>
-         <td>N/A</td>
-         <td>N/A</td>
-         <td>N/A</td>
-         <td>&gt;= 3.6</td>
-         <td><a href="https://github.com/AMD-AGI/TraceLens">AMD-AGI/TraceLens</a></td>
-       </tr>
-       <tr>
-         <td>GEAK 4.0</td>
-         <td>MI300, MI325, MI355</td>
-         <td>7.2.x</td>
-         <td>Ubuntu 22.04, Ubuntu 24.04</td>
-         <td>&gt; 3.8</td>
-         <td><a href="https://github.com/AMD-AGI/GEAK">AMD-AGI/GEAK</a></td>
-       </tr>
-       <tr>
-         <td>IntelliKit 0.1.0</td>
-         <td>MI300, MI325, MI355</td>
-         <td>7.2.x</td>
-         <td>Ubuntu 22.04, Ubuntu 24.04</td>
-         <td>&gt;= 3.10</td>
-         <td><a href="https://github.com/AMDResearch/intellikit">AMDResearch/intellikit</a></td>
-       </tr>
-       <tr>
-         <td>AgentKernelArena 0.1.0</td>
-         <td>MI300, MI325, MI355</td>
-         <td>7.2.x</td>
-         <td>Ubuntu 22.04, Ubuntu 24.04</td>
-         <td>&gt;= 3.10</td>
-         <td><a href="https://github.com/AMD-AGI/AgentKernelArena">AMD-AGI/AgentKernelArena</a></td>
-       </tr>
-       <tr>
-         <td>Magpie 0.1.0</td>
-         <td>MI300, MI325, MI355</td>
-         <td>7.2.x</td>
-         <td>Ubuntu 22.04, Ubuntu 24.04</td>
-         <td>&gt;= 3.10</td>
-         <td><a href="https://github.com/AMD-AGI/Magpie">AMD-AGI/Magpie</a></td>
-       </tr>
-     </tbody>
-   </table>
+.. _AMD-AGI/TraceLens: https://github.com/AMD-AGI/TraceLens
+.. _AMD-AGI/GEAK: https://github.com/AMD-AGI/GEAK
+.. _AMDResearch/intellikit: https://github.com/AMDResearch/intellikit
+.. _AMD-AGI/AgentKernelArena: https://github.com/AMD-AGI/AgentKernelArena
+.. _AMD-AGI/Magpie: https://github.com/AMD-AGI/Magpie
 
 .. note::
 

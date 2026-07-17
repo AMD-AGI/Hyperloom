@@ -14,7 +14,7 @@ or view a detailed breakdown of all previous Hyperloom pre-release versions unde
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
 
-## Hyperloom
+## Hyperloom public snapshot
 
 The first public snapshot of Hyperloom combines features from the following
 per-release versions:
