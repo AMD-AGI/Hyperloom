@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Sweep matrix renderer — concurrency/ISL-OSL grid on the final stack (grid size, best point, variants ≤50 rows)."""
 

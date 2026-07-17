@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Kernel-stack validation handler: draining pending KEEP integrates and
 running/recovering the positive-needs-review stack e2e validation."""

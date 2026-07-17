@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CLOSE phase handler: the 5-step close sequencer, post-opt roofline, and the
 closing-grace / report-terminal helpers used by ``Coordinator.run``."""
