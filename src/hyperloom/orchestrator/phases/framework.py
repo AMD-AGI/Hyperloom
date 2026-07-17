@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """FRAMEWORK_AGENT phase handler: candidate discovery/ranking/audit, authoring
 specialist dispatch, enablement repair, and Critic-review submission/reauthor."""
@@ -10,6 +11,7 @@ import logging as _logging
 import os
 import subprocess
 import time
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1184,7 +1186,7 @@ class FrameworkPhase(PhaseHandler):
                     {
                         "framework": getattr(req, "framework", "") or "sglang",
                         "repo_url": repo,
-                        "work_dir": str(getattr(req, "work_dir", "/tmp/framework-agent")),
+                        "work_dir": str(getattr(req, "work_dir", None) or (Path(tempfile.gettempdir()) / "framework-agent")),
                         "baseline": {"throughput": 1.0},
                         "search_perf_prs": True,
                         "search_modes": search_modes,
@@ -1326,7 +1328,7 @@ class FrameworkPhase(PhaseHandler):
         signature = classify_failure(text)
         if signature.is_actionable:
             return
-        digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()
+        digest = hashlib.sha1(text.encode("utf-8", errors="replace"), usedforsecurity=False).hexdigest()
         state = self.shared_state
         seen = getattr(state, "enablement_human_review_logged", None)
         if not isinstance(seen, list):

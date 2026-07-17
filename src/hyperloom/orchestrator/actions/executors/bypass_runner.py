@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Bypass benchmark runner (CLI).
 
@@ -32,6 +33,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from hyperloom.common.env_safety import scrub_child_process_env
 
 from . import bypass_analysis
 from . import bypass_engine
@@ -573,7 +576,7 @@ def _server_env(
     profile: bool, profile_dir: str | None, bench_envs: dict | None = None,
 ) -> dict[str, str]:
     """Build the server subprocess env (parent + profiler dirs + GPU pin)."""
-    env = os.environ.copy()
+    env = scrub_child_process_env(os.environ.copy())
     # GPU pin: the materializer writes ROCR_VISIBLE_DEVICES into benchmark.envs
     # (reconciled against TP). Inject it so the server binds the same cards
     # Magpie would; missing on single-GPU pods (harmless).

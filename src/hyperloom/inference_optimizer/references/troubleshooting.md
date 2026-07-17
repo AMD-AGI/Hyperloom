@@ -25,7 +25,7 @@ half-created (`.git` exists but `src/` is incomplete) or the filesystem may be
 showing stale metadata. Do not manually clone GEAK, delete only `build/`, or
 edit the checkout in place. Stop any other installer using the same dependency
 root, remove the entire
-`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/GEAK`
+`${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/GEAK`
 directory, then rerun the full install so `install.sh` owns the fresh clone.
 Multiple concurrent installs sharing one dependency root also share this
 checkout; avoid running them at the same time.
@@ -34,7 +34,7 @@ In sandboxes where `/workspace/hyperloom` is unwritable, override the
 **workspace root** with `USER_DATA_PATH` (not the per-session subdir):
 
 ```bash
-export USER_DATA_PATH="/wekafs/xiaofei/sessions"   # workspace root
+export USER_DATA_PATH="/shared/hyperloom-sessions"   # workspace root
 mkdir -p "$USER_DATA_PATH"
 ```
 

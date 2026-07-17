@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Configuration for the Robustness Agent.
 
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -21,17 +23,19 @@ from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, DEF
 
 log = logging.getLogger(__name__)
 
-# Primary data source: cluster DNS first, then a local dev port-forward.
+# Primary data source: an optional explicit endpoint (ROBUSTNESS_SERVER_URL),
+# then generic in-cluster / local-dev fallbacks. No internal cluster DNS is
+# hardcoded; set ROBUSTNESS_SERVER_URL for a specific deployment.
 ROBUSTNESS_SERVER_CANDIDATES: list[str] = [
-    "http://robustness-server.robustness.svc.cluster.local:8000",
-    "http://robustness-server.primus-safe.svc.cluster.local:8000",
+    u for u in (os.environ.get("ROBUSTNESS_SERVER_URL", "").strip(),) if u
+] + [
     "http://robustness-server:8000",
     "http://localhost:8000",
 ]
 
 SESSION_DIR_CANDIDATES: list[Path] = [
     Path("/workspace/session"),
-    Path("/tmp/robustness-session"),
+    Path(tempfile.gettempdir()) / "robustness-session",
 ]
 
 
@@ -65,7 +69,7 @@ class Config:
         family (A–L) for their meaning.
     """
 
-    session_dir: Path = field(default_factory=lambda: Path("/tmp/robustness-session"))
+    session_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / "robustness-session")
 
     # Primary data source; empty means "skip server, only use local probe".
     robustness_server_url: str = ""

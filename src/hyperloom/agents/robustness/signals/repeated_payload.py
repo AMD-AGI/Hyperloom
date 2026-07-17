@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Detect same-fingerprint action retries (B1 / same_payload_loop).
 
@@ -284,7 +285,7 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
         value = _walk_path(payload, path)
         subset[path] = _strip_blacklisted(value)
     canonical = json.dumps(subset, sort_keys=True, default=str)
-    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha1(canonical.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def _walk_path(payload: dict[str, Any], path: str) -> Any:

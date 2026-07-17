@@ -68,7 +68,7 @@ Recommended locations:
 | Setup | Suggested path |
 |-------|----------------|
 | Single-user pod | `$USER_DATA_PATH/kb` |
-| Shared persistent mount | `/wekafs/hyperloom/kb` |
+| Shared persistent mount | `/shared/hyperloom/kb` |
 | Hosted Primus-Claw sandbox | Platform-managed; don't override unless instructed. |
 
 ---

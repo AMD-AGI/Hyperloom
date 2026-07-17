@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CLI ``_preflight`` cluster — auto-install/env-hygiene checks run before ``optimize`` starts."""
 
@@ -15,7 +16,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import (
+    filter_untrusted_env_mapping,
+    is_allowed_dotenv_key,
+    is_allowed_kernel_agent_env_key,
+)
+
 from .credentials import (
+    _is_deepseek_anthropic_url,
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
@@ -41,6 +49,27 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "GEAK_BASE_URL",
     "LLM_API_BASE",
 )
+
+
+def _resolve_dotenv_file() -> Path | None:
+    """Resolve the trusted repo ``.env`` file without trusting arbitrary cwd."""
+    explicit_root = os.environ.get("REPO_ROOT", "").strip()
+    candidates: list[Path] = []
+    if explicit_root:
+        candidates.append(Path(explicit_root))
+    else:
+        # Development checkout: preflight.py -> cli -> inference_optimizer ->
+        # hyperloom -> src -> repo root.
+        package_root = Path(__file__).resolve().parents[4]
+        candidates.append(package_root)
+        cwd = Path.cwd()
+        if (cwd / "pyproject.toml").is_file() and (cwd / "src" / "hyperloom").is_dir():
+            candidates.append(cwd)
+    for root in candidates:
+        env_file = root / ".env"
+        if env_file.is_file():
+            return env_file
+    return None
 
 
 def _provider_only_mode_before_fallback() -> str:
@@ -107,10 +136,10 @@ def _load_dotenv_fallback() -> None:
     environment, regardless of whether LLM credentials are already set (so
     operational vars like ``TRACELENS_ROOT`` / ``FORGE_PATH`` are also picked up).
     """
-    repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
-    env_file = Path(repo_root) / ".env"
-    if not env_file.exists():
+    env_file = _resolve_dotenv_file()
+    if env_file is None:
         return
+    parsed: dict[str, str] = {}
     loaded = 0
     for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw.strip()
@@ -129,6 +158,14 @@ def _load_dotenv_fallback() -> None:
             value = value[1:-1]
         if key in ("TRACELENS_ROOT", "TRACELENS_INTERNAL_ROOT") and _is_placeholder_tracelens_path(value):
             continue
+        parsed[key] = value
+    safe_vars, dropped_vars = filter_untrusted_env_mapping(
+        parsed,
+        allow_predicate=is_allowed_dotenv_key,
+    )
+    for key in dropped_vars:
+        print(f"Preflight: WARNING — ignoring unsupported .env key {key} from {env_file}", file=sys.stderr)
+    for key, value in safe_vars.items():
         if key not in os.environ:
             os.environ[key] = value
             loaded += 1
@@ -243,7 +280,16 @@ def _load_kernel_agent_env_fallback() -> None:
             text = env_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return
-        _correct_kernel_agent_path_vars(_parse_env_assignments(text), env_path)
+        file_vars, dropped_file_vars = filter_untrusted_env_mapping(
+            _parse_env_assignments(text),
+            allow_predicate=is_allowed_kernel_agent_env_key,
+        )
+        for key in dropped_file_vars:
+            print(
+                f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
+                file=sys.stderr,
+            )
+        _correct_kernel_agent_path_vars(file_vars, env_path)
         return
 
     if not candidate:
@@ -280,7 +326,16 @@ def _load_kernel_agent_env_fallback() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    file_vars = _parse_env_assignments(text)
+    parsed_file_vars = _parse_env_assignments(text)
+    file_vars, dropped_file_vars = filter_untrusted_env_mapping(
+        parsed_file_vars,
+        allow_predicate=is_allowed_kernel_agent_env_key,
+    )
+    for key in dropped_file_vars:
+        print(
+            f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
+            file=sys.stderr,
+        )
     loaded = 0
     for key, value in file_vars.items():
         if key not in os.environ:
@@ -481,7 +536,7 @@ def _check_gpu_visibility() -> None:
 def _check_shm_disk() -> None:
     """Warn (not fail-fast) on tight ``/dev/shm`` (vLLM/NCCL IPC needs headroom)."""
     try:
-        usage = shutil.disk_usage("/dev/shm")
+        usage = shutil.disk_usage("/dev/shm")  # nosec B108 - mountpoint probe, not temp file creation.
     except (FileNotFoundError, OSError):
         return
     if usage.free < _DEV_SHM_MIN_FREE_BYTES:
@@ -872,6 +927,12 @@ def _preflight(
     resolved_urls: tuple[str, str] | None = None
     anthropic_url, openai_url = _resolve_llm_endpoints()
     if anthropic_url or openai_url:
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if deepseek_key and _is_deepseek_anthropic_url(anthropic_url):
+            for alias in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+                if not os.environ.get(alias):
+                    os.environ[alias] = deepseek_key
+                    print(f"Preflight: filled {alias} from DEEPSEEK_API_KEY")
         for var, want in (
             ("ANTHROPIC_BASE_URL", anthropic_url),
             ("OPENAI_BASE_URL", openai_url),
@@ -895,7 +956,7 @@ def _preflight(
             geak_claude_model = (
                 os.environ.get("CLAUDE_MODEL", "").strip()
                 or os.environ.get("DEEPSEEK_MODEL", "").strip()
-                or ("deepseek-chat" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
+                or ("deepseek-v4-pro" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else "")
                 or "claude-opus-4-8"
             )
             os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
@@ -1001,16 +1062,19 @@ def _preflight(
     if not inferencex_path:
         from ..session.paths import (
             magpie_dir as _magpie_default,
-            open_source_root as _open_source_default,
+            resolve_dep_dir as _resolve_dep_dir,
         )
 
-        open_source_root = _open_source_default()
         _magpie_env = os.environ.get("MAGPIE_PATH")
         magpie_root = Path(_magpie_env) if _magpie_env else _magpie_default()
-        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
+        # InferenceX detection order: Magpie submodule (canonical post-install.sh)
+        # → installer's per-revision cache checkout (InferenceX@<sha>, resolved via
+        # resolve_dep_dir so a process that did not inherit INFERENCEX_PATH still
+        # finds it; falls back to the bare dir). Legacy read-only host mounts
+        # removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
-            open_source_root / "InferenceX",
+            _resolve_dep_dir("InferenceX"),
         ):
             if _inferencex_checkout_ok(candidate):
                 if os.access(candidate, os.W_OK):
@@ -1024,7 +1088,7 @@ def _preflight(
     # When no writable checkout was found, clone one ourselves. baseline cannot
     # run without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from ..session.paths import open_source_root as _open_source_default
+        from ..session.paths import deps_cache_root as _open_source_default
 
         dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")

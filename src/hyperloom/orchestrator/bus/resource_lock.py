@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """ResourceLockManager + SqliteLeaseBackend.
 
@@ -205,7 +206,7 @@ class SqliteLeaseBackend:
             capacity_by_lane: dict[str, int] = {}
             placeholders = ",".join("?" * len(expanded))
             cur.execute(
-                f"SELECT lane, capacity FROM lane_capacity WHERE lane IN ({placeholders})",
+                f"SELECT lane, capacity FROM lane_capacity WHERE lane IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 expanded,
             )
             for row in cur.fetchall():
@@ -218,7 +219,7 @@ class SqliteLeaseBackend:
 
             # Pull holders to reap expired rows and count live holders per lane.
             cur.execute(
-                f"SELECT lane, holder_id, expires_at FROM leases WHERE lane IN ({placeholders})",
+                f"SELECT lane, holder_id, expires_at FROM leases WHERE lane IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 expanded,
             )
             rows = [dict(r) for r in cur.fetchall()]
@@ -327,7 +328,7 @@ class SqliteLeaseBackend:
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(lease.lanes))
             cur.execute(
-                f"UPDATE leases SET expires_at=?, heartbeat_at=? WHERE lane IN ({placeholders}) AND holder_id=?",
+                f"UPDATE leases SET expires_at=?, heartbeat_at=? WHERE lane IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
                 (new_expires_iso, now_iso, *lease.lanes, lease.holder_id),
             )
             if cur.rowcount != len(lease.lanes):
@@ -348,7 +349,7 @@ class SqliteLeaseBackend:
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(lease.lanes))
             cur.execute(
-                f"DELETE FROM leases WHERE lane IN ({placeholders}) AND holder_id=?",
+                f"DELETE FROM leases WHERE lane IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
                 (*lease.lanes, lease.holder_id),
             )
             return cur.rowcount

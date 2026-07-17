@@ -29,8 +29,8 @@ builder as the live Coordinator `session_breakdown` action and the
 
 Use this when:
 
-* You want to (re)produce the breakdown for a historical WekaFS
-  session.
+* You want to (re)produce the breakdown for a historical session on a shared
+  filesystem.
 * A live session crashed before reaching the closing phase and you
   want the partial breakdown anyway.
 * You need to bulk-export breakdowns for downstream indexing.
@@ -43,16 +43,16 @@ Use these commands to produce a session breakdown.
 # Live session in the current sandbox (USER_DATA_PATH or /workspace/hyperloom)
 python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
 
-# Historical session on WekaFS
+# Historical session on a shared filesystem
 python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
-    --session-dir /wekafs/users/zgong/inference_optimizer-sessions/<sid>
+    --session-dir /shared/hyperloom-sessions/<user>/<sid>
 
 # Override output path (don't touch session_dir)
 python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
     --session-dir <SD> --output /tmp/breakdown-<sid>.json
 
 # Bulk historical
-for d in /wekafs/users/*/inference_optimizer-sessions/*; do
+for d in /shared/hyperloom-sessions/*/*; do
     [ -d "$d" ] || continue
     python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \
         --session-dir "$d" > /dev/null
@@ -91,16 +91,16 @@ Use the following commands to render a session report.
 ```bash
 # Deterministic only (no LLM):
 python -m hyperloom.inference_optimizer.tools.dump_session_report \
-    --input  /wekafs/.../session_breakdown.json \
-    --output /wekafs/.../session_report.md
+    --input  /shared/hyperloom-sessions/<user>/<sid>/session_breakdown.json \
+    --output /shared/hyperloom-sessions/<user>/<sid>/session_report.md
 
 # With LLM-polished prose (OpenAI-compatible endpoint):
 HYPERLOOM_REPORT_LLM_BACKEND=openai \
-OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1 \
+OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1 \
 OPENAI_API_KEY=... \
 python -m hyperloom.inference_optimizer.tools.dump_session_report \
-    --input  /wekafs/.../session_breakdown.json \
-    --output /wekafs/.../session_report.md
+    --input  /shared/hyperloom-sessions/<user>/<sid>/session_breakdown.json \
+    --output /shared/hyperloom-sessions/<user>/<sid>/session_report.md
 ```
 
 When `--output` is omitted the report is written to

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Shared model-path resolution: a ``--model`` value -> a local model directory.
 
@@ -19,6 +20,69 @@ in ``hyperloom.common.__init__``) mirror this same strategy independently.
 from __future__ import annotations
 
 from pathlib import Path
+
+
+def _identity_leaf(seg: str) -> str:
+    """Reduce one identity segment to its ``org/repo`` (or bare ``repo``) form.
+
+    Strips a ``models--`` cache prefix and canonicalizes the ``org--repo`` cache
+    separator to ``org/repo``; a segment without org info stays bare.
+    """
+    s = seg.strip().strip("/").split("/")[-1]
+    if s.startswith("models--"):
+        s = s[len("models--"):]
+    return s.replace("--", "/")
+
+
+def _identity_bare(full: str) -> str:
+    """Return the repo-only tail of an ``org/repo`` identity (or the value)."""
+    return full.rsplit("/", 1)[-1] if "/" in full else full
+
+
+def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[str]]:
+    """Return ``(full, bare)`` casefolded identity candidate sets.
+
+    ``full`` keeps the ``org/repo`` qualification (e.g. ``qwen/qwen2.5-7b``);
+    ``bare`` is the repo tail only (``qwen2.5-7b``). Covers flat dirs, bare
+    names, HF repo ids, and HF hub cache paths whose ``snapshots/<hash>``
+    basename hides the repo name in an upstream ``models--org--repo`` segment.
+    """
+    raw = ("" if model is None else str(model)).strip()
+    if not raw:
+        return set(), set()
+    p = Path(raw)
+    segments = [p.name]
+    # HF hub cache hides the repo name in a mid-path models--org--repo segment;
+    # the snapshots/<hash> basename alone cannot recover it.
+    segments += [part for part in p.parts if part.startswith("models--")]
+    full = {_identity_leaf(s) for s in segments if s}
+    full = {f for f in full if f}
+    bare = {_identity_bare(f) for f in full}
+    return {f.casefold() for f in full}, {b.casefold() for b in bare}
+
+
+def model_identities_match(declared: str, *launched: str) -> bool:
+    """Whether ``declared`` names the same model as any ``launched`` value.
+
+    Prefers a fully-qualified ``org/repo`` match. Falls back to the repo-only
+    (bare) name ONLY when at least one side lacks org info — so two different
+    orgs sharing a repo name (``a/Llama-8B`` vs ``b/Llama-8B``) do NOT match,
+    while a declared clean name (``Llama-8B``, no org) still matches its
+    launched ``org/repo`` form.
+    """
+    d_full, d_bare = model_identity_candidates(declared)
+    l_full: set[str] = set()
+    l_bare: set[str] = set()
+    for value in launched:
+        vf, vb = model_identity_candidates(value)
+        l_full |= vf
+        l_bare |= vb
+    if d_full & l_full:
+        return True
+    # Both sides carry org qualification but no full match -> distinct models.
+    if any("/" in x for x in d_full) and any("/" in x for x in l_full):
+        return False
+    return bool(d_bare & l_bare)
 
 
 def resolve_local_model_dir(model: str | Path | None) -> Path | None:

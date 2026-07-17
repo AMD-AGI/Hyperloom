@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for ClaudeBackend pure helpers (no real SDK): prompt composition,
 usage coercion, block iteration/classification, tool-use parsing, text
@@ -90,7 +91,7 @@ def test_reset_conversation_clears_session_id() -> None:
 
 
 def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm-api.amd.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub-key")
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
@@ -101,7 +102,7 @@ def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch)
 
     assert opts.kwargs["setting_sources"] == []
     child_env = opts.kwargs["env"]
-    assert child_env["ANTHROPIC_BASE_URL"] == "https://llm-api.amd.com/anthropic"
+    assert child_env["ANTHROPIC_BASE_URL"] == "https://llm.example.invalid/anthropic"
     assert child_env["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: sub-key"
     assert child_env["ANTHROPIC_MODEL"] == "claude-opus-4-6"
     assert child_env["ANTHROPIC_SMALL_FAST_MODEL"] == "claude-opus-4-6"
@@ -129,7 +130,7 @@ def test_build_options_maps_openai_gateway_env_for_claude_code(monkeypatch) -> N
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm-api.amd.com/Unified/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: openai-key")
     b = _backend(model="claude-opus-4-6")

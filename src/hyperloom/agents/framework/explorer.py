@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """PR/ref exploration engine; candidates come from ``sources.enumerate_candidates`` (honours ``search_modes``), enrichment + filtering happen here.
 
@@ -62,7 +63,7 @@ def _coalesce_str(*values: Any) -> str:
 def _summary_of(detail: dict[str, Any]) -> dict[str, Any]:
     """Return the nested ``summary`` mapping from a PR detail payload.
 
-    primus-cortex wraps PR metadata under a ``summary`` key; this defaults
+    primus_cortex wraps PR metadata under a ``summary`` key; this defaults
     to ``{}`` when it is absent or not a dict.
 
     Args:

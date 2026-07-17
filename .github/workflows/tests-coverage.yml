@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 name: Tests with Coverage
 
@@ -6,11 +7,12 @@ name: Tests with Coverage
 # matches paths-ignore (documentation-only and repo-metadata edits).
 #
 # Pytest argv for CI lives in ``pyproject.toml`` → ``[tool.hyperloom.tests_coverage]``.
-# This workflow reads that table with inline Python (no ``ci/coverage_summary.py``).
+# This workflow reads that table with inline Python.
 # Coverage per-tree summary reads ``[tool.coverage.run].source`` the same way.
 # When ``OOB/`` is present, ``pip install -e \"./OOB\"`` enables ``agent_mcp_server``
 # UTs; if absent, install is skipped (``importorskip`` in OOB tests).
 # Two matrix legs (Python 3.10 + 3.11).
+# pull_request runs use the workflow definition from the PR merge ref.
 on:
   # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
   # PR does not double-trigger (one run per event class).
@@ -141,7 +143,6 @@ jobs:
           _SOURCE_SEGMENTS = {
               "src/hyperloom": ["/hyperloom/"],
               "OOB": ["/OOB/", "/agent_mcp_server/"],
-              "ci": ["/ci/"],
           }
 
           def _row_path_stmts_miss(line: str):

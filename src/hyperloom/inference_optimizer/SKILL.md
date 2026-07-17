@@ -116,7 +116,7 @@ host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens`; when unset,
+`${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens`; when unset,
 `src/hyperloom/agents/kernel/scripts/install.sh` clones
 [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
 it to a fixed SHA. A pre-existing checkout you maintain is only used as
@@ -131,7 +131,7 @@ URL/path). The per-version
 TraceLens is required by `_server_patcher`),
 `/sgl-workspace/{aiter,sglang,vllm}/`,
 `~/.cache/amd-ai-devtool/semantic-index/`
-(GEAK RAG embedding cache), `/wekafs/hyperloom/geak-memory/memory.db`
+(GEAK RAG embedding cache), `/shared/hyperloom/geak-memory/memory.db`
 (GEAK cross-session memory). Each is overridable via its own env if
 you want a fully self-contained session.
 
@@ -317,7 +317,7 @@ After Step 1, source the generated `kernel-agent.env.sh` in the same shell.
 ### Step 1 — Install (one-time per pod / venv rebuild)
 
 ```bash
-export REPO_ROOT="$(pwd)"   # repo root containing src/hyperloom/ + .env
+export REPO_ROOT="$(pwd -P)"   # repo root containing src/hyperloom/ + .env
 bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"   # pod-local runtime env
 ```
@@ -406,9 +406,11 @@ Steps for the launching agent:
    `model_arch.json` at the workspace root. Do not create a subdirectory
    such as `model_arch_advisory/`; the CLI only reads the root-level
    convention file. Include `model_name` (required for the stale-file
-   guard — its basename must match the launched `--model` basename or
-   Hyperloom ignores the file). All other fields are optional; renderers
-   drop empty fields.
+   guard). Set it to the **clean model name** (e.g. `Qwen2.5-7B-Instruct`);
+   the guard normalizes launch forms — flat dirs, HF repo ids, and HF hub
+   cache `models--org--repo/snapshots/<hash>` paths — so do NOT use the
+   snapshot commit hash. All other fields are optional; renderers drop
+   empty fields.
 
 ```json
 {
@@ -472,7 +474,7 @@ stated value is lost (issue #903):
 | Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). Keep consistent with `--quantize`. |
 | Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. |
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
-| External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` as TODO 0 so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
+| External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` to run first so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Ignored on `--resume`. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
@@ -534,12 +536,12 @@ export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
-# to $HYPERLOOM_OPEN_SOURCE_ROOT/TraceLens and pin it to a
-# fixed SHA. Only export it as an operator override to point at a
+# to ${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha> and pin it
+# to a fixed SHA. Only export it as an operator override to point at a
 # pre-existing checkout you maintain; this skips both the clone and the
 # SHA pin.
 # export TRACELENS_ROOT=/path/to/your/TraceLens
-# Optional internal extension; export only to enable it (open-source-only if unset):
+# Optional TraceLens-internal checkout; export only to enable it (open-source-only if unset):
 # export TRACELENS_INTERNAL_ROOT=/workspace/TraceLens-internal
 
 export PYTHON="${PYTHON:-$(command -v python3)}"
@@ -604,7 +606,7 @@ In sandboxes where `/workspace/hyperloom` is unwritable, override the
 **workspace root** with `USER_DATA_PATH` (not the per-session subdir):
 
 ```bash
-export USER_DATA_PATH="/wekafs/xiaofei/sessions"   # workspace root
+export USER_DATA_PATH="/shared/hyperloom-sessions"   # workspace root
 mkdir -p "$USER_DATA_PATH"
 ```
 

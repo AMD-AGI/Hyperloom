@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit coverage for the GEAK e2e breakdown collector and the
 sweep ``benchmark_report.json`` writer.
@@ -71,7 +72,7 @@ def test_collect_geak_reconstructs_from_disk_when_result_missing(
     (pf / "handoff.json").write_text(
         json.dumps(
             {
-                "model_path": "/wekafs/models/Qwen-Qwen3-0.6B",
+                "model_path": "/path/models/Qwen-Qwen3-0.6B",
                 "framework": "vllm",
                 "gpu_type": "mi300x",
                 "tp": 1,
@@ -584,6 +585,7 @@ PY
         result={
             "status": "ok",
             "bench_script": str(bench),
+            "output_dir": str(tmp_path),
             "final_overlay": "/tmp/overlay",
             "bench_client": "inferencex",
             "accepted_config": {

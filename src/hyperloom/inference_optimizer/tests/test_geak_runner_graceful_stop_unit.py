@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 """Behavioral tests for geak_runner's graceful-stop / flush contract.
 
 Drive the real call_geak() against a fake runner script so the process-group
@@ -42,16 +43,34 @@ def _handoff() -> dict:
             "exp_root": "/tmp/x"}
 
 
-def test_resolve_runner_falls_back_to_open_source_root(tmp_path, monkeypatch):
-    geak_root = tmp_path / "open-source" / "GEAK"
+def test_resolve_runner_falls_back_to_cache_dir(tmp_path, monkeypatch):
+    geak_root = tmp_path / "cache" / "GEAK"
     runner = geak_root / "interface" / "run_e2e.py"
     runner.parent.mkdir(parents=True)
     runner.write_text("# fake\n", encoding="utf-8")
     monkeypatch.delenv("GEAK_E2E_RUNNER", raising=False)
     monkeypatch.delenv("GEAK_ROOT", raising=False)
-    monkeypatch.setenv("HYPERLOOM_OPEN_SOURCE_ROOT", str(tmp_path / "open-source"))
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
 
     assert psr._resolve_runner() == str(runner)
+
+
+def test_resolve_runner_prefers_newest_pinned_geak_in_cache(tmp_path, monkeypatch):
+    import os as _os
+
+    cache = tmp_path / "cache"
+    old_runner = cache / "GEAK@1111111" / "interface" / "run_e2e.py"
+    new_runner = cache / "GEAK@2222222" / "interface" / "run_e2e.py"
+    for r in (old_runner, new_runner):
+        r.parent.mkdir(parents=True)
+        r.write_text("# fake\n", encoding="utf-8")
+    _os.utime(old_runner.parent.parent, (1_000_000, 1_000_000))
+    _os.utime(new_runner.parent.parent, (2_000_000, 2_000_000))
+    monkeypatch.delenv("GEAK_E2E_RUNNER", raising=False)
+    monkeypatch.delenv("GEAK_ROOT", raising=False)
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(cache))
+
+    assert psr._resolve_runner() == str(new_runner)
 
 
 def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):

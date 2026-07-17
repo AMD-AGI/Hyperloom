@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for the per-session path helpers."""
 
@@ -30,6 +31,42 @@ def test_runs_root_and_dir():
 def test_runs_dir_rejects_unknown_action():
     with pytest.raises(ValueError):
         sp.runs_dir(SD, "definitely-not-an-action", "t1")
+
+
+@pytest.mark.parametrize(
+    "bad_task_id",
+    [
+        "../escape",
+        "..",
+        ".",
+        "a/../../etc",
+        "sub/dir",
+        "/abs/path",
+        "x/y",
+    ],
+)
+def test_runs_dir_rejects_task_id_traversal(bad_task_id):
+    # Legitimate task ids are single path components; anything path-like must
+    # be rejected so it cannot relocate the sandbox.
+    with pytest.raises(ValueError):
+        sp.runs_dir(SD, "baseline", bad_task_id)
+
+
+def test_runs_dir_accepts_uuid_hex_task_id():
+    tid = "0123456789abcdef0123456789abcdef"
+    assert sp.runs_dir(SD, "baseline", tid) == SD / "runs" / "baseline" / tid
+
+
+def test_kernel_agent_runs_dir_rejects_traversal():
+    for bad in ("../x", ".", "a/b", "/abs"):
+        with pytest.raises(ValueError):
+            sp.kernel_agent_runs_dir(SD, bad)
+
+
+def test_patches_dir_rejects_traversal():
+    for bad in ("../x", ".", "a/b", "/abs"):
+        with pytest.raises(ValueError):
+            sp.patches_dir(SD, bad)
 
 
 def test_validate_action_strips():

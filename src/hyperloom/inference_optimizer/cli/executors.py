@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Action-executor wiring for the CLI.
 
@@ -11,6 +12,7 @@ must not import ``cli`` (one-way dependency).
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -38,6 +40,26 @@ if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycl
 
 
 log = logging.getLogger(__name__)
+
+
+def _mcp_servers_from_config(config_path: str | None) -> tuple[str, ...] | None:
+    """Return MCP server names declared by an operator-supplied config file.
+
+    ``None`` means no explicit config was supplied. A tuple, including an empty
+    tuple, means an explicit config was supplied and should be authoritative for
+    MCP tool gating.
+    """
+    if not config_path:
+        return None
+    try:
+        payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("specialist_mcp_config could not be inspected for tool gating: %r", exc)
+        return ()
+    servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+    if not isinstance(servers, dict):
+        return ()
+    return tuple(str(name) for name in servers if str(name).strip())
 
 
 async def _noop_prep(ctx) -> dict:
@@ -127,6 +149,7 @@ def _build_specialist_executor(
         # Operator --specialist-mcp-config wins; else auto-generate one from the
         # live KnowledgePlane so the subprocess has the PR Monitor MCP wired.
         mcp_config_path: str | None = str(getattr(args, "specialist_mcp_config", "") or "") or None
+        forced_mcp_servers = _mcp_servers_from_config(mcp_config_path)
         if mcp_config_path is None and knowledge_plane is not None:
             try:
                 pr_mcp_url = knowledge_plane.specialist_mcp_url()
@@ -146,6 +169,7 @@ def _build_specialist_executor(
             )
             if generated is not None:
                 mcp_config_path = str(generated)
+                forced_mcp_servers = None
         sub_config = SpecialistSubprocessConfig(
             claude_executable=claude_bin or "claude",
             model=claude_model,
@@ -159,6 +183,7 @@ def _build_specialist_executor(
             default_tools=DEFAULT_SPECIALIST_TOOLS,
             default_max_turns=max_turns,
             knowledge_plane=knowledge_plane,
+            forced_mcp_servers=forced_mcp_servers,
         )
     else:
 

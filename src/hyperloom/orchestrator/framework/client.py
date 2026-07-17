@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coordinator-side thin client for the framework-agent
 ``fa phase-discover`` subcommand.
@@ -162,7 +163,7 @@ async def phase_discover(
 ) -> dict[str, Any]:
     """FRAMEWORK-phase batch discovery shim.
 
-    Non-empty ``keywords`` is used verbatim for the primus-cortex AND-search
+    Non-empty ``keywords`` is used verbatim for the primus_cortex AND-search
     (fa skips its own ``extract_keywords``); empty/``None`` keeps the default
     keyword extraction. Returns the ``fa phase-discover`` payload
     ``{batch_id, framework, repo_url, candidates: [...]}``.

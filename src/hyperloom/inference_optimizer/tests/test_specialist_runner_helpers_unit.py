@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for SpecialistRunner pure helpers + workspace file protocol:
 failure classification, empty-done synthesis, redaction, path resolution, and
@@ -29,11 +30,26 @@ def test_now_iso():
 
 
 def test_safe_redact():
-    line = "export ANTHROPIC_API_KEY=sk-123 and GITHUB_TOKEN=ghp_x"
+    line = "export ANTHROPIC_API_KEY=sk-ant-123 and GITHUB_TOKEN=ghp_secret"
     out = sr._safe_redact(line)
-    assert "ANTHROPIC_API_KEY[REDACTED]" in out
-    assert "GITHUB_TOKEN[REDACTED]" in out
+    assert "ANTHROPIC_API_KEY=[REDACTED]" in out
+    assert "GITHUB_TOKEN=[REDACTED]" in out
+    assert "sk-ant-123" not in out
+    assert "ghp_secret" not in out
     assert sr._safe_redact("plain line") == "plain line"
+
+
+def test_safe_redact_headers_and_token_shapes():
+    line = (
+        "Authorization: Bearer sk-live-secret "
+        "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig "
+        "aws=AKIA1234567890ABCDEF"
+    )
+    out = sr._safe_redact(line)
+    assert "Authorization: Bearer [REDACTED]" in out
+    assert "sk-live-secret" not in out
+    assert "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig" not in out
+    assert "AKIA1234567890ABCDEF" not in out
 
 
 def test_extra_focus_tags(monkeypatch):
@@ -148,6 +164,25 @@ def test_append_transcript(tmp_path):
     assert json.loads(lines[0])["turn"] == 1
 
 
+def test_append_transcript_redacts_nested_metadata(tmp_path):
+    r = _runner()
+    r._append_transcript(
+        tmp_path,
+        1,
+        {
+            "metadata": {
+                "prompt": "OPENAI_API_KEY=sk-live-secret",
+                "headers": ["Authorization: Bearer ghp_secretvalue"],
+            }
+        },
+    )
+
+    text = (tmp_path / "transcript.jsonl").read_text(encoding="utf-8")
+    assert "sk-live-secret" not in text
+    assert "ghp_secretvalue" not in text
+    assert "[REDACTED]" in text
+
+
 def test_write_heartbeat(tmp_path):
     r = _runner()
     r._write_heartbeat(tmp_path, turn=3, max_turns=10, status="working")
@@ -207,3 +242,33 @@ def test_maybe_setup_worktree_readonly(tmp_path):
     r = _runner(backend_factory=None, subprocess_config=cfg)
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"readonly": True}))
     assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, "")
+
+
+def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):
+    # Legitimate patch paths stay inside the worktree/workspace.
+    worktree = tmp_path / "worktree"
+    workspace = tmp_path / "workspace"
+    worktree.mkdir()
+    workspace.mkdir()
+    bases = [worktree, workspace]
+
+    inside = worktree / "patches" / "x.patch"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("diff", encoding="utf-8")
+    assert sr._patch_path_within_bases(inside, bases) is True
+    assert sr._patch_path_within_bases(workspace / "y.patch", bases) is True
+
+
+def test_patch_path_within_bases_rejects_outside_paths(tmp_path):
+    # Absolute / traversal paths outside the sandbox are refused.
+    from pathlib import Path
+
+    worktree = tmp_path / "worktree"
+    workspace = tmp_path / "workspace"
+    worktree.mkdir()
+    workspace.mkdir()
+    bases = [worktree, workspace]
+
+    assert sr._patch_path_within_bases(Path("/etc/passwd"), bases) is False
+    assert sr._patch_path_within_bases(worktree / ".." / "escape.patch", bases) is False
+    assert sr._patch_path_within_bases(tmp_path / "sibling.patch", bases) is False

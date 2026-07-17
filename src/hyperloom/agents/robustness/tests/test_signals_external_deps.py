@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for external-dependency signals."""
 
@@ -104,7 +105,7 @@ def test_j2_wekafs_unreachable_fires_high():
             "mounts": [
                 {
                     "env_name": "TRACELENS_ROOT",
-                    "path": "/wekafs/hyperloom/TraceLens",
+                    "path": "/path/hyperloom/TraceLens",
                     "ok": False,
                     "error": "not_found",
                     "latency_ms": 0.1,

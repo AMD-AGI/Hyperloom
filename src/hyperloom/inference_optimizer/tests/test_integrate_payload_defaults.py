@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """``_fill_integrate_defaults_from_state`` + integrate_handler defaulting (base_tput/config_path/extra_server_args from SharedState)."""
 

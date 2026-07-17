@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Recipe-snapshot KB + KnowledgePlane bootstrap for the CLI.
 
@@ -250,6 +251,11 @@ def _bootstrap_knowledge_plane(
         status_text = f"disabled ({reason})"
         print(f"PR Monitor       : DISABLED ({reason})")
         pr_reachable = False
+    elif not pr_mcp_url:
+        status_text = "disabled (no_mcp_url)"
+        print("PR Monitor       : DISABLED (no MCP URL configured)")
+        pr_reachable = False
+        pr_client.enabled = False
     else:
         status_text = f"MCP {pr_mcp_url}"
         print(f"PR Monitor       : {pr_mcp_url}")

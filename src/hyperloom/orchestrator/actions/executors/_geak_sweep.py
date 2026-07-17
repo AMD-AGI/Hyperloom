@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Workload sweep that relaunches the GEAK-optimized server.
 
@@ -19,6 +20,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import scrub_child_process_env
 from hyperloom.common.jsonio import read_json
 
 log = logging.getLogger(__name__)
@@ -181,7 +183,7 @@ async def sweep_via_geak(
             variant_idx += 1
             out_dir = output_root / variant_name
             out_dir.mkdir(parents=True, exist_ok=True)
-            env = dict(os.environ)
+            env = scrub_child_process_env(dict(os.environ))
             env.update({
                 "BACKEND": backend,
                 "OUT_DIR": str(out_dir),

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """HTTP client for the InferenceX public benchmarks API.
 
@@ -17,8 +18,6 @@ Optional environment overrides:
 * ``INFERENCEX_BASE_URL``     — defaults to upstream public URL.
 * ``INFERENCEX_TIMEOUT_SEC``  — per-request timeout (default 5).
 * ``INFERENCEX_MAX_ATTEMPTS`` — default 2.
-* ``INFERENCEX_INSECURE``     — accept ``"1"``/``"true"`` to skip TLS
-  verification.
 """
 
 from __future__ import annotations
@@ -29,6 +28,7 @@ import logging
 import os
 import socket
 import ssl
+import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -40,6 +40,14 @@ log = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://inferencex.semianalysis.com/api/v1"
 DEFAULT_TIMEOUT_SEC = 5.0
 DEFAULT_MAX_ATTEMPTS = 2
+
+
+
+
+def _require_http_url(url: str) -> None:
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in {"http", "https"}:
+        raise InferenceXFetchError(f"unsupported URL scheme: {scheme!r}")
 
 
 class InferenceXFetchError(Exception):
@@ -90,33 +98,6 @@ def _max_attempts() -> int:
         return DEFAULT_MAX_ATTEMPTS
 
 
-def _insecure() -> bool:
-    """Report whether TLS verification should be skipped.
-
-    Returns:
-        bool: ``True`` when ``INFERENCEX_INSECURE`` is one of
-            ``"1"``/``"true"``/``"yes"``, otherwise ``False``.
-    """
-    raw = os.environ.get("INFERENCEX_INSECURE", "").strip().lower()
-    return raw in ("1", "true", "yes")
-
-
-def _build_ssl_context() -> ssl.SSLContext | None:
-    """Build an SSL context honouring the insecure override.
-
-    Returns:
-        ssl.SSLContext | None: ``None`` for normal (verified) TLS, or a
-            context with hostname checking and certificate verification
-            disabled when :func:`_insecure` is set.
-    """
-    if not _insecure():
-        return None
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 def _fetch_raw(url: str) -> bytes:
     """Single HTTP GET with gzip support.
 
@@ -130,6 +111,7 @@ def _fetch_raw(url: str) -> bytes:
         InferenceXFetchError: On any non-200 status, network failure, or
             transport-level decode error.
     """
+    _require_http_url(url)
     req = urllib.request.Request(
         url,
         headers={
@@ -137,9 +119,8 @@ def _fetch_raw(url: str) -> bytes:
             "User-Agent": "src/hyperloom/inference_optimizer/baseline_comparison",
         },
     )
-    ctx = _build_ssl_context()
     try:
-        with urllib.request.urlopen(req, timeout=_timeout_sec(), context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=_timeout_sec()) as resp:  # nosec B310 - URL scheme checked above.
             status = resp.getcode()
             if status != 200:
                 raise InferenceXFetchError(f"HTTP {status}")

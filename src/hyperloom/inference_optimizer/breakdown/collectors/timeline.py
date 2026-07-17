@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
 
@@ -240,7 +241,14 @@ def _capability_for_action(
     state: dict[str, Any],
     action: str,
 ) -> dict[str, Any]:
-    """Per-action capability tally from ``<action>_attempts``, with an ``optimization_stack`` KEEP fallback.
+    """Per-action capability tally from the real ``<action>_attempts`` ledger.
+
+    Status is derived strictly from recorded attempt evidence (written forward
+    by ``SharedState.record_action_attempt``). We deliberately do NOT reverse-
+    infer ``kept`` from ``optimization_stack``: the stack is the final adopted
+    state and can carry seeded / warm-replayed / cross-harness entries that were
+    never a real this-session attempt, so counting them would fabricate KEEPs
+    and attempts. No attempt record => ``not_attempted``.
 
     Args:
         state (dict[str, Any]): Parsed ``state.json``.
@@ -257,24 +265,35 @@ def _capability_for_action(
         else 0
     )
 
-    # Fallback from optimization_stack (adopted entries only), counted per action.
-    stack = state.get("optimization_stack") or []
-    if isinstance(stack, list):
-        stack_keeps = sum(1 for e in stack if isinstance(e, dict) and str(e.get("action") or "") == action)
-    else:
-        stack_keeps = 0
-    if stack_keeps > n_keeps:
-        n_keeps = stack_keeps
-        # Stack keeps imply at least as many attempts.
-        if n_attempts < stack_keeps:
-            n_attempts = stack_keeps
-
     status = "kept" if n_keeps > 0 else "tried" if n_attempts > 0 else "not_attempted"
     return {
         "status": status,
         "attempts": n_attempts,
         "keeps": n_keeps,
     }
+
+
+def _fold_search_ledger_keeps(row: dict[str, Any], search: dict[str, Any]) -> None:
+    """Promote a capability row to ``kept`` from its real ``*_search`` ledger.
+
+    ``<phase>_search.accepted`` is the forward-recorded ledger of variants this
+    session actually accepted (KEPT). Unlike ``optimization_stack`` (which can
+    carry seeded / warm-replayed entries that were never a real this-session
+    KEEP), the search ledger is genuine evidence, so it may set the status to
+    ``kept``. No accepted entries => the row's attempt-derived status stands.
+
+    Args:
+        row (dict[str, Any]): The capability row to update in place.
+        search (dict[str, Any]): The ``<phase>_search`` ledger from state.
+    """
+    accepted = [v for v in (search.get("accepted") or []) if isinstance(v, dict)]
+    if not accepted:
+        return
+    if row.get("keeps", 0) < len(accepted):
+        row["keeps"] = len(accepted)
+    if row.get("attempts", 0) < row["keeps"]:
+        row["attempts"] = row["keeps"]
+    row["status"] = "kept"
 
 
 def collect_capability_summary(
@@ -367,6 +386,7 @@ def collect_capability_summary(
                 (_to_float(v.get("gain_pct")) or 0.0 for v in backends_search["accepted"] if isinstance(v, dict)),
                 default=None,
             )
+        _fold_search_ledger_keeps(backends, backends_search)
 
     params = _capability_for_action(state, "params")
     params_search = state.get("params_search") or {}
@@ -377,6 +397,7 @@ def collect_capability_summary(
                 (_to_float(v.get("gain_pct")) or 0.0 for v in params_search["accepted"] if isinstance(v, dict)),
                 default=None,
             )
+        _fold_search_ledger_keeps(params, params_search)
 
     validate = _capability_for_action(state, "validate_stack")
     validate["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))
@@ -403,6 +424,7 @@ def collect_capability_summary(
                 (_to_float(v.get("gain_pct")) or 0.0 for v in accepted_entries),
                 default=None,
             )
+        _fold_search_ledger_keeps(explore, explore_search)
         keep_unstable_count = sum(
             1
             for entry in (explore_search.get("rejected") or [])

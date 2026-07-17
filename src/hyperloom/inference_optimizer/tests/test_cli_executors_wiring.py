@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for :mod:`hyperloom.inference_optimizer.cli.executors`.
 
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -91,6 +93,25 @@ def test_build_specialist_executor_subprocess_with_knowledge_plane(monkeypatch, 
         knowledge_plane=_KP(),
     )
     assert callable(executor)
+
+
+def test_mcp_servers_from_explicit_config(tmp_path):
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps({"mcpServers": {"cortex_kb": {"type": "http"}, "pr_monitor": {"type": "http"}}}),
+        encoding="utf-8",
+    )
+    assert set(cli_executors._mcp_servers_from_config(str(cfg))) == {"cortex_kb", "pr_monitor"}
+
+
+def test_mcp_servers_from_absent_config_is_not_authoritative():
+    assert cli_executors._mcp_servers_from_config(None) is None
+
+
+def test_mcp_servers_from_empty_explicit_config_is_authoritative(tmp_path):
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    assert cli_executors._mcp_servers_from_config(str(cfg)) == ()
 
 
 def test_build_specialist_executor_subprocess_kp_missing_methods(monkeypatch, tmp_path):

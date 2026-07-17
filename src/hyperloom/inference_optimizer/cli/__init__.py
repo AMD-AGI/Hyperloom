@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
 
@@ -13,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import sys
 import time
@@ -71,6 +73,7 @@ from .credentials import (
 from .multi_node import (
     _provision_multi_node_rayjob_stack as _provision_multi_node_rayjob_stack,
     _dump_mn_input_params as _dump_mn_input_params,
+    _resolve_mn_backend as _resolve_mn_backend,
 )
 from .quantization import (
     _run_quantization_prelude as _run_quantization_prelude,
@@ -100,6 +103,16 @@ from ..session.paths import (
 
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
+
+_HF_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
+_DEFAULT_MODEL_PATH_ROOTS: tuple[str, ...] = (
+    "/models",
+    "/path/models",
+    "/mnt/models",
+    "/shared_nfs",
+    "/wekafs",
+    "/hyperloom/models",
+)
 
 from .parser import (
     _build_parser as _build_parser,
@@ -164,6 +177,62 @@ def _enforce_expected_framework(
             file=sys.stderr,
         )
         raise SystemExit(2)
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        return path == root or path.is_relative_to(root)
+    except AttributeError:  # pragma: no cover - Python <3.9
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+
+def _resume_model_path_roots() -> tuple[Path, ...]:
+    raw = os.environ.get("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", "").strip()
+    configured = [p for p in raw.split(os.pathsep) if p.strip()] if raw else []
+    roots = configured + list(_DEFAULT_MODEL_PATH_ROOTS)
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        p = Path(root).expanduser().resolve()
+        marker = str(p)
+        if marker not in seen:
+            out.append(p)
+            seen.add(marker)
+    return tuple(out)
+
+
+def _validate_resume_model_path(model_path: str) -> str:
+    """Validate persisted ``state.model_path`` before re-exporting MODEL_PATH.
+
+    Resume trusts state.json for continuity, but state.json is writable session
+    data. Keep local model paths under known model roots; still allow
+    HuggingFace-style repo IDs because fresh launches support them too.
+    """
+    raw = str(model_path or "").strip()
+    if not raw:
+        return ""
+    if any(ch in raw for ch in ("\x00", "\n", "\r")):
+        raise ValueError("model_path contains control characters")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        if _HF_MODEL_ID_RE.fullmatch(raw) and ".." not in raw.split("/"):
+            return raw
+        raise ValueError(
+            "model_path must be a HuggingFace repo id or an absolute path under "
+            "INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS"
+        )
+    resolved = path.resolve()
+    roots = _resume_model_path_roots()
+    if any(_path_is_under(resolved, root) for root in roots):
+        return str(resolved)
+    raise ValueError(
+        "model_path is outside allowed model roots; set "
+        "INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS to opt into this root"
+    )
 
 
 def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
@@ -535,8 +604,6 @@ def _probe_llm_catalog(
 ) -> set[str] | frozenset[str] | None:
     """Probe ``<base_url>/models`` with retry (gateway flakes); return set of model ids or None.
 
-    TLS verification is on by default; ``INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1`` skips it (warns).
-
     Args:
         base_url (str): The gateway base URL; ``""`` returns ``None``.
         api_key (str): Optional bearer key sent in the ``Authorization``
@@ -560,24 +627,6 @@ def _probe_llm_catalog(
         )
         return None
 
-    insecure = os.environ.get(
-        "INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE",
-        "",
-    ).strip().lower() in ("1", "true", "yes")
-    if insecure:
-        print(
-            "Preflight: WARNING — INFERENCE_OPTIMIZER_CATALOG_PROBE_INSECURE=1 "
-            "is set; catalog probe will skip TLS verification while sending "
-            "an Authorization: Bearer header. Use only against trusted internal "
-            "gateways with self-signed certs."
-        )
-        try:
-            import urllib3  # type: ignore[import-not-found]
-
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        except Exception:  # noqa: BLE001
-            pass
-
     probe_url = base_url.rstrip("/") + "/models"
     headers = _catalog_probe_headers(base_url=base_url, api_key=api_key)
 
@@ -591,7 +640,6 @@ def _probe_llm_catalog(
                 probe_url,
                 headers=headers,
                 timeout=_CATALOG_REQUEST_TIMEOUT_SEC,
-                verify=not insecure,
             )
         except Exception as exc:  # noqa: BLE001
             last_err = f"{type(exc).__name__}: {exc}"
@@ -709,6 +757,12 @@ def _custom_orch_model_allowed() -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _custom_orch_model_explicitly_disabled() -> bool:
+    """Whether the operator explicitly requested strict AMD model allowlisting."""
+    raw = os.environ.get("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL")
+    return raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}
+
+
 def _critic_agent_runtime_needed(
     critic_choice: str,
     *,
@@ -752,7 +806,9 @@ def _validate_and_resolve_claude_model(
     # Custom orchestration models are enabled by default; the gateway catalog
     # probe below is the sole gate. Set INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0
     # to restore the stricter AMD Claude allowlist.
-    allow_custom = _custom_orch_model_allowed() or _claude_model_should_follow_codex()
+    allow_custom = _custom_orch_model_allowed()
+    if not _custom_orch_model_explicitly_disabled():
+        allow_custom = allow_custom or _claude_model_should_follow_codex()
     if not allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
         print(
             f"ERROR: --claude-model={chosen!r} is not allowed. "
@@ -1327,6 +1383,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             sys.exit(2)
 
     os.environ["INFERENCE_OPTIMIZER_NODES"] = str(nodes_resolved)
+    # Multi-node topology handoff: export the CLI-flag-resolved backend / image /
+    # gpus-per-node so downstream subprocesses (kernel agent, benchmark, KB
+    # topology, external-mode state synthesis) read a single stable source. These
+    # are internal handoff envs, not a public config API; users pass --mn-backend
+    # / --mn-image / --gpus-per-node instead.
+    if nodes_resolved >= 2:
+        os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] = str(gpus_per_node_resolved)
+        os.environ["INFERENCE_OPTIMIZER_MN_BACKEND"] = _resolve_mn_backend(args)
+        mn_image_resolved = str(getattr(args, "mn_image", "") or "").strip()
+        if mn_image_resolved:
+            os.environ["INFERENCE_OPTIMIZER_MN_IMAGE"] = mn_image_resolved
     operator_server_args = str(getattr(args, "server_args", "") or "").strip()
     if operator_server_args:
         os.environ["INFERENCE_OPTIMIZER_SERVER_ARGS"] = operator_server_args
@@ -1509,12 +1576,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
         # Re-export session-level env from persisted state so a fresh-shell resume doesn't fall back to YAML defaults.
         if state.model_path:
-            os.environ["MODEL_PATH"] = state.model_path
-            print(f"  re-exported MODEL_PATH: {state.model_path}")
+            try:
+                resume_model_path = _validate_resume_model_path(state.model_path)
+            except ValueError as exc:
+                print(f"ERROR: --resume refused persisted model_path: {exc}", file=sys.stderr)
+                sys.exit(2)
+            os.environ["MODEL_PATH"] = resume_model_path
+            print(f"  re-exported MODEL_PATH: {resume_model_path}")
             # Backfill model_info for sessions created before the field existed
             # (or whose config was unreadable at launch); fail-soft to {}.
             if not state.model_info:
-                state.model_info = summarize_model_config(state.model_path)
+                state.model_info = summarize_model_config(resume_model_path)
                 if state.model_info:
                     state.save(session_dir)
                     print("  backfilled model_info (from config.json)")

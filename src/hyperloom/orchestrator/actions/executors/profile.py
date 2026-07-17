@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Real ``profile`` ActionRunner — Magpie run with torch profiler on.
 
@@ -25,6 +26,7 @@ from __future__ import annotations
 import gzip
 import logging
 import os
+import tempfile
 import shlex
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,7 @@ from hyperloom.common.io import safe_mtime
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
+    ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
 from ._xdit_patcher import ensure_xdit_profiler_patched
@@ -545,7 +548,7 @@ class ProfileExecutor(BaselineExecutor):
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
         default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
-        cwd: Path | str = "/tmp",
+        cwd: Path | str | None = None,
     ):
         """Initialize the profile executor with profile-specific defaults.
 
@@ -565,7 +568,7 @@ class ProfileExecutor(BaselineExecutor):
             default_config_path=default_config_path,
             session_dir=session_dir,
             default_timeout_sec=default_timeout_sec,
-            cwd=cwd,
+            cwd=cwd if cwd is not None else tempfile.gettempdir(),
         )
 
     def _resolve_default_config(self) -> Path:
@@ -685,6 +688,7 @@ class ProfileExecutor(BaselineExecutor):
 
         ix_root = Path(inferencex_path)
         lib_ok = ensure_benchmark_lib_patched(ix_root)
+        ensure_benchmark_lib_eval_dest_patched(ix_root)
         serving_ok = ensure_benchmark_serving_patched(ix_root)
         lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
         serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"

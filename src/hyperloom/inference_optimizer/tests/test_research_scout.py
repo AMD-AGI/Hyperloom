@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Research scout: tag/domain wiring, hint artifacts, and state bookkeeping for the read-only PRELUDE collector."""
 

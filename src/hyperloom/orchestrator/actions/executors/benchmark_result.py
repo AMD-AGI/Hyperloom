@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Benchmark result parsing shared by Magpie-backed executors.
 
@@ -32,14 +33,17 @@ log = logging.getLogger(__name__)
 _DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (Path("/workspace/inferencex_result.json"),)
 
 
-# Wrapper-side diagnostic files hardcoded under ``/workspace/``. They live
-# outside the per-task workspace so the NFS clone misses them;
-# :func:`harvest_leaked_artifacts` copies fresh matches in.
+# Wrapper-side files that leak outside the per-task workspace (under /workspace
+# or env-derived roots like $INFERENCEX_PATH, where append_lm_eval_summary
+# ``mv ./``-s eval output); harvest_leaked_artifacts copies fresh matches back.
+# ``results*.json`` (lm-eval accuracy schema) is the #927 safety net for when the
+# patcher-based redirect missed — parse_eval_results then finds the harvested copy.
 _DEFAULT_LEAK_ARTIFACT_GLOBS: tuple[str, ...] = (
     "server.log",
     "gpu_metrics.csv",
     "profile_*.trace.json.gz",
     "inferencex_result*.json",
+    "results*.json",
 )
 _DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 
@@ -149,6 +153,16 @@ def _rescue_candidate_paths(
         else:
             _push(p)
 
+    # Env-derived dirs: the InferenceX checkout ($INFERENCEX_PATH), where
+    # append_lm_eval_summary's ``mv ./`` lands, plus $RESULT_DIR overrides.
+    for derived in _env_derived_leak_roots():
+        if derived.is_dir():
+            try:
+                for fp in sorted(derived.glob("inferencex_result*.json")):
+                    _push(fp)
+            except OSError:
+                continue
+
     for default in _DEFAULT_RESCUE_PATHS:
         _push(default)
 
@@ -199,12 +213,26 @@ def _materialize_rescue_into_workspace(
     return destination
 
 
+def _env_derived_leak_roots() -> list[Path]:
+    """Leak roots derived from the runtime env: the InferenceX checkout
+    (``$INFERENCEX_PATH``), where ``append_lm_eval_summary``'s ``mv ./`` lands,
+    plus ``$RESULT_DIR`` when an override routed results outside the workspace.
+    """
+    out: list[Path] = []
+    for env_key in ("INFERENCEX_PATH", "RESULT_DIR"):
+        val = (os.environ.get(env_key) or "").strip()
+        if val:
+            out.append(Path(val))
+    return out
+
+
 def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
     """Return the directory roots to scan for wrapper-side leak files.
 
     Order: explicit ``leak_root`` kwarg (tests) →
     ``$INFERENCE_OPTIMIZER_LEAK_ROOTS`` (colon-separated) →
-    :data:`_DEFAULT_LEAK_ARTIFACT_ROOT` (``/workspace``).
+    :data:`_DEFAULT_LEAK_ARTIFACT_ROOT` (``/workspace``) plus the env-derived
+    roots from :func:`_env_derived_leak_roots` (deduped).
 
     Args:
         leak_root: Optional explicit root override (used by tests); when
@@ -220,7 +248,13 @@ def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
         parts = [Path(p.strip()) for p in env_raw.split(":") if p.strip()]
         if parts:
             return tuple(parts)
-    return (_DEFAULT_LEAK_ARTIFACT_ROOT,)
+    roots: list[Path] = [_DEFAULT_LEAK_ARTIFACT_ROOT]
+    seen = {_DEFAULT_LEAK_ARTIFACT_ROOT}
+    for root in _env_derived_leak_roots():
+        if root not in seen:
+            seen.add(root)
+            roots.append(root)
+    return tuple(roots)
 
 
 def harvest_leaked_artifacts(

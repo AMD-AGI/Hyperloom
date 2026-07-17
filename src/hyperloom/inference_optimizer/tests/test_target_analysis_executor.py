@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Integration + unit tests for :class:`TargetAnalysisExecutor`.
 
@@ -129,7 +130,7 @@ async def test_model_mapping_miss_writes_skipped(session_dir, monkeypatch):
         _ctx(
             session_dir,
             {
-                "model_path": "/wekafs/models/MyCorp-Custom-FT-7B",
+                "model_path": "/path/models/MyCorp-Custom-FT-7B",
                 "framework": "vllm",
                 "precision": "fp8",
                 "isl": 1024,
@@ -152,7 +153,7 @@ async def test_happy_path_writes_files(session_dir, monkeypatch):
         _ctx(
             session_dir,
             {
-                "model_path": "/wekafs/models/MiniMaxAI-MiniMax-M2.5",
+                "model_path": "/path/models/MiniMaxAI-MiniMax-M2.5",
                 "framework": "vllm",
                 "precision": "fp8",
                 "isl": 1024,

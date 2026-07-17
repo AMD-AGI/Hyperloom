@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Cross-framework audit helpers for framework-agent P1.
 
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -152,7 +154,7 @@ def run_cross_framework_audit(request: dict[str, Any]) -> dict[str, Any]:
     raw_roots = explicit_roots or fallback_roots
     roots = [Path(str(r)).expanduser() for r in raw_roots if str(r).strip()]
     roots_source = "explicit" if explicit_roots else ("fallback" if fallback_roots else "none")
-    work_dir = Path(str(request.get("work_dir") or "/tmp/framework-agent/phase-audit")).expanduser()
+    work_dir = Path(str(request.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent" / "phase-audit"))).expanduser()
 
     metrics: dict[str, Any] = {
         "src_framework": src_framework,

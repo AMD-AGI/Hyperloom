@@ -1,11 +1,12 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
-"""Primus Cortex PR Monitor client.
+"""Primus Cortex candidate source client.
 
-Internal-network replacement for anonymous GitHub Search; talks to the
-``primus-cortex-pr-monitor`` REST service. Stdlib-only (``urllib.request``).
-Hard-fails on errors (network / non-200 / bad JSON) so misconfigured nodes
-don't silently fall back to an empty list (CLI surfaces exit code 2). Returns
+Optional replacement for anonymous GitHub Search; talks to the
+``primus_cortex`` REST service. Stdlib-only (``urllib.request``). Hard-fails
+on errors (network / non-200 / bad JSON) so misconfigured nodes don't silently
+fall back to an empty list (CLI surfaces exit code 2). Returns
 :class:`GitHubPr` records shared with the GitHub backend.
 """
 
@@ -20,8 +21,16 @@ from typing import Any
 from ._shared import GitHubPr, _repo_slug
 
 
+
+
+def _require_http_url(url: str) -> None:
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in {"http", "https"}:
+        raise PrimusCortexError(f"unsupported PR Monitor URL scheme: {scheme!r}")
+
+
 class PrimusCortexError(RuntimeError):
-    """Raised when a primus-cortex request cannot be completed (CLI exit code 2)."""
+    """Raised when a primus_cortex request cannot be completed (CLI exit code 2)."""
 
 
 def _normalise_base_url(base_url: str) -> str:
@@ -83,6 +92,7 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
         PrimusCortexError: On HTTP errors, unreachable hosts, timeouts, or other
             transport failures.
     """
+    _require_http_url(url)
     req = urllib.request.Request(
         url,
         headers={
@@ -91,7 +101,7 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - URL scheme checked above.
             status = int(getattr(resp, "status", 200) or 200)
             body = resp.read()
             content_type = resp.headers.get("Content-Type", "") if resp.headers else ""
@@ -132,7 +142,7 @@ def _http_get_json(url: str, *, timeout_sec: float) -> Any:
 
 
 def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
-    """Coerce a primus-cortex PR list item into the shared GitHubPr record.
+    """Coerce a primus_cortex list item into the shared GitHubPr record.
 
     Args:
         item (Any): A single PR list item, expected to be a JSON object.
@@ -158,7 +168,7 @@ def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
 
 
 def _extract_pr_list(payload: Any, *, source_url: str) -> list[dict[str, Any]]:
-    """Normalise a primus-cortex PR list response into ``list[dict]``.
+    """Normalise a primus_cortex list response into ``list[dict]``.
 
     Args:
         payload (Any): The decoded response; a list, or a dict carrying a list
@@ -204,7 +214,7 @@ def list_perf_prs(
     label: str | None = None,
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """List PRs from primus-cortex.
+    """List PRs from primus_cortex.
 
     Returns :class:`GitHubPr` (same as the GitHub backend) so the dispatcher
     can union both sources without per-source branching.

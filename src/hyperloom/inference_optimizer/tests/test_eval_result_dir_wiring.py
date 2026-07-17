@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Regression tests for the ``$EVAL_RESULT_DIR`` wiring (P0 accuracy-gate fix).
 
@@ -156,7 +157,7 @@ def _write_yaml(path: Path) -> None:
     cfg = {
         "benchmark": {
             "framework": "sglang",
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
@@ -181,7 +182,7 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
             {
                 "success": True,
                 "framework": "sglang",
-                "model": "/wekafs/models/Qwen-Qwen3-8B",
+                "model": "/path/models/Qwen-Qwen3-8B",
                 "throughput": {
                     "request_throughput": tput / 256,
                     "output_throughput": tput,
@@ -486,7 +487,7 @@ def test_baseline_skips_accuracy_when_run_eval_off_in_base_yaml(tmp_path):
     cfg = {
         "benchmark": {
             "framework": "sglang",
-            "model": "/wekafs/models/Qwen-Qwen3-8B",
+            "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256, "RUN_EVAL": False},
@@ -579,7 +580,7 @@ def _fake_scriptable_workspace(slot: Path, *, gate_passed: bool = True) -> Path:
             {
                 "success": True,
                 "framework": "xdit",
-                "model": "/wekafs/models/xdit-diffusion",
+                "model": "/path/models/xdit-diffusion",
                 "throughput": {
                     "request_throughput": 5.0,
                     "output_throughput": 5.0,

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
 
@@ -15,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -523,7 +525,7 @@ def _dump_mn_input_params(args: argparse.Namespace, nodes_resolved: int) -> None
 
         base = os.path.expandvars("$USER_DATA_PATH/optimizer_runs")
         if "$" in base or not base.startswith("/"):
-            base = "/tmp/optimizer_runs"
+            base = str(Path(tempfile.gettempdir()) / "optimizer_runs")
         os.makedirs(base, exist_ok=True)
         ts = _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
@@ -550,7 +552,7 @@ def _dump_mn_input_params(args: argparse.Namespace, nodes_resolved: int) -> None
             "MODEL_CLASS", "PRECISION", "USER_DATA_PATH", "SAFE_WORKSPACE",
             "BENCHMARK_BASE_URL", "SKIP_VARIANTS", "RUN_EVAL",
             "GPU_TYPE", "ISL", "OSL", "CONC", "RANDOM_RANGE_RATIO",
-            "INFERENCEX_PATH", "TRACELENS_ROOT", "NODE_TLS_REJECT_UNAUTHORIZED",
+            "INFERENCEX_PATH", "TRACELENS_ROOT",
         )
         env: dict[str, str] = {}
         for k, v in sorted(os.environ.items()):

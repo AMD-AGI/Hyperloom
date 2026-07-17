@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """TaskRegistry — DelegatedTask state machine, persisted in the ``tasks`` table.
 
@@ -513,7 +514,7 @@ class TaskRegistry:
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(family_kinds))
             cur.execute(
-                f"SELECT task_id, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",
+                f"SELECT task_id, history FROM tasks WHERE state='queued' AND kind IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 family_kinds,
             )
             rows = [(r["task_id"], r["history"]) for r in cur.fetchall()]

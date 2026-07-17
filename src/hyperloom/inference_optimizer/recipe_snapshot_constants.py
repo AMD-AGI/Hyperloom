@@ -1,9 +1,10 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """recipe-snapshot v2 HTTP wire constants — single source of truth.
 
 Mirrors the contract documented in
-``primus-cortex-internal/docs/recipe-snapshot-api-reference.md``. The
+the internal recipe snapshot API reference. The
 recipe-KB remote clients (see :mod:`hyperloom.orchestrator.knowledge.recipe_kb`
 and :mod:`hyperloom.orchestrator.knowledge.recipe_kb.gbrain_remote_client`) build requests as
 plain dicts keyed by these ``Final[str]`` constants so a backend rename surfaces

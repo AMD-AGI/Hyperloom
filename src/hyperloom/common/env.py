@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Environment-variable readers (canonical ``env_*``).
 
@@ -8,7 +9,6 @@ so any package may depend on it without an import cycle.
 
 Divergent readers intentionally NOT delegated here (kept local by design):
 
-* ``ci/optimize_submit._env_truthy`` — additionally accepts ``y``.
 * ``orchestrator/roofline_ceiling._env_int`` — reads from a *dict* mapping, not
   from ``os.environ``.
 * ``orchestrator/trace/trace_env.env_flag`` — also treats ``0/false/no/off`` as

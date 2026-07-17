@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for framework_agent.explorer pure logic, plan mode, and e2e ranking_mode / keep_winner_only / build_concurrency flows. Hermetic - stubs candidate enumeration, workspace, commands, and metric evaluation to exercise explore() control flow."""
 

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for the 5-tuple recipe-snapshot canonical_id derivation."""
 
@@ -67,7 +68,7 @@ def test_canonical_id_lowercases_every_component() -> None:
 def test_canonical_id_basenames_path_style_model() -> None:
     """A path-style ``--model`` must converge on the same canonical_id as the bare name."""
     cid_path = recipe_canonical_id(
-        model="/wekafs/models/Qwen3-30B-A3B",
+        model="/path/models/Qwen3-30B-A3B",
         hardware="mi355x",
         framework_name="sglang",
         framework_version="0.4.5",

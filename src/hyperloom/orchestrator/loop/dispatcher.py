@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coordinator main loop and runtime protocol manager."""
 
@@ -10,6 +11,9 @@ import os
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
+    KERNEL_AGENT_OWNED_ACTIONS,
+)
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
@@ -360,6 +364,27 @@ class DispatcherCollaborator:
                     if gpu_specialist_lease is not None:
                         extra_context["gpu_ids"] = list(range(gpu_count))
                         extra_context["gpu_specialist_lease"] = gpu_specialist_lease
+            # Defensive audit (log-only): flag a queued task whose kind has
+            # no registered executor. Kernel-owned kinds are legitimately
+            # unregistered under --no-kernel, so they are excluded to avoid a
+            # false positive. Dispatch is unchanged.
+            try:
+                _coord = object.__getattribute__(self, "_coord")
+                _execs = getattr(getattr(_coord, "sub", None), "executor_registry", None)
+                if (
+                    isinstance(_execs, dict)
+                    and _execs
+                    and task.kind not in _execs
+                    and task.kind != "specialist"
+                    and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
+                ):
+                    log.warning(
+                        "dispatch audit: queued task_id=%s kind=%r "
+                        "has no registered executor (dispatch unchanged)",
+                        task.task_id, task.kind,
+                    )
+            except Exception:  # noqa: BLE001 - audit must never affect dispatch
+                pass
             spawned.append(
                 (
                     task,
@@ -972,6 +997,20 @@ class DispatcherCollaborator:
         loop = self._coordinator_loop
         if loop is None or loop.is_closed():
             return "(run_action_now unavailable: coordinator loop not running)"
+        # Defensive audit (log-only): detect and log if this sync bridge is
+        # invoked on the coordinator loop thread. Behaviour is unchanged.
+        try:
+            _running = asyncio.get_running_loop()
+            if _running is loop:
+                log.warning(
+                    "run_action_now: invoked on the coordinator "
+                    "loop thread (action=%r)",
+                    name,
+                )
+        except RuntimeError:
+            pass
+        except Exception:  # noqa: BLE001 - audit must never affect flow
+            pass
         coro = self._run_action_now(name, dict(params or {}))
         # Cap inline wait under backend timeout so a slow action can't wedge the turn.
         try:
@@ -1041,7 +1080,10 @@ class DispatcherCollaborator:
             )
             return f"(run_action_now: {action_name!r} denied: {str(getattr(seq_denied, 'hint', seq_denied))[:200]})"
         lanes, ttl = self._registry_lanes_ttl(action_name)
-        content_fp = hashlib.sha1(json.dumps(params or {}, sort_keys=True, default=str).encode()).hexdigest()[:10]
+        content_fp = hashlib.sha1(
+            json.dumps(params or {}, sort_keys=True, default=str).encode(),
+            usedforsecurity=False,
+        ).hexdigest()[:10]
         key = f"inline:orchestration:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
         task, was_existing = await self.tasks.create_or_return_existing(
             kind=action_name,

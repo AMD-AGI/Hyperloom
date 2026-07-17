@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage-gap unit tests for the external baseline comparison layer.
 
@@ -10,9 +11,7 @@ Covers uncovered branches in ``baseline_comparison``: whitespace-only input to
 from __future__ import annotations
 
 from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
-    _format_report_md,
     _row_to_point,
-    to_inferencex_name,
 )
 from hyperloom.inference_optimizer.baseline_comparison.types import (
     BaselinePoint,

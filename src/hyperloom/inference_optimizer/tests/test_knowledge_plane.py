@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """KnowledgePlane facade tests."""
 
@@ -32,7 +33,18 @@ def test_plane_enabled_pr_returns_mcp_url():
     assert plane.specialist_mcp_url() == "http://pr.test/mcp/"
 
 
-def test_plane_cortex_enabled_when_url_set():
+def test_plane_cortex_enabled_when_headerless_url_set():
+    plane = KnowledgePlane.from_clients(
+        pr_monitor=PRMonitorClient.from_args(enabled=False),
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+    )
+    assert plane.cortex_enabled is True
+    assert plane.cortex_specialist_mcp_url() == "http://gbrain.test/mcp"
+    assert plane.cortex_specialist_mcp_headers() == {}
+
+
+def test_plane_cortex_auth_header_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS", raising=False)
     plane = KnowledgePlane.from_clients(
         pr_monitor=PRMonitorClient.from_args(enabled=False),
         cortex_kb_mcp_url="http://gbrain.test/mcp",
@@ -41,6 +53,18 @@ def test_plane_cortex_enabled_when_url_set():
     assert plane.cortex_enabled is True
     assert plane.cortex_specialist_mcp_url() == "http://gbrain.test/mcp"
     assert plane.cortex_specialist_mcp_headers() == {"Authorization": "Bearer t"}
+
+
+def test_plane_cortex_auth_header_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS", "0")
+    plane = KnowledgePlane.from_clients(
+        pr_monitor=PRMonitorClient.from_args(enabled=False),
+        cortex_kb_mcp_url="http://gbrain.test/mcp",
+        cortex_kb_mcp_headers={"Authorization": "Bearer t"},
+    )
+    assert plane.cortex_enabled is False
+    assert plane.cortex_specialist_mcp_url() == ""
+    assert plane.cortex_specialist_mcp_headers() == {}
 
 
 def test_plane_reset_round_caches_noop():

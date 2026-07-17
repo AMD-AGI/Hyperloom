@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Anonymous GitHub Search backend for perf PR candidate discovery.
 
@@ -117,7 +118,7 @@ def search_perf_prs(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS API URL.
             data = json.loads(resp.read().decode("utf-8"))
     except Exception:  # noqa: BLE001 - best-effort policy
         return []

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for PR KB consumption (slug parity, page client, diff synthesis, source)."""
 
@@ -46,7 +47,7 @@ def test_normalise_repo():
 
 def test_repo_slug_parity_with_worker():
     """Consumer repo_slug must match the PR KB writer byte-for-byte."""
-    worker = Path("/wekafs/zhanglei/Primus-Claw/pr-kb/pr_kb/slug.py")
+    worker = Path("/path/zhanglei/Primus-Claw/pr-kb/pr_kb/slug.py")
     if not worker.is_file():
         pytest.skip("worker slug.py not present")
     import importlib.util

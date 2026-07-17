@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Atomic filesystem writes (canonical ``atomic_write*``).
 
@@ -35,7 +36,7 @@ from typing import Any
 
 
 def _best_effort_fsync(fh: Any) -> None:
-    """``os.fsync`` the file handle, swallowing OSError (tmpfs/wekafs reject it)."""
+    """``os.fsync`` the file handle, swallowing OSError (tmpfs/path reject it)."""
     with suppress(OSError):
         fh.flush()
         os.fsync(fh.fileno())

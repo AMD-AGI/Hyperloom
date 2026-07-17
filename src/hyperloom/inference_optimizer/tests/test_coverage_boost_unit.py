@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Focused unit coverage for small pure-logic helpers.
 
@@ -95,7 +96,7 @@ def test_name_mapping_paths() -> None:
     assert nm.to_inferencex_name("") is None
     # Whitespace-only collapses to empty after strip.
     assert nm.to_inferencex_name("   ") is None
-    assert nm.to_inferencex_name("/wekafs/models/MiniMaxAI-MiniMax-M2.5") == "MiniMax-M2.5"
+    assert nm.to_inferencex_name("/path/models/MiniMaxAI-MiniMax-M2.5") == "MiniMax-M2.5"
     assert nm.to_inferencex_name("totally-unknown-model") is None
 
 

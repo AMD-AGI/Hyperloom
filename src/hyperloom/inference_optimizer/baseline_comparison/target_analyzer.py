@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Top-level orchestration for the external baseline comparison step.
 
@@ -55,7 +56,7 @@ from .types import BaselinePoint, BaselineQuery, BaselineSummary
 # InferenceX (https://inferencex.semianalysis.com) refers to models by short
 # human names (``MiniMax-M2.5``, ``DeepSeek-R1-0528``), but local weights
 # typically live at HuggingFace-style paths like
-# ``/wekafs/models/MiniMaxAI-MiniMax-M2.5``. The mapping below owns that
+# ``/models/MiniMaxAI-MiniMax-M2.5``. The mapping below owns that
 # translation.
 #
 # Hard rules:

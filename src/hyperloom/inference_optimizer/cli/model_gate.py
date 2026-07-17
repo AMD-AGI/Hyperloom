@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Model / GPU gate for the CLI: GPU-type resolution, arch / config loading,
 unsupported-model detection, and the pre-flight gates that run before a session
@@ -218,21 +219,29 @@ _SUPPORTED_QUANT_METHODS = frozenset({
 # ``.biases`` / ``.scales`` weights (plural — distinct from a standard ``.bias``).
 _MLX_QUANT_MODES = frozenset({"affine", "mlx"})
 
-def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
+def _load_model_arch(
+    workspace_root: Path, model_name: str, launched_model: str = "",
+) -> dict:
     """Best-effort loader for the advisory ``<workspace_root>/model_arch.json`` profile (prompts only).
 
-    Soft-degrades to ``{}`` (never blocks launch) on missing/unreadable/invalid file. Stale-file guard:
-    require ``data["model_name"]`` basename to match launched ``--model`` basename, else WARN + ``{}``.
+    Soft-degrades to ``{}`` (never blocks launch) on missing/unreadable/invalid
+    file. Stale-file guard: the declared ``data["model_name"]`` must share an
+    identity candidate with the launched model, else WARN + ``{}``. Candidates
+    normalize flat dirs, bare names, HF repo ids, and HF hub cache
+    ``models--org--repo/snapshots/<hash>`` paths so a declared clean name still
+    matches a commit-hash launch basename.
 
     Args:
         workspace_root (Path): Directory containing ``model_arch.json``.
-        model_name (str): The launched model name, used for the stale-file
-            freshness check.
+        model_name (str): The resolved model identity (display name / basename).
+        launched_model (str): The raw ``--model`` value; carries the HF cache
+            ``models--org--repo`` segment that ``model_name`` may have lost.
 
     Returns:
         dict: The advisory architecture profile, or ``{}`` when missing,
             unreadable, invalid, or stale.
     """
+    from hyperloom.common.model_paths import model_identities_match
     arch_path = workspace_root / "model_arch.json"
     try:
         raw = arch_path.read_text(encoding="utf-8")
@@ -257,13 +266,14 @@ def _load_model_arch(workspace_root: Path, model_name: str) -> dict:
             "model_arch_missing_model_name: %s (cannot verify freshness)", arch_path
         )
         return {}
-    if Path(declared).name != Path(model_name).name:
+    if not model_identities_match(declared, model_name, launched_model):
         logging.warning(
             "model_arch_stale_or_mismatch: %s declares model_name=%r but "
-            "launching %r — ignoring",
+            "launching model_name=%r (--model=%r) — ignoring",
             arch_path,
             declared,
             model_name,
+            launched_model,
         )
         return {}
     return data
@@ -1355,7 +1365,15 @@ def _run_compat_detector(
     Returns:
         str | None: The first non-None reason from the sub-chain, else ``None``.
     """
-    available = {"model_path": model_path, "data": data, "gpu_type": gpu_type}
+    # Resolve a HF repo-id to its local cache dir ONCE so every disk-reading
+    # detector (hf_quant_config.json, safetensors shards, tokenizer files, PEFT
+    # adapters, ...) sees a real directory. Without this, a repo-id launch makes
+    # Path(repo_id).is_dir() False and those detectors silently skip -- deferring
+    # "incompatible checkpoint" rejection to server init, the exact silent
+    # degradation the resolver is meant to remove. An already-local dir resolves
+    # to itself; an unresolvable id falls back to the raw path (prior behaviour).
+    resolved_mp = str(resolve_local_model_dir(model_path) or model_path)
+    available = {"model_path": resolved_mp, "data": data, "gpu_type": gpu_type}
     call_args = tuple(available[name] for name in spec.args)
     fns = spec.fn if isinstance(spec.fn, tuple) else (spec.fn,)
     for fn in fns:

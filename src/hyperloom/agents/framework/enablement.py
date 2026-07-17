@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Enablement failure-signature classifier.
 
@@ -11,6 +12,7 @@ filesystem access.
 from __future__ import annotations
 
 import re
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Pattern
@@ -375,7 +377,7 @@ class EnablementRequest:
     model: str
     repo_url: str
     launch_log: str = ""
-    work_dir: Path = field(default=Path("/tmp/framework-agent-enablement"))
+    work_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / "framework-agent-enablement")
     gpu_type: str = ""
     launch_probe: str = ""
     max_search_candidates: int = 5
@@ -408,7 +410,7 @@ class EnablementRequest:
             model=model,
             repo_url=repo_url,
             launch_log=str(raw.get("launch_log") or ""),
-            work_dir=Path(str(raw.get("work_dir") or "/tmp/framework-agent-enablement")).expanduser(),
+            work_dir=Path(str(raw.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent-enablement"))).expanduser(),
             gpu_type=str(raw.get("gpu_type") or "").strip().lower(),
             launch_probe=str(raw.get("launch_probe") or "").strip(),
             max_search_candidates=int(raw.get("max_search_candidates", 5)),

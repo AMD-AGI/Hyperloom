@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """PD-disaggregation router launcher (head pod, multi-node).
 
@@ -19,13 +20,14 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 # Public port the router binds (matches launch_multinode._INFERENCE_PORT).
 _PUBLIC_PORT = 8888
-_DEFAULT_PID_FILE = "/tmp/multi_node_pids/router.pid"
-_DEFAULT_LOG_FILE = "/tmp/multi_node_logs/router.log"
+_DEFAULT_PID_FILE = str(Path(tempfile.gettempdir()) / "multi_node_pids" / "router.pid")
+_DEFAULT_LOG_FILE = str(Path(tempfile.gettempdir()) / "multi_node_logs" / "router.log")
 
 
 def _log(msg: str) -> None:
@@ -64,7 +66,7 @@ def _build_sglang_router_cmd(
         "--decode",
         decode_url,
         "--host",
-        "0.0.0.0",
+        "0.0.0.0",  # nosec B104 - router is the public multi-node endpoint.
         "--port",
         str(public_port),
     ]
@@ -104,7 +106,7 @@ def _build_vllm_router_cmd(
         "--decode-url",
         decode_url,
         "--host",
-        "0.0.0.0",
+        "0.0.0.0",  # nosec B104 - router is the public multi-node endpoint.
         "--port",
         str(public_port),
     ]

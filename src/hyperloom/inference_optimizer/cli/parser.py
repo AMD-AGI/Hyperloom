@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CLI argument parser — ``_build_parser`` and its purely-computational helpers."""
 
@@ -244,7 +245,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "once, and exports RAY_ADDRESS for kernel-agent. Does not stop the "
         "RayJob on exit; run `python3 -m hyperloom.inference_optimizer.multi_node "
         "stop-multi-job` when you want to release it. Requires "
-        "--mn-image or INFERENCE_OPTIMIZER_MN_IMAGE. "
+        "--mn-image. "
         "Default: 1.",
     )
     opt.add_argument(
@@ -253,23 +254,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
         "head+workers) or 'infera' (idle InferaDeployment + SSH control "
-        "plane). Resolution: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND "
-        "> rayjob. Single-node runs ignore this flag.",
+        "plane). Defaults to rayjob when omitted. Single-node runs ignore "
+        "this flag.",
     )
     opt.add_argument(
         "--mn-image",
         default=None,
         help="Container image for the multi-node pods (Infera worker/prefill/"
         "decode pods, or RayJob head+workers). Required when --nodes>=2 unless "
-        "INFERENCE_OPTIMIZER_MN_IMAGE is set or state file "
-        "last_create_request.image is present.",
+        "the state file last_create_request.image is present.",
     )
     opt.add_argument(
         "--gpus-per-node",
         type=int,
         default=None,
         help="GPUs per multi-node pod (Infera worker/prefill/decode or RayJob "
-        "head+workers). Resolution: flag > INFERENCE_OPTIMIZER_GPUS_PER_NODE > 8.",
+        "head+workers). Defaults to 8 when omitted.",
     )
     opt.add_argument(
         "--cpus-per-node",
@@ -528,7 +528,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
         "falls back to $USER_DATA_PATH (legacy flat layout). "
         "USER_DATA_PATH MUST stay at workspace level "
-        "(/wekafs/.../sessions/, not the per-session subdir) "
+        "(/shared/hyperloom-sessions, not the per-session subdir) "
         "so runtime/ resolution works. Skips the SharedState "
         "seed and lets the Coordinator replay the prior "
         "event log + state.json.",
@@ -583,8 +583,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Reference GPU hardware key for external baseline comparison "
-            "(e.g. b300 / mi355x / h200). target_analysis ALWAYS runs as "
-            "TODO 0 and always writes "
+            "(e.g. b300 / mi355x / h200). target_analysis ALWAYS runs first, "
+            "before baseline, and always writes "
             "$SESSION_DIR/target_analysis/target_baseline.json + a short "
             "MD report. When this flag is set, the JSON carries the "
             "matching InferenceX (https://inferencex.semianalysis.com) "
@@ -947,12 +947,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip() or None,
         help="PR Monitor REST URL for this run (flag wins). Default: "
-        "$PRIMUS_CORTEX_PR_API (the canonical internal PR API env), else "
-        "the in-cluster "
-        "http://primus-cortex-pr-api.primus-cortex.svc.cluster.local. "
-        "Set this flag / $PRIMUS_CORTEX_PR_API to a reachable HTTPS "
-        "endpoint when running outside the primus-cortex namespace. Pair "
-        "with --pr-monitor-mcp-url when port-forwarding for local debug.",
+        "$PRIMUS_CORTEX_PR_API, else unset. Set this flag or env var to a "
+        "reachable primus_cortex HTTPS endpoint. Pair with "
+        "--pr-monitor-mcp-url when exposing the corresponding MCP server.",
     )
     opt.add_argument(
         "--pr-monitor-mcp-url",
@@ -960,8 +957,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="PR Monitor MCP URL handed to specialist LLM backends (flag "
-        "wins). Default: the in-cluster MCP endpoint. The trailing slash "
-        "is mandatory.",
+        "wins). Default: unset, which disables PR Monitor MCP tools. The "
+        "trailing slash is mandatory when configured.",
     )
     opt.add_argument(
         "--degraded-pr",

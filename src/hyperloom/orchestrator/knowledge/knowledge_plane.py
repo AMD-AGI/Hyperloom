@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """KnowledgePlane facade for advisory knowledge inputs.
 
@@ -11,7 +12,10 @@ specialist tool whitelist.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
+
+from hyperloom.common.env import is_truthy
 
 from .pr_monitor import (
     DEFAULT_PR_MONITOR_MCP_URL,
@@ -20,6 +24,16 @@ from .pr_monitor import (
 
 
 log = logging.getLogger(__name__)
+
+
+def _has_persistent_secret_header(headers: dict[str, str]) -> bool:
+    """Return true when headers cannot be safely persisted in MCP config."""
+    return any(str(name).lower() == "authorization" for name in headers)
+
+
+def _allow_persistent_mcp_auth_headers() -> bool:
+    setting = os.environ.get("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS")
+    return True if setting is None else is_truthy(setting)
 
 
 @dataclass
@@ -85,9 +99,15 @@ class KnowledgePlane:
         """Whether the read-only ``cortex_kb`` KB-graph MCP is wired.
 
         Returns:
-            bool: ``True`` when a ``cortex_kb_mcp_url`` is configured.
+            bool: ``True`` when a ``cortex_kb_mcp_url`` is configured and can
+            be written to the specialist MCP config without persisting secrets.
         """
-        return bool((self.cortex_kb_mcp_url or "").strip())
+        if not bool((self.cortex_kb_mcp_url or "").strip()):
+            return False
+        return (
+            not _has_persistent_secret_header(self.cortex_kb_mcp_headers)
+            or _allow_persistent_mcp_auth_headers()
+        )
 
     def cortex_specialist_mcp_url(self) -> str:
         """KB-graph MCP URL to advertise as the specialist ``cortex_kb`` server.
@@ -95,6 +115,8 @@ class KnowledgePlane:
         Returns:
             The configured URL, or ``""`` when the KB-graph MCP is disabled.
         """
+        if not self.cortex_enabled:
+            return ""
         return (self.cortex_kb_mcp_url or "").strip()
 
     def cortex_specialist_mcp_headers(self) -> dict[str, str]:
@@ -103,7 +125,7 @@ class KnowledgePlane:
         Returns:
             A copy of the configured header map (``{}`` when none / disabled).
         """
-        if not (self.cortex_kb_mcp_url or "").strip():
+        if not self.cortex_enabled:
             return {}
         return dict(self.cortex_kb_mcp_headers or {})
 

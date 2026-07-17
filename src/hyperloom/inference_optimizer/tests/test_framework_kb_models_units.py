@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for framework-agent pure helpers in ``kb`` and ``models``.
 
@@ -14,7 +15,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.agents.framework import kb
 from hyperloom.agents.framework.kb import (
     _build_llm_prompt,
     _iter_message_text,

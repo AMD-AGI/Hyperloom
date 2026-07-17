@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Shell helpers for trusted framework exploration commands.
 
@@ -39,7 +40,7 @@ def run_command(
             ``timed_out`` is True.
     """
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # nosec B602 - framework commands are explicit operator/test configuration.
             command,
             cwd=str(cwd),
             shell=True,

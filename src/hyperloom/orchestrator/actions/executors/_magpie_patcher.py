@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Idempotent, atomic-write patcher for Magpie ``_prepare_benchmark_scripts``.
 
@@ -143,7 +144,7 @@ _ATOMIC_REPLACE = "os.replace("
 _PREPARE_METHOD_MARKER = "def _prepare_benchmark_scripts"
 
 # System-wide lock.
-_LOCK_PATH = "/tmp/hyperloom_magpie_benchmarker_patcher.lock"
+_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_magpie_benchmarker_patcher.lock")
 
 
 def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:

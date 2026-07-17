@@ -70,12 +70,8 @@ def quark_root(tmp_path: Path) -> Path:
 
 @pytest.mark.asyncio
 async def test_quark_root_missing_fast_path(tmp_path, monkeypatch):
-    # QUARK_ROOT unset -> resolver falls back to a nonexistent DEFAULT_QUARK_ROOT so bootstrap fails.
+    # QUARK_ROOT unset -> bootstrap fails without using an internal default path.
     monkeypatch.delenv("QUARK_ROOT", raising=False)
-    monkeypatch.setattr(
-        "hyperloom.agents.quantization.driver.retry.DEFAULT_QUARK_ROOT",
-        str(tmp_path / "no_such_quark"),
-    )
 
     async def _never_called(**kwargs: Any) -> AttemptResult:  # pragma: no cover
         raise AssertionError("runner should not be invoked when bootstrap fails")

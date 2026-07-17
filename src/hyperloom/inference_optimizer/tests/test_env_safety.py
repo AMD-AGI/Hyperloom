@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for multi-node SSH env key validation.
 
@@ -15,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.inference_optimizer.multi_node._internal import env_safety
+from hyperloom.common import env_safety as common_env_safety
 
 
 def test_valid_mori_and_sglang_keys_allowed():
@@ -58,3 +60,50 @@ def test_filter_forward_env_drops_bad_keys():
 def test_assert_forward_env_keys_raises():
     with pytest.raises(ValueError, match="disallowed SSH forward env keys"):
         env_safety.assert_forward_env_keys({"LD_PRELOAD": "/tmp/x.so"})
+
+
+def test_common_env_safety_filters_dotenv_and_kernel_agent_keys_only():
+    assert common_env_safety.is_allowed_dotenv_key("OPENAI_API_KEY")
+    assert common_env_safety.is_allowed_dotenv_key("HF_TOKEN")
+    assert common_env_safety.is_allowed_dotenv_key("HTTPS_PROXY")
+    assert common_env_safety.is_allowed_dotenv_key("HYPERLOOM_RUNTIME_DIR")
+    assert not common_env_safety.is_allowed_dotenv_key("PYTHONPATH")
+    assert not common_env_safety.is_allowed_dotenv_key("BAD-NAME")
+
+    assert common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_ROOT")
+    assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_SPECIALIST_ALLOW_MCP_AUTH_HEADERS")
+    assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
+    assert common_env_safety.is_allowed_kernel_agent_env_key("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS")
+    assert not common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_TOKEN")
+
+    allowed, dropped = common_env_safety.filter_untrusted_env_mapping(
+        {
+            "bench_foo": 1,
+            "custom_tuning_knob": "enabled",
+            "ANTHROPIC_API_KEY": "anthropic-secret",
+            "LD_PRELOAD": "/tmp/agent-provided.so",
+            "OPENAI_API_KEY": "secret",
+            "PYTHONPATH": "/tmp/agent-provided",
+            "SAFE_API_KEY": "safe-secret",
+            "bad key": "nope",
+            "": "empty",
+        },
+        allow_predicate=common_env_safety.valid_env_key,
+    )
+    assert allowed == {
+        "bench_foo": "1",
+        "custom_tuning_knob": "enabled",
+        "ANTHROPIC_API_KEY": "anthropic-secret",
+        "LD_PRELOAD": "/tmp/agent-provided.so",
+        "OPENAI_API_KEY": "secret",
+        "PYTHONPATH": "/tmp/agent-provided",
+        "SAFE_API_KEY": "safe-secret",
+    }
+    assert dropped == {
+        "bad key": "invalid_env_key",
+        "<empty>": "invalid_env_key",
+    }
+
+    env = {"LD_PRELOAD": "evil.so", "PATH": "/bin", "SAFE": "1"}
+    assert common_env_safety.scrub_child_process_env(env) is env
+    assert env == {"PATH": "/bin", "SAFE": "1"}

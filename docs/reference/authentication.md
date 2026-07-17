@@ -72,8 +72,8 @@ One OpenAI-compatible endpoint serves both Claude and GPT models
 
 | Variable           | Issuer                              | Where to obtain                                                                                       | Format              |
 |--------------------|-------------------------------------|-------------------------------------------------------------------------------------------------------|---------------------|
-| `SAFE_API_KEY`     | AMD LiteLLM gateway                 | [LLM Gateway](https://global.primus-safe.amd.com/litellm-gateway)                                     | `ak-...`            |
-| `OPENAI_BASE_URL`  | AMD LiteLLM gateway                 | `https://global.primus-safe.amd.com/api/v1/llm-proxy/v1` (default for the hosted SaFE setup)          | URL ending in `/v1` |
+| `SAFE_API_KEY`     | Your LiteLLM gateway                | Your gateway's LLM Gateway page                                                                       | `ak-...`            |
+| `OPENAI_BASE_URL`  | Your LiteLLM gateway                | `https://<your-gateway-host>/api/v1/llm-proxy/v1` (adjust to your gateway)                            | URL ending in `/v1` |
 
 `SAFE_API_KEY` is the single AMD credential used by all downstream
 tooling:
@@ -101,7 +101,7 @@ For one-off use without writing to disk:
 
 ```bash
 export SAFE_API_KEY=ak-your-safe-apikey
-export OPENAI_BASE_URL=https://global.primus-safe.amd.com/api/v1/llm-proxy/v1
+export OPENAI_BASE_URL=https://<your-gateway-host>/api/v1/llm-proxy/v1
 ```
 
 ### Split entrypoints (native Anthropic + OpenAI)
@@ -178,19 +178,19 @@ loads them and derives `PATH` / `LD_LIBRARY_PATH` from `ROCM_PATH` /
 
 ### Dependency checkout variables
 
-Open-source dependencies default under `HYPERLOOM_OPEN_SOURCE_ROOT`
-(`/opt/hyperloom/open-source-repos`), decoupled from `USER_DATA_PATH` so
-shared session storage does not collocate concurrent pods' clones.
+Open-source dependencies default under `HYPERLOOM_CACHE_DIR`
+(`$REPO_ROOT/.cache`), cloned per revision as `<name>@<sha>`. The cache is
+repo-local and writable, so open-source runs need no privileged `/opt` mount.
 
 Leave these variables unset unless you maintain your own checkouts. An
 explicit path pointing at a missing directory fails preflight.
 
 | Variable                     | Set by operator? | Default / auto-clone target                                | Description                                                                                                         |
 |------------------------------|------------------|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_OPEN_SOURCE_ROOT` | rarely           | `/opt/hyperloom/open-source-repos`                         | Pod-local root for open-source deps (TraceLens, InferenceX, GEAK). Writable `/opt` required unless overridden. |
-| `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/InferenceX`                | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis; the inference_optimizer installer (`hyperloom/inference_optimizer/assets/install.sh`) clones it when unset. |
-| `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_OPEN_SOURCE_ROOT}/TraceLens`                 | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; the kernel-agent installer clones and pins it when unset. |
-| `TRACELENS_INTERNAL_ROOT`    | optional         | unset (open-source-only)                                   | Internal TraceLens extension (roofline gap, MI355+ MAF). Hyperloom never clones it — set only when you maintain a checkout. |
+| `HYPERLOOM_CACHE_DIR`        | rarely           | `$REPO_ROOT/.cache`                                        | Writable, repo-local root for open-source deps (TraceLens, InferenceX, GEAK), cloned per revision as `<name>@<sha>`. |
+| `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>` | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis; the inference_optimizer installer (`hyperloom/inference_optimizer/assets/install.sh`) clones it when unset. |
+| `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; the kernel-agent installer clones and pins it when unset. |
+| `TRACELENS_INTERNAL_ROOT`    | optional         | unset (MAF measured on-device)                             | Optional internal TraceLens extension that backfills MAF without an on-device benchmark. When unset, Hyperloom measures MAF on an idle GPU (microbenchmark) — roofline gap / MI355+ MAF analysis is still produced, just measured locally. Hyperloom never clones it. |
 | `MAGPIE_PATH`                | optional override | Resolved from installed `Magpie` package                  | Magpie package root for benchmark wrappers and patch inspection. `install.sh` pip-installs Magpie from `MAGPIE_PACKAGE_SPEC` when it is not importable. |
 
 ```{note}
@@ -227,7 +227,7 @@ GEAK uses the generated runtime configuration directly.
 
 ## Hosted mode (Primus-Claw)
 
-When you launch through the [Hyperloom UI](https://crusoe.primus-safe.amd.com/hyperloom/),
+When you launch through the hosted Hyperloom UI,
 you do not need to set any of the variables above by hand. The
 sandbox initializer binds your LLM Gateway key as `SAFE_API_KEY`,
 populates the path env from sandbox defaults, and runs install/preflight

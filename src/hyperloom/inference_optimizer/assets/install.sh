@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 # Inference Optimizer installer.
 #
@@ -57,8 +58,42 @@ done
 # $HYPERLOOM_RUNTIME_DIR.
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
+
+resolve_repo_root() {
+  if [ -n "${REPO_ROOT:-}" ]; then
+    printf '%s\n' "$REPO_ROOT"
+    return 0
+  fi
+  local source_root packaged_root
+  source_root="$(cd "${_script_dir}/../../../.." && pwd)"
+  packaged_root="$(cd "${_script_dir}/../../.." && pwd)"
+  if [ -f "${source_root}/pyproject.toml" ]; then
+    printf '%s\n' "$source_root"
+  else
+    printf '%s\n' "$packaged_root"
+  fi
+}
+
+REPO_ROOT="$(resolve_repo_root)"
 DOTENV_LOADED_COUNT=0
+
+setup_dotenv_is_authoritative() {
+  [ -f "$REPO_ROOT/.env" ] || return 1
+  grep -q '^HYPERLOOM_RUN_MODE=' "$REPO_ROOT/.env" 2>/dev/null
+}
+
+scrub_stale_workspace_env_for_setup_dotenv() {
+  setup_dotenv_is_authoritative || return 0
+  unset USER_DATA_PATH
+  unset HYPERLOOM_RUNTIME_DIR
+  unset KERNEL_AGENT_ENV
+  unset HYPERLOOM_ROOT
+  unset HYPERLOOM_KERNEL_AGENT_ROOT
+  unset KERNEL_AGENT_ROOT
+  unset FRAMEWORK_AGENT_ROOT
+  unset HYPERLOOM_SKILL_PATH
+  unset PYTHONPATH
+}
 
 load_dotenv_no_clobber() {
   DOTENV_LOADED_COUNT=0
@@ -94,6 +129,7 @@ load_dotenv_no_clobber() {
 # Load .env before deriving USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR so a
 # freshly-copied .env.template can be the single configuration entrypoint.
 # The loader is no-clobber: explicit shell exports always win.
+scrub_stale_workspace_env_for_setup_dotenv
 load_dotenv_no_clobber
 # Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
 # can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
@@ -107,11 +143,10 @@ HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
 # Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
-# Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
-# so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
-# Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
-# /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
-_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
+# Writable, repo-local base for auto-cloned deps: $HYPERLOOM_CACHE_DIR else
+# $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
+# wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
+_open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
 # tree-reform.MD P2.5: kernel-agent/framework-agent live under the hyperloom
 # package tree in both source and pip-installed layouts. A missing pyproject at
 # REPO_ROOT means setup is running from a pip --target workspace rather than a
@@ -129,6 +164,46 @@ FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/fram
 # installer/venv, so FRAMEWORK_AGENT_ROOT now just points at that in-tree
 # package (still overridable) and the old chain_framework_agent() delegation
 # below is a no-op.
+# Resolve a git ref to a commit SHA: 7-40 hex passes through; branch/tag via
+# ls-remote (falls back to the raw ref). The SHA keys the per-revision cache.
+_resolve_ref_sha() {
+  local repo="$1" ref="$2" sha=""
+  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  sha="$(git ls-remote "$repo" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
+  if [ -z "$sha" ]; then
+    # Loud, not silent: a raw-ref cache key drops the per-revision guarantee.
+    echo "[inference-optimizer WARN] could not resolve '$ref' at $repo to a commit SHA (network or bad ref); using '$ref' as the per-revision cache key -- stale-checkout guard weakened. Pin *_REF to a 40-hex SHA or restore network access." >&2
+    sha="$ref"
+  fi
+  printf '%s' "$sha"
+}
+
+# Bound cache growth: keep the newest $HYPERLOOM_CACHE_KEEP (default 3, 0 disables)
+# <name>@<sha> checkouts per dep, prune older ones. A moving branch ref (GEAK
+# `main`) resolves to a new SHA each HEAD bump, so the cache would grow unbounded.
+# Lock-held; the just-installed revision is newest, so always retained.
+_prune_dep_cache() {
+  local keep="${HYPERLOOM_CACHE_KEEP:-3}"
+  case "$keep" in ''|*[!0-9]*) keep=3 ;; esac
+  [ "$keep" -eq 0 ] && return 0
+  local name stale listing
+  for name in "$@"; do
+    # `|| true`: no-match glob fails `ls` under `set -euo pipefail`. Collect, then act.
+    listing="$(ls -dt "${_open_source_root}/${name}@"* 2>/dev/null | tail -n +"$((keep + 1))" || true)"
+    [ -n "$listing" ] || continue
+    while IFS= read -r stale; do
+      [ -n "$stale" ] && [ -d "$stale" ] || continue
+      log "pruning stale dep cache (keeping newest ${keep} ${name}@*): ${stale}"
+      rm -rf -- "$stale" 2>/dev/null || true
+    done <<EOF
+$listing
+EOF
+  done
+}
+
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a release commit/tag instead of the default branch. Operators can
 # re-pin with MAGPIE_REF=<tag|sha>.
@@ -148,7 +223,8 @@ INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX
 # per-install clone is reproducible (same rationale as MAGPIE_REF). Operators
 # can re-pin with INFERENCEX_REF=<tag|branch|sha>.
 INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
-INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"
+_INFERENCEX_SHA="$(_resolve_ref_sha "$INFERENCEX_REPO" "$INFERENCEX_REF")"
+INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX@${_INFERENCEX_SHA}}"
 
 DRY_RUN=0
 CHECK_ONLY=0
@@ -288,8 +364,8 @@ acquire_install_lock() {
 }
 
 # Preflight credential validation. Mirrors src/hyperloom/agents/kernel/scripts/install.sh:
-# a usable setup needs at least one LLM base URL and at least one key. This
-# accepts either the AMD single-gateway pair or native split OpenAI/Anthropic.
+# a usable setup needs Anthropic or DeepSeek credentials. The installer gate
+# intentionally does not default or require OpenAI.
 #
 # Loader (env wins; never overwrites a key that is already set):
 #   env > $REPO_ROOT/.env
@@ -307,11 +383,10 @@ preflight_validate_credentials() {
   preflight_load_dotenv
   local missing=()
   local has_url=0 has_key=0
-  { [ -n "${OPENAI_BASE_URL:-}" ] || [ -n "${ANTHROPIC_BASE_URL:-}" ]; } && has_url=1
-  { [ -n "${SAFE_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] \
-    || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && has_key=1
-  [ "$has_url" -eq 0 ] && missing+=("OPENAI_BASE_URL or ANTHROPIC_BASE_URL")
-  [ "$has_key" -eq 0 ] && missing+=("SAFE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN")
+  { [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ -n "${DEEPSEEK_BASE_URL:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_url=1
+  { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ]; } && has_key=1
+  [ "$has_url" -eq 0 ] && missing+=("ANTHROPIC_BASE_URL or DEEPSEEK_BASE_URL (DeepSeek may omit the URL)")
+  [ "$has_key" -eq 0 ] && missing+=("ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or DEEPSEEK_API_KEY")
   if [ "$has_url" -eq 1 ] && [ "$has_key" -eq 1 ]; then
     log "credentials preflight: usable LLM base URL + key present"
     return 0
@@ -337,15 +412,12 @@ Tried loading from:
   - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
 
 Fix one of:
-  1. Single gateway:
-       export SAFE_API_KEY=ak-your-safe-apikey
-       export OPENAI_BASE_URL=https://gateway.example.com/v1
-  2. Split OpenAI or Anthropic:
-       export OPENAI_BASE_URL=https://api.openai.com/v1
-       export OPENAI_API_KEY=sk-...
-       # or
+  1. Anthropic:
        export ANTHROPIC_BASE_URL=https://api.anthropic.com
        export ANTHROPIC_API_KEY=sk-ant-...
+  2. DeepSeek:
+       export DEEPSEEK_API_KEY=sk-...
+       # optional: export DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
   3. Copy .env from a working worktree into this one:
        cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
 EOF
@@ -776,7 +848,7 @@ PY
 # --- 3. InferenceX checkout: fresh clone from upstream ---
 #
 # Previously this function scanned a list of shared-filesystem candidates
-# (`/wekafs/hyperloom/InferenceX`, `/wekafs/fully-local/.../InferenceX`,
+# (`/shared/hyperloom/InferenceX`, `/shared/fully-local/.../InferenceX`,
 # etc.) and pointed every install at whichever it found first. That
 # multi-install / shared-checkout layout is the upstream source of the
 # concurrent-write races in bugs.md §C #1 — every fresh Magpie
@@ -1054,6 +1126,23 @@ chain_kernel_agent
 # `fa` CLI is already installed by ensure_inference_optimizer() above; no
 # more separate chain_framework_agent() delegation to a standalone installer.
 
+_write_specialist_secret_env_opt_in() {
+  if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
+    log "would append HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1 to ${KERNEL_AGENT_ENV}"
+    return 0
+  fi
+  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
+    sed -i 's|^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=.*|export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1|' "$KERNEL_AGENT_ENV"
+  else
+    {
+      echo ""
+      echo "# Production bootstrap: specialist subprocesses need env credentials unless claude CLI auth is preconfigured"
+      echo "export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1"
+    } >> "$KERNEL_AGENT_ENV"
+  fi
+}
+
 _probe_framework_source_roots() {
   log "probing framework source roots for INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"
   local roots
@@ -1095,8 +1184,10 @@ PY
   fi
 }
 
+_write_specialist_secret_env_opt_in
 _probe_framework_source_roots
 
+_prune_dep_cache "InferenceX" "Magpie"
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
 log "  HYPERLOOM_KERNEL_AGENT_ROOT=${HYPERLOOM_KERNEL_AGENT_ROOT}"

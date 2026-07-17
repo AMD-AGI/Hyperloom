@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known non-secret Hyperloom identifiers"
+regexTarget = "line"
+regexes = [
+  '''inferenceX_key:\s+[A-Za-z0-9._-]+''',
+  '''llm_key\s*=\s*"approved-msg_abc123"''',
+  '''"per_token":\s*"a8w8_untuned_gemm\.csv"''',
+]

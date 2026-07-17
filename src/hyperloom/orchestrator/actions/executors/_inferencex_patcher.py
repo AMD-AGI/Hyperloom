@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Idempotent, backward-compatible patcher for InferenceX
 ``benchmarks/benchmark_lib.sh``.
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from functools import partial
 from pathlib import Path
 from typing import Callable
@@ -36,8 +38,8 @@ _PATCHED_LINE = '        num_prompts="${NUM_PROMPTS:-$max_concurrency}"'
 # "Already patched?" sentinel.
 _PATCH_SENTINEL = "${NUM_PROMPTS:-$max_concurrency}"
 
-# System-wide lock (``/tmp`` is writable; cross-reboot persistence not needed).
-_LOCK_PATH = "/tmp/hyperloom_benchmark_lib_patcher.lock"
+# System-wide lock; cross-reboot persistence is not needed.
+_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_patcher.lock")
 
 
 # ``benchmark_serving.py`` hardcodes the ``/start_profile`` ``extra_body`` and
@@ -55,7 +57,15 @@ _BENCH_SERVING_PATCHED = (
     '\'{"num_steps": 1, "merge_profiles": true, "profile_by_stage": true}\'),'
 )
 _BENCH_SERVING_SENTINEL = "PROFILE_EXTRA_BODY"
-_BENCH_SERVING_LOCK_PATH = "/tmp/hyperloom_benchmark_serving_patcher.lock"
+_BENCH_SERVING_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_serving_patcher.lock")
+
+# ``append_lm_eval_summary`` does ``mv ./`` — eval artifacts land in the process
+# cwd (the InferenceX checkout), escaping the session. Redirect to ``$RESULT_DIR``
+# (Hyperloom's session dir), falling back to ``.`` when unset.
+_EVAL_DEST_LEGACY = 'mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2'
+_EVAL_DEST_PATCHED = 'mv -f "$jf" "${RESULT_DIR:-.}/" || echo "WARN: failed to move ${jf}" >&2'
+_EVAL_DEST_SENTINEL = '"${RESULT_DIR:-.}/"'
+_EVAL_DEST_LOCK_PATH = "/tmp/hyperloom_benchmark_lib_eval_dest_patcher.lock"
 
 
 def _discover_inferencex_roots(
@@ -408,4 +418,73 @@ def ensure_benchmark_serving_patched(
     )
 
 
-__all__ = ["ensure_benchmark_lib_patched", "ensure_benchmark_serving_patched"]
+def _is_eval_dest_patched(src: Path) -> bool:
+    """Return whether ``benchmark_lib.sh`` already redirects eval artifacts to
+    ``$RESULT_DIR`` (the eval-dest sentinel is present).
+
+    Args:
+        src (Path): The ``benchmark_lib.sh`` file to inspect.
+
+    Returns:
+        bool: ``True`` if the eval-dest sentinel is present; ``False`` on a
+        miss or read error.
+    """
+    return file_contains_sentinel(src, _EVAL_DEST_SENTINEL, log, "_inferencex_patcher")
+
+
+def ensure_benchmark_lib_eval_dest_patched(
+    inferencex_path: Path | str | None = None,
+) -> bool:
+    """Ensure ``append_lm_eval_summary`` moves eval artifacts to ``$RESULT_DIR``
+    instead of the process cwd (the InferenceX checkout).
+
+    Returns ``True`` when patched at exit, ``False`` (non-fatal) when the file
+    is missing or the legacy line is absent (falls back to the scan-side
+    salvage in :mod:`benchmark_result`). Concurrency-safe; independent lock so
+    it does not serialize with the NUM_PROMPTS patch on the same file.
+
+    Args:
+        inferencex_path: Caller-provided override root; defaults to env-based
+            discovery when ``None``.
+
+    Returns:
+        True when at least one discovered ``benchmark_lib.sh`` is patched (or
+        already patched), False when none could be patched.
+    """
+    return _ensure_patched(
+        _resolve_benchmark_lib_paths(inferencex_path),
+        _is_eval_dest_patched,
+        partial(
+            _apply_line_replacement_atomic,
+            legacy=_EVAL_DEST_LEGACY,
+            patched_line=_EVAL_DEST_PATCHED,
+            tmp_prefix=".benchmark_lib.sh.eval_dest_",
+            missing_msg=(
+                "_inferencex_patcher: expected eval-artifact ``mv ./`` line not "
+                "found in %s; upstream layout may have changed. Eval artifacts "
+                "will land in the process cwd (InferenceX checkout) and be "
+                "recovered by the benchmark_result scan-side salvage instead."
+            ),
+            success_msg=(
+                "_inferencex_patcher: redirected eval artifacts to $RESULT_DIR in %s"
+            ),
+        ),
+        _EVAL_DEST_LOCK_PATH,
+        empty_msg=(
+            "_inferencex_patcher: no InferenceX root discovered "
+            "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
+            "benchmark_lib.sh missing — skipping eval-dest patch (fine for "
+            "tests and dry-runs without a real InferenceX tree)"
+        ),
+        failure_msg=(
+            "_inferencex_patcher: failed to eval-dest-patch %s; other discovered "
+            "roots will still be attempted"
+        ),
+    )
+
+
+__all__ = [
+    "ensure_benchmark_lib_patched",
+    "ensure_benchmark_lib_eval_dest_patched",
+    "ensure_benchmark_serving_patched",
+]

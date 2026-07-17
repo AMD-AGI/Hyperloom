@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 r"""Parse the Coordinator-style ``_compose_prompt`` text into structured fields.
 
@@ -186,7 +187,7 @@ def _try_parse_payload(raw: str) -> dict[str, Any] | None:
     # ``str(dict)`` form (Python repr, single quotes) — most common.
     try:
         value = ast.literal_eval(raw)
-    except (ValueError, SyntaxError):
+    except (ValueError, SyntaxError, TypeError):  # tolerate malformed payloads (return None)
         value = None
     if isinstance(value, dict):
         return value

@@ -1,11 +1,11 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for the bypass analysis layer (pure functions, no GPU)."""
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors import bypass_analysis as ba
 

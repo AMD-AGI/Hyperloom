@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Shared model-config helpers (config.json parsing + arch/type detection).
 
@@ -559,3 +560,33 @@ def _model_is_gemma2(model_path: str) -> bool:
         if _config_has_model_identity(data):
             return False
     return _path_looks_like_gemma2(model_path)
+
+
+def _sparse_kv_block_size(model_path: str) -> int | None:
+    """Return the KV-cache block size a sparse-attention model requires, or None.
+
+    Sparse-attention models (e.g. MiniMax-M3 MSA) declare a fixed page/block
+    size under ``sparse_attention_config.sparse_block_size`` (top level or a
+    nested text-tower scope). Their vLLM sparse backends only accept that exact
+    block size (``get_supported_kernel_block_sizes()`` returns just it), so the
+    paged KV cache must launch with ``--block-size <that value>`` or KV-cache
+    init aborts with "No common block size for <default>".
+
+    Config-derived and model-agnostic: returns the declared size (e.g. 128) for
+    ANY model that carries it, else ``None`` (dense model, no declared size, or
+    unreadable config -- the caller then injects nothing and keeps prior
+    behaviour). Requires a readable ``config.json`` at ``model_path``.
+
+    Args:
+        model_path: Filesystem path (or resolvable id) to the model.
+
+    Returns:
+        The required KV-cache block size, or ``None`` when undetermined.
+    """
+    data = _load_model_config_dict(model_path)
+    if not isinstance(data, dict):
+        return None
+    sparse = _merge_config_scopes(data).get("sparse_attention_config")
+    if not isinstance(sparse, dict):
+        return None
+    return to_int(sparse.get("sparse_block_size"))

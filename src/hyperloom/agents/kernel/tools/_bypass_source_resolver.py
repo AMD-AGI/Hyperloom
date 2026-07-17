@@ -1,5 +1,6 @@
 ###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -124,7 +125,7 @@ def is_editable_source(path: str | None, kernel_kind: str | None = None) -> bool
     if low.endswith(".py"):
         if kernel_kind == "triton_inductor_generated":
             return False
-        if "torchinductor" in path or path.startswith("/tmp/"):
+        if "torchinductor" in path or path.startswith("/tmp/"):  # nosec B108 - marker for generated compiler artifacts.
             return False
         return True
     return False

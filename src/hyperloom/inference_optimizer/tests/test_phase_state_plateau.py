@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """plateau pure functions + escalate hints + stop_reason ENUM."""
 
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.phases.machine_state import (
+    DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     ESCALATE_HINT_BUDGET_BUMP_CAP,
     ESCALATE_HINT_BUDGET_BUMP_DELTA,
@@ -78,16 +80,17 @@ def test_plateau_explore_AND_low_gain_AND_streak_triggers():
                 {"gain_pct": 0.05},
             ]
         },
-        specialist_rounds=[
-            {"proposals_total": 1, "proposals_kept": 1},
-            {"proposals_total": 0, "proposals_kept": 0},
-            {"proposals_total": 0, "proposals_kept": 0},
-            {"proposals_total": 0, "proposals_kept": 0},
-        ],
+        specialist_rounds=(
+            [{"proposals_total": 1, "proposals_kept": 1}]
+            + [
+                {"proposals_total": 0, "proposals_kept": 0}
+                for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
+            ]
+        ),
     )
     triggered, ev = compute_plateau_explore(state)
     assert triggered is True
-    assert ev["empty_streak"] == 3
+    assert ev["empty_streak"] == DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK
     assert ev["recent_keep_gain_pct"] < DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT
 
 
@@ -244,9 +247,8 @@ def test_exit_normal_explore_exits_on_plateau():
         phase_budget_pct={},
         explore_search={"winners_history": [{"gain_pct": 0.1}]},
         specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0},
-            {"proposals_total": 0, "proposals_kept": 0},
-            {"proposals_total": 0, "proposals_kept": 0},
+            {"proposals_total": 0, "proposals_kept": 0}
+            for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
         pending_escalate_hint="",
         stop_reason="",
@@ -567,9 +569,8 @@ def test_compute_next_phase_advances_on_plateau():
         phase_budget_pct={},
         explore_search={"winners_history": [{"gain_pct": 0.1}]},
         specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0},
-            {"proposals_total": 0, "proposals_kept": 0},
-            {"proposals_total": 0, "proposals_kept": 0},
+            {"proposals_total": 0, "proposals_kept": 0}
+            for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
         params_no_promote_streak=0,
         backends_search={},

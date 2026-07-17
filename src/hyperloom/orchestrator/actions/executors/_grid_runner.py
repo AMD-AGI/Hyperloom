@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Shared helper for the ``explore`` executor's grid runs.
 
@@ -23,6 +24,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.env_safety import scrub_child_process_env
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
@@ -185,6 +187,26 @@ def _resolve_magpie_python() -> str:
     if candidate:
         return candidate
     return "python3"
+
+
+def _validate_magpie_python_override(value: str) -> str:
+    """Validate caller-supplied Magpie interpreter overrides before argv[0]."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if any(ch in raw for ch in ("\x00", "\n", "\r")):
+        raise ValueError("magpie_python contains control characters")
+    resolved = Path(raw)
+    if not resolved.is_absolute():
+        found = shutil.which(raw)
+        if not found:
+            raise ValueError(f"magpie_python is not executable on PATH: {raw}")
+        resolved = Path(found)
+    if not resolved.is_file():
+        raise ValueError(f"magpie_python is not a file: {raw}")
+    if not resolved.name.lower().startswith("python"):
+        raise ValueError(f"magpie_python must point to a Python interpreter, got: {raw}")
+    return str(resolved)
 
 
 def _resolve_probe_python() -> str:
@@ -737,8 +759,14 @@ def _kill_stale_servers() -> None:
                 # Already exited or owned by another user.
                 pass
 
-    # Clear /dev/shm segments that prevent re-binding.
-    for pattern in ("/dev/shm/vllm*", "/dev/shm/nccl*", "/dev/shm/cuda*", "/dev/shm/torch*", "/dev/shm/atom*"):
+    # Clear GPU runtime shared-memory segments that prevent re-binding.
+    for pattern in (  # nosec B108 - intentionally targets known /dev/shm runtime prefixes.
+        "/dev/shm/vllm*",
+        "/dev/shm/nccl*",
+        "/dev/shm/cuda*",
+        "/dev/shm/torch*",
+        "/dev/shm/atom*",
+    ):
         for f in glob.glob(pattern):
             try:
                 os.remove(f)
@@ -800,7 +828,7 @@ def _run_magpie(
     if preclean and not os.environ.get("PYTEST_CURRENT_TEST"):
         _kill_stale_servers()
 
-    env = os.environ.copy()
+    env = scrub_child_process_env(os.environ.copy())
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     magpie_dir = os.environ.get("MAGPIE_PATH") or ""
     if magpie_dir:
@@ -931,6 +959,8 @@ async def run_grid(
         from .benchmark_backend import resolve_benchmark_interpreter
 
         magpie_python = resolve_benchmark_interpreter()
+    else:
+        magpie_python = _validate_magpie_python_override(magpie_python)
     if warmup_before_measure is None:
         warmup_before_measure = _run_grid_warmup_enabled()
     auto_warmup_requested = bool(warmup_before_measure and server_lifecycle is None)

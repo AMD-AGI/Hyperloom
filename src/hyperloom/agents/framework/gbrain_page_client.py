@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Minimal gbrain MCP page client for the standalone ``fa`` package.
 
@@ -18,8 +19,15 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
+
+
+def _require_http_url(url: str) -> None:
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported URL scheme: {scheme!r}")
 
 
 class GbrainPageError(RuntimeError):
@@ -125,7 +133,7 @@ class GbrainPageClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # nosec B310 - URL scheme checked above.
                 raw = self._read_body(resp)
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise GbrainPageError(f"gbrain {tool} transport error: {exc!r}") from exc

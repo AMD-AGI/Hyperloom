@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Static guard for the retired ``extra_sglang_args`` payload field."""
 
@@ -21,13 +22,6 @@ ALLOWED_FILES: dict[str, str] = {
     ),
     "src/hyperloom/inference_optimizer/tests/test_no_legacy_writer_sites.py": (
         "this guard names the retired field it scans for"
-    ),
-    "ci/transform_to_session_summary_v2.py": (
-        "load-time session_breakdown.json migration only; reads the retired key "
-        "as a fallback and emits canonical extra_server_args"
-    ),
-    "ci/test_ci_transform_v2.py": (
-        "tests pin the session_breakdown.json legacy-arg migration contract"
     ),
 }
 

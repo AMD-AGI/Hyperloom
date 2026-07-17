@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """ExploreExecutor.
 
@@ -67,7 +68,7 @@ from ._grid_runner import (
 )
 from ._grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
-from ._stack_rebench import measure_stack_rebench
+from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -88,9 +89,9 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 # Stack rebench stability threshold: after a KEEP, rebench tput must beat
 # ``base_tput * (1 + DEFAULT_STACK_STABLE_PCT/100)`` else evict
-# (KEEP_UNSTABLE → REVERT). Set below the KEEP threshold. Override via
-# ``params['stack_stable_threshold_pct']``.
-DEFAULT_STACK_STABLE_PCT = 0.5
+# (KEEP_UNSTABLE → REVERT). Sourced from ``_stack_rebench`` so the explore
+# ledger and integrate_patch share one confirmation floor (below the KEEP
+# gate). Override via ``params['stack_stable_threshold_pct']``.
 
 
 _now_iso = functools.partial(now_iso, "auto")
@@ -1318,12 +1319,18 @@ class ExploreExecutor:
                                     float(accuracy_value),
                                 )
                             else:
-                                # No eval result. Serving: skip the gate (no
-                                # accuracy data). Scriptable: fail closed.
-                                accuracy_ok = not scriptable
+                                # No eval result. Both scriptable and serving
+                                # fail closed: a gated variant (scriptable, or a
+                                # high-risk serving variant with a baseline) that
+                                # yields no accuracy verdict likely broke the eval
+                                # path, so the change is reverted. The former
+                                # serving throughput-only skip is removed. Baseline
+                                # is where a missing accuracy result halts the run;
+                                # post-baseline it is a per-variant REVERT.
+                                accuracy_ok = False
                         if not accuracy_ok:
                             outcome = "REVERT"
-                            reason = "accuracy_drop"
+                            reason = "accuracy_unavailable" if accuracy_value is None else "accuracy_drop"
                         else:
                             outcome = "KEEP"
 

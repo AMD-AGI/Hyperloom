@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for the ``same_payload_loop`` signal (B1)."""
 
@@ -140,7 +141,7 @@ def test_baseline_family_uses_dedicated_projection():
             "result_dir": "/workspace/hyperloom",
             "extra_server_args": ["--tp", "8"],
             "extra_envs": {"CONC": "8"},
-            "model_path": "/wekafs/models/dsr1",
+            "model_path": "/path/models/dsr1",
             "gpu_type": "mi300x",
             "config_path": "/tmp/baseline_config.yaml",
             "disable_run_eval": False,
