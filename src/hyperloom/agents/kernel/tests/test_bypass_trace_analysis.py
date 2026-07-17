@@ -1,5 +1,6 @@
 ###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -56,19 +57,32 @@ def _run(argv, capsys):
 
 def _base_argv(ws: Path, trace_input: str, extra=None):
     argv = [
-        "--trace-input", trace_input,
-        "--session-id", "utest",
-        "--workspace-path", str(ws),
-        "--framework", "vllm",
-        "--target-platform", "MI300X",
-        "--model-name", "utest-llm",
-        "--top-k", "8",
+        "--trace-input",
+        trace_input,
+        "--session-id",
+        "utest",
+        "--workspace-path",
+        str(ws),
+        "--framework",
+        "vllm",
+        "--target-platform",
+        "MI300X",
+        "--model-name",
+        "utest-llm",
+        "--top-k",
+        "8",
     ]
     return argv + (extra or [])
 
 
 def _assert_artifacts(result):
-    for key in ("kernel_candidates", "kernel_roofline", "tracelens_summary", "trace_input_manifest", "trace_report_path"):
+    for key in (
+        "kernel_candidates",
+        "kernel_roofline",
+        "tracelens_summary",
+        "trace_input_manifest",
+        "trace_report_path",
+    ):
         p = result["artifact_paths"][key]
         assert p and Path(p).is_file(), f"missing artifact {key}: {p}"
 
@@ -181,9 +195,29 @@ def test_bypass_diffusion_aggregation_numerics():
     # sigma_ideal = sum(actual * eff); placeholder kernels count only toward
     # no_perf_model_us.
     hot = [
-        {"duration_us": 100.0, "roofline_attainment_pct": 50.0, "bound_type": "compute_bound", "roofline_source": "analytical", "name": "gemm_k", "kernel_category": "GEMM"},
-        {"duration_us": 60.0, "roofline_attainment_pct": 25.0, "bound_type": "memory_bound", "roofline_source": "analytical", "name": "attn_k", "kernel_category": "SDPA"},
-        {"duration_us": 40.0, "roofline_attainment_pct": 0.0, "roofline_source": "placeholder", "name": "p_k", "kernel_category": "Other"},
+        {
+            "duration_us": 100.0,
+            "roofline_attainment_pct": 50.0,
+            "bound_type": "compute_bound",
+            "roofline_source": "analytical",
+            "name": "gemm_k",
+            "kernel_category": "GEMM",
+        },
+        {
+            "duration_us": 60.0,
+            "roofline_attainment_pct": 25.0,
+            "bound_type": "memory_bound",
+            "roofline_source": "analytical",
+            "name": "attn_k",
+            "kernel_category": "SDPA",
+        },
+        {
+            "duration_us": 40.0,
+            "roofline_attainment_pct": 0.0,
+            "roofline_source": "placeholder",
+            "name": "p_k",
+            "kernel_category": "Other",
+        },
     ]
     r = dr.build_report_from_bypass(hot, {"busy_pct": 80.0, "idle_pct": 20.0}, 4, 10)
     t = r["totals"]
@@ -204,9 +238,12 @@ def test_diffusion_report_totals_param_marks_full_scope():
     # When workload totals are supplied, the report uses them verbatim and marks
     # kernel_scope=all_device_kernels.
     totals = {
-        "sigma_actual_kernel_us": 100.0, "sigma_ideal_roofline_us": 30.0,
-        "kernel_roofline_efficiency": 0.3, "compute_bound_us": 60.0,
-        "memory_bound_us": 40.0, "no_perf_model_us": 0.0,
+        "sigma_actual_kernel_us": 100.0,
+        "sigma_ideal_roofline_us": 30.0,
+        "kernel_roofline_efficiency": 0.3,
+        "compute_bound_us": 60.0,
+        "memory_bound_us": 40.0,
+        "no_perf_model_us": 0.0,
     }
     # kernels_aggregated reflects the all-kernel count, not len(hot_kernels).
     r = dr.build_report_from_bypass([], {"busy_pct": 90.0}, 8, 10, totals=totals, kernels_aggregated=137)
@@ -219,7 +256,14 @@ def test_diffusion_report_totals_param_marks_full_scope():
 def test_bypass_diffusion_report_shape_without_steps():
     # No denoise steps -> no per_step block, but the core report keys stay put.
     r = dr.build_report_from_bypass([], {"busy_pct": 0.0}, None, 10)
-    for key in ("source", "totals", "gpu_timeline_pct", "gpu_busy_ratio", "end_to_end_efficiency_estimate", "top_kernels"):
+    for key in (
+        "source",
+        "totals",
+        "gpu_timeline_pct",
+        "gpu_busy_ratio",
+        "end_to_end_efficiency_estimate",
+        "top_kernels",
+    ):
         assert key in r
     assert "per_step" not in r
 
@@ -231,10 +275,22 @@ def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
     trace = tmp_path / "t.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
     argv = [
-        "--trace-input", str(trace), "--session-id", "utest-xdit-diff",
-        "--workspace-path", str(tmp_path), "--framework", "xdit",
-        "--target-platform", "MI300X", "--model-name", "utest-dit",
-        "--top-k", "8", "--num-denoise-steps", "20",
+        "--trace-input",
+        str(trace),
+        "--session-id",
+        "utest-xdit-diff",
+        "--workspace-path",
+        str(tmp_path),
+        "--framework",
+        "xdit",
+        "--target-platform",
+        "MI300X",
+        "--model-name",
+        "utest-dit",
+        "--top-k",
+        "8",
+        "--num-denoise-steps",
+        "20",
     ]
     rc, result, _ = _run(argv, capsys)
     assert rc == 0
@@ -250,11 +306,24 @@ def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
 def test_bypass_cli_accepts_forwarded_diffusion_flags():
     # The bypass parser must accept --model-path/--precision (and the
     # diffusion-ceiling siblings) or strict parse_args exits 2.
-    args = bta._build_arg_parser().parse_args([
-        "--trace-input", "/x", "--framework", "xdit",
-        "--model-path", "/models/flux", "--precision", "fp8",
-        "--height", "1024", "--width", "1024", "--cfg-batch", "2",
-    ])
+    args = bta._build_arg_parser().parse_args(
+        [
+            "--trace-input",
+            "/x",
+            "--framework",
+            "xdit",
+            "--model-path",
+            "/models/flux",
+            "--precision",
+            "fp8",
+            "--height",
+            "1024",
+            "--width",
+            "1024",
+            "--cfg-batch",
+            "2",
+        ]
+    )
     assert args.model_path == "/models/flux"
     assert args.precision == "fp8"
     assert args.height == 1024 and args.width == 1024
@@ -385,7 +454,9 @@ def test_quality_warning_steady_fallback(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_BYPASS_CORR_WARN_PCT", raising=False)
     warnings: list = []
     bta._emit_quality_warnings(
-        _analyze(kernels=_HEALTHY_KERNELS, attributed_pct=80.0, steady_status="no_repeating_window_fell_back_to_full_trace"),
+        _analyze(
+            kernels=_HEALTHY_KERNELS, attributed_pct=80.0, steady_status="no_repeating_window_fell_back_to_full_trace"
+        ),
         warnings,
     )
     assert "bypass_steady_fallback_full_trace" in _codes(warnings)
@@ -456,13 +527,20 @@ def test_xdit_steady_anchored_is_not_estimated(tmp_path, capsys, monkeypatch):
     trace = tmp_path / "x.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _STEADY_EVENTS}).encode("utf-8"))
     argv = [
-        "--trace-input", str(trace),
-        "--session-id", "utest-xdit",
-        "--workspace-path", str(tmp_path),
-        "--framework", "xdit",
-        "--target-platform", "MI300X",
-        "--model-name", "FLUX.1-dev",
-        "--top-k", "8",
+        "--trace-input",
+        str(trace),
+        "--session-id",
+        "utest-xdit",
+        "--workspace-path",
+        str(tmp_path),
+        "--framework",
+        "xdit",
+        "--target-platform",
+        "MI300X",
+        "--model-name",
+        "FLUX.1-dev",
+        "--top-k",
+        "8",
     ]
     _, result, _ = _run(argv, capsys)
     assert result["aggregation_scope"] == "steady_state"
@@ -484,13 +562,20 @@ def test_xdit_full_trace_fallback_is_estimated(tmp_path, capsys, monkeypatch):
     trace = tmp_path / "x.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
     argv = [
-        "--trace-input", str(trace),
-        "--session-id", "utest-xdit-full",
-        "--workspace-path", str(tmp_path),
-        "--framework", "xdit",
-        "--target-platform", "MI300X",
-        "--model-name", "FLUX.1-dev",
-        "--top-k", "8",
+        "--trace-input",
+        str(trace),
+        "--session-id",
+        "utest-xdit-full",
+        "--workspace-path",
+        str(tmp_path),
+        "--framework",
+        "xdit",
+        "--target-platform",
+        "MI300X",
+        "--model-name",
+        "FLUX.1-dev",
+        "--top-k",
+        "8",
     ]
     _, result, _ = _run(argv, capsys)
     assert result["aggregation_scope"] == "full_trace"
@@ -593,5 +678,3 @@ def test_csv_artifacts_written_and_paths_exposed(tmp_path, capsys, monkeypatch):
     assert "optimization_priority" in rows[0] and "suggestion" in rows[0]
     srows = list(csv.DictReader(io.StringIO(Path(spath).read_text())))
     assert srows and "kernel_category" in srows[0]
-
-

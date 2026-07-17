@@ -1,5 +1,6 @@
 ###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -88,7 +89,7 @@ def _remap_aiter_meta(path: str) -> str:
     live = _aiter_csrc_root()
     if not live:
         return path
-    tail = path[path.find("aiter_meta/csrc/") + len("aiter_meta/csrc/"):]
+    tail = path[path.find("aiter_meta/csrc/") + len("aiter_meta/csrc/") :]
     remapped = live.rstrip("/") + "/" + tail
     return remapped if os.path.exists(remapped) else path
 

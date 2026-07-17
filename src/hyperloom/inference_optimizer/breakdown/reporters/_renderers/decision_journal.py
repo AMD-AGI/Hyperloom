@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Decision journal renderer.
 
@@ -133,11 +134,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             if isinstance(base_ref, (int, float))
             else "—"
         )
-        parts.append(
-            f"**{phase}** round `{round_id}` "
-            f"(base={base_ref_disp}, "
-            f"ts={entry.get('ts') or '—'})"
-        )
+        parts.append(f"**{phase}** round `{round_id}` (base={base_ref_disp}, ts={entry.get('ts') or '—'})")
         parts.append(
             md_table(
                 ["field", "value"],

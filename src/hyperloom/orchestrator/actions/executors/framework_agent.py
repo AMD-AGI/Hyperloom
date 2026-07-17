@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Apply one discovered framework PR candidate and KEEP or REVERT by benchmark."""
 
@@ -451,9 +452,7 @@ class FrameworkAgentExecutor:
             return {
                 "status": "failed",
                 "error_class": "missing_param",
-                "error": (
-                    "framework requires params.candidate (the PR metadata row produced by `fa phase-discover`)"
-                ),
+                "error": ("framework requires params.candidate (the PR metadata row produced by `fa phase-discover`)"),
             }
         batch_id = str(params.get("batch_id") or "")
         slug = _candidate_slug(candidate)
@@ -649,8 +648,7 @@ class FrameworkAgentExecutor:
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
         if stash_state == "failed":
             log.error(
-                "framework: cannot stash user changes in %s: %s; "
-                "aborting candidate to avoid data loss",
+                "framework: cannot stash user changes in %s: %s; aborting candidate to avoid data loss",
                 framework_root,
                 stash_note,
             )
@@ -675,16 +673,21 @@ class FrameworkAgentExecutor:
         if git_tree:
             pre_apply_sha, sha_err = _git_head_sha(framework_root)
             if pre_apply_sha is None:
-                return _with_stash_restore(framework_root, stash_state, stash_note, {
-                    "status": "apply_failed",
-                    "error_class": "no_pre_apply_sha",
-                    "error": (f"could not capture HEAD sha in {framework_root}: {sha_err or 'unknown'}"),
-                    "candidate": candidate,
-                    "batch_id": batch_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "workspace": str(output_root),
-                })
+                return _with_stash_restore(
+                    framework_root,
+                    stash_state,
+                    stash_note,
+                    {
+                        "status": "apply_failed",
+                        "error_class": "no_pre_apply_sha",
+                        "error": (f"could not capture HEAD sha in {framework_root}: {sha_err or 'unknown'}"),
+                        "candidate": candidate,
+                        "batch_id": batch_id,
+                        "patches_applied": [],
+                        "patches_reverted": [],
+                        "workspace": str(output_root),
+                    },
+                )
 
         # Stage 1: apply patches (with -3 fallback for git trees;
         # backup-based apply for non-git roots like pip wheel installs).
@@ -697,6 +700,7 @@ class FrameworkAgentExecutor:
         # missing-target diffs are left to git apply's own check so a legitimate
         # candidate is never dropped here.
         from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
+
         for patch in patch_paths:
             try:
                 _ptext = Path(patch).read_text(encoding="utf-8", errors="replace")
@@ -738,33 +742,43 @@ class FrameworkAgentExecutor:
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "apply_failed",
-                "error_class": "git_apply_failed",
-                "error": apply_errors,
-                "candidate": candidate,
-                "batch_id": batch_id,
-                "patches_applied": [],
-                "patches_reverted": [str(p) for p in reverted],
-                "patch_source_mode": patch_source_mode,
-                "reason": "git apply failed (see error)",
-                "workspace": str(output_root),
-                "lane": "perf_framework",
-                "retry_feedback": [fb.to_dict() for fb in apply_feedbacks],
-                "prior_patches": [str(p) for p in patch_paths],
-            })
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "apply_failed",
+                    "error_class": "git_apply_failed",
+                    "error": apply_errors,
+                    "candidate": candidate,
+                    "batch_id": batch_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "patch_source_mode": patch_source_mode,
+                    "reason": "git apply failed (see error)",
+                    "workspace": str(output_root),
+                    "lane": "perf_framework",
+                    "retry_feedback": [fb.to_dict() for fb in apply_feedbacks],
+                    "prior_patches": [str(p) for p in patch_paths],
+                },
+            )
 
         if params.get("apply_only"):
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "applied_no_bench",
-                "candidate": candidate,
-                "batch_id": batch_id,
-                "patches_applied": [str(p) for p in applied],
-                "patches_reverted": [],
-                "patch_source_mode": patch_source_mode,
-                "reason": "apply_only=True; benchmark skipped",
-                "workspace": str(output_root),
-            })
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "applied_no_bench",
+                    "candidate": candidate,
+                    "batch_id": batch_id,
+                    "patches_applied": [str(p) for p in applied],
+                    "patches_reverted": [],
+                    "patch_source_mode": patch_source_mode,
+                    "reason": "apply_only=True; benchmark skipped",
+                    "workspace": str(output_root),
+                },
+            )
 
         # Bench via run_grid (size=1).
         try:
@@ -779,34 +793,44 @@ class FrameworkAgentExecutor:
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "reverted",
-                "error_class": "framework_script_mismatch",
-                "error": str(exc),
-                "candidate": candidate,
-                "batch_id": batch_id,
-                "patches_applied": [],
-                "patches_reverted": [str(p) for p in reverted],
-                "reason": str(exc),
-                "workspace": str(output_root),
-            })
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "reverted",
+                    "error_class": "framework_script_mismatch",
+                    "error": str(exc),
+                    "candidate": candidate,
+                    "batch_id": batch_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "reason": str(exc),
+                    "workspace": str(output_root),
+                },
+            )
         except Exception as exc:  # noqa: BLE001
             reverted = self._revert_patches(
                 framework_root,
                 applied,
                 pre_apply_sha=pre_apply_sha,
             )
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": "reverted",
-                "error_class": "bench_exception",
-                "error": repr(exc),
-                "candidate": candidate,
-                "batch_id": batch_id,
-                "patches_applied": [],
-                "patches_reverted": [str(p) for p in reverted],
-                "reason": f"bench raised: {exc!r}",
-                "workspace": str(output_root),
-            })
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "reverted",
+                    "error_class": "bench_exception",
+                    "error": repr(exc),
+                    "candidate": candidate,
+                    "batch_id": batch_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "reason": f"bench raised: {exc!r}",
+                    "workspace": str(output_root),
+                },
+            )
 
         # KEEP / REVERT decision.
         base_tput = float(params.get("base_tput") or 0.0)
@@ -866,22 +890,27 @@ class FrameworkAgentExecutor:
                 patch_path=str(applied[0]) if applied else "",
                 extra=extra,
             )
-            return _with_stash_restore(framework_root, stash_state, stash_note, {
-                "status": revert_status,
-                "candidate": candidate,
-                "batch_id": batch_id,
-                "patches_applied": [],
-                "patches_reverted": [str(p) for p in reverted],
-                "output_throughput": new_tput,
-                "delta_pct": delta_pct,
-                "accuracy_pass": accuracy_pass,
-                "base_tput": base_tput,
-                "keep_threshold_pct": keep_threshold_pct,
-                "patch_source_mode": patch_source_mode,
-                "reason": "; ".join(reasons) or "gate failed",
-                "bench_result": bench_result,
-                "workspace": str(output_root),
-            })
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": revert_status,
+                    "candidate": candidate,
+                    "batch_id": batch_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "output_throughput": new_tput,
+                    "delta_pct": delta_pct,
+                    "accuracy_pass": accuracy_pass,
+                    "base_tput": base_tput,
+                    "keep_threshold_pct": keep_threshold_pct,
+                    "patch_source_mode": patch_source_mode,
+                    "reason": "; ".join(reasons) or "gate failed",
+                    "bench_result": bench_result,
+                    "workspace": str(output_root),
+                },
+            )
 
         # KEEP: commit the patches so they survive the next candidate's REJECT.
         # Non-git trees keep the patches in-place as working-tree edits.
@@ -897,23 +926,28 @@ class FrameworkAgentExecutor:
                     applied,
                     pre_apply_sha=pre_apply_sha,
                 )
-                return _with_stash_restore(framework_root, stash_state, stash_note, {
-                    "status": "apply_failed",
-                    "error_class": "keep_commit_failed",
-                    "error": commit_err or "git commit returned no sha",
-                    "candidate": candidate,
-                    "batch_id": batch_id,
-                    "patches_applied": [],
-                    "patches_reverted": [str(p) for p in reverted],
-                    "output_throughput": new_tput,
-                    "delta_pct": delta_pct,
-                    "accuracy_pass": accuracy_pass,
-                    "base_tput": base_tput,
-                    "keep_threshold_pct": keep_threshold_pct,
-                    "reason": f"KEEP commit failed: {commit_err}",
-                    "bench_result": bench_result,
-                    "workspace": str(output_root),
-                })
+                return _with_stash_restore(
+                    framework_root,
+                    stash_state,
+                    stash_note,
+                    {
+                        "status": "apply_failed",
+                        "error_class": "keep_commit_failed",
+                        "error": commit_err or "git commit returned no sha",
+                        "candidate": candidate,
+                        "batch_id": batch_id,
+                        "patches_applied": [],
+                        "patches_reverted": [str(p) for p in reverted],
+                        "output_throughput": new_tput,
+                        "delta_pct": delta_pct,
+                        "accuracy_pass": accuracy_pass,
+                        "base_tput": base_tput,
+                        "keep_threshold_pct": keep_threshold_pct,
+                        "reason": f"KEEP commit failed: {commit_err}",
+                        "bench_result": bench_result,
+                        "workspace": str(output_root),
+                    },
+                )
 
         await self._write_kb_record(
             candidate=candidate,
@@ -922,23 +956,28 @@ class FrameworkAgentExecutor:
             patch_path=str(applied[0]) if applied else "",
             extra=extra,
         )
-        return _with_stash_restore(framework_root, stash_state, stash_note, {
-            "status": "kept",
-            "candidate": candidate,
-            "batch_id": batch_id,
-            "patches_applied": [str(p) for p in applied],
-            "patches_reverted": [],
-            "output_throughput": new_tput,
-            "delta_pct": delta_pct,
-            "accuracy_pass": accuracy_pass,
-            "base_tput": base_tput,
-            "keep_threshold_pct": keep_threshold_pct,
-            "keep_commit_sha": keep_sha,
-            "patch_source_mode": patch_source_mode,
-            "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
-            "bench_result": bench_result,
-            "workspace": str(output_root),
-        })
+        return _with_stash_restore(
+            framework_root,
+            stash_state,
+            stash_note,
+            {
+                "status": "kept",
+                "candidate": candidate,
+                "batch_id": batch_id,
+                "patches_applied": [str(p) for p in applied],
+                "patches_reverted": [],
+                "output_throughput": new_tput,
+                "delta_pct": delta_pct,
+                "accuracy_pass": accuracy_pass,
+                "base_tput": base_tput,
+                "keep_threshold_pct": keep_threshold_pct,
+                "keep_commit_sha": keep_sha,
+                "patch_source_mode": patch_source_mode,
+                "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
+                "bench_result": bench_result,
+                "workspace": str(output_root),
+            },
+        )
 
     # KB writeback: append FRAMEWORK outcome to lessons.jsonl
     async def _write_kb_record(

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for the FRAMEWORK_AGENT phase-discover subcommand. Hermetic - stubs ``sources.enumerate_candidates``."""
 
@@ -96,16 +97,25 @@ def test_phase_discover_enables_search_perf_prs(monkeypatch, tmp_path: Path, cap
         captured["search_modes"] = list(r.search_modes)
         captured["keywords"] = list(r.keywords)
         return [
-            Candidate(ref="PR:42", repo="ROCm/vllm", source="github",
-                      title="perf: moe fp8", html_url="https://github.com/ROCm/vllm/pull/42", score=0.9),
+            Candidate(
+                ref="PR:42",
+                repo="ROCm/vllm",
+                source="github",
+                title="perf: moe fp8",
+                html_url="https://github.com/ROCm/vllm/pull/42",
+                score=0.9,
+            ),
         ]
 
     monkeypatch.setattr(src, "enumerate_candidates", fake_enum)
     req = {
-        "model": "/m/DeepSeek", "framework": "vllm", "gpu_type": "mi300x",
+        "model": "/m/DeepSeek",
+        "framework": "vllm",
+        "gpu_type": "mi300x",
         "repo_url": "https://github.com/ROCm/vllm.git",
         "gaps": [{"gap_canonical_id": "g1", "gap_description": "moe fp8 decode"}],
-        "max_search_candidates": 5, "batch_id": "b1",
+        "max_search_candidates": 5,
+        "batch_id": "b1",
     }
     req_path = tmp_path / "req.json"
     req_path.write_text(json.dumps(req), encoding="utf-8")
@@ -132,10 +142,13 @@ def test_phase_discover_uses_primus_when_url_present(monkeypatch, tmp_path: Path
 
     monkeypatch.setattr(src, "enumerate_candidates", fake_enum)
     req = {
-        "model": "/m/x", "framework": "vllm", "gpu_type": "mi300x",
+        "model": "/m/x",
+        "framework": "vllm",
+        "gpu_type": "mi300x",
         "repo_url": "https://github.com/ROCm/vllm.git",
         "gaps": [{"gap_canonical_id": "g1", "gap_description": "x"}],
-        "primus_cortex_url": "http://primus.local/v1", "batch_id": "b1",
+        "primus_cortex_url": "http://primus.local/v1",
+        "batch_id": "b1",
     }
     req_path = tmp_path / "req.json"
     req_path.write_text(json.dumps(req), encoding="utf-8")
@@ -156,18 +169,27 @@ def test_extract_pr_number_from_ref_and_url() -> None:
 def test_candidate_excluded_by_memory_matches_id_and_pr_number() -> None:
     # ref id match.
     assert cli._candidate_excluded_by_memory(
-        pr_url="https://github.com/o/r/pull/7", ref="PR:7", pr_number=7,
-        excluded_ids={"PR:7"}, excluded_pr_numbers=set(),
+        pr_url="https://github.com/o/r/pull/7",
+        ref="PR:7",
+        pr_number=7,
+        excluded_ids={"PR:7"},
+        excluded_pr_numbers=set(),
     )
     # PR-number match.
     assert cli._candidate_excluded_by_memory(
-        pr_url="", ref="PR:9", pr_number=9,
-        excluded_ids=set(), excluded_pr_numbers={"9"},
+        pr_url="",
+        ref="PR:9",
+        pr_number=9,
+        excluded_ids=set(),
+        excluded_pr_numbers={"9"},
     )
     # Genuinely new candidate passes.
     assert not cli._candidate_excluded_by_memory(
-        pr_url="https://github.com/o/r/pull/3", ref="PR:3", pr_number=3,
-        excluded_ids={"PR:7"}, excluded_pr_numbers={"9"},
+        pr_url="https://github.com/o/r/pull/3",
+        ref="PR:3",
+        pr_number=3,
+        excluded_ids={"PR:7"},
+        excluded_pr_numbers={"9"},
     )
 
 
@@ -193,12 +215,30 @@ def test_phase_discover_hard_filters_excluded_and_failed(monkeypatch, tmp_path: 
 
     def fake_enum(r):
         return [
-            Candidate(ref="PR:1234", repo="sgl-project/sglang", source="github",
-                      title="excluded by id", html_url="https://github.com/sgl-project/sglang/pull/1234", score=0.9),
-            Candidate(ref="PR:5678", repo="sgl-project/sglang", source="github",
-                      title="excluded by failed pr#", html_url="https://github.com/sgl-project/sglang/pull/5678", score=0.8),
-            Candidate(ref="PR:9999", repo="sgl-project/sglang", source="github",
-                      title="brand new", html_url="https://github.com/sgl-project/sglang/pull/9999", score=0.7),
+            Candidate(
+                ref="PR:1234",
+                repo="sgl-project/sglang",
+                source="github",
+                title="excluded by id",
+                html_url="https://github.com/sgl-project/sglang/pull/1234",
+                score=0.9,
+            ),
+            Candidate(
+                ref="PR:5678",
+                repo="sgl-project/sglang",
+                source="github",
+                title="excluded by failed pr#",
+                html_url="https://github.com/sgl-project/sglang/pull/5678",
+                score=0.8,
+            ),
+            Candidate(
+                ref="PR:9999",
+                repo="sgl-project/sglang",
+                source="github",
+                title="brand new",
+                html_url="https://github.com/sgl-project/sglang/pull/9999",
+                score=0.7,
+            ),
         ]
 
     monkeypatch.setattr(src, "enumerate_candidates", fake_enum)

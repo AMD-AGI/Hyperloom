@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Post-optimization concurrency sweep.
 
@@ -616,6 +617,8 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     Returns:
         List of VariantResult for this arm (one per CONC).
     """
+    from ..actions.executors._grid_runner import _num_gpus_for_config
+    from ..actions.executors._ray_serving import maybe_serving_lease
     from ..actions.executors._server_lifecycle import (
         resolve_lifecycle_params,
         teardown_lifecycle_server,
@@ -633,6 +636,13 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     )
     if not grid:
         return arm_results
+
+    # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``)
+    # spans this arm's persistent server — boot + every CONC reuse round, or the
+    # Option B per-variant restarts — so the shared server's whole lifetime is
+    # covered by a single lease and no GPU process outlives it. ``None`` on the
+    # local path (multi-node / RAY_EXEC off / tests) keeps the legacy behaviour.
+    arm_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(base_yaml_path))
 
     # Shared pid_dir for server reuse across all CONC variants in this arm.
     pid_dir = workspace / f"server_{arm_name}"
@@ -656,33 +666,37 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         # Framework does not support server_lifecycle — fall through to
         # Option B (per-variant server restart via normal run_grid).
         log.info(
-            "conc_sweep single-server: arm=%s not lifecycle-eligible (%s); "
-            "using per-variant server restart (Option B)",
+            "conc_sweep single-server: arm=%s not lifecycle-eligible (%s); using per-variant server restart (Option B)",
             arm_name,
             lc_reason,
         )
-        return await _sweep_arm_option_b(
-            arm_name=arm_name,
-            grid=grid,
-            base_yaml_path=base_yaml_path,
-            workspace=workspace,
-            model_path=model_path,
-            gpu_type=gpu_type,
-            variant_timeout_sec=variant_timeout_sec,
-            soft_deadline_sec=soft_deadline_sec,
-            deadline=deadline,
-            state=state,
-            session_dir=session_dir,
-            json_path=json_path,
-            csv_path=csv_path,
-            started_at=started_at,
-            total_budget_sec=total_budget_sec,
-            has_budget=has_budget,
-            opt_args=opt_args,
-            opt_envs=opt_envs,
-            _all_results_ref=_all_results_ref,
-            _budget_state=_budget_state,
-        )
+        try:
+            return await _sweep_arm_option_b(
+                arm_name=arm_name,
+                grid=grid,
+                base_yaml_path=base_yaml_path,
+                workspace=workspace,
+                model_path=model_path,
+                gpu_type=gpu_type,
+                variant_timeout_sec=variant_timeout_sec,
+                soft_deadline_sec=soft_deadline_sec,
+                deadline=deadline,
+                state=state,
+                session_dir=session_dir,
+                json_path=json_path,
+                csv_path=csv_path,
+                started_at=started_at,
+                total_budget_sec=total_budget_sec,
+                has_budget=has_budget,
+                opt_args=opt_args,
+                opt_envs=opt_envs,
+                _all_results_ref=_all_results_ref,
+                _budget_state=_budget_state,
+                serving_lease=arm_lease,
+            )
+        finally:
+            if arm_lease is not None:
+                arm_lease.close()
 
     # Boot-retry-descend: try each CONC from highest to lowest until boot succeeds.
     # Failed higher-CONC boots are tracked locally; they are only committed to the
@@ -720,6 +734,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 preclean_before_run=True,
                 warmup_before_measure=False,
                 soft_deadline_sec=soft_deadline_sec,
+                serving_lease=arm_lease,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -748,14 +763,17 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
             except Exception:  # noqa: BLE001
                 pass
-            failed_boots.append(br or VariantResult(
-                name=boot_variant.name,
-                extra_server_args=boot_variant.extra_server_args,
-                extra_envs=dict(boot_variant.extra_envs),
-                status="failed",
-                error="single_server_boot_failed",
-                error_class="single_server_boot_failed",
-            ))
+            failed_boots.append(
+                br
+                or VariantResult(
+                    name=boot_variant.name,
+                    extra_server_args=boot_variant.extra_server_args,
+                    extra_envs=dict(boot_variant.extra_envs),
+                    status="failed",
+                    error="single_server_boot_failed",
+                    error_class="single_server_boot_failed",
+                )
+            )
             boot_idx += 1
             continue
 
@@ -820,13 +838,16 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             opt_envs=opt_envs,
             _all_results_ref=_all_results_ref,
             _budget_state=_budget_state,
+            serving_lease=arm_lease,
         )
         arm_results.extend(ob_results)
+        if arm_lease is not None:
+            arm_lease.close()
         return arm_results
 
     # Server is up: sweep remaining CONCs by reuse.
     try:
-        reuse_grid = grid[boot_idx + 1:]
+        reuse_grid = grid[boot_idx + 1 :]
         for r_idx, variant in enumerate(reuse_grid):
             # Check task-level budget before each reuse point.
             _reuse_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
@@ -879,6 +900,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     preclean_before_run=False,
                     warmup_before_measure=False,
                     soft_deadline_sec=soft_deadline_sec,
+                    serving_lease=arm_lease,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
@@ -921,11 +943,14 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 budget_remaining_sec=_budget_state.get("budget_remaining_sec"),
             )
     finally:
-        # Safety teardown — idempotent, no-op if already torn down.
+        # Safety teardown — idempotent, no-op if already torn down. Reap the
+        # server BEFORE releasing the Ray lease so no GPU process outlives it.
         try:
             teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
         except Exception:  # noqa: BLE001
             pass
+        if arm_lease is not None:
+            arm_lease.close()
 
     return arm_results
 
@@ -952,6 +977,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     opt_envs: dict[str, str],
     _all_results_ref: list[VariantResult],
     _budget_state: dict[str, Any],
+    serving_lease: Any = None,
 ) -> list[VariantResult]:
     """Option B fallback: run each variant with its own server (legacy behaviour).
 
@@ -1020,6 +1046,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
                 model_path=model_path,
                 gpu_type=gpu_type,
                 soft_deadline_sec=soft_deadline_sec,
+                serving_lease=serving_lease,
             )
         except Exception as exc:  # noqa: BLE001
             sub = [
@@ -1147,9 +1174,9 @@ def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> None
             json_path,
             json.dumps(payload, indent=2, ensure_ascii=False, default=str),
         )
-        all_points: list[dict[str, Any]] = list(
-            (payload.get("baseline") or {}).get("points") or []
-        ) + list((payload.get("optimized") or {}).get("points") or [])
+        all_points: list[dict[str, Any]] = list((payload.get("baseline") or {}).get("points") or []) + list(
+            (payload.get("optimized") or {}).get("points") or []
+        )
         _write_csv(csv_path, all_points)
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -1335,8 +1362,7 @@ async def run_conc_sweep(
     from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
 
     resolved_gpu = _gpu_runner_type(
-        os.environ.get("GPU_TYPE", "").strip().lower()
-        or str(getattr(state, "gpu_type", "") or "").strip().lower()
+        os.environ.get("GPU_TYPE", "").strip().lower() or str(getattr(state, "gpu_type", "") or "").strip().lower()
     )
     try:
         base_yaml_path = materialize_config_with_envs(
@@ -1403,10 +1429,13 @@ async def run_conc_sweep(
         ]
         for arm_name, arm_args, arm_envs in arms_order:
             skip_grid_fn = lambda _an=arm_name, _aa=arm_args, _ae=arm_envs: _build_arm_grid(  # noqa: E731
-                _an, concs_desc,
-                isl=isl, osl=osl,
+                _an,
+                concs_desc,
+                isl=isl,
+                osl=osl,
                 num_prompts_factor=num_prompts_factor,
-                arm_args=_aa, arm_envs=_ae,
+                arm_args=_aa,
+                arm_envs=_ae,
             )
 
             # Check overall budget before starting each arm.

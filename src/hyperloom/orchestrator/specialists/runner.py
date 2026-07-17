@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """SpecialistRunner.
 
@@ -143,9 +144,7 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     + r")\b)(?P<sep>\s*(?:=|:)\s*)(?P<quote>['\"]?)(?P<value>[^\s,'\"\]}]+)(?P=quote)",
     re.IGNORECASE,
 )
-_AUTHORIZATION_RE = re.compile(
-    r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)"
-)
+_AUTHORIZATION_RE = re.compile(r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _BEARER_RE = re.compile(r"(?i)\b(?P<prefix>bearer\s+)(?P<value>[A-Za-z0-9._~+/=-]+)")
 _TOKEN_VALUE_RES = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{3,}\b"),
@@ -763,8 +762,10 @@ class SpecialistRunner:
                     f.write(json.dumps(row, sort_keys=True) + "\n")
         except Exception:  # noqa: BLE001 — trace must never break the run
             log.debug(
-                "full-trace: specialist intel append failed for "
-                "task_id=%s turn=%s", task_id, turn, exc_info=True,
+                "full-trace: specialist intel append failed for task_id=%s turn=%s",
+                task_id,
+                turn,
+                exc_info=True,
             )
 
     def _record_specialist_conversation(
@@ -1039,6 +1040,10 @@ class SpecialistRunner:
         # present it overrides the legacy ``max_turns × per_turn`` ceiling.
         wall_budget_raw = (ctx.extra or {}).get("wall_budget_sec")
         wall_budget_sec = float(wall_budget_raw) if wall_budget_raw else None
+        # Ray-managed GPU execution (§12 T4): when the dispatcher acquired a
+        # GpuSpecialistLease, run the whole subprocess inside its num_gpus actor
+        # so any GPU command lands within Ray's assigned devices. ``None`` keeps
+        # the local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES).
         sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
             task_id=ctx.task.task_id,
             workspace=workspace,
@@ -1050,6 +1055,7 @@ class SpecialistRunner:
             max_turns=prep.max_turns,
             gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
             wall_budget_sec=wall_budget_sec,
+            gpu_lease=(ctx.extra or {}).get("gpu_specialist_lease"),
         )
         self._append_transcript(
             workspace,
@@ -1272,8 +1278,7 @@ class SpecialistRunner:
             if not _patch_path_within_bases(Path(str(p)), search_bases):
                 dropped_scanned_outside.append(str(p))
                 log.warning(
-                    "specialist: scanned patch %r resolves outside the "
-                    "specialist worktree/workspace; dropping",
+                    "specialist: scanned patch %r resolves outside the specialist worktree/workspace; dropping",
                     p,
                 )
                 continue

@@ -1,10 +1,11 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Cyclic phase machine acceptance tests.
 
 Covers ``compute_next_phase`` SWEEP back-edge branches, the per-cycle budget
 window, Coordinator loopback application, PolicyGate re-entry after a loopback,
-and the short-run single-pass regression. All deterministic + offline.
+and short-run macro-loop behaviour. All deterministic + offline.
 """
 
 from __future__ import annotations
@@ -90,8 +91,9 @@ def test_sweep_closes_when_insufficient_remaining():
     assert evidence["reloop_blocked"] == "insufficient_remaining"
 
 
-def test_short_bounded_run_never_reloops():
-    # 12h bounded run: single-pass chain winds down to CLOSE, no macro-cycle.
+def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
+    # 12h bounded run: macro-loop is available even though budget accounting
+    # stays in short-run charge-back mode.
     st = _sweep_state(
         max_minutes=12 * 60,
         started_hours_ago=1.0,
@@ -99,13 +101,29 @@ def test_short_bounded_run_never_reloops():
         gain_at_cycle_start=0.0,
     )
     reloop, ev = ps.should_reloop_to_explore(st)
+    assert reloop is True
+    assert ev["reloop"] is True
+    assert ev["next_cycle"] == 1
+
+    target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
+    assert target == ps.PHASE_EXPLORE
+    assert reason == "cycle_reloop"
+    assert evidence["loopback"] is True
+    assert evidence["next_cycle"] == 1
+
+
+def test_short_bounded_run_closes_when_insufficient_remaining():
+    # 12h bounded run with ~10min left: still below the 30min reloop floor.
+    st = _sweep_state(max_minutes=12 * 60, started_hours_ago=12 - 10 / 60.0)
+    reloop, ev = ps.should_reloop_to_explore(st)
     assert reloop is False
-    assert ev["reloop_blocked"] == "short_run_single_pass"
+    assert ev["reloop_blocked"] == "insufficient_remaining"
 
     target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
     assert target == ps.PHASE_CLOSE
     assert reason == "sweep_done"
     assert "loopback" not in evidence
+    assert evidence["reloop_blocked"] == "insufficient_remaining"
 
 
 def test_exactly_24h_is_long_run(monkeypatch):
@@ -177,6 +195,31 @@ def test_budget_minutes_ignores_cycle_window_for_short_run():
     # budgets stay anchored on the whole session even if cycle_minutes was pinned.
     st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=600, cycle_minutes=360.0)
     assert ps._budget_minutes(st) == 600.0
+
+
+def test_short_run_keeps_chargeback_budgeting_across_cycles():
+    now = 1_000_000.0
+    start_ts = datetime.fromtimestamp(now - 2 * 3600.0, tz=timezone.utc).isoformat()
+    common = dict(
+        session_id="t",
+        phase=ps.PHASE_EXPLORE,
+        start_ts=start_ts,
+        max_minutes=600,
+        cycle_minutes=360.0,
+        phase_started_unix=now,
+    )
+    cycle0 = SharedState(**common, macro_cycle=0)
+    cycle1 = SharedState(**common, macro_cycle=1)
+
+    total0 = ps._phase_budget_total_seconds(cycle0, now_unix=now)
+    total1 = ps._phase_budget_total_seconds(cycle1, now_unix=now)
+    legacy_whole_run = 600 * 60.0 * ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
+    cycle_window = 360.0 * 60.0 * ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
+
+    assert total0 is not None and total0 > 0
+    assert total0 == pytest.approx(total1)
+    assert total0 != pytest.approx(legacy_whole_run)
+    assert total0 != pytest.approx(cycle_window)
 
 
 # Coordinator loopback application
@@ -290,10 +333,10 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
     )
 
 
-# Regression — short-run path unchanged (12h single-cycle behaviour)
-def test_regression_sweep_to_close_evidence_carries_no_loopback():
+# Regression — short-run path now uses macro-loop while budget remains.
+def test_regression_short_run_sweep_evidence_carries_loopback():
     st = _sweep_state(max_minutes=12 * 60)
     target, reason, evidence = ps.compute_next_phase(st, max_hours=12.0)
-    assert (target, reason) == (ps.PHASE_CLOSE, "sweep_done")
-    assert "loopback" not in evidence
-    assert evidence.get("reloop_blocked") == "short_run_single_pass"
+    assert (target, reason) == (ps.PHASE_EXPLORE, "cycle_reloop")
+    assert evidence["loopback"] is True
+    assert evidence["next_cycle"] == 1

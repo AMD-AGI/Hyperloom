@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """IntegratePatchExecutor tests."""
 
@@ -126,15 +127,15 @@ def test_framework_run_eval_envs_no_force_without_baseline():
     # No baseline score -> nothing to gate against -> don't force eval.
     assert IntegratePatchExecutor._framework_run_eval_envs({"framework_agent_authoring": True}) is None
     assert (
-        IntegratePatchExecutor._framework_run_eval_envs(
-            {"framework_agent_authoring": True, "accuracy_baseline": 0.0}
-        )
+        IntegratePatchExecutor._framework_run_eval_envs({"framework_agent_authoring": True, "accuracy_baseline": 0.0})
         is None
     )
 
 
 def test_framework_run_eval_envs_none_for_generic_explore():
-    assert IntegratePatchExecutor._framework_run_eval_envs({"specialist_task_id": "s1", "accuracy_baseline": 0.8}) is None
+    assert (
+        IntegratePatchExecutor._framework_run_eval_envs({"specialist_task_id": "s1", "accuracy_baseline": 0.8}) is None
+    )
     assert IntegratePatchExecutor._framework_run_eval_envs({}) is None
 
 
@@ -597,9 +598,7 @@ async def test_enablement_reverts_when_still_not_runnable(tmp_path: Path, monkey
 @pytest.mark.asyncio
 async def test_enablement_keeps_verified_when_accuracy_above_floor(tmp_path: Path, monkeypatch):
     """Booted + eval accuracy above the absolute floor -> KEEP, non-provisional."""
-    result, repo = await _run_enablement_integrate(
-        tmp_path, monkeypatch, booted=True, enablement_accuracy=0.42
-    )
+    result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True, enablement_accuracy=0.42)
     assert result["status"] == "kept"
     assert result["runnable"] is True
     assert result["correctness_verified"] is True
@@ -610,9 +609,7 @@ async def test_enablement_keeps_verified_when_accuracy_above_floor(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_enablement_reverts_when_accuracy_zero(tmp_path: Path, monkeypatch):
     """Booted but eval accuracy == floor (garbage output) -> REVERT."""
-    result, repo = await _run_enablement_integrate(
-        tmp_path, monkeypatch, booted=True, enablement_accuracy=0.0
-    )
+    result, repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True, enablement_accuracy=0.0)
     assert result["status"] == "reverted"
     assert result["runnable"] is False
     assert result["correctness_verified"] is False
@@ -809,6 +806,7 @@ def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
 async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, monkeypatch):
     """Enablement integrate replays setup_commands and surfaces them in the result."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -943,12 +941,14 @@ def test_apply_patch_no_git_rejects_path_traversal_before_apply(
 def test_derive_lane_enablement():
     """_derive_lane returns 'enablement' when params.enablement is set."""
     from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+
     assert _derive_lane({"enablement": True}) == "enablement"
 
 
 def test_derive_lane_perf_framework():
     """_derive_lane returns 'perf_framework' for framework_agent_authoring params."""
     from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+
     assert _derive_lane({"framework_agent_authoring": True}) == "perf_framework"
     assert _derive_lane({"framework_agent_candidate_id": "x"}) == "perf_framework"
 
@@ -956,5 +956,6 @@ def test_derive_lane_perf_framework():
 def test_derive_lane_perf_explore():
     """_derive_lane returns 'perf_explore' for plain explore params."""
     from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+
     assert _derive_lane({}) == "perf_explore"
     assert _derive_lane({"specialist_task_id": "abc"}) == "perf_explore"

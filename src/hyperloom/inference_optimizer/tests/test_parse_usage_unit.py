@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for out-of-process token-usage parsers."""
 
@@ -44,6 +45,7 @@ def test_normalize_usage_valid():
 
 # ---- parse_forge_usage ----
 
+
 def test_parse_forge_usage_none_without_marker():
     assert pu.parse_forge_usage("") is None
     assert pu.parse_forge_usage("forge done: baseline=1 best=1") is None
@@ -61,17 +63,20 @@ def test_parse_forge_usage_extracts_last_marker():
     out = pu.parse_forge_usage(stdout)
     # Last marker wins; extra keys (cost/calls) dropped.
     assert out == {
-        "input_tokens": 100, "output_tokens": 40,
-        "cache_creation_input_tokens": 5, "cache_read_input_tokens": 9,
+        "input_tokens": 100,
+        "output_tokens": 40,
+        "cache_creation_input_tokens": 5,
+        "cache_read_input_tokens": 9,
     }
 
 
 def test_parse_forge_usage_skips_malformed_marker():
-    stdout = "FORGE_LLM_USAGE not-json\nFORGE_LLM_USAGE {\"input_tokens\": 7}\n"
+    stdout = 'FORGE_LLM_USAGE not-json\nFORGE_LLM_USAGE {"input_tokens": 7}\n'
     assert pu.parse_forge_usage(stdout)["input_tokens"] == 7
 
 
 # ---- parse_forge_steps ----
+
 
 def test_parse_forge_steps_none_without_marker():
     assert pu.parse_forge_steps("") is None
@@ -81,12 +86,10 @@ def test_parse_forge_steps_none_without_marker():
 def test_parse_forge_steps_extracts_timeline_and_summary():
     payload = {
         "steps": [
-            {"iteration": 1, "decision": "KEEP", "wall_ms": 88.1, "snr_db": 35.0,
-             "rationale": "fuse epilogue"},
+            {"iteration": 1, "decision": "KEEP", "wall_ms": 88.1, "snr_db": 35.0, "rationale": "fuse epilogue"},
             {"iteration": 2, "decision": "REVERT", "wall_ms": 90.0},
         ],
-        "summary": {"iterations": 2, "kept": 1, "speedup": 1.05,
-                    "termination_reason": "plateaued"},
+        "summary": {"iterations": 2, "kept": 1, "speedup": 1.05, "termination_reason": "plateaued"},
     }
     stdout = "noise\nFORGE_STEPS " + json.dumps(payload) + "\ntail\n"
     out = pu.parse_forge_steps(stdout)
@@ -96,15 +99,13 @@ def test_parse_forge_steps_extracts_timeline_and_summary():
 
 
 def test_parse_forge_steps_last_marker_wins_and_skips_malformed():
-    stdout = (
-        "FORGE_STEPS not-json\n"
-        'FORGE_STEPS {"steps": [{"iteration": 1}], "summary": {"iterations": 1}}\n'
-    )
+    stdout = 'FORGE_STEPS not-json\nFORGE_STEPS {"steps": [{"iteration": 1}], "summary": {"iterations": 1}}\n'
     out = pu.parse_forge_steps(stdout)
     assert out["summary"]["iterations"] == 1
 
 
 # ---- parse_claude_stream_json_turn_usages ----
+
 
 def test_parse_turn_usages_missing(tmp_path):
     assert pu.parse_claude_stream_json_turn_usages(tmp_path / "no.log") == []
@@ -138,6 +139,7 @@ def test_parse_turn_usages_none_when_no_per_message_usage(tmp_path):
 
 # ---- parse_claude_stream_json_tool_calls ----
 
+
 def test_parse_tool_calls_missing(tmp_path):
     assert pu.parse_claude_stream_json_tool_calls(tmp_path / "no.log") == []
 
@@ -149,17 +151,19 @@ def test_parse_tool_calls_extracts_in_order(tmp_path):
         '{"type": "text", "text": "thinking"},'
         '{"type": "tool_use", "name": "WebSearch", "input": {"query": "rocm flash attn"}},'
         '{"type": "tool_use", "name": "mcp__cortex_kb__lookup", "input": {"q": "x"}}'
-        ']}}\n'
+        "]}}\n"
         "garbled\n"
         '{"type": "assistant", "message": {"content": ['
         '{"type": "tool_use", "name": "Read", "input": {"path": "/a/b.py"}}'
-        ']}}\n'
+        "]}}\n"
         '{"type": "result", "result": "done"}\n',
         encoding="utf-8",
     )
     calls = pu.parse_claude_stream_json_tool_calls(log)
     assert [c["tool"] for c in calls] == [
-        "WebSearch", "mcp__cortex_kb__lookup", "Read",
+        "WebSearch",
+        "mcp__cortex_kb__lookup",
+        "Read",
     ]
     assert calls[0]["query"] == "rocm flash attn"
     assert calls[2]["query"] == "/a/b.py"
@@ -170,8 +174,7 @@ def test_parse_tool_calls_extracts_in_order(tmp_path):
 def test_parse_tool_calls_none_when_no_tools(tmp_path):
     log = tmp_path / "p.log"
     log.write_text(
-        '{"type": "assistant", "message": {"content": ['
-        '{"type": "text", "text": "no tools here"}]}}\n',
+        '{"type": "assistant", "message": {"content": [{"type": "text", "text": "no tools here"}]}}\n',
         encoding="utf-8",
     )
     assert pu.parse_claude_stream_json_tool_calls(log) == []

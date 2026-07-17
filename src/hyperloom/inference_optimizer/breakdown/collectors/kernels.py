@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
 
@@ -23,7 +24,6 @@ from ._common import (
     _scan_profile_reports,
     _to_float,
 )
-
 
 
 # Kernel backend invocations
@@ -1155,8 +1155,7 @@ def collect_conc_sweep_summary(
         recovered = _recover_conc_sweep_summary_from_runs(session_dir, warnings)
         if _conc_sweep_successful_pairs(recovered) > 0:
             warnings.append(
-                "conc_sweep_summary: reports/conc_sweep_summary.json absent; "
-                "recovered from runs/conc_sweep"
+                "conc_sweep_summary: reports/conc_sweep_summary.json absent; recovered from runs/conc_sweep"
             )
             return recovered
         return {}
@@ -1453,4 +1452,3 @@ def collect_source_files(
         if lst:
             out[key] = lst
     return out
-

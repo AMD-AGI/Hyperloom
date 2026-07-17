@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """KnowledgePlane facade tests."""
 
@@ -168,7 +169,9 @@ def test_collect_kb_provenance_no_warning_when_plane_healthy(tmp_path: Path):
 
     marker = pr_monitor_status_json(tmp_path)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({"enabled": True, "reachable": True, "mcp_url": "http://pr.test/mcp/", "status_text": "ok"}))
+    marker.write_text(
+        json.dumps({"enabled": True, "reachable": True, "mcp_url": "http://pr.test/mcp/", "status_text": "ok"})
+    )
     warnings_list: list = []
     collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=warnings_list)
     assert not any(w.startswith("pr_monitor:") for w in warnings_list)
@@ -191,14 +194,29 @@ def test_collect_kb_provenance_attributes_recipe_reads_per_source(
 
     audit = recipe_snapshot_audit_jsonl(tmp_path)
     audit.parent.mkdir(parents=True, exist_ok=True)
-    audit.write_text("\n".join(json.dumps(r) for r in [
-        {"method": "get_recipe", "remote": "composite", "resolution": "remote",
-         "hit": True, "result": {
-             "sources": ["gbrain", "cortex"], "best_config_source": "gbrain"}},
-        {"method": "get_recipe", "remote": "composite", "resolution": "remote",
-         "hit": True, "result": {
-             "sources": ["cortex"], "best_config_source": "cortex"}},
-    ]) + "\n", encoding="utf-8")
+    audit.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "method": "get_recipe",
+                    "remote": "composite",
+                    "resolution": "remote",
+                    "hit": True,
+                    "result": {"sources": ["gbrain", "cortex"], "best_config_source": "gbrain"},
+                },
+                {
+                    "method": "get_recipe",
+                    "remote": "composite",
+                    "resolution": "remote",
+                    "hit": True,
+                    "result": {"sources": ["cortex"], "best_config_source": "cortex"},
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
     rs = out["recipe_snapshot_reads"]

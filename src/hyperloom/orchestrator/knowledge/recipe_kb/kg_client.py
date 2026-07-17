@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Knowledge-Graph query client over the gbrain page store.
 
@@ -620,7 +621,12 @@ class KGClient:
         return out
 
     def _native_query_facts(
-        self, subject: Any, predicate: Any, object: Any, conditions: Any, limit: int  # noqa: A002
+        self,
+        subject: Any,
+        predicate: Any,
+        object: Any,
+        conditions: Any,
+        limit: int,  # noqa: A002
     ) -> list[Fact]:
         """Run ``query_facts`` over gbrain's native link graph.
 
@@ -771,9 +777,7 @@ class KGClient:
                 break
         return out
 
-    def find_conflicts(
-        self, *, knobs: Sequence[str], hardware: str = "", framework: str = ""
-    ) -> list[dict[str, Any]]:
+    def find_conflicts(self, *, knobs: Sequence[str], hardware: str = "", framework: str = "") -> list[dict[str, Any]]:
         """Detect ``CONFLICTS_WITH`` relations among a set of knobs.
 
         Args:
@@ -860,7 +864,12 @@ class KGClient:
         return True
 
     def retract_fact(
-        self, *, page_slug: str, subject: str, predicate: str, object: str  # noqa: A002
+        self,
+        *,
+        page_slug: str,
+        subject: str,
+        predicate: str,
+        object: str,  # noqa: A002
     ) -> bool:
         """Remove a matching fact line from a page's ``## Facts`` fence.
 
@@ -883,11 +892,15 @@ class KGClient:
         removed = False
         for line in content.splitlines():
             m = _FACT_LINE_RE.match(line.strip())
-            if m and (
-                _entity(m.group("subject")),
-                m.group("predicate").strip().upper(),
-                _entity(m.group("object")),
-            ) == want:
+            if (
+                m
+                and (
+                    _entity(m.group("subject")),
+                    m.group("predicate").strip().upper(),
+                    _entity(m.group("object")),
+                )
+                == want
+            ):
                 removed = True
                 continue
             kept.append(line)
@@ -901,7 +914,11 @@ class KGClient:
         return True
 
     def _native_emit_fact(
-        self, subject: str, predicate: str, object: str, properties: dict[str, Any] | None  # noqa: A002
+        self,
+        subject: str,
+        predicate: str,
+        object: str,
+        properties: dict[str, Any] | None,  # noqa: A002
     ) -> bool:
         """Emit a fact as a native link-graph edge.
 
@@ -1023,6 +1040,7 @@ class KGClient:
     def emit_fact_safe(self, **kwargs: Any) -> bool:
         """Call :meth:`emit_fact`, returning ``False`` on any backend error."""
         return self._degrade_safe(self.emit_fact, False, **kwargs)
+
 
 def _page_content(page: Any, *, full: bool = False) -> str:
     """Extract a page's body (or full raw markdown) from a get_page result.
@@ -1168,13 +1186,15 @@ def generate_variants_graph_guided(
         if any(c.object in stack_set for c in conflicts):
             continue
         seen.add(knob)
-        out.append({
-            "knob": knob,
-            "expected_gain": fact.gain,
-            "confidence": fact.confidence,
-            "evidence_count": int(_pct(fact.properties.get("tested_sessions")) or 1),
-            "source": "kg_causal",
-        })
+        out.append(
+            {
+                "knob": knob,
+                "expected_gain": fact.gain,
+                "confidence": fact.confidence,
+                "evidence_count": int(_pct(fact.properties.get("tested_sessions")) or 1),
+                "source": "kg_causal",
+            }
+        )
         if len(out) >= int(max_variants):
             break
     return out
@@ -1246,10 +1266,7 @@ def generate_knob_candidates_graph_guided(
         conditions["fw"] = framework
 
     blocked_set = {
-        f.subject
-        for f in kg.query_facts_safe(
-            object=objs, predicate=["KNOB_REVERTED_ON"], limit=_MAX_FACTS_PER_PAGE
-        )
+        f.subject for f in kg.query_facts_safe(object=objs, predicate=["KNOB_REVERTED_ON"], limit=_MAX_FACTS_PER_PAGE)
     }
     candidates = kg.query_facts_safe(
         object=objs,
@@ -1274,16 +1291,18 @@ def generate_knob_candidates_graph_guided(
                 envs = {}
         keep_n = _pct(fact.properties.get("keep_n")) or 1
         seen.add(knob)
-        out.append({
-            "knob": knob,
-            "args": str(fact.properties.get("args") or ""),
-            "envs": envs,
-            "name": str(fact.properties.get("name") or ""),
-            "expected_gain": fact.gain,
-            "confidence": fact.confidence,
-            "evidence_count": int(keep_n),
-            "source": "kg_knob",
-        })
+        out.append(
+            {
+                "knob": knob,
+                "args": str(fact.properties.get("args") or ""),
+                "envs": envs,
+                "name": str(fact.properties.get("name") or ""),
+                "expected_gain": fact.gain,
+                "confidence": fact.confidence,
+                "evidence_count": int(keep_n),
+                "source": "kg_knob",
+            }
+        )
         if len(out) >= int(max_variants):
             break
     return out

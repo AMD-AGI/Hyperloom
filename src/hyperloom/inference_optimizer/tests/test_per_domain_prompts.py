@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Per-domain specialist prompt templates.
 
@@ -755,9 +756,7 @@ def test_research_lane_has_no_conflicts():
 def _build_serving_prompt(**kwargs: Any) -> tuple[str, str]:
     domain = get_domain("serving_specialist")
     assert domain is not None
-    return build_specialist_prompts(
-        SpecialistPromptInputs(domain=domain, **kwargs)
-    )
+    return build_specialist_prompts(SpecialistPromptInputs(domain=domain, **kwargs))
 
 
 def test_prompt_builder_emits_nine_sections():
@@ -993,7 +992,7 @@ def test_note_specialist_dispatched_resets_only_its_anchor():
     s = SharedState()
     s.bump_domain_round_counters()
     s.bump_domain_round_counters()
- # serving_specialist maps to the "framework" kb_anchor.
+    # serving_specialist maps to the "framework" kb_anchor.
     s.note_specialist_dispatched("serving_specialist")
     assert s.rounds_since_last_specialist["framework"] == 0
     # A different anchor is untouched.

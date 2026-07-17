@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """In-process metrics shim (process-local registry; swap :func:`get_registry` for a real Prometheus client while keeping the ``inc``/``observe`` API)."""
 
@@ -99,6 +100,7 @@ class MetricsRegistry:
                 hist = _Histogram(name=name)
                 self._histograms[name] = hist
             return hist
+
 
 _registry = MetricsRegistry()
 

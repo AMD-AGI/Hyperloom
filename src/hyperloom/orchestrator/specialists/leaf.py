@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Thin leaf sub-agent definition for single-layer specialist fan-out.
 
@@ -29,8 +30,7 @@ _LEAF_AGENT_PROMPT = (
     "already exposed via the inherited VISIBLE_DEVICES — use only those and "
     "never the production serving GPU. "
     "As your last action, also write your result to a `leaf_result.json` file "
-    "in your working directory so it is captured as a distinct artifact. "
-    + BASH_KILL_SAFETY_PREAMBLE
+    "in your working directory so it is captured as a distinct artifact. " + BASH_KILL_SAFETY_PREAMBLE
 )
 
 _LEAF_AGENT_DESCRIPTION = (

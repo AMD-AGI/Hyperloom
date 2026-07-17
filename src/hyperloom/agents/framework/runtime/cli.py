@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Framework Agent CLI entry point.
 
@@ -315,11 +316,11 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     if not forced_refs_raw:
         env_refs = (os.environ.get("FRAMEWORK_AGENT_FORCE_PR_REFS") or "").strip()
         forced_refs_raw = [r for r in env_refs.replace(";", ",").split(",")] if env_refs else []
-    forced_repo_scope = str(
-        request.get("forced_candidate_repo_scope")
-        or os.environ.get("FRAMEWORK_AGENT_FORCE_PR_REPO")
-        or ""
-    ).strip().lower()
+    forced_repo_scope = (
+        str(request.get("forced_candidate_repo_scope") or os.environ.get("FRAMEWORK_AGENT_FORCE_PR_REPO") or "")
+        .strip()
+        .lower()
+    )
 
     def _norm_ref(r: str) -> str:
         r = str(r or "").strip()
@@ -350,9 +351,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
 
     # Hard-dedup: drop candidates already discovered/finalised, and collapse
     # "same PR number as a failed candidate" into a drop.
-    excluded_ids: set[str] = {
-        str(x).strip() for x in (request.get("excluded_candidate_ids") or []) if str(x).strip()
-    }
+    excluded_ids: set[str] = {str(x).strip() for x in (request.get("excluded_candidate_ids") or []) if str(x).strip()}
     excluded_pr_numbers: set[str] = {n for n in (_extract_pr_number(x) for x in excluded_ids) if n}
     failed_ctx = request.get("failed_candidate_context") or []
     if isinstance(failed_ctx, list):
@@ -377,8 +376,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
     # prepend it so it ranks ahead of primus_cortex/github fallbacks.
     pr_kb_enabled = (os.environ.get("PR_KB_ENABLE", "1") or "1").strip() != "0"
     pr_kb_configured = bool(
-        (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
-        and (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
+        (os.environ.get("GBRAIN_BASE_URL", "") or "").strip() and (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
     )
     if pr_kb_enabled and pr_kb_configured and "gbrain_pr_kb" not in search_modes:
         search_modes = ["gbrain_pr_kb", *search_modes]
@@ -435,9 +433,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             # Derive the owner/name slug for pr_url/diff_url but KEEP the repo
             # field as the canonical .git URL for cross-discover origin re-tagging.
             repo_slug = repo
-            if str(entry.get("source") or "") == "explicit" and (
-                repo.startswith("http") or repo.endswith(".git")
-            ):
+            if str(entry.get("source") or "") == "explicit" and (repo.startswith("http") or repo.endswith(".git")):
                 slug = _normalise_pr_kb_repo(repo)
                 if slug:
                     repo_slug = slug  # used only for pr_url/diff_url
@@ -456,7 +452,11 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
             diff_url = (
                 f"{html_url}.diff"
                 if html_url and isinstance(pr_number, int)
-                else (f"https://github.com/{repo_slug}/pull/{pr_number}.diff" if repo_slug and isinstance(pr_number, int) else "")
+                else (
+                    f"https://github.com/{repo_slug}/pull/{pr_number}.diff"
+                    if repo_slug and isinstance(pr_number, int)
+                    else ""
+                )
             )
             pr_url = html_url or _pr_url_for(repo_slug, pr_number)
             # Drop candidates already seen/finalised or equivalent to a failed PR.

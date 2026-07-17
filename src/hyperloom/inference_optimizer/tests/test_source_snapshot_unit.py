@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit coverage for the per-KEEP source-layer snapshot contract
 (``hyperloom.orchestrator.source_snapshot``): ``_safe_rel`` path sanitation,
@@ -32,9 +33,7 @@ def test_safe_rel_rejects_traversal() -> None:
 
 
 def test_safe_rel_passthrough_for_plain_relative_path() -> None:
-    assert _safe_rel("vllm/model_executor/layers/foo.py") == (
-        "vllm/model_executor/layers/foo.py"
-    )
+    assert _safe_rel("vllm/model_executor/layers/foo.py") == ("vllm/model_executor/layers/foo.py")
 
 
 def test_snapshot_source_layer_captures_upsert_and_delete(tmp_path: Path) -> None:
@@ -65,9 +64,7 @@ def test_snapshot_source_layer_captures_upsert_and_delete(tmp_path: Path) -> Non
     # Manifest is persisted alongside a real copy of the file.
     on_disk = json.loads((dest / MANIFEST_NAME).read_text(encoding="utf-8"))
     assert on_disk["files"] == manifest["files"]
-    assert (dest / "files" / "pkg" / "kept.py").read_text(encoding="utf-8") == (
-        "print('kept')\n"
-    )
+    assert (dest / "files" / "pkg" / "kept.py").read_text(encoding="utf-8") == ("print('kept')\n")
 
 
 def test_snapshot_source_layer_skips_unsafe_paths(tmp_path: Path) -> None:

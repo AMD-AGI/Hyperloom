@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for orchestration-memory checkpoint helpers."""
 
@@ -273,21 +274,15 @@ def test_is_degenerate_parse_error():
 
 
 def test_is_degenerate_all_empty():
-    assert is_degenerate_checkpoint(
-        {"current_plan": "", "hypotheses": [], "pending": [], "tried_and_why": []}
-    )
+    assert is_degenerate_checkpoint({"current_plan": "", "hypotheses": [], "pending": [], "tried_and_why": []})
 
 
 def test_is_degenerate_false_with_plan():
-    assert not is_degenerate_checkpoint(
-        {"current_plan": "go", "hypotheses": [], "pending": [], "tried_and_why": []}
-    )
+    assert not is_degenerate_checkpoint({"current_plan": "go", "hypotheses": [], "pending": [], "tried_and_why": []})
 
 
 def test_is_degenerate_false_with_list():
-    assert not is_degenerate_checkpoint(
-        {"current_plan": "", "hypotheses": ["h"], "pending": [], "tried_and_why": []}
-    )
+    assert not is_degenerate_checkpoint({"current_plan": "", "hypotheses": ["h"], "pending": [], "tried_and_why": []})
 
 
 def test_build_memory_record_inherits_empty_fields():

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Structured apply-failure feedback for patch reauthoring.
 
@@ -228,9 +229,7 @@ def source_context_for_file(
         or ``""`` when unavailable.
     """
     try:
-        return _source_context_for_file_impl(
-            filepath, symbol=symbol, window=window, search_roots=search_roots
-        )
+        return _source_context_for_file_impl(filepath, symbol=symbol, window=window, search_roots=search_roots)
     except Exception:  # noqa: BLE001 — grounding is best-effort
         log.debug("apply_feedback: source-context-for-file failed for %s", filepath, exc_info=True)
         return ""

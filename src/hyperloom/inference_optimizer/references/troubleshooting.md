@@ -25,7 +25,7 @@ half-created (`.git` exists but `src/` is incomplete) or the filesystem may be
 showing stale metadata. Do not manually clone GEAK, delete only `build/`, or
 edit the checkout in place. Stop any other installer using the same dependency
 root, remove the entire
-`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/GEAK`
+`${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/GEAK`
 directory, then rerun the full install so `install.sh` owns the fresh clone.
 Multiple concurrent installs sharing one dependency root also share this
 checkout; avoid running them at the same time.
@@ -87,8 +87,9 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 - `correctness_passed=false`: do not integrate; the kernel-agent report must
   contain explicit correctness evidence.
 - `stop_reason=global_converged`: the cyclic phase machine exhausted leverage
-  across macro-cycles (R7: consecutive no-gain cycles); stop and report, only
-  resume if the user changes workload / search space / model / strategy.
+  across macro-cycles for the current budget (R7: consecutive no-gain cycles);
+  stop and report, only resume if the user changes workload / search space /
+  model / strategy.
   (Leverage exhaustion *within* a single phase is now the non-terminal
   phase-exit reason `explore_no_more_leverage` / `kernel_no_more_leverage`,
   which switches lever rather than ending the run.)

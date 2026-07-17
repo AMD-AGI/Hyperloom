@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Bypass benchmark runner (CLI).
 
@@ -79,9 +80,7 @@ def _run_eval_enabled(bench_envs: dict[str, Any]) -> bool:
 
 def _tokenize_extra_args(bench_envs: dict[str, Any], framework: str) -> list[str]:
     """Return the framework's extra server args as a token list."""
-    key = {"sglang": "EXTRA_SGLANG_ARGS", "vllm": "EXTRA_VLLM_ARGS", "atom": "EXTRA_ATOM_ARGS"}.get(
-        framework, ""
-    )
+    key = {"sglang": "EXTRA_SGLANG_ARGS", "vllm": "EXTRA_VLLM_ARGS", "atom": "EXTRA_ATOM_ARGS"}.get(framework, "")
     raw = str(os.environ.get(key) or bench_envs.get(key) or "").strip()
     if not raw:
         return []
@@ -155,8 +154,12 @@ def run_benchmark(
 
     if framework_registry.is_scriptable(framework):
         return _run_scriptable_benchmark(
-            framework=framework, model=model, bench=bench, bench_envs=bench_envs,
-            timeout_s=timeout_s, output_dir=output_dir,
+            framework=framework,
+            model=model,
+            bench=bench,
+            bench_envs=bench_envs,
+            timeout_s=timeout_s,
+            output_dir=output_dir,
         )
 
     if framework not in bypass_engine.SERVER_FRAMEWORKS:
@@ -166,7 +169,9 @@ def run_benchmark(
     inferencex_root = bypass_engine.resolve_inferencex_root(bench)
     if not inferencex_root or not Path(inferencex_root).is_dir():
         _emit_failure(
-            output_dir, framework, model,
+            output_dir,
+            framework,
+            model,
             f"InferenceX path not resolvable/usable: {inferencex_root!r}",
         )
         return 2
@@ -201,13 +206,27 @@ def run_benchmark(
     if remote_base_url:
         start = time.time()
         rc = _run_client_and_eval(
-            inferencex_root=inferencex_root, model=model, base_url=remote_base_url,
-            isl=isl, osl=osl, conc=conc, rrr=rrr, profile=profile,
-            bench_envs=bench_envs, workspace=workspace, timeout_s=timeout_s,
+            inferencex_root=inferencex_root,
+            model=model,
+            base_url=remote_base_url,
+            isl=isl,
+            osl=osl,
+            conc=conc,
+            rrr=rrr,
+            profile=profile,
+            bench_envs=bench_envs,
+            workspace=workspace,
+            timeout_s=timeout_s,
         )
         return _finalize_report(
-            workspace=workspace, framework=framework, model=model, server_log=server_log,
-            bench_envs=bench_envs, start=start, rc=rc, profile=profile,
+            workspace=workspace,
+            framework=framework,
+            model=model,
+            server_log=server_log,
+            bench_envs=bench_envs,
+            start=start,
+            rc=rc,
+            profile=profile,
         )
 
     # server_lifecycle.server_ready_timeout_s (injected by inject_lifecycle,
@@ -223,19 +242,42 @@ def run_benchmark(
             _emit_failure(output_dir, framework, model, "phase=server requires pid_dir", workspace=workspace)
             return 2
         return _run_server_phase(
-            framework=framework, model=model, tp=tp, port=port,
-            max_model_len=max_model_len_i, profile=profile, profile_dir=profile_dir,
-            bench_envs=bench_envs, server_log=server_log, base_url=base_url,
-            timeout_s=timeout_s, server_ready_timeout_s=server_ready_timeout,
-            pid_dir=pid_dir, workspace=workspace, output_dir=output_dir,
+            framework=framework,
+            model=model,
+            tp=tp,
+            port=port,
+            max_model_len=max_model_len_i,
+            profile=profile,
+            profile_dir=profile_dir,
+            bench_envs=bench_envs,
+            server_log=server_log,
+            base_url=base_url,
+            timeout_s=timeout_s,
+            server_ready_timeout_s=server_ready_timeout,
+            pid_dir=pid_dir,
+            workspace=workspace,
+            output_dir=output_dir,
         )
 
     if phase == "client":
         return _run_client_phase(
-            framework=framework, model=model, port=port, conc=conc, isl=isl, osl=osl,
-            rrr=rrr, profile=profile, bench_envs=bench_envs, inferencex_root=inferencex_root,
-            base_url=base_url, server_log=server_log, timeout_s=timeout_s,
-            workspace=workspace, pid_dir=pid_dir, cleanup=cleanup, start=time.time(),
+            framework=framework,
+            model=model,
+            port=port,
+            conc=conc,
+            isl=isl,
+            osl=osl,
+            rrr=rrr,
+            profile=profile,
+            bench_envs=bench_envs,
+            inferencex_root=inferencex_root,
+            base_url=base_url,
+            server_log=server_log,
+            timeout_s=timeout_s,
+            workspace=workspace,
+            pid_dir=pid_dir,
+            cleanup=cleanup,
+            start=time.time(),
         )
 
     # YAML-driven lifecycle: run_grid injects benchmark.server_lifecycle
@@ -249,16 +291,33 @@ def run_benchmark(
         if verdict == _REUSE:
             # A persistent server from a prior round is up AND ours: reuse it.
             return _run_client_phase(
-                framework=framework, model=model, port=port, conc=conc, isl=isl, osl=osl,
-                rrr=rrr, profile=profile, bench_envs=bench_envs, inferencex_root=inferencex_root,
-                base_url=base_url, server_log=server_log, timeout_s=timeout_s,
-                workspace=workspace, pid_dir=sl_pid_dir, cleanup=sl_cleanup, start=time.time(),
+                framework=framework,
+                model=model,
+                port=port,
+                conc=conc,
+                isl=isl,
+                osl=osl,
+                rrr=rrr,
+                profile=profile,
+                bench_envs=bench_envs,
+                inferencex_root=inferencex_root,
+                base_url=base_url,
+                server_log=server_log,
+                timeout_s=timeout_s,
+                workspace=workspace,
+                pid_dir=sl_pid_dir,
+                cleanup=sl_cleanup,
+                start=time.time(),
             )
         if verdict == _FOREIGN:
             # Healthy port but no pid/meta: a server we did not launch holds it.
             # Refuse rather than reuse (reuse-key mismatch) or boot over it.
             _write_report(
-                workspace, framework, model, False, time.time(),
+                workspace,
+                framework,
+                model,
+                False,
+                time.time(),
                 [f"port {port} in use by a non-bypass server (no lifecycle pid/meta)"],
                 profiling_enabled=profile,
             )
@@ -266,13 +325,27 @@ def run_benchmark(
         # verdict == _BOOT: no server yet. Start + persist, run this round's
         # client, then honor cleanup.
         return _run_lifecycle_all(
-            framework=framework, model=model, tp=tp, port=port,
-            max_model_len=max_model_len_i, profile=profile, profile_dir=profile_dir,
-            bench_envs=bench_envs, server_log=server_log, base_url=base_url,
-            timeout_s=timeout_s, server_ready_timeout_s=server_ready_timeout,
-            pid_dir=sl_pid_dir, cleanup=sl_cleanup,
-            inferencex_root=inferencex_root, conc=conc, isl=isl, osl=osl, rrr=rrr,
-            workspace=workspace, output_dir=output_dir,
+            framework=framework,
+            model=model,
+            tp=tp,
+            port=port,
+            max_model_len=max_model_len_i,
+            profile=profile,
+            profile_dir=profile_dir,
+            bench_envs=bench_envs,
+            server_log=server_log,
+            base_url=base_url,
+            timeout_s=timeout_s,
+            server_ready_timeout_s=server_ready_timeout,
+            pid_dir=sl_pid_dir,
+            cleanup=sl_cleanup,
+            inferencex_root=inferencex_root,
+            conc=conc,
+            isl=isl,
+            osl=osl,
+            rrr=rrr,
+            workspace=workspace,
+            output_dir=output_dir,
         )
 
     # phase == "all": start server, run client, always teardown.
@@ -280,8 +353,13 @@ def run_benchmark(
     extra_args = _tokenize_extra_args(bench_envs, framework)
     try:
         server_cmd = bypass_engine.build_server_command(
-            framework=framework, model=model, tp=tp, port=port,
-            max_model_len=max_model_len_i, extra_args=extra_args, profile_dir=profile_dir,
+            framework=framework,
+            model=model,
+            tp=tp,
+            port=port,
+            max_model_len=max_model_len_i,
+            extra_args=extra_args,
+            profile_dir=profile_dir,
             python_exe=sys.executable,
         )
     except ValueError as exc:
@@ -293,35 +371,73 @@ def run_benchmark(
     try:
         if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout):
             _write_report(
-                workspace, framework, model, False, start,
-                ["server did not become ready"], profiling_enabled=profile,
+                workspace,
+                framework,
+                model,
+                False,
+                start,
+                ["server did not become ready"],
+                profiling_enabled=profile,
             )
             return 1
         rc = _run_client_and_eval(
-            inferencex_root=inferencex_root, model=model, base_url=base_url,
-            isl=isl, osl=osl, conc=conc, rrr=rrr, profile=profile,
-            bench_envs=bench_envs, workspace=workspace, timeout_s=timeout_s,
+            inferencex_root=inferencex_root,
+            model=model,
+            base_url=base_url,
+            isl=isl,
+            osl=osl,
+            conc=conc,
+            rrr=rrr,
+            profile=profile,
+            bench_envs=bench_envs,
+            workspace=workspace,
+            timeout_s=timeout_s,
         )
     finally:
         _terminate_server(server_proc)
 
     return _finalize_report(
-        workspace=workspace, framework=framework, model=model, server_log=server_log,
-        bench_envs=bench_envs, start=start, rc=rc, profile=profile,
+        workspace=workspace,
+        framework=framework,
+        model=model,
+        server_log=server_log,
+        bench_envs=bench_envs,
+        start=start,
+        rc=rc,
+        profile=profile,
     )
 
 
 def _run_server_phase(
-    *, framework, model, tp, port, max_model_len, profile, profile_dir,
-    bench_envs, server_log, base_url, timeout_s, server_ready_timeout_s, pid_dir, workspace, output_dir,
+    *,
+    framework,
+    model,
+    tp,
+    port,
+    max_model_len,
+    profile,
+    profile_dir,
+    bench_envs,
+    server_log,
+    base_url,
+    timeout_s,
+    server_ready_timeout_s,
+    pid_dir,
+    workspace,
+    output_dir,
 ) -> int:
     """Start a persistent server, write pid/meta, and exit without teardown."""
     server_env = _server_env(profile, profile_dir, bench_envs)
     extra_args = _tokenize_extra_args(bench_envs, framework)
     try:
         server_cmd = bypass_engine.build_server_command(
-            framework=framework, model=model, tp=tp, port=port,
-            max_model_len=max_model_len, extra_args=extra_args, profile_dir=profile_dir,
+            framework=framework,
+            model=model,
+            tp=tp,
+            port=port,
+            max_model_len=max_model_len,
+            extra_args=extra_args,
+            profile_dir=profile_dir,
             python_exe=sys.executable,
         )
     except ValueError as exc:
@@ -331,8 +447,13 @@ def _run_server_phase(
     if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout_s):
         _terminate_server(proc)
         _write_report(
-            workspace, framework, model, False, time.time(),
-            ["server did not become ready"], profiling_enabled=profile,
+            workspace,
+            framework,
+            model,
+            False,
+            time.time(),
+            ["server did not become ready"],
+            profiling_enabled=profile,
         )
         return 1
     try:
@@ -340,20 +461,45 @@ def _run_server_phase(
     except OSError:
         pgid = proc.pid
     bypass_engine.write_lifecycle_files(
-        pid_dir=pid_dir, framework=framework, port=port, pid=proc.pid, pgid=pgid, model=model,
+        pid_dir=pid_dir,
+        framework=framework,
+        port=port,
+        pid=proc.pid,
+        pgid=pgid,
+        model=model,
     )
     # Do NOT terminate: the server stays up for the reuse client phase.
     return 0
 
 
 def _run_client_phase(
-    *, framework, model, port, conc, isl, osl, rrr, profile, bench_envs,
-    inferencex_root, base_url, server_log, timeout_s, workspace, pid_dir, cleanup, start,
+    *,
+    framework,
+    model,
+    port,
+    conc,
+    isl,
+    osl,
+    rrr,
+    profile,
+    bench_envs,
+    inferencex_root,
+    base_url,
+    server_log,
+    timeout_s,
+    workspace,
+    pid_dir,
+    cleanup,
+    start,
 ) -> int:
     """Reuse a running server; run client (+eval); teardown when cleanup."""
     if not pid_dir:
         _write_report(
-            workspace, framework, model, False, start,
+            workspace,
+            framework,
+            model,
+            False,
+            start,
             ["phase=client requires pid_dir"],
             profiling_enabled=profile,
         )
@@ -361,16 +507,25 @@ def _run_client_phase(
     verdict = _server_reusable(base_url, pid_dir, framework, port)
     if verdict != _REUSE:
         reason = (
-            "no healthy server to reuse" if verdict == _BOOT
+            "no healthy server to reuse"
+            if verdict == _BOOT
             else f"port {port} in use by a non-bypass server (no lifecycle pid/meta)"
         )
         _write_report(workspace, framework, model, False, start, [reason], profiling_enabled=profile)
         return 1
     try:
         rc = _run_client_and_eval(
-            inferencex_root=inferencex_root, model=model, base_url=base_url,
-            isl=isl, osl=osl, conc=conc, rrr=rrr, profile=profile,
-            bench_envs=bench_envs, workspace=workspace, timeout_s=timeout_s,
+            inferencex_root=inferencex_root,
+            model=model,
+            base_url=base_url,
+            isl=isl,
+            osl=osl,
+            conc=conc,
+            rrr=rrr,
+            profile=profile,
+            bench_envs=bench_envs,
+            workspace=workspace,
+            timeout_s=timeout_s,
         )
     finally:
         if cleanup and pid_dir:
@@ -378,15 +533,40 @@ def _run_client_phase(
 
             teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
     return _finalize_report(
-        workspace=workspace, framework=framework, model=model, server_log=server_log,
-        bench_envs=bench_envs, start=start, rc=rc, profile=profile,
+        workspace=workspace,
+        framework=framework,
+        model=model,
+        server_log=server_log,
+        bench_envs=bench_envs,
+        start=start,
+        rc=rc,
+        profile=profile,
     )
 
 
 def _run_lifecycle_all(
-    *, framework, model, tp, port, max_model_len, profile, profile_dir,
-    bench_envs, server_log, base_url, timeout_s, server_ready_timeout_s, pid_dir, cleanup,
-    inferencex_root, conc, isl, osl, rrr, workspace, output_dir,
+    *,
+    framework,
+    model,
+    tp,
+    port,
+    max_model_len,
+    profile,
+    profile_dir,
+    bench_envs,
+    server_log,
+    base_url,
+    timeout_s,
+    server_ready_timeout_s,
+    pid_dir,
+    cleanup,
+    inferencex_root,
+    conc,
+    isl,
+    osl,
+    rrr,
+    workspace,
+    output_dir,
 ) -> int:
     """Start + persist a server, run this round's client, teardown iff cleanup.
 
@@ -398,8 +578,13 @@ def _run_lifecycle_all(
     extra_args = _tokenize_extra_args(bench_envs, framework)
     try:
         server_cmd = bypass_engine.build_server_command(
-            framework=framework, model=model, tp=tp, port=port,
-            max_model_len=max_model_len, extra_args=extra_args, profile_dir=profile_dir,
+            framework=framework,
+            model=model,
+            tp=tp,
+            port=port,
+            max_model_len=max_model_len,
+            extra_args=extra_args,
+            profile_dir=profile_dir,
             python_exe=sys.executable,
         )
     except ValueError as exc:
@@ -410,8 +595,13 @@ def _run_lifecycle_all(
     if not bypass_engine.wait_for_server_ready(base_url, timeout_s=server_ready_timeout_s):
         _terminate_server(proc)
         _write_report(
-            workspace, framework, model, False, start,
-            ["server did not become ready"], profiling_enabled=profile,
+            workspace,
+            framework,
+            model,
+            False,
+            start,
+            ["server did not become ready"],
+            profiling_enabled=profile,
         )
         return 1
     try:
@@ -419,12 +609,25 @@ def _run_lifecycle_all(
     except OSError:
         pgid = proc.pid
     bypass_engine.write_lifecycle_files(
-        pid_dir=pid_dir, framework=framework, port=port, pid=proc.pid, pgid=pgid, model=model,
+        pid_dir=pid_dir,
+        framework=framework,
+        port=port,
+        pid=proc.pid,
+        pgid=pgid,
+        model=model,
     )
     rc = _run_client_and_eval(
-        inferencex_root=inferencex_root, model=model, base_url=base_url,
-        isl=isl, osl=osl, conc=conc, rrr=rrr, profile=profile,
-        bench_envs=bench_envs, workspace=workspace, timeout_s=timeout_s,
+        inferencex_root=inferencex_root,
+        model=model,
+        base_url=base_url,
+        isl=isl,
+        osl=osl,
+        conc=conc,
+        rrr=rrr,
+        profile=profile,
+        bench_envs=bench_envs,
+        workspace=workspace,
+        timeout_s=timeout_s,
     )
     if cleanup:
         _terminate_server(proc)
@@ -432,21 +635,31 @@ def _run_lifecycle_all(
 
         teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
     return _finalize_report(
-        workspace=workspace, framework=framework, model=model, server_log=server_log,
-        bench_envs=bench_envs, start=start, rc=rc, profile=profile,
+        workspace=workspace,
+        framework=framework,
+        model=model,
+        server_log=server_log,
+        bench_envs=bench_envs,
+        start=start,
+        rc=rc,
+        profile=profile,
     )
 
 
 def _run_scriptable_benchmark(
-    *, framework, model, bench, bench_envs, timeout_s, output_dir,
+    *,
+    framework,
+    model,
+    bench,
+    bench_envs,
+    timeout_s,
+    output_dir,
 ) -> int:
     """Run a server-less scriptable benchmark (e.g. xDiT) and write the report."""
     inferencex_root = bypass_engine.resolve_inferencex_root(bench)
     workspace = bypass_report.create_workspace(output_dir, framework)
     _snapshot_config(workspace, {"benchmark": bench})
-    runner_type = str(
-        bench.get("runner_type") or os.environ.get("RUNNER_TYPE") or "mi300x"
-    ).lower()
+    runner_type = str(bench.get("runner_type") or os.environ.get("RUNNER_TYPE") or "mi300x").lower()
     # Profiler parity with the serving path: honor torch_profiler.enabled so
     # scriptable scripts (xDiT) trace into the workspace torch_trace dir.
     profiler = (bench.get("profiler") or {}).get("torch_profiler") or {}
@@ -456,10 +669,14 @@ def _run_scriptable_benchmark(
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
     start = time.time()
     rc, error = bypass_scriptable.run_scriptable(
-        framework=framework, runner_type=runner_type,
-        inferencex_root=str(inferencex_root or ""), bench=bench,
-        workspace=workspace, timeout_s=timeout_s,
-        profile=profile, profile_dir=profile_dir,
+        framework=framework,
+        runner_type=runner_type,
+        inferencex_root=str(inferencex_root or ""),
+        bench=bench,
+        workspace=workspace,
+        timeout_s=timeout_s,
+        profile=profile,
+        profile_dir=profile_dir,
     )
     if error is not None:
         _write_report(workspace, framework, model, False, start, [error], profiling_enabled=profile)
@@ -472,7 +689,13 @@ def _run_scriptable_benchmark(
     if raw is None:
         errors.append("inferencex_result.json not produced")
     _write_report(
-        workspace, framework, model, success, start, errors, raw=raw,
+        workspace,
+        framework,
+        model,
+        success,
+        start,
+        errors,
+        raw=raw,
         profiling_enabled=profile,
     )
     return 0 if success else (rc or 1)
@@ -505,8 +728,18 @@ def _ensure_eval_deps(python_exe: str) -> None:
 
 
 def _run_client_and_eval(
-    *, inferencex_root, model, base_url, isl, osl, conc, rrr, profile,
-    bench_envs, workspace, timeout_s,
+    *,
+    inferencex_root,
+    model,
+    base_url,
+    isl,
+    osl,
+    conc,
+    rrr,
+    profile,
+    bench_envs,
+    workspace,
+    timeout_s,
 ) -> int:
     """Run the InferenceX client, then optional eval; return client rc."""
     # Honor materializer-computed request sizing (env then YAML envs) so the
@@ -515,17 +748,29 @@ def _run_client_and_eval(
     num_prompts = _as_opt_int(os.environ.get("NUM_PROMPTS") or bench_envs.get("NUM_PROMPTS"))
     num_warmups = _as_opt_int(os.environ.get("NUM_WARMUPS") or bench_envs.get("NUM_WARMUPS"))
     client_cmd = bypass_engine.build_client_command(
-        inferencex_root=inferencex_root, python_exe=sys.executable, model=model,
-        base_url=base_url, isl=isl, osl=osl, conc=conc, random_range_ratio=rrr,
-        result_dir=str(workspace), result_filename="inferencex_result",
-        num_prompts=num_prompts, num_warmups=num_warmups,
-        profile=profile, trust_remote_code=True,
+        inferencex_root=inferencex_root,
+        python_exe=sys.executable,
+        model=model,
+        base_url=base_url,
+        isl=isl,
+        osl=osl,
+        conc=conc,
+        random_range_ratio=rrr,
+        result_dir=str(workspace),
+        result_filename="inferencex_result",
+        num_prompts=num_prompts,
+        num_warmups=num_warmups,
+        profile=profile,
+        trust_remote_code=True,
     )
     rc = _run_subprocess(client_cmd, timeout_s, workspace, "client")
     if rc == 0 and _run_eval_enabled(bench_envs):
         _ensure_eval_deps(sys.executable)
         eval_cmd = bypass_engine.build_eval_command(
-            python_exe=sys.executable, model=model, base_url=base_url, conc=conc,
+            python_exe=sys.executable,
+            model=model,
+            base_url=base_url,
+            conc=conc,
             out_dir=str(workspace / "lm_eval"),
             tasks=os.environ.get("MAGPIE_EVAL_TASKS", "gsm8k").strip() or "gsm8k",
             limit=(os.environ.get("MAGPIE_EVAL_LIMIT", "").strip() or None),
@@ -558,21 +803,32 @@ def _finalize_report(*, workspace, framework, model, server_log, bench_envs, sta
         errors.append("inferencex_result.json not produced")
     client_stderr = _read_log(workspace / "client_stderr.log")
     analysis = bypass_analysis.build_analysis(
-        workspace=workspace, server_log=server_log, success=success,
-        stderr_text=client_stderr, run_eval=_run_eval_enabled(bench_envs),
+        workspace=workspace,
+        server_log=server_log,
+        success=success,
+        stderr_text=client_stderr,
+        run_eval=_run_eval_enabled(bench_envs),
     )
     _write_report(
-        workspace, framework, model, success, start, errors,
-        raw=raw, analysis=analysis, profiling_enabled=profile,
+        workspace,
+        framework,
+        model,
+        success,
+        start,
+        errors,
+        raw=raw,
+        analysis=analysis,
+        profiling_enabled=profile,
     )
     if success:
         return 0
     return rc or eval_rc or 1
 
 
-
 def _server_env(
-    profile: bool, profile_dir: str | None, bench_envs: dict | None = None,
+    profile: bool,
+    profile_dir: str | None,
+    bench_envs: dict | None = None,
 ) -> dict[str, str]:
     """Build the server subprocess env (parent + profiler dirs + GPU pin)."""
     env = scrub_child_process_env(os.environ.copy())
@@ -659,7 +915,8 @@ def _snapshot_config(workspace: Path, cfg: dict[str, Any]) -> None:
     """Persist the effective config into the workspace (best-effort)."""
     try:
         (workspace / "config.yaml").write_text(
-            yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8",
+            yaml.safe_dump(cfg, sort_keys=False),
+            encoding="utf-8",
         )
     except OSError:
         pass

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for the FRAMEWORK config-exploration capability (Route B).
 
@@ -40,9 +41,7 @@ class _FakeTasks:
         return self._running
 
     async def create_or_return_existing(self, *, kind, params, idempotency_key, **kwargs):
-        self.calls.append(
-            {"kind": kind, "params": params, "idempotency_key": idempotency_key}
-        )
+        self.calls.append({"kind": kind, "params": params, "idempotency_key": idempotency_key})
         return SimpleNamespace(task_id="framework-config-explore-1"), False
 
 
@@ -415,9 +414,7 @@ def test_mn_explore_skips_framework_config_generation_specialist(monkeypatch):
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
     s = SimpleNamespace(
         _MN_AUTO_EXPLORE_GRID_CAP=Coordinator._MN_AUTO_EXPLORE_GRID_CAP,
-        shared_state=SimpleNamespace(
-            baseline_config_path="", current_best={}, baseline_tput=0.0, last_baseline={}
-        ),
+        shared_state=SimpleNamespace(baseline_config_path="", current_best={}, baseline_tput=0.0, last_baseline={}),
         tasks=_FakeTasks(),
     )
     task = SimpleNamespace(task_id="gen-1", params={"framework_config_generation": True})
@@ -594,7 +591,9 @@ def test_dispatch_generation_warm_error_is_swallowed():
         raise RuntimeError("warm fail")
 
     s._warm_specialist_params = _warm_boom
-    assert asyncio.run(Coordinator._dispatch_framework_config_generation_specialist(s, 1)) == "framework-config-explore-1"
+    assert (
+        asyncio.run(Coordinator._dispatch_framework_config_generation_specialist(s, 1)) == "framework-config-explore-1"
+    )
 
 
 def test_finish_lane_survives_save_error():
@@ -665,9 +664,12 @@ def test_run_swallows_enqueue_failure():
         raise RuntimeError("q down")
 
     s.tasks.create_or_return_existing = _boom
-    assert asyncio.run(
-        Coordinator._run_framework_config_exploration(s, explicit_grid=[{"name": "v", "extra_args": "--x"}])
-    ) == ""
+    assert (
+        asyncio.run(
+            Coordinator._run_framework_config_exploration(s, explicit_grid=[{"name": "v", "extra_args": "--x"}])
+        )
+        == ""
+    )
 
 
 def test_ingest_reinits_non_list_pending():
@@ -724,20 +726,14 @@ def test_record_survives_lifecycle_error():
     s = _fake_self()
     s.shared_state.record_lifecycle_event = _raise
     task = SimpleNamespace(task_id="c", params={})
-    Coordinator._record_framework_config_exploration_result(
-        s, task=task, result={"per_variant_outcomes": []}
-    )
+    Coordinator._record_framework_config_exploration_result(s, task=task, result={"per_variant_outcomes": []})
     assert len(s.shared_state.framework_config_exploration_results) == 1
 
 
 def test_dispatch_generation_specialist_bottleneck_domain():
-    s = _dispatch_deps(
-        _fake_self(framework="sglang", current_top_bottleneck=lambda: "comm")
-    )
+    s = _dispatch_deps(_fake_self(framework="sglang", current_top_bottleneck=lambda: "comm"))
     s._dominant_roofline_direction = lambda: ("comm", 91.0)
-    tid = asyncio.run(
-        Coordinator._dispatch_framework_config_generation_specialist(s, 1)
-    )
+    tid = asyncio.run(Coordinator._dispatch_framework_config_generation_specialist(s, 1))
     assert tid == "framework-config-explore-1"
     p = s.tasks.calls[0]["params"]
     assert p["domain"] == "comm_specialist"
@@ -769,9 +765,7 @@ def test_context_lines_includes_bottleneck_and_flags():
             }
         },
     )
-    lines = s._framework_config_generation_context_lines(
-        framework="sglang", direction="memory", direction_pct=95.0
-    )
+    lines = s._framework_config_generation_context_lines(framework="sglang", direction="memory", direction_pct=95.0)
     text = "\n".join(lines)
     assert "CURRENT BOTTLENECK: memory" in text
     assert "95% saturated" in text
@@ -781,9 +775,7 @@ def test_context_lines_includes_bottleneck_and_flags():
 
 def test_context_lines_bottleneck_without_direction():
     s = _fake_self(current_top_bottleneck=lambda: "idle")
-    lines = s._framework_config_generation_context_lines(
-        framework="sglang", direction="", direction_pct=0.0
-    )
+    lines = s._framework_config_generation_context_lines(framework="sglang", direction="", direction_pct=0.0)
     text = "\n".join(lines)
     assert "CURRENT BOTTLENECK: idle." in text
     assert "roofline direction" not in text
@@ -791,17 +783,13 @@ def test_context_lines_bottleneck_without_direction():
 
 def test_context_lines_empty_without_context():
     s = _fake_self()
-    lines = s._framework_config_generation_context_lines(
-        framework="sglang", direction="", direction_pct=0.0
-    )
+    lines = s._framework_config_generation_context_lines(framework="sglang", direction="", direction_pct=0.0)
     assert lines == []
 
 
 def test_context_lines_entry_present_but_no_flags():
     s = _fake_self(discovered_flags={"sglang": {}})
-    lines = s._framework_config_generation_context_lines(
-        framework="sglang", direction="", direction_pct=0.0
-    )
+    lines = s._framework_config_generation_context_lines(framework="sglang", direction="", direction_pct=0.0)
     assert lines == []
 
 
@@ -810,21 +798,15 @@ def test_context_lines_swallows_bottleneck_exception():
         raise RuntimeError("no snapshot")
 
     s = _fake_self(current_top_bottleneck=_boom)
-    lines = s._framework_config_generation_context_lines(
-        framework="sglang", direction="comm", direction_pct=80.0
-    )
+    lines = s._framework_config_generation_context_lines(framework="sglang", direction="comm", direction_pct=80.0)
     text = "\n".join(lines)
     assert "CURRENT BOTTLENECK: unknown" in text
     assert "comm" in text
 
 
 def test_context_lines_uses_unknown_key_when_framework_blank():
-    s = _fake_self(
-        discovered_flags={"unknown": {"backend_flags": ["--foo"], "param_flags": []}}
-    )
-    lines = s._framework_config_generation_context_lines(
-        framework="", direction="", direction_pct=0.0
-    )
+    s = _fake_self(discovered_flags={"unknown": {"backend_flags": ["--foo"], "param_flags": []}})
+    lines = s._framework_config_generation_context_lines(framework="", direction="", direction_pct=0.0)
     assert any("--foo" in ln for ln in lines)
 
 
@@ -836,12 +818,8 @@ def test_hold_generating_empty_harvest_finishes_not_seeds(monkeypatch):
     # generation_empty rather than falling back to the default seed grid.
     from hyperloom.orchestrator.actions.executors import explore as _exp
 
-    gv = SimpleNamespace(
-        name="seed1", extra_server_args="--s", extra_envs={"E": "1"}, note="n"
-    )
-    monkeypatch.setattr(
-        _exp, "_default_grid_for_framework", lambda framework, *, model_class: [gv]
-    )
+    gv = SimpleNamespace(name="seed1", extra_server_args="--s", extra_envs={"E": "1"}, note="n")
+    monkeypatch.setattr(_exp, "_default_grid_for_framework", lambda framework, *, model_class: [gv])
     s = _fake_self(
         framework="atom",
         framework_config_exploration_enabled=True,

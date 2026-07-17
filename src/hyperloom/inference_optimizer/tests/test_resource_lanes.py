@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """research_lane capacity + concurrent dispatcher tests."""
 
@@ -765,9 +766,7 @@ def test_gpu_research_lane_known_and_conflicts_are_symmetric():
     gpu_research_lane and vice versa.
     """
     assert "gpu_research_lane" in KNOWN_LANES
-    assert LANE_CONFLICTS["gpu_research_lane"] == frozenset(
-        {"benchmark_lane", "profile_lane", "server_lifecycle"}
-    )
+    assert LANE_CONFLICTS["gpu_research_lane"] == frozenset({"benchmark_lane", "profile_lane", "server_lifecycle"})
     for serving in ("benchmark_lane", "profile_lane", "server_lifecycle"):
         assert "gpu_research_lane" in LANE_CONFLICTS[serving]
     assert "gpu_research_lane" not in LANE_CONFLICTS["gpu_research_lane"]

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
 
@@ -31,7 +32,6 @@ from ._common import (
     _to_float,
     _to_int,
 )
-
 
 
 log = logging.getLogger(__name__)
@@ -532,9 +532,7 @@ def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     if isinstance(raw_ts, list):
         for t in raw_ts:
             try:
-                crash_ts_iso.append(
-                    datetime.fromtimestamp(float(t), tz=timezone.utc).isoformat()
-                )
+                crash_ts_iso.append(datetime.fromtimestamp(float(t), tz=timezone.utc).isoformat())
             except (TypeError, ValueError, OSError, OverflowError):
                 continue
 
@@ -565,13 +563,7 @@ def _collect_recovery(state: dict[str, Any]) -> dict[str, Any]:
     steward_continuation = bool(state.get("steward_continuation_used"))
     resume_pending = bool(state.get("resume_pending_revalidation"))
     degraded = bool(state.get("degraded_mode"))
-    recovered = bool(
-        crash_count > 0
-        or crash_ts_iso
-        or steward_continuation
-        or resume_pending
-        or last_exc
-    )
+    recovered = bool(crash_count > 0 or crash_ts_iso or steward_continuation or resume_pending or last_exc)
     return {
         "recovered": recovered,
         "crash_count": crash_count,
@@ -644,10 +636,7 @@ def collect_session(
         # USER_DATA_PATH root (the operator-chosen workspace base). Manifest is
         # snapshotted at session start; env is the in-process fallback.
         "user_data_path": str(
-            manifest.get("user_data_path")
-            or state.get("user_data_path")
-            or os.environ.get("USER_DATA_PATH")
-            or ""
+            manifest.get("user_data_path") or state.get("user_data_path") or os.environ.get("USER_DATA_PATH") or ""
         ),
         "tick_count": int(state.get("tick") or 0),
         # Crash / interruption / resume history.
@@ -678,11 +667,7 @@ def collect_session_meta(
     image = session_section.get("image")
     image_str = image if isinstance(image, str) and image.strip() else ""
     elapsed_min = session_section.get("elapsed_minutes")
-    duration_s = (
-        int(round(elapsed_min * 60))
-        if isinstance(elapsed_min, (int, float)) and elapsed_min > 0
-        else 0
-    )
+    duration_s = int(round(elapsed_min * 60)) if isinstance(elapsed_min, (int, float)) and elapsed_min > 0 else 0
     return {
         "code_revision": str(manifest.get("code_revision") or ""),
         "image": image_str or None,
@@ -1106,11 +1091,7 @@ def collect_final(
         # A GEAK e2e candidate whose self-reported win is not yet confirmed by a
         # main-flow rebench; surfaced as an audit-only note and EXCLUDED from the
         # headline gain. Empty on native/validated sessions.
-        "geak_pending": (
-            dict(state.get("geak_pending") or {})
-            if isinstance(state.get("geak_pending"), dict)
-            else {}
-        ),
+        "geak_pending": (dict(state.get("geak_pending") or {}) if isinstance(state.get("geak_pending"), dict) else {}),
         "validated_at_stack_len": val_stack_len,
         "validated_ts": str(state.get("cumulative_gain_validated_ts") or ""),
         "stack_changed_after_validation": stack_len > val_stack_len > 0,
@@ -1306,4 +1287,3 @@ def _build_final_invocation(
         "config_path": _rel(config_path, session_dir) if config_path else None,
         "server_log_path": _rel(server_log_path, session_dir) if server_log_path else None,
     }
-

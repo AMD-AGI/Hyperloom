@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Shared helper for the ``explore`` executor's grid runs.
 
@@ -108,10 +109,7 @@ from ._grid_variant_filter import (
 )
 
 
-
 log = logging.getLogger(__name__)
-
-
 
 
 def _resolve_magpie_python() -> str:
@@ -255,40 +253,8 @@ def _resolve_session_dir() -> Path:
     return _sd()
 
 
-
-
 # SKIP_VARIANTS: comma/whitespace patterns matched (exact or fnmatch) against
 # ``GridVariant.name``. Order: params["skip_variants"] > $SKIP_VARIANTS > "".
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # Env-flag capability probe: a serving env flag can be defined in the build yet
@@ -406,18 +372,6 @@ def unsupported_capability_reason(variant: "GridVariant") -> str | None:
     return _probe_vllm_aiter_shared_expert_unsupported()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 # Sanitization for LLM-supplied overrides (benchmark_script / result_dir):
 # reject path separators / shell metacharacters, raising ``ValueError`` instead
 # of running an unsafe subprocess.
@@ -481,46 +435,6 @@ def sanitize_result_dir(value: Any) -> str | None:
             "metacharacters; pass an absolute or workspace-relative path"
         )
     return text
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _build_variant_yaml(
@@ -806,6 +720,7 @@ def _run_magpie(
     soft_deadline_sec: float | None = None,
     preclean: bool = True,
     server_already_ready: bool = False,
+    serving_lease: Any = None,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr).
 
@@ -831,6 +746,10 @@ def _run_magpie(
         preclean (bool): Whether to pre-clean stale servers before launch.
         server_already_ready (bool): Pass ``True`` for warm reuse rounds so the
             soft-deadline clock runs from process spawn, not the ready marker.
+        serving_lease: When set (Ray-managed GPU execution, §12 T1), the round
+            runs inside the lease's actor — which holds ``num_gpus`` across every
+            round sharing this server — instead of a local subprocess. ``None``
+            keeps the existing local ``run_with_session_kill`` path unchanged.
 
     Returns:
         tuple[int, str, str]: ``(returncode, stdout, stderr)``.
@@ -867,6 +786,33 @@ def _run_magpie(
     # redirect into a prior run's slot.
     env["SERVER_LOG"] = str(output_dir / "server.log")
     env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
+
+    # Ray-managed GPU execution (§12 T1): route the round through the serving
+    # lease's actor, which holds ``num_gpus`` across every round sharing this
+    # server. The lease is owned by the caller (conc_sweep arm / baseline /
+    # sweep / explore), so one lease spans boot + all reuse rounds — no detached
+    # GPU process outlives its Ray lease (§4.2). Ray sets ``*_VISIBLE_DEVICES``
+    # in the worker, so the YAML's device list is stripped first (T2) to stop
+    # Magpie re-exporting it and overriding Ray's card assignment.
+    if serving_lease is not None:
+        from ._ray_backend import strip_visible_devices_from_config
+
+        ray_config_path = strip_visible_devices_from_config(config_path)
+        cmd = build_benchmark_command(
+            python_exe=magpie_python,
+            config_path=ray_config_path,
+            output_dir=output_dir,
+        )
+        return serving_lease.run_session_kill(
+            cmd,
+            env=env,
+            cwd=cwd,
+            timeout=timeout_sec,
+            soft_deadline_sec=soft_deadline_sec,
+            server_log_path=str(output_dir / "server.log"),
+            server_already_ready=server_already_ready,
+        )
+
     cmd = build_benchmark_command(
         python_exe=magpie_python,
         config_path=config_path,
@@ -884,6 +830,27 @@ def _run_magpie(
         server_already_ready=server_already_ready,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def _num_gpus_for_config(config_path: Path) -> float:
+    """Read the tensor-parallel size (``TP``) from a materialized benchmark YAML.
+
+    Used as the Ray ``num_gpus`` for a benchmark lease so Ray leases exactly the
+    cards the server needs. Falls back to 1 on any read/parse error.
+
+    Args:
+        config_path: Path to the materialized benchmark config YAML.
+
+    Returns:
+        The GPU count (``TP``) as a float for Ray's ``num_gpus``.
+    """
+    try:
+        with Path(config_path).open(encoding="utf-8") as fp:
+            cfg = yaml.safe_load(fp) or {}
+        envs = (cfg.get("benchmark") or {}).get("envs") or {}
+        return float(int(envs.get("TP", 1) or 1))
+    except Exception:  # noqa: BLE001 — best-effort; default to 1 GPU
+        return 1.0
 
 
 async def run_grid(
@@ -906,8 +873,18 @@ async def run_grid(
     warmup_before_measure: bool | None = None,
     preclean_before_run: bool = True,
     server_already_ready: bool = False,
+    serving_lease: Any = None,
 ) -> list[VariantResult]:
-    """Execute each grid variant and return all per-variant results."""
+    """Execute each grid variant and return all per-variant results.
+
+    ``serving_lease`` (Ray-managed GPU execution, §12 T1) is a caller-owned
+    :class:`~._ray_serving.ServingLease` that every round in this grid runs
+    through, so one Ray GPU lease spans the variant's warmup + measure rounds.
+    ``None`` keeps the local-subprocess path. The lease's lifecycle (create /
+    close) is owned by the caller so it can also span multiple ``run_grid``
+    calls that reuse one persistent server (conc_sweep arm, explore warmup +
+    decision).
+    """
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
         from .benchmark_backend import resolve_benchmark_interpreter
@@ -1147,6 +1124,7 @@ async def run_grid(
                     result_dir=result_dir,
                     soft_deadline_sec=None,
                     preclean=True,
+                    serving_lease=serving_lease,
                 )
             except subprocess.TimeoutExpired as exc:
                 from ._server_lifecycle import teardown_lifecycle_server
@@ -1340,6 +1318,7 @@ async def run_grid(
             is_multi_node as _mn_imn,
             mn_bench_warmup_enabled as _mn_warm,
         )
+
         if _mn_imn() and _mn_warm():
             _mn_warm_slot = slot / "mn_warmup"
             try:
@@ -1353,15 +1332,19 @@ async def run_grid(
                     result_dir=None,
                     soft_deadline_sec=None,
                     preclean=False,
+                    serving_lease=serving_lease,
                 )
                 log.info(
                     "grid_runner: MN warmup pass done (discarded) %d/%d name=%s",
-                    i + 1, len(grid), variant.name,
+                    i + 1,
+                    len(grid),
+                    variant.name,
                 )
             except Exception as exc:  # noqa: BLE001 - warmup is best-effort
                 log.warning(
                     "grid_runner: MN warmup pass failed (ignored) name=%s: %r",
-                    variant.name, exc,
+                    variant.name,
+                    exc,
                 )
 
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
@@ -1379,6 +1362,7 @@ async def run_grid(
                 soft_deadline_sec=soft_deadline_sec,
                 preclean=(False if auto_warmup else preclean_before_run),
                 server_already_ready=(server_already_ready or auto_warmup),
+                serving_lease=serving_lease,
             )
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks.

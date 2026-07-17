@@ -116,7 +116,7 @@ host make "latest" pick the wrong run.
 
 Inputs that stay outside `$USER_DATA_PATH` by design (read-only sources
 or warm-start caches): **TraceLens** — `$TRACELENS_ROOT` (default
-`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens`; when unset,
+`${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens`; when unset,
 `src/hyperloom/agents/kernel/scripts/install.sh` clones
 [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) there and pins
 it to a fixed SHA. A pre-existing checkout you maintain is only used as
@@ -406,9 +406,11 @@ Steps for the launching agent:
    `model_arch.json` at the workspace root. Do not create a subdirectory
    such as `model_arch_advisory/`; the CLI only reads the root-level
    convention file. Include `model_name` (required for the stale-file
-   guard — its basename must match the launched `--model` basename or
-   Hyperloom ignores the file). All other fields are optional; renderers
-   drop empty fields.
+   guard). Set it to the **clean model name** (e.g. `Qwen2.5-7B-Instruct`);
+   the guard normalizes launch forms — flat dirs, HF repo ids, and HF hub
+   cache `models--org--repo/snapshots/<hash>` paths — so do NOT use the
+   snapshot commit hash. All other fields are optional; renderers drop
+   empty fields.
 
 ```json
 {
@@ -534,8 +536,8 @@ export HYPERLOOM_KERNEL_AGENT_ROOT="$REPO_ROOT/src/hyperloom/agents/kernel"
 export KERNEL_AGENT_ROOT="$HYPERLOOM_KERNEL_AGENT_ROOT"
 export WORKSPACE_PATH="${WORKSPACE_PATH:-/workspace}"
 # TRACELENS_ROOT: leave unset to let install.sh clone AMD-AGI/TraceLens
-# to $HYPERLOOM_OPEN_SOURCE_ROOT/TraceLens and pin it to a
-# fixed SHA. Only export it as an operator override to point at a
+# to ${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha> and pin it
+# to a fixed SHA. Only export it as an operator override to point at a
 # pre-existing checkout you maintain; this skips both the clone and the
 # SHA pin.
 # export TRACELENS_ROOT=/path/to/your/TraceLens

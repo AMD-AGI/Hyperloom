@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """ProfileExecutor + kernel REQUEST programmatic handler tests."""
 
@@ -1283,9 +1284,7 @@ async def test_baseline_executor_keeps_valid_measurement_with_wrapper_failure(tm
         idempotency_key="baseline-valid-warning",
     )
     sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", return_value=fake_completed
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", return_value=fake_completed):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -1370,9 +1369,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         idempotency_key="prof-1",
     )
     sub.register_executor("profile", pe)
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert res.result["framework"] == "sglang"
@@ -1441,9 +1438,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
         idempotency_key="prof-inferencex-path",
     )
     sub.register_executor("profile", pe)
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", return_value=fake_completed
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", return_value=fake_completed):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -1506,9 +1501,7 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
         idempotency_key="prof-capture",
     )
     sub.register_executor("profile", pe)
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert res.result["framework"] == "vllm"

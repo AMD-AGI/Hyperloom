@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Branch coverage for benchmark-result parsing: leak harvesting, rescue-path
 salvage, raw-result merging, TPOT derivation, and OSL resolution."""
@@ -361,6 +362,7 @@ def test_aggregate_gpu_samples_by_role_empty_without_role():
 # ---- harvest_mn_gpu_metrics -----------------------------------------------
 def test_harvest_mn_gpu_metrics_single_node_noop(monkeypatch, tmp_path):
     import hyperloom.orchestrator.actions.executors._multi_node_env as mn
+
     monkeypatch.setattr(mn, "is_multi_node", lambda: False)
     assert br.harvest_mn_gpu_metrics(tmp_path) == {}
 
@@ -370,7 +372,8 @@ def test_harvest_mn_gpu_metrics_folds_pod_csvs(monkeypatch, tmp_path):
 
     monkeypatch.setattr(mn, "is_multi_node", lambda: True)
     monkeypatch.setattr(
-        mn, "pd_topology_from_state",
+        mn,
+        "pd_topology_from_state",
         lambda: {"prefill_pod_ips": ["10.0.0.1"], "decode_pod_ips": ["10.0.0.2"]},
     )
 
@@ -379,12 +382,8 @@ def test_harvest_mn_gpu_metrics_folds_pod_csvs(monkeypatch, tmp_path):
     monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
 
     header = "timestamp,Temperature (Junction) (C),Average Socket Power (W)"
-    (shared / "gpu_metrics_10.0.0.1.csv").write_text(
-        f"{header}\n1000,55,300\n1001,56,310\n", encoding="utf-8"
-    )
-    (shared / "gpu_metrics_10.0.0.2.csv").write_text(
-        f"{header}\n1000,50,280\n", encoding="utf-8"
-    )
+    (shared / "gpu_metrics_10.0.0.1.csv").write_text(f"{header}\n1000,55,300\n1001,56,310\n", encoding="utf-8")
+    (shared / "gpu_metrics_10.0.0.2.csv").write_text(f"{header}\n1000,50,280\n", encoding="utf-8")
 
     dest = tmp_path / "ws"
     dest.mkdir()
@@ -418,16 +417,13 @@ def test_is_scriptable_via_quality_gate():
 
 def test_is_valid_measurement_scriptable_gate(monkeypatch):
     # Scriptable run: valid on positive throughput when the quality gate passes.
-    assert br.is_valid_measurement(
-        {"quality_gate": {"passed": True}, "output_throughput": 5.0}
-    ) is True
+    assert br.is_valid_measurement({"quality_gate": {"passed": True}, "output_throughput": 5.0}) is True
     # Scriptable run whose quality gate fails is not selectable.
     monkeypatch.setattr(br, "quality_gate_passed", lambda qg, require=False: False, raising=False)
     import hyperloom.orchestrator.actions.executors._accuracy_gate as ag
+
     monkeypatch.setattr(ag, "quality_gate_passed", lambda qg, require=False: False)
-    assert br.is_valid_measurement(
-        {"quality_gate": {"passed": False}, "output_throughput": 5.0}
-    ) is False
+    assert br.is_valid_measurement({"quality_gate": {"passed": False}, "output_throughput": 5.0}) is False
 
 
 def test_is_valid_measurement_serving_and_bad_input():
@@ -459,9 +455,7 @@ def test_harvest_mn_gpu_metrics_window_and_malformed_rows(monkeypatch, tmp_path)
 
     header = "timestamp,Temperature (Junction) (C),Average Socket Power (W)"
     # Rows: one in-window, one out-of-window (dropped), one blank, one bad ts.
-    (shared / "gpu_metrics_hostA.csv").write_text(
-        f"{header}\n1000,55,300\n5,50,280\n\n,51,290\n", encoding="utf-8"
-    )
+    (shared / "gpu_metrics_hostA.csv").write_text(f"{header}\n1000,55,300\n5,50,280\n\n,51,290\n", encoding="utf-8")
     # A too-short file (header only) is skipped.
     (shared / "gpu_metrics_hostB.csv").write_text(f"{header}\n", encoding="utf-8")
 
@@ -483,9 +477,7 @@ def test_harvest_mn_gpu_metrics_report_not_dict(monkeypatch, tmp_path):
     shared.mkdir()
     monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
     header = "timestamp,Temperature (Junction) (C),Average Socket Power (W)"
-    (shared / "gpu_metrics_hostA.csv").write_text(
-        f"{header}\n1000,55,300\n", encoding="utf-8"
-    )
+    (shared / "gpu_metrics_hostA.csv").write_text(f"{header}\n1000,55,300\n", encoding="utf-8")
 
     dest = tmp_path / "ws"
     dest.mkdir()

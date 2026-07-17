@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 """Alignment / credibility unit tests for the GEAK(GEAK) e2e gain path.
 
 Covers the three coupling points that keep Hyperloom's reported gain honest and
@@ -124,9 +125,7 @@ def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
 
 
 @pytest.mark.asyncio
-async def test_geak_harness_fallback_writes_measured_headline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Rebench-first 2a: the headline is written from the GEAK-harness MEASURED
     throughput (not a self-reported speedup), and it lifts current_best +
     optimization_stack the same way the orchestrator (2b) path does."""
@@ -141,7 +140,7 @@ async def test_geak_harness_fallback_writes_measured_headline(
         "final_overlay": "",
         "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
         "alignment_metrics": {
-            "hot_geak_speedup": 1.1329,     # the INFLATED number we must NOT use
+            "hot_geak_speedup": 1.1329,  # the INFLATED number we must NOT use
             "cold_geak_speedup": 1.088,
             "final_basis": "cold",
         },
@@ -199,7 +198,7 @@ def test_report_shows_provisional_not_zero_validated() -> None:
         _final_breakdown(
             provenance="geak_cross_harness_provisional",
             pending=True,
-            gain_v=0.0,       # collectors coerces a pending/unstamped validated to 0.0
+            gain_v=0.0,  # collectors coerces a pending/unstamped validated to 0.0
             gain_round=13.79,
         )
     )
@@ -207,8 +206,8 @@ def test_report_shows_provisional_not_zero_validated() -> None:
     warns = " ".join(sec.warnings)
     assert "Provisional" in facts
     assert "13.79" in facts or "13.8" in facts
-    assert "Validated cumulative gain" not in facts   # must NOT claim validation
-    assert "+0.00%" not in facts                       # must NOT read as no-op
+    assert "Validated cumulative gain" not in facts  # must NOT claim validation
+    assert "+0.00%" not in facts  # must NOT read as no-op
     assert "PROVISIONAL" in warns and "cross-harness" in warns
 
 
@@ -247,7 +246,7 @@ def _revalidate_task(*, expected_hash: str) -> Task:
 @pytest.mark.asyncio
 async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> None:
     """decision==validated → validated == (measured − baseline)/baseline, same harness."""
-    base, measured = 2844.209, 3270.0     # ~+14.97%, engaged + identity matches
+    base, measured = 2844.209, 3270.0  # ~+14.97%, engaged + identity matches
     coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
     coord.shared_state.optimization_stack = [{"action": "geak_e2e", "tput": 3236.489}]
     coord.shared_state.resume_pending_revalidation = True
@@ -263,9 +262,7 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
         "best_variant": {"fingerprint": "abc"},
         "winners": [],
     }
-    await coord._promote_to_shared_state(
-        "explore", result, task=_revalidate_task(expected_hash="abc")
-    )
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
@@ -278,7 +275,7 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> None:
     """decision==fallback (config drift) → NO validated stamp; 2a is invoked."""
-    base, measured = 2844.209, 3270.0     # engaged, but fingerprint won't match
+    base, measured = 2844.209, 3270.0  # engaged, but fingerprint won't match
     coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
     coord.shared_state.optimization_stack = [{"action": "geak_e2e", "tput": 3236.489}]
     coord.shared_state.resume_pending_revalidation = True
@@ -293,12 +290,10 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
 
     result = {
         "output_throughput": measured,
-        "best_variant": {"fingerprint": "DRIFTED"},   # != expected "abc"
+        "best_variant": {"fingerprint": "DRIFTED"},  # != expected "abc"
         "winners": [],
     }
-    await coord._promote_to_shared_state(
-        "explore", result, task=_revalidate_task(expected_hash="abc")
-    )
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
 
     ss = coord.shared_state
     # 2b did NOT stamp validated (still 0); it deferred to the GEAK harness (2a).

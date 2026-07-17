@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit coverage for the xDiT (scriptable diffusion) framework integration.
 
@@ -97,9 +98,7 @@ class TestXditBlacklist:
         assert gr.xdit_blacklist_reason({"RCCL_MSCCL_ENABLE": "1"}) is not None
 
     def test_combo_crash(self):
-        reason = gr.xdit_blacklist_reason(
-            {"AMD_DIRECT_DISPATCH": "1", "AMDGCN_USE_BUFFER_OPS": "1"}
-        )
+        reason = gr.xdit_blacklist_reason({"AMD_DIRECT_DISPATCH": "1", "AMDGCN_USE_BUFFER_OPS": "1"})
         assert reason is not None
 
     def test_safe_envs_pass(self):
@@ -136,9 +135,7 @@ class TestQualityGate:
         assert ag.quality_gate_passed({"note": "n/a"}, require=True) is False
         # An explicit pass / usable thresholds still pass when required.
         assert ag.quality_gate_passed({"passed": True}, require=True) is True
-        assert ag.quality_gate_passed(
-            {"lpips": 0.01, "lpips_max": 0.05}, require=True
-        ) is True
+        assert ag.quality_gate_passed({"lpips": 0.01, "lpips_max": 0.05}, require=True) is True
 
     def test_quality_gate_passed_skipped_reference_established(self, monkeypatch):
         # The baseline establishing the reference (skipped) must pass even when
@@ -206,9 +203,7 @@ class TestQualityGate:
 
     def test_parse_eval_results_scriptable_gate_without_passed_fails_closed(self, tmp_path):
         report = tmp_path / "benchmark_report.json"
-        report.write_text(
-            json.dumps({"quality_gate": {"ssim": 0.97}}), encoding="utf-8"
-        )
+        report.write_text(json.dumps({"quality_gate": {"ssim": 0.97}}), encoding="utf-8")
         out = ag.parse_eval_results(tmp_path, framework="xdit")
         assert out["accuracy"] == 0.0
 
@@ -309,6 +304,7 @@ class TestLifecycleScriptableSkip:
 
     def test_scriptable_ineligible(self, tmp_path):
         import yaml
+
         cfg = {
             "benchmark": {
                 "framework": "xdit",
@@ -321,12 +317,14 @@ class TestLifecycleScriptableSkip:
         from hyperloom.orchestrator.actions.executors._server_lifecycle import (
             resolve_lifecycle_params,
         )
+
         result = resolve_lifecycle_params(cfg_file)
         assert result["eligible"] is False
         assert "scriptable" in result["reason"].lower()
 
     def test_serving_eligible_with_builtin_script(self, tmp_path):
         import yaml
+
         cfg = {
             "benchmark": {
                 "framework": "sglang",
@@ -338,6 +336,7 @@ class TestLifecycleScriptableSkip:
         from hyperloom.orchestrator.actions.executors._server_lifecycle import (
             resolve_lifecycle_params,
         )
+
         result = resolve_lifecycle_params(cfg_file)
         assert result["eligible"] is True
 
@@ -589,6 +588,7 @@ class TestQualityGateReportSelection:
 
     def test_mtime_preferred_over_name_sort(self, tmp_path):
         import time
+
         sub_a = tmp_path / "aaa"
         sub_a.mkdir()
         sub_z = tmp_path / "zzz"

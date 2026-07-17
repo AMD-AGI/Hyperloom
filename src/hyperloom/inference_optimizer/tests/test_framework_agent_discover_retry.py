@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Cover the retry fix — ``fa phase-discover`` retries before flipping ``framework_agent_phase_done``.
 
@@ -57,9 +58,7 @@ class _CoordinatorStub:
     _stamp_framework_progress = Coordinator._stamp_framework_progress
     # Reverse-lookup called on every repo; here it resolves to the session
     # framework, so nothing is tagged (same-framework path).
-    _framework_agent_repo_url_origin_framework = staticmethod(
-        Coordinator._framework_agent_repo_url_origin_framework
-    )
+    _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coordinator + MockBackend + SubAgentRunner tests."""
 
@@ -1479,9 +1480,7 @@ async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
             params={},
             idempotency_key="k-audit-kill-1",
         )
-        with caplog.at_level(
-            logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"
-        ):
+        with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
             await c._handle_intent(
                 "robustness",
                 Intent(
@@ -1491,10 +1490,7 @@ async def test_kill_task_by_robustness_emits_audit_log(session_dir, caplog):
             )
         after = await c.tasks.get(task.task_id)
         assert after.state == "cancelled"
-        assert any(
-            "kill_task audit" in r.getMessage() and task.task_id in r.getMessage()
-            for r in caplog.records
-        )
+        assert any("kill_task audit" in r.getMessage() and task.task_id in r.getMessage() for r in caplog.records)
     finally:
         await c.stop()
 
@@ -1524,14 +1520,9 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
     # registry is populated, so register one unrelated executor first.
     c.sub.register_executor("report", _noop_executor)
     try:
-        with caplog.at_level(
-            logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"
-        ):
+        with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
             await c.tick(1)
-        assert any(
-            "dispatch audit" in r.getMessage() and "long_running" in r.getMessage()
-            for r in caplog.records
-        )
+        assert any("dispatch audit" in r.getMessage() and "long_running" in r.getMessage() for r in caplog.records)
         assert await c.tasks.by_state("failed")
     finally:
         await c.stop()
@@ -1560,14 +1551,9 @@ async def test_dispatch_audit_skips_kernel_owned_kind_under_no_kernel(session_di
         requires_lanes=[],
     )
     try:
-        with caplog.at_level(
-            logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"
-        ):
+        with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
             await c.dispatcher._pump_dispatcher_once()
-        assert not any(
-            "dispatch audit" in r.getMessage() and "kernel_opt" in r.getMessage()
-            for r in caplog.records
-        )
+        assert not any("dispatch audit" in r.getMessage() and "kernel_opt" in r.getMessage() for r in caplog.records)
         # dispatch unchanged: the task still fails on the missing runner.
         assert await c.tasks.by_state("failed")
     finally:

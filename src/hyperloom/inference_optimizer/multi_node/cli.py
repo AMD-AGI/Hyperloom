@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """``hyperloom.inference_optimizer.multi_node`` — single-entry sandbox CLI managing one session-scoped RayJob.
 
@@ -78,8 +79,6 @@ def _poll_timeout_from_args(args: argparse.Namespace) -> int:
     if pt is not None:
         return max(1, int(pt))
     return _resolve_poll_timeout_s()
-
-
 
 
 # Ray dashboard job status strings.
@@ -178,8 +177,6 @@ def _save_state(state: dict[str, Any]) -> None:
         path.chmod(0o600)
     except OSError as exc:
         warn(f"could not chmod state file {path} to 0600: {exc}")
-
-
 
 
 def _require_state(*keys: str) -> dict[str, Any]:
@@ -408,6 +405,7 @@ def _infera_ssh_bash_with_env(
         cp = _run(known_hosts)
     return cp
 
+
 def _short_poll(
     *,
     label: str,
@@ -502,12 +500,6 @@ def _short_poll(
         time.sleep(interval_s)
 
 
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Subcommand: create-infera (Infera idle-pod backend)
 #
@@ -515,39 +507,6 @@ def _short_poll(
 # worker pods (mn-idle.sh) and an SSH control plane instead of a RayJob with
 # the Ray Dashboard. The benchmark entry point is the Infera frontend
 # (:8000), NOT sglang rank-0 :8888.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def install_geak_on_pods_best_effort() -> int:
@@ -1609,8 +1568,12 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
     if nnodes >= 2:
         # Multi-node: dir-based PID/log layout (one file per rank).
-        pid_dir = args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
-        log_dir = args.log_file or state.get("last_server_log_dir") or str(Path(tempfile.gettempdir()) / "multi_node_logs")
+        pid_dir = (
+            args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
+        )
+        log_dir = (
+            args.log_file or state.get("last_server_log_dir") or str(Path(tempfile.gettempdir()) / "multi_node_logs")
+        )
         info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
 
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
@@ -1886,7 +1849,9 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
     nnodes = int(state.get("nodes") or 1)
 
     if nnodes >= 2:
-        pid_dir = args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
+        pid_dir = (
+            args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
+        )
         info(f"kill-inference (multi-node): pid_dir={pid_dir}")
         kill_ep = _build_multinode_kill_entrypoint(pid_dir)
         kill_sub = _exec_kill_submission(
@@ -1899,7 +1864,9 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
         _save_state(state)
         return 0
 
-    pid_file = args.pid_file or state.get("last_server_pid_file") or str(Path(tempfile.gettempdir()) / "multi_node_server.pid")
+    pid_file = (
+        args.pid_file or state.get("last_server_pid_file") or str(Path(tempfile.gettempdir()) / "multi_node_server.pid")
+    )
     info(f"kill-inference (single-node): pid_file={pid_file}")
     entrypoint = _build_kill_single_entrypoint(pid_file)
     kill_sub = _exec_kill_submission(

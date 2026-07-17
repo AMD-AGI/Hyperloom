@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """PR KB (gbrain) candidate discovery backend.
 
@@ -102,9 +103,7 @@ def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
             continue
         num = int(tail)
         if num not in by_number:
-            by_number[num] = _candidate(
-                request.repo_url, repo_n, num, title=str(hit.get("title") or "")
-            )
+            by_number[num] = _candidate(request.repo_url, repo_n, num, title=str(hit.get("title") or ""))
 
     # list_pages fallback — enumerate meta pages directly and client-side
     # filter by this repo's meta prefix (best-effort; no server-side filter).
@@ -124,9 +123,7 @@ def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
                 continue
             num = int(tail)
             if num not in by_number:
-                by_number[num] = _candidate(
-                    request.repo_url, repo_n, num, title=str(entry.get("title") or "")
-                )
+                by_number[num] = _candidate(request.repo_url, repo_n, num, title=str(entry.get("title") or ""))
         # Warn when the cap was hit with no match: matches may be beyond the cap.
         if not by_number and len(pages) >= list_cap:
             _log.warning(

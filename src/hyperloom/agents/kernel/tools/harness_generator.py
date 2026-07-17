@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Generate GEAK-compatible test harnesses from existing benchmark files.
 
@@ -21,6 +22,7 @@ from typing import Callable
 
 # Data classes
 
+
 @dataclass
 class FuncInfo:
     """Metadata about a function discovered in the benchmark source.
@@ -33,6 +35,7 @@ class FuncInfo:
             ``benchmark`` / empty for orchestrators).
         lineno (int): 1-based line number of the ``def`` statement.
     """
+
     name: str
     params: list[str]
     source: str
@@ -50,12 +53,14 @@ class CallInfo:
         kwargs (dict[str, str]): Mapping of keyword name to unparsed
             value expression.
     """
+
     func_name: str
     args: list[str]
     kwargs: dict[str, str]
 
 
 # BenchmarkAnalyzer — generic AST-based benchmark file analyzer
+
 
 class BenchmarkAnalyzer:
     """Analyze a benchmark Python file to extract structure for harness generation."""
@@ -148,9 +153,7 @@ class BenchmarkAnalyzer:
             return dec.attr
         return ""
 
-    def classify_functions(
-        self, decorated: dict[str, FuncInfo]
-    ) -> tuple[FuncInfo | None, FuncInfo | None]:
+    def classify_functions(self, decorated: dict[str, FuncInfo]) -> tuple[FuncInfo | None, FuncInfo | None]:
         """Classify decorated functions into (reference, kernel); either can be None."""
         ref_candidates: list[FuncInfo] = []
         kernel_candidates: list[FuncInfo] = []
@@ -189,9 +192,7 @@ class BenchmarkAnalyzer:
 
         # Fallback when classification found nothing.
         if ref is None and kernel is None and len(decorated) >= 1:
-            perftest_funcs = [
-                fi for fi in decorated.values() if fi.decorator == "perftest"
-            ]
+            perftest_funcs = [fi for fi in decorated.values() if fi.decorator == "perftest"]
             if len(perftest_funcs) == 1:
                 kernel = perftest_funcs[0]
             elif len(perftest_funcs) >= 2:
@@ -217,9 +218,7 @@ class BenchmarkAnalyzer:
             if node.name in decorated:
                 continue
             if "test" in node.name.lower() or "bench" in node.name.lower():
-                body_src = "\n".join(
-                    self.lines[node.lineno - 1 : node.end_lineno or node.lineno]
-                )
+                body_src = "\n".join(self.lines[node.lineno - 1 : node.end_lineno or node.lineno])
                 if any(dn in body_src for dn in dec_names):
                     params = [a.arg for a in node.args.args]
                     start = node.lineno - 1
@@ -302,6 +301,7 @@ class BenchmarkAnalyzer:
 
 # Config builder — from TraceLens input_shapes
 
+
 def _build_configs(candidate: dict) -> tuple[str, str, str]:
     """Build (ALL_CONFIGS, cfg unpack, config_str) code from candidate shapes."""
     input_shapes = candidate.get("input_shapes") or []
@@ -354,9 +354,14 @@ def _build_configs(candidate: dict) -> tuple[str, str, str]:
                 break
 
     dim_names = _dim_names(max_ndim)
-    dtype_map = {"bf16": "torch.bfloat16", "fp16": "torch.float16",
-                 "fp32": "torch.float32", "bfloat16": "torch.bfloat16",
-                 "float16": "torch.float16", "float32": "torch.float32"}
+    dtype_map = {
+        "bf16": "torch.bfloat16",
+        "fp16": "torch.float16",
+        "fp32": "torch.float32",
+        "bfloat16": "torch.bfloat16",
+        "float16": "torch.float16",
+        "float32": "torch.float32",
+    }
 
     config_entries = []
     for dims, dtype in unique_configs:
@@ -366,9 +371,7 @@ def _build_configs(candidate: dict) -> tuple[str, str, str]:
 
     all_configs = "[\n" + ",\n".join(config_entries) + ",\n]"
     unpack = ", ".join(dim_names[:max_ndim]) + ", dtype = cfg"
-    config_str_parts = " ".join(
-        f"{n}={{{n}}}" for n in dim_names[:max_ndim]
-    )
+    config_str_parts = " ".join(f"{n}={{{n}}}" for n in dim_names[:max_ndim])
     config_str_code = f'f"{config_str_parts} {{dtype}}"'
 
     return all_configs, unpack, config_str_code
@@ -454,6 +457,7 @@ def _dim_names(ndim: int) -> list[str]:
 
 # Adapter function generator
 
+
 def _generate_setup_inputs(
     analyzer: BenchmarkAnalyzer,
     test_func: FuncInfo | None,
@@ -494,8 +498,7 @@ def _generate_setup_inputs(
             if name in index_of:
                 i = index_of[name]
                 prev = used_params[i][1]
-                if (call_value and not _is_variable(call_value)
-                        and not (prev and not _is_variable(prev))):
+                if call_value and not _is_variable(call_value) and not (prev and not _is_variable(prev)):
                     used_params[i] = (name, call_value)
                 continue
             index_of[name] = len(used_params)
@@ -548,9 +551,7 @@ def _collect_used_params(
     return [(p, None) for p in params]
 
 
-def _match_call_args_to_params(
-    call: CallInfo, params: list[str]
-) -> list[tuple[str, str | None]]:
+def _match_call_args_to_params(call: CallInfo, params: list[str]) -> list[tuple[str, str | None]]:
     """Match call args to params, returning [(param, call_value_or_None), ...] (positional + tensor kwargs)."""
     result: list[tuple[str, str | None]] = []
 
@@ -561,9 +562,17 @@ def _match_call_args_to_params(
 
     # Skip kwargs for dtypes, quant settings, modes, flags, etc.
     SKIP_KWARG_HINTS = {
-        "dtype", "q_dtype", "quant_dtype", "quant_type", "type",
-        "mode", "model_sensitive", "use_model_sensitive", "group_size",
-        "shuffle", "out_before_quant",
+        "dtype",
+        "q_dtype",
+        "quant_dtype",
+        "quant_type",
+        "type",
+        "mode",
+        "model_sensitive",
+        "use_model_sensitive",
+        "group_size",
+        "shuffle",
+        "out_before_quant",
     }
     matched_params = {p for p, _ in result}
     for kw_name, kw_val in call.kwargs.items():
@@ -619,8 +628,15 @@ def _is_index_param(name: str) -> bool:
         bool: True for index / sequence-length tensor parameters.
     """
     INDEX_EXACT = {
-        "block_tables", "block_table", "seq_lens", "seqlens", "context_lens",
-        "cu_seqlens", "kv_indptr", "qo_indptr", "block_tables_stride0",
+        "block_tables",
+        "block_table",
+        "seq_lens",
+        "seqlens",
+        "context_lens",
+        "cu_seqlens",
+        "kv_indptr",
+        "qo_indptr",
+        "block_tables_stride0",
     }
     if name in INDEX_EXACT:
         return True
@@ -645,9 +661,18 @@ def _is_int_scalar_param(name: str) -> bool:
         bool: True for integer scalar parameters.
     """
     INT_EXACT = {
-        "max_seq_len", "max_qlen", "num_kv_heads", "num_heads", "num_seqs",
-        "head_size", "block_size", "num_queries_per_kv", "high_precision",
-        "quant_algo", "partition_size", "max_num_partitions",
+        "max_seq_len",
+        "max_qlen",
+        "num_kv_heads",
+        "num_heads",
+        "num_seqs",
+        "head_size",
+        "block_size",
+        "num_queries_per_kv",
+        "high_precision",
+        "quant_algo",
+        "partition_size",
+        "max_num_partitions",
     }
     if name in INT_EXACT:
         return True
@@ -780,7 +805,9 @@ def _is_variable(s: str) -> bool:
             ``False`` / ``None``.
     """
     return bool(re.match(r"^[a-zA-Z_]\w*$", s)) and s not in (
-        "True", "False", "None",
+        "True",
+        "False",
+        "None",
     )
 
 
@@ -1125,14 +1152,12 @@ def _try_generate_aiter_harness(
         return None
     # Recognize both aiter perf decorators (@benchmark and @perftest); passthrough
     # wrappers carry no mappable shape params and are filtered by the kwargs guard.
-    bench_fns = [fi for fi in decorated.values()
-                 if fi.decorator in ("benchmark", "perftest")]
+    bench_fns = [fi for fi in decorated.values() if fi.decorator in ("benchmark", "perftest")]
     if not bench_fns:
         return None
     # Pick the first perf fn that actually times an op (run_perftest / aiter.<op>).
     test_fn = next(
-        (fi for fi in bench_fns
-         if "run_perftest" in fi.source or "aiter." in fi.source),
+        (fi for fi in bench_fns if "run_perftest" in fi.source or "aiter." in fi.source),
         bench_fns[0],
     )
     log(f"aiter idiom: reusing @benchmark fn {test_fn.name!r}")
@@ -1146,13 +1171,23 @@ def _try_generate_aiter_harness(
     kwargs: dict[str, object] = {}
     # Role -> value from the traced operands.
     role_value = {
-        "m": shape.get("M"), "token": shape.get("M"), "tokens": shape.get("M"),
-        "tokennum": shape.get("M"), "num_tokens": shape.get("M"),
-        "numtokens": shape.get("M"), "seqlen": shape.get("M"), "batch": shape.get("M"),
-        "n": shape.get("N"), "model_dim": shape.get("N"), "dim": shape.get("N"),
-        "hidden": shape.get("N"), "hidden_size": shape.get("N"),
-        "k": shape.get("K"), "inter_dim": shape.get("K"),
-        "intermediate": shape.get("K"), "inter": shape.get("K"),
+        "m": shape.get("M"),
+        "token": shape.get("M"),
+        "tokens": shape.get("M"),
+        "tokennum": shape.get("M"),
+        "num_tokens": shape.get("M"),
+        "numtokens": shape.get("M"),
+        "seqlen": shape.get("M"),
+        "batch": shape.get("M"),
+        "n": shape.get("N"),
+        "model_dim": shape.get("N"),
+        "dim": shape.get("N"),
+        "hidden": shape.get("N"),
+        "hidden_size": shape.get("N"),
+        "k": shape.get("K"),
+        "inter_dim": shape.get("K"),
+        "intermediate": shape.get("K"),
+        "inter": shape.get("K"),
     }
     positional = [shape.get(k) for k in ("M", "N", "K") if shape.get(k)]
     si = 0
@@ -1170,7 +1205,7 @@ def _try_generate_aiter_harness(
     if not pinned_dims:
         log("aiter idiom: could not map any candidate shape to fn params")
         return None
-    log(f"aiter idiom: pinned traced shape params {[(k,v) for k,v in kwargs.items() if v!='__DTYPE__']}")
+    log(f"aiter idiom: pinned traced shape params {[(k, v) for k, v in kwargs.items() if v != '__DTYPE__']}")
 
     # Render kwargs dict; dtype placeholder becomes a torch dtype literal.
     dtype_literal = _aiter_torch_dtype(candidate)
@@ -1184,8 +1219,7 @@ def _try_generate_aiter_harness(
     helper_defs = _aiter_module_funcs(analyzer, exclude=set(decorated.keys()))
 
     harness_code = (
-        _AITER_HARNESS_TEMPLATE
-        .replace("__IMPORTS__", "\n".join(imports))
+        _AITER_HARNESS_TEMPLATE.replace("__IMPORTS__", "\n".join(imports))
         .replace("__HELPER_DEFS__", "\n\n".join(helper_defs))
         .replace("__TEST_FN_SRC__", test_fn.source)
         .replace("__TEST_FN_NAME__", test_fn.name)
@@ -1203,6 +1237,7 @@ def _try_generate_aiter_harness(
         if str(validator_path) not in sys.path:
             sys.path.insert(0, str(validator_path))
         from validate_harness import static_check
+
         ok, errs = static_check(str(harness_path))
         if not ok:
             log(f"aiter harness failed static_check: {errs}")
@@ -1284,9 +1319,12 @@ def _aiter_torch_dtype(candidate: dict) -> str:
     """Map the candidate precision to a torch dtype literal (default bf16)."""
     prec = str(candidate.get("precision") or candidate.get("dtype") or "bf16").lower()
     return {
-        "fp16": "torch.float16", "float16": "torch.float16",
-        "fp32": "torch.float32", "float32": "torch.float32",
-        "bf16": "torch.bfloat16", "bfloat16": "torch.bfloat16",
+        "fp16": "torch.float16",
+        "float16": "torch.float16",
+        "fp32": "torch.float32",
+        "float32": "torch.float32",
+        "bf16": "torch.bfloat16",
+        "bfloat16": "torch.bfloat16",
     }.get(prec, "torch.bfloat16")
 
 
@@ -1338,6 +1376,7 @@ def maybe_generate_harness(
             test_command)`` on success, or ``None`` on any failure.
     """
     from pathlib import Path as _Path
+
     out_dir = _Path(out_dir)
 
     def _log(msg: str) -> None:
@@ -1364,6 +1403,7 @@ def maybe_generate_harness(
         if validator_path.is_file():
             sys.path.insert(0, str(validator_path.parent))
             from validate_harness import static_check
+
             ok, _ = static_check(benchmark_file)
             if ok:
                 _log("benchmark file already passes static_check, skipping generation")
@@ -1379,12 +1419,7 @@ def maybe_generate_harness(
         sf = _Path(source_file)
         parts = sf.parts
         for i, p in enumerate(parts):
-            if (
-                i > 0
-                and p != "__init__.py"
-                and not p.startswith(".")
-                and _Path(*parts[: i + 1]).is_dir()
-            ):
+            if i > 0 and p != "__init__.py" and not p.startswith(".") and _Path(*parts[: i + 1]).is_dir():
                 pkg_dir = _Path(*parts[:i]) / p
                 if (pkg_dir / "__init__.py").exists():
                     module_parts = list(parts[i:])
@@ -1412,17 +1447,24 @@ def maybe_generate_harness(
     ref_func, kernel_func = analyzer.classify_functions(decorated)
     test_func = analyzer.get_test_function(decorated)
 
-    _log(f"found: ref={ref_func.name if ref_func else None}, "
-         f"kernel={kernel_func.name if kernel_func else None}, "
-         f"test={test_func.name if test_func else None}")
+    _log(
+        f"found: ref={ref_func.name if ref_func else None}, "
+        f"kernel={kernel_func.name if kernel_func else None}, "
+        f"test={test_func.name if test_func else None}"
+    )
 
     if not kernel_func and not ref_func:
         # aiter op_tests expose no standalone kernel/ref funcs; a single perf fn
         # builds inputs, computes a torch ref inline, and times aiter.<op>. Reuse
         # it directly instead of failing.
         aiter_hr = _try_generate_aiter_harness(
-            analyzer, decorated, candidate, source_file, benchmark_path,
-            out_dir, _log,
+            analyzer,
+            decorated,
+            candidate,
+            source_file,
+            benchmark_path,
+            out_dir,
+            _log,
         )
         if aiter_hr is not None:
             return aiter_hr
@@ -1434,28 +1476,43 @@ def maybe_generate_harness(
     # via the op_test idiom, which builds the real multi-tensor inputs; only if
     # that also fails do we refuse so the caller skips-with-reason.
     if _is_heterogeneous_multi_tensor(candidate):
-        _log("heterogeneous multi-tensor input_shapes; GEMM config builder "
-             "unsafe, retrying via op_test idiom")
+        _log("heterogeneous multi-tensor input_shapes; GEMM config builder unsafe, retrying via op_test idiom")
         aiter_hr = _try_generate_aiter_harness(
-            analyzer, decorated, candidate, source_file, benchmark_path,
-            out_dir, _log,
+            analyzer,
+            decorated,
+            candidate,
+            source_file,
+            benchmark_path,
+            out_dir,
+            _log,
         )
         if aiter_hr is not None:
             return aiter_hr
-        _log("HARNESS_SPEC_INSUFFICIENT: heterogeneous multi-tensor op with no "
-             "usable op_test idiom; refusing to fabricate a GEMM harness")
+        _log(
+            "HARNESS_SPEC_INSUFFICIENT: heterogeneous multi-tensor op with no "
+            "usable op_test idiom; refusing to fabricate a GEMM harness"
+        )
         return None
 
     all_configs, cfg_unpack, config_str_code = _build_configs(candidate)
 
     setup_body = _generate_setup_inputs(
-        analyzer, test_func, cfg_unpack, ref_func, kernel_func,
+        analyzer,
+        test_func,
+        cfg_unpack,
+        ref_func,
+        kernel_func,
     )
     run_kernel_body = _generate_run_kernel(
-        analyzer, test_func, kernel_func,
+        analyzer,
+        test_func,
+        kernel_func,
     )
     run_ref_body = _generate_run_ref(
-        analyzer, test_func, ref_func, kernel_func,
+        analyzer,
+        test_func,
+        ref_func,
+        kernel_func,
     )
 
     # Copy decorated defs, excluding the test orchestrator.
@@ -1494,6 +1551,7 @@ def maybe_generate_harness(
     # Validate with static_check.
     try:
         from validate_harness import static_check
+
         ok, errs = static_check(str(harness_path))
         if not ok:
             _log(f"generated harness failed static_check: {errs}")

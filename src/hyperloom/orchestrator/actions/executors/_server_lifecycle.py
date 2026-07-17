@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Shared single-node ``server_lifecycle`` helpers.
 
@@ -99,11 +100,9 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     # the Magpie built-in-script check (whose script names are serving-only).
     from hyperloom.inference_optimizer import framework_registry
 
-    if (
-        str(bench.get("workload_kind") or "").strip().lower()
-        == framework_registry.SCRIPTABLE
-        or framework_registry.is_scriptable(info["framework"])
-    ):
+    if str(
+        bench.get("workload_kind") or ""
+    ).strip().lower() == framework_registry.SCRIPTABLE or framework_registry.is_scriptable(info["framework"]):
         info["reason"] = "scriptable framework (server-less; no server_lifecycle)"
         return info
 

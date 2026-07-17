@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Framework source-root resolution for PolicyGate and flag discovery.
 
@@ -42,9 +43,7 @@ _AITER_META_CSRC_ROOT = "/aiter_meta/csrc/"
 
 # ROCm / HIP source roots for the enablement path, always merged into the
 # allowlist.
-_ROCM_HIP_SOURCE_ROOTS: tuple[str, ...] = (
-    "/opt/rocm/",
-)
+_ROCM_HIP_SOURCE_ROOTS: tuple[str, ...] = ("/opt/rocm/",)
 
 
 def resolve_rocm_hip_source_roots() -> tuple[str, ...]:
@@ -56,6 +55,7 @@ def resolve_rocm_hip_source_roots() -> tuple[str, ...]:
         tuple[str, ...]: :data:`_ROCM_HIP_SOURCE_ROOTS`.
     """
     return _ROCM_HIP_SOURCE_ROOTS
+
 
 # Minimal static fallbacks when importlib/glob find nothing (image defaults).
 _STATIC_PATCH_FALLBACK_ROOTS: tuple[str, ...] = (

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Pre-launch / pre-action feasibility signals (C1 / C2 / C3) — "doomed before it starts".
 
@@ -21,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+
 if TYPE_CHECKING:
     from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity

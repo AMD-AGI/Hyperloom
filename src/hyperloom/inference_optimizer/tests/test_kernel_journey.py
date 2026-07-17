@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for the additive ``kernel_journey`` breakdown section.
 
@@ -288,9 +289,7 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
     assert versions["forge"]["version"] == sha
 
 
-def test_geak_provenance_resolves_geak_root_env_without_explicit_root(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_geak_provenance_resolves_geak_root_env_without_explicit_root(tmp_path: Path, monkeypatch) -> None:
     # With no producer-supplied root, ``geak`` falls back to $GEAK_ROOT so
     # versions["geak"] records that repo's SHA.
     geak_root = tmp_path / "GEAK"

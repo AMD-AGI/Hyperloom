@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Directed + cross-repo + dedup coverage for the FRAMEWORK discover batch builder."""
 
@@ -48,9 +49,7 @@ class _CoordinatorStub:
     _build_framework_working_memory = Coordinator._build_framework_working_memory
     _FRAMEWORK_TRIED_MEMORY_CAP = Coordinator._FRAMEWORK_TRIED_MEMORY_CAP
     # Reverse-lookup called on every repo the discovery merge queries.
-    _framework_agent_repo_url_origin_framework = staticmethod(
-        Coordinator._framework_agent_repo_url_origin_framework
-    )
+    _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
 
     def __init__(self, tmp_path: Path) -> None:
         self.session_dir = tmp_path

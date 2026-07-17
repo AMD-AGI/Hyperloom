@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Cross-section fact synthesis for the executive summary + LLM prompt.
 
@@ -247,10 +248,7 @@ def _headline(breakdown: dict[str, Any]) -> str:
             f"= {sign}{g:.2f}% validated gain"
         )
     if b and not f:
-        return (
-            f"baseline {framework_registry.format_primary_metric(fw, b, precision=2)} "
-            "(no validated final)"
-        )
+        return f"baseline {framework_registry.format_primary_metric(fw, b, precision=2)} (no validated final)"
     return "no validated throughput recorded"
 
 

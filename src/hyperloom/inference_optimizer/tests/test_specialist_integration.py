@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Specialist sub-agent integration smoke test exercising the cli → Coordinator → SubAgentRunner → SpecialistRunner chain with real wiring."""
 
@@ -343,6 +344,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
 def test_cli_specialist_flags_present():
     """Smoke that the new CLI specialist flags parse."""
     from hyperloom.inference_optimizer import cli as cli_mod
+
     parser = cli_mod._build_parser()
     args = parser.parse_args(
         [

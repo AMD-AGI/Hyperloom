@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Gbrain-backed read-only remote for the recipe-snapshot KB.
 
@@ -59,8 +60,6 @@ _EXTRA_SERVER_ARGS_KEY = "extra_server_args"
 # rather than blocking the foreground loop. Override via
 # ``GBRAIN_RECIPE_SCAN_BUDGET_SEC``.
 _RECIPE_SCAN_BUDGET_SEC = 20.0
-
-
 
 
 def _require_http_url(url: str) -> None:
@@ -534,7 +533,9 @@ def _labels_match(recipe: Mapping[str, Any], label_match: Mapping[str, Any]) -> 
     want = C.canonical_labels(
         model=str(label_match.get(C.F_LABEL_MODEL, "") or recipe_labels.get(C.F_LABEL_MODEL, "")),
         hardware=str(label_match.get(C.F_LABEL_HARDWARE, "") or recipe_labels.get(C.F_LABEL_HARDWARE, "")),
-        framework_name=str(label_match.get(C.F_LABEL_FRAMEWORK_NAME, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK_NAME, "")),
+        framework_name=str(
+            label_match.get(C.F_LABEL_FRAMEWORK_NAME, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK_NAME, "")
+        ),
         framework_version=str(
             label_match.get(C.F_LABEL_FRAMEWORK_VERSION, "") or recipe_labels.get(C.F_LABEL_FRAMEWORK_VERSION, "")
         ),
@@ -951,6 +952,7 @@ class GbrainRemoteRecipeClient:
         if order_by in (C.ORDER_BY_UPDATED_AT_ASC, C.ORDER_BY_CREATED_AT_ASC):
             rows = list(reversed(rows))
         return rows[: int(limit)] if limit and limit > 0 else rows
+
 
 def _passes_metric_filters(recipe: Mapping[str, Any], metric_filters: Mapping[str, Any]) -> bool:
     """Apply ``{metric: {min,max}}`` filters against the recipe's metrics.

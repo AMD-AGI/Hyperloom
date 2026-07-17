@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """GEAK e2e optimizer submission (whole-pipeline; GEAK@GEAK main).
 
@@ -37,10 +38,17 @@ def _resolve_runner() -> str:
     root = os.environ.get("GEAK_ROOT", "").strip()
     if root:
         roots.append(root)
-    open_source_root = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT", "").strip()
-    if open_source_root:
-        roots.append(str(Path(open_source_root) / "GEAK"))
-    roots.append("/opt/hyperloom/open-source-repos/GEAK")
+    cache_dir = os.environ.get("HYPERLOOM_CACHE_DIR", "").strip()
+    if cache_dir:
+        # install.sh clones GEAK per revision as <cache>/GEAK@<sha>; prefer the
+        # newest such checkout, then the bare dir. Mirrors paths.resolve_dep_dir.
+        pinned = sorted(
+            (p for p in Path(cache_dir).glob("GEAK@*") if p.is_dir()),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+            reverse=True,
+        )
+        roots.extend(str(p) for p in pinned)
+        roots.append(str(Path(cache_dir) / "GEAK"))
     for root in dict.fromkeys(roots):
         cand = Path(root) / "interface" / "run_e2e.py"
         if cand.is_file():
@@ -48,12 +56,11 @@ def _resolve_runner() -> str:
     raise FileNotFoundError(
         "e2e runner not found. Set GEAK_E2E_RUNNER to "
         "<GEAK checkout>/interface/run_e2e.py (the installer exports it), "
-        "or set GEAK_ROOT/HYPERLOOM_OPEN_SOURCE_ROOT."
+        "or set GEAK_ROOT/HYPERLOOM_CACHE_DIR."
     )
 
 
-def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
-              python_bin: str = "") -> dict:
+def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python_bin: str = "") -> dict:
     """Run GEAK e2e once and return the parsed result.json (+ run metadata).
 
     Args:
@@ -89,8 +96,12 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
     # start_new_session=True -> run_e2e + its vllm/node children share a process
     # group we can signal as a unit (prevents leaked-server orphans).
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        env=env, start_new_session=True,
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
     )
 
     def _killpg(sig: int) -> None:
@@ -127,14 +138,16 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
             "status": "error",
             "error": f"no parseable result.json (rc={returncode})",
         }
-    result.update({
-        "returncode": returncode,
-        "stdout_tail": stdout_tail,
-        "stderr_tail": stderr_tail,
-        "elapsed_s": round(time.time() - started, 2),
-        "handoff_path": str(handoff_path),
-        "result_path": str(result_path),
-    })
+    result.update(
+        {
+            "returncode": returncode,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+            "elapsed_s": round(time.time() - started, 2),
+            "handoff_path": str(handoff_path),
+            "result_path": str(result_path),
+        }
+    )
     return result
 
 
@@ -156,9 +169,15 @@ def _main(argv: list[str]) -> int:
 
     handoff = json.loads(Path(args.handoff_json).read_text(encoding="utf-8"))
     out = call_geak(handoff, Path(args.output_dir), timeout_s=timeout_s)
-    print(json.dumps({"status": out.get("status"),
-                      "speedup": out.get("throughput_speedup"),
-                      "result_path": out.get("result_path")}))
+    print(
+        json.dumps(
+            {
+                "status": out.get("status"),
+                "speedup": out.get("throughput_speedup"),
+                "result_path": out.get("result_path"),
+            }
+        )
+    )
     return 0 if out.get("status") not in ("error", None) else 1
 
 

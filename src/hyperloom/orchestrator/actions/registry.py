@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """ActionRegistry
 
@@ -128,9 +129,7 @@ class ActionRegistryError(RuntimeError):
 def _require_vocab(action_name: str, field: str, value: Any, allowed: frozenset[str]) -> None:
     """Raise :class:`ActionRegistryError` unless ``value`` is in ``allowed``."""
     if value not in allowed:
-        raise ActionRegistryError(
-            f"action {action_name!r}: {field}={value!r} not in {sorted(allowed)!r}"
-        )
+        raise ActionRegistryError(f"action {action_name!r}: {field}={value!r} not in {sorted(allowed)!r}")
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CursorStore
 
@@ -159,5 +160,6 @@ class CursorStore:
                 last_processed_msg_id=msg_id,
                 processed_at=now,
             )
+
 
 __all__ = ["CursorState", "CursorStore"]

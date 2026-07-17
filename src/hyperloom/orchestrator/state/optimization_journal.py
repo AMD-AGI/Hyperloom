@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Per-session optimization journal — structured JSON record of every KEEP / REVERT / no_promote decision.
 
@@ -41,9 +42,7 @@ _JOURNAL_KEEP_STATUSES: frozenset[str] = frozenset({"kept"})
 
 # Statuses meaning a real change was tested/applied then rolled back or rejected
 # on measured grounds → REVERT. Everything else is ``no_promote``.
-_JOURNAL_REVERT_STATUSES: frozenset[str] = frozenset(
-    {"reverted", "accuracy_unavailable_reject", "regression"}
-)
+_JOURNAL_REVERT_STATUSES: frozenset[str] = frozenset({"reverted", "accuracy_unavailable_reject", "regression"})
 
 # Change-kind vocabulary for coarse dashboard grouping.
 KIND_BACKEND: str = "backend"  # --attention-backend, kv_cache_dtype, ...

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for ``parallel_e2e_runner.load_env_file`` key/URL derivation.
 
@@ -39,15 +40,15 @@ def test_split_gateway_geak_and_llm_aliases_take_openai_key(tmp_path):
     env = per.load_env_file(
         _write_env(
             tmp_path,
-            OPENAI_API_KEY="sk-openai",
-            ANTHROPIC_API_KEY="sk-ant",
+            OPENAI_API_KEY="openai-test-key",
+            ANTHROPIC_API_KEY="anthropic-test-key",
             OPENAI_BASE_URL="https://api.openai.com/v1",
             ANTHROPIC_BASE_URL="https://api.anthropic.com",
         )
     )
     for alias in ("GEAK_API_KEY", "LLM_API_KEY", "AMD_LLM_API_KEY"):
-        assert env[alias] == "sk-openai", alias
-    assert env["ANTHROPIC_API_KEY"] == "sk-ant"
+        assert env[alias] == "openai-test-key", alias
+    assert env["ANTHROPIC_API_KEY"] == "anthropic-test-key"
     assert env["GEAK_BASE_URL"] == "https://api.openai.com/v1"
     assert env["LLM_API_BASE"] == "https://api.openai.com/v1"
     assert "_".join(("legacy backend", "API", "KEY")) not in env

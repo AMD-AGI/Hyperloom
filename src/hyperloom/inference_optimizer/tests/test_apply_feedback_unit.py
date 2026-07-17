@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for the structured apply-failure feedback helpers.
 
@@ -22,6 +23,7 @@ from hyperloom.orchestrator.actions.executors._apply_feedback import (
 # ---------------------------------------------------------------------------
 # ApplyFeedback dataclass
 # ---------------------------------------------------------------------------
+
 
 def test_from_dict_defaults_for_missing_keys():
     fb = ApplyFeedback.from_dict({})
@@ -76,16 +78,11 @@ def test_format_for_mandate_all_sections():
 # read_patch_source_context
 # ---------------------------------------------------------------------------
 
+
 def test_read_context_modification_with_ab_prefix(tmp_path):
     target = tmp_path / "mod.py"
     target.write_text("\n".join(f"line{i}" for i in range(1, 21)) + "\n", encoding="utf-8")
-    patch_text = (
-        "--- a/mod.py\n"
-        "+++ b/mod.py\n"
-        "@@ -10,1 +10,1 @@\n"
-        "-line10\n"
-        "+line10_patched\n"
-    )
+    patch_text = "--- a/mod.py\n+++ b/mod.py\n@@ -10,1 +10,1 @@\n-line10\n+line10_patched\n"
     ctx = read_patch_source_context(patch_text, tmp_path, radius=6)
     assert "mod.py" in ctx
     assert "line10" in ctx
@@ -94,12 +91,7 @@ def test_read_context_modification_with_ab_prefix(tmp_path):
 def test_read_context_deletion_uses_minus_side(tmp_path):
     target = tmp_path / "gone.py"
     target.write_text("a\nb\nc\n", encoding="utf-8")
-    patch_text = (
-        "--- a/gone.py\n"
-        "+++ /dev/null\n"
-        "@@ -1,3 +0,0 @@\n"
-        "-a\n-b\n-c\n"
-    )
+    patch_text = "--- a/gone.py\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-a\n-b\n-c\n"
     ctx = read_patch_source_context(patch_text, tmp_path, radius=6)
     assert "gone.py" in ctx
 
@@ -119,12 +111,7 @@ def test_read_context_empty_file_returns_empty(tmp_path):
 def test_read_context_absolute_target(tmp_path):
     target = tmp_path / "abs.py"
     target.write_text("x\ny\nz\n", encoding="utf-8")
-    patch_text = (
-        f"--- {target}\n"
-        f"+++ {target}\n"
-        "@@ -1 +1 @@\n"
-        "-x\n+x2\n"
-    )
+    patch_text = f"--- {target}\n+++ {target}\n@@ -1 +1 @@\n-x\n+x2\n"
     ctx = read_patch_source_context(patch_text, tmp_path)
     assert str(target) in ctx
 
@@ -132,6 +119,7 @@ def test_read_context_absolute_target(tmp_path):
 # ---------------------------------------------------------------------------
 # source_context_for_file
 # ---------------------------------------------------------------------------
+
 
 def test_source_context_for_file_empty_path_returns_empty():
     assert source_context_for_file("   ") == ""
@@ -173,6 +161,7 @@ def test_source_context_for_file_symbol_not_found_centres_top(tmp_path):
 # build_apply_feedback
 # ---------------------------------------------------------------------------
 
+
 def test_build_apply_feedback_without_root():
     fb = build_apply_feedback("/tmp/p.patch", channel="git", tried_levels=[1], stderr="e")
     assert isinstance(fb, ApplyFeedback)
@@ -204,6 +193,7 @@ def test_build_apply_feedback_with_root_unreadable_patch(tmp_path):
 # ---------------------------------------------------------------------------
 # Exception-guard branches (helpers must swallow and return "")
 # ---------------------------------------------------------------------------
+
 
 def test_read_patch_source_context_swallows_exceptions(tmp_path, monkeypatch):
     def _boom(*a, **k):

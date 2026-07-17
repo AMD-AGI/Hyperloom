@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """TraceLens analysis tool for the resident Kernel-agent skill.
 
@@ -187,11 +188,7 @@ class OpResolution:
     @property
     def is_routable(self) -> bool:
         """True when there is a resolved, patchable, editable source to optimize."""
-        return (
-            self.status == _ROUTABLE_STATUS
-            and bool(self.patchable)
-            and bool(self.sources)
-        )
+        return self.status == _ROUTABLE_STATUS and bool(self.patchable) and bool(self.sources)
 
     def leaf_resolutions(self) -> list["OpResolution"]:
         """Expand into one routable leaf per editable ``.cu`` to optimize.
@@ -207,12 +204,7 @@ class OpResolution:
         semantics, not in the leaves produced here.
         """
         if self.kind == "composite" and self.fanout:
-            return [
-                leaf
-                for sub in self.fanout
-                if sub.is_routable
-                for leaf in sub.leaf_resolutions()
-            ]
+            return [leaf for sub in self.fanout if sub.is_routable for leaf in sub.leaf_resolutions()]
         if not self.is_routable:
             return []
         return [replace(self, target_index=i) for i in range(len(self.sources))]
@@ -289,7 +281,7 @@ def _remap_aiter_meta(path: str) -> str:
     if not live:
         return path
     idx = path.find("aiter_meta/csrc/")
-    tail = path[idx + len("aiter_meta/csrc/"):]
+    tail = path[idx + len("aiter_meta/csrc/") :]
     remapped = live.rstrip("/") + "/" + tail
     # Only adopt the remap if it actually resolves on disk; else keep original.
     return remapped if os.path.exists(remapped) else path
@@ -408,15 +400,19 @@ class OpResolver:
             if abs_path in seen:
                 continue
             seen.add(abs_path)
-            out.append((
-                abs_path,
-                str(info.get("kernel_kind") or ""),
-                str(info.get("prebuilt_binary") or ""),
-            ))
+            out.append(
+                (
+                    abs_path,
+                    str(info.get("kernel_kind") or ""),
+                    str(info.get("prebuilt_binary") or ""),
+                )
+            )
         return out
 
     def _select_source_meta(
-        self, entry: dict[str, Any], framework: str | None,
+        self,
+        entry: dict[str, Any],
+        framework: str | None,
     ) -> list[tuple[str, str, str]]:
         """Pick the editable ``(path, kernel_kind, prebuilt_binary)`` list per container.
 
@@ -424,6 +420,7 @@ class OpResolver:
         on disk; otherwise honor the ``framework`` hint (only ``vllm``/``sglang``
         are recognized -- any other value falls through), then default to sglang.
         """
+
         def present(path: str) -> bool:
             try:
                 return bool(path) and os.path.exists(path)
@@ -448,21 +445,32 @@ class OpResolver:
         return sgl or vll
 
     def _single(
-        self, op_name: str, entry: dict[str, Any], framework: str | None,
+        self,
+        op_name: str,
+        entry: dict[str, Any],
+        framework: str | None,
     ) -> OpResolution:
         """Resolve a ``single`` entry to its editable source(s)."""
         meta = self._select_source_meta(entry, framework)
         sources = [m[0] for m in meta]
         if sources:
             return OpResolution(
-                op_name=op_name, kind="single", status=_ROUTABLE_STATUS,
-                patchable=True, framework=framework, sources=sources,
+                op_name=op_name,
+                kind="single",
+                status=_ROUTABLE_STATUS,
+                patchable=True,
+                framework=framework,
+                sources=sources,
                 kernel_kinds=[m[1] for m in meta],
                 prebuilt_binaries=[m[2] for m in meta],
             )
         return OpResolution(
-            op_name=op_name, kind="single", status="non_rewritable",
-            patchable=False, framework=framework, sources=[],
+            op_name=op_name,
+            kind="single",
+            status="non_rewritable",
+            patchable=False,
+            framework=framework,
+            sources=[],
             reason=_nonrewritable_reason(entry),
         )
 
@@ -489,9 +497,7 @@ class OpResolver:
         if name:
             fw = (framework or "").strip().lower()
             containers = (
-                [entry.get("vllm"), entry.get("sglang")]
-                if fw != "sglang"
-                else [entry.get("sglang"), entry.get("vllm")]
+                [entry.get("vllm"), entry.get("sglang")] if fw != "sglang" else [entry.get("sglang"), entry.get("vllm")]
             )
             for container in containers:
                 for kname, info in (container or {}).items():
@@ -500,20 +506,33 @@ class OpResolver:
                     path = info.get("kernel_source_path")
                     if info.get("patchable") and _is_editable_source(path, info.get("kernel_kind")):
                         return OpResolution(
-                            op_name=op_name, kind="dispatch", status=_ROUTABLE_STATUS,
-                            patchable=True, framework=framework,
-                            sources=[_absolutize_source(str(path))], matched_route=kname,
+                            op_name=op_name,
+                            kind="dispatch",
+                            status=_ROUTABLE_STATUS,
+                            patchable=True,
+                            framework=framework,
+                            sources=[_absolutize_source(str(path))],
+                            matched_route=kname,
                             kernel_kinds=[str(info.get("kernel_kind") or "")],
                             prebuilt_binaries=[str(info.get("prebuilt_binary") or "")],
                         )
                     return OpResolution(
-                        op_name=op_name, kind="dispatch", status="non_rewritable",
-                        patchable=False, framework=framework, sources=[],
-                        reason="dispatch route has no editable source", matched_route=kname,
+                        op_name=op_name,
+                        kind="dispatch",
+                        status="non_rewritable",
+                        patchable=False,
+                        framework=framework,
+                        sources=[],
+                        reason="dispatch route has no editable source",
+                        matched_route=kname,
                     )
         return OpResolution(
-            op_name=op_name, kind="dispatch", status="unresolved",
-            patchable=None, framework=framework, sources=[],
+            op_name=op_name,
+            kind="dispatch",
+            status="unresolved",
+            patchable=None,
+            framework=framework,
+            sources=[],
         )
 
     def _composite(
@@ -541,9 +560,7 @@ class OpResolver:
         if name:
             fw = (framework or "").strip().lower()
             containers = (
-                [entry.get("sglang"), entry.get("vllm")]
-                if fw == "sglang"
-                else [entry.get("vllm"), entry.get("sglang")]
+                [entry.get("sglang"), entry.get("vllm")] if fw == "sglang" else [entry.get("vllm"), entry.get("sglang")]
             )
             for container in containers:
                 for kname, info in (container or {}).items():
@@ -552,9 +569,13 @@ class OpResolver:
                     path = info.get("kernel_source_path")
                     if info.get("patchable") and _is_editable_source(path, info.get("kernel_kind")):
                         return OpResolution(
-                            op_name=op_name, kind="composite", status=_ROUTABLE_STATUS,
-                            patchable=True, framework=framework,
-                            sources=[_absolutize_source(str(path))], matched_route=kname,
+                            op_name=op_name,
+                            kind="composite",
+                            status=_ROUTABLE_STATUS,
+                            patchable=True,
+                            framework=framework,
+                            sources=[_absolutize_source(str(path))],
+                            matched_route=kname,
                         )
         # No trace device symbol (composite pybind ops frequently carry none —
         # device_kernel_name is None for the fused-MoE / gdn-attention labels).
@@ -597,9 +618,14 @@ class OpResolver:
                 if len(matched) == 1:
                     ap, kk, pb = matched[0]
                     return OpResolution(
-                        op_name=op_name, kind="composite", status=_ROUTABLE_STATUS,
-                        patchable=True, framework=framework, sources=[ap],
-                        kernel_kinds=[kk], prebuilt_binaries=[pb],
+                        op_name=op_name,
+                        kind="composite",
+                        status=_ROUTABLE_STATUS,
+                        patchable=True,
+                        framework=framework,
+                        sources=[ap],
+                        kernel_kinds=[kk],
+                        prebuilt_binaries=[pb],
                         matched_route="name_anchored",
                     )
                 if matched:
@@ -608,9 +634,14 @@ class OpResolver:
         meta = self._select_source_meta(entry, framework)
         fanout = [
             OpResolution(
-                op_name=op_name, kind="composite", status=_ROUTABLE_STATUS,
-                patchable=True, framework=framework, sources=[src],
-                kernel_kinds=[kind_], prebuilt_binaries=[pb],
+                op_name=op_name,
+                kind="composite",
+                status=_ROUTABLE_STATUS,
+                patchable=True,
+                framework=framework,
+                sources=[src],
+                kernel_kinds=[kind_],
+                prebuilt_binaries=[pb],
             )
             for src, kind_, pb in meta
         ]
@@ -640,7 +671,9 @@ def resolve_op_source(
     """
     table = mapping if mapping is not None else load_mapping()
     return OpResolver(table).resolve_op_source(
-        op_name, framework=framework, device_kernel_name=device_kernel_name,
+        op_name,
+        framework=framework,
+        device_kernel_name=device_kernel_name,
     )
 
 
@@ -662,19 +695,14 @@ def _is_safe_litellm_gateway() -> bool:
     Detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` host or
     the codebase-wide ``SAFE_API_KEY`` signal; other backends are left alone.
     """
-    base_url = (
-        os.environ.get("ANTHROPIC_BASE_URL", "")
-        or os.environ.get("OPENAI_BASE_URL", "")
-    ).lower()
+    base_url = (os.environ.get("ANTHROPIC_BASE_URL", "") or os.environ.get("OPENAI_BASE_URL", "")).lower()
     # Generic protocol markers by default (no operator/brand strings shipped);
     # a specific deployment can add its own gateway host substrings via
     # HYPERLOOM_STRICT_GATEWAY_MARKERS (comma-separated). SAFE_API_KEY is the
     # strong signal and is checked regardless.
     markers = tuple(
         m.strip().lower()
-        for m in os.environ.get(
-            "HYPERLOOM_STRICT_GATEWAY_MARKERS", "litellm,llm-proxy"
-        ).split(",")
+        for m in os.environ.get("HYPERLOOM_STRICT_GATEWAY_MARKERS", "litellm,llm-proxy").split(",")
         if m.strip()
     )
     return bool(os.environ.get("SAFE_API_KEY")) or any(m in base_url for m in markers)
@@ -696,6 +724,7 @@ def _resolve_tracelens_model() -> str:
     if not _is_safe_litellm_gateway():
         return raw
     return raw.lower().replace(".", "-")
+
 
 def _resolve_arch_benchmark_timeout_s() -> int:
     """Return the GPU arch microbenchmark timeout in seconds (floor 600s).
@@ -1674,24 +1703,23 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, (f"runtime-generated (torch.compile / Inductor cache): {source_file}")
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _reusable_roots()):
-        return False, (
-            f"source not under a reusable framework root: {source_file}"
-        )
+        return False, (f"source not under a reusable framework root: {source_file}")
     # cpp_itfs host-launcher guard: a .py under csrc/cpp_itfs/ is a host driver
     # whose real GPU code lives in sibling .cuh/.cpp.jinja; skip it so the
     # candidate doesn't burn a forge/geak attempt.
     if "/csrc/cpp_itfs/" in lower_file and lower_file.endswith(".py"):
         return False, (
-            f"cpp_itfs host launcher (device code is in sibling .cuh/.cpp.jinja, "
-            f"not this .py): {source_file}"
+            f"cpp_itfs host launcher (device code is in sibling .cuh/.cpp.jinja, not this .py): {source_file}"
         )
     source_type = candidate.get("source_type")
     # aiter device-source promotion: a real .cu/.cuh/.hip kernel under /aiter/ is
     # patchable even when the classifier left source_type unknown, since aiter
     # JIT-compiles each op and forge edits it in place.
-    if (source_type not in {"hip_cpp", "triton", "python", "flydsl"}
-            and "/aiter/" in lower_file
-            and lower_file.endswith((".cu", ".cuh", ".hip"))):
+    if (
+        source_type not in {"hip_cpp", "triton", "python", "flydsl"}
+        and "/aiter/" in lower_file
+        and lower_file.endswith((".cu", ".cuh", ".hip"))
+    ):
         return True, ""
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
@@ -2380,6 +2408,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         """
         low = path_str.lower()
         return any(tag in low for tag in ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_"))
+
     # Same-library guard (RCA root cause 2): never pair a kernel from one library
     # with a benchmark from another (e.g. a sglang sgl-kernel .cuh with an aiter
     # op_test). Editing the kernel then "validating" against an unrelated lib's
@@ -2433,6 +2462,7 @@ _PACKAGE_INNER_ROOTS = (
     "/sgl-workspace/aiter/aiter",
     "/sgl-workspace/sglang/python/sglang",
 )
+
 
 def upgrade_pybind_shim_source(source_file: str, kernel_name: str, kernel_repo: str) -> str:
     """Promote a tiny pybind11 shim to the real device source.
@@ -2554,11 +2584,30 @@ def _shape_call_entries(shapes: Any, call_num: Any = None) -> list[dict[str, Any
 
 # Recognized dtype tokens appearing as the suffix on a TraceLens shape entry
 # (e.g. ``(64,5120) bf16``); used to recognise a trailing dtype on a paren-less entry.
-_KNOWN_DTYPE_TOKENS = frozenset({
-    "bf16", "fp16", "fp32", "f32", "fp8", "f8", "fp8_e4m3", "fp8_e5m2",
-    "e4m3", "e5m2", "int8", "int4", "int32", "int64", "int", "uint8",
-    "bool", "float", "double", "half",
-})
+_KNOWN_DTYPE_TOKENS = frozenset(
+    {
+        "bf16",
+        "fp16",
+        "fp32",
+        "f32",
+        "fp8",
+        "f8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+        "e4m3",
+        "e5m2",
+        "int8",
+        "int4",
+        "int32",
+        "int64",
+        "int",
+        "uint8",
+        "bool",
+        "float",
+        "double",
+        "half",
+    }
+)
 
 
 def _split_shape_dtype(entry: Any) -> tuple[str, str]:
@@ -4222,9 +4271,7 @@ def deterministic_extract_hot_kernels(
                 "call_count": op_count,
                 "efficiency_percent": round(eff_pct, 2),
                 "impact_score": (
-                    member.get("impact_score")
-                    if member.get("impact_score") is not None
-                    else impact_score
+                    member.get("impact_score") if member.get("impact_score") is not None else impact_score
                 ),
                 "bound_type": member.get("bound_type", ""),
                 "tracelens_category": category,
@@ -4490,9 +4537,10 @@ _TRACELENS_REF_DEFAULT = "4d6e0d9f03bab0541f04a68952dcf13988475708"
 
 def _default_tracelens_root() -> Path:
     """Installer-managed default checkout path (mirrors install.sh /
-    hyperloom.inference_optimizer.session.paths.open_source_root)."""
-    base = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT") or "/opt/hyperloom/open-source-repos"
-    return Path(base) / "TraceLens"
+    hyperloom.inference_optimizer.session.paths.deps_cache_root)."""
+    from hyperloom.inference_optimizer.session.paths import deps_cache_root
+
+    return deps_cache_root() / "TraceLens"
 
 
 def _is_default_tracelens_root(tl_root: Path) -> bool:
@@ -4515,9 +4563,7 @@ def _tracelens_checkout_complete(tl_root: Path) -> bool:
     """
     if (tl_root / ".git").exists():
         return True
-    return (
-        tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md"
-    ).exists() or (
+    return (tl_root / "TraceLens/Agent/Analysis/.cursor/skills/analysis-orchestrator.md").exists() or (
         tl_root / "TraceLens/AgenticMode/Standalone/.cursor/skills/standalone-analysis-orchestrator.md"
     ).exists()
 
@@ -4579,20 +4625,23 @@ def _ensure_tracelens_checkout(tl_root: Path, *, log_path: Path) -> None:
             )
             if rc != 0:
                 raise FileNotFoundError(
-                    f"TraceLens root not found and self-heal clone failed (repo={repo}); "
-                    f"tried to rebuild at {tl_root}"
+                    f"TraceLens root not found and self-heal clone failed (repo={repo}); tried to rebuild at {tl_root}"
                 )
             # Pin to the requested SHA; a failed fetch/checkout must not ship the
             # clone's default HEAD (an unpinned tree).
             if ref and ref != "HEAD":
                 rc = run_command(
                     ["git", "-C", str(tmp_dir), "fetch", "--depth", "1", "origin", ref],
-                    cwd=None, log_path=log_path, timeout_s=600,
+                    cwd=None,
+                    log_path=log_path,
+                    timeout_s=600,
                 )
                 if rc == 0:
                     rc = run_command(
                         ["git", "-C", str(tmp_dir), "checkout", "-q", "FETCH_HEAD"],
-                        cwd=None, log_path=log_path, timeout_s=120,
+                        cwd=None,
+                        log_path=log_path,
+                        timeout_s=120,
                     )
                 if rc != 0:
                     raise FileNotFoundError(
@@ -5118,39 +5167,59 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
     if not isinstance(contract, dict):
         contract = {}
     # --- collectives ---
-    _COLL = (("all_reduce", "allreduce"), ("all_gather", "allgather"),
-             ("reduce_scatter", "reducescatter"), ("all_to_all", "alltoall"),
-             ("broadcast",), ("reduce",))
-    _OPMAP = {"all_reduce": "all_reduce", "allreduce": "all_reduce",
-              "all_gather": "all_gather", "allgather": "all_gather",
-              "reduce_scatter": "reduce_scatter", "reducescatter": "reduce_scatter",
-              "all_to_all": "all_to_all", "alltoall": "all_to_all",
-              "broadcast": "broadcast", "reduce": "reduce"}
+    _COLL = (
+        ("all_reduce", "allreduce"),
+        ("all_gather", "allgather"),
+        ("reduce_scatter", "reducescatter"),
+        ("all_to_all", "alltoall"),
+        ("broadcast",),
+        ("reduce",),
+    )
+    _OPMAP = {
+        "all_reduce": "all_reduce",
+        "allreduce": "all_reduce",
+        "all_gather": "all_gather",
+        "allgather": "all_gather",
+        "reduce_scatter": "reduce_scatter",
+        "reducescatter": "reduce_scatter",
+        "all_to_all": "all_to_all",
+        "alltoall": "all_to_all",
+        "broadcast": "broadcast",
+        "reduce": "reduce",
+    }
     if bool(item.get("is_multigpu")) or any(tag in name for grp in _COLL for tag in grp):
         op = next((_OPMAP[t] for grp in _COLL for t in grp if t in name), "all_reduce")
         contract["kind"] = "collective"
         contract["collective_op"] = op
-        ws = mp.get("WORLD_SIZE") or mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE") \
+        ws = (
+            mp.get("WORLD_SIZE")
+            or mp.get("TP_SIZE")
+            or mp.get("TENSOR_PARALLEL_SIZE")
             or item.get("num_gpus_recommended")
+        )
         if ws:
             contract["world_size"] = int(ws)
         if mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"):
             contract["tp_size"] = int(mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"))
         contract.setdefault("reduce_op", "sum")
         contract["reference"] = f"torch.distributed.{op}"
-        contract["e2e_note"] = ("comm-bound collective: a 1-GPU GEAK slot cannot "
-                                "reproduce inter-GPU traffic; needs KERNEL_AGENT_NUM_GPUS>=world_size")
+        contract["e2e_note"] = (
+            "comm-bound collective: a 1-GPU GEAK slot cannot "
+            "reproduce inter-GPU traffic; needs KERNEL_AGENT_NUM_GPUS>=world_size"
+        )
     # --- attention ---
     elif any(t in name for t in ("mha", "flash", "attn", "attention", "paged")):
         contract["kind"] = "attention"
         contract["causal"] = True  # autoregressive serving attention is causal
-        for src, dst in (("HEAD_SIZE", "head_dim"), ("NUM_ATTENTION_HEADS", "num_heads"),
-                         ("NUM_KEY_VALUE_HEADS", "num_kv_heads")):
+        for src, dst in (
+            ("HEAD_SIZE", "head_dim"),
+            ("NUM_ATTENTION_HEADS", "num_heads"),
+            ("NUM_KEY_VALUE_HEADS", "num_kv_heads"),
+        ):
             if mp.get(src) is not None:
                 contract[dst] = mp.get(src)
         contract.setdefault("kv_layout", "unknown")  # to be confirmed from trace; flag for reviewer
-        contract["seqlen_regime"] = "prefill" if "prefill" in name else (
-            "decode" if "decode" in name else "mixed")
+        contract["seqlen_regime"] = "prefill" if "prefill" in name else ("decode" if "decode" in name else "mixed")
         contract["reference"] = "torch.nn.functional.scaled_dot_product_attention"
     # E2E-TRANSFER honesty flag: warn when a kernel-level win is unlikely to move
     # serving E2E so neither the pipeline nor a reviewer over-trusts a micro-speedup.
@@ -5461,9 +5530,7 @@ def write_reports(
                     )
                     if _est:
                         _diff_report["analytic_ceiling"] = _est
-                        _actual_us = float(
-                            _diff_report.get("totals", {}).get("sigma_actual_kernel_us", 0.0) or 0.0
-                        )
+                        _actual_us = float(_diff_report.get("totals", {}).get("sigma_actual_kernel_us", 0.0) or 0.0)
                         if _est.get("ideal_ms") and _actual_us > 0:
                             _diff_report["analytic_within_pct"] = round(
                                 _est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2

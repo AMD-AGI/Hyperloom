@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Regression tests for direct-gateway auth setup in ``_preflight``.
 
@@ -116,9 +117,7 @@ def test_dotenv_fallback_filters_explicit_repo_env(tmp_path, monkeypatch):
     monkeypatch.delenv("LD_PRELOAD", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     (tmp_path / ".env").write_text(
-        "LD_PRELOAD=/tmp/evil.so\n"
-        "PYTHONSTARTUP=/tmp/pwn.py\n"
-        "OPENAI_BASE_URL=https://gateway.example/v1\n",
+        "LD_PRELOAD=/tmp/evil.so\nPYTHONSTARTUP=/tmp/pwn.py\nOPENAI_BASE_URL=https://gateway.example/v1\n",
         encoding="utf-8",
     )
     cli_preflight._load_dotenv_fallback()
@@ -227,7 +226,12 @@ def test_preflight_keeps_explicit_provider_keys_over_safe_key(
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-user-token")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
-    for name in ("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "_".join(("GEAK", "API", "KEY")), "_".join(("LLM", "API", "KEY")), "_".join(("AMD_LLM", "API", "KEY"))):
+    for name in (
+        "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
+        "_".join(("GEAK", "API", "KEY")),
+        "_".join(("LLM", "API", "KEY")),
+        "_".join(("AMD_LLM", "API", "KEY")),
+    ):
         monkeypatch.delenv(name, raising=False)
 
     resolved = cli_preflight._preflight()
@@ -237,7 +241,7 @@ def test_preflight_keeps_explicit_provider_keys_over_safe_key(
     # Explicit provider keys are preserved.
     assert cli.os.environ["_".join(("OPENAI", "API", "KEY"))] == "openai-user-token"
     assert cli.os.environ["_".join(("ANTHROPIC", "API", "KEY"))] == "anthropic-user-token"
- # Unset aliases are still gap-filled from SAFE API key.
+    # Unset aliases are still gap-filled from SAFE API key.
     assert cli.os.environ["_".join(("ANTHROPIC", "AUTH", "TOKEN"))] == "safe-key"
     assert cli.os.environ["_".join(("GEAK", "API", "KEY"))] == "safe-key"
 
@@ -1422,7 +1426,9 @@ def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeyp
     assert args.codex_model == "claude-opus-4-6"
 
 
-def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(monkeypatch, tmp_path, clean_url_env, stub_install_steps):
+def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
+    monkeypatch, tmp_path, clean_url_env, stub_install_steps
+):
     """Single Anthropic-compatible gateways may populate OPENAI_BASE_URL during preflight; model-follow intent is preflight-time."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
@@ -1498,7 +1504,9 @@ def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
 
     monkeypatch.setattr(cli, "_probe_llm_catalog", _capture)
     args = _build_parser().parse_args(["optimize", "--model", "/m", "--framework", "vllm"])
-    cli._validate_and_resolve_claude_model(args, ("https://llm.example.invalid/Unified", "https://llm.example.invalid/Unified/v1"))
+    cli._validate_and_resolve_claude_model(
+        args, ("https://llm.example.invalid/Unified", "https://llm.example.invalid/Unified/v1")
+    )
 
     assert seen == {"base_url": "https://llm.example.invalid/Unified/v1", "api_key": "openai-token"}
     assert args.claude_model == "GPT-5.4"
@@ -1514,6 +1522,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 
 def _ns(**overrides) -> argparse.Namespace:
     defaults: dict = {
@@ -1742,6 +1751,7 @@ def test_cli_parser_exposes_degraded_flags():
 
 
 # Framework guard
+
 
 def test_expected_framework_guard_rejects_mismatch(monkeypatch, capsys):
     monkeypatch.setenv("EXPECTED_FRAMEWORK", "vllm")

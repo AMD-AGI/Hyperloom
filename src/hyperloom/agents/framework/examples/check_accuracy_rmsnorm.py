@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Numerical-accuracy check for the explore --execute e2e path: compares sglang RMSNorm vs a reference torch impl and emits accuracy.json; ``accuracy`` is the fraction of tokens with relative error under rtol (default 1e-2)."""
 

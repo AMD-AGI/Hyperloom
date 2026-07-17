@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude.
 
@@ -309,12 +310,8 @@ class ClaudeBackend:
                     for longer than this attempt's amplified idle budget.
             """
             attempt_state["n"] += 1
-            idle_timeout_s = self.call_timeout_s * (
-                _RETRY_IDLE_TIMEOUT_MULTIPLIER ** (attempt_state["n"] - 1)
-            )
-            return await self._invoke_and_collect(
-                full_prompt, options, idle_timeout_s=idle_timeout_s
-            )
+            idle_timeout_s = self.call_timeout_s * (_RETRY_IDLE_TIMEOUT_MULTIPLIER ** (attempt_state["n"] - 1))
+            return await self._invoke_and_collect(full_prompt, options, idle_timeout_s=idle_timeout_s)
 
         def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
             """Record a transient-failure retry warning into the call log.
@@ -359,8 +356,7 @@ class ClaudeBackend:
                 }
             )
             raise BackendError(
-                f"Claude backend timed out: stream idle for >{self.call_timeout_s:.0f}s "
-                "(likely upstream proxy stall)"
+                f"Claude backend timed out: stream idle for >{self.call_timeout_s:.0f}s (likely upstream proxy stall)"
             ) from exc
         # Capture the SDK session token for the next conversational resume;
         # only overwrite on a non-empty id.
@@ -604,9 +600,7 @@ class ClaudeBackend:
                 # fully silent gateway trips ``asyncio.TimeoutError``.
                 try:
                     if idle_timeout_s is not None:
-                        message = await asyncio.wait_for(
-                            stream_iter.__anext__(), timeout=idle_timeout_s
-                        )
+                        message = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout_s)
                     else:
                         message = await stream_iter.__anext__()
                 except StopAsyncIteration:

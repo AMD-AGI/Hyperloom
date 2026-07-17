@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Top-level builder for ``session_breakdown.json``.
 
@@ -818,9 +819,7 @@ def write_minimal_final_report(
     cb_tput = current_best.get("tput")
     # Framework-aware primary metric: serving shows tok/s/GPU, scriptable xDiT
     # shows per-image latency e2el_mean_ms (ms).
-    baseline_metric_s = framework_registry.format_primary_metric(
-        state.framework, state.baseline_tput, precision=2
-    )
+    baseline_metric_s = framework_registry.format_primary_metric(state.framework, state.baseline_tput, precision=2)
     cb_metric_s = (
         framework_registry.format_primary_metric(state.framework, cb_tput, precision=2)
         if isinstance(cb_tput, (int, float))

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Idempotent, atomic-write patcher for Magpie ``_prepare_benchmark_scripts``.
 
@@ -120,14 +121,12 @@ _EVAL_CONCURRENCY_FLAG_RE = re.compile(r"\s*--concurrent-requests\s+(?:\"\$CONC\
 # InferenceX benchmark_lib.sh::run_lm_eval reads concurrency from env
 # (EVAL_CONCURRENT_REQUESTS, fallback CONC). Passing --concurrent-requests to
 # run_eval is rejected as an unknown argument.
-_RUN_EVAL_LEGACY_BLOCK = (
-    '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n'
-)
+_RUN_EVAL_LEGACY_BLOCK = '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n'
 _RUN_EVAL_PATCHED_BLOCK = (
     "        # HYPERLOOM_EVAL_CONCURRENCY_FIX: benchmark_lib.sh resolves eval\n"
     "        # concurrency from EVAL_CONCURRENT_REQUESTS (fallback CONC).\n"
-    "        EVAL_CONCURRENT_REQUESTS=\"${EVAL_CONCURRENT_REQUESTS:-$CONC}\" "
-    "run_eval --framework lm-eval --port \"$PORT\" || exit $?\n"
+    '        EVAL_CONCURRENT_REQUESTS="${EVAL_CONCURRENT_REQUESTS:-$CONC}" '
+    'run_eval --framework lm-eval --port "$PORT" || exit $?\n'
 )
 
 # Upstream atomic-copy helper; its presence signals Magpie already copies
@@ -293,8 +292,7 @@ def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
             ok = False
             continue
         log.info(
-            "_magpie_patcher: stripped redundant '%s' eval flag from %s "
-            "(concurrency still flows via the CONC env)",
+            "_magpie_patcher: stripped redundant '%s' eval flag from %s (concurrency still flows via the CONC env)",
             _EVAL_CONCURRENCY_FLAG_MARKER,
             script,
         )

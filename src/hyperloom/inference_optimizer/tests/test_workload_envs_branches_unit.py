@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Branch-coverage tests for shared workload-env materialization: GPU-count
 detection, profile-window math, per-model work-arounds, and NUM_PROMPTS
@@ -94,7 +95,7 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert envs["SGLANG_REMOVE_ME"] == "override"
 
 
-def test_materialize_drops_loader_env_injections(tmp_path, monkeypatch):
+def test_materialize_preserves_valid_workload_env_keys(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     _stub_server_arg_injectors(monkeypatch)
     src = tmp_path / "base.yaml"
@@ -103,20 +104,34 @@ def test_materialize_drops_loader_env_injections(tmp_path, monkeypatch):
         src,
         tmp_path / "out",
         extra_envs={
+            "ANTHROPIC_API_KEY": "anthropic-secret",
             "LD_PRELOAD": "/tmp/evil.so",
+            "OPENAI_API_KEY": "secret",
             "PYTHONSTARTUP": "/tmp/pwn.py",
+            "SAFE_API_KEY": "safe-secret",
             "SGLANG_USE_AITER": "1",
+            "UNKNOWN_VALID_TUNING_KNOB": "enabled",
+            "BAD-NAME": "dropped",
         },
         reference_envs={
             "PYTHONPATH": "/tmp/evil",
+            "REFERENCE_ONLY_KNOB": "1",
             "VLLM_ROCM_USE_AITER": "1",
+            "bad key": "dropped",
         },
     )
     envs = bench["envs"]
-    assert "LD_PRELOAD" not in envs
-    assert "PYTHONSTARTUP" not in envs
-    assert "PYTHONPATH" not in envs
+    assert envs["ANTHROPIC_API_KEY"] == "anthropic-secret"
+    assert envs["LD_PRELOAD"] == "/tmp/evil.so"
+    assert envs["OPENAI_API_KEY"] == "secret"
+    assert envs["PYTHONSTARTUP"] == "/tmp/pwn.py"
+    assert envs["PYTHONPATH"] == "/tmp/evil"
+    assert envs["SAFE_API_KEY"] == "safe-secret"
+    assert "BAD-NAME" not in envs
+    assert "bad key" not in envs
+    assert envs["REFERENCE_ONLY_KNOB"] == "1"
     assert envs["SGLANG_USE_AITER"] == "1"
+    assert envs["UNKNOWN_VALID_TUNING_KNOB"] == "enabled"
     assert envs["VLLM_ROCM_USE_AITER"] == "1"
 
 
@@ -383,9 +398,7 @@ def test_sparse_model_respects_operator_pinned_block_size(monkeypatch, tmp_path)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
     src = _write(tmp_path / "cfg.yaml", framework="vllm")
-    bench = _materialize(
-        src, tmp_path / "out", model_path=model_dir, extra_server_args="--block-size 64"
-    )
+    bench = _materialize(src, tmp_path / "out", model_path=model_dir, extra_server_args="--block-size 64")
     assert "--block-size 64" in bench["envs"]["EXTRA_VLLM_ARGS"]
     assert "--block-size 128" not in bench["envs"]["EXTRA_VLLM_ARGS"]
 

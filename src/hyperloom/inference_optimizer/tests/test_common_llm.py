@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ def test_openai_chat_completions_posts_and_returns_content(monkeypatch: pytest.M
 
     result = llm.call_openai_chat_completions(
         base_url="https://openai.example/v1/",
-        api_key="sk-test",
+        api_key="openai-test-key",
         model="m",
         system="sys",
         user="user",
@@ -44,7 +45,7 @@ def test_openai_chat_completions_posts_and_returns_content(monkeypatch: pytest.M
 
     assert result == "hello"
     assert captured["url"] == "https://openai.example/v1/chat/completions"
-    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+    assert captured["headers"]["Authorization"] == "Bearer openai-test-key"
     assert captured["body"]["messages"][0]["content"] == "sys"
     assert captured["body"]["temperature"] == 0.0
     assert captured["timeout"] == 3.0
@@ -79,7 +80,15 @@ def test_anthropic_messages_posts_and_joins_text_blocks(monkeypatch: pytest.Monk
 
     def _post(url: str, *, headers: dict[str, str], content: str, timeout: float) -> _Response:
         captured.update({"url": url, "headers": headers, "body": json.loads(content), "timeout": timeout})
-        return _Response({"content": [{"type": "text", "text": "a"}, {"type": "image", "text": "skip"}, {"type": "text", "text": "b"}]})
+        return _Response(
+            {
+                "content": [
+                    {"type": "text", "text": "a"},
+                    {"type": "image", "text": "skip"},
+                    {"type": "text", "text": "b"},
+                ]
+            }
+        )
 
     monkeypatch.setattr("httpx.post", _post)
 

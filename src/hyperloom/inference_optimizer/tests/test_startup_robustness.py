@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for the startup-robustness preflight + launch-info wire format (cli.py)."""
 
@@ -163,10 +164,13 @@ def test_anthropic_intent_skips_critic_agent_even_after_openai_env_appears(clean
     clean_creds_env.setenv("OPENAI_BASE_URL", "https://api.anthropic.com")
     clean_creds_env.setenv("_".join(("OPENAI", "API", "KEY")), "stale-openai-token")
 
-    assert cli._critic_agent_runtime_needed(
-        "agent",
-        codex_follows_claude=codex_follows_claude,
-    ) is False
+    assert (
+        cli._critic_agent_runtime_needed(
+            "agent",
+            codex_follows_claude=codex_follows_claude,
+        )
+        is False
+    )
 
 
 def test_build_backends_uses_claude_critic_when_codex_follows_claude(

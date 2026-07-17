@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """FrameworkAgentExecutor coverage tests."""
 
@@ -917,7 +918,7 @@ async def test_executor_cross_repo_disables_checkout_head(tmp_path: Path):
 @pytest.mark.parametrize(
     "new_accuracy, expected_pass",
     [
-        (0.78, True),   # baseline 0.80, drop 0.02 <= 0.05 -> pass
+        (0.78, True),  # baseline 0.80, drop 0.02 <= 0.05 -> pass
         (0.70, False),  # baseline 0.80, drop 0.10 >  0.05 -> fail
     ],
 )
@@ -937,6 +938,7 @@ async def test_bench_candidate_accuracy_gate_reads_accuracy_key(
         return [_mk_variant_result(tput=1100.0, status="succeeded")]
 
     from hyperloom.orchestrator.actions.executors import framework_agent as fp_mod
+
     with (
         patch.object(fp_mod, "run_grid", new=fake_run_grid),
         patch.object(fp_mod, "materialize_config_with_envs", return_value=config_path),
@@ -970,6 +972,7 @@ async def test_bench_candidate_accuracy_gate_skipped_without_baseline(tmp_path: 
         return [_mk_variant_result(tput=1100.0, status="succeeded")]
 
     from hyperloom.orchestrator.actions.executors import framework_agent as fp_mod
+
     with (
         patch.object(fp_mod, "run_grid", new=fake_run_grid),
         patch.object(fp_mod, "materialize_config_with_envs", return_value=config_path),

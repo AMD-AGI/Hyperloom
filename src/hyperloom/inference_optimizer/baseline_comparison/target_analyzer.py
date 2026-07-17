@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Top-level orchestration for the external baseline comparison step.
 
@@ -455,19 +456,20 @@ def analyze(
         return summary
 
     if not canonical_model:
-        return _skip("skipped", "model_mapping_miss",
-                     f"model name mapping miss for {model_path!r}; no InferenceX name found")
+        return _skip(
+            "skipped", "model_mapping_miss", f"model name mapping miss for {model_path!r}; no InferenceX name found"
+        )
 
     if not query.gpu:
         return _skip("skipped", "no_target_gpu_configured", "compare_against_gpu is empty")
 
     rows = fetch_rows(canonical_model)
     if rows is None:
-        return _skip("no_match", "fetch_error",
-                     f"InferenceX API fetch failed for model={canonical_model!r}")
+        return _skip("no_match", "fetch_error", f"InferenceX API fetch failed for model={canonical_model!r}")
     if not rows:
-        return _skip("no_match", "no_inferencex_data",
-                     f"InferenceX returned no benchmarks for model={canonical_model!r}")
+        return _skip(
+            "no_match", "no_inferencex_data", f"InferenceX returned no benchmarks for model={canonical_model!r}"
+        )
 
     matched = find_reference_rows(
         rows,
@@ -478,32 +480,41 @@ def analyze(
     )
     if not matched:
         hw = query.gpu.strip().casefold()
-        has_gpu = any(
-            isinstance(r, dict) and str(r.get("hardware") or "").strip().casefold() == hw
-            for r in rows
-        )
+        has_gpu = any(isinstance(r, dict) and str(r.get("hardware") or "").strip().casefold() == hw for r in rows)
         if not has_gpu:
-            return _skip("no_match", "unsupported_target_gpu",
-                         f"InferenceX has no {query.gpu!r} data for model={canonical_model!r}")
+            return _skip(
+                "no_match",
+                "unsupported_target_gpu",
+                f"InferenceX has no {query.gpu!r} data for model={canonical_model!r}",
+            )
         # GPU present but no comparable row. Distinguish a precision-only miss
         # (same GPU/shape exists at a different precision) from a shape miss so
         # the strict precision filter is observable rather than silent.
         if query.precision:
             shape_rows = find_reference_rows(
-                rows, hardware=query.gpu, isl=query.isl, osl=query.osl, precision="",
+                rows,
+                hardware=query.gpu,
+                isl=query.isl,
+                osl=query.osl,
+                precision="",
             )
             if shape_rows:
-                return _skip("no_match", "precision_mismatch",
-                             f"InferenceX has gpu={query.gpu} isl/osl={query.isl}/{query.osl} rows "
-                             f"but none at precision={query.precision}")
-        return _skip("no_match", "dimension_mismatch",
-                     f"no InferenceX row for gpu={query.gpu} isl/osl={query.isl}/{query.osl} "
-                     f"precision={query.precision or '(any)'}")
+                return _skip(
+                    "no_match",
+                    "precision_mismatch",
+                    f"InferenceX has gpu={query.gpu} isl/osl={query.isl}/{query.osl} rows "
+                    f"but none at precision={query.precision}",
+                )
+        return _skip(
+            "no_match",
+            "dimension_mismatch",
+            f"no InferenceX row for gpu={query.gpu} isl/osl={query.isl}/{query.osl} "
+            f"precision={query.precision or '(any)'}",
+        )
 
     points = [p for p in (_row_to_point(r) for r in matched) if p is not None]
     if not points:
-        return _skip("no_match", "no_valid_rows",
-                     "matched InferenceX rows had no positive tput_per_gpu")
+        return _skip("no_match", "no_valid_rows", "matched InferenceX rows had no positive tput_per_gpu")
 
     all_points = _dedup_by_conc(points)
     best = max(points, key=lambda p: p.tput_per_gpu)

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
 
@@ -15,6 +16,7 @@ import sys
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
 
 def _quantization_enabled_via_env() -> bool:
     """Return ``True`` iff the deterministic quantization master switch is on.
@@ -34,6 +36,7 @@ def _quantization_enabled_via_env() -> bool:
         "yes",
         "on",
     )
+
 
 async def _run_quantization_prelude(args: argparse.Namespace) -> None:
     """Run the quantization-agent once before the optimization loop.

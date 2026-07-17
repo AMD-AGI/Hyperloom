@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Kernel-stack validation handler: draining pending KEEP integrates and
 running/recovering the positive-needs-review stack e2e validation."""
@@ -390,6 +391,7 @@ class KernelStackPhase(PhaseHandler):
             incremental gain, apply/revert sub-results and stack metadata.
         """
         from ..actions.executors.baseline import BaselineExecutor
+
         # Lazy (re-)import so tests can monkeypatch it on the source module.
         from ..actions.executors.benchmark_result import is_valid_measurement  # noqa: F811
         from ..kernel.request_handlers import (

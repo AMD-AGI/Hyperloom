@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for reference-script parsing, rendering, and discovery."""
 
@@ -130,7 +131,10 @@ def test_render_round_trip(tmp_path):
     src = _write(tmp_path, _M3_RECIPE)
     r = parse_reference_script(src, framework="vllm")
     text = render_reference_script(
-        framework="vllm", server_args=r.server_args, envs=r.envs, model=r.model,
+        framework="vllm",
+        server_args=r.server_args,
+        envs=r.envs,
+        model=r.model,
     )
     rt_src = _write(tmp_path, text, "rt.sh")
     r2 = parse_reference_script(rt_src, framework="vllm")
@@ -147,12 +151,19 @@ def _mk_tree(tmp_path: Path, names: list[str]) -> Path:
 
 
 def test_discovery_exact(tmp_path):
-    root = _mk_tree(tmp_path, [
-        "dsr1_fp8_mi300x.sh", "gptoss_fp4_mi300x.sh",
-    ])
+    root = _mk_tree(
+        tmp_path,
+        [
+            "dsr1_fp8_mi300x.sh",
+            "gptoss_fp4_mi300x.sh",
+        ],
+    )
     path, tier = discover_reference_script(
-        str(root), model_path="dsr1", precision="fp8",
-        gpu_type="mi300x", framework="vllm",
+        str(root),
+        model_path="dsr1",
+        precision="fp8",
+        gpu_type="mi300x",
+        framework="vllm",
     )
     assert tier == "exact"
     assert path.endswith("dsr1_fp8_mi300x.sh")
@@ -162,20 +173,29 @@ def test_discovery_exact_underscore_model(tmp_path):
     """Model aliases containing ``_`` (qwen3_moe, qwen2_5_vl) must parse:
     the precision/gpu fields sit to the right of the GPU anchor, so they are
     not mistaken for the model's own underscore segments."""
-    root = _mk_tree(tmp_path, [
-        "qwen3_moe_bf16_mi300x.sh",
-        "qwen2_5_vl_fp8_mi300x.sh",
-    ])
+    root = _mk_tree(
+        tmp_path,
+        [
+            "qwen3_moe_bf16_mi300x.sh",
+            "qwen2_5_vl_fp8_mi300x.sh",
+        ],
+    )
     path, tier = discover_reference_script(
-        str(root), model_path="/path/models/qwen3_moe", precision="bf16",
-        gpu_type="mi300x", framework="vllm",
+        str(root),
+        model_path="/path/models/qwen3_moe",
+        precision="bf16",
+        gpu_type="mi300x",
+        framework="vllm",
     )
     assert tier == "exact"
     assert path.endswith("qwen3_moe_bf16_mi300x.sh")
 
     path2, tier2 = discover_reference_script(
-        str(root), model_path="qwen2_5_vl", precision="fp8",
-        gpu_type="mi300x", framework="vllm",
+        str(root),
+        model_path="qwen2_5_vl",
+        precision="fp8",
+        gpu_type="mi300x",
+        framework="vllm",
     )
     assert tier2 == "exact"
     assert path2.endswith("qwen2_5_vl_fp8_mi300x.sh")
@@ -184,8 +204,11 @@ def test_discovery_exact_underscore_model(tmp_path):
 def test_discovery_version_mismatch_is_none(tmp_path):
     root = _mk_tree(tmp_path, ["minimaxm2.5_fp8_mi300x.sh"])
     path, tier = discover_reference_script(
-        str(root), model_path="minimaxm3", precision="fp8",
-        gpu_type="mi300x", framework="vllm",
+        str(root),
+        model_path="minimaxm3",
+        precision="fp8",
+        gpu_type="mi300x",
+        framework="vllm",
     )
     assert tier == "none"
     assert path is None
@@ -194,8 +217,11 @@ def test_discovery_version_mismatch_is_none(tmp_path):
 def test_discovery_fuzzy(tmp_path):
     root = _mk_tree(tmp_path, ["kimik2.5_int4_mi300x.sh"])
     path, tier = discover_reference_script(
-        str(root), model_path="/path/models/moonshotai-Kimi-K2.5-Instruct",
-        precision="int4", gpu_type="mi300x", framework="vllm",
+        str(root),
+        model_path="/path/models/moonshotai-Kimi-K2.5-Instruct",
+        precision="int4",
+        gpu_type="mi300x",
+        framework="vllm",
     )
     assert tier == "fuzzy"
     assert path.endswith("kimik2.5_int4_mi300x.sh")
@@ -205,8 +231,11 @@ def test_discovery_framework_gate(tmp_path):
     """An atom-tagged script must not match a vllm run."""
     root = _mk_tree(tmp_path, ["dsr1_fp8_mi300x_atom.sh"])
     _, tier = discover_reference_script(
-        str(root), model_path="dsr1", precision="fp8",
-        gpu_type="mi300x", framework="vllm",
+        str(root),
+        model_path="dsr1",
+        precision="fp8",
+        gpu_type="mi300x",
+        framework="vllm",
     )
     assert tier == "none"
 
@@ -214,16 +243,22 @@ def test_discovery_framework_gate(tmp_path):
 def test_discovery_precision_gpu_filter(tmp_path):
     root = _mk_tree(tmp_path, ["dsr1_fp8_b200.sh", "dsr1_fp4_mi300x.sh"])
     _, tier = discover_reference_script(
-        str(root), model_path="dsr1", precision="fp8",
-        gpu_type="mi300x", framework="vllm",
+        str(root),
+        model_path="dsr1",
+        precision="fp8",
+        gpu_type="mi300x",
+        framework="vllm",
     )
     assert tier == "none"
 
 
 def test_discovery_missing_path_failsoft():
     path, tier = discover_reference_script(
-        "/nonexistent", model_path="x", precision="fp8",
-        gpu_type="mi300x", framework="vllm",
+        "/nonexistent",
+        model_path="x",
+        precision="fp8",
+        gpu_type="mi300x",
+        framework="vllm",
     )
     assert path is None
     assert tier == "none"
@@ -231,9 +266,13 @@ def test_discovery_missing_path_failsoft():
 
 def test_models_compatible_exact_and_fuzzy():
     assert models_compatible("dsr1", "/path/models/dsr1") is True
-    assert models_compatible(
-        "minimaxm2.5", "/path/models/MiniMaxAI-MiniMax-M2.5",
-    ) is True
+    assert (
+        models_compatible(
+            "minimaxm2.5",
+            "/path/models/MiniMaxAI-MiniMax-M2.5",
+        )
+        is True
+    )
 
 
 def test_models_compatible_version_mismatch_blocked():
@@ -257,8 +296,10 @@ def test_resolve_no_flag_does_not_discover(tmp_path, monkeypatch):
     monkeypatch.setenv("INFERENCEX_PATH", str(root))
     monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(
-        reference_script=None, model="/path/models/dsr1",
-        precision="fp8", gpu_type="mi300x",
+        reference_script=None,
+        model="/path/models/dsr1",
+        precision="fp8",
+        gpu_type="mi300x",
     )
     server_args, envs, model, source = _resolve_reference_recipe(args)
     assert (server_args, envs, model, source) == ("", {}, "", "")
@@ -268,8 +309,10 @@ def test_resolve_valid_flag_is_used(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
     args = SimpleNamespace(
-        reference_script=src, model="/path/models/whatever",
-        precision="fp8", gpu_type="mi300x",
+        reference_script=src,
+        model="/path/models/whatever",
+        precision="fp8",
+        gpu_type="mi300x",
     )
     server_args, envs, model, source = _resolve_reference_recipe(args)
     assert "--block-size 128" in server_args
@@ -282,8 +325,10 @@ def test_resolve_invalid_flag_falls_back_to_discovery(tmp_path, monkeypatch):
     monkeypatch.setenv("INFERENCEX_PATH", str(root))
     monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(
-        reference_script="/no/such/recipe.sh", model="/path/models/dsr1",
-        precision="fp8", gpu_type="mi300x",
+        reference_script="/no/such/recipe.sh",
+        model="/path/models/dsr1",
+        precision="fp8",
+        gpu_type="mi300x",
     )
     server_args, envs, model, source = _resolve_reference_recipe(args)
     assert source.endswith("dsr1_fp8_mi300x.sh")
@@ -294,7 +339,9 @@ def test_resolve_invalid_flag_no_inferencex_returns_empty(tmp_path, monkeypatch)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.setenv("FRAMEWORK", "vllm")
     args = SimpleNamespace(
-        reference_script="/no/such/recipe.sh", model="/path/models/dsr1",
-        precision="fp8", gpu_type="mi300x",
+        reference_script="/no/such/recipe.sh",
+        model="/path/models/dsr1",
+        precision="fp8",
+        gpu_type="mi300x",
     )
     assert _resolve_reference_recipe(args) == ("", {}, "", "")

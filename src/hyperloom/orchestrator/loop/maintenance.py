@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coordinator main loop and runtime protocol manager."""
 
@@ -8,6 +9,7 @@ from typing import Any
 from ..state.shared_state import SharedState
 
 import logging as _logging
+
 log = _logging.getLogger(__name__)
 
 
@@ -204,9 +206,8 @@ class MaintenanceCollaborator:
             ctx_token_hard = int(getattr(self._checkpoint_policy, "context_token_hard", 0) or 0)
             ctx_token_soft = int(getattr(self._checkpoint_policy, "context_token_soft", 0) or 0)
             ctx_now = int(tracker.context_tokens_now)
-            token_due = (
-                (ctx_token_hard > 0 and ctx_now >= ctx_token_hard)
-                or (ctx_token_soft > 0 and ctx_now >= ctx_token_soft)
+            token_due = (ctx_token_hard > 0 and ctx_now >= ctx_token_hard) or (
+                ctx_token_soft > 0 and ctx_now >= ctx_token_soft
             )
             emergency_ceiling = (
                 int(ctx_token_hard / max(0.01, _orch_mem.DEFAULT_CONTEXT_TOKEN_HARD_FRACTION) * 0.98)

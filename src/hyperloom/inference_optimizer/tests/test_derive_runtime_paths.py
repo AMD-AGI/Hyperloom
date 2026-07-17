@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for preflight PATH/LD_LIBRARY_PATH derivation (replaces hyperloom.env.sh)."""
 

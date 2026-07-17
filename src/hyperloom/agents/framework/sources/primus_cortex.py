@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Primus Cortex candidate source client.
 
@@ -18,8 +19,6 @@ import urllib.request
 from typing import Any
 
 from ._shared import GitHubPr, _repo_slug
-
-
 
 
 def _require_http_url(url: str) -> None:

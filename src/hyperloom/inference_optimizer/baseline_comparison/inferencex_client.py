@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """HTTP client for the InferenceX public benchmarks API.
 
@@ -39,8 +40,6 @@ log = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://inferencex.semianalysis.com/api/v1"
 DEFAULT_TIMEOUT_SEC = 5.0
 DEFAULT_MAX_ATTEMPTS = 2
-
-
 
 
 def _require_http_url(url: str) -> None:
@@ -210,7 +209,9 @@ def fetch_rows(model_api_name: str) -> list[dict] | None:
     if last_exc is not None:
         log.warning(
             "InferenceX: fetch failed for %s after %d attempt(s): %s",
-            name, attempts, last_exc,
+            name,
+            attempts,
+            last_exc,
         )
     return None
 
@@ -260,10 +261,7 @@ def find_reference_rows(
     ]
     prec = str(precision or "").strip().casefold()
     if prec:
-        matched = [
-            r for r in matched
-            if str(r.get("precision") or "").strip().casefold() == prec
-        ]
+        matched = [r for r in matched if str(r.get("precision") or "").strip().casefold() == prec]
     return matched
 
 

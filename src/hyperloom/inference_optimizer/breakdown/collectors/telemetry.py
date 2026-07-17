@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
 
@@ -24,7 +25,6 @@ from ._common import (
     _scan_profile_reports,
     _to_float,
 )
-
 
 
 # Critic / Robustness
@@ -381,7 +381,9 @@ def collect_telemetry(
         "baseline_report_path": _rel(baseline_report, session_dir) if baseline_report else None,
         "profile_report_paths": [_rel(p, session_dir) or str(p) for p in profile_reports],
         "torch_trace_paths": [_rel(p, session_dir) or str(p) for p in _scan_run_dirs(session_dir, "torch_trace*")],
-        "system_profile_paths": [_rel(p, session_dir) or str(p) for p in _scan_run_dirs(session_dir, "system_profile*")],
+        "system_profile_paths": [
+            _rel(p, session_dir) or str(p) for p in _scan_run_dirs(session_dir, "system_profile*")
+        ],
         "server_log_paths": [_rel(p, session_dir) or str(p) for p in _scan_server_logs(session_dir)],
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
         # per-lane occupancy / capacity summary from the leases DB.
@@ -506,25 +508,20 @@ def collect_kb_provenance(
         if row.get("hit"):
             recipe_hits += 1
         result = row.get("result") if isinstance(row.get("result"), dict) else {}
-        for src in (result.get("sources") or []):
+        for src in result.get("sources") or []:
             recipe_by_source[str(src)] = recipe_by_source.get(str(src), 0) + 1
         best_config_src = result.get("best_config_source")
         for src in (
-            best_config_src if isinstance(best_config_src, list)
-            else [best_config_src] if best_config_src else []
+            best_config_src if isinstance(best_config_src, list) else [best_config_src] if best_config_src else []
         ):
-            recipe_best_config_by_source[str(src)] = (
-                recipe_best_config_by_source.get(str(src), 0) + 1
-            )
+            recipe_best_config_by_source[str(src)] = recipe_best_config_by_source.get(str(src), 0) + 1
 
     cortex_sid = (state.get("cortex_session_id") or "").strip()
     warm = state.get("warm_start_recipe") or {}
     # FINAL reference attribution: which path supplied the warm recipe that was
     # actually applied this session, per the WarmStartContext source tag set at T0.
     wsc = state.get("warm_start_context") or {}
-    warm_start_recipe_source = str(
-        ((wsc.get("match") or {}).get("source") or "")
-    ) if isinstance(wsc, dict) else ""
+    warm_start_recipe_source = str(((wsc.get("match") or {}).get("source") or "")) if isinstance(wsc, dict) else ""
     pitfalls = state.get("warm_start_pitfalls") or []
     lessons = state.get("warm_start_lessons") or []
     # warm-recipe replay outcome; empty before completion / when --no-warm-replay.
@@ -826,4 +823,3 @@ def _domain_for_task(round_entry: dict[str, Any], task_id: str) -> str:
     if round_entry.get("domain"):
         return str(round_entry.get("domain"))
     return ""
-

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """High-level KB write façade used by the decision reviewer.
 
@@ -63,6 +64,7 @@ _KB_RELEVANT_VERDICTS: frozenset[str] = frozenset(
 # failures, reads/writes short-circuit for ``cooldown`` seconds.
 _DEFAULT_BREAKER_THRESHOLD = 1
 _DEFAULT_BREAKER_COOLDOWN_SECONDS = 60.0
+
 
 @dataclass
 class WriteContext:

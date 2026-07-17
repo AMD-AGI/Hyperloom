@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for phase_state pure helpers: escalate hints, budget normalization,
 time/budget remaining math, post-prelude target, and history-row builder."""

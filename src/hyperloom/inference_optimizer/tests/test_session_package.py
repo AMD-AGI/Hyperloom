@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for breakdown.session_package.package_session_artifacts.
 
@@ -243,6 +244,7 @@ def test_loose_can_be_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 def test_truncation_is_flagged_in_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.breakdown import session_package as sp
+
     monkeypatch.setattr(sp, "_MAX_TOTAL_BYTES", 5)
     sd = tmp_path / "session"
     _build_session(sd)

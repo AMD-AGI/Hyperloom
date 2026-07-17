@@ -1,11 +1,11 @@
 ---
-name: hyperloom-gpt-oss-120b-24h
-description: Run a long-horizon Hyperloom gpt-oss-120b optimization session. Use when the user wants the cyclic macro-cycle behavior for a roughly 24-hour demo.
+name: hyperloom-qwen3-30b-a3b-instruct-2507-24h
+description: Run a long-horizon Hyperloom Qwen3-30B-A3B-Instruct-2507 optimization session. Use when the user wants the cyclic macro-cycle behavior for a roughly 24-hour demo.
 ---
 
-# Hyperloom gpt-oss-120b Long-Horizon Run
+# Hyperloom Qwen3-30B-A3B-Instruct-2507 Long-Horizon Run
 
-Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a long-horizon gpt-oss-120b demo.
+Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a long-horizon Qwen3-30B-A3B-Instruct-2507 demo.
 
 ## Run Mode
 
@@ -62,18 +62,18 @@ After that, run all remaining commands for this demo inside the same container w
 docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
 ```
 
-## Long-Horizon Gate
+## Long-Horizon Budget Mode
 
-Current Hyperloom treats `--max-hours 24` as a long-horizon run. Long-horizon cyclic macro-cycles require one of:
+Current Hyperloom can open cyclic macro-cycles for all time budgets while budget and leverage remain. `--max-hours 24` still selects long-horizon budget accounting, which uses the fixed per-cycle budget window. Long-horizon budget mode requires one of:
 
 1. `--max-hours >= 24`
 2. an unbounded run (`max_minutes == 0`)
 
-Cyclic macro-cycling is always on; the long-horizon behavior is gated purely by the budget above (`--max-hours >= 24` or an unbounded run).
+Shorter bounded runs can also reloop, but they keep charge-back phase budgeting against the remaining session time instead of the fixed per-cycle window.
 
 ## Environment
 
-- `MODEL_PATH=<optional; if unset, download openai/gpt-oss-120b from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
+- `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-30B-A3B-Instruct-2507 from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
 - `FRAMEWORK=<provided by the existing environment or repository-root .env; do not invent it>`
 - `GPU_TYPE=<do not set; omit --gpu-type and let Hyperloom auto-detect from ROCm/system info>`
 Required optimize CLI flags:
@@ -94,14 +94,14 @@ Use this decision flow:
 
 - If the user chooses the existing `MODEL_PATH`, inspect that path and use it only when it contains `config.json`; otherwise ask again for a valid path or the demo default.
 - If the user provides a custom local path, export `MODEL_PATH` to that path and require `config.json` before launch.
-- If the user chooses the demo default, set `MODEL_PATH=${REPO_ROOT}/.cache/hyperloom-models/gpt-oss-120b` and download `openai/gpt-oss-120b` there when `config.json` is not already present.
+- If the user chooses the demo default, set `MODEL_PATH=${REPO_ROOT}/.cache/hyperloom-models/Qwen3-30B-A3B-Instruct-2507` and download `Qwen/Qwen3-30B-A3B-Instruct-2507` there when `config.json` is not already present.
 
 Do not assume the Hugging Face CLI exists; resolve or download the selected model with Python:
 
 ```bash
 python -m pip install -U huggingface_hub
 export REPO_ROOT="$(pwd -P)"
-export MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/.cache/hyperloom-models/gpt-oss-120b}"
+export MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/.cache/hyperloom-models/Qwen3-30B-A3B-Instruct-2507}"
 python - <<'PY'
 import os
 from pathlib import Path
@@ -112,7 +112,7 @@ if (target / "config.json").is_file():
     print(f"Using existing model at {target.resolve()}")
 else:
     snapshot_download(
-        repo_id="openai/gpt-oss-120b",
+        repo_id="Qwen/Qwen3-30B-A3B-Instruct-2507",
         local_dir=str(target),
         local_dir_use_symlinks=False,
     )

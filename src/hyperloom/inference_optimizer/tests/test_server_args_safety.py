@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for multi-node server-args denylist validation."""
 
@@ -32,7 +33,7 @@ def test_allows_speculative_config_json():
         "--chat-template /etc/passwd",
         "--lora-modules name=/evil",
         "--lora-paths /evil",
-        "--hf-overrides '{\"architectures\":[\"Evil\"]}'",
+        '--hf-overrides \'{"architectures":["Evil"]}\'',
         "--config /etc/passwd",
         "--revision evil-branch",
         "--custom-weight-path /evil",

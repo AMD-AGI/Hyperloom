@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CriticAgentBackend — bridges the ``hyperloom.agents.critic`` runtime into
 the Coordinator as a real Critic Backend.
@@ -117,9 +118,7 @@ def _extract_review_json(text: str) -> dict[str, Any] | None:
     the genuine verdict is the last block the Critic emits, an echoed block
     can only appear before it.
     """
-    return extract_first_json_with_key(
-        text, "review_verdicts", _BARE_JSON_RE, last=True
-    )
+    return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE, last=True)
 
 
 def _anthropic_text_from_content(content: Any) -> str:
@@ -135,11 +134,7 @@ def _anthropic_text_from_content(content: Any) -> str:
     """
     if not isinstance(content, list):
         return ""
-    parts = [
-        block.get("text", "")
-        for block in content
-        if isinstance(block, dict) and block.get("type") == "text"
-    ]
+    parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
     return "".join(parts).strip()
 
 
@@ -343,7 +338,9 @@ class CriticAgentBackend:
     # Proposal msg_ids reviewed by the current turn, snapshotted for llm_calls
     # attribution.
     _trace_reviewed_msg_ids: list[str] | None = field(
-        default=None, init=False, repr=False,
+        default=None,
+        init=False,
+        repr=False,
     )
     _skill_preamble: str | None = field(default=None, init=False, repr=False)
     _static_context: dict[str, Any] = field(
@@ -394,9 +391,7 @@ class CriticAgentBackend:
             )
 
         self._review_model = (
-            (self.claude_model or self.codex_model)
-            if self.protocol == "anthropic"
-            else self.codex_model
+            (self.claude_model or self.codex_model) if self.protocol == "anthropic" else self.codex_model
         )
         if self.protocol == "anthropic":
             self._init_anthropic_client()
@@ -420,10 +415,7 @@ class CriticAgentBackend:
                 import httpx
             except ImportError:
                 # Best-effort fallback to SDK default timeouts.
-                log.warning(
-                    "critic_agent_backend: httpx unavailable; "
-                    "falling back to AsyncOpenAI default timeouts"
-                )
+                log.warning("critic_agent_backend: httpx unavailable; falling back to AsyncOpenAI default timeouts")
             else:
                 connect_timeout_s = parse_call_timeout_env(
                     "CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S",
@@ -480,14 +472,12 @@ class CriticAgentBackend:
         try:
             import httpx
         except ImportError as exc:  # pragma: no cover
-            raise BackendError(
-                "httpx not installed; required for the Anthropic critic-agent review path"
-            ) from exc
+            raise BackendError("httpx not installed; required for the Anthropic critic-agent review path") from exc
         base_url = (
-            self.anthropic_base_url
-            or os.environ.get("ANTHROPIC_BASE_URL", "")
-            or "https://api.anthropic.com"
-        ).strip().rstrip("/")
+            (self.anthropic_base_url or os.environ.get("ANTHROPIC_BASE_URL", "") or "https://api.anthropic.com")
+            .strip()
+            .rstrip("/")
+        )
         api_key = (
             self.anthropic_api_key
             or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1137,9 +1127,7 @@ class CriticAgentBackend:
             BackendError: If the Anthropic Messages API call fails or returns a
                 non-2xx status.
         """
-        system_text = "\n\n".join(
-            str(m.get("content") or "") for m in messages if m.get("role") == "system"
-        ).strip()
+        system_text = "\n\n".join(str(m.get("content") or "") for m in messages if m.get("role") == "system").strip()
         turns = [
             {
                 "role": "assistant" if m.get("role") == "assistant" else "user",
@@ -1167,18 +1155,12 @@ class CriticAgentBackend:
         status = int(getattr(resp, "status_code", 200) or 200)
         if status >= 400:
             body_txt = str(getattr(resp, "text", ""))[:200]
-            raise BackendError(
-                f"Anthropic API call failed (critic-agent reasoning): status={status} body={body_txt}"
-            )
+            raise BackendError(f"Anthropic API call failed (critic-agent reasoning): status={status} body={body_txt}")
         try:
             body = resp.json()
         except ValueError as exc:
-            raise BackendError(
-                f"Anthropic API returned non-JSON body (critic-agent reasoning): {exc!r}"
-            ) from exc
-        self._accumulate_anthropic_usage(
-            usage_acc, body.get("usage") if isinstance(body, dict) else None
-        )
+            raise BackendError(f"Anthropic API returned non-JSON body (critic-agent reasoning): {exc!r}") from exc
+        self._accumulate_anthropic_usage(usage_acc, body.get("usage") if isinstance(body, dict) else None)
         self._trace_critic_llm_call(usage_acc, latency_ms=latency_ms)
         text = _anthropic_text_from_content(body.get("content") if isinstance(body, dict) else None)
         stop_reason = body.get("stop_reason") if isinstance(body, dict) else None
@@ -1238,7 +1220,10 @@ class CriticAgentBackend:
             pass
 
     def set_trace_context(
-        self, *, tick: int | None = None, phase: str | None = None,
+        self,
+        *,
+        tick: int | None = None,
+        phase: str | None = None,
     ) -> None:
         """Stamp the timeline keys for the next reactor turn's trace row.
 
@@ -1254,7 +1239,10 @@ class CriticAgentBackend:
         self._trace_phase = (str(phase) or None) if phase else None
 
     def _trace_critic_llm_call(
-        self, usage_acc: dict[str, int], *, latency_ms: int | None = None,
+        self,
+        usage_acc: dict[str, int],
+        *,
+        latency_ms: int | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a critic reasoning loop.
 

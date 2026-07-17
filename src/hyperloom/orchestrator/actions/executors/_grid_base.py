@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Shared helper for the ``explore`` executor's grid runs.
 
@@ -19,6 +20,7 @@ from hyperloom.common.coerce import to_str_list
 from ._canonical_fingerprint import canonical_fingerprint
 
 log = logging.getLogger(__name__)
+
 
 # Content-based variant fingerprint (cross-action dedup ledger key). Delegates
 # to :func:`canonical_fingerprint` (the single source of truth); both produce
@@ -55,9 +57,11 @@ def variant_fingerprint(
         args_mode=args_mode,
     )
 
+
 _MAGPIE_CWD_DEFAULT = tempfile.gettempdir()
 
 _VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
+
 
 @dataclass
 class GridVariant:
@@ -138,6 +142,7 @@ class GridVariant:
             args_mode=self.args_mode,
         )
 
+
 def coerce_extra_envs(value: Any) -> dict[str, str]:
     """Normalize Orchestration-supplied ``extra_envs`` to ``dict[str,str]``.
 
@@ -190,6 +195,7 @@ def coerce_extra_envs(value: Any) -> dict[str, str]:
             out_l[k] = v.strip()
         return out_l
     return {}
+
 
 @dataclass
 class VariantResult:

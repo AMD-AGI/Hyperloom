@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for the non-git patch apply/revert path in FrameworkAgentExecutor.
 
@@ -94,6 +95,7 @@ def test_revert_patches_git_tree_uses_git_reset(tmp_path, monkeypatch):
 def test_revert_patches_no_pre_apply_sha_on_git_tree_logs_error(tmp_path, monkeypatch, caplog):
     """If we somehow have a git tree but no pre_apply_sha, return [] and log."""
     import logging
+
     monkeypatch.setattr(fp, "_is_git_tree", lambda p: True)
 
     exe = _Executor()
@@ -138,6 +140,7 @@ def test_nogit_apply_revert_via_executor_roundtrip(tmp_path):
     exe._nogit_patch_backups = backups
 
     import hyperloom.orchestrator.actions.executors.framework_agent as fa_mod
+
     original_fn = fa_mod._is_git_tree
     try:
         fa_mod._is_git_tree = lambda p: False

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coordinator resume tests.
 
@@ -549,14 +550,11 @@ class TestTracelensRootEnvCorrection:
         runtime = tmp_path / "runtime"
         runtime.mkdir(exist_ok=True)
         (runtime / "kernel-agent.env.sh").write_text(
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\n"
-            f"export TRACELENS_ROOT='{tracelens_dir}'\n",
+            f"export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\nexport TRACELENS_ROOT='{tracelens_dir}'\n",
             encoding="utf-8",
         )
 
-    def test_corrects_invalid_inherited_root_from_env_file(
-        self, tmp_path, monkeypatch, capsys
-    ):
+    def test_corrects_invalid_inherited_root_from_env_file(self, tmp_path, monkeypatch, capsys):
         """Root set + inherited TRACELENS_ROOT points nowhere → corrected from file."""
         good = tmp_path / "deps" / "TraceLens"
         good.mkdir(parents=True)
@@ -597,8 +595,7 @@ class TestTracelensRootEnvCorrection:
         magpie_dir = tmp_path / "not-a-magpie-checkout"
         magpie_dir.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
-            "export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\n"
-            f"export MAGPIE_PATH='{magpie_dir}'\n",
+            f"export HYPERLOOM_KERNEL_AGENT_ROOT=/opt/kernel-agent\nexport MAGPIE_PATH='{magpie_dir}'\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/opt/kernel-agent")

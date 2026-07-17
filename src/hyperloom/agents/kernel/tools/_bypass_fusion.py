@@ -1,5 +1,6 @@
 ###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -45,7 +46,10 @@ def _summarize_cluster(run: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "launch_count": len(run),
         "categories": sorted(set(cats)),
-        "members": [{"name": names[i], "category": cats[i], "dur_us": round(float(run[i].get("dur") or 0.0), 3)} for i in range(len(run))],
+        "members": [
+            {"name": names[i], "category": cats[i], "dur_us": round(float(run[i].get("dur") or 0.0), 3)}
+            for i in range(len(run))
+        ],
         "distinct_kernels": sorted(set(names)),
         "aggregate_dur_us": round(total_dur, 3),
         "span_us": round(span, 3),

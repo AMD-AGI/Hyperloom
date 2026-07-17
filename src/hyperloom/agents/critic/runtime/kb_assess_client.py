@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Optional client for the substrate KB ``/v2/reasoning/assess`` endpoint.
 
@@ -34,6 +35,7 @@ def _require_http_url(url: str) -> None:
     scheme = urllib.parse.urlparse(url).scheme
     if scheme not in {"http", "https"}:
         raise ValueError(f"unsupported URL scheme: {scheme!r}")
+
 
 log = logging.getLogger(__name__)
 

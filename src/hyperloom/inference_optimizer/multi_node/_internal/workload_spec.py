@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Pure builders for the SaFE CreateWorkloadRequest body of a session-scoped multi-node-inference RayJob.
 
@@ -32,9 +33,7 @@ from . import infera_support
 _INFERENCE_SERVER_PORT = 8888
 # Ray head-role selector label. Neutral default for portability; internal
 # deployments can restore their cluster's label via the env override.
-_HEAD_ROLE_LABEL = os.environ.get(
-    "HYPERLOOM_RAY_HEAD_ROLE_LABEL", "hyperloom.io/ray-role"
-)
+_HEAD_ROLE_LABEL = os.environ.get("HYPERLOOM_RAY_HEAD_ROLE_LABEL", "hyperloom.io/ray-role")
 _HEAD_ROLE_VALUE = "head"
 # Submitter-only signal-interruptable driver for RayJob.spec.entrypoint.
 _SUBMITTER_BLOCK_ENTRYPOINT = "tail -f /dev/null"
@@ -401,9 +400,7 @@ def build_infera_workload_body(
             res["rdmaResource"] = rdma_resource
         return res
 
-    frontend_ep = _b64(
-        _INFERA_FRONTEND_ENTRYPOINT_TMPL.format(port=frontend_port, model=model.strip())
-    )
+    frontend_ep = _b64(_INFERA_FRONTEND_ENTRYPOINT_TMPL.format(port=frontend_port, model=model.strip()))
     worker_idle_ep = _b64(infera_support.idle_worker_entrypoint(role="worker", ssh_port_base=ssh_port))
     prefill_idle_ep = _b64(infera_support.idle_worker_entrypoint(role="prefill", ssh_port_base=ssh_port))
     decode_idle_ep = _b64(infera_support.idle_worker_entrypoint(role="decode", ssh_port_base=ssh_port))

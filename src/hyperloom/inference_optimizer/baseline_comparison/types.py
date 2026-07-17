@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Data shapes for the external baseline comparison layer.
 
@@ -145,6 +146,7 @@ class BaselineSummary:
             "warning": self.warning,
             "source": self.source,
         }
+
 
 __all__ = [
     "BaselineQuery",

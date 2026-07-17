@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Import-lint guard for ``hyperloom.common``.
 
@@ -68,7 +69,4 @@ def test_common_has_no_first_party_imports():
                 if len(parts) >= 2 and parts[1] != "common":
                     offenders.append(f"{path.name}: import {module}")
 
-    assert not offenders, (
-        "hyperloom.common must not import first-party packages "
-        f"(tree-reform.MD §7): {offenders}"
-    )
+    assert not offenders, f"hyperloom.common must not import first-party packages (tree-reform.MD §7): {offenders}"

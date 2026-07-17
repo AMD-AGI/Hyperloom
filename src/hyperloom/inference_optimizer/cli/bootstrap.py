@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Session bootstrap + summary helpers for the CLI.
 
@@ -78,20 +79,21 @@ def _seed_shared_state(
         detect_gpu_count,
         research_lane_ceiling,
     )
-    research_lane_capacity = int(
-        getattr(args, "research_lane_capacity", 1) or 1
-    )
+
+    research_lane_capacity = int(getattr(args, "research_lane_capacity", 1) or 1)
     research_lane_capacity = max(
-        0, min(research_lane_ceiling(), research_lane_capacity),
+        0,
+        min(research_lane_ceiling(), research_lane_capacity),
     )
     gpu_specialist_capacity_raw = getattr(
-        args, "gpu_specialist_capacity", None,
+        args,
+        "gpu_specialist_capacity",
+        None,
     )
     try:
         gpu_specialist_capacity = max(
             0,
-            int(gpu_specialist_capacity_raw)
-            if gpu_specialist_capacity_raw is not None else detect_gpu_count(),
+            int(gpu_specialist_capacity_raw) if gpu_specialist_capacity_raw is not None else detect_gpu_count(),
         )
     except (TypeError, ValueError):
         gpu_specialist_capacity = detect_gpu_count()
@@ -111,13 +113,10 @@ def _seed_shared_state(
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
     # EXPLORE hard force-exit thresholds.
     if getattr(args, "explore_force_exit_hours_remaining", None) is not None:
-        plateau_overrides["force_exit_hours_remaining"] = float(
-            args.explore_force_exit_hours_remaining
-        )
+        plateau_overrides["force_exit_hours_remaining"] = float(args.explore_force_exit_hours_remaining)
     if getattr(args, "explore_force_exit_budget_pct", None) is not None:
-        plateau_overrides["force_exit_budget_pct"] = float(
-            args.explore_force_exit_budget_pct
-        )
+        plateau_overrides["force_exit_budget_pct"] = float(args.explore_force_exit_budget_pct)
+
     # Resolve int workload knobs from the CLI arg, applying the shared fallback
     # default when unset. Inherited env is NOT a config source (issue #903); the
     # CLI resolver (`_resolve_workload_knobs`) has already folded any resume
@@ -147,16 +146,14 @@ def _seed_shared_state(
         Ladder: explicit CLI/$FRAMEWORK_VERSION -> auto-detect package version
         -> "". Auto-detect runs only when both CLI and env are empty.
         """
-        explicit = (
-            (getattr(args_in, "framework_version", None) or "").strip()
-            or (os.environ.get("FRAMEWORK_VERSION", "") or "").strip()
-        )
+        explicit = (getattr(args_in, "framework_version", None) or "").strip() or (
+            os.environ.get("FRAMEWORK_VERSION", "") or ""
+        ).strip()
         if explicit:
             return explicit
-        framework = (
-            (getattr(args_in, "framework", None) or "").strip()
-            or (os.environ.get("FRAMEWORK", "") or "").strip()
-        )
+        framework = (getattr(args_in, "framework", None) or "").strip() or (
+            os.environ.get("FRAMEWORK", "") or ""
+        ).strip()
         if not framework:
             return ""
         from ..recipe_snapshot_constants import (
@@ -170,38 +167,43 @@ def _seed_shared_state(
 
     # --explore-overtime-kill-ratio mirror; <=0 disables the gate.
     explore_overtime_kill_ratio_raw = getattr(
-        args, "explore_overtime_kill_ratio", None,
+        args,
+        "explore_overtime_kill_ratio",
+        None,
     )
     try:
         explore_overtime_kill_ratio = (
-            float(explore_overtime_kill_ratio_raw)
-            if explore_overtime_kill_ratio_raw is not None else 2.0
+            float(explore_overtime_kill_ratio_raw) if explore_overtime_kill_ratio_raw is not None else 2.0
         )
     except (TypeError, ValueError):
         explore_overtime_kill_ratio = 2.0
 
     # --explore-variant-timeout-sec mirror; 0 (default) auto-derives the cap, positive pins it.
     explore_variant_timeout_raw = getattr(
-        args, "explore_variant_timeout_sec", None,
+        args,
+        "explore_variant_timeout_sec",
+        None,
     )
     try:
         explore_variant_timeout_sec_override = max(
             0,
-            int(explore_variant_timeout_raw)
-            if explore_variant_timeout_raw is not None else 0,
+            int(explore_variant_timeout_raw) if explore_variant_timeout_raw is not None else 0,
         )
     except (TypeError, ValueError):
         explore_variant_timeout_sec_override = 0
 
     # --explore-variant-timeout-safety-margin mirror: auto-derive headroom over the soft kill ratio (neg -> 0).
     explore_variant_timeout_safety_margin_raw = getattr(
-        args, "explore_variant_timeout_safety_margin", None,
+        args,
+        "explore_variant_timeout_safety_margin",
+        None,
     )
     try:
         explore_variant_timeout_safety_margin = max(
             0.0,
             float(explore_variant_timeout_safety_margin_raw)
-            if explore_variant_timeout_safety_margin_raw is not None else 0.5,
+            if explore_variant_timeout_safety_margin_raw is not None
+            else 0.5,
         )
     except (TypeError, ValueError):
         explore_variant_timeout_safety_margin = 0.5
@@ -214,11 +216,9 @@ def _seed_shared_state(
     # so resume/breakdown stay correct in a fresh shell.
     _resolved_kernel_order = [
         t.strip().lower()
-        for t in str(
-            os.environ.get("KERNEL_OPT_BACKEND_ORDER")
-            or os.environ.get("KERNEL_OPT_BACKENDS")
-            or ""
-        ).split(",")
+        for t in str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").split(
+            ","
+        )
         if t.strip()
     ]
     _kernel_optimizer_record = "geak" if "geak" in _resolved_kernel_order else "native"
@@ -238,7 +238,9 @@ def _seed_shared_state(
         model_class=args.model_class or "",
         # Advisory architecture profile; fresh-launch only. Soft-degrade to {}.
         model_arch=_load_model_arch(
-            _workspace_root_resolve(), _model_identity
+            _workspace_root_resolve(),
+            _model_identity,
+            str(args.model),
         ),
         # Architecture-identity tags from config.json.
         model_architectures=_cfg_tags.get("architectures", []),
@@ -250,9 +252,7 @@ def _seed_shared_state(
         # Workload metadata mirrored from CLI/env.
         tp=_int_arg("tp", DEFAULT_TP),
         ep=_int_arg("ep", DEFAULT_EP),
-        precision=(
-            str(getattr(args, "precision", None) or DEFAULT_PRECISION).strip()
-        ),
+        precision=(str(getattr(args, "precision", None) or DEFAULT_PRECISION).strip()),
         framework_version=_resolve_framework_version(args),
         conc=_int_arg("conc", DEFAULT_CONC),
         isl=_int_arg("isl", DEFAULT_ISL),
@@ -261,9 +261,7 @@ def _seed_shared_state(
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
-        continue_kernel_after_gemm=bool(
-            getattr(args, "continue_kernel_after_gemm", True)
-        ),
+        continue_kernel_after_gemm=bool(getattr(args, "continue_kernel_after_gemm", True)),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain=0.0,
@@ -281,6 +279,8 @@ def _seed_shared_state(
         ),
         # Standalone FRAMEWORK_AGENT phase; --no-framework-agent skips it.
         framework_agent_phase_enabled=not bool(getattr(args, "no_framework_agent", False)),
+        # FRAMEWORK local-exploration arm; --no-framework-local-explore opts out.
+        framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
         explore_enabled=not bool(getattr(args, "no_explore", False)),
         # FRAMEWORK config-exploration lane toggle (default OFF).
         framework_config_exploration_enabled=bool(
@@ -289,9 +289,7 @@ def _seed_shared_state(
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
-        research_scout_interval=max(
-            1, int(getattr(args, "research_scout_interval", 3) or 3)
-        ),
+        research_scout_interval=max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
@@ -308,6 +306,7 @@ def _seed_shared_state(
     state.save(session_dir)
     return state
 
+
 def _snapshot_system_prompts(
     session_dir: Path,
     *,
@@ -318,6 +317,7 @@ def _snapshot_system_prompts(
         target = agent_prompt_snapshot(session_dir, role)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body or "(empty)", encoding="utf-8")
+
 
 def _print_session_skeleton(session_dir: Path) -> None:
     """Echo the freshly-created skeleton so launchers see the exact layout.
@@ -331,6 +331,7 @@ def _print_session_skeleton(session_dir: Path) -> None:
         marker = "ok" if (session_dir / sub).is_dir() else "MISSING"
         print(f"  [{marker}] {sub}/")
     print("  [ok] manifest.json (written first)")
+
 
 def _print_final_summary(
     state: SharedState,
@@ -374,14 +375,8 @@ def _print_final_summary(
                 f"{failure_summary.get('root_cause')}"
             )
             if failure_summary.get("server_log"):
-                print(
-                    f"  server_log           : "
-                    f"{failure_summary.get('server_log')}"
-                )
-    print(
-        f"  cumulative_gain      : {state.cumulative_gain:.2f}% "
-        f"(per-round sum — informational)"
-    )
+                print(f"  server_log           : {failure_summary.get('server_log')}")
+    print(f"  cumulative_gain      : {state.cumulative_gain:.2f}% (per-round sum — informational)")
     if state.cumulative_gain_validated_ts:
         stale = (
             " ⚠ stack changed since validation"
@@ -394,15 +389,13 @@ def _print_final_summary(
             f"ts={state.cumulative_gain_validated_ts}){stale}"
         )
     else:
-        print(
-            "  cumulative_gain_val  : 0.00% "
-            "⚠ never validated — no `explore` stack-rebench has succeeded yet"
-        )
+        print("  cumulative_gain_val  : 0.00% ⚠ never validated — no `explore` stack-rebench has succeeded yet")
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
     _print_kernel_opt_summary_line(state)
     print("===============================================")
+
 
 def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
     """Reconcile persisted ``crash_count`` (state.json + final.json) up to the live in-memory value.
@@ -423,6 +416,7 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
     # reports/final.json: patch the single field in place if present.
     try:
         from ..session.session_paths import reports_dir
+
         final_json = reports_dir(session_dir) / "final.json"
         if final_json.exists():
             data = json.loads(final_json.read_text(encoding="utf-8"))
@@ -435,12 +429,14 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
     except Exception:  # noqa: BLE001
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
+
 def _print_kernel_opt_summary_line(state: SharedState) -> None:
     """One-line forensic readout of kernel_opt attempts at session end (matches the on-disk report; best-effort)."""
     try:
         from hyperloom.orchestrator.kernel.attempt_summary import (
             build_kernel_optimization_summary,
         )
+
         session_dir = _resolve_session_dir_for_summary(state)
         if session_dir is None:
             return
@@ -460,13 +456,12 @@ def _print_kernel_opt_summary_line(state: SharedState) -> None:
         takeaways = summary.get("top_takeaways") or []
         if len(takeaways) >= 2:
             print(f"  kernel_opt_top_cause : {takeaways[1]}")
-        report_path = (
-            Path(session_dir) / "reports" / "kernel_optimization_summary.json"
-        )
+        report_path = Path(session_dir) / "reports" / "kernel_optimization_summary.json"
         if report_path.is_file():
             print(f"  kernel_opt_report    : {report_path}")
     except Exception:  # noqa: BLE001 — stdout print must never fail the run
         pass
+
 
 def _default_target_summary(args: argparse.Namespace) -> str:
     """Compose a human-readable objective summary from the CLI target flags.
@@ -494,14 +489,10 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     if args.target_tput:
         from .. import framework_registry
 
-        target = framework_registry.format_primary_metric(
-            getattr(args, "framework", None), args.target_tput
-        )
-        return (
-            f"Establish baseline on {Path(args.model).name} then reach "
-            f"{target} within {args.max_hours}h."
-        )
+        target = framework_registry.format_primary_metric(getattr(args, "framework", None), args.target_tput)
+        return f"Establish baseline on {Path(args.model).name} then reach {target} within {args.max_hours}h."
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
+
 
 def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
     """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped."""
@@ -519,6 +510,7 @@ def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
             log.warning("conc_sweep: ignoring non-integer CONC token %r", t)
     return out or [256, 128, 64, 32, 16, 8, 4, 2]
 
+
 def _read_failure_summary(session_dir: Path) -> dict | None:
     """Read ``reports/final.json``'s ``failure_summary`` block, if present.
 
@@ -528,12 +520,14 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
     """
     try:
         from ..session.session_paths import reports_dir
+
         final_json = reports_dir(session_dir) / "final.json"
         data = json.loads(final_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
         return None
     fs = data.get("failure_summary") if isinstance(data, dict) else None
     return fs if isinstance(fs, dict) else None
+
 
 def _resolve_reference_recipe(
     args: argparse.Namespace,
@@ -559,19 +553,15 @@ def _resolve_reference_recipe(
         discover_reference_script,
         parse_reference_script,
     )
+
     recipe = parse_reference_script(source, framework=framework)
     if recipe.server_args or recipe.envs:
-        print(
-            f"Reference script: {source} "
-            f"({len(recipe.server_args.split())} arg tokens, "
-            f"{len(recipe.envs)} env(s))"
-        )
+        print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
         return (recipe.server_args, dict(recipe.envs), recipe.model or "", source)
 
     # Explicit source unreadable / yielded nothing: auto-discover instead.
     print(
-        f"Reference script: {source} not usable (unreadable or no flags "
-        f"lifted); falling back to auto-discovery",
+        f"Reference script: {source} not usable (unreadable or no flags lifted); falling back to auto-discovery",
         file=sys.stderr,
     )
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
@@ -590,11 +580,11 @@ def _resolve_reference_recipe(
         return (recipe.server_args, dict(recipe.envs), recipe.model or "", path)
     if path and tier == "fuzzy":
         print(
-            f"Reference script: candidate {path} (fuzzy match — NOT applied; "
-            f"pass --reference-script {path} to use it)",
+            f"Reference script: candidate {path} (fuzzy match — NOT applied; pass --reference-script {path} to use it)",
             file=sys.stderr,
         )
     return ("", {}, "", "")
+
 
 def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:
     """Best-effort session_dir lookup ($HYPERLOOM_SESSION_DIR) for the stdout kernel_opt line; ``None`` if unresolved."""

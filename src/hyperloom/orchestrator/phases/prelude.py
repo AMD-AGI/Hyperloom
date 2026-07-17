@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """PRELUDE phase handler: warm-recipe replay (KB best_config auto-apply) and
 the initial baseline/roofline internal-analysis task enqueue."""
@@ -174,9 +175,7 @@ class PreludePhase(PhaseHandler):
             kept = [
                 p
                 for p in patches
-                if isinstance(p, dict)
-                and not p.get("expired")
-                and _norm(p.get("patch_file")) not in advisory_drop
+                if isinstance(p, dict) and not p.get("expired") and _norm(p.get("patch_file")) not in advisory_drop
             ]
             for p in patches:
                 if isinstance(p, dict) and _norm(p.get("patch_file")) in advisory_drop:

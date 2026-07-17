@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """RobustnessAgentBackend — bridges the ``hyperloom.agents.robustness``
 runtime into the Coordinator as a real Robustness Backend.
@@ -282,7 +283,6 @@ class RobustnessAgentBackend:
         metadata["output_tokens"] = ot
         if usage.get("model"):
             metadata["model"] = usage.get("model")
-
 
     def _build_runtime_env(self) -> dict[str, str]:
         """Build the subprocess environment for ``runtime.cli`` invocations.

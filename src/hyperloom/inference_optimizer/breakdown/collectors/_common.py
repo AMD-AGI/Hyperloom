@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
 
@@ -16,7 +17,6 @@ from typing import Any, Iterable
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json, read_jsonl
-
 
 
 # Shared helpers
@@ -371,4 +371,3 @@ def _scan_profile_reports(session_dir: Path) -> list[tuple[Path, Path]]:
         if report is not None:
             out.append((task_dir, report))
     return out
-

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CLI argument parser — ``_build_parser`` and its purely-computational helpers."""
 
@@ -120,7 +121,9 @@ def _default_codex_model_env() -> str:
         or (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
         or anthropic_url == "https://api.deepseek.com/anthropic"
     ) and not openai_url:
-        return (os.environ.get("CLAUDE_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "").strip() or DEFAULT_DEEPSEEK_MODEL
+        return (
+            os.environ.get("CLAUDE_MODEL") or os.environ.get("DEEPSEEK_MODEL") or ""
+        ).strip() or DEFAULT_DEEPSEEK_MODEL
     if anthropic_url and not openai_url:
         return (os.environ.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
     explicit = (os.environ.get("CODEX_MODEL") or "").strip()
@@ -274,15 +277,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cpus-per-node",
         type=int,
         default=None,
-        help="CPU cores requested per multi-node pod (Infera or RayJob). "
-        "Resolution: flag > 96 (default).",
+        help="CPU cores requested per multi-node pod (Infera or RayJob). Resolution: flag > 96 (default).",
     )
     opt.add_argument(
         "--mem-per-node",
         type=int,
         default=None,
-        help="Memory (GiB) requested per multi-node pod (Infera or RayJob). "
-        "Resolution: flag > 1024 (default).",
+        help="Memory (GiB) requested per multi-node pod (Infera or RayJob). Resolution: flag > 1024 (default).",
     )
     # --rayjob-extra-env is a prompt-driven pass-through forwarded verbatim to workload_spec.env; the CLI
     # invents no keys. Reserved RAY_JOB_ENTRYPOINT stripped downstream; credential keys auto-injected elsewhere.
@@ -333,8 +334,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Framework server args to apply in every phase. Routed through "
         "the framework-specific EXTRA_*_ARGS env in Magpie YAMLs "
         "(EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS / EXTRA_ATOM_ARGS). "
-        "Example: --server-args \"--kv-cache-dtype fp8_e4m3 "
-        "--gpu-memory-utilization 0.85\".",
+        'Example: --server-args "--kv-cache-dtype fp8_e4m3 '
+        '--gpu-memory-utilization 0.85".',
     )
     opt.add_argument(
         "--ep",
@@ -400,15 +401,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--pd-prefill-ep",
         type=int,
         default=0,
-        help="EP for the prefill group (disaggregated only); 0 = fall back to "
-        "--ep. Multi-node PD only.",
+        help="EP for the prefill group (disaggregated only); 0 = fall back to --ep. Multi-node PD only.",
     )
     opt.add_argument(
         "--pd-decode-ep",
         type=int,
         default=0,
-        help="EP for the decode group (disaggregated only); 0 = fall back to "
-        "--ep. Multi-node PD only.",
+        help="EP for the decode group (disaggregated only); 0 = fall back to --ep. Multi-node PD only.",
     )
     opt.add_argument(
         "--pd-prefill-extra-args",
@@ -679,6 +678,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "the framework-agent toolchain is unavailable "
         "or you want a faster cold start. "
         "Default: framework phase enabled.",
+    )
+    opt.add_argument(
+        "--no-framework-local-explore",
+        dest="no_framework_local_explore",
+        action="store_true",
+        default=False,
+        help="Disable the FRAMEWORK_AGENT local-exploration arm. By default, "
+        "when PR discovery is empty/exhausted (or the ranker prefers it), the "
+        "phase dispatches a write-capable specialist that authors a throughput "
+        "patch from the live source + profiling evidence (and may web-search "
+        "the latest upstream code) instead of skipping the phase. Disabling "
+        "restores the historical behavior of exiting after "
+        "DISCOVER_FAILURE_RETRY_LIMIT (3) empty/failed discoveries. Requires "
+        "the authoring track (has no effect under diff-only mode).",
     )
     opt.add_argument(
         "--kernel-codex",

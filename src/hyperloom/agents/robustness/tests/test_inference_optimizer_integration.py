@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """End-to-end integration with inference_optimizer: drive a Coordinator prompt through the reactor and validate every intent against the upstream PolicyGate. Skipped when inference_optimizer is not importable."""
 

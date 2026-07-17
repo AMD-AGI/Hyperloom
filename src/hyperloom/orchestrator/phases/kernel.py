@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """KERNEL_AGENT phase handler: bf16-dense-GEMM fallback, GEAK e2e run,
 GEMM-tuning keep/promote, and watermark-roofline gating."""
@@ -48,9 +49,7 @@ class KernelPhase(PhaseHandler):
             return
         stack_len = int(getattr(self.shared_state, "cumulative_gain_validated_stack_len", 0) or 0)
         try:
-            await self.sub.run_task(
-                await self._enqueue_internal_analysis_task(reason=f"kernel_entry_g{stack_len}")
-            )
+            await self.sub.run_task(await self._enqueue_internal_analysis_task(reason=f"kernel_entry_g{stack_len}"))
         except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
             log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
             return
@@ -74,12 +73,7 @@ class KernelPhase(PhaseHandler):
 
         if geak_selected():
             return True
-        return (
-            str(getattr(self.shared_state, "kernel_optimizer", "") or "")
-            .strip()
-            .lower()
-            == "geak"
-        )
+        return str(getattr(self.shared_state, "kernel_optimizer", "") or "").strip().lower() == "geak"
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """Run deterministic KERNEL-entry setup before LLM kernel work (FP8 GEMM tuning gate).
@@ -117,12 +111,9 @@ class KernelPhase(PhaseHandler):
 
             if self._bf16_dense_gemm_fallback_pending():
                 log.info(
-                    "KERNEL entry: resuming pending bf16 dense GEMM fallback "
-                    "after prior forge fp8 no-candidate result"
+                    "KERNEL entry: resuming pending bf16 dense GEMM fallback after prior forge fp8 no-candidate result"
                 )
-                result = await self._run_bf16_dense_gemm_fallback(
-                    run_gemm_tuning_handler
-                )
+                result = await self._run_bf16_dense_gemm_fallback(run_gemm_tuning_handler)
             else:
                 result = await run_gemm_tuning_handler(
                     {
@@ -146,13 +137,8 @@ class KernelPhase(PhaseHandler):
             and self._should_run_bf16_dense_gemm_fallback(result)
             and str(result.get("decision") or "").strip().upper() != "KEEP"
         ):
-            log.info(
-                "KERNEL entry: forge fp8 GEMM tuning found no candidate; "
-                "trying bf16 dense fallback"
-            )
-            result = await self._run_bf16_dense_gemm_fallback(
-                run_gemm_tuning_handler
-            )
+            log.info("KERNEL entry: forge fp8 GEMM tuning found no candidate; trying bf16 dense fallback")
+            result = await self._run_bf16_dense_gemm_fallback(run_gemm_tuning_handler)
             await self._handle_gemm_tuning_result(result)
 
         status = str(result.get("status") or "unknown")
@@ -239,9 +225,7 @@ class KernelPhase(PhaseHandler):
             return False
         if str(result.get("precision") or "").strip().lower() != "fp8":
             return False
-        framework = str(
-            result.get("framework") or getattr(self.shared_state, "framework", "") or ""
-        ).strip().lower()
+        framework = str(result.get("framework") or getattr(self.shared_state, "framework", "") or "").strip().lower()
         if framework != "sglang":
             return False
         if str(result.get("micro_decision") or "").strip().lower() != "no_improvement":
@@ -257,19 +241,14 @@ class KernelPhase(PhaseHandler):
                 improved = int(tuner.get("improved_shapes") or 0)
             except (TypeError, ValueError):
                 improved = 0
-            if improved > 0 and str(tuner.get("env_var") or "").strip() and str(
-                tuner.get("env_value") or ""
-            ).strip():
+            if improved > 0 and str(tuner.get("env_var") or "").strip() and str(tuner.get("env_value") or "").strip():
                 return False
         return True
 
     def _bf16_dense_gemm_fallback_pending(self) -> bool:
         """Return True when a recorded fp8 no-op still needs its bf16 retry."""
         last = getattr(self.shared_state, "last_gemm_tuning", {}) or {}
-        return (
-            self._should_run_bf16_dense_gemm_fallback(last)
-            and not self._bf16_dense_gemm_fallback_attempted()
-        )
+        return self._should_run_bf16_dense_gemm_fallback(last) and not self._bf16_dense_gemm_fallback_attempted()
 
     def _bf16_dense_gemm_fallback_attempted(self) -> bool:
         """Detect whether the bf16 dense fallback has already been attempted."""
@@ -278,11 +257,7 @@ class KernelPhase(PhaseHandler):
         if isinstance(last, dict):
             attempts.append(last)
         attempts.extend(getattr(self.shared_state, "gemm_tuning_attempts", None) or [])
-        return any(
-            self._is_bf16_dense_gemm_fallback_attempt(entry)
-            for entry in attempts
-            if isinstance(entry, dict)
-        )
+        return any(self._is_bf16_dense_gemm_fallback_attempt(entry) for entry in attempts if isinstance(entry, dict))
 
     @staticmethod
     def _is_bf16_dense_gemm_fallback_attempt(entry: dict[str, Any]) -> bool:
@@ -294,9 +269,7 @@ class KernelPhase(PhaseHandler):
         for key in ("task_id", "reason", "source"):
             if str(entry.get(key) or "").strip() in markers:
                 return True
-        if "kernel_entry_gemm_tuning_bf16_fallback" in str(
-            entry.get("workspace") or ""
-        ):
+        if "kernel_entry_gemm_tuning_bf16_fallback" in str(entry.get("workspace") or ""):
             return True
         if str(entry.get("precision") or "").strip().lower() != "bf16":
             return False
@@ -325,8 +298,7 @@ class KernelPhase(PhaseHandler):
                 cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
                 envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
         except Exception:  # noqa: BLE001
-            log.warning("bench_protocol: could not read recipe %r", recipe_path,
-                        exc_info=True)
+            log.warning("bench_protocol: could not read recipe %r", recipe_path, exc_info=True)
             envs = {}
 
         def _pick(key: str, cast: Callable[[str], Any]) -> Any:
@@ -378,7 +350,8 @@ class KernelPhase(PhaseHandler):
             return env_default_timeout, env_default_timeout + 600, False
         remaining = deadline - time.monotonic()
         grace = effective_closing_grace_sec(
-            float(getattr(self.shared_state, "max_minutes", 0) or 0), None,
+            float(getattr(self.shared_state, "max_minutes", 0) or 0),
+            None,
         )
         margin = float(os.environ.get("GEAK_BUDGET_MARGIN_S", "300"))
         # Reserve the closing window: kill the subprocess with at least ``grace`` left.
@@ -386,7 +359,8 @@ class KernelPhase(PhaseHandler):
         # Also honour the KERNEL_AGENT phase's own wall-clock budget:
         # cap by min(session, kernel_phase).
         phase_rem = _phase_state.phase_budget_remaining_seconds(
-            self.shared_state, budget_pct=self._phase_budget_pct,
+            self.shared_state,
+            budget_pct=self._phase_budget_pct,
         )
         if phase_rem is not None:
             kill_budget = min(kill_budget, float(phase_rem))
@@ -417,9 +391,7 @@ class KernelPhase(PhaseHandler):
         # Forward the SAME bench knobs Hyperloom benched with so GEAK's internal
         # e2e measures identically; source = the baseline recipe's benchmark.envs
         # (process-env fallback). Only resolved keys are sent.
-        bench_protocol = self._resolve_bench_protocol(
-            str(getattr(state, "baseline_config_path", "") or "")
-        )
+        bench_protocol = self._resolve_bench_protocol(str(getattr(state, "baseline_config_path", "") or ""))
         # Serving-launch fidelity: forward the SAME max-model-len / gpu-mem-util
         # the baseline served with so GEAK launches the identical engine and its
         # baseline matches raw_baseline_tput. Resolver parses these from the raw
@@ -451,20 +423,18 @@ class KernelPhase(PhaseHandler):
             # Orchestrator throughput of the SAME config GEAK seeds its baseline
             # with, so run_e2e can compute a pure measurement divergence. 0.0 =>
             # no accepted config yet (falls back to raw baseline downstream).
-            "orchestrator_best_tput_same_config": float(
-                (state.current_best or {}).get("tput") or 0.0
-            ) if isinstance(getattr(state, "current_best", None), dict) else 0.0,
+            "orchestrator_best_tput_same_config": float((state.current_best or {}).get("tput") or 0.0)
+            if isinstance(getattr(state, "current_best", None), dict)
+            else 0.0,
             # Serving-launch fidelity (both optional; unset => GEAK adapter default).
             "max_model_len": int(getattr(state, "max_model_len", 0) or int(os.environ.get("MAX_MODEL_LEN", "0") or 0)),
-            "mem_fraction": float(getattr(state, "mem_fraction", 0.0) or float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0)),
+            "mem_fraction": float(
+                getattr(state, "mem_fraction", 0.0) or float(os.environ.get("GPU_MEMORY_UTILIZATION", "0") or 0.0)
+            ),
             "exp_root": str(self.session_dir / "geak"),
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the
             # in-progress on-disk artifacts while a new cycle gets a fresh dir.
-            "eval_dir": str(
-                self.session_dir
-                / "geak"
-                / f"e2e_cycle{int(getattr(state, 'macro_cycle', 0) or 0)}"
-            ),
+            "eval_dir": str(self.session_dir / "geak" / f"e2e_cycle{int(getattr(state, 'macro_cycle', 0) or 0)}"),
             # Align GEAK's bench CLIENT to Hyperloom's exact one so final/sweep
             # numbers are cross-harness comparable.
             "bench_client": "auto",
@@ -537,11 +507,13 @@ class KernelPhase(PhaseHandler):
             the ``skip_to_sweep`` hint so the coordinator never deadlocks.
             """
             state.geak_result = result
-            self._record_phase_entry_evidence(geak={
-                "status": result.get("status"),
-                "error_class": result.get("error_class"),
-                "error": (str(result.get("error") or "")[:500] or None),
-            })
+            self._record_phase_entry_evidence(
+                geak={
+                    "status": result.get("status"),
+                    "error_class": result.get("error_class"),
+                    "error": (str(result.get("error") or "")[:500] or None),
+                }
+            )
             # Persist the wind-down hint durably.
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
@@ -551,10 +523,7 @@ class KernelPhase(PhaseHandler):
         # so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
         recovered = _read_geak_result(result_path)
-        if (
-            recovered.get("status") == "ok"
-            and not self._geak_win_already_recorded()
-        ):
+        if recovered.get("status") == "ok" and not self._geak_win_already_recorded():
             log.info(
                 "GEAK result.json exists but state has no recorded win "
                 "(crash before handback); promoting recovered result."
@@ -562,9 +531,7 @@ class KernelPhase(PhaseHandler):
             _promote_recovered_result(recovered, recovered_from="existing_result_json")
             if recovered.get("status") == "ok":
                 try:
-                    await self._enqueue_internal_stack_rebench(
-                        reason="geak_e2e_win_recovered"
-                    )
+                    await self._enqueue_internal_stack_rebench(reason="geak_e2e_win_recovered")
                 except Exception:  # noqa: BLE001 - defensive
                     log.exception("geak: enqueue rebench for recovered result failed")
             return
@@ -573,8 +540,7 @@ class KernelPhase(PhaseHandler):
             runner = _kernel_agent_tool_path("backends/geak_runner.py")
         except Exception as exc:  # noqa: BLE001
             log.exception("GEAK runner not resolvable; skipping KERNEL")
-            _finish_skip({"status": "error", "error_class": "runner_not_found",
-                          "error": repr(exc)})
+            _finish_skip({"status": "error", "error_class": "runner_not_found", "error": repr(exc)})
             return
 
         # Budget-aware timeouts: shrink to the remaining run deadline and always
@@ -585,24 +551,32 @@ class KernelPhase(PhaseHandler):
             log.warning(
                 "GEAK: only %ds budget remains (< min %ds); skipping e2e "
                 "and winding down to SWEEP so the closing report runs in time.",
-                runner_timeout, min_run,
+                runner_timeout,
+                min_run,
             )
-            _finish_skip({
-                "status": "skipped",
-                "error_class": "insufficient_budget",
-                "error": (f"only {runner_timeout}s of KERNEL budget remained "
-                          f"(< min {min_run}s); skipped to protect the closing "
-                          f"report window"),
-                "runner_timeout_s": runner_timeout,
-            })
+            _finish_skip(
+                {
+                    "status": "skipped",
+                    "error_class": "insufficient_budget",
+                    "error": (
+                        f"only {runner_timeout}s of KERNEL budget remained "
+                        f"(< min {min_run}s); skipped to protect the closing "
+                        f"report window"
+                    ),
+                    "runner_timeout_s": runner_timeout,
+                }
+            )
             return
 
-        cmd = ["python3", str(runner), str(handoff_path), str(out_dir),
-               "--timeout-s", str(runner_timeout)]
-        log.info("KERNEL entry: delegating to GEAK e2e (from=%s) "
-                 "runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
-                 from_phase or "<unknown>", runner_timeout, kill_timeout,
-                 budget_known, " ".join(cmd))
+        cmd = ["python3", str(runner), str(handoff_path), str(out_dir), "--timeout-s", str(runner_timeout)]
+        log.info(
+            "KERNEL entry: delegating to GEAK e2e (from=%s) runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
+            from_phase or "<unknown>",
+            runner_timeout,
+            kill_timeout,
+            budget_known,
+            " ".join(cmd),
+        )
 
         # Run in its own process group so a timeout can SIGTERM the whole
         # runner -> run_e2e -> vllm/node tree (grace to flush result.json), then
@@ -611,8 +585,12 @@ class KernelPhase(PhaseHandler):
 
         def _run() -> subprocess.CompletedProcess:
             p = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                env=dict(os.environ), start_new_session=True,
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+                start_new_session=True,
             )
 
             def _killpg(sig: int) -> None:
@@ -632,7 +610,10 @@ class KernelPhase(PhaseHandler):
                     _killpg(signal.SIGKILL)
                     out, err = p.communicate()
                 raise subprocess.TimeoutExpired(
-                    cmd, kill_timeout, output=out, stderr=err,
+                    cmd,
+                    kill_timeout,
+                    output=out,
+                    stderr=err,
                 )
             return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
@@ -642,15 +623,17 @@ class KernelPhase(PhaseHandler):
             if proc.returncode != 0:
                 log.warning("GEAK runner rc=%s: %s", proc.returncode, stderr_tail)
         except subprocess.TimeoutExpired:
-            log.warning("GEAK runner exceeded kill_timeout=%ds; SIGTERM'd "
-                        "to let it flush, then reclaimed the closing window",
-                        kill_timeout)
+            log.warning(
+                "GEAK runner exceeded kill_timeout=%ds; SIGTERM'd to let it flush, then reclaimed the closing window",
+                kill_timeout,
+            )
             # The graceful SIGTERM gives run_e2e a window to flush result.json;
             # keep a real win instead of discarding the phase as a timeout.
             recovered = _read_geak_result(result_path)
             if recovered.get("status") == "ok":
-                log.info("GEAK flushed an OK result.json under SIGTERM "
-                         "grace; promoting the recovered win despite the cap.")
+                log.info(
+                    "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
+                )
                 _promote_recovered_result(
                     recovered,
                     recovered_from="sigterm_flushed_result_json",
@@ -659,38 +642,35 @@ class KernelPhase(PhaseHandler):
                 # Rebench-first: enqueue the main-flow rebench (candidate stays
                 # pending if a budget cap prevents it from running).
                 try:
-                    await self._enqueue_internal_stack_rebench(
-                        reason="geak_e2e_win_sigterm_recovered"
-                    )
+                    await self._enqueue_internal_stack_rebench(reason="geak_e2e_win_sigterm_recovered")
                 except Exception:  # noqa: BLE001 - defensive
-                    log.exception(
-                        "geak: enqueue rebench for sigterm-recovered result failed"
-                    )
+                    log.exception("geak: enqueue rebench for sigterm-recovered result failed")
                 return
-            _finish_skip({
-                "status": "error",
-                "error_class": "timeout",
-                "error": (f"GEAK e2e killed after {kill_timeout}s "
-                          f"(budget-capped); closing window preserved"),
-                "runner_timeout_s": runner_timeout,
-                "kill_timeout_s": kill_timeout,
-            })
+            _finish_skip(
+                {
+                    "status": "error",
+                    "error_class": "timeout",
+                    "error": (f"GEAK e2e killed after {kill_timeout}s (budget-capped); closing window preserved"),
+                    "runner_timeout_s": runner_timeout,
+                    "kill_timeout_s": kill_timeout,
+                }
+            )
             return
         except Exception as exc:  # noqa: BLE001
             log.exception("GEAK runner crashed")
-            _finish_skip({"status": "error", "error_class": "runner_crashed",
-                          "error": repr(exc)})
+            _finish_skip({"status": "error", "error_class": "runner_crashed", "error": repr(exc)})
             return
 
         result: dict[str, Any] = _read_geak_result(result_path)
         if not result:
-            _finish_skip({
-                "status": "error",
-                "error_class": "no_result_json",
-                "error": (f"runner rc={proc.returncode} produced no parseable "
-                          f"result.json at {result_path}"),
-                "stderr_tail": stderr_tail,
-            })
+            _finish_skip(
+                {
+                    "status": "error",
+                    "error_class": "no_result_json",
+                    "error": (f"runner rc={proc.returncode} produced no parseable result.json at {result_path}"),
+                    "stderr_tail": stderr_tail,
+                }
+            )
             return
         # Carry the actual exit code so the breakdown can audit a nonzero rc.
         result.setdefault("returncode", proc.returncode)
@@ -705,16 +685,18 @@ class KernelPhase(PhaseHandler):
                 "orchestrator best (%s); refusing to promote a phantom-baseline gain",
                 result.get("error"),
             )
-            _finish_skip({
-                "status": "baseline_reproduction_failed",
-                "error_class": "baseline_reproduction_failed",
-                "error": (str(result.get("error") or "")[:500] or
-                          "GEAK baseline ref != orchestrator best (env_spec mismatch)"),
-                "ref_tput": result.get("ref_tput"),
-                "orchestrator_best_tput_same_config": result.get(
-                    "orchestrator_best_tput_same_config"
-                ),
-            })
+            _finish_skip(
+                {
+                    "status": "baseline_reproduction_failed",
+                    "error_class": "baseline_reproduction_failed",
+                    "error": (
+                        str(result.get("error") or "")[:500]
+                        or "GEAK baseline ref != orchestrator best (env_spec mismatch)"
+                    ),
+                    "ref_tput": result.get("ref_tput"),
+                    "orchestrator_best_tput_same_config": result.get("orchestrator_best_tput_same_config"),
+                }
+            )
             return
 
         # Rebench-first: record the win as an UNVALIDATED candidate only; the
@@ -728,26 +710,32 @@ class KernelPhase(PhaseHandler):
                 await self._enqueue_internal_stack_rebench(reason="geak_e2e_win")
             except Exception:  # noqa: BLE001 - defensive
                 log.exception("geak: enqueue same-harness revalidation failed")
-        self._record_phase_entry_evidence(geak={
-            "status": result.get("status"),
-            "throughput_speedup": result.get("throughput_speedup"),
-            "final_throughput_tok_s": result.get("final_throughput_tok_s"),
-            "eval_dir": result.get("eval_dir"),
-            "report_path": result.get("report_path"),
-            "runner_timeout_s": runner_timeout,
-        })
+        self._record_phase_entry_evidence(
+            geak={
+                "status": result.get("status"),
+                "throughput_speedup": result.get("throughput_speedup"),
+                "final_throughput_tok_s": result.get("final_throughput_tok_s"),
+                "eval_dir": result.get("eval_dir"),
+                "report_path": result.get("report_path"),
+                "runner_timeout_s": runner_timeout,
+            }
+        )
         state.save(self.session_dir)
-        await self.bus.append_and_seq(Message.new(
-            "kernel_agent", "orchestration", "response",
-            {
-                "in_reply_to": "",
-                "kind": "geak_e2e_done",
-                "status": str(result.get("status") or "unknown"),
-                "speedup": result.get("throughput_speedup"),
-                "result_path": str(result_path),
-            },
-            priority=1,
-        ))
+        await self.bus.append_and_seq(
+            Message.new(
+                "kernel_agent",
+                "orchestration",
+                "response",
+                {
+                    "in_reply_to": "",
+                    "kind": "geak_e2e_done",
+                    "status": str(result.get("status") or "unknown"),
+                    "speedup": result.get("throughput_speedup"),
+                    "result_path": str(result_path),
+                },
+                priority=1,
+            )
+        )
         # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
         state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
         state.save(self.session_dir)
@@ -849,7 +837,8 @@ class KernelPhase(PhaseHandler):
                 "geak candidate: large cross-harness measurement divergence "
                 "%.2f%% (|.|>%.1f%%) - candidate held out of headline until a "
                 "main-flow rebench validates it",
-                float(mdiv), _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
+                float(mdiv),
+                _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
             )
 
     def _promote_geak_from_candidate(
@@ -880,19 +869,21 @@ class KernelPhase(PhaseHandler):
         cb = dict(self.shared_state.current_best or {})
         cb_envs = dict(cb.get("extra_envs") or {}) if isinstance(cb.get("extra_envs"), Mapping) else {}
         cb_envs.update(parsed_envs)
-        cb.update({
-            "action": "geak_e2e",
-            "tput": measured,
-            "ttft_mean_ms": result.get("ttft_ms"),
-            "tpot_mean_ms": result.get("tpot_ms"),
-            "extra_server_args": accepted_flags,
-            "extra_envs": cb_envs,
-            "geak_launch_script": result.get("final_launch_script"),
-            "geak_bench_script": result.get("bench_script"),
-            "geak_eval_dir": result.get("eval_dir"),
-            "final_overlay": result.get("final_overlay") or "",
-            "workspace": result.get("eval_dir"),
-        })
+        cb.update(
+            {
+                "action": "geak_e2e",
+                "tput": measured,
+                "ttft_mean_ms": result.get("ttft_ms"),
+                "tpot_mean_ms": result.get("tpot_ms"),
+                "extra_server_args": accepted_flags,
+                "extra_envs": cb_envs,
+                "geak_launch_script": result.get("final_launch_script"),
+                "geak_bench_script": result.get("bench_script"),
+                "geak_eval_dir": result.get("eval_dir"),
+                "final_overlay": result.get("final_overlay") or "",
+                "workspace": result.get("eval_dir"),
+            }
+        )
         # Audit cross-check: GEAK's own within-harness speedups (not the headline).
         am = result.get("alignment_metrics") or {}
         cb["geak_alignment"] = {
@@ -936,9 +927,7 @@ class KernelPhase(PhaseHandler):
             self.shared_state.cumulative_gain = gain
             self.shared_state.cumulative_gain_validated = gain
             self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(
-                self.shared_state.optimization_stack
-            )
+            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
         self.shared_state.cumulative_gain_provenance = provenance
         self.shared_state.resume_pending_revalidation = False
         self.shared_state.geak_pending = {}
@@ -975,7 +964,7 @@ class KernelPhase(PhaseHandler):
         # Replay GEAK-e2e's discovery substream so the assembler backfills each
         # kernel's discovery-sourced fields; GEAK profiles via rocprofv3 (route
         # ``bypass``), ``tool="geak"`` for version provenance.
-        for run in (journey.get("discovery_runs") or []):
+        for run in journey.get("discovery_runs") or []:
             if not isinstance(run, dict):
                 continue
             try:
@@ -988,9 +977,8 @@ class KernelPhase(PhaseHandler):
                     tool="geak",
                 )
             except Exception:  # noqa: BLE001
-                log.debug("geak kernel_journey discovery replay failed",
-                          exc_info=True)
-        for k in (journey.get("kernels") or []):
+                log.debug("geak kernel_journey discovery replay failed", exc_info=True)
+        for k in journey.get("kernels") or []:
             if not isinstance(k, dict):
                 continue
             kid = str(k.get("kernel_id") or "")
@@ -1024,8 +1012,7 @@ class KernelPhase(PhaseHandler):
                         extra_server_args=str(e2e.get("extra_server_args") or ""),
                     )
             except Exception:  # noqa: BLE001
-                log.debug("geak kernel_journey replay failed for %s", kid,
-                          exc_info=True)
+                log.debug("geak kernel_journey replay failed for %s", kid, exc_info=True)
         for tool, meta in (journey.get("versions") or {}).items():
             if not isinstance(meta, dict):
                 continue
@@ -1060,9 +1047,7 @@ class KernelPhase(PhaseHandler):
             return False
         from ..kernel.request_handlers import _resolve_gemm_tuning_backend
 
-        backend = str(
-            result.get("backend") or _resolve_gemm_tuning_backend({})
-        ).strip().lower()
+        backend = str(result.get("backend") or _resolve_gemm_tuning_backend({})).strip().lower()
         if backend != "forge":
             return False
         framework = str(getattr(self.shared_state, "framework", "") or "").strip().lower()
@@ -1081,10 +1066,7 @@ class KernelPhase(PhaseHandler):
         # Block-scale fp8 only, asserted positively via ``weight_block_size``.
         from hyperloom.inference_optimizer.model_config_utils import _fp8_is_block_scale
 
-        model_path = str(
-            getattr(self.shared_state, "model_path", "")
-            or os.environ.get("MODEL_PATH", "")
-        )
+        model_path = str(getattr(self.shared_state, "model_path", "") or os.environ.get("MODEL_PATH", ""))
         return _fp8_is_block_scale(model_path)
 
     def _ck_switch_precision_is_fp8(self, result: dict[str, Any]) -> bool:
@@ -1125,8 +1107,7 @@ class KernelPhase(PhaseHandler):
         # Forge results route to the per-tuner E2E validator when table tuning
         # asked for it OR when the CK block-scale backend switch is eligible.
         if result.get("backend") == "forge" and (
-            result.get("requires_e2e_validation")
-            or self._ck_blockscale_switch_eligible(result)
+            result.get("requires_e2e_validation") or self._ck_blockscale_switch_eligible(result)
         ):
             await self._validate_forge_gemm_tuning_e2e(result)
         else:
@@ -1234,9 +1215,7 @@ class KernelPhase(PhaseHandler):
             variant_name = "forge_gemm_tuned"
         else:
             tuned_file = str(result.get("tuned_file") or "")
-            extra_envs = (
-                {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file} if tuned_file else {}
-            )
+            extra_envs = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": tuned_file} if tuned_file else {}
             variant_name = "a8w8_blockscale_tuned_gemm"
 
         # fp8 block-scale CK backend switch safety net (an operator-set value
@@ -1276,7 +1255,8 @@ class KernelPhase(PhaseHandler):
                 ts=ts,
             )
             self._journal_gemm_tuning_keep(
-                entry, task_id=str(result.get("task_id") or ""),
+                entry,
+                task_id=str(result.get("task_id") or ""),
             )
         self.shared_state.current_best = {
             "action": "gemm_tuning",
@@ -1291,9 +1271,7 @@ class KernelPhase(PhaseHandler):
         self.shared_state.cumulative_gain = (speedup - 1.0) * 100.0
         self.shared_state.cumulative_gain_validated = self.shared_state.cumulative_gain
         self.shared_state.cumulative_gain_validated_ts = ts
-        self.shared_state.cumulative_gain_validated_stack_len = len(
-            self.shared_state.optimization_stack or []
-        )
+        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
 
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
         """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
@@ -1332,35 +1310,34 @@ class KernelPhase(PhaseHandler):
             env_var = str(t.get("env_var") or "").strip()
             env_value = str(t.get("env_value") or "").strip()
             if env_var and env_value:
-                candidates.append({
-                    "tuner": t.get("tuner") or "unknown",
-                    "env_var": env_var,
-                    "env_value": env_value,
-                    "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
-                })
+                candidates.append(
+                    {
+                        "tuner": t.get("tuner") or "unknown",
+                        "env_var": env_var,
+                        "env_value": env_value,
+                        "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
+                    }
+                )
 
         # Standalone fp8 block-scale CK backend switch: inject as its own
         # candidate so the loop E2E-validates baseline Triton vs CK.
         if self._ck_blockscale_switch_eligible(result):
-            if not any(
-                c.get("env_var") == "SGLANG_FP8_BLOCKSCALE_CK_MAX_M"
-                for c in candidates
-            ):
-                candidates.append({
-                    "tuner": "ck_blockscale_backend_switch",
-                    "env_var": "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
-                    "env_value": "256",
-                    "micro_speedup": 1.0,
-                })
+            if not any(c.get("env_var") == "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" for c in candidates):
+                candidates.append(
+                    {
+                        "tuner": "ck_blockscale_backend_switch",
+                        "env_var": "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
+                        "env_value": "256",
+                        "micro_speedup": 1.0,
+                    }
+                )
 
         if not candidates:
             log.info("forge gemm tuning: no candidates to E2E validate")
             return
 
         baseline_tput = float(self.shared_state.baseline_tput or 0.0)
-        running_tput = float(
-            (self.shared_state.current_best or {}).get("tput") or baseline_tput
-        )
+        running_tput = float((self.shared_state.current_best or {}).get("tput") or baseline_tput)
         stacked_envs: dict[str, str] = {}
         kept: list[dict[str, Any]] = []
         reverted: list[dict[str, Any]] = []
@@ -1381,7 +1358,8 @@ class KernelPhase(PhaseHandler):
             env = {cand["env_var"]: cand["env_value"]}
             extra_server_args = (
                 "--moe-runner-backend aiter"
-                if tuner_name == "fmoe_ck" and str(getattr(self.shared_state, "framework", "") or "").lower() == "sglang"
+                if tuner_name == "fmoe_ck"
+                and str(getattr(self.shared_state, "framework", "") or "").lower() == "sglang"
                 else ""
             )
             # Merge with previously KEEP'd envs.
@@ -1390,7 +1368,9 @@ class KernelPhase(PhaseHandler):
 
             log.info(
                 "forge gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)",
-                tuner_name, cand["env_var"], running_tput,
+                tuner_name,
+                cand["env_var"],
+                running_tput,
             )
 
             try:
@@ -1410,7 +1390,8 @@ class KernelPhase(PhaseHandler):
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "forge gemm E2E: integrate failed for %s: %s",
-                    tuner_name, exc,
+                    tuner_name,
+                    exc,
                 )
                 reverted.append({**cand, "reason": repr(exc)})
                 continue
@@ -1421,7 +1402,10 @@ class KernelPhase(PhaseHandler):
 
             log.info(
                 "forge gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%",
-                tuner_name, decision, new_tput, gain_pct,
+                tuner_name,
+                decision,
+                new_tput,
+                gain_pct,
             )
 
             if decision == "KEEP" and new_tput > running_tput:
@@ -1450,7 +1434,8 @@ class KernelPhase(PhaseHandler):
                     ts=ts,
                 )
                 self._journal_gemm_tuning_keep(
-                    entry, task_id=f"gemm_tune_e2e_{tuner_name}",
+                    entry,
+                    task_id=f"gemm_tune_e2e_{tuner_name}",
                 )
             else:
                 reverted.append({**cand, "reason": f"decision={decision}, gain={gain_pct:.2f}%"})
@@ -1470,12 +1455,12 @@ class KernelPhase(PhaseHandler):
             self.shared_state.cumulative_gain = total_gain
             self.shared_state.cumulative_gain_validated = total_gain
             self.shared_state.cumulative_gain_validated_ts = ts
-            self.shared_state.cumulative_gain_validated_stack_len = len(
-                self.shared_state.optimization_stack or []
-            )
+            self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
             log.info(
                 "forge gemm E2E: %d tuners KEEP (total gain=+%.2f%%), %d REVERT",
-                len(kept), total_gain, len(reverted),
+                len(kept),
+                total_gain,
+                len(reverted),
             )
         else:
             stacked_envs = {}
@@ -1598,8 +1583,11 @@ class KernelPhase(PhaseHandler):
         except Exception as exc:  # noqa: BLE001
             log.exception("KERNEL entry forge-fusion failed")
             result = {
-                "status": "failed", "decision": "REVERT", "engine": "forge_fusion",
-                "error_class": exc.__class__.__name__, "error": repr(exc),
+                "status": "failed",
+                "decision": "REVERT",
+                "engine": "forge_fusion",
+                "error_class": exc.__class__.__name__,
+                "error": repr(exc),
             }
         await self._handle_fusion_result(result)
 
@@ -1618,10 +1606,15 @@ class KernelPhase(PhaseHandler):
         try:
             await self.bus.append_and_seq(
                 Message.new(
-                    "kernel_agent", "orchestration", "response",
+                    "kernel_agent",
+                    "orchestration",
+                    "response",
                     {
-                        "in_reply_to": "", "kind": "run_fusion_done", "status": status,
-                        "result": result, "source": "kernel_entry_auto",
+                        "in_reply_to": "",
+                        "kind": "run_fusion_done",
+                        "status": status,
+                        "result": result,
+                        "source": "kernel_entry_auto",
                     },
                     priority=1,
                 )
@@ -1667,9 +1660,12 @@ class KernelPhase(PhaseHandler):
             except Exception as exc:  # noqa: BLE001
                 log.exception("KERNEL entry fusion snapshot materialization failed")
                 integ = {
-                    "status": "failed", "decision": "REVERT",
-                    "error_class": exc.__class__.__name__, "error": repr(exc),
-                    "patch_path": patch, "target_file": target_file,
+                    "status": "failed",
+                    "decision": "REVERT",
+                    "error_class": exc.__class__.__name__,
+                    "error": repr(exc),
+                    "patch_path": patch,
+                    "target_file": target_file,
                 }
         if integ is None:
             try:
@@ -1689,8 +1685,12 @@ class KernelPhase(PhaseHandler):
                 )
             except Exception as exc:  # noqa: BLE001
                 log.exception("KERNEL entry fusion integrate failed")
-                integ = {"status": "failed", "decision": "REVERT",
-                         "error_class": exc.__class__.__name__, "error": repr(exc)}
+                integ = {
+                    "status": "failed",
+                    "decision": "REVERT",
+                    "error_class": exc.__class__.__name__,
+                    "error": repr(exc),
+                }
         decision = str(integ.get("decision") or "").strip().upper() if isinstance(integ, dict) else "REVERT"
         gain = integ.get("gain_pct") if isinstance(integ, dict) else None
         log.info("KERNEL entry: fusion integrate decision=%s gain_pct=%s", decision, gain)
@@ -1703,11 +1703,16 @@ class KernelPhase(PhaseHandler):
         try:
             await self.bus.append_and_seq(
                 Message.new(
-                    "kernel_agent", "orchestration", "response",
+                    "kernel_agent",
+                    "orchestration",
+                    "response",
                     {
-                        "in_reply_to": "", "kind": "fusion_integrate_done",
+                        "in_reply_to": "",
+                        "kind": "fusion_integrate_done",
                         "status": integ.get("status", "failed") if isinstance(integ, dict) else "failed",
-                        "decision": decision, "gain_pct": gain, "result": integ,
+                        "decision": decision,
+                        "gain_pct": gain,
+                        "result": integ,
                         "source": "kernel_entry_auto",
                     },
                     priority=1,
@@ -1787,9 +1792,7 @@ class KernelPhase(PhaseHandler):
         self.shared_state.cumulative_gain = gain
         self.shared_state.cumulative_gain_validated = gain
         self.shared_state.cumulative_gain_validated_ts = ts
-        self.shared_state.cumulative_gain_validated_stack_len = len(
-            self.shared_state.optimization_stack or []
-        )
+        self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack or [])
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).

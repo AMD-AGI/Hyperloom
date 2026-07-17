@@ -1,0 +1,900 @@
+# Copyright Advanced Micro Devices, Inc. All rights reserved.
+
+"""Long-lived Ray actors that hold GPU/serving process lifecycles."""
+
+from __future__ import annotations
+
+import logging
+import os
+import signal
+import subprocess
+from dataclasses import dataclass, field
+from typing import Any
+
+log = logging.getLogger(__name__)
+
+# Sentinel returncodes (distinct from -909..-912 watchdog sentinels).
+_ACTOR_TIMEOUT_RC: int = -912
+_RAY_ACTOR_DIED_RC: int = -913
+
+# Timeout for ray.get probes on specialist actor methods (is_alive/exit_code/stop).
+_LEASE_PROBE_TIMEOUT_SEC: float = 30.0
+
+# Scheduling timeout for GPU-specialist actors; coordinator tasks do not use one.
+_RAY_SPECIALIST_SCHED_TIMEOUT_SEC: float = float(
+    os.environ.get("INFERENCE_OPTIMIZER_RAY_SPECIALIST_SCHED_TIMEOUT_SEC", "300")
+)
+
+
+class RayInfeasibleError(RuntimeError):
+    """Raised when the cluster can never satisfy the requested resources."""
+
+
+class RaySchedTimeoutError(RuntimeError):
+    """Raised when a specialist actor fails to schedule within the timeout."""
+
+
+def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
+    """Raise :exc:`RayInfeasibleError` when the cluster cannot satisfy the request.
+
+    Reads ``ray.cluster_resources()`` (totals, not available) so legitimate
+    contention still queues — only permanently infeasible configurations fail fast.
+    """
+    import ray  # noqa: PLC0415
+
+    totals = ray.cluster_resources()
+    cluster_gpus = float(totals.get("GPU", 0))
+    if cluster_gpus < num_gpus:
+        raise RayInfeasibleError(
+            f"cluster has {cluster_gpus} GPU(s), {num_gpus} requested; "
+            "set INFERENCE_OPTIMIZER_RAY_EXEC=0 or add GPUs"
+        )
+    if serving_slot and "serving_slot" not in totals:
+        raise RayInfeasibleError(
+            "existing Ray head has no serving_slot resource; "
+            "restart with --resources='{\"serving_slot\":1}' or set INFERENCE_OPTIMIZER_RAY_EXEC=0"
+        )
+
+
+def _pdeathsig_preexec() -> None:
+    """Best-effort: ask the OS to SIGKILL this child if its parent dies.
+
+    Linux-only (``PR_SET_PDEATHSIG``). Combined with an explicit ``stop()`` this
+    guarantees no detached GPU process survives its owning Ray actor. A no-op
+    where prctl is unavailable.
+    """
+    try:
+        import ctypes  # noqa: PLC0415
+
+        # PR_SET_PDEATHSIG = 1
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(1, signal.SIGKILL)
+    except Exception:  # noqa: BLE001 — best-effort hardening only
+        pass
+
+
+@dataclass
+class ManagedServerProcess:
+    """Supervise a single GPU/serving subprocess tied to this object's lifetime.
+
+    The process is launched in a new POSIX session (distinct pgid) so the whole
+    tree can be reaped atomically, and PR_SET_PDEATHSIG is armed so an
+    unexpected owner death still kills it.
+    """
+
+    _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
+    _cmd: list[str] = field(default_factory=list, init=False, repr=False)
+
+    def start(
+        self,
+        cmd: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        log_path: str | None = None,
+    ) -> int:
+        """Launch the subprocess and return its pid.
+
+        Args:
+            cmd: Command to launch.
+            env: Environment (Ray-set ``*_VISIBLE_DEVICES`` already present in
+                the actor's ``os.environ``; pass a merged env if overlaying).
+            cwd: Working directory.
+            log_path: Optional path to redirect stdout/stderr.
+
+        Returns:
+            The launched process pid.
+
+        Raises:
+            RuntimeError: If a process is already running under this supervisor.
+        """
+        if self._proc is not None and self._proc.poll() is None:
+            raise RuntimeError("ManagedServerProcess already running")
+        self._cmd = list(cmd)
+        stdout: Any = subprocess.DEVNULL
+        if log_path:
+            os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+            stdout = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 — closed on stop
+        if os.name == "posix":
+            # New session (distinct pgid) so the whole tree reaps atomically;
+            # PR_SET_PDEATHSIG so an unexpected owner death still kills the child.
+            self._proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
+                cmd,
+                env=env,
+                cwd=cwd,
+                stdout=stdout,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                preexec_fn=_pdeathsig_preexec,
+            )
+        else:  # pragma: no cover - non-posix fallback
+            self._proc = subprocess.Popen(  # noqa: S603
+                cmd,
+                env=env,
+                cwd=cwd,
+                stdout=stdout,
+                stderr=subprocess.STDOUT,
+            )
+        return self._proc.pid
+
+    def pid(self) -> int | None:
+        """Return the running pid, or ``None`` when not running.
+
+        Returns:
+            The pid, or ``None`` when no live process is supervised.
+        """
+        if self._proc is None or self._proc.poll() is not None:
+            return None
+        return self._proc.pid
+
+    def is_alive(self) -> bool:
+        """Return whether the supervised process is still running.
+
+        Returns:
+            ``True`` when the process is live.
+        """
+        return self._proc is not None and self._proc.poll() is None
+
+    def exit_code(self) -> int | None:
+        """Return the process exit code, or ``None`` while running / never started.
+
+        Returns:
+            The exit code once the process has terminated, else ``None``.
+        """
+        if self._proc is None:
+            return None
+        return self._proc.poll()
+
+    def stop(self, *, grace_seconds: float = 5.0) -> None:
+        """Reap the whole process tree (SIGTERM → grace → SIGKILL). Idempotent.
+
+        Args:
+            grace_seconds: Seconds to wait after SIGTERM before SIGKILL.
+        """
+        from ._subprocess_kill import kill_my_spawned_server
+
+        kill_my_spawned_server(self._proc, grace_seconds=grace_seconds)
+        self._proc = None
+
+
+def _serving_actor_body() -> Any:
+    """Build the ServingActor class (imports ray lazily so import is cheap).
+
+    Returns:
+        A ``ray.remote``-decorated actor class holding a serving process.
+    """
+    import ray  # noqa: PLC0415
+
+    @ray.remote
+    class ServingActor:
+        """Ray actor owning one serving process for its whole lifetime.
+
+        Holds ``num_gpus`` (+ optional ``serving_slot``) via the ``.options()``
+        the submitter sets. The server lives exactly as long as the actor.
+        """
+
+        def __init__(self) -> None:
+            self._mgr = ManagedServerProcess()
+
+        def start(self, cmd, *, env=None, cwd=None, log_path=None) -> int:
+            """Launch the serving subprocess; Ray has set visible devices.
+
+            Returns:
+                The launched pid.
+            """
+            merged = dict(os.environ)
+            for key, value in (env or {}).items():
+                if key in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+                    continue
+                merged[key] = value
+            return self._mgr.start(cmd, env=merged, cwd=cwd, log_path=log_path)
+
+        def run_blocking(
+            self,
+            cmd,
+            *,
+            env=None,
+            cwd=None,
+            timeout=None,
+            soft_deadline_sec=None,
+            server_log_path=None,
+            server_already_ready=False,
+        ):
+            """Run one benchmark round to completion; return ``(rc, stdout, stderr)``."""
+            import subprocess as _sp  # noqa: PLC0415
+
+            from ._ray_backend import _run_subprocess_worker  # noqa: PLC0415
+
+            try:
+                return _run_subprocess_worker(
+                    cmd=cmd,
+                    env=env,
+                    cwd=cwd,
+                    timeout_s=timeout,
+                    soft_deadline_sec=soft_deadline_sec,
+                    server_log_path=server_log_path,
+                    server_already_ready=server_already_ready,
+                )
+            except _sp.TimeoutExpired as exc:
+                return _ACTOR_TIMEOUT_RC, "", f"TimeoutExpired: {exc}"
+
+        def is_alive(self) -> bool:
+            """Return whether the serving process is still up.
+
+            Returns:
+                ``True`` when alive.
+            """
+            return self._mgr.is_alive()
+
+        def pid(self) -> int | None:
+            """Return the serving pid, or ``None``.
+
+            Returns:
+                The pid or ``None``.
+            """
+            return self._mgr.pid()
+
+        def exit_code(self) -> int | None:
+            """Return the supervised process exit code, or ``None`` while running.
+
+            Returns:
+                The exit code once the process has terminated, else ``None``.
+            """
+            return self._mgr.exit_code()
+
+        def stop(self) -> None:
+            """Reap the serving process tree."""
+            self._mgr.stop()
+
+        def __ray_terminate__(self) -> None:  # pragma: no cover - Ray teardown hook
+            """Reap the serving process when Ray tears the actor down."""
+            try:
+                self._mgr.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return ServingActor
+
+
+def make_serving_actor(num_gpus: float, *, serving_slot: bool = True):
+    """Create a ServingActor handle holding ``num_gpus`` (+ optional ``serving_slot``)."""
+    actor_cls: Any = _serving_actor_body()
+    resources = {"serving_slot": 1} if serving_slot else None
+    return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()
+
+
+def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
+    """Create a GpuSpecialistActor handle holding ``num_gpus`` (+ optional ``serving_slot``)."""
+    actor_cls: Any = _serving_actor_body()
+    resources = {"serving_slot": 1} if serving_slot else None
+    return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()
+
+
+class ServingLease:
+    """A held Ray GPU lease spanning every round that shares one server.
+
+    Wraps a long-lived :class:`ServingActor` holding ``num_gpus`` (+ optional
+    ``serving_slot`` whole-machine mutex). The actor is created on first use and
+    stays alive until :meth:`close`. Single-node only.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_gpus: float,
+        serving_slot: bool = True,
+        ensure_log_path: Any = None,
+    ) -> None:
+        self._num_gpus = float(num_gpus)
+        self._serving_slot = bool(serving_slot)
+        self._ensure_log_path = ensure_log_path
+        self._actor: Any = None
+
+    def ensure(self) -> None:
+        """Ensure the Ray cluster is up and the serving actor is created.
+
+        Idempotent — a second call is a no-op once the actor exists.
+        Raises :exc:`RayInfeasibleError` when the cluster cannot satisfy the lease.
+        """
+        if self._actor is not None:
+            return
+        from ._ray_backend import get_ray_backend  # noqa: PLC0415
+
+        get_ray_backend().ensure(log_path=self._ensure_log_path)
+        _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
+        self._actor = make_serving_actor(self._num_gpus, serving_slot=self._serving_slot)
+
+    def run_session_kill(
+        self,
+        cmd: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout: int | float | None = None,
+        soft_deadline_sec: float | None = None,
+        server_log_path: str | None = None,
+        server_already_ready: bool = False,
+    ) -> tuple[int, str, str]:
+        """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``.
+
+        Drop-in for ``run_with_session_kill``; re-raises ``subprocess.TimeoutExpired``
+        on hard timeout. Cluster-ensure failures and Ray worker errors degrade to
+        a benchmark failure (rc=1) rather than crashing the session.
+        """
+        import subprocess as _sp  # noqa: PLC0415
+
+        import ray  # noqa: PLC0415
+
+        try:
+            self.ensure()
+        except (RayInfeasibleError, RuntimeError) as exc:
+            log.warning("ServingLease.run_session_kill: cluster ensure failed: %r", exc)
+            return 1, "", f"ray_ensure_error: {exc}"[:2000]
+        ref = self._actor.run_blocking.remote(
+            cmd,
+            env=env,
+            cwd=cwd,
+            timeout=timeout,
+            soft_deadline_sec=soft_deadline_sec,
+            server_log_path=server_log_path,
+            server_already_ready=server_already_ready,
+        )
+        # Resolve Ray's exception classes defensively. Real ray always exposes
+        # both, but this is a failure hot-path: a partial test double or a future
+        # ray rename must never turn a benchmark failure into an AttributeError
+        # *while handling* the original error. An empty-tuple fallback simply
+        # catches nothing, so an unknown error still propagates unchanged.
+        _ray_exc = getattr(ray, "exceptions", None)
+        _actor_err: Any = getattr(_ray_exc, "RayActorError", ()) if _ray_exc else ()
+        _task_err: Any = getattr(_ray_exc, "RayTaskError", ()) if _ray_exc else ()
+        try:
+            rc, out, err = ray.get(ref)
+        except _actor_err as exc:  # type: ignore[misc]
+            # The actor (worker) itself died — e.g. its server OOM-killed the
+            # worker, or raylet reaped it. Drop the dead handle so the NEXT round
+            # / variant re-creates a fresh actor via ``ensure()``, and surface
+            # this round as a benchmark failure (rc=1) instead of letting the
+            # actor error propagate and crash the session. Matters now that one
+            # lease is reused across a whole round: a mid-round actor death must
+            # self-heal rather than cascade to every remaining variant.
+            log.warning("ServingLease.run_session_kill: ray actor died: %r", exc)
+            self._actor = None
+            return 1, "", f"ray_actor_error: {exc}"[:2000]
+        except _task_err as exc:  # type: ignore[misc]
+            # Worker crash / unexpected error: surface as a benchmark failure so
+            # the caller's existing rc!=0 handling runs, not a session crash.
+            log.warning("ServingLease.run_session_kill: ray worker error: %r", exc)
+            return 1, "", f"ray_worker_error: {exc}"[:2000]
+        if rc == _ACTOR_TIMEOUT_RC:
+            raise _sp.TimeoutExpired(cmd, timeout or 0, output=out or None, stderr=err or None)
+        return rc, out, err
+
+    def close(self) -> None:
+        """Kill the actor, releasing the GPU lease. Idempotent, never raises."""
+        if self._actor is None:
+            return
+        try:
+            import ray  # noqa: PLC0415
+
+            ray.kill(self._actor)
+        except Exception:  # noqa: BLE001 — teardown must not raise
+            pass
+        self._actor = None
+
+    def __enter__(self) -> ServingLease:
+        """Ensure the lease on context entry.
+
+        Returns:
+            This lease.
+        """
+        self.ensure()
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        """Release the lease on context exit.
+
+        Returns:
+            ``False`` so exceptions propagate.
+        """
+        self.close()
+        return False
+
+
+def maybe_serving_lease(
+    *,
+    num_gpus: float,
+    serving_slot: bool = True,
+    ensure_log_path: Any = None,
+) -> ServingLease | None:
+    """Return a :class:`ServingLease` when single-node Ray execution is active.
+
+    The single seam executors use to opt a benchmark unit onto Ray: it returns
+    a (not-yet-ensured) lease when the Ray backend should run this work and the
+    run is single-node, else ``None`` (multi-node, ``INFERENCE_OPTIMIZER_RAY_EXEC``
+    off, or the pytest default). Callers pass the result straight into
+    ``run_grid(..., serving_lease=lease)`` / ``run_session_kill`` — ``None``
+    transparently keeps the existing local-subprocess path — and MUST
+    :meth:`ServingLease.close` a non-``None`` lease (typically in a ``finally``)
+    to release the GPU lease.
+
+    Args:
+        num_gpus: GPUs the lease holds (typically the serving ``TP``).
+        serving_slot: Whether to also hold the whole-machine ``serving_slot``
+            resource. Defaults ``True`` — every serving-family caller
+            (baseline / conc_sweep / sweep / explore) is mutually exclusive on
+            the node (§12 T6).
+        ensure_log_path: Optional path forwarded to the cluster ensure.
+
+    Returns:
+        A lease to route benchmark rounds through, or ``None`` to run locally.
+    """
+    from ._multi_node_env import is_multi_node  # noqa: PLC0415
+    from ._ray_backend import _should_use_ray_backend  # noqa: PLC0415
+
+    if not _should_use_ray_backend() or is_multi_node():
+        return None
+    return ServingLease(
+        num_gpus=num_gpus,
+        serving_slot=serving_slot,
+        ensure_log_path=ensure_log_path,
+    )
+
+
+class GpuSpecialistLease:
+    """A held Ray GPU lease that runs a ``needs_gpu`` specialist subprocess.
+
+    Wraps a :func:`make_gpu_specialist_actor` actor holding ``num_gpus``. The
+    specialist's entire subprocess runs inside the actor so all GPU commands land
+    within Ray's assigned visible devices. Exposes ``start`` / ``is_alive`` /
+    ``exit_code`` / ``stop`` / ``close`` (mirroring Popen for the reap loop).
+    Single-node only.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_gpus: float,
+        serving_slot: bool = False,
+        ensure_log_path: Any = None,
+    ) -> None:
+        self._num_gpus = float(num_gpus)
+        self._serving_slot = bool(serving_slot)
+        self._ensure_log_path = ensure_log_path
+        self._actor: Any = None
+        self._pid: int | None = None
+
+    def start(
+        self,
+        cmd: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        log_path: str | None = None,
+    ) -> int:
+        """Ensure the cluster, create the actor, launch the subprocess; return its pid.
+
+        Raises :exc:`RayInfeasibleError` for unschedulable resource requests or
+        :exc:`RaySchedTimeoutError` if the actor does not schedule within
+        :data:`_RAY_SPECIALIST_SCHED_TIMEOUT_SEC`.
+        """
+        import ray  # noqa: PLC0415
+
+        from ._ray_backend import get_ray_backend  # noqa: PLC0415
+
+        get_ray_backend().ensure(log_path=self._ensure_log_path)
+        _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
+        self._actor = make_gpu_specialist_actor(
+            self._num_gpus, serving_slot=self._serving_slot
+        )
+        try:
+            self._pid = int(
+                ray.get(
+                    self._actor.start.remote(cmd, env=env, cwd=cwd, log_path=log_path),
+                    timeout=_RAY_SPECIALIST_SCHED_TIMEOUT_SEC,
+                )
+            )
+        except ray.exceptions.GetTimeoutError as exc:
+            self.close()
+            raise RaySchedTimeoutError(
+                f"GPU-specialist actor did not schedule within "
+                f"{_RAY_SPECIALIST_SCHED_TIMEOUT_SEC:.0f}s; "
+                "cluster may be fully occupied"
+            ) from exc
+        return self._pid
+
+    def pid(self) -> int | None:
+        """Return the launched pid, or ``None`` before :meth:`start`.
+
+        Returns:
+            The pid, or ``None``.
+        """
+        return self._pid
+
+    def is_alive(self) -> bool:
+        """Return whether the specialist subprocess is still running.
+
+        Returns ``False`` when the actor is unreachable or the probe times out
+        (treated as transient; caller retries on the next poll tick).
+        """
+        if self._actor is None:
+            return False
+        import ray  # noqa: PLC0415
+
+        try:
+            return bool(
+                ray.get(self._actor.is_alive.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC)
+            )
+        except ray.exceptions.GetTimeoutError:
+            return True  # still-alive assumption on timeout (avoid premature kill)
+        except Exception:  # noqa: BLE001 — dead actor reads as not-alive
+            return False
+
+    def exit_code(self) -> int | None:
+        """Return the subprocess exit code, or ``None`` while running / actor dead."""
+        if self._actor is None:
+            return None
+        import ray  # noqa: PLC0415
+
+        try:
+            return ray.get(self._actor.exit_code.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def stop(self) -> None:
+        """Reap the specialist subprocess tree (keeps the actor/lease alive). Never raises."""
+        if self._actor is None:
+            return
+        import ray  # noqa: PLC0415
+
+        try:
+            ray.get(self._actor.stop.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC)
+        except Exception:  # noqa: BLE001 — teardown must not raise
+            pass
+
+    def close(self) -> None:
+        """Kill the actor, releasing the GPU lease. Idempotent, never raises."""
+        if self._actor is None:
+            return
+        try:
+            import ray  # noqa: PLC0415
+
+            ray.kill(self._actor)
+        except Exception:  # noqa: BLE001 — teardown must not raise
+            pass
+        self._actor = None
+
+
+def maybe_gpu_specialist_lease(
+    *,
+    num_gpus: float,
+    serving_slot: bool = False,
+    ensure_log_path: Any = None,
+) -> GpuSpecialistLease | None:
+    """Return a :class:`GpuSpecialistLease` when single-node Ray execution is active.
+
+    Mirrors :func:`maybe_serving_lease`: the single seam the dispatcher uses to
+    route a ``needs_gpu`` specialist's whole subprocess into a Ray ``num_gpus``
+    actor (§12 T4). Returns ``None`` (keep the legacy SQLite-gpu-id device path)
+    for multi-node, ``INFERENCE_OPTIMIZER_RAY_EXEC`` off, the pytest default, or
+    a non-positive ``num_gpus``.
+
+    Args:
+        num_gpus: GPUs the specialist would lease.
+        serving_slot: Whether the specialist also holds the whole-machine
+            ``serving_slot`` (whole-machine / bench-capable ``gpu_research_lane``
+            specialists — mutually exclusive with serving, §12 T6). ``False``
+            (default) for the serving-disjoint pool.
+        ensure_log_path: Optional path forwarded to the cluster ensure.
+
+    Returns:
+        A lease to run the specialist subprocess through, or ``None`` (local).
+    """
+    if num_gpus <= 0:
+        return None
+    from ._multi_node_env import is_multi_node  # noqa: PLC0415
+    from ._ray_backend import _should_use_ray_backend  # noqa: PLC0415
+
+    if not _should_use_ray_backend() or is_multi_node():
+        return None
+    return GpuSpecialistLease(
+        num_gpus=num_gpus,
+        serving_slot=serving_slot,
+        ensure_log_path=ensure_log_path,
+    )
+
+
+# ── P4 (skeleton) — multi-node serving via placement group + rank actors ──────
+# Gated OFF by default; wired in only when INFERENCE_OPTIMIZER_RAY_MN_SERVING is set.
+
+
+def _mn_serving_ray_enabled() -> bool:
+    """Return whether the P4 Ray multi-node serving skeleton is opted into.
+
+    Off by default: multi-node is deferred (decisions 4/5). ``True`` only when
+    ``INFERENCE_OPTIMIZER_RAY_MN_SERVING`` is explicitly truthy.
+
+    Returns:
+        ``True`` when the multi-node Ray serving path is enabled.
+    """
+    return os.environ.get("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _make_serving_placement_group(nodes: int, gpus_per_node: float, *, serving_slot: bool):
+    """Reserve one whole-node bundle per serving rank (STRICT_SPREAD).
+
+    Each bundle asks for ``gpus_per_node`` GPUs (+ optional ``serving_slot``) and
+    STRICT_SPREAD forces one bundle per distinct node, so the rank actors below
+    land one-per-node and collectively hold every serving card until the group
+    is torn down. Blocks until the group is scheduled.
+
+    Args:
+        nodes: Number of serving nodes (bundles).
+        gpus_per_node: GPUs each node's rank holds.
+        serving_slot: Whether each bundle also reserves the node's
+            ``serving_slot`` (declared on GPU worker pods by the multi-node
+            maintainer, §4.5).
+
+    Returns:
+        The ready Ray ``PlacementGroup``.
+    """
+    import ray  # noqa: PLC0415
+    from ray.util.placement_group import placement_group  # noqa: PLC0415
+
+    bundle: dict[str, float] = {"GPU": float(gpus_per_node)}
+    if serving_slot:
+        bundle["serving_slot"] = 1
+    pg = placement_group([dict(bundle) for _ in range(int(nodes))], strategy="STRICT_SPREAD")
+    ray.get(pg.ready())
+    return pg
+
+
+def _remove_serving_placement_group(pg: Any) -> None:
+    """Release a serving placement group's reserved bundles.
+
+    Args:
+        pg: The placement group to remove.
+    """
+    from ray.util.placement_group import remove_placement_group  # noqa: PLC0415
+
+    remove_placement_group(pg)
+
+
+def _make_rank_actor(pg: Any, bundle_index: int, num_gpus: float, *, serving_slot: bool):
+    """Create one serving rank actor pinned to ``pg``'s ``bundle_index``.
+
+    Args:
+        pg: The serving placement group.
+        bundle_index: Bundle (node) this rank is pinned to.
+        num_gpus: GPUs this rank holds.
+        serving_slot: Whether the rank also holds ``serving_slot``.
+
+    Returns:
+        A Ray actor handle for the rank (a ServingActor pinned to the bundle).
+    """
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy  # noqa: PLC0415
+
+    actor_cls: Any = _serving_actor_body()
+    resources = {"serving_slot": 1} if serving_slot else None
+    return actor_cls.options(
+        num_gpus=num_gpus,
+        resources=resources,
+        scheduling_strategy=PlacementGroupSchedulingStrategy(
+            placement_group=pg,
+            placement_group_bundle_index=int(bundle_index),
+        ),
+    ).remote()
+
+
+class ServingGroupManager:
+    """Multi-node serving held by a Ray placement group + per-node rank actors.
+
+    **P4 SKELETON — gated OFF by default.** Reserves a STRICT_SPREAD placement
+    group and launches one :class:`ServingActor` rank per bundle. Interface
+    mirrors :class:`ServingLease` for eventual single-node parity.
+    """
+
+    def __init__(
+        self,
+        *,
+        nodes: int,
+        gpus_per_node: float,
+        serving_slot: bool = True,
+        ensure_log_path: Any = None,
+    ) -> None:
+        self._nodes = int(nodes)
+        self._gpus_per_node = float(gpus_per_node)
+        self._serving_slot = bool(serving_slot)
+        self._ensure_log_path = ensure_log_path
+        self._pg: Any = None
+        self._ranks: list[Any] = []
+        self._pids: list[int] = []
+
+    def start(
+        self,
+        rank_cmds: list[list[str]],
+        *,
+        envs: list[dict[str, str] | None] | None = None,
+        cwds: list[str | None] | None = None,
+        log_paths: list[str | None] | None = None,
+    ) -> list[int]:
+        """Reserve the placement group and launch one server rank per node.
+
+        Args:
+            rank_cmds: One command per rank (``len == nodes``).
+            envs: Optional per-rank env overlays.
+            cwds: Optional per-rank working directories.
+            log_paths: Optional per-rank stdout/stderr log paths.
+
+        Returns:
+            The launched rank pids (one per node).
+
+        Raises:
+            ValueError: If ``len(rank_cmds)`` does not match ``nodes``.
+        """
+        if len(rank_cmds) != self._nodes:
+            raise ValueError(f"expected {self._nodes} rank_cmds, got {len(rank_cmds)}")
+        import ray  # noqa: PLC0415
+
+        from ._ray_backend import get_ray_backend  # noqa: PLC0415
+
+        get_ray_backend().ensure(log_path=self._ensure_log_path)
+        self._pg = _make_serving_placement_group(self._nodes, self._gpus_per_node, serving_slot=self._serving_slot)
+        self._ranks = []
+        self._pids = []
+        for i, cmd in enumerate(rank_cmds):
+            actor = _make_rank_actor(self._pg, i, self._gpus_per_node, serving_slot=self._serving_slot)
+            self._ranks.append(actor)
+            pid = int(
+                ray.get(
+                    actor.start.remote(
+                        cmd,
+                        env=(envs[i] if envs else None),
+                        cwd=(cwds[i] if cwds else None),
+                        log_path=(log_paths[i] if log_paths else None),
+                    )
+                )
+            )
+            self._pids.append(pid)
+        return list(self._pids)
+
+    def pids(self) -> list[int]:
+        """Return the launched rank pids.
+
+        Returns:
+            The per-node rank pids.
+        """
+        return list(self._pids)
+
+    def ranks_alive(self) -> list[bool]:
+        """Return per-rank liveness (``False`` for a rank whose actor is gone).
+
+        Returns:
+            One bool per rank.
+        """
+        if not self._ranks:
+            return []
+        import ray  # noqa: PLC0415
+
+        out: list[bool] = []
+        for actor in self._ranks:
+            try:
+                out.append(bool(ray.get(actor.is_alive.remote())))
+            except Exception:  # noqa: BLE001 — a dead rank reads as not-alive
+                out.append(False)
+        return out
+
+    def is_alive(self) -> bool:
+        """Return whether every rank server is still running.
+
+        Returns:
+            ``True`` when all ranks are alive (and at least one exists).
+        """
+        alive = self.ranks_alive()
+        return bool(alive) and all(alive)
+
+    def stop(self) -> None:
+        """Reap every rank's server subprocess tree (keeps actors/PG alive)."""
+        if not self._ranks:
+            return
+        import ray  # noqa: PLC0415
+
+        for actor in self._ranks:
+            try:
+                ray.get(actor.stop.remote())
+            except Exception:  # noqa: BLE001 — teardown must not raise
+                pass
+
+    def close(self) -> None:
+        """Kill all rank actors and remove the placement group. Idempotent."""
+        import ray  # noqa: PLC0415
+
+        for actor in self._ranks:
+            try:
+                ray.kill(actor)
+            except Exception:  # noqa: BLE001 — teardown must not raise
+                pass
+        self._ranks = []
+        self._pids = []
+        if self._pg is not None:
+            try:
+                _remove_serving_placement_group(self._pg)
+            except Exception:  # noqa: BLE001 — teardown must not raise
+                pass
+            self._pg = None
+
+
+def maybe_serving_group_manager(
+    *,
+    nodes: int,
+    gpus_per_node: float,
+    serving_slot: bool = True,
+    ensure_log_path: Any = None,
+) -> ServingGroupManager | None:
+    """Return a :class:`ServingGroupManager` when the P4 MN-serving path is opted in.
+
+    **Off by default (decisions 4/5).** Returns ``None`` unless the run is
+    multi-node AND ``INFERENCE_OPTIMIZER_RAY_MN_SERVING`` is set — so the live
+    detached ``restart_server_for_round`` path is completely unaffected until a
+    multi-node maintainer opts in and wires it.
+
+    Args:
+        nodes: Number of serving nodes.
+        gpus_per_node: GPUs each rank holds.
+        serving_slot: Whether each rank reserves the node ``serving_slot``.
+        ensure_log_path: Optional path forwarded to the cluster ensure.
+
+    Returns:
+        A group manager to start rank servers through, or ``None`` (legacy path).
+    """
+    if nodes <= 0 or gpus_per_node <= 0:
+        return None
+    from ._multi_node_env import is_multi_node  # noqa: PLC0415
+
+    if not is_multi_node() or not _mn_serving_ray_enabled():
+        return None
+    return ServingGroupManager(
+        nodes=nodes,
+        gpus_per_node=gpus_per_node,
+        serving_slot=serving_slot,
+        ensure_log_path=ensure_log_path,
+    )
+
+
+__all__ = [
+    "GpuSpecialistLease",
+    "ManagedServerProcess",
+    "RayInfeasibleError",
+    "RaySchedTimeoutError",
+    "ServingGroupManager",
+    "ServingLease",
+    "make_gpu_specialist_actor",
+    "make_serving_actor",
+    "maybe_gpu_specialist_lease",
+    "maybe_serving_group_manager",
+    "maybe_serving_lease",
+]

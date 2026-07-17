@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for ``cli_backends``: per-role backend construction (mock/agent
 choices, kernel selection, validation errors), advisory proposal-scorer
@@ -262,9 +263,7 @@ def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     parser = _build_parser()
-    args = parser.parse_args(
-        ["optimize", "--model", "x", "--proposal-scorer-models", "m1,m2"]
-    )
+    args = parser.parse_args(["optimize", "--model", "x", "--proposal-scorer-models", "m1,m2"])
     assert args.proposal_scorer_models == "m1,m2"
     assert args.proposal_scoring is False
     assert clib._build_proposal_scorer(args) is None
@@ -343,18 +342,21 @@ def test_robustness_options_workload_uid_from_env(monkeypatch) -> None:
 
 def test_kernel_agent_max_turns_default(monkeypatch):
     from hyperloom.inference_optimizer.cli import backends as cb
+
     monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", raising=False)
     assert cb._resolve_kernel_agent_max_turns() == 5
 
 
 def test_kernel_agent_max_turns_env_override(monkeypatch):
     from hyperloom.inference_optimizer.cli import backends as cb
+
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "9")
     assert cb._resolve_kernel_agent_max_turns() == 9
 
 
 def test_kernel_agent_max_turns_invalid_falls_back(monkeypatch):
     from hyperloom.inference_optimizer.cli import backends as cb
+
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "not-an-int")
     assert cb._resolve_kernel_agent_max_turns() == 5
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_AGENT_MAX_TURNS", "0")

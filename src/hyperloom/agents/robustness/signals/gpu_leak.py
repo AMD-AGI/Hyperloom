@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """GPU memory leak detector.
 
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+
 if TYPE_CHECKING:
     from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
@@ -265,6 +267,7 @@ class GpuLeakDetector:
                 "finalize at the last validated gain"
             ),
         )
+
 
 __all__ = [
     "GpuLeakConfig",

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Supplementary coverage for LocalRecipeStore normalisation + edge paths."""
 
@@ -46,7 +47,9 @@ def test_coerce_dict_variants():
 
 
 def test_normalise_findings_and_failures():
-    assert ls._normalise_str_dicts([{"description": "d", "measured_impact": "i"}, "skip"], ("description", "measured_impact")) == [
+    assert ls._normalise_str_dicts(
+        [{"description": "d", "measured_impact": "i"}, "skip"], ("description", "measured_impact")
+    ) == [
         {"description": "d", "measured_impact": "i"},
     ]
     assert ls._normalise_str_dicts([{"description": "d", "reason": "r"}], ("description", "reason")) == [

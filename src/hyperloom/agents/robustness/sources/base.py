@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Source protocol + DegradeRouter.
 
@@ -94,6 +95,7 @@ class SourceData:
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
     sources_used: list[str] = field(default_factory=list)
     degraded_reason: str | None = None
+
 
 @runtime_checkable
 class Source(Protocol):

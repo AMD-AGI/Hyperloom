@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Helper that bridges the multi-node CLI state into Magpie subprocesses.
 
@@ -219,9 +220,7 @@ def pd_topology_from_state() -> dict[str, Any]:
         "prefill_ep": _iv("last_restart_pd_prefill_ep"),
         "decode_ep": _iv("last_restart_pd_decode_ep"),
         "transfer_backend": str(
-            st.get("last_restart_pd_transfer_backend")
-            or st.get("pd_transfer_backend")
-            or ""
+            st.get("last_restart_pd_transfer_backend") or st.get("pd_transfer_backend") or ""
         ).strip(),
         "prefill_pod_ips": _ips("prefill_pod_ips"),
         "decode_pod_ips": _ips("decode_pod_ips"),

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Filesystem path resolver.
 
@@ -28,6 +29,8 @@ ENV_USER_DATA_PATH = "USER_DATA_PATH"
 ENV_OVERRIDE_ASSET_ROOT = "INFERENCE_OPTIMIZER_ASSET_ROOT"
 ENV_SESSION_LAYOUT = "INFERENCE_OPTIMIZER_SESSION_LAYOUT"
 ENV_CURRENT_SESSION_DIR = "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"
+ENV_CACHE_DIR = "HYPERLOOM_CACHE_DIR"
+ENV_REPO_ROOT = "REPO_ROOT"
 
 # Shipped read-only asset dirs live directly under ``inference_optimizer/``,
 # one level up from this ``session/`` module — hence ``.parent.parent``.
@@ -310,53 +313,74 @@ def runtime_dir() -> Path:
     return workspace_root() / "runtime"
 
 
-def open_source_root() -> Path:
-    """Pod-local base for auto-cloned open-source deps, mirroring the install
-    scripts: ``$HYPERLOOM_OPEN_SOURCE_ROOT`` else
-    ``/opt/hyperloom/open-source-repos``. A pod-internal, non-ephemeral dir
-    (NOT /tmp, which a reaper can wipe mid-run). Decoupled from
-    ``$USER_DATA_PATH`` so a shared workspace root never collocates concurrent
-    pods' checkouts.
+def deps_cache_root() -> Path:
+    """Writable cache root for open-source dependency checkouts.
 
-    Returns:
-        The pod-local open-source repos root path.
+    Resolution: ``$HYPERLOOM_CACHE_DIR`` else ``$REPO_ROOT/.cache``
+    (``REPO_ROOT`` falls back to the current working directory). Deps are cloned
+    per revision under this root; see :func:`resolve_dep_dir`.
     """
-    override = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT")
+    override = os.environ.get(ENV_CACHE_DIR)
     if override:
         return Path(override)
-    return Path("/opt/hyperloom/open-source-repos")
+    repo_root = os.environ.get(ENV_REPO_ROOT) or os.getcwd()
+    return Path(repo_root) / ".cache"
+
+
+def _dir_mtime(p: Path) -> float:
+    """``p``'s mtime, or ``0.0`` if it vanished mid-resolution (race-safe)."""
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def resolve_dep_dir(name: str, env_var: str | None = None) -> Path:
+    """Resolve a dependency checkout, bridging install.sh's per-revision
+    ``<name>@<sha>`` layout to runtime callers.
+
+    Order: ``$<env_var>`` (installer-written exact path) → newest
+    ``<deps_cache_root>/<name>@<sha>`` → bare ``<deps_cache_root>/<name>``. The
+    glob step lets a process that did not inherit the env var still find the
+    installer's checkout rather than a path it never created (#722).
+
+    Args:
+        name: Dependency directory name (e.g. ``TraceLens``).
+        env_var: Installer-exported override env var, if any.
+
+    Returns:
+        The resolved dependency checkout path.
+    """
+    if env_var:
+        override = os.environ.get(env_var)
+        if override:
+            return Path(override)
+    root = deps_cache_root()
+    pinned = [p for p in root.glob(f"{name}@*") if p.is_dir()]
+    if pinned:
+        return max(pinned, key=_dir_mtime)
+    return root / name
 
 
 def magpie_dir() -> Path:
-    """Magpie package root (``$MAGPIE_PATH`` override, else legacy default).
-
-    ``install.sh`` resolves ``MAGPIE_PATH`` from the pip-installed package.
-    This helper keeps the old default path for back-compat with callers that
-    ask before setup has exported the resolved value.
+    """Magpie checkout root, via :func:`resolve_dep_dir` (``$MAGPIE_PATH`` else
+    newest ``Magpie@<sha>`` else bare — Magpie is pip-installed, so bare is the
+    common case).
 
     Returns:
         The Magpie package/check-out root path.
     """
-    override = os.environ.get("MAGPIE_PATH")
-    if override:
-        return Path(override)
-    return open_source_root() / "Magpie"
+    return resolve_dep_dir("Magpie", "MAGPIE_PATH")
 
 
 def tracelens_root() -> Path:
-    """``<open_source_root>/TraceLens/`` — TraceLens checkout (pod-local;
-    ``$TRACELENS_ROOT`` overrides). Aligned with
-    src/hyperloom/agents/kernel/scripts/install.sh so script and runtime
-    resolve the same checkout even when the consuming
-    process did not inherit the installer-written env.
+    """TraceLens checkout root, via :func:`resolve_dep_dir` (``$TRACELENS_ROOT``
+    else newest ``TraceLens@<sha>`` else bare).
 
     Returns:
         The TraceLens checkout path.
     """
-    override = os.environ.get("TRACELENS_ROOT")
-    if override:
-        return Path(override)
-    return open_source_root() / "TraceLens"
+    return resolve_dep_dir("TraceLens", "TRACELENS_ROOT")
 
 
 def mn_profile_trace_root() -> Path:
@@ -386,7 +410,8 @@ __all__ = [
     "magpie_dir",
     "make_session_dir",
     "mn_profile_trace_root",
-    "open_source_root",
+    "deps_cache_root",
+    "resolve_dep_dir",
     "runtime_dir",
     "session_dir",
     "find_latest_per_session_dir",

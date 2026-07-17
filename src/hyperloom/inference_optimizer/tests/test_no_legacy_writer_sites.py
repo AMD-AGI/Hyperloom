@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Static guard for the retired ``extra_sglang_args`` payload field."""
 
@@ -89,8 +90,8 @@ def test_no_legacy_writer_sites_outside_allowlist() -> None:
 def test_allowlist_is_minimal() -> None:
     actual = _files_with_legacy_key()
     dead_entries = sorted(set(ALLOWED_FILES) - actual)
-    assert not dead_entries, (
-        "ALLOWED_FILES entries that no longer contain 'extra_sglang_args':\n  " + "\n  ".join(dead_entries)
+    assert not dead_entries, "ALLOWED_FILES entries that no longer contain 'extra_sglang_args':\n  " + "\n  ".join(
+        dead_entries
     )
 
 

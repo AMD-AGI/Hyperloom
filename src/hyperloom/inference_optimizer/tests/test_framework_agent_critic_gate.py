@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Converged FRAMEWORK pre-screen gate.
 
@@ -158,7 +159,14 @@ async def test_materialize_unknown_route_runs_both_tracks(coord: Coordinator, mo
 async def test_approve_verdict_materializes(coord: Coordinator, monkeypatch) -> None:
     raw: list = []
     monkeypatch.setattr(coord.phase_framework, "_enqueue_framework_agent_task", lambda c: _append(raw, c))
-    pending = _pending({"candidate": dict(_CANDIDATE), "audit_step": "direct_framework", "batch_id": "b", "framework_agent_candidate_id": _CANDIDATE["candidate_id"]})
+    pending = _pending(
+        {
+            "candidate": dict(_CANDIDATE),
+            "audit_step": "direct_framework",
+            "batch_id": "b",
+            "framework_agent_candidate_id": _CANDIDATE["candidate_id"],
+        }
+    )
     coord.state.pending_proposals[pending.proposal_msg_id] = pending
     await coord._handle_single_verdict(source="critic", pending=pending, verdict="approve", reasoning="ok")
     assert len(raw) == 1

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Enablement discovery + authoring operations.
 
@@ -203,10 +204,8 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "setup via ENVIRONMENT SETUP below is separate and allowed.)",
     "Do NOT fabricate throughput/latency/accuracy numbers — the gate here is "
     "RUNNABILITY (does the server boot + pass a minimal inference), not perf.",
-    "Prefer the smallest bridging change that makes the combo run; do not "
-    "refactor unrelated code.",
-    "If a discovered PR already implements the fix, adapt/backport it rather "
-    "than authoring from scratch.",
+    "Prefer the smallest bridging change that makes the combo run; do not refactor unrelated code.",
+    "If a discovered PR already implements the fix, adapt/backport it rather than authoring from scratch.",
 )
 
 # Environment-setup authorization: the specialist MAY run dependency/tool
@@ -225,8 +224,7 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
     "Keep setup commands minimal and deterministic (pin versions), non-"
     "interactive (`-y` / `--yes`), and limited to package/tool installation — "
     "they are validated against an install-only allowlist on replay.",
-    "If NO environment setup is needed (a pure source fix), leave "
-    "`setup_commands` empty.",
+    "If NO environment setup is needed (a pure source fix), leave `setup_commands` empty.",
 )
 
 
@@ -276,8 +274,7 @@ def _render_task_description(
     """
     lines: list[str] = []
     lines.append(
-        f"GOAL: make model `{req.model}` run under the `{req.framework}` backend. "
-        "It currently fails to start."
+        f"GOAL: make model `{req.model}` run under the `{req.framework}` backend. It currently fails to start."
     )
     lines.append("")
     lines.append(f"FAILURE CLASS: {sig.kind} (confidence {sig.confidence:.2f}).")

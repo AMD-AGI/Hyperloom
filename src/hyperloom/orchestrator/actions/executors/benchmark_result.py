@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Benchmark result parsing shared by Magpie-backed executors.
 
@@ -32,14 +33,17 @@ log = logging.getLogger(__name__)
 _DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (Path("/workspace/inferencex_result.json"),)
 
 
-# Wrapper-side diagnostic files hardcoded under ``/workspace/``. They live
-# outside the per-task workspace so the NFS clone misses them;
-# :func:`harvest_leaked_artifacts` copies fresh matches in.
+# Wrapper-side files that leak outside the per-task workspace (under /workspace
+# or env-derived roots like $INFERENCEX_PATH, where append_lm_eval_summary
+# ``mv ./``-s eval output); harvest_leaked_artifacts copies fresh matches back.
+# ``results*.json`` (lm-eval accuracy schema) is the #927 safety net for when the
+# patcher-based redirect missed — parse_eval_results then finds the harvested copy.
 _DEFAULT_LEAK_ARTIFACT_GLOBS: tuple[str, ...] = (
     "server.log",
     "gpu_metrics.csv",
     "profile_*.trace.json.gz",
     "inferencex_result*.json",
+    "results*.json",
 )
 _DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 
@@ -149,6 +153,16 @@ def _rescue_candidate_paths(
         else:
             _push(p)
 
+    # Env-derived dirs: the InferenceX checkout ($INFERENCEX_PATH), where
+    # append_lm_eval_summary's ``mv ./`` lands, plus $RESULT_DIR overrides.
+    for derived in _env_derived_leak_roots():
+        if derived.is_dir():
+            try:
+                for fp in sorted(derived.glob("inferencex_result*.json")):
+                    _push(fp)
+            except OSError:
+                continue
+
     for default in _DEFAULT_RESCUE_PATHS:
         _push(default)
 
@@ -199,12 +213,26 @@ def _materialize_rescue_into_workspace(
     return destination
 
 
+def _env_derived_leak_roots() -> list[Path]:
+    """Leak roots derived from the runtime env: the InferenceX checkout
+    (``$INFERENCEX_PATH``), where ``append_lm_eval_summary``'s ``mv ./`` lands,
+    plus ``$RESULT_DIR`` when an override routed results outside the workspace.
+    """
+    out: list[Path] = []
+    for env_key in ("INFERENCEX_PATH", "RESULT_DIR"):
+        val = (os.environ.get(env_key) or "").strip()
+        if val:
+            out.append(Path(val))
+    return out
+
+
 def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
     """Return the directory roots to scan for wrapper-side leak files.
 
     Order: explicit ``leak_root`` kwarg (tests) →
     ``$INFERENCE_OPTIMIZER_LEAK_ROOTS`` (colon-separated) →
-    :data:`_DEFAULT_LEAK_ARTIFACT_ROOT` (``/workspace``).
+    :data:`_DEFAULT_LEAK_ARTIFACT_ROOT` (``/workspace``) plus the env-derived
+    roots from :func:`_env_derived_leak_roots` (deduped).
 
     Args:
         leak_root: Optional explicit root override (used by tests); when
@@ -220,7 +248,13 @@ def _resolve_leak_roots(leak_root: Path | None) -> tuple[Path, ...]:
         parts = [Path(p.strip()) for p in env_raw.split(":") if p.strip()]
         if parts:
             return tuple(parts)
-    return (_DEFAULT_LEAK_ARTIFACT_ROOT,)
+    roots: list[Path] = [_DEFAULT_LEAK_ARTIFACT_ROOT]
+    seen = {_DEFAULT_LEAK_ARTIFACT_ROOT}
+    for root in _env_derived_leak_roots():
+        if root not in seen:
+            seen.add(root)
+            roots.append(root)
+    return tuple(roots)
 
 
 def harvest_leaked_artifacts(
@@ -490,6 +524,7 @@ def harvest_mn_gpu_metrics(
     # so never touch its result path. is_multi_node() is the authoritative
     # gate (state nodes>=2 or $INFERENCE_OPTIMIZER_NODES>=2).
     from ._multi_node_env import is_multi_node
+
     if not is_multi_node():
         return out
     # Resolve the shared server-log dir exactly as cli.py forwards it to the
@@ -497,8 +532,7 @@ def harvest_mn_gpu_metrics(
     # client reads where the pod sampler wrote, without changing forwarding
     # logic. Absolute-only; unresolved $VAR is treated as absent.
     shared = os.path.expandvars(
-        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
-        or "$USER_DATA_PATH/server_logs"
+        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
     )
     if not shared.startswith("/") or "$" in shared:
         return out
@@ -515,6 +549,7 @@ def harvest_mn_gpu_metrics(
     # PD-disaggregation: map each pod IP -> prefill/decode role so metrics
     # can be tagged and aggregated per role (empty unless disaggregated).
     from ._multi_node_env import pd_topology_from_state
+
     pd = pd_topology_from_state()
     role_of: dict[str, str] = {}
     for _ip in pd.get("prefill_pod_ips", []):
@@ -531,7 +566,7 @@ def harvest_mn_gpu_metrics(
     merged: list[list[str]] = []
     samples: list[dict[str, Any]] = []
     for pod_csv in pod_csvs:
-        host = pod_csv.stem[len("gpu_metrics_"):]
+        host = pod_csv.stem[len("gpu_metrics_") :]
         try:
             with pod_csv.open(encoding="utf-8", errors="replace", newline="") as f:
                 rows = list(csv.reader(f))
@@ -593,9 +628,7 @@ def harvest_mn_gpu_metrics(
                     by_role = _aggregate_gpu_samples_by_role(samples)
                     if by_role:
                         report["gpu_monitor_by_role"] = by_role
-                        out["gpu_monitor_by_role"] = {
-                            k: v.get("samples") for k, v in by_role.items()
-                        }
+                        out["gpu_monitor_by_role"] = {k: v.get("samples") for k, v in by_role.items()}
                 try:
                     with report_path.open("w", encoding="utf-8") as f:
                         json.dump(report, f, indent=2)

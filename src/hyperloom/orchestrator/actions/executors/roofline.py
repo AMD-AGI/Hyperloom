@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Roofline composite ActionRunner.
 
@@ -58,6 +59,7 @@ def _trace_is_high_idle(ta_result: dict[str, Any]) -> bool:
         if isinstance(w, dict) and w.get("code") == "high_gpu_idle_pct":
             return True
     return False
+
 
 # seconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = functools.partial(now_iso, "seconds")
@@ -180,10 +182,7 @@ def _profile_err_text(profile_result: Any) -> str:
     capture-failure detection."""
     if not isinstance(profile_result, dict):
         return ""
-    parts = [
-        str(profile_result.get(k) or "")
-        for k in ("error", "error_class", "error_excerpt", "stderr_tail")
-    ]
+    parts = [str(profile_result.get(k) or "") for k in ("error", "error_class", "error_excerpt", "stderr_tail")]
     sub = profile_result.get("sub_result")
     if isinstance(sub, dict):
         parts += [str(sub.get(k) or "") for k in ("error", "error_class")]
@@ -298,10 +297,12 @@ class RooflineExecutor:
             _disable_cuda_graph_flag,
             _is_cuda_graph_capture_failure,
         )
+
         eager_flag = _disable_cuda_graph_flag(framework)
         for attempt in range(1, _PROFILE_MAX_ATTEMPTS + 1):
             profile_ctx = self._wrap_profile_ctx(
-                ctx, disable_cuda_graph=disable_cuda_graph,
+                ctx,
+                disable_cuda_graph=disable_cuda_graph,
                 framework=framework,
             )
             try:
@@ -315,13 +316,10 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                     last_error,
                 )
-                if not disable_cuda_graph and _is_cuda_graph_capture_failure(
-                    last_error
-                ):
+                if not disable_cuda_graph and _is_cuda_graph_capture_failure(last_error):
                     disable_cuda_graph = True
                     log.warning(
-                        "roofline: cuda-graph capture failure detected; next "
-                        "attempt boots eager (%s)",
+                        "roofline: cuda-graph capture failure detected; next attempt boots eager (%s)",
                         eager_flag,
                     )
                 continue
@@ -369,8 +367,7 @@ class RooflineExecutor:
                 ):
                     disable_cuda_graph = True
                     log.warning(
-                        "roofline: cuda-graph capture failure detected; next "
-                        "attempt boots eager (%s)",
+                        "roofline: cuda-graph capture failure detected; next attempt boots eager (%s)",
                         eager_flag,
                     )
                 continue
@@ -416,8 +413,7 @@ class RooflineExecutor:
                     "execution — re-profile needed"
                 )
                 log.warning(
-                    "roofline profile attempt %d/%d: zero-ops trace (%s); "
-                    "re-profiling",
+                    "roofline profile attempt %d/%d: zero-ops trace (%s); re-profiling",
                     attempt,
                     _PROFILE_MAX_ATTEMPTS,
                     trace_path,
@@ -636,9 +632,7 @@ class RooflineExecutor:
             try:
                 cb_ctx = self._wrap_profile_ctx(ctx, framework=framework)
                 cb_profile = await profile_executor(cb_ctx)
-                cb_trace = (
-                    _extract_trace_path(cb_profile) if isinstance(cb_profile, dict) else ""
-                )
+                cb_trace = _extract_trace_path(cb_profile) if isinstance(cb_profile, dict) else ""
                 if cb_trace:
                     cb_payload: dict[str, Any] = {"trace_input": str(cb_trace)}
                     if roofline_arm:
@@ -647,9 +641,7 @@ class RooflineExecutor:
                         cb_payload["roofline_output_name"] = roofline_output_name
                     cb_ta = await trace_analyze_handler(cb_payload, session_dir=session_dir)
                     if isinstance(cb_ta, dict) and cb_ta.get("status") == "ok":
-                        cb_hot = (
-                            cb_ta.get("hot_kernels_top15") or cb_ta.get("hot_kernels") or []
-                        )
+                        cb_hot = cb_ta.get("hot_kernels_top15") or cb_ta.get("hot_kernels") or []
                         if cb_hot:
                             log.info(
                                 "roofline: compute-bound re-profile surfaced %d hot "
@@ -751,7 +743,9 @@ class RooflineExecutor:
 
     @staticmethod
     def _wrap_profile_ctx(
-        parent_ctx: RunnerContext, *, disable_cuda_graph: bool = False,
+        parent_ctx: RunnerContext,
+        *,
+        disable_cuda_graph: bool = False,
         framework: str = "",
     ) -> RunnerContext:
         """Construct a child RunnerContext for profile_executor.
@@ -775,6 +769,7 @@ class RooflineExecutor:
         params = dict(parent_task.params or {})
         if disable_cuda_graph:
             from .baseline import _with_cuda_graph_disabled
+
             params["base_extra_args"] = _with_cuda_graph_disabled(
                 str(params.get("base_extra_args") or ""),
                 framework or str(params.get("framework") or ""),

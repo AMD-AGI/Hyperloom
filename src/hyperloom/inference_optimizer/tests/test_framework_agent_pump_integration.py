@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Integration test for ``_pump_framework_agent_phase`` (converged async gate).
 
@@ -18,6 +19,7 @@ import pytest
 
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
 # Cross-cutting framework parametrisation; add new frameworks here.
@@ -58,6 +60,7 @@ class _StateStub:
         self.phase = "FRAMEWORK_AGENT"
         self.framework_agent_phase_done = False
         self.framework_agent_authoring_enabled = False
+        self.framework_local_explore_enabled = False
         self.framework_agent_discover_failures = 0
         self.framework_agent_empty_discoveries = 0
         self.framework_agent_batches: list[dict[str, Any]] = []
@@ -127,10 +130,14 @@ class _CoordinatorStub:
     _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
     _discover_next_framework_batch = Coordinator._discover_next_framework_batch
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
+    # Local-exploration arm surface (disabled in this stub's state, so these
+    # short-circuit; bound so the shared pump/select paths resolve).
+    _LOCAL_EXPLORE_KIND = FrameworkPhase._LOCAL_EXPLORE_KIND
+    _framework_local_explore_arm_enabled = FrameworkPhase._framework_local_explore_arm_enabled
+    _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
+    _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
     # The discovery merge calls this reverse-lookup on every repo.
-    _framework_agent_repo_url_origin_framework = staticmethod(
-        Coordinator._framework_agent_repo_url_origin_framework
-    )
+    _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
 
     def __init__(self, tmp_path: Path, *, framework: str = "sglang") -> None:
         self.session_dir = tmp_path
@@ -145,9 +152,7 @@ class _CoordinatorStub:
     async def _record_observation(self, *_a: Any, **_k: Any) -> None:
         return None
 
-    async def _rank_framework_agent_candidates_llm(
-        self, candidates: list[dict[str, Any]]
-    ) -> dict[str, Any] | None:
+    async def _rank_framework_agent_candidates_llm(self, candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
         # Force the deterministic discovery-order fallback.
         return None
 
@@ -174,11 +179,7 @@ def _pump(stub: _CoordinatorStub) -> None:
 
 
 def _framework_agent_pendings(stub: _CoordinatorStub) -> list[Any]:
-    return [
-        p
-        for p in stub.state.pending_proposals.values()
-        if getattr(p, "action_name", "") == "framework_agent"
-    ]
+    return [p for p in stub.state.pending_proposals.values() if getattr(p, "action_name", "") == "framework_agent"]
 
 
 @pytest.mark.parametrize("framework", _FRAMEWORK_PARAMETRISATION)
@@ -333,9 +334,7 @@ def test_pump_retries_empty_discover_before_marking_phase_done(
         assert stub.shared_state.framework_agent_phase_done is False
         assert stub.shared_state.framework_agent_empty_discoveries == i + 1
         assert _framework_agent_pendings(stub) == []
-        assert [
-            r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"
-        ] == []
+        assert [r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"] == []
 
     # The limit-th consecutive empty batch ends the phase with a summary row.
     _pump(stub)

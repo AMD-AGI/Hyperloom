@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """RCA engines, both exposing ``async def summarize(symptom) -> str``.
 
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 import httpx
 
 from ..signals import Symptom, SymptomSeverity
+
 if TYPE_CHECKING:
     from ..state_store import DetectorStateView
 

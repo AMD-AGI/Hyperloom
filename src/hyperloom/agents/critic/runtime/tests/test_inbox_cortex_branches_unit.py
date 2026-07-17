@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Branch coverage for inbox_parser helpers."""
 
@@ -41,11 +42,7 @@ def test_parse_inbox_prompt_type_error() -> None:
 
 
 def test_parse_inbox_prompt_preamble_and_sections() -> None:
-    text = (
-        "preamble line before any section\n"
-        "=== Shared session state ===\n"
-        "phase=EXPLORE cycle=1\n"
-    )
+    text = "preamble line before any section\n=== Shared session state ===\nphase=EXPLORE cycle=1\n"
     parsed = parse_inbox_prompt(text)
     d = parsed.to_dict()
     assert d["shared_state"].get("phase") == "EXPLORE"

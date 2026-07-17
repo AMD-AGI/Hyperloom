@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """On-disk recipe-snapshot store backing the local-only write path.
 
@@ -686,6 +687,7 @@ class LocalRecipeStore:
             "recipe_canonical_id": canonical_id,
             "attempt_at": stamped_at,
         }
+
 
 # search filter helpers
 def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> bool:

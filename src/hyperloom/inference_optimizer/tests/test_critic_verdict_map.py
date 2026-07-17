@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Critic per-variant ``verdict_map`` tests."""
 
@@ -28,6 +29,8 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
     REVIEW_VERDICTS,
 )
+
+
 # 1. intent_parser — envelope schema accepts verdict OR verdict_map
 def _envelope(**payload: Any) -> dict[str, Any]:
     return {

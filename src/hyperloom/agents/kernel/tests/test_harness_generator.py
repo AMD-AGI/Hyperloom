@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for harness_generator.py (AST analysis + harness synthesis)."""
 
@@ -71,12 +72,7 @@ def test_get_imports_dedents_function_local():
     """
     import ast as _ast
 
-    src = (
-        "import torch\n"
-        "def f():\n"
-        "    import math\n"
-        "    return math.pi\n"
-    )
+    src = "import torch\ndef f():\n    import math\n    return math.pi\n"
     a = hg.BenchmarkAnalyzer(src)
     imports = a.get_imports()
     assert "import math" in imports, imports
@@ -251,18 +247,22 @@ def test_build_configs_unparseable_shapes_fallback():
 
 def test_is_heterogeneous_multi_tensor():
     # Paged-attention style: distinct ranks across tensors -> True.
-    attn = {"input_shapes": [
-        {"shape": "(64, 32, 128) bf16"},
-        {"shape": "(2181038080,) fp8"},
-        {"shape": "(1177697, 1, 8, 128) bf16"},
-        {"shape": "(65,) int"},
-    ]}
+    attn = {
+        "input_shapes": [
+            {"shape": "(64, 32, 128) bf16"},
+            {"shape": "(2181038080,) fp8"},
+            {"shape": "(1177697, 1, 8, 128) bf16"},
+            {"shape": "(65,) int"},
+        ]
+    }
     assert hg._is_heterogeneous_multi_tensor(attn) is True
     # Normal shape sweep (all same rank) -> False.
-    gemm = {"input_shapes": [
-        {"shape": "(256, 4096) bf16"},
-        {"shape": "(1024, 4096) bf16"},
-    ]}
+    gemm = {
+        "input_shapes": [
+            {"shape": "(256, 4096) bf16"},
+            {"shape": "(1024, 4096) bf16"},
+        ]
+    }
     assert hg._is_heterogeneous_multi_tensor(gemm) is False
     # Single tensor / empty -> False.
     assert hg._is_heterogeneous_multi_tensor({"input_shapes": [{"shape": "(256, 4096) bf16"}]}) is False
@@ -483,11 +483,7 @@ def _inject_fake_validate(monkeypatch, *, harness_ok, bench_ok, force_file=False
 
 def test_parse_traced_operand_dims_list_of_dict():
     """TraceLens list form: [{'shape': '(a,b) dt<br>(c,d,e) dt<br>...'}]."""
-    cand = {
-        "input_shapes": [
-            {"shape": "(64,2048) bf16<br>(128,1536,2048) bf16<br>(128,2048,768) bf16<br>(4600,) int"}
-        ]
-    }
+    cand = {"input_shapes": [{"shape": "(64,2048) bf16<br>(128,1536,2048) bf16<br>(128,2048,768) bf16<br>(4600,) int"}]}
     dims = hg._parse_traced_operand_dims(cand)
     assert dims[0] == (64, 2048)
     assert dims[1] == (128, 1536, 2048)
@@ -504,9 +500,7 @@ def test_parse_traced_operand_dims_plain_string():
 def test_aiter_shape_from_candidate_moe_inter_dim_from_w2():
     """ck_moe: inter_dim is w2's LAST axis (w2=(E, model_dim, inter_dim)), not topk."""
     cand = {
-        "input_shapes": [
-            {"shape": "(64,2048) bf16<br>(128,1536,2048) bf16<br>(128,2048,768) bf16<br>(64,8,768) bf16"}
-        ]
+        "input_shapes": [{"shape": "(64,2048) bf16<br>(128,1536,2048) bf16<br>(128,2048,768) bf16<br>(64,8,768) bf16"}]
     }
     s = hg._aiter_shape_from_candidate(cand)
     assert s["M"] == 64  # token
@@ -634,16 +628,23 @@ def _referenced_keys(body: str) -> set[str]:
     refs: set[str] = set()
     for node in ast.walk(tree):
         # inputs.get("X")
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "get"
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "inputs"
-                and node.args and isinstance(node.args[0], ast.Constant)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "inputs"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
             refs.add(node.args[0].value)
         # inputs["X"]
-        if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
-                and node.value.id == "inputs"
-                and isinstance(node.slice, ast.Constant)):
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "inputs"
+            and isinstance(node.slice, ast.Constant)
+        ):
             refs.add(node.slice.value)
     return refs
 
@@ -655,8 +656,7 @@ def test_setup_inputs_union_covers_ref_only_keys():
     test_func = a.get_test_function(dec)
     ref_func, kernel_func = a.classify_functions(dec)
 
-    setup_body = hg._generate_setup_inputs(
-        a, test_func, "M, N, dtype = cfg", ref_func, kernel_func)
+    setup_body = hg._generate_setup_inputs(a, test_func, "M, N, dtype = cfg", ref_func, kernel_func)
     ref_body = hg._generate_run_ref(a, test_func, ref_func, kernel_func)
 
     setup_keys = _setup_keys(setup_body)
@@ -676,12 +676,11 @@ def test_setup_inputs_infers_correct_types():
     test_func = a.get_test_function(dec)
     ref_func, kernel_func = a.classify_functions(dec)
 
-    body = hg._generate_setup_inputs(
-        a, test_func, "M, N, dtype = cfg", ref_func, kernel_func)
+    body = hg._generate_setup_inputs(a, test_func, "M, N, dtype = cfg", ref_func, kernel_func)
 
     # index tensors are int, not randn float
-    assert 'block_tables = torch.zeros(M, N, dtype=torch.int32' in body
-    assert 'seq_lens = torch.zeros(M, N, dtype=torch.int32' in body
+    assert "block_tables = torch.zeros(M, N, dtype=torch.int32" in body
+    assert "seq_lens = torch.zeros(M, N, dtype=torch.int32" in body
     # int scalars
     assert "max_seq_len = 1" in body
     assert "num_kv_heads = 1" in body
@@ -702,5 +701,5 @@ def test_run_func_body_uses_get_not_subscript():
     test_func = a.get_test_function(dec)
     ref_func, kernel_func = a.classify_functions(dec)
     body = hg._generate_run_func_body(a, test_func, ref_func)
-    assert 'inputs.get(' in body
+    assert "inputs.get(" in body
     assert 'inputs["' not in body

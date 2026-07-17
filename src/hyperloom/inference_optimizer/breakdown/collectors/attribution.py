@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
 
@@ -17,7 +18,6 @@ from typing import Any
 from ._common import (
     _to_float,
 )
-
 
 
 def _normalize_specialist_key(provenance: str) -> str:
@@ -263,9 +263,7 @@ def collect_attribution(
             # instead of being credited to a backend that produced no KEEP.
             "kernel_unattributed_pct_of_total": round(kernel_unattributed, 2),
             "explore_pct_of_total": round(family_totals.get("explore", 0.0), 2),
-            "replay_warm_recipe_pct_of_total": round(
-                family_totals.get("replay_warm_recipe", 0.0), 2
-            ),
+            "replay_warm_recipe_pct_of_total": round(family_totals.get("replay_warm_recipe", 0.0), 2),
             "framework_pct_of_total": round(family_totals.get("framework", 0.0), 2),
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
             "geak_pct_of_total": round(family_totals.get("geak", 0.0), 2),
@@ -510,4 +508,3 @@ def _reconstruct_gain_ledger(
         out.append(row)
         cum_before = cum_after
     return out
-

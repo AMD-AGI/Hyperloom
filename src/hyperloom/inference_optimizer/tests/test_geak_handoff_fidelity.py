@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 """Serving-launch fidelity forwarding for the GEAK handoff.
 
 Guards that Hyperloom forwards the same max-model-len / gpu-mem-util its Magpie
@@ -33,7 +34,7 @@ def test_parse_absent_and_valueless_and_empty() -> None:
 
 
 def test_parse_quoted_value_survives_shlex() -> None:
-    args = "--compilation-config='{\"cudagraph_mode\":\"FULL\"}' --max-model-len 4096"
+    args = '--compilation-config=\'{"cudagraph_mode":"FULL"}\' --max-model-len 4096'
     assert _parse_server_arg_value(args, "--max-model-len") == "4096"
     assert _parse_server_arg_value(args, "--compilation-config") == '{"cudagraph_mode":"FULL"}'
 
@@ -68,9 +69,7 @@ def test_resolve_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_resolve_omits_unresolved_knobs() -> None:
     """No source => key omitted entirely (GEAK adapter applies its own default)."""
     assert _resolve_serving_fidelity(baseline_server_args="", state_max_model_len=0) == {}
-    out = _resolve_serving_fidelity(
-        baseline_server_args="--gpu-memory-utilization 0.9", state_max_model_len=0
-    )
+    out = _resolve_serving_fidelity(baseline_server_args="--gpu-memory-utilization 0.9", state_max_model_len=0)
     assert out == {"mem_fraction": 0.9}
     assert "max_model_len" not in out
 

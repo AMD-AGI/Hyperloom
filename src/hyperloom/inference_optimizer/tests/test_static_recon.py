@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for the static-recon specialist.
 
@@ -72,6 +73,7 @@ def test_render_checklist_for_prompt_includes_id_and_bridge():
 
 # --- shared-expert fusion entry ---------------------------------------------
 
+
 def test_shared_expert_fusion_entry_in_mxfp8_rocm():
     """rocm.moe.shared_expert_fusion must appear for ROCm + mxfp8 runs."""
     ids = [e.id for e in src.entries_for(gpu_type="MI355X", precision="mxfp8")]
@@ -106,9 +108,7 @@ def test_filter_entries_for_model_removes_entry_when_no_shared_expert():
     for model_info in ({}, {"has_shared_expert": False}, {"is_moe": True}):
         filtered = src.filter_entries_for_model(entries, model_info)
         ids = [e.id for e in filtered]
-        assert "rocm.moe.shared_expert_fusion" not in ids, (
-            f"entry leaked through for model_info={model_info}"
-        )
+        assert "rocm.moe.shared_expert_fusion" not in ids, f"entry leaked through for model_info={model_info}"
 
 
 def test_filter_entries_for_model_preserves_other_entries():

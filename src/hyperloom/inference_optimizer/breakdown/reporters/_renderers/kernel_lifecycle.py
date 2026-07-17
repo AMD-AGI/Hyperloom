@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Kernel lifecycle renderer — one row per detected kernel with its full optimization lifecycle.
 
@@ -181,7 +182,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             Decision(
                 kind="not_attempted",
                 subject="kernel_lifecycle",
-                rationale=(f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor Forge attempted)"),
+                rationale=(
+                    f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor Forge attempted)"
+                ),
             )
         )
 

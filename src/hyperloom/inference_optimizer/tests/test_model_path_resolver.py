@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for ``resolve_local_model_dir`` (repo id / path -> local model dir).
 
@@ -24,9 +25,7 @@ def _make_model_dir(tmp_path: Path, cfg: dict | None = None) -> Path:
     """Create a fake local model dir carrying a ``config.json``."""
     d = tmp_path / "weights"
     d.mkdir()
-    (d / "config.json").write_text(
-        json.dumps(cfg or {"model_type": "llama"}), encoding="utf-8"
-    )
+    (d / "config.json").write_text(json.dumps(cfg or {"model_type": "llama"}), encoding="utf-8")
     return d
 
 

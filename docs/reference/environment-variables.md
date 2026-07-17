@@ -88,7 +88,8 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--pd-ib-device`.
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
-  `--no-framework-agent`, `--no-kernel`, `--no-explore`.
+  `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
+  `--no-explore`.
 - **Agent models:** `--claude-model`, `--codex-model`.
 - **Session / resume:** `--resume`, `--resume-from`, `--session-dir`,
   `--reset-state`.
@@ -189,6 +190,7 @@ The following variables configure framework source discovery and path overrides.
 | `HYPERLOOM_`<br>`SGLANG_PA`<br>`TCH_EXACT`<br>`_VERSIONS`           | Unset                                                                  | Pin the sglang server-patch step to specific upstream versions; advanced compatibility option.                                                          |
 | `HYPERLOOM_`<br>`ENABLE`<br>`_PATCH`                          | `1`                                                                    | Set to `0` to skip the in-place server patch step (useful when the upstream is already pre-patched).                                                    |
 | `AITER_REF` | Unset | Optional bare-metal AITER install pin. When unset, the installer selects the newest tag compatible with the installed torch/triton stack. |
+| `INFERENCE_`<br>`OPTIMIZER_`<br>`FRAMEWORK_`<br>`AUDIT_USE_LLM`      | `auto`                                                                 | Controls the FRAMEWORK phase semantic-audit LLM deep-read. `off` keeps the hermetic static verdict only; `on` always runs the evidence-gated LLM refine; `auto` (default) escalates to the LLM only when the static verdict is `unknown` or `confidence < 0.5`. The refine never upgrades to an `already_*` status the static layer did not already back with evidence. |
 
 ---
 

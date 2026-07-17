@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Integration tests for the prepare/commit lifecycle via :class:`InMemoryKBClient`."""
 
@@ -697,7 +698,7 @@ def test_kb_assess_skipped_when_unconfigured(tmp_path, monkeypatch):
     kb = InMemoryKBClient()
     writer = KBWriter(kb, session_memory=sm)
     rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
- # no CORTEX_KB_URL -> no assess client
+    # no CORTEX_KB_URL -> no assess client
     assert rev.kb_assess_client is None
     bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_LEVERS, "sess_noassess"))
     assert bundle.kb_assess_by_proposal == {}

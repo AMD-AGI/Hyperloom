@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Critic gate over specialist patches."""
 
@@ -204,7 +205,9 @@ async def test_executor_short_circuits_on_recorded_reject(tmp_path: Path):
     assert result["status"] in ("rejected_by_critic", "apply_failed")
     assert result["patches_applied"] == []
     if result["status"] == "rejected_by_critic":
-        assert "Critic verdict 'reject'" in result["reason"]
+        # The gate now requires a permissive verdict; a recorded 'reject' is
+        # surfaced in the reason (wording generalized in SWSPLAT-42420 fix).
+        assert "verdict 'reject'" in result["reason"]
 
 
 @pytest.mark.asyncio

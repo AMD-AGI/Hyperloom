@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Baseline parameter override tests."""
 
@@ -513,9 +514,7 @@ def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
     assert captured["env"]["RESULT_DIR"] == str(tmp_path / "redirect_leak")
 
 
-def test_baseline_executor_falls_back_to_shared_state_model_path(
-    tmp_path, monkeypatch
-):
+def test_baseline_executor_falls_back_to_shared_state_model_path(tmp_path, monkeypatch):
     # params has no model_path and MODEL_PATH is unset: without the SharedState
     # fallback the bare YAML model name leaks into --model-path.
     monkeypatch.delenv("MODEL_PATH", raising=False)
@@ -548,15 +547,10 @@ def test_baseline_executor_falls_back_to_shared_state_model_path(
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert (
-        captured["cfg"]["benchmark"]["model"]
-        == "/path/models/PrimeIntellect-Qwen3-1.7B"
-    )
+    assert captured["cfg"]["benchmark"]["model"] == "/path/models/PrimeIntellect-Qwen3-1.7B"
 
 
-def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(
-    tmp_path, monkeypatch
-):
+def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(tmp_path, monkeypatch):
     # Production form: the executor is a module-level singleton and live state
     # arrives via ctx.extra; without reading it the bare YAML model name leaks.
     monkeypatch.delenv("MODEL_PATH", raising=False)
@@ -577,10 +571,13 @@ def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(
         default_config_path=base,
         session_dir=tmp_path,
     )
-    task = SimpleNamespace(task_id="t-baseline-extra", params={
-        "output_dir": str(output_dir),
-        "timeout_sec": 10,
-    })
+    task = SimpleNamespace(
+        task_id="t-baseline-extra",
+        params={
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+        },
+    )
     ctx = SimpleNamespace(
         task=task,
         extra={
@@ -597,10 +594,7 @@ def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert (
-        captured["cfg"]["benchmark"]["model"]
-        == "/path/models/PrimeIntellect-Qwen3-1.7B"
-    )
+    assert captured["cfg"]["benchmark"]["model"] == "/path/models/PrimeIntellect-Qwen3-1.7B"
 
 
 def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path):
@@ -752,7 +746,8 @@ def test_reference_base_seeds_lowest_priority(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
-        base, out,
+        base,
+        out,
         model_path="/path/models/X",
         gpu_type="mi300x",
         reference_server_args="--block-size 128 --attention-backend TRITON_ATTN",
@@ -769,7 +764,8 @@ def test_reference_base_extra_args_override_wins(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
-        base, out,
+        base,
+        out,
         model_path="/path/models/X",
         gpu_type="mi300x",
         reference_server_args="--block-size 128 --attention-backend TRITON_ATTN",
@@ -792,7 +788,8 @@ def test_reference_envs_do_not_clobber_existing(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     materialized = materialize_config_with_envs(
-        base, out,
+        base,
+        out,
         model_path="/path/models/X",
         gpu_type="mi300x",
         extra_envs={"VLLM_ROCM_USE_AITER": "1"},
@@ -813,14 +810,19 @@ def test_empty_reference_is_byte_identical(tmp_path):
     out_b = tmp_path / "b"
     out_b.mkdir()
     m_with = materialize_config_with_envs(
-        base, out_a,
-        model_path="/path/models/X", gpu_type="mi300x",
-        reference_server_args="", reference_envs=None,
+        base,
+        out_a,
+        model_path="/path/models/X",
+        gpu_type="mi300x",
+        reference_server_args="",
+        reference_envs=None,
         out_name="x.yaml",
     )
     m_without = materialize_config_with_envs(
-        base, out_b,
-        model_path="/path/models/X", gpu_type="mi300x",
+        base,
+        out_b,
+        model_path="/path/models/X",
+        gpu_type="mi300x",
         out_name="x.yaml",
     )
     assert yaml.safe_load(m_with.read_text()) == yaml.safe_load(m_without.read_text())

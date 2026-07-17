@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Structured-intent transport validation (protocol layer).
 
@@ -39,6 +40,7 @@ class IntentType(str, Enum):
     # specialist exit: one per task.
     SPECIALIST_DONE = "specialist_done"
 
+
 @dataclass
 class Intent:
     """One validated intent from any transport."""
@@ -64,6 +66,7 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     # specialist exit envelope; per-variant schema enforced by PolicyGate R3.
     IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "empty", "summary"),
 }
+
 
 class NoIntentEmitted(RuntimeError):
     """Backend produced no parseable envelope and no tool_use blocks."""

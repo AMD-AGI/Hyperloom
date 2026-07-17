@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests that framework-family authoring specialists lease the whole machine.
 
@@ -71,10 +72,7 @@ def _build_coord(
     state.save(tmp_path)
 
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {
-        name: MockBackend(idle)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
-    }
+    backends = {name: MockBackend(idle) for name in ("orchestration", "kernel_agent", "critic", "robustness")}
     return Coordinator(
         session_dir=tmp_path,
         backends=backends,
@@ -94,9 +92,7 @@ class _GpuProbe:
 
     async def __call__(self, ctx) -> dict:
         self.entries.append(ctx.task.task_id)
-        self.gpu_ids_by_task[ctx.task.task_id] = list(
-            (ctx.extra or {}).get("gpu_ids") or []
-        )
+        self.gpu_ids_by_task[ctx.task.task_id] = list((ctx.extra or {}).get("gpu_ids") or [])
         await asyncio.sleep(self.sleep_seconds)
         return {
             "runner_status": "succeeded",
@@ -152,9 +148,7 @@ def test_enablement_params_carry_whole_machine_gpu(tmp_path, monkeypatch):
 
 def test_framework_gpu_params_empty_without_gpus(tmp_path, monkeypatch):
     """No visible cards → no needs_gpu (never deadlock the dispatcher)."""
-    coord = _build_coord(
-        tmp_path, monkeypatch, gpu_specialist_capacity=0, visible_devices=""
-    )
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0, visible_devices="")
     assert coord.framework_gpu_pool.capacity == 0
     assert coord._framework_gpu_params() == {}
 
@@ -170,9 +164,7 @@ def test_framework_gpu_params_empty_on_multi_node(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_framework_family_leases_whole_machine_when_capacity_zero(
-    tmp_path, monkeypatch
-):
+async def test_framework_family_leases_whole_machine_when_capacity_zero(tmp_path, monkeypatch):
     """A framework-family GPU task leases every card from ``framework_gpu_pool``
     even though ``gpu_specialist_capacity=0`` empties the EXPLORE pool."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
@@ -205,9 +197,7 @@ async def test_framework_family_leases_whole_machine_when_capacity_zero(
 
 
 @pytest.mark.asyncio
-async def test_framework_family_defaults_gpu_count_to_whole_machine(
-    tmp_path, monkeypatch
-):
+async def test_framework_family_defaults_gpu_count_to_whole_machine(tmp_path, monkeypatch):
     """Omitting ``gpu_count`` defaults a framework-family task to the whole
     machine (not the serving TP)."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
@@ -259,9 +249,7 @@ async def test_gpu_research_lane_mutexes_serving_lanes(tmp_path, monkeypatch):
                 action="baseline",
                 ttl_sec=60,
             )
-            assert blocked is None, (
-                f"{serving_lane} was acquirable while gpu_research_lane held"
-            )
+            assert blocked is None, f"{serving_lane} was acquirable while gpu_research_lane held"
         # A second GPU task is also blocked (cap-1 / strictly serial).
         second = await coord.locks.try_acquire_many(
             ["gpu_research_lane"],
@@ -340,9 +328,7 @@ async def test_explore_gpu_specialist_uses_carved_pool(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(
-    tmp_path, monkeypatch
-):
+async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(tmp_path, monkeypatch):
     """A bench-capable EXPLORE specialist (mode=patch & bench=true) leases the
     whole machine from ``framework_gpu_pool`` — so serving occupying the whole
     node (TP == #GPUs, which empties the serving-disjoint pool) does not leave

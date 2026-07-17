@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CodexBackend tests (mock OpenAI client — no network)."""
 
@@ -409,9 +410,7 @@ def _chat_backend_raising(exc: BaseException) -> CodexBackend:
 
 
 def _ws_backend_raising(exc: BaseException) -> CodexBackend:
-    return CodexBackend(
-        model="gpt-5.5", web_search=True, client_factory=lambda: _RaisingChatClient(exc)
-    )
+    return CodexBackend(model="gpt-5.5", web_search=True, client_factory=lambda: _RaisingChatClient(exc))
 
 
 @pytest.mark.asyncio

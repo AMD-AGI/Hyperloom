@@ -12,6 +12,7 @@ import pytest
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.framework import paths as _framework_paths
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
 class _StateStub:
@@ -23,6 +24,9 @@ class _StateStub:
         self.framework_agent_phase_progress: list[dict[str, Any]] = []
         self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.framework_agent_authoring_enabled = authoring
+        # Local-exploration arm off in this suite: these tests exercise the
+        # PR-authoring track; the arm has dedicated coverage elsewhere.
+        self.framework_local_explore_enabled = False
         self.framework_agent_specialist_candidate_map: dict[str, str] = {}
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
@@ -116,18 +120,24 @@ class _Stub:
     _materialize_framework_agent_candidate = Coordinator._materialize_framework_agent_candidate
     _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
     _discover_next_framework_batch = Coordinator._discover_next_framework_batch
-    _framework_agent_repo_url_origin_framework = staticmethod(
-        Coordinator._framework_agent_repo_url_origin_framework
-    )
+    _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
     _enqueue_framework_agent_authoring_specialist = Coordinator._enqueue_framework_agent_authoring_specialist
     _framework_agent_authoring_inflight = Coordinator._framework_agent_authoring_inflight
     _record_framework_agent_authored_outcome = Coordinator._record_framework_agent_authored_outcome
     _record_framework_agent_audit_skip = Coordinator._record_framework_agent_audit_skip
     _framework_agent_audit_seed_lines = staticmethod(Coordinator._framework_agent_audit_seed_lines)
+    _framework_audit_use_llm_mode = staticmethod(FrameworkPhase._framework_audit_use_llm_mode)
+    _framework_audit_verdict_uncertain = staticmethod(FrameworkPhase._framework_audit_verdict_uncertain)
     _framework_agent_audit_skip_confident = staticmethod(Coordinator._framework_agent_audit_skip_confident)
     _framework_agent_roots_have_git = staticmethod(Coordinator._framework_agent_roots_have_git)
     _pump_framework_agent_phase = Coordinator._pump_framework_agent_phase
+    # Local-exploration arm surface (disabled in this suite's state, so these
+    # short-circuit; bound so the shared pump/select paths resolve).
+    _LOCAL_EXPLORE_KIND = FrameworkPhase._LOCAL_EXPLORE_KIND
+    _framework_local_explore_arm_enabled = FrameworkPhase._framework_local_explore_arm_enabled
+    _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
+    _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
     # Stub has no GPU pool, so ``_framework_gpu_params`` degrades to ``{}``.
     _coerce_needs_gpu = staticmethod(Coordinator._coerce_needs_gpu)
     _framework_authoring_lanes_ttl = Coordinator._framework_authoring_lanes_ttl
@@ -149,9 +159,7 @@ class _Stub:
     async def _record_observation(self, *_a: Any, **_k: Any) -> None:
         return None
 
-    async def _rank_framework_agent_candidates_llm(
-        self, candidates: list[dict[str, Any]]
-    ) -> dict[str, Any] | None:
+    async def _rank_framework_agent_candidates_llm(self, candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
         # Force deterministic discovery-order fallback (no LLM call).
         return None
 
@@ -232,6 +240,7 @@ def test_pump_submits_candidate_proposal(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The pump submits the candidate as a ``framework_agent`` proposal; no task is created inline."""
+
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
 
@@ -286,9 +295,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
     # One unprocessed candidate so the signal has a valid target.
     _CAND_ID = "https://github.com/ROCm/vllm/pull/999"
-    stub.shared_state.framework_agent_batches = [
-        {"batch_id": "b1", "candidates": [{"candidate_id": _CAND_ID}]}
-    ]
+    stub.shared_state.framework_agent_batches = [{"batch_id": "b1", "candidates": [{"candidate_id": _CAND_ID}]}]
     stub.shared_state.framework_agent_phase_progress = []
 
     assert (
@@ -341,9 +348,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub.tasks._queued.clear()
 
     # A bare kernel integrate_patch task (no framework_agent_authoring) does NOT count.
-    stub.tasks._queued.append(
-        SimpleNamespace(kind="integrate_patch", task_id="k2", params={})
-    )
+    stub.tasks._queued.append(SimpleNamespace(kind="integrate_patch", task_id="k2", params={}))
     assert (
         asyncio.run(
             Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
@@ -590,13 +595,13 @@ def test_config_levers_helper_extracts_from_proposal_set():
     assert levers["--enable-mtp"] == ""
 
     # A patch deliverable is NOT a config-only outcome.
-    assert _framework_config_levers_from_done(
-        {"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}
-    ) == {}
+    assert (
+        _framework_config_levers_from_done({"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}) == {}
+    )
     # No levers → empty.
-    assert _framework_config_levers_from_done(
-        {"patches_written": [], "proposal_set": [{"name": "research-only"}]}
-    ) == {}
+    assert (
+        _framework_config_levers_from_done({"patches_written": [], "proposal_set": [{"name": "research-only"}]}) == {}
+    )
 
 
 def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
@@ -615,9 +620,7 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
     )
     done_payload = {
         "patches_written": [],
-        "proposal_set": [
-            {"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}}
-        ],
+        "proposal_set": [{"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}}],
         "summary": "PR maps to a config lever on this build",
     }
 
@@ -740,9 +743,7 @@ def test_pump_audit_skip_low_confidence_downgrades_to_author(
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["specialist"]  # not skipped
     # No terminal already_present row was written (it wasn't skipped).
-    assert not any(
-        r.get("status") == "already_present" for r in stub.shared_state.framework_agent_phase_progress
-    )
+    assert not any(r.get("status") == "already_present" for r in stub.shared_state.framework_agent_phase_progress)
 
 
 def test_pump_audit_skip_no_evidence_downgrades_to_author(
@@ -833,7 +834,12 @@ def test_audit_candidate_calls_phase_audit_when_uncached(
 
     async def _phase_audit(**_: Any) -> dict[str, Any]:
         calls.n += 1
-        return {"recommended_next_step": "direct_framework", "semantic_status": "not_present"}
+        # A confident static verdict: `auto` LLM policy does not re-run.
+        return {
+            "recommended_next_step": "direct_framework",
+            "semantic_status": "not_present",
+            "confidence": 0.9,
+        }
 
     monkeypatch.setattr(_fa_client, "phase_audit", _phase_audit)
     stub = _Stub(tmp_path, authoring=True)
@@ -920,12 +926,10 @@ def test_audit_candidate_cross_framework_sets_target_framework(
 
 def test_framework_agent_repo_url_origin_framework_known() -> None:
     """Reverse-lookup resolves each repo_map-known framework's canonical repo URL."""
-    assert Coordinator._framework_agent_repo_url_origin_framework(
-        "https://github.com/ROCm/vllm.git"
-    ) == "vllm"
-    assert Coordinator._framework_agent_repo_url_origin_framework(
-        "https://github.com/sgl-project/sglang.git"
-    ) == "sglang"
+    assert Coordinator._framework_agent_repo_url_origin_framework("https://github.com/ROCm/vllm.git") == "vllm"
+    assert (
+        Coordinator._framework_agent_repo_url_origin_framework("https://github.com/sgl-project/sglang.git") == "sglang"
+    )
 
 
 def test_framework_agent_repo_url_origin_framework_unknown_or_kernel_repo() -> None:
@@ -949,9 +953,7 @@ def test_discover_batch_tags_cross_repo_candidates_by_default(
         if repo_url == vllm_url:
             return {
                 "batch_id": "b1",
-                "candidates": [
-                    {"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}
-                ],
+                "candidates": [{"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}],
             }
         return {
             "batch_id": "b1",
@@ -985,9 +987,7 @@ def test_discover_batch_does_not_tag_cross_repo_candidates_when_kill_switch_set(
         if repo_url == vllm_url:
             return {
                 "batch_id": "b1",
-                "candidates": [
-                    {"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}
-                ],
+                "candidates": [{"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}],
             }
         return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
 

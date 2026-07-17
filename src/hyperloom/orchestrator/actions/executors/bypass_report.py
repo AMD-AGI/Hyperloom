@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Bypass benchmark report writer.
 
@@ -166,21 +167,25 @@ def format_summary_text(report: dict[str, Any]) -> str:
     ]
     throughput = report.get("throughput")
     if isinstance(throughput, dict):
-        lines.extend([
-            f"output_throughput: {throughput.get('output_throughput')}",
-            f"request_throughput: {throughput.get('request_throughput')}",
-            f"total_token_throughput: {throughput.get('total_token_throughput')}",
-            f"completed_requests: {throughput.get('completed_requests')}",
-            f"duration_seconds: {throughput.get('duration_seconds')}",
-        ])
+        lines.extend(
+            [
+                f"output_throughput: {throughput.get('output_throughput')}",
+                f"request_throughput: {throughput.get('request_throughput')}",
+                f"total_token_throughput: {throughput.get('total_token_throughput')}",
+                f"completed_requests: {throughput.get('completed_requests')}",
+                f"duration_seconds: {throughput.get('duration_seconds')}",
+            ]
+        )
     latency = report.get("latency")
     if isinstance(latency, dict):
         ttft = latency.get("ttft") or {}
         tpot = latency.get("tpot") or {}
-        lines.extend([
-            f"mean_ttft_ms: {ttft.get('mean_ms')}",
-            f"mean_tpot_ms: {tpot.get('mean_ms')}",
-        ])
+        lines.extend(
+            [
+                f"mean_ttft_ms: {ttft.get('mean_ms')}",
+                f"mean_tpot_ms: {tpot.get('mean_ms')}",
+            ]
+        )
     errors = report.get("errors") or []
     if errors:
         lines.append("errors:")
@@ -204,11 +209,13 @@ def write_log_aliases(workspace: Path) -> None:
     try:
         if stdout_parts:
             (workspace / "benchmark_stdout.log").write_text(
-                "\n".join(stdout_parts), encoding="utf-8",
+                "\n".join(stdout_parts),
+                encoding="utf-8",
             )
         if stderr_parts:
             (workspace / "benchmark_stderr.log").write_text(
-                "\n".join(stderr_parts), encoding="utf-8",
+                "\n".join(stderr_parts),
+                encoding="utf-8",
             )
     except OSError:
         pass

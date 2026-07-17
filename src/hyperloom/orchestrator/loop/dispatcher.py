@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coordinator main loop and runtime protocol manager."""
 
@@ -35,6 +36,7 @@ from .coordinator import (
     _format_inbox_event,
 )
 import logging as _logging
+
 log = _logging.getLogger(__name__)
 
 
@@ -226,6 +228,12 @@ class DispatcherCollaborator:
                 continue
             lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
+                # SQLite lane gate. Under single-node Ray execution (§12 T7,
+                # decision 1) the authoritative GPU mutex is Ray's custom
+                # resources (``serving_slot`` + ``num_gpus`` on the leases below),
+                # not this gate — but it is kept as a cheap, resume-safe
+                # scheduling / observability view (its acquire/release events feed
+                # the lane timeline). The two layers are redundant.
                 try:
                     expanded = _expand_lanes(lanes_needed)
                 except ValueError:
@@ -253,6 +261,7 @@ class DispatcherCollaborator:
             else:
                 lease = None
             gpu_lease = None
+            gpu_specialist_lease: Any = None
             extra_context: dict[str, Any] = {}
             if task.kind == "specialist":
                 params = task.params or {}
@@ -272,9 +281,7 @@ class DispatcherCollaborator:
                     )
 
                     whole_machine_lane = uses_whole_machine_gpu_lane(params)
-                    is_framework_authoring = bool(
-                        params.get("framework_agent_authoring")
-                    )
+                    is_framework_authoring = bool(params.get("framework_agent_authoring"))
                     if whole_machine_lane:
                         gpu_pool = self.framework_gpu_pool
                         if is_framework_authoring:
@@ -282,9 +289,7 @@ class DispatcherCollaborator:
                             default_gpu_count = gpu_pool.capacity or 1
                         else:
                             # Bench specialist: size to the serving TP.
-                            default_gpu_count = (
-                                self._resolve_serving_tp() or gpu_pool.capacity or 1
-                            )
+                            default_gpu_count = self._resolve_serving_tp() or gpu_pool.capacity or 1
                     else:
                         gpu_pool = self.gpu_specialist_pool
                         # Default gpu_count to the serving TP; explicit wins.
@@ -333,6 +338,29 @@ class DispatcherCollaborator:
                                 )
                         continue
                     extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
+                    # Ray-managed GPU execution (§12 T4): route the whole
+                    # specialist subprocess into a ``num_gpus`` actor. Ray
+                    # assigns + masks the physical cards, so the SQLite ids above
+                    # are now only capacity/TTL accounting (decision 3 / §12 T5).
+                    # Advertise the logical 0..N-1 view the specialist actually
+                    # sees under Ray's mask. ``None`` off the Ray path (multi-node
+                    # / RAY_EXEC off / tests) keeps the SQLite-gpu-id device path.
+                    from ..actions.executors._ray_serving import (
+                        maybe_gpu_specialist_lease,
+                    )
+
+                    # Whole-machine / bench-capable specialists (gpu_research_lane)
+                    # also hold the ``serving_slot`` so Ray makes them mutually
+                    # exclusive with serving (§12 T6); the serving-disjoint pool
+                    # takes ``num_gpus`` only and can run on cards disjoint from
+                    # serving.
+                    gpu_specialist_lease = maybe_gpu_specialist_lease(
+                        num_gpus=gpu_count,
+                        serving_slot=whole_machine_lane,
+                    )
+                    if gpu_specialist_lease is not None:
+                        extra_context["gpu_ids"] = list(range(gpu_count))
+                        extra_context["gpu_specialist_lease"] = gpu_specialist_lease
             # Defensive audit (log-only): flag a queued task whose kind has
             # no registered executor. Kernel-owned kinds are legitimately
             # unregistered under --no-kernel, so they are excluded to avoid a
@@ -348,9 +376,9 @@ class DispatcherCollaborator:
                     and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
                 ):
                     log.warning(
-                        "dispatch audit: queued task_id=%s kind=%r "
-                        "has no registered executor (dispatch unchanged)",
-                        task.task_id, task.kind,
+                        "dispatch audit: queued task_id=%s kind=%r has no registered executor (dispatch unchanged)",
+                        task.task_id,
+                        task.kind,
                     )
             except Exception:  # noqa: BLE001 - audit must never affect dispatch
                 pass
@@ -363,6 +391,7 @@ class DispatcherCollaborator:
                             prebound_lease=lease,
                             extra_context=extra_context,
                             gpu_lease=gpu_lease,
+                            gpu_specialist_lease=gpu_specialist_lease,
                         ),
                     ),
                     gpu_lease,
@@ -377,6 +406,7 @@ class DispatcherCollaborator:
         prebound_lease: Any,
         extra_context: dict[str, Any],
         gpu_lease: Any,
+        gpu_specialist_lease: Any = None,
     ) -> "SubAgentResult":
         """Run a dispatched task, releasing its GPU lease in a structured finally.
 
@@ -384,13 +414,19 @@ class DispatcherCollaborator:
         guarantees the cards are freed on completion, error, or cancellation
         even if the pump coroutine is cancelled or the reap never runs.
         ``release`` is idempotent, so the release in
-        :meth:`_reap_dispatched_task` remains harmless.
+        :meth:`_reap_dispatched_task` remains harmless. When a Ray
+        ``GpuSpecialistLease`` was acquired (§12 T4) it is closed here too so
+        the ``num_gpus`` lease is released on every exit path.
 
         Args:
             task: The dispatched task.
             prebound_lease: The already-acquired resource-lane lease (or None).
             extra_context: Per-task context (wall budget, gpu ids, …).
-            gpu_lease: The GPU specialist lease to release, or None.
+            gpu_lease: The SQLite GPU-specialist accounting lease to release, or
+                None.
+            gpu_specialist_lease: The Ray ``GpuSpecialistLease`` to close
+                (release the ``num_gpus`` actor lease), or None on the local
+                path.
 
         Returns:
             SubAgentResult: The result from ``sub.run_task``.
@@ -410,6 +446,14 @@ class DispatcherCollaborator:
                         "dispatcher: finally GPU-lease release failed for task=%s",
                         task.task_id,
                     )
+            if gpu_specialist_lease is not None:
+                try:
+                    gpu_specialist_lease.close()
+                except Exception:  # noqa: BLE001 — teardown must not raise
+                    log.exception(
+                        "dispatcher: finally GpuSpecialistLease close failed for task=%s",
+                        task.task_id,
+                    )
 
     def _specialist_wall_budget_sec(self, *, needs_gpu: bool) -> float:
         """Compute the explicit wall-clock budget for a specialist task.
@@ -419,9 +463,9 @@ class DispatcherCollaborator:
 
             budget_min = min(base × (macro_cycle + 1), 240)
 
-        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >=24h
-        gate), so <24h bounded runs always get the base value (cpu 10 / gpu 60)
-        and never degrade.
+        ``macro_cycle`` grows whenever a new macro-cycle opens, including short
+        bounded runs. As cycles progress, specialists get more room to complete
+        larger attempts, up to the 4h cap.
 
         Args:
             needs_gpu: Whether the specialist holds a GPU lease (selects the
@@ -859,7 +903,7 @@ class DispatcherCollaborator:
             eligible = framework in ("sglang", "vllm", "vllm-aiter")
         else:
             # GEAK: legacy FP8 + SGLang only.
-            eligible = (precision == "fp8" and framework == "sglang")
+            eligible = precision == "fp8" and framework == "sglang"
 
         if not eligible:
             return False
@@ -956,8 +1000,7 @@ class DispatcherCollaborator:
             _running = asyncio.get_running_loop()
             if _running is loop:
                 log.warning(
-                    "run_action_now: invoked on the coordinator "
-                    "loop thread (action=%r)",
+                    "run_action_now: invoked on the coordinator loop thread (action=%r)",
                     name,
                 )
         except RuntimeError:

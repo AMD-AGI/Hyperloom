@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Focused unit tests for ``coordinator`` module-level helpers and static utilities."""
 
@@ -179,7 +180,6 @@ def test_skip_gemm_tuning_env(monkeypatch):
     assert Coordinator._skip_gemm_tuning() is True
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "")
     assert Coordinator._skip_gemm_tuning() is False
-
 
 
 def test_build_sweep_params_skill_defaults():

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """PRELUDE-bootstrap analysis-task enqueue tests (kind/idempotency/benchmark-script wiring of ``_enqueue_internal_analysis_task``)."""
 
@@ -241,5 +242,3 @@ async def test_kernel_entry_reprofile_swallows_failure(coord: Coordinator):
     await coord._maybe_reprofile_for_kernel()  # must not raise
 
     assert coord.shared_state.last_roofline_tput == 100.0
-
-

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Winner-decision gates (throughput / accuracy / completed) for candidate evaluation."""
 
@@ -135,9 +136,7 @@ def prior_score(
             return 0.5
         return 0.0
 
-    apply_score = (
-        sum(_success_value(str(rec.get("outcome") or "")) * w for w, rec in associated) / weight_sum
-    )
+    apply_score = sum(_success_value(str(rec.get("outcome") or "")) * w for w, rec in associated) / weight_sum
     quality = 0.45 * apply_score + 0.35 * gain_score + 0.20 * param_score
     score = min(1.0, avg_association) * quality
     return round(max(0.0, min(1.0, score)), 4)

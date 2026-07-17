@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Live Langfuse push for the trace subsystem (opt-in, best-effort).
 
@@ -1001,8 +1002,11 @@ class LangfuseEmitter:
                     "pmc_diagnosis": row.get("pmc_diagnosis"),
                 }
             self.record_kb_span(
-                name=name, agent="forge", output=row,
-                metadata=metadata, ts=row.get("ts"),
+                name=name,
+                agent="forge",
+                output=row,
+                metadata=metadata,
+                ts=row.get("ts"),
             )
 
     def _flush_gemm_tuning(self) -> None:

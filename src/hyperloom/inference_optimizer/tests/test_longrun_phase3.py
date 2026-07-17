@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Long-run resilience and periodic soft restart acceptance tests.
 
@@ -333,12 +334,8 @@ async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
     assert (await coord.tasks.get(orphan.task_id)).state == "failed", (
         "orphaned expired-running task must be failed by the pump"
     )
-    assert (await coord.tasks.get(live.task_id)).state == "running", (
-        "in-window running task must not be reclaimed"
-    )
-    assert (await coord.tasks.get(no_ttl.task_id)).state == "running", (
-        "no-TTL running task must never be reclaimed"
-    )
+    assert (await coord.tasks.get(live.task_id)).state == "running", "in-window running task must not be reclaimed"
+    assert (await coord.tasks.get(no_ttl.task_id)).state == "running", "no-TTL running task must never be reclaimed"
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Specialist_done bookkeeping tests.
 
@@ -622,6 +623,5 @@ def test_handle_intent_dispatch_table_has_specialist_done_branch():
     from hyperloom.orchestrator.loop.intent_router import _INTENT_DISPATCH
 
     assert _INTENT_DISPATCH.get(IntentType.SPECIALIST_DONE) == "_handle_specialist_done", (
-        "_INTENT_DISPATCH must route SPECIALIST_DONE to "
-        "_handle_specialist_done (KB_gaps/Gap-03)"
+        "_INTENT_DISPATCH must route SPECIALIST_DONE to _handle_specialist_done (KB_gaps/Gap-03)"
     )

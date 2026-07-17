@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """FRAMEWORK ranker soft-guidance from working memory.
 
@@ -15,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
 class _StateStub:
@@ -35,6 +37,7 @@ class _StateStub:
 
 
 class _MemCoord:
+    _LOCAL_EXPLORE_KIND = FrameworkPhase._LOCAL_EXPLORE_KIND
     _FRAMEWORK_KEEP_STATUSES = Coordinator._FRAMEWORK_KEEP_STATUSES
     _FRAMEWORK_TRIED_MEMORY_CAP = Coordinator._FRAMEWORK_TRIED_MEMORY_CAP
     _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
@@ -137,9 +140,8 @@ class _FakeStream:
 
     def __aiter__(self):
         async def _gen():
-            yield SimpleNamespace(
-                choices=[SimpleNamespace(delta=SimpleNamespace(content=self._text))]
-            )
+            yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=self._text))])
+
         return _gen()
 
 
@@ -164,7 +166,9 @@ def test_ranker_prompt_includes_tried_block_and_returns_match():
         {"candidate_id": "PR:723", "status": "reverted", "gain_pct": 0.0, "rationale": "no-op on SD3 path"},
     ]
     captured: dict[str, Any] = {}
-    coord._framework_agent_ranker_client = lambda: _FakeClient(captured, '{"candidate_id": "PR:2000", "reason": "attacks mem-bw"}')  # type: ignore[attr-defined]
+    coord._framework_agent_ranker_client = lambda: _FakeClient(
+        captured, '{"candidate_id": "PR:2000", "reason": "attacks mem-bw"}'
+    )  # type: ignore[attr-defined]
     coord._framework_agent_ranker_model = lambda: "m"  # type: ignore[attr-defined]
 
     candidates = [

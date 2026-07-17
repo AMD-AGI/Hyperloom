@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
@@ -257,12 +258,15 @@ async def test_profile_exception_with_capture_signature_escalates_eager(tmp_path
 
     state = _state()
     executor = RooflineExecutor(shared_state=state)
-    with patch(
-        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
-        new=fake_profile,
-    ), patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
-        new=fake_ta,
+    with (
+        patch(
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+            new=fake_profile,
+        ),
+        patch(
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            new=fake_ta,
+        ),
     ):
         result = await executor(_ctx(tmp_path))
 
@@ -290,12 +294,15 @@ async def test_close_post_opt_reason_uses_opt_output_name(tmp_path):
     state = _state()
     ctx = _ctx(tmp_path, params={"base_extra_args": "", "reason": "close_post_opt"})
     executor = RooflineExecutor(shared_state=state)
-    with patch(
-        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
-        new=fake_profile,
-    ), patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
-        new=fake_ta,
+    with (
+        patch(
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+            new=fake_profile,
+        ),
+        patch(
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            new=fake_ta,
+        ),
     ):
         result = await executor(ctx)
 
@@ -334,12 +341,15 @@ async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
     state = _state()
     state.last_trace_analyze = {"analysis_md_text": "stale", "roofline_snapshot_id": 9}
     executor = RooflineExecutor(shared_state=state)
-    with patch(
-        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
-        new=fake_profile,
-    ), patch(
-        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
-        new=fake_ta,
+    with (
+        patch(
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+            new=fake_profile,
+        ),
+        patch(
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            new=fake_ta,
+        ),
     ):
         result = await executor(_ctx(tmp_path))
 

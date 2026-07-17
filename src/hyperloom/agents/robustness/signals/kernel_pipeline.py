@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Kernel-pipeline / external-backend health signals (F1-F5).
 
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+
 if TYPE_CHECKING:
     from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for :mod:`hyperloom.orchestrator.bus.storage.schema`.
 
@@ -50,9 +51,7 @@ def test_migrate_leases_from_v1_pk():
         )
         """
     )
-    cur.execute(
-        "INSERT INTO leases VALUES ('benchmark_lane','h1','t1','baseline',1,'a','e','hb')"
-    )
+    cur.execute("INSERT INTO leases VALUES ('benchmark_lane','h1','t1','baseline',1,'a','e','hb')")
     assert schema._migrate_leases_v1_to_v2(cur) is True
     # Composite PK allows two holders on the same lane
     cur.execute("PRAGMA table_info(leases)")

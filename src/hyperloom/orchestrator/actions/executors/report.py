@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Real ``report`` ActionRunner.
 
@@ -384,7 +385,6 @@ def _explain_stop_reason(stop_reason):
     return _STOP_REASON_EXPLANATIONS.get(str(stop_reason or "").strip(), "")
 
 
-
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -505,9 +505,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     _fw = summary.get("framework")
     lines.append("## Throughput")
     lines.append("")
-    lines.append(
-        f"- baseline            : `{framework_registry.format_primary_metric(_fw, summary['baseline_tput'])}`"
-    )
+    lines.append(f"- baseline            : `{framework_registry.format_primary_metric(_fw, summary['baseline_tput'])}`")
     if cb_tput is not None:
         lines.append(
             f"- current_best        : `{framework_registry.format_primary_metric(_fw, cb_tput)}` "
@@ -936,18 +934,20 @@ def _format_conc_sweep_curve_section(summary: dict[str, Any]) -> list[str]:
     png_rel = summary.get("conc_sweep_curve_png")
     if not png_rel:
         return []
+    # final.md and the PNG both live in reports_dir, so the embed must be
+    # relative to final.md's own directory (its basename), not the
+    # session-root-relative path stored in final.json.
+    png_md_rel = Path(str(png_rel)).name
     lines: list[str] = []
     lines.append("## Concurrency Sweep — Throughput vs Interactivity")
     lines.append("")
     lines.append(
         "Efficiency (tok/s/GPU) vs Interactivity (tok/s/user) across the "
         "post-optimization concurrency ladder.  "
-        "Dark-red = baseline, orange = optimized."
+        "Red = baseline, orange = optimized."
     )
     lines.append("")
-    # Use the relative path so the image renders correctly when the report
-    # directory is the working directory.
-    lines.append(f"![Concurrency sweep curve]({png_rel})")
+    lines.append(f"![Concurrency sweep curve]({png_md_rel})")
     lines.append("")
     return lines
 

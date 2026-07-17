@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Supplementary coverage for IntegratePatchExecutor decision + KB paths."""
 
@@ -97,7 +98,8 @@ async def test_no_framework_agent_root(tmp_path, monkeypatch):
     session.mkdir()
     _write_workspace(session, "spec")
     monkeypatch.setattr(
-        ip, "_resolve_framework_root",
+        ip,
+        "_resolve_framework_root",
         lambda explicit, patch_paths=None: None,
     )
     ex = IntegratePatchExecutor(session_dir=session)
@@ -278,7 +280,14 @@ async def test_keep_confirmed_by_rebench(tmp_path, monkeypatch):
         IntegratePatchExecutor,
         "_confirm_stack_rebench",
         _stub_confirm(
-            {"stable": True, "tput": 190.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": True}
+            {
+                "stable": True,
+                "tput": 190.0,
+                "workspace": "/w",
+                "warnings": [],
+                "stable_floor": 100.0,
+                "accuracy_pass": True,
+            }
         ),
     )
     res = await ex(
@@ -309,7 +318,14 @@ async def test_revert_when_rebench_unstable(tmp_path, monkeypatch):
         IntegratePatchExecutor,
         "_confirm_stack_rebench",
         _stub_confirm(
-            {"stable": False, "tput": 80.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": None}
+            {
+                "stable": False,
+                "tput": 80.0,
+                "workspace": "/w",
+                "warnings": [],
+                "stable_floor": 100.0,
+                "accuracy_pass": None,
+            }
         ),
     )
     res = await ex(
@@ -340,7 +356,14 @@ async def test_revert_when_rebench_accuracy_fails(tmp_path, monkeypatch):
         IntegratePatchExecutor,
         "_confirm_stack_rebench",
         _stub_confirm(
-            {"stable": True, "tput": 190.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": False}
+            {
+                "stable": True,
+                "tput": 190.0,
+                "workspace": "/w",
+                "warnings": [],
+                "stable_floor": 100.0,
+                "accuracy_pass": False,
+            }
         ),
     )
     res = await ex(
@@ -373,7 +396,14 @@ async def test_revert_when_rebench_accuracy_missing_with_baseline(tmp_path, monk
         IntegratePatchExecutor,
         "_confirm_stack_rebench",
         _stub_confirm(
-            {"stable": True, "tput": 190.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": None}
+            {
+                "stable": True,
+                "tput": 190.0,
+                "workspace": "/w",
+                "warnings": [],
+                "stable_floor": 100.0,
+                "accuracy_pass": None,
+            }
         ),
     )
     res = await ex(
@@ -413,7 +443,14 @@ async def test_keep_when_rebench_accuracy_missing_but_not_required(tmp_path, mon
         IntegratePatchExecutor,
         "_confirm_stack_rebench",
         _stub_confirm(
-            {"stable": True, "tput": 190.0, "workspace": "/w", "warnings": [], "stable_floor": 100.0, "accuracy_pass": None}
+            {
+                "stable": True,
+                "tput": 190.0,
+                "workspace": "/w",
+                "warnings": [],
+                "stable_floor": 100.0,
+                "accuracy_pass": None,
+            }
         ),
     )
     res = await ex(

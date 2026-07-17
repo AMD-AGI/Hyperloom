@@ -1,5 +1,6 @@
 ###############################################################################
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -621,9 +622,7 @@ def analyze_trace(
             if cat == "gpu_user_annotation" and ev.get("ph") == "X":
                 ts = ev.get("ts", 0) or 0
                 dur = ev.get("dur", 0) or 0
-                annotation_windows.append(
-                    {"name": ev.get("name", "") or "", "ts": float(ts), "dur": float(dur)}
-                )
+                annotation_windows.append({"name": ev.get("name", "") or "", "ts": float(ts), "dur": float(dur)})
                 continue
             if cat in _GPU_CATS and ev.get("ph") == "X":
                 dur = float(ev.get("dur", 0) or 0)
@@ -648,8 +647,14 @@ def analyze_trace(
             scope = "steady_state"
 
     body = _finalize(
-        k_events, m_events, corr_to_extid, extid_to_opname, extid_to_opmeta,
-        window=window, top_k=top_k, emit_launches=emit_launches,
+        k_events,
+        m_events,
+        corr_to_extid,
+        extid_to_opname,
+        extid_to_opmeta,
+        window=window,
+        top_k=top_k,
+        emit_launches=emit_launches,
     )
     body["attribution"]["annotation_window_count"] = len(annotation_windows)
 

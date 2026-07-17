@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Long-run exploration-depth bottleneck re-direction acceptance tests.
 
@@ -41,8 +42,7 @@ def _plateaued_explore_state(
     st.explore_search = {"schema_version": 1, "winners_history": []}
     # Enough trailing empty specialist rounds → empty_streak >= threshold.
     st.specialist_rounds = [
-        {"proposals_total": 0, "proposals_kept": 0}
-        for _ in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
+        {"proposals_total": 0, "proposals_kept": 0} for _ in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
     ]
     if top_bottleneck:
         st.roofline_snapshots = [{"snapshot_id": 1, "top_bottleneck": top_bottleneck}]

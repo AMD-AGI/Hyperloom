@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """FRAMEWORK candidate-level artifacts + outcome classification.
 
@@ -33,9 +34,7 @@ log = logging.getLogger(__name__)
 
 # Per-candidate terminal statuses that mean the candidate reached the apply/bench
 # stage (as opposed to being filtered before any source change).
-_TESTED_STATUSES: frozenset[str] = frozenset(
-    {"kept", "reverted", "applied_no_bench", "apply_failed", "bench_reverted"}
-)
+_TESTED_STATUSES: frozenset[str] = frozenset({"kept", "reverted", "applied_no_bench", "apply_failed", "bench_reverted"})
 
 
 def candidate_key(row: dict[str, Any] | None) -> str:

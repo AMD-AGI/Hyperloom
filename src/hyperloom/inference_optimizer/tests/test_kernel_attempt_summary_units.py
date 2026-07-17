@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit tests for pure helpers in ``kernel_attempt_summary``.
 
@@ -324,19 +325,39 @@ def test_summary_one_line_per_category():
 def test_session_kernel_opt_outcome_rollup():
     out = kas._session_kernel_opt_outcome
     assert out([]) == kas.OUTCOME_SKIP
-    assert out([
-        {"outcome_class": kas.OUTCOME_FAIL},
-        {"outcome_class": kas.OUTCOME_SUCCESS},
-    ]) == kas.OUTCOME_SUCCESS
-    assert out([
-        {"outcome_class": kas.OUTCOME_SKIP},
-        {"outcome_class": kas.OUTCOME_SKIP},
-    ]) == kas.OUTCOME_SKIP
-    assert out([
-        {"outcome_class": kas.OUTCOME_SKIP},
-        {"outcome_class": kas.OUTCOME_TIMEOUT},
-    ]) == kas.OUTCOME_TIMEOUT
-    assert out([
-        {"outcome_class": kas.OUTCOME_TIMEOUT},
-        {"outcome_class": kas.OUTCOME_FAIL},
-    ]) == kas.OUTCOME_FAIL
+    assert (
+        out(
+            [
+                {"outcome_class": kas.OUTCOME_FAIL},
+                {"outcome_class": kas.OUTCOME_SUCCESS},
+            ]
+        )
+        == kas.OUTCOME_SUCCESS
+    )
+    assert (
+        out(
+            [
+                {"outcome_class": kas.OUTCOME_SKIP},
+                {"outcome_class": kas.OUTCOME_SKIP},
+            ]
+        )
+        == kas.OUTCOME_SKIP
+    )
+    assert (
+        out(
+            [
+                {"outcome_class": kas.OUTCOME_SKIP},
+                {"outcome_class": kas.OUTCOME_TIMEOUT},
+            ]
+        )
+        == kas.OUTCOME_TIMEOUT
+    )
+    assert (
+        out(
+            [
+                {"outcome_class": kas.OUTCOME_TIMEOUT},
+                {"outcome_class": kas.OUTCOME_FAIL},
+            ]
+        )
+        == kas.OUTCOME_FAIL
+    )

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """A ``needs_gpu`` specialist delegate acquires gpu_research_lane and gets a
 budget-sourced lease TTL (so the lane never expires mid-run and lets serving
@@ -29,10 +30,7 @@ def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
     state.save(tmp_path)
 
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {
-        name: MockBackend(idle)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
-    }
+    backends = {name: MockBackend(idle) for name in ("orchestration", "kernel_agent", "critic", "robustness")}
     return Coordinator(
         session_dir=tmp_path,
         backends=backends,
@@ -77,9 +75,7 @@ async def test_needs_gpu_specialist_acquires_gpu_research_lane(tmp_path):
     assert "research_lane" in task.requires_lanes
     # TTL re-sourced to the GPU wall budget × (1 + grace).
     budget = coord._specialist_wall_budget_sec(needs_gpu=True)
-    assert task.lease_ttl_sec == max(
-        1800, int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
-    )
+    assert task.lease_ttl_sec == max(1800, int(budget * (1.0 + GPU_LEASE_TTL_GRACE)))
     # Iron law: lane TTL ≥ the agent's wall-budget kill.
     assert task.lease_ttl_sec >= int(budget)
 

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Per-role backend construction + robustness option wiring for the CLI.
 
@@ -40,8 +41,7 @@ def _official_anthropic_only() -> bool:
         or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     )
     has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip()
-        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
     )
     return has_anthropic and not has_openai
 
@@ -49,8 +49,7 @@ def _official_anthropic_only() -> bool:
 def _official_openai_only() -> bool:
     """True when only the OpenAI-side endpoint is available."""
     has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip()
-        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
     )
     has_anthropic = bool(
         (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
@@ -69,16 +68,13 @@ def _deepseek_only() -> bool:
     DeepSeek OpenAI endpoint. An explicit Anthropic key takes precedence.
     """
     has_deepseek = bool(
-        (os.environ.get("DEEPSEEK_BASE_URL") or "").strip()
-        or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+        (os.environ.get("DEEPSEEK_BASE_URL") or "").strip() or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     )
     has_anthropic_key = bool(
-        (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-        or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        (os.environ.get("ANTHROPIC_API_KEY") or "").strip() or (os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
     )
     has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip()
-        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
     )
     return has_deepseek and not has_anthropic_key and not has_openai
 
@@ -133,7 +129,6 @@ def _resolve_kernel_agent_max_turns() -> int:
     except ValueError:
         return _KERNEL_AGENT_DEFAULT_MAX_TURNS
     return val if val >= 1 else _KERNEL_AGENT_DEFAULT_MAX_TURNS
-
 
 
 def _build_backends(

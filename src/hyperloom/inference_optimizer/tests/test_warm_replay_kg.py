@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for KG-enhanced warm-start context in cortex_t0."""
 
@@ -115,8 +116,7 @@ def test_graph_guided_knobs_enabled_by_flag(monkeypatch: Any) -> None:
     ctx = _ctx_knob()
     knobs = ctx.get("graph_guided_knobs", [])
     assert any(
-        k["knob"] == "abc123" and k["args"] == "--moe-runner-backend aiter" and k["source"] == "kg_knob"
-        for k in knobs
+        k["knob"] == "abc123" and k["args"] == "--moe-runner-backend aiter" and k["source"] == "kg_knob" for k in knobs
     )
 
 
@@ -132,9 +132,7 @@ def test_filter_warm_patches_advisory_and_expiry() -> None:
     ]
     advisory = [{"patch_file": "risky.py", "confidence": 0.8}]
     state = SimpleNamespace(gpu_type="mi300x", framework="sglang")
-    kept = Coordinator._filter_warm_patches_with_kg(
-        SimpleNamespace(), patches, advisory, state
-    )
+    kept = Coordinator._filter_warm_patches_with_kg(SimpleNamespace(), patches, advisory, state)
     files = {p["patch_file"] for p in kept}
     assert files == {"good.py"}
 
@@ -146,9 +144,7 @@ def test_filter_warm_patches_keeps_low_confidence_advisory() -> None:
 
     patches = [{"patch_file": "maybe.py", "measured_gain_pct": 5}]
     advisory = [{"patch_file": "maybe.py", "confidence": 0.5}]  # below threshold
-    kept = Coordinator._filter_warm_patches_with_kg(
-        SimpleNamespace(), patches, advisory, SimpleNamespace()
-    )
+    kept = Coordinator._filter_warm_patches_with_kg(SimpleNamespace(), patches, advisory, SimpleNamespace())
     assert [p["patch_file"] for p in kept] == ["maybe.py"]
 
 
@@ -260,8 +256,12 @@ def _emit_decision(monkeypatch: Any, kg: Any, **kwargs: Any) -> None:
 def test_emit_kg_decision_keep_emits_improves(monkeypatch: Any) -> None:
     kg = _RecordingKG()
     _emit_decision(
-        monkeypatch, kg,
-        patch_file="aiter_backend", outcome="KEEP", gain_pct=12.0, error_class="",
+        monkeypatch,
+        kg,
+        patch_file="aiter_backend",
+        outcome="KEEP",
+        gain_pct=12.0,
+        error_class="",
         archs=["Qwen2ForCausalLM"],
     )
     assert len(kg.calls) == 1
@@ -277,8 +277,12 @@ def test_emit_kg_decision_keep_emits_improves(monkeypatch: Any) -> None:
 def test_emit_kg_decision_revert_emits_reverted_on(monkeypatch: Any) -> None:
     kg = _RecordingKG()
     _emit_decision(
-        monkeypatch, kg,
-        patch_file="fp8_patch", outcome="REVERT", gain_pct=-4.2, error_class="perf",
+        monkeypatch,
+        kg,
+        patch_file="fp8_patch",
+        outcome="REVERT",
+        gain_pct=-4.2,
+        error_class="perf",
         archs=["Qwen2ForCausalLM", "LlamaForCausalLM"],
     )
     assert {c["predicate"] for c in kg.calls} == {"REVERTED_ON"}
@@ -289,8 +293,13 @@ def test_emit_kg_decision_revert_emits_reverted_on(monkeypatch: Any) -> None:
 def test_emit_kg_decision_skips_non_native(monkeypatch: Any) -> None:
     kg = _RecordingKG(native=False)
     _emit_decision(
-        monkeypatch, kg,
-        patch_file="p", outcome="KEEP", gain_pct=5.0, error_class="", archs=["A"],
+        monkeypatch,
+        kg,
+        patch_file="p",
+        outcome="KEEP",
+        gain_pct=5.0,
+        error_class="",
+        archs=["A"],
     )
     assert kg.calls == []
 
@@ -299,8 +308,13 @@ def test_emit_kg_decision_keep_zero_gain_no_edge(monkeypatch: Any) -> None:
     # A KEEP with non-positive gain is not an IMPROVES claim.
     kg = _RecordingKG()
     _emit_decision(
-        monkeypatch, kg,
-        patch_file="p", outcome="KEEP", gain_pct=0.0, error_class="", archs=["A"],
+        monkeypatch,
+        kg,
+        patch_file="p",
+        outcome="KEEP",
+        gain_pct=0.0,
+        error_class="",
+        archs=["A"],
     )
     assert kg.calls == []
 

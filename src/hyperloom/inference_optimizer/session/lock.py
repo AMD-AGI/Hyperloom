@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Single-optimizer session lock.
 
@@ -107,15 +108,8 @@ class SessionAlreadyRunning(RuntimeError):
         self.owner = owner or {}
         who = ""
         if owner:
-            who = (
-                f" (held by pid={owner.get('pid')} "
-                f"host={owner.get('hostname')} "
-                f"since={owner.get('started_at')})"
-            )
-        super().__init__(
-            f"another optimizer is already running for session "
-            f"{self.session_dir}{who}"
-        )
+            who = f" (held by pid={owner.get('pid')} host={owner.get('hostname')} since={owner.get('started_at')})"
+        super().__init__(f"another optimizer is already running for session {self.session_dir}{who}")
 
 
 class SessionLockPathError(RuntimeError):

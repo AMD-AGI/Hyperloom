@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
 
@@ -25,7 +26,6 @@ from ._common import (
     _to_float,
     _to_int,
 )
-
 
 
 # Action labels whose ``<action>_attempts`` lists feed the timeline + capability tallies.
@@ -744,4 +744,3 @@ def collect_phase_segments(
             "once the fleet is fully v0.8 to fail closed"
         )
     return segments
-

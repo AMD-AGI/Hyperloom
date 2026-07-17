@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Integrate kernel-request handler + report runner + e2e tests."""
 
@@ -187,9 +188,7 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -248,9 +247,7 @@ async def test_integrate_handler_keeps_positive_stack_increment(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -307,9 +304,7 @@ async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -364,9 +359,7 @@ async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -405,9 +398,7 @@ async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(s
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -442,9 +433,7 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "REVERT"
     assert res["gain_pct"] < -1
@@ -486,9 +475,7 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     # error_class here is deliberately NOT in the fault whitelist, proving the
@@ -543,9 +530,7 @@ async def test_integrate_handler_reverts_applied_source_on_non_keep(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "REVERT"
@@ -598,9 +583,7 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -731,9 +714,7 @@ async def test_integrate_handler_injects_extra_server_args(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "KEEP"
@@ -773,9 +754,7 @@ async def test_integrate_handler_needs_review_when_within_threshold(
         "allow_unknown_target": True,
         "skip_rebuild": True,
     }
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-    ):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "NEEDS_REVIEW"
 
@@ -821,9 +800,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
             "reusable_native_kernel_ids": ["k1"],
         }
         c.shared_state.save(session_dir)
-        with patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-        ):
+        with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
             await c._handle_intent(
                 "orchestration",
                 Intent(
@@ -913,9 +890,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
                 "skip_rebuild": True,
             },
         }
-        with patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run
-        ):
+        with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
             for _ in range(4):
                 await c._handle_intent(
                     "orchestration",
@@ -1055,4 +1030,3 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path, mo
     assert res.state == "succeeded"
     assert res.result["status"] == "failed"
     assert "session_dir" in res.result.get("error", "")
-

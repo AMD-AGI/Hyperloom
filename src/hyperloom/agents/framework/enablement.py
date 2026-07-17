@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Enablement failure-signature classifier.
 
@@ -332,9 +333,7 @@ def classify_failure(log_text: str) -> FailureSignature:
         )
 
     primary = min(hits, key=lambda h: (h.rule_index, h.match.start()))
-    secondary = tuple(
-        h.rule.kind for h in sorted(hits, key=lambda h: h.rule_index) if h.rule.kind != primary.rule.kind
-    )
+    secondary = tuple(h.rule.kind for h in sorted(hits, key=lambda h: h.rule_index) if h.rule.kind != primary.rule.kind)
 
     symbol = ""
     if primary.rule.symbol_from is not None:
@@ -409,7 +408,9 @@ class EnablementRequest:
             model=model,
             repo_url=repo_url,
             launch_log=str(raw.get("launch_log") or ""),
-            work_dir=Path(str(raw.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent-enablement"))).expanduser(),
+            work_dir=Path(
+                str(raw.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent-enablement"))
+            ).expanduser(),
             gpu_type=str(raw.get("gpu_type") or "").strip().lower(),
             launch_probe=str(raw.get("launch_probe") or "").strip(),
             max_search_candidates=int(raw.get("max_search_candidates", 5)),

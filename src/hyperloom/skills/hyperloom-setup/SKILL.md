@@ -62,7 +62,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-python3 -m pip install ./hyperloom_inference_optimizer-0.8.0-py3-none-any.whl --target .
+python3 -m pip install ./hyperloom_inference_optimizer-*-py3-none-any.whl --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -178,13 +178,13 @@ value.
 
 8. Only when the user chose `baremetal`, ask whether to install a serving
    framework (used as the `--install-framework` value in Step 4):
-   - `none`: use an already-installed SGLang/vLLM framework stack on the host.
-   - `sglang`: install SGLang ROCm framework components (shared with the host torch).
+   - `none`: use an already-installed vLLM/SGLang framework stack on the host.
    - `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
      pins its own torch, so it runs in an isolated env and never touches the
      host torch/SGLang stack.
+   - `sglang`: install SGLang ROCm framework components (shared with the host torch).
    - If the user is unsure, recommend `none` when a framework is already present;
-     otherwise recommend `sglang`.
+     otherwise recommend `vllm (isolated)`.
 
 ## Step 3: Write `.env`
 
@@ -258,7 +258,7 @@ If any required secret is missing or still a placeholder, stop and ask the user 
 ## Step 4: Run Setup Backend
 
 In `baremetal` mode, run the backend on the host. The `--install-framework` value
-is the framework the user chose in Step 2 (`none` / `sglang` / `vllm`). In
+is the framework the user chose in Step 2 (`none` / `vllm` / `sglang`). In
 `docker` mode, skip the backend on the host (see below).
 
 ### `baremetal`
@@ -273,19 +273,19 @@ export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none
 ```
 
-For `sglang`:
-
-```bash
-export REPO_ROOT="$(pwd -P)"
-PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
-```
-
 For `vllm` (installs into an isolated venv; `--install-framework vllm` already
 defaults to isolated, the flag below is explicit):
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+```
+
+For `sglang`:
+
+```bash
+export REPO_ROOT="$(pwd -P)"
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework sglang --yes
 ```
 
 ### `docker`
@@ -319,7 +319,7 @@ mode, skip this until the demo skill runs setup inside the container. Read
   no serving framework was importable on the host (e.g. `--install-framework
   none` without SGLang/vLLM installed). Tell the user that demo skills needing
   a framework will not run until one is installed, and offer to re-run setup
-  with `--install-framework sglang` or `vllm`. Do not invent a `FRAMEWORK`
+  with `--install-framework vllm` or `sglang`. Do not invent a `FRAMEWORK`
   value.
 
 ## Step 6: Report Result
@@ -339,19 +339,22 @@ Do not print secret values back to the user.
 
 When setup completed in `baremetal` mode, or when `.env` is written in `docker`
 mode, ask the user whether they want to run a demo optimization now, and if so
-which length:
+which option:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
 - `8h` — medium-length Qwen3-14B-FP8 run.
-- `24h` — long-horizon cyclic run.
+- `24h` — long-horizon Qwen3-30B-A3B-Instruct-2507 cyclic run.
+- `custom advanced` — user-selected model, framework, workload, budget, phase
+  toggles, and advanced CLI flags.
 
-If the user wants to run a custom model, keep using one of these demo presets.
-Ask the user for a local model path, confirm that the directory exists and
-contains `config.json`, then export `MODEL_PATH=<that path>` before loading the
-selected demo skill. Explain that the model path is replaced, but the selected
-demo still owns the workload preset: tensor parallelism, concurrency,
-input/output lengths, precision, target gain, and run budget are not retuned
-unless the user explicitly asks to adjust them.
+If the user wants to run a custom model with a preset workload, keep using one
+of the fixed demo presets. Ask the user for a local model path, confirm that the
+directory exists and contains `config.json`, then export `MODEL_PATH=<that path>`
+before loading the selected demo skill. Explain that the model path is replaced,
+but the selected fixed demo still owns the workload preset: tensor parallelism,
+concurrency, input/output lengths, precision, target gain, and run budget are
+not retuned. If the user wants to choose those workload values explicitly, load
+the `custom advanced` demo skill instead.
 
 If the user declines, stop here. If `HYPERLOOM_RUN_MODE` is `baremetal` and
 `FRAMEWORK` is unset, do not offer a demo; tell the user to install a serving
@@ -365,8 +368,11 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 
 - `3h` → `hyperloom-qwen3-8b-3h`
 - `8h` → `hyperloom-qwen3-14b-fp8-8h`
-- `24h` → `hyperloom-gpt-oss-120b-24h`
+- `24h` → `hyperloom-qwen3-30b-a3b-instruct-2507-24h`
+- `custom advanced` → `hyperloom-custom-advanced`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,
-`FRAMEWORK`, `USER_DATA_PATH`), so the user re-enters nothing. It resolves the
-optimizer skill from `.env` `HYPERLOOM_SKILL_PATH` (written by Step 3).
+`FRAMEWORK`, `USER_DATA_PATH`). Fixed presets do not ask the user to re-enter
+workload settings. The custom advanced skill reuses setup values, then asks for
+workload and phase choices. It resolves the optimizer skill from `.env`
+`HYPERLOOM_SKILL_PATH` (written by Step 3).

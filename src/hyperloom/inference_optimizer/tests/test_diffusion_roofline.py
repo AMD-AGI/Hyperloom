@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for the diffusion workload-level roofline aggregator.
 
@@ -36,9 +37,7 @@ def _write_csvs(csv_dir: Path, *, with_timeline: bool = True) -> None:
             f.write(",".join(r) + "\n")
     if with_timeline:
         (csv_dir / dr.GPU_TIMELINE_CSV).write_text(
-            "type,time ms,percent\n"
-            "computation_time,2400,96.0\n"
-            "busy_time,2450,98.0\n"
+            "type,time ms,percent\ncomputation_time,2400,96.0\nbusy_time,2450,98.0\n"
         )
 
 
@@ -159,10 +158,20 @@ def test_safe_float_non_numeric_is_zero():
 
 def test_aggregate_unified_memory_bound_split():
     rows = [
-        {dr.COL_NAME: "gemm", dr.COL_BOUND: "COMPUTE_BOUND", dr.COL_OP_COUNT: "1",
-         dr.COL_ROOFLINE_TIME: "10", dr.COL_KERNEL_TIME_SUM: "100"},
-        {dr.COL_NAME: "copy", dr.COL_BOUND: "MEMORY_BOUND", dr.COL_OP_COUNT: "1",
-         dr.COL_ROOFLINE_TIME: "5", dr.COL_KERNEL_TIME_SUM: "50"},
+        {
+            dr.COL_NAME: "gemm",
+            dr.COL_BOUND: "COMPUTE_BOUND",
+            dr.COL_OP_COUNT: "1",
+            dr.COL_ROOFLINE_TIME: "10",
+            dr.COL_KERNEL_TIME_SUM: "100",
+        },
+        {
+            dr.COL_NAME: "copy",
+            dr.COL_BOUND: "MEMORY_BOUND",
+            dr.COL_OP_COUNT: "1",
+            dr.COL_ROOFLINE_TIME: "5",
+            dr.COL_KERNEL_TIME_SUM: "50",
+        },
     ]
     totals = dr.aggregate_unified(rows)
     assert totals["compute_bound_us"] == pytest.approx(100.0)
@@ -242,12 +251,18 @@ def test_main_end_to_end_with_model_dir_and_output(tmp_path, monkeypatch, capsys
         "argv",
         [
             "diffusion_roofline",
-            "--perf-csv-dir", str(csv_dir),
-            "--num-denoise-steps", "25",
-            "--top-k", "3",
-            "--model-dir", str(model_dir),
-            "--precision", "bf16",
-            "--output", str(out_path),
+            "--perf-csv-dir",
+            str(csv_dir),
+            "--num-denoise-steps",
+            "25",
+            "--top-k",
+            "3",
+            "--model-dir",
+            str(model_dir),
+            "--precision",
+            "bf16",
+            "--output",
+            str(out_path),
         ],
     )
     rc = dr.main()
@@ -270,12 +285,18 @@ def test_main_with_dit_geometry_flags(tmp_path, monkeypatch, capsys):
         "argv",
         [
             "diffusion_roofline",
-            "--perf-csv-dir", str(csv_dir),
-            "--num-denoise-steps", "25",
-            "--dit-hidden-size", "3072",
-            "--dit-num-layers", "38",
-            "--dit-num-tokens", "4096",
-            "--achievable-tflops", "1686",
+            "--perf-csv-dir",
+            str(csv_dir),
+            "--num-denoise-steps",
+            "25",
+            "--dit-hidden-size",
+            "3072",
+            "--dit-num-layers",
+            "38",
+            "--dit-num-tokens",
+            "4096",
+            "--achievable-tflops",
+            "1686",
         ],
     )
     rc = dr.main()
@@ -295,12 +316,18 @@ def test_main_target_platform_resolves_achievable(tmp_path, monkeypatch, capsys)
         "argv",
         [
             "diffusion_roofline",
-            "--perf-csv-dir", str(csv_dir),
-            "--num-denoise-steps", "25",
-            "--dit-hidden-size", "3072",
-            "--dit-num-layers", "38",
-            "--dit-num-tokens", "4096",
-            "--target-platform", "MI355X",
+            "--perf-csv-dir",
+            str(csv_dir),
+            "--num-denoise-steps",
+            "25",
+            "--dit-hidden-size",
+            "3072",
+            "--dit-num-layers",
+            "38",
+            "--dit-num-tokens",
+            "4096",
+            "--target-platform",
+            "MI355X",
         ],
     )
     rc = dr.main()

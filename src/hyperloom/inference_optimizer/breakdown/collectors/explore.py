@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
 
@@ -28,7 +29,6 @@ from ._common import (
     _to_float,
     _to_int,
 )
-
 
 
 # Explore search ledger
@@ -371,4 +371,3 @@ def collect_sweep(
         "all_variants": variants_on_disk,
         "config_path": ls.get("config_path"),
     }
-

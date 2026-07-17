@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
 
@@ -178,25 +179,25 @@ from .geak import (
 )
 
 __all__ = [
-    'collect_attribution',
-    'collect_baseline',
-    'collect_capability_summary',
-    'collect_critic_robustness',
-    'collect_decision_trace',
-    'collect_final',
-    'collect_explore_search',
-    'collect_kb_provenance',
-    'collect_kernel_invocations',
-    'collect_kernel_lifecycle',
-    'collect_geak',
-    'collect_phase_segments',
-    'collect_phase_timeline',
-    'collect_session',
-    'collect_source_files',
-    'collect_specialist_runs',
-    'collect_sweep',
-    'collect_telemetry',
-    'collect_token_usage',
-    'collect_workload',
-    'collect_model_info',
+    "collect_attribution",
+    "collect_baseline",
+    "collect_capability_summary",
+    "collect_critic_robustness",
+    "collect_decision_trace",
+    "collect_final",
+    "collect_explore_search",
+    "collect_kb_provenance",
+    "collect_kernel_invocations",
+    "collect_kernel_lifecycle",
+    "collect_geak",
+    "collect_phase_segments",
+    "collect_phase_timeline",
+    "collect_session",
+    "collect_source_files",
+    "collect_specialist_runs",
+    "collect_sweep",
+    "collect_telemetry",
+    "collect_token_usage",
+    "collect_workload",
+    "collect_model_info",
 ]

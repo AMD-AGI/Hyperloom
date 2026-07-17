@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Dump ``session_breakdown.json`` for one hyperloom session directory.
 
@@ -90,10 +91,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--include-transcripts",
         action="store_true",
-        help=(
-            "Inline specialist transcript bodies under "
-            "specialist_runs[i].transcripts[j].body."
-        ),
+        help=("Inline specialist transcript bodies under specialist_runs[i].transcripts[j].body."),
     )
     parser.add_argument(
         "--verbose",

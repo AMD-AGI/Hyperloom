@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """plateau pure functions + escalate hints + stop_reason ENUM."""
 
@@ -81,10 +82,7 @@ def test_plateau_explore_AND_low_gain_AND_streak_triggers():
         },
         specialist_rounds=(
             [{"proposals_total": 1, "proposals_kept": 1}]
-            + [
-                {"proposals_total": 0, "proposals_kept": 0}
-                for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
-            ]
+            + [{"proposals_total": 0, "proposals_kept": 0} for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)]
         ),
     )
     triggered, ev = compute_plateau_explore(state)
@@ -246,8 +244,7 @@ def test_exit_normal_explore_exits_on_plateau():
         phase_budget_pct={},
         explore_search={"winners_history": [{"gain_pct": 0.1}]},
         specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0}
-            for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
+            {"proposals_total": 0, "proposals_kept": 0} for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
         pending_escalate_hint="",
         stop_reason="",
@@ -568,8 +565,7 @@ def test_compute_next_phase_advances_on_plateau():
         phase_budget_pct={},
         explore_search={"winners_history": [{"gain_pct": 0.1}]},
         specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0}
-            for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
+            {"proposals_total": 0, "proposals_kept": 0} for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
         params_no_promote_streak=0,
         backends_search={},

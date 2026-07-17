@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Baseline accuracy-eval handling: ``disable_run_eval`` wiring + the eval-failure fallback that salvages the throughput baseline."""
 
@@ -127,9 +128,7 @@ def test_eval_rooted_failure_scans_logs(tmp_path: Path):
     out = tmp_path / "task"
     ws = out / "benchmark_sglang_x"
     ws.mkdir(parents=True)
-    (ws / "benchmark_stderr.log").write_text(
-        "+ run_eval ...\nrun_eval failed with exit code 1\n", encoding="utf-8"
-    )
+    (ws / "benchmark_stderr.log").write_text("+ run_eval ...\nrun_eval failed with exit code 1\n", encoding="utf-8")
     result = {"status": "failed", "error": "generic", "output_dir": str(out)}
     assert BaselineExecutor._is_eval_rooted_failure(result) is True
 
@@ -140,9 +139,7 @@ def test_eval_rooted_failure_climbs_from_round_subdir(tmp_path: Path):
     task = tmp_path / "task"
     warm_ws = task / "warmup_round" / "benchmark_sglang_x"
     warm_ws.mkdir(parents=True)
-    (warm_ws / "server.log").write_text(
-        "Unknown parameter: --concurrent-requests\n", encoding="utf-8"
-    )
+    (warm_ws / "server.log").write_text("Unknown parameter: --concurrent-requests\n", encoding="utf-8")
     measure = task / "measure_round"
     measure.mkdir(parents=True)
     result = {"status": "failed", "error": "100% request failures", "output_dir": str(measure)}
@@ -202,9 +199,7 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
         if run_eval != "false":
             # Simulate a broken eval that aborts the script: no valid workspace,
             # marker in stderr.
-            return subprocess.CompletedProcess(
-                cmd, 1, "", "ERROR: run_eval failed with exit code 1\n"
-            )
+            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
         _fake_workspace(slot)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -369,9 +364,7 @@ def test_baseline_eval_failure_fallback_stops_run(tmp_path):
         slot = Path(cmd[out_idx + 1])
         run_eval = str(cfg["benchmark"]["envs"].get("RUN_EVAL", "true")).lower()
         if run_eval != "false":
-            return subprocess.CompletedProcess(
-                cmd, 1, "", "ERROR: run_eval failed with exit code 1\n"
-            )
+            return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
         _fake_workspace(slot)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -487,9 +480,7 @@ def test_no_stop_when_not_genuine_baseline():
     rec = _StopRecorder()
     task = SimpleNamespace(task_id="t", kind="replay_warm_recipe", params={"framework": "sglang"})
     ctx = SimpleNamespace(task=task, extra={"shared_state": rec})
-    executor._maybe_stop_on_missing_baseline_accuracy(
-        ctx, {"status": "succeeded", "run_eval_disabled": False}
-    )
+    executor._maybe_stop_on_missing_baseline_accuracy(ctx, {"status": "succeeded", "run_eval_disabled": False})
     assert rec.stop_reason == ""
 
 
@@ -506,10 +497,7 @@ def test_eval_already_off_does_not_retry(tmp_path):
     def fake_run(cmd, *args, **kwargs):
         calls.append("x")
         # Even with an eval marker, an explicit opt-out must not double-run.
-        return subprocess.CompletedProcess(
-
-            cmd, 1, "", "ERROR: run_eval failed with exit code 1\n"
-        )
+        return subprocess.CompletedProcess(cmd, 1, "", "ERROR: run_eval failed with exit code 1\n")
 
     executor = BaselineExecutor(
         magpie_python="/opt/venv/bin/python",

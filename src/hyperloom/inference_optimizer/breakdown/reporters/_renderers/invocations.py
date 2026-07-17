@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Kernel invocation renderers."""
 
@@ -133,5 +134,3 @@ def render_forge(breakdown: dict[str, Any]) -> RenderedSection:
         title="Forge Invocations",
         key="forge_invocations",
     )
-
-

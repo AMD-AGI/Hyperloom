@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
 
@@ -26,7 +27,6 @@ from ._common import (
     _parse_iso_unix,
     _to_float,
 )
-
 
 
 # Unified token + decision timeline.
@@ -152,7 +152,8 @@ def aggregate_session_cache_tokens(
 
 
 def _load_proposal_task_map(
-    session_dir: Path, warnings: list[str],
+    session_dir: Path,
+    warnings: list[str],
 ) -> dict[str, str]:
     """Read ``reports/trace/proposal_task_map.jsonl`` into ``{msg_id: task_id}``.
 
@@ -162,7 +163,8 @@ def _load_proposal_task_map(
     rows win on duplicate msg_id. Best-effort: missing file yields ``{}``.
     """
     rows = _load_jsonl_safe(
-        session_dir / "reports" / "trace" / "proposal_task_map.jsonl", warnings,
+        session_dir / "reports" / "trace" / "proposal_task_map.jsonl",
+        warnings,
     )
     out: dict[str, str] = {}
     for r in rows:
@@ -176,7 +178,8 @@ def _load_proposal_task_map(
 
 
 def _attribute_critic_calls(
-    calls: list[dict[str, Any]], msg_to_task: dict[str, str],
+    calls: list[dict[str, Any]],
+    msg_to_task: dict[str, str],
 ) -> None:
     """Backfill ``task_id`` on Critic review calls from the proposal->task map.
 
@@ -307,11 +310,13 @@ def _phase_at(ts: Any, windows: list[tuple[float, str]]) -> str:
 # Components whose unjoined LLM spend is legitimately not tied to a single
 # decision (planning / review / monitoring), bucketed as ``overhead`` rather
 # than ``unattributed``.
-_OVERHEAD_COMPONENTS: frozenset[str] = frozenset({
-    "orchestration",
-    "critic",
-    "robustness",
-})
+_OVERHEAD_COMPONENTS: frozenset[str] = frozenset(
+    {
+        "orchestration",
+        "critic",
+        "robustness",
+    }
+)
 
 
 def _decision_key(task_id: str, dyn_id: str) -> str | None:
@@ -415,19 +420,13 @@ def collect_token_usage(
     attributed = _empty_token_bucket()
     for k in attributed:
         attributed[k] = (
-            int(session_total.get(k, 0) or 0)
-            - int(unattributed.get(k, 0) or 0)
-            - int(overhead.get(k, 0) or 0)
+            int(session_total.get(k, 0) or 0) - int(unattributed.get(k, 0) or 0) - int(overhead.get(k, 0) or 0)
         )
     total_calls = int(session_total.get("calls", 0) or 0)
     attr_calls = int(attributed.get("calls", 0) or 0)
     overhead_calls = int(overhead.get("calls", 0) or 0)
-    attributed_calls_pct = (
-        round(100.0 * attr_calls / total_calls, 2) if total_calls else 0.0
-    )
-    overhead_calls_pct = (
-        round(100.0 * overhead_calls / total_calls, 2) if total_calls else 0.0
-    )
+    attributed_calls_pct = round(100.0 * attr_calls / total_calls, 2) if total_calls else 0.0
+    overhead_calls_pct = round(100.0 * overhead_calls / total_calls, 2) if total_calls else 0.0
 
     # Per-task token map from the per-decision view (only decision-bearing
     # task_ids carry tokens — i.e. the attributed subset).
@@ -841,4 +840,3 @@ def _write_decision_trace_jsonl(
         )
     except OSError as exc:
         warnings.append(f"decision_trace: failed to write {target}: {exc!r}")
-

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Local fallback source.
 
@@ -153,6 +154,7 @@ class LocalProbeConfig:
         if self.session_dir is None:
             return None
         return self.session_dir / "storage" / "coordinator.db"
+
 
 class LocalProbeSource:
     """Minimum-effort local data source for the reactor.

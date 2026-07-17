@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unified candidate key + terminal-row invariant.
 
@@ -98,7 +99,9 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
     assert row["error"] == "boom"
     assert row["ts"]
     second = coord._stamp_framework_progress(
-        candidate_id="cid-1", batch_id="b1", status="no_result_failed",
+        candidate_id="cid-1",
+        batch_id="b1",
+        status="no_result_failed",
     )
     assert second is False
     assert len(coord.shared_state.framework_agent_phase_progress) == 1
@@ -140,9 +143,7 @@ class _BusStub:
 
 class _ReviewCoord(_MiniCoord):
     _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
-    _submit_framework_agent_candidate_for_review = (
-        Coordinator._submit_framework_agent_candidate_for_review
-    )
+    _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review
 
     def __init__(self, tmp_path: Path) -> None:
         super().__init__(tmp_path)

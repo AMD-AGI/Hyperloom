@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
@@ -660,19 +661,19 @@ def test_patch_with_absolute_path_header_is_rejected(tmp_path):
     original.write_text("import triton\n\n\ndef kernel():\n    return 1\n", encoding="utf-8")
     evil = tmp_path / "evil.patch"
     evil.write_text(
-        "--- a/fused_moe.py\n"
-        "+++ /etc/cron.d/pwned\n"
-        "@@ -1,1 +1,2 @@\n"
-        " import triton\n"
-        "+# owned\n",
+        "--- a/fused_moe.py\n+++ /etc/cron.d/pwned\n@@ -1,1 +1,2 @@\n import triton\n+# owned\n",
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-evil", "backend": "forge",
+        "status": "completed",
+        "attempt_id": "geak-evil",
+        "backend": "forge",
         "backend_paths": {"partial_latest_optimized": str(evil)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
-        attempt, target_file=str(original), run_dir=tmp_path,
+        attempt,
+        target_file=str(original),
+        run_dir=tmp_path,
     )
     assert source == "missing"
     assert artifact_path == ""
@@ -684,19 +685,19 @@ def test_patch_with_parent_traversal_header_is_rejected(tmp_path):
     original.write_text("import triton\n\n\ndef kernel():\n    return 1\n", encoding="utf-8")
     evil = tmp_path / "evil.patch"
     evil.write_text(
-        "--- a/fused_moe.py\n"
-        "+++ b/../../../../tmp/pwned.py\n"
-        "@@ -1,1 +1,2 @@\n"
-        " import triton\n"
-        "+# owned\n",
+        "--- a/fused_moe.py\n+++ b/../../../../tmp/pwned.py\n@@ -1,1 +1,2 @@\n import triton\n+# owned\n",
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-evil2", "backend": "forge",
+        "status": "completed",
+        "attempt_id": "geak-evil2",
+        "backend": "forge",
         "backend_paths": {"partial_latest_optimized": str(evil)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
-        attempt, target_file=str(original), run_dir=tmp_path,
+        attempt,
+        target_file=str(original),
+        run_dir=tmp_path,
     )
     assert source == "missing"
     assert artifact_path == ""
@@ -712,19 +713,21 @@ def test_patch_targeting_other_basename_is_rejected(tmp_path):
         encoding="utf-8",
     )
     attempt = {
-        "status": "completed", "attempt_id": "geak-other", "backend": "forge",
+        "status": "completed",
+        "attempt_id": "geak-other",
+        "backend": "forge",
         "backend_paths": {"partial_latest_optimized": str(other)},
     }
     artifact_path, source, _ = ko._select_source_artifact(
-        attempt, target_file=str(original), run_dir=tmp_path,
+        attempt,
+        target_file=str(original),
+        run_dir=tmp_path,
     )
     assert source == "missing"
     assert artifact_path == ""
 
 
-_RECON_ORIGINAL = (
-    "import triton\n\n\ndef helper():\n    return 1\n\n\ndef kernel():\n    return helper()\n"
-)
+_RECON_ORIGINAL = "import triton\n\n\ndef helper():\n    return 1\n\n\ndef kernel():\n    return helper()\n"
 _RECON_KERNEL_SECTION = (
     "diff --git a/fused_moe.py b/fused_moe.py\n"
     "--- a/fused_moe.py\n"
@@ -797,8 +800,7 @@ def test_reconstruct_prefers_real_target_over_orig_sibling(tmp_path):
     patch = (
         "diff --git a/fused_moe.py.orig b/fused_moe.py.orig\n"
         "--- a/fused_moe.py.orig\n+++ b/fused_moe.py.orig\n"
-        "@@ -1 +1 @@\n-junk\n+junk2\n"
-        + _RECON_KERNEL_SECTION
+        "@@ -1 +1 @@\n-junk\n+junk2\n" + _RECON_KERNEL_SECTION
     )
     out = _reconstruct(tmp_path, patch)
     assert out
@@ -811,8 +813,7 @@ def test_reconstruct_ignores_companion_new_file_dev_null(tmp_path):
     patch = (
         "diff --git a/new_helper.py b/new_helper.py\n"
         "new file mode 100644\n--- /dev/null\n+++ b/new_helper.py\n"
-        "@@ -0,0 +1 @@\n+HELPER = 1\n"
-        + _RECON_KERNEL_SECTION
+        "@@ -0,0 +1 @@\n+HELPER = 1\n" + _RECON_KERNEL_SECTION
     )
     out = _reconstruct(tmp_path, patch)
     assert out
@@ -839,9 +840,7 @@ def test_reconstruct_rejects_absolute_path_patch(tmp_path):
     """An absolute-path diff header is refused (no write outside)."""
     victim = tmp_path / "victim.py"
     victim.write_text("safe\n", encoding="utf-8")
-    patch = (
-        f"--- a/fused_moe.py\n+++ {victim}\n@@ -1 +1 @@\n-safe\n+PWNED\n"
-    )
+    patch = f"--- a/fused_moe.py\n+++ {victim}\n@@ -1 +1 @@\n-safe\n+PWNED\n"
     assert _reconstruct(tmp_path, patch) == ""
     assert victim.read_text(encoding="utf-8") == "safe\n"
 
@@ -910,8 +909,11 @@ def test_build_patch_snapshot_sources_worktree_and_base(tmp_path):
         "--- /dev/null\n+++ b/aiter/ops/helper.py\n@@ -0,0 +1 @@\n+HELP\n"
     )
     res = ko.build_patch_snapshot(
-        str(patch), worktree=worktree, kernel_repo=str(tmp_path / "base"),
-        clean_base=str(tmp_path / "base"), out_dir=tmp_path / "snap",
+        str(patch),
+        worktree=worktree,
+        kernel_repo=str(tmp_path / "base"),
+        clean_base=str(tmp_path / "base"),
+        out_dir=tmp_path / "snap",
     )
     assert res is not None
     snap = Path(res["snapshot_dir"])
@@ -933,8 +935,11 @@ def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):
         "--- /dev/null\n+++ b/helper.py\n@@ -0,0 +1 @@\n+HELP\n"
     )
     res = ko.build_patch_snapshot(
-        str(patch), worktree=worktree, kernel_repo=str(base),
-        clean_base=str(base), out_dir=tmp_path / "snap",
+        str(patch),
+        worktree=worktree,
+        kernel_repo=str(base),
+        clean_base=str(base),
+        out_dir=tmp_path / "snap",
     )
     assert res is None
 

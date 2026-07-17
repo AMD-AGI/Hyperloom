@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit coverage for the unified GEMM-tuning result handling on Coordinator.
 
@@ -77,22 +78,16 @@ class TestPromoteGemmTuningKeep:
 
     def test_ignores_unparseable_speedup(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
-        coord._promote_gemm_tuning_keep(
-            {"status": "ok", "decision": "KEEP", "best_speedup": object()}
-        )
+        coord._promote_gemm_tuning_keep({"status": "ok", "decision": "KEEP", "best_speedup": object()})
         assert coord.shared_state.optimization_stack == []
 
     def test_ignores_low_speedup_or_baseline(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=0.0)
-        coord._promote_gemm_tuning_keep(
-            {"status": "ok", "decision": "KEEP", "best_speedup": 1.5}
-        )
+        coord._promote_gemm_tuning_keep({"status": "ok", "decision": "KEEP", "best_speedup": 1.5})
         assert coord.shared_state.optimization_stack == []
 
         coord2 = _coord(tmp_path, baseline_tput=100.0)
-        coord2._promote_gemm_tuning_keep(
-            {"status": "ok", "decision": "KEEP", "best_speedup": 1.0}
-        )
+        coord2._promote_gemm_tuning_keep({"status": "ok", "decision": "KEEP", "best_speedup": 1.0})
         assert coord2.shared_state.optimization_stack == []
 
     def test_forge_backend_records_stack_and_current_best(self, tmp_path):
@@ -242,9 +237,7 @@ class TestPromoteFusionIntegrateKeep:
         assert coord.shared_state.current_best["patch_path"] == "/tmp/fusion.patch"
 
     @pytest.mark.asyncio
-    async def test_handle_fusion_result_posts_and_integrates_kept_candidate(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_handle_fusion_result_posts_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0)
         coord.bus = _Bus()
         phase = KernelPhase(coord)
@@ -268,9 +261,7 @@ class TestPromoteFusionIntegrateKeep:
         assert coord.bus.messages[0].payload["kind"] == "run_fusion_done"
 
     @pytest.mark.asyncio
-    async def test_handle_fusion_result_tolerates_non_dict_and_bus_failure(
-        self, tmp_path
-    ):
+    async def test_handle_fusion_result_tolerates_non_dict_and_bus_failure(self, tmp_path):
         coord = _coord(tmp_path)
 
         class BadBus:
@@ -285,9 +276,7 @@ class TestPromoteFusionIntegrateKeep:
         assert coord.shared_state.last_fusion == {"status": "failed"}
 
     @pytest.mark.asyncio
-    async def test_integrate_fusion_builds_payload_and_records_keep(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_integrate_fusion_builds_payload_and_records_keep(self, tmp_path, monkeypatch):
         coord = _coord(
             tmp_path,
             baseline_tput=100.0,
@@ -367,9 +356,7 @@ class TestPromoteFusionIntegrateKeep:
         assert coord.shared_state.last_fusion_integrate == {}
 
     @pytest.mark.asyncio
-    async def test_run_forge_fusion_after_gemm_handles_handler_exception(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_run_forge_fusion_after_gemm_handles_handler_exception(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path)
         coord.bus = _Bus()
         phase = KernelPhase(coord)
@@ -462,9 +449,7 @@ class TestValidateForgeGemmTuningE2E:
         assert result["e2e_results"]["reverted"][0]["tuner"] == "dense_bf16"
 
     @pytest.mark.asyncio
-    async def test_handles_no_candidates_without_rewriting_raw_result(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_handles_no_candidates_without_rewriting_raw_result(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         phase = KernelPhase(coord)
         monkeypatch.setattr(
@@ -574,9 +559,7 @@ class TestBf16DenseFallback:
             }
         )
 
-    def test_fallback_pending_resumes_terminal_fp8_no_candidate(
-        self, tmp_path, monkeypatch
-    ):
+    def test_fallback_pending_resumes_terminal_fp8_no_candidate(self, tmp_path, monkeypatch):
         coord = _coord(
             tmp_path,
             framework="sglang",
@@ -602,9 +585,7 @@ class TestBf16DenseFallback:
                 "decision": "REVERT",
                 "backend": "forge",
                 "precision": "bf16",
-                "workspace": str(
-                    tmp_path / "runs/gemm_tuning/kernel_entry_gemm_tuning_bf16_fallback"
-                ),
+                "workspace": str(tmp_path / "runs/gemm_tuning/kernel_entry_gemm_tuning_bf16_fallback"),
                 "tuners_run": [{"tuner": "sglang_dense_bf16"}],
             }
         )
@@ -613,9 +594,7 @@ class TestBf16DenseFallback:
         assert coord._gemm_tuning_required_before_kernel_opt() is False
 
     @pytest.mark.asyncio
-    async def test_kernel_entry_runs_bf16_dense_fallback_after_fp8_no_improvement(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_kernel_entry_runs_bf16_dense_fallback_after_fp8_no_improvement(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, framework="sglang")
         coord.bus = type(
             "Bus",
@@ -685,9 +664,7 @@ class TestBf16DenseFallback:
         assert coord.shared_state.last_gemm_tuning["precision"] == "bf16"
 
     @pytest.mark.asyncio
-    async def test_kernel_entry_resumes_pending_bf16_fallback_without_rerunning_fp8(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_kernel_entry_resumes_pending_bf16_fallback_without_rerunning_fp8(self, tmp_path, monkeypatch):
         coord = _coord(
             tmp_path,
             framework="sglang",
@@ -737,13 +714,9 @@ class TestBf16DenseFallback:
 
         await coord._on_enter_kernel(from_phase="EXPLORE")
 
-        assert [c["task_id"] for c in calls] == [
-            "kernel_entry_gemm_tuning_bf16_fallback"
-        ]
+        assert [c["task_id"] for c in calls] == ["kernel_entry_gemm_tuning_bf16_fallback"]
         assert calls[0]["precision"] == "bf16"
-        assert coord.shared_state.last_gemm_tuning["task_id"] == (
-            "kernel_entry_gemm_tuning_bf16_fallback"
-        )
+        assert coord.shared_state.last_gemm_tuning["task_id"] == ("kernel_entry_gemm_tuning_bf16_fallback")
         assert coord._bf16_dense_gemm_fallback_pending() is False
 
     @pytest.mark.asyncio
@@ -801,9 +774,7 @@ class TestCkBlockscaleSwitchEligible:
     def test_not_eligible_non_fp8(self, tmp_path, monkeypatch):
         # Non-fp8 session precision and no runtime fp8 signal -> not eligible.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(
-            krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto")
-        )
+        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is False
 
     def test_not_eligible_non_gfx942_gpu(self, tmp_path, monkeypatch):
@@ -820,20 +791,13 @@ class TestCkBlockscaleSwitchEligible:
     def test_eligible_for_runtime_fp8_via_result_precision(self, tmp_path, monkeypatch):
         # Session precision is bf16, but the forge result stamps runtime precision fp8.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(
-            krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto")
-        )
-        assert (
-            coord._ck_blockscale_switch_eligible({"backend": "forge", "precision": "fp8"})
-            is True
-        )
+        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("bf16", "auto"))
+        assert coord._ck_blockscale_switch_eligible({"backend": "forge", "precision": "fp8"}) is True
 
     def test_eligible_for_runtime_fp8_via_quantization_arg(self, tmp_path, monkeypatch):
         # Runtime --quantization fp8 is resolved from server args.
         coord = _eligible_coord(tmp_path, monkeypatch, precision="bf16")
-        monkeypatch.setattr(
-            krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("fp8", "auto")
-        )
+        monkeypatch.setattr(krh_mod, "_resolve_forge_precision_and_quant", lambda _s, _p: ("fp8", "auto"))
         assert coord._ck_blockscale_switch_eligible({"backend": "forge"}) is True
 
     def test_not_eligible_per_token_fp8(self, tmp_path, monkeypatch):
@@ -1023,9 +987,7 @@ class TestHandleGemmTuningResult:
         assert coord.shared_state.last_gemm_tuning["decision"] == "REVERT"
 
     @pytest.mark.asyncio
-    async def test_forge_no_improvement_but_ck_eligible_routes_to_validator(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_forge_no_improvement_but_ck_eligible_routes_to_validator(self, tmp_path, monkeypatch):
         # a8w8 tuner reported no_improvement but the CK block-scale switch is
         # eligible → route to the E2E validator, not inline promote.
         coord = _eligible_coord(tmp_path, monkeypatch)
@@ -1095,10 +1057,12 @@ class TestValidateForgeGemmTuningE2E:
     @pytest.mark.asyncio
     async def test_keep_stacks_envs_and_rewrites_result(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
-        fake = _make_integrate([
-            {"decision": "KEEP", "new_tput": 120.0, "gain_pct": 20.0},
-            {"decision": "KEEP", "new_tput": 132.0, "gain_pct": 10.0},
-        ])
+        fake = _make_integrate(
+            [
+                {"decision": "KEEP", "new_tput": 120.0, "gain_pct": 20.0},
+                {"decision": "KEEP", "new_tput": 132.0, "gain_pct": 10.0},
+            ]
+        )
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
 
         result = {
@@ -1108,13 +1072,19 @@ class TestValidateForgeGemmTuningE2E:
             "requires_e2e_validation": True,
             "tuners_run": [
                 {
-                    "status": "ok", "improved_shapes": 5, "tuner": "fmoe_ck",
-                    "env_var": "AITER_CONFIG_FMOE", "env_value": "/fmoe.json",
+                    "status": "ok",
+                    "improved_shapes": 5,
+                    "tuner": "fmoe_ck",
+                    "env_var": "AITER_CONFIG_FMOE",
+                    "env_value": "/fmoe.json",
                     "best_micro_speedup": 1.2,
                 },
                 {
-                    "status": "ok", "improved_shapes": 3, "tuner": "dense_gemm",
-                    "env_var": "AITER_DENSE", "env_value": "/dense.json",
+                    "status": "ok",
+                    "improved_shapes": 3,
+                    "tuner": "dense_gemm",
+                    "env_var": "AITER_DENSE",
+                    "env_value": "/dense.json",
                     "best_micro_speedup": 1.1,
                 },
             ],
@@ -1164,9 +1134,7 @@ class TestValidateForgeGemmTuningE2E:
         }
 
     @pytest.mark.asyncio
-    async def test_injects_synthetic_ck_candidate_when_eligible_no_table_candidates(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_injects_synthetic_ck_candidate_when_eligible_no_table_candidates(self, tmp_path, monkeypatch):
         # No table candidates, but CK switch is eligible: the synthetic CK
         # candidate is injected, E2E-validated, and stacked under gemm_tuning.
         coord = _eligible_coord(tmp_path, monkeypatch)
@@ -1180,8 +1148,11 @@ class TestValidateForgeGemmTuningE2E:
             "extra_envs": {},
             "tuners_run": [
                 {
-                    "status": "ok", "improved_shapes": 0, "tuner": "a8w8_blockscale",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", "env_value": "/t.csv",
+                    "status": "ok",
+                    "improved_shapes": 0,
+                    "tuner": "a8w8_blockscale",
+                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+                    "env_value": "/t.csv",
                 },
             ],
         }
@@ -1215,8 +1186,11 @@ class TestValidateForgeGemmTuningE2E:
             "requires_e2e_validation": True,
             "tuners_run": [
                 {
-                    "status": "ok", "improved_shapes": 0, "tuner": "a8w8_blockscale",
-                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", "env_value": "/t.csv",
+                    "status": "ok",
+                    "improved_shapes": 0,
+                    "tuner": "a8w8_blockscale",
+                    "env_var": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+                    "env_value": "/t.csv",
                 },
             ],
         }
@@ -1238,8 +1212,12 @@ class TestValidateForgeGemmTuningE2E:
             "requires_e2e_validation": True,
             "tuners_run": [
                 {
-                    "status": "ok", "improved_shapes": 2, "tuner": "dense",
-                    "env_var": "X", "env_value": "1", "best_micro_speedup": 1.05,
+                    "status": "ok",
+                    "improved_shapes": 2,
+                    "tuner": "dense",
+                    "env_var": "X",
+                    "env_value": "1",
+                    "best_micro_speedup": 1.05,
                 },
             ],
         }
@@ -1261,8 +1239,12 @@ class TestValidateForgeGemmTuningE2E:
             "requires_e2e_validation": True,
             "tuners_run": [
                 {
-                    "status": "ok", "improved_shapes": 4, "tuner": "dense",
-                    "env_var": "X", "env_value": "1", "best_micro_speedup": 1.05,
+                    "status": "ok",
+                    "improved_shapes": 4,
+                    "tuner": "dense",
+                    "env_var": "X",
+                    "env_value": "1",
+                    "best_micro_speedup": 1.05,
                 },
             ],
         }
@@ -1290,8 +1272,12 @@ class TestValidateForgeGemmTuningE2E:
             "requires_e2e_validation": True,
             "tuners_run": [
                 {
-                    "status": "ok", "improved_shapes": 2, "tuner": "dense",
-                    "env_var": "X", "env_value": "1", "best_micro_speedup": 1.1,
+                    "status": "ok",
+                    "improved_shapes": 2,
+                    "tuner": "dense",
+                    "env_var": "X",
+                    "env_value": "1",
+                    "best_micro_speedup": 1.1,
                 },
             ],
         }
@@ -1325,8 +1311,12 @@ class TestValidateForgeGemmTuningE2E:
             "requires_e2e_validation": True,
             "tuners_run": [
                 {
-                    "status": "ok", "improved_shapes": 2, "tuner": "dense",
-                    "env_var": "X", "env_value": "1", "best_micro_speedup": 1.1,
+                    "status": "ok",
+                    "improved_shapes": 2,
+                    "tuner": "dense",
+                    "env_var": "X",
+                    "env_value": "1",
+                    "best_micro_speedup": 1.1,
                 },
             ],
         }

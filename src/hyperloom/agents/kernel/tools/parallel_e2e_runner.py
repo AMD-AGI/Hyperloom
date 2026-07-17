@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """End-to-end Kernel-agent runner for real model/profile/backend testing.
 
@@ -308,8 +309,7 @@ def main() -> int:
     parser.add_argument(
         "--backends",
         default="forge",
-        help="Comma list of agentic backends (default 'forge'). "
-        "Pass an explicit value to force a specific subset.",
+        help="Comma list of agentic backends (default 'forge'). Pass an explicit value to force a specific subset.",
     )
     parser.add_argument(
         "--num-gpus-override",

@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit coverage for the GEAK e2e breakdown collector and the
 sweep ``benchmark_report.json`` writer.
@@ -125,8 +126,7 @@ def test_collect_geak_reconstructs_from_disk_when_result_missing(
     # exp_root is relativized under the session dir.
     assert out["exp_root"] == "geak/e2e_Qwen-Qwen3-0.6B_20260629T174250Z"
     # Stages the runner reached are surfaced for forensics.
-    for stage in ("handoff", "baseline", "kernels", "opbench", "strategy",
-                  "kernel_journey"):
+    for stage in ("handoff", "baseline", "kernels", "opbench", "strategy", "kernel_journey"):
         assert stage in out["stages_reached"]
     assert out["kernels_attempted"] == [{"name": "paged_attention_task"}]
     # Per-kernel attribution is backfilled from the surviving journey.
@@ -199,9 +199,7 @@ def test_collect_geak_reconstruct_cause_runner_reported_failure(tmp_path: Path) 
     pf = tmp_path / "geak"
     pf.mkdir()
     (pf / "handoff.json").write_text(json.dumps({"framework": "vllm"}), encoding="utf-8")
-    (pf / "result.json").write_text(
-        json.dumps({"status": "error", "error_class": "timeout"}), encoding="utf-8"
-    )
+    (pf / "result.json").write_text(json.dumps({"status": "error", "error_class": "timeout"}), encoding="utf-8")
 
     out = collect_geak(tmp_path, {"kernel_optimizer": "geak"}, [])
 
@@ -631,8 +629,7 @@ PY
     assert ok_report["output_throughput_tok_s"] == 321.0
 
     fail_report = json.loads(
-        (tmp_path / "sweep" / "variant_1_conc2_isl8192_osl1024" / "benchmark_report.json")
-        .read_text(encoding="utf-8")
+        (tmp_path / "sweep" / "variant_1_conc2_isl8192_osl1024" / "benchmark_report.json").read_text(encoding="utf-8")
     )
     assert fail_report["success"] is False
     assert fail_report["source"] == "geak"

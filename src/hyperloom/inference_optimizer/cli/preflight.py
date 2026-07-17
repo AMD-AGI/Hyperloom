@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CLI ``_preflight`` cluster — auto-install/env-hygiene checks run before ``optimize`` starts."""
 
@@ -99,6 +100,7 @@ def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | No
             os.environ.pop(key, None)
         else:
             os.environ[key] = original
+
 
 # /dev/shm threshold: below this, a launch can collide with stale vLLM/NCCL shm segments.
 _DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
@@ -454,13 +456,9 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
     """
     mods = list(_BENCH_SERVING_DEPS)
     probe = (
-        "import importlib.util, sys; "
-        "print('\\n'.join(m for m in sys.argv[1:] "
-        "if importlib.util.find_spec(m) is None))"
+        "import importlib.util, sys; print('\\n'.join(m for m in sys.argv[1:] if importlib.util.find_spec(m) is None))"
     )
-    result = subprocess.run(
-        [python_exe, "-c", probe, *mods], capture_output=True, text=True
-    )
+    result = subprocess.run([python_exe, "-c", probe, *mods], capture_output=True, text=True)
     if result.returncode != 0:
         # Probe itself failed unexpectedly; fall back to attempting all so a
         # genuinely missing client is not silently left uninstalled.
@@ -1021,10 +1019,7 @@ def _preflight(
     # bypass-only environment never resolves the Magpie venv / /opt/venv.
     magpie_python = benchmark_python
     if not _magpie_backend_active:
-        print(
-            f"Preflight: benchmark backend is "
-            f"{_resolve_active_backend_name()!r}; skipping Magpie install/import"
-        )
+        print(f"Preflight: benchmark backend is {_resolve_active_backend_name()!r}; skipping Magpie install/import")
         check = None
     else:
         check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
@@ -1061,16 +1056,19 @@ def _preflight(
     if not inferencex_path:
         from ..session.paths import (
             magpie_dir as _magpie_default,
-            open_source_root as _open_source_default,
+            resolve_dep_dir as _resolve_dep_dir,
         )
 
-        open_source_root = _open_source_default()
         _magpie_env = os.environ.get("MAGPIE_PATH")
         magpie_root = Path(_magpie_env) if _magpie_env else _magpie_default()
-        # InferenceX detection order: Magpie submodule (canonical post-install.sh) → standalone pod-local checkout. Legacy read-only host mounts removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
+        # InferenceX detection order: Magpie submodule (canonical post-install.sh)
+        # → installer's per-revision cache checkout (InferenceX@<sha>, resolved via
+        # resolve_dep_dir so a process that did not inherit INFERENCEX_PATH still
+        # finds it; falls back to the bare dir). Legacy read-only host mounts
+        # removed (caused mkstemp [Errno 30]); clone a fresh writable checkout instead.
         for candidate in (
             magpie_root / "InferenceX",
-            open_source_root / "InferenceX",
+            _resolve_dep_dir("InferenceX"),
         ):
             if _inferencex_checkout_ok(candidate):
                 if os.access(candidate, os.W_OK):
@@ -1084,7 +1082,7 @@ def _preflight(
     # When no writable checkout was found, clone one ourselves. baseline cannot
     # run without InferenceX, so a clone failure is a hard error.
     if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
-        from ..session.paths import open_source_root as _open_source_default
+        from ..session.paths import deps_cache_root as _open_source_default
 
         dest = _open_source_default() / "InferenceX"
         print(f"Preflight: InferenceX not found; cloning into {dest} ...")

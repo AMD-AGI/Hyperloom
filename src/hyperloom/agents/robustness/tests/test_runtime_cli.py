@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Tests for the subprocess transport CLI: the in-process ``_run_tick`` helper and the real ``python -m robustness_agent.runtime.cli tick`` invocation. Pins the request.json/emit.json contract the Coordinator host-side wrapper depends on."""
 
@@ -288,17 +289,19 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
 async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
     """A drained RCA usage block is surfaced on the emit payload."""
     from hyperloom.agents.robustness import runtime as runtime_pkg
+
     real_build = runtime_pkg.cli.build_reactor_components  # type: ignore[attr-defined]
 
-    usage = {"input_tokens": 12, "output_tokens": 5, "calls": 1,
-             "latency_ms": 30, "model": "claude-opus-4-7"}
+    usage = {"input_tokens": 12, "output_tokens": 5, "calls": 1, "latency_ms": 30, "model": "claude-opus-4-7"}
 
     def _spy_build(config, *, rca=None, session_id=None):
         bundle = real_build(config, rca=rca, session_id=session_id)
+
         # Replace the rca engine with a stub that reports usage once.
         class _StubRca:
             def drain_usage(self):
                 return usage
+
         bundle.components.rca = _StubRca()
         return bundle
 
@@ -307,13 +310,17 @@ async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
     from hyperloom.agents.robustness.role.reactor import Reactor
+
     monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)
 
     from hyperloom.agents.robustness.runtime.cli import _coerce_request, _run_tick
-    request = _coerce_request({
-        **_REQUEST_HEARTBEAT,
-        "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
-    })
+
+    request = _coerce_request(
+        {
+            **_REQUEST_HEARTBEAT,
+            "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
+        }
+    )
     emit = await _run_tick(request)
     assert emit["llm_usage"] == usage
 
@@ -322,6 +329,7 @@ async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
 async def test_run_tick_omits_llm_usage_when_none(tmp_path: Path, monkeypatch):
     """No RCA call → no ``llm_usage`` key on the emit payload."""
     from hyperloom.agents.robustness import runtime as runtime_pkg
+
     real_build = runtime_pkg.cli.build_reactor_components  # type: ignore[attr-defined]
 
     def _spy_build(config, *, rca=None, session_id=None):
@@ -332,12 +340,16 @@ async def test_run_tick_omits_llm_usage_when_none(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(runtime_pkg.cli, "build_reactor_components", _spy_build)
     from hyperloom.agents.robustness.role.reactor import Reactor
+
     monkeypatch.setattr(Reactor, "tick", _zero_tick, raising=True)
 
     from hyperloom.agents.robustness.runtime.cli import _coerce_request, _run_tick
-    request = _coerce_request({
-        **_REQUEST_HEARTBEAT,
-        "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
-    })
+
+    request = _coerce_request(
+        {
+            **_REQUEST_HEARTBEAT,
+            "options": {"session_dir": str(tmp_path), "robustness_server_url": ""},
+        }
+    )
     emit = await _run_tick(request)
     assert "llm_usage" not in emit

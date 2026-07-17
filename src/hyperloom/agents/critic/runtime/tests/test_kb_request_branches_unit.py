@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Branch coverage for in_memory_kb_client + request_models validators."""
 
@@ -53,9 +54,7 @@ def test_list_validation_and_filters() -> None:
 
 def test_upsert_normalization_warning_and_merge() -> None:
     kb = InMemoryKBClient(time_fn=lambda: 1.0)
-    res = kb.upsert(
-        {"scope": {"model": "big-model"}, "kind": "technique", "slug": "slug-aaaa", "importance": 0.5}
-    )
+    res = kb.upsert({"scope": {"model": "big-model"}, "kind": "technique", "slug": "slug-aaaa", "importance": 0.5})
     assert res["created"] is True
 
     res2 = kb.upsert(
@@ -72,9 +71,7 @@ def test_upsert_normalization_warning_and_merge() -> None:
     assert res2["row"]["importance"] == 0.8
     assert "kb_x" in res2["row"]["edges"]["relates_to"]
 
-    res3 = kb.upsert(
-        {"scope": {"model": "big-model"}, "kind": "technique", "slug": "slug-aaaa", "importance": 0.1}
-    )
+    res3 = kb.upsert({"scope": {"model": "big-model"}, "kind": "technique", "slug": "slug-aaaa", "importance": 0.1})
     assert "importance_protected" in res3["warnings"]
 
 
