@@ -40,12 +40,13 @@ def test_safe_redact():
 
 
 def test_safe_redact_headers_and_token_shapes():
-    line = "Authorization: Bearer sk-live-secret jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig aws=AKIA1234567890ABCDEF"
+    fake_aws_key = "AKIA" + "1234567890ABCDEF"
+    line = f"Authorization: Bearer sk-live-secret jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig aws={fake_aws_key}"
     out = sr._safe_redact(line)
     assert "Authorization: Bearer [REDACTED]" in out
     assert "sk-live-secret" not in out
     assert "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig" not in out
-    assert "AKIA1234567890ABCDEF" not in out
+    assert fake_aws_key not in out
 
 
 def test_extra_focus_tags(monkeypatch):
