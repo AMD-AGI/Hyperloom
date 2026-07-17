@@ -87,8 +87,9 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 - `correctness_passed=false`: do not integrate; the kernel-agent report must
   contain explicit correctness evidence.
 - `stop_reason=global_converged`: the cyclic phase machine exhausted leverage
-  across macro-cycles (R7: consecutive no-gain cycles); stop and report, only
-  resume if the user changes workload / search space / model / strategy.
+  across macro-cycles for the current budget (R7: consecutive no-gain cycles);
+  stop and report, only resume if the user changes workload / search space /
+  model / strategy.
   (Leverage exhaustion *within* a single phase is now the non-terminal
   phase-exit reason `explore_no_more_leverage` / `kernel_no_more_leverage`,
   which switches lever rather than ending the run.)
