@@ -35,7 +35,11 @@ from ..session.paths import mn_profile_trace_root
 from ._internal import safe_client, ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts
 from ._internal.log import info, warn, err
-from ._internal.server_args_safety import ServerArgsRejected, validate_server_args
+from ._internal.server_args_safety import (
+    ServerArgsRejected,
+    shell_safe_extra_args,
+    validate_server_args,
+)
 from .state_paths import resolve_state_file
 from ._internal.external_state import load_multi_node_state
 
@@ -730,6 +734,17 @@ def _build_restart_entrypoint(
     if framework not in ("sglang", "vllm"):
         raise RuntimeError(f"unsupported framework: {args.framework!r} (use sglang or vllm)")
 
+    # extra_args is spliced after ``--`` into a shell entrypoint and word-split
+    # by launch_server.sh into argv. Denylist path/model flags, then re-quote
+    # each token so a value like ``--foo 1; touch x`` cannot inject a second
+    # shell command (metacharacters stay inside a single quoted token).
+    raw_extra_args = args.extra_args or ""
+    try:
+        validate_server_args(raw_extra_args, context="restart-server --extra-args")
+        safe_extra_args = shell_safe_extra_args(raw_extra_args, context="restart-server --extra-args")
+    except ServerArgsRejected as exc:
+        raise RuntimeError(str(exc)) from exc
+
     kill_sh = _read_pod_script("kill_server.sh")
     launch_sh = _read_pod_script("launch_server.sh")
 
@@ -749,7 +764,7 @@ def _build_restart_entrypoint(
         f'"$WORK_DIR/launch_server.sh" {shlex.quote(str(framework))} '
         f"{shlex.quote(str(args.model))} {shlex.quote(str(args.tp))} "
         f"{shlex.quote(str(pid_file))} {shlex.quote(str(log_file))} "
-        f"{wait_flag} -- {args.extra_args}"
+        f"{wait_flag} -- {safe_extra_args}"
     )
     return entrypoint
 
