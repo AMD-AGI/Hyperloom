@@ -1612,6 +1612,14 @@ def apply_kernel_patch(
     except Exception as exc:  # noqa: BLE001
         return {"status": "failed", "error": str(exc)}
 
+    # Coerce/validate the rebuild_command BEFORE any file/pod mutation so an
+    # invalid (shell-control) command fails all-or-nothing instead of aborting
+    # after the patch is already copied onto the live target / fanned out.
+    try:
+        coerced_rebuild_command = _coerce_rebuild_command(rebuild_command) if rebuild_command else []
+    except ValueError as exc:
+        return {"status": "failed", "error_class": "invalid_rebuild_command", "error": str(exc)}
+
     backup_dir = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
     manifest_path = backup_dir / "manifest.json"
     source_backup = _copy_to_backup(target, backup_dir, "source")
@@ -1695,7 +1703,7 @@ def apply_kernel_patch(
 
     command: list[str] = []
     if rebuild_command:
-        command = _coerce_rebuild_command(rebuild_command)
+        command = list(coerced_rebuild_command)
     elif not skip_rebuild:
         command = list(strategy["rebuild_command"])
 
@@ -1846,6 +1854,12 @@ def _apply_kernel_patch_snapshot(
     except ValueError as exc:
         return {"status": "failed", "error": str(exc)}
 
+    # Coerce/validate rebuild_command BEFORE any file/pod mutation (all-or-nothing).
+    try:
+        coerced_rebuild_command = _coerce_rebuild_command(rebuild_command) if rebuild_command else []
+    except ValueError as exc:
+        return {"status": "failed", "error_class": "invalid_rebuild_command", "error": str(exc)}
+
     # Resolve repo-relative patch paths against the explicit root, else the strategy
     # root. Never guess ``target.parent`` — a wrong root breaks the byte-for-byte contract.
     resolved_root = str(repo_root or "") or primary_strategy["root"]
@@ -1995,7 +2009,7 @@ def _apply_kernel_patch_snapshot(
 
     command: list[str] = []
     if rebuild_command:
-        command = _coerce_rebuild_command(rebuild_command)
+        command = list(coerced_rebuild_command)
 
     rebuild: dict[str, Any] = {"status": "skipped", "reason": "source-only patch or skip_rebuild=true"}
     jit_build_backup: dict[str, Any] = {"status": "skipped", "reason": "rebuild not run"}
