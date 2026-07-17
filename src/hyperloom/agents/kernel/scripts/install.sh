@@ -675,10 +675,19 @@ ensure_ray_started() {
     return 0
   fi
   if ray status >/dev/null 2>&1; then
-    log "ray head already running"
-    return 0
+    # A head is up: reuse it only if it declares the serving_slot mutex the Ray
+    # execution backend needs. A head from an older install (pre-serving_slot) or
+    # a manual `ray start` lacks it, so serving-family tasks would deadlock
+    # PENDING on an undeclared resource. Restart it here to add the resource
+    # (install time is safe: nothing depends on the head yet).
+    if ray status 2>/dev/null | grep -q 'serving_slot'; then
+      log "ray head already running with serving_slot"
+      return 0
+    fi
+    warn "ray head running without serving_slot; restarting head to declare it"
+  else
+    log "no live ray head detected; starting one"
   fi
-  log "no live ray head detected; starting one"
   # issue #433: raise fd limit BEFORE starting the head so the raylet inherits
   # a ceiling high enough to stay up (container default 1024 makes it abort).
   ensure_fd_limit_for_ray
