@@ -128,9 +128,7 @@ def run_scriptable(
     script = resolve_scriptable_script(framework, runner_type, inferencex_root)
     if script is None:
         return 2, f"scriptable benchmark script not found for {framework}_{runner_type}.sh"
-    env = build_scriptable_env(
-        bench, runner_type, workspace, profile=profile, profile_dir=profile_dir
-    )
+    env = build_scriptable_env(bench, runner_type, workspace, profile=profile, profile_dir=profile_dir)
     cmd = ["bash", str(script)]
     try:
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout_s)

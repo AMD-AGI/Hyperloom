@@ -44,7 +44,6 @@ from datetime import datetime
 from typing import Any
 
 
-
 def _shared_state_module():
     """Import parent shared_state lazily to avoid a module-level cycle."""
     from .. import shared_state
@@ -56,6 +55,7 @@ class _RenderMixin:
     def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
         """Forwarding shim — implementation in :mod:`.policy`."""
         from ...policy import gate as _m
+
         return _m.to_policy_denial_summary(self, top_k=top_k)
 
     def to_intervention_mix_summary(self) -> str:
@@ -960,4 +960,3 @@ class _RenderMixin:
             f"tput={best.get('output_throughput', '?')} "
             f"conc={best.get('conc', '?')} isl={best.get('isl', '?')} osl={best.get('osl', '?')}"
         )
-

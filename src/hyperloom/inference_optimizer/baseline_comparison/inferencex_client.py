@@ -42,8 +42,6 @@ DEFAULT_TIMEOUT_SEC = 5.0
 DEFAULT_MAX_ATTEMPTS = 2
 
 
-
-
 def _require_http_url(url: str) -> None:
     scheme = urllib.parse.urlparse(url).scheme
     if scheme not in {"http", "https"}:
@@ -211,7 +209,9 @@ def fetch_rows(model_api_name: str) -> list[dict] | None:
     if last_exc is not None:
         log.warning(
             "InferenceX: fetch failed for %s after %d attempt(s): %s",
-            name, attempts, last_exc,
+            name,
+            attempts,
+            last_exc,
         )
     return None
 
@@ -261,10 +261,7 @@ def find_reference_rows(
     ]
     prec = str(precision or "").strip().casefold()
     if prec:
-        matched = [
-            r for r in matched
-            if str(r.get("precision") or "").strip().casefold() == prec
-        ]
+        matched = [r for r in matched if str(r.get("precision") or "").strip().casefold() == prec]
     return matched
 
 

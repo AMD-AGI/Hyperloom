@@ -309,8 +309,7 @@ def main() -> int:
     parser.add_argument(
         "--backends",
         default="forge",
-        help="Comma list of agentic backends (default 'forge'). "
-        "Pass an explicit value to force a specific subset.",
+        help="Comma list of agentic backends (default 'forge'). Pass an explicit value to force a specific subset.",
     )
     parser.add_argument(
         "--num-gpus-override",

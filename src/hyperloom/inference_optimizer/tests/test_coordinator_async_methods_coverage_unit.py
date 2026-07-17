@@ -32,7 +32,8 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends() -> dict[str, Backend]:
     return {
-        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        name: MockBackend(_silent_plan(), name=name)
+        for name in ("orchestration", "kernel_agent", "critic", "robustness")
     }
 
 
@@ -127,21 +128,24 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
     """Mixed subprocess_nonzero + fast_exit_arg_error failures must still
     fast-fail once 3 total baseline failures accrue, even though neither
     per-class streak reaches its own threshold."""
+
     def _task() -> Task:
         return Task(
-            task_id="bl-mixed", kind="baseline", state="running",
+            task_id="bl-mixed",
+            kind="baseline",
+            state="running",
             params={"config_path": "baseline.yaml"},
             idempotency_key="bl-mixed",
         )
-    subproc = {"status": "failed", "error_class": "subprocess_nonzero",
-               "error": "boom"}
-    argerr = {"status": "failed", "error_class": "fast_exit_arg_error",
-              "error": "bad arg"}
+
+    subproc = {"status": "failed", "error_class": "subprocess_nonzero", "error": "boom"}
+    argerr = {"status": "failed", "error_class": "fast_exit_arg_error", "error": "bad arg"}
 
     await coord._handle_unpromotable_result(_task(), subproc)
     await coord._handle_unpromotable_result(_task(), argerr)
     assert coord.shared_state.stop_reason not in (
-        "baseline_failed", "baseline_arg_error",
+        "baseline_failed",
+        "baseline_arg_error",
     )
     await coord._handle_unpromotable_result(_task(), subproc)
     assert coord.shared_state.baseline_failure_streak == 2
@@ -494,9 +498,7 @@ async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(
-    coord: Coordinator, tmp_path
-) -> None:
+async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(coord: Coordinator, tmp_path) -> None:
     """An ``artifacts_written`` entry whose ``source`` is an ABSOLUTE path
     OUTSIDE the specialist sandbox must NOT be routable: integrate_patch would
     reject it as ``source_outside_workspace``, so autosubmit must not create a
@@ -556,9 +558,7 @@ async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
         done_payload={
             "patches_written": [],
             "proposal_set": [],
-            "artifacts_written": [
-                {"source": rel_escape, "target": "configs/model_configs/x.csv", "kind": "k"}
-            ],
+            "artifacts_written": [{"source": rel_escape, "target": "configs/model_configs/x.csv", "kind": "k"}],
         },
     )
     assert len(coord.state.pending_proposals) == n_before
@@ -584,9 +584,7 @@ async def test_autosubmit_routes_relative_source_in_workspace_parent(coord: Coor
         done_payload={
             "patches_written": [],
             "proposal_set": [],
-            "artifacts_written": [
-                {"source": "../tuned.csv", "target": "configs/model_configs/x.csv", "kind": "k"}
-            ],
+            "artifacts_written": [{"source": "../tuned.csv", "target": "configs/model_configs/x.csv", "kind": "k"}],
         },
     )
     assert len(coord.state.pending_proposals) == n_before + 1

@@ -263,7 +263,9 @@ def _validate_trace_structure(
             capture_files = sorted(p for p in capture.iterdir() if p.is_file())
             capture_traces_present = bool(capture_files)
             if not capture_files:
-                issues.append("[1] capture_traces/ exists but is empty — graph capture path fired but produced no files.")
+                issues.append(
+                    "[1] capture_traces/ exists but is empty — graph capture path fired but produced no files."
+                )
 
     # --- Check 2 (Deval): capture file has cpu_op + Input Dims ---
     # Sample the heaviest capture file; gate cpu_op-with-Input-Dims fraction
@@ -385,9 +387,9 @@ def _validate_trace_structure(
     # re-profiles rather than caching an empty snapshot. ``"Op count"`` is 0 even
     # on healthy traces, so key on the presence of ``cpu_op`` / ``kernel`` events.
     if main_traces:
-        has_ops = _trace_contains(
-            main_traces[0], '"cat": "cpu_op"'
-        ) or _trace_contains(main_traces[0], '"cat": "kernel"')
+        has_ops = _trace_contains(main_traces[0], '"cat": "cpu_op"') or _trace_contains(
+            main_traces[0], '"cat": "kernel"'
+        )
         if not has_ops:
             zero_ops = True
             issues.append(
@@ -1054,9 +1056,7 @@ class ProfileExecutor(BaselineExecutor):
                 result["status"] = "failed"
                 result["error_class"] = "no_trace_files"
                 probed = ", ".join(str(p) for p in _candidate_trace_dirs(workspace))
-                result["error"] = (
-                    f"no .trace.json.gz or capture sidecar under {workspace_str} (probed: {probed})"
-                )
+                result["error"] = f"no .trace.json.gz or capture sidecar under {workspace_str} (probed: {probed})"
                 if existing_empty_dirs:
                     log.warning(
                         "profile_executor: trace dirs exist but no .trace.json.gz "

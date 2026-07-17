@@ -40,7 +40,7 @@ def _extract_ensure_geak() -> str:
 def _run_ensure_geak(tmp_path: Path, *, package_metadata: bool) -> str:
     """Run the extracted ensure_geak body with stubs; return combined output."""
     geak_root = tmp_path / "os" / "GEAK"
-    (geak_root / ".git").mkdir(parents=True)          # take the "already present" path
+    (geak_root / ".git").mkdir(parents=True)  # take the "already present" path
     (geak_root / "interface").mkdir(parents=True)
     (geak_root / "interface" / "run_e2e.py").write_text("# runner\n", encoding="utf-8")
     if package_metadata:
@@ -106,8 +106,9 @@ def test_skips_pip_with_warning_when_no_package_metadata(tmp_path: Path) -> None
 
 def test_static_guards_pip_from_checkout() -> None:
     body = _extract_ensure_geak()
-    assert 'python3 -m pip install ${_PIP_FLAGS} "${GEAK_ROOT}"' in body, \
+    assert 'python3 -m pip install ${_PIP_FLAGS} "${GEAK_ROOT}"' in body, (
         "ensure_geak must pip-install the local ${GEAK_ROOT} checkout"
+    )
     assert 'GEAK_HOME="${GEAK_ROOT}"' in body, "must pass GEAK_HOME to reuse the checkout"
     assert "git+" not in body, "must not build a git+<remote> pip URL"
     assert "setup.sh" not in body, "setup.sh path must be fully removed"

@@ -65,7 +65,7 @@ _BENCH_SERVING_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmar
 _EVAL_DEST_LEGACY = 'mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2'
 _EVAL_DEST_PATCHED = 'mv -f "$jf" "${RESULT_DIR:-.}/" || echo "WARN: failed to move ${jf}" >&2'
 _EVAL_DEST_SENTINEL = '"${RESULT_DIR:-.}/"'
-_EVAL_DEST_LOCK_PATH = "/tmp/hyperloom_benchmark_lib_eval_dest_patcher.lock"
+_EVAL_DEST_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_dest_patcher.lock")
 
 
 def _discover_inferencex_roots(
@@ -308,9 +308,7 @@ def ensure_benchmark_lib_patched(
                 "different shape, or the upstream layout has changed. "
                 "Manual review needed."
             ),
-            success_msg=(
-                "_inferencex_patcher: applied NUM_PROMPTS-respecting patch to %s (Hyperloom issue #194 §2)"
-            ),
+            success_msg=("_inferencex_patcher: applied NUM_PROMPTS-respecting patch to %s (Hyperloom issue #194 §2)"),
         ),
         _LOCK_PATH,
         empty_msg=(
@@ -319,9 +317,7 @@ def ensure_benchmark_lib_patched(
             "benchmark_lib.sh missing — skipping patch (this is fine "
             "for tests and dry-runs without a real InferenceX tree)"
         ),
-        failure_msg=(
-            "_inferencex_patcher: failed to patch %s; other discovered roots will still be attempted"
-        ),
+        failure_msg=("_inferencex_patcher: failed to patch %s; other discovered roots will still be attempted"),
     )
 
 
@@ -343,9 +339,7 @@ def _resolve_benchmark_serving_paths(
         A list of existing ``benchmark_serving.py`` paths, or ``[]`` when none
         exist.
     """
-    return _resolve_inferencex_files(
-        inferencex_path, "utils", "bench_serving", "benchmark_serving.py"
-    )
+    return _resolve_inferencex_files(inferencex_path, "utils", "bench_serving", "benchmark_serving.py")
 
 
 def _is_benchmark_serving_patched(src: Path) -> bool:
@@ -411,9 +405,7 @@ def ensure_benchmark_serving_patched(
             "InferenceX tree)"
         ),
         failure_msg=(
-            "_inferencex_patcher: failed to PROFILE_EXTRA_BODY-"
-            "patch %s; other discovered roots will still be "
-            "attempted"
+            "_inferencex_patcher: failed to PROFILE_EXTRA_BODY-patch %s; other discovered roots will still be attempted"
         ),
     )
 
@@ -465,9 +457,7 @@ def ensure_benchmark_lib_eval_dest_patched(
                 "will land in the process cwd (InferenceX checkout) and be "
                 "recovered by the benchmark_result scan-side salvage instead."
             ),
-            success_msg=(
-                "_inferencex_patcher: redirected eval artifacts to $RESULT_DIR in %s"
-            ),
+            success_msg=("_inferencex_patcher: redirected eval artifacts to $RESULT_DIR in %s"),
         ),
         _EVAL_DEST_LOCK_PATH,
         empty_msg=(
@@ -477,8 +467,7 @@ def ensure_benchmark_lib_eval_dest_patched(
             "tests and dry-runs without a real InferenceX tree)"
         ),
         failure_msg=(
-            "_inferencex_patcher: failed to eval-dest-patch %s; other discovered "
-            "roots will still be attempted"
+            "_inferencex_patcher: failed to eval-dest-patch %s; other discovered roots will still be attempted"
         ),
     )
 

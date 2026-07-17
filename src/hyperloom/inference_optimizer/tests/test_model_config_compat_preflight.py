@@ -182,9 +182,7 @@ def test_detect_missing_tokenizer_skipped_for_scriptable_xdit(tmp_path):
         model_type="qwen2",
         max_position_embeddings=32768,
     )
-    assert (
-        cli._detect_incompatible_model_config(str(m), framework="xdit") is None
-    )
+    assert cli._detect_incompatible_model_config(str(m), framework="xdit") is None
 
 
 def test_detect_missing_tokenizer_still_blocks_serving_framework(tmp_path):
@@ -1079,9 +1077,10 @@ def test_preflight_persists_under_strict_env(tmp_path, monkeypatch):
 def test_private_quant_paroquant_blocks(tmp_path):
     m = tmp_path / "paro"
     _write_config(
-        m, model_type="qwen3_5", max_position_embeddings=32768,
-        quantization_config={"quant_method": "paroquant", "bits": 4,
-                             "group_size": 128, "krot": 8},
+        m,
+        model_type="qwen3_5",
+        max_position_embeddings=32768,
+        quantization_config={"quant_method": "paroquant", "bits": 4, "group_size": 128, "krot": 8},
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "paroquant" in reason
@@ -1091,7 +1090,9 @@ def test_private_quant_mlx_affine_blocks(tmp_path):
     # MTPLX / MLX 8-bit affine: mode set, no quant_method.
     m = tmp_path / "mlx_affine"
     _write_config(
-        m, model_type="qwen3_5", max_position_embeddings=32768,
+        m,
+        model_type="qwen3_5",
+        max_position_embeddings=32768,
         quantization_config={"bits": 8, "group_size": 64, "mode": "affine"},
     )
     reason = cli._detect_incompatible_model_config(str(m))
@@ -1103,7 +1104,9 @@ def test_private_quant_no_method_blocks(tmp_path):
     # sglang raises "Unknown quantization method: ''" in engine init.
     m = tmp_path / "no_method"
     _write_config(
-        m, model_type="llama", max_position_embeddings=32768,
+        m,
+        model_type="llama",
+        max_position_embeddings=32768,
         quantization_config={"group_size": 64, "bits": 8},
     )
     reason = cli._detect_incompatible_model_config(str(m))
@@ -1113,9 +1116,10 @@ def test_private_quant_no_method_blocks(tmp_path):
 def test_private_quant_mxtq_blocks(tmp_path):
     m = tmp_path / "mxtq"
     _write_config(
-        m, model_type="qwen3_5_moe", max_position_embeddings=32768,
-        quantization_config={"weight_format": "mxtq", "method": "affine",
-                             "group_size": 64},
+        m,
+        model_type="qwen3_5_moe",
+        max_position_embeddings=32768,
+        quantization_config={"weight_format": "mxtq", "method": "affine", "group_size": 64},
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "mxtq" in reason
@@ -1139,11 +1143,16 @@ def test_private_quant_mlx_weights_index_blocks(tmp_path):
     m = tmp_path / "mlx_weights"
     _write_config(m, model_type="qwen3_5", max_position_embeddings=32768)
     (m / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {
-            "lm_head.biases": "model-00001.safetensors",
-            "lm_head.scales": "model-00001.safetensors",
-            "model.embed_tokens.weight": "model-00001.safetensors",
-        }}), encoding="utf-8",
+        json.dumps(
+            {
+                "weight_map": {
+                    "lm_head.biases": "model-00001.safetensors",
+                    "lm_head.scales": "model-00001.safetensors",
+                    "model.embed_tokens.weight": "model-00001.safetensors",
+                }
+            }
+        ),
+        encoding="utf-8",
     )
     reason = cli._detect_incompatible_model_config(str(m))
     assert reason is not None and "MLX" in reason
@@ -1165,13 +1174,15 @@ def test_peft_adapter_only_checkpoint_blocks(tmp_path):
         encoding="utf-8",
     )
     (m / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {
-            "base_model.model.lm_head.lora_A.default.weight": "adapter_model.safetensors",
-            "base_model.model.lm_head.lora_B.default.weight": "adapter_model.safetensors",
-            "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": (
-                "adapter_model.safetensors"
-            ),
-        }}),
+        json.dumps(
+            {
+                "weight_map": {
+                    "base_model.model.lm_head.lora_A.default.weight": "adapter_model.safetensors",
+                    "base_model.model.lm_head.lora_B.default.weight": "adapter_model.safetensors",
+                    "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": ("adapter_model.safetensors"),
+                }
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -1186,13 +1197,15 @@ def test_merged_peft_like_checkpoint_with_base_weights_not_blocked(tmp_path):
     m = tmp_path / "merged_adapter"
     _write_config(m, model_type="qwen2", max_position_embeddings=32768)
     (m / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {
-            "model.embed_tokens.weight": "model-00001.safetensors",
-            "lm_head.weight": "model-00001.safetensors",
-            "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": (
-                "model-00001.safetensors"
-            ),
-        }}),
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.embed_tokens.weight": "model-00001.safetensors",
+                    "lm_head.weight": "model-00001.safetensors",
+                    "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": ("model-00001.safetensors"),
+                }
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -1202,7 +1215,9 @@ def test_merged_peft_like_checkpoint_with_base_weights_not_blocked(tmp_path):
 def test_standard_quant_fp8_not_blocked(tmp_path):
     m = tmp_path / "fp8"
     _write_config(
-        m, model_type="qwen3", max_position_embeddings=32768,
+        m,
+        model_type="qwen3",
+        max_position_embeddings=32768,
         quantization_config={"quant_method": "fp8"},
     )
     assert cli._detect_incompatible_model_config(str(m)) is None
@@ -1212,7 +1227,9 @@ def test_standard_quant_awq_gptq_not_blocked(tmp_path):
     for method in ("awq", "gptq", "compressed-tensors"):
         m = tmp_path / f"std_{method.replace('-', '_')}"
         _write_config(
-            m, model_type="qwen3", max_position_embeddings=32768,
+            m,
+            model_type="qwen3",
+            max_position_embeddings=32768,
             quantization_config={"quant_method": method},
         )
         assert cli._detect_incompatible_model_config(str(m)) is None, method
@@ -1287,12 +1304,8 @@ def _spy_langfuse_emit(monkeypatch) -> dict[str, list]:
     from hyperloom.inference_optimizer import breakdown as bd
     from hyperloom.orchestrator.trace import langfuse_emitter as lfe
 
-    monkeypatch.setattr(
-        lfe, "flush_session", lambda sd: calls["flush"].append(Path(sd))
-    )
-    monkeypatch.setattr(
-        bd, "patch_breakdown_langfuse", lambda sd: calls["patch"].append(Path(sd))
-    )
+    monkeypatch.setattr(lfe, "flush_session", lambda sd: calls["flush"].append(Path(sd)))
+    monkeypatch.setattr(bd, "patch_breakdown_langfuse", lambda sd: calls["patch"].append(Path(sd)))
     monkeypatch.setattr(
         lfe,
         "record_session_breakdown",
@@ -1384,17 +1397,22 @@ def test_declared_standard_quant_with_scales_index_not_blocked(tmp_path):
     for method in ("awq", "gptq", "compressed-tensors"):
         m = tmp_path / f"std_scales_{method.replace('-', '_')}"
         _write_config(
-            m, model_type="qwen3", max_position_embeddings=32768,
+            m,
+            model_type="qwen3",
+            max_position_embeddings=32768,
             quantization_config={"quant_method": method},
         )
         (m / "model.safetensors.index.json").write_text(
-            json.dumps({"weight_map": {
-                "model.layers.0.self_attn.q_proj.scales":
-                    "model-00001.safetensors",
-                "model.layers.0.self_attn.q_proj.biases":
-                    "model-00001.safetensors",
-                "model.embed_tokens.weight": "model-00001.safetensors",
-            }}), encoding="utf-8",
+            json.dumps(
+                {
+                    "weight_map": {
+                        "model.layers.0.self_attn.q_proj.scales": "model-00001.safetensors",
+                        "model.layers.0.self_attn.q_proj.biases": "model-00001.safetensors",
+                        "model.embed_tokens.weight": "model-00001.safetensors",
+                    }
+                }
+            ),
+            encoding="utf-8",
         )
         assert cli._detect_incompatible_model_config(str(m)) is None, method
 
@@ -1417,18 +1435,14 @@ def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypa
         return None
 
     spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
-    cli_model_gate._run_compat_detector(
-        spec, model_path="org/repo", data={}, gpu_type=None
-    )
+    cli_model_gate._run_compat_detector(spec, model_path="org/repo", data={}, gpu_type=None)
     assert seen["model_path"] == str(local_dir)
 
 
 def test_run_compat_detector_falls_back_to_raw_when_unresolvable(monkeypatch):
     """An unresolvable model path (e.g. an uncached repo-id) falls back to the
     raw string so behaviour is unchanged from before the resolver."""
-    monkeypatch.setattr(
-        cli_model_gate, "resolve_local_model_dir", lambda mp: None
-    )
+    monkeypatch.setattr(cli_model_gate, "resolve_local_model_dir", lambda mp: None)
     seen: dict[str, str] = {}
 
     def _fake_detector(model_path):
@@ -1436,7 +1450,5 @@ def test_run_compat_detector_falls_back_to_raw_when_unresolvable(monkeypatch):
         return None
 
     spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
-    cli_model_gate._run_compat_detector(
-        spec, model_path="/raw/model/path", data={}, gpu_type=None
-    )
+    cli_model_gate._run_compat_detector(spec, model_path="/raw/model/path", data={}, gpu_type=None)
     assert seen["model_path"] == "/raw/model/path"

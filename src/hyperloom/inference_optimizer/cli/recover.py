@@ -18,6 +18,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+
 def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
     """Inspect on-disk artifacts to judge whether a session finished cleanly.
 
@@ -61,6 +62,7 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
         "counts_final": counts_final,
         "looks_complete": close_done and breakdown_recorded,
     }
+
 
 def _run_recover_session(args: argparse.Namespace) -> int:
     """Offline recovery for a session that exited abnormally.

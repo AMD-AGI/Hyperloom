@@ -147,9 +147,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     assert "entered" in out
     assert "elapsed_sec=120" in out
     # Wiring: the rendered remaining must match the budget helper it delegates to.
-    expected_rem = int(
-        _ps.phase_budget_remaining_seconds(s, budget_pct={"EXPLORE": 0.5}, now_unix=1_000_120.0)
-    )
+    expected_rem = int(_ps.phase_budget_remaining_seconds(s, budget_pct={"EXPLORE": 0.5}, now_unix=1_000_120.0))
     assert f"remaining_sec={expected_rem}" in out
     # EXPLORE allowlist carries explore + specialist + recover only.
     assert "explore" in out and "specialist" in out

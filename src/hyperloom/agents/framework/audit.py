@@ -63,6 +63,7 @@ _APPLICABILITIES = (
     "needs_human_review",
 )
 
+
 def _signal_lines(lines: list[str]) -> list[str]:
     """Keep semantically meaningful lines (drop blanks / pure punctuation).
 
@@ -274,7 +275,9 @@ def _classify(
 
 def _persist_audit(request: dict[str, Any], result: dict[str, Any]) -> None:
     """Persist the semantic audit result next to audit material."""
-    work_dir = Path(str(request.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent" / "phase-audit"))).expanduser()
+    work_dir = Path(
+        str(request.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent" / "phase-audit"))
+    ).expanduser()
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
         import json
@@ -300,9 +303,7 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
         ``<work_dir>/semantic_audit.json`` when ``work_dir`` is set).
     """
     candidate = request.get("candidate") or {}
-    candidate_id = str(
-        candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or ""
-    )
+    candidate_id = str(candidate.get("candidate_id") or candidate.get("pr_url") or candidate.get("ref") or "")
     src_framework = str(request.get("framework") or "").strip().lower()
     dst_framework = str(request.get("target_framework") or "").strip().lower()
     if dst_framework and dst_framework != src_framework:
@@ -314,7 +315,9 @@ def run_phase_audit(request: dict[str, Any]) -> dict[str, Any]:
         return result
 
     roots = [Path(str(r)).expanduser() for r in (request.get("framework_source_roots") or []) if str(r).strip()]
-    work_dir = Path(str(request.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent" / "phase-audit"))).expanduser()
+    work_dir = Path(
+        str(request.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent" / "phase-audit"))
+    ).expanduser()
 
     patch_text, patch_source = _obtain_patch_text(request, work_dir)
     if not patch_text.strip():

@@ -524,6 +524,7 @@ def harvest_mn_gpu_metrics(
     # so never touch its result path. is_multi_node() is the authoritative
     # gate (state nodes>=2 or $INFERENCE_OPTIMIZER_NODES>=2).
     from ._multi_node_env import is_multi_node
+
     if not is_multi_node():
         return out
     # Resolve the shared server-log dir exactly as cli.py forwards it to the
@@ -531,8 +532,7 @@ def harvest_mn_gpu_metrics(
     # client reads where the pod sampler wrote, without changing forwarding
     # logic. Absolute-only; unresolved $VAR is treated as absent.
     shared = os.path.expandvars(
-        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
-        or "$USER_DATA_PATH/server_logs"
+        os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
     )
     if not shared.startswith("/") or "$" in shared:
         return out
@@ -549,6 +549,7 @@ def harvest_mn_gpu_metrics(
     # PD-disaggregation: map each pod IP -> prefill/decode role so metrics
     # can be tagged and aggregated per role (empty unless disaggregated).
     from ._multi_node_env import pd_topology_from_state
+
     pd = pd_topology_from_state()
     role_of: dict[str, str] = {}
     for _ip in pd.get("prefill_pod_ips", []):
@@ -565,7 +566,7 @@ def harvest_mn_gpu_metrics(
     merged: list[list[str]] = []
     samples: list[dict[str, Any]] = []
     for pod_csv in pod_csvs:
-        host = pod_csv.stem[len("gpu_metrics_"):]
+        host = pod_csv.stem[len("gpu_metrics_") :]
         try:
             with pod_csv.open(encoding="utf-8", errors="replace", newline="") as f:
                 rows = list(csv.reader(f))
@@ -627,9 +628,7 @@ def harvest_mn_gpu_metrics(
                     by_role = _aggregate_gpu_samples_by_role(samples)
                     if by_role:
                         report["gpu_monitor_by_role"] = by_role
-                        out["gpu_monitor_by_role"] = {
-                            k: v.get("samples") for k, v in by_role.items()
-                        }
+                        out["gpu_monitor_by_role"] = {k: v.get("samples") for k, v in by_role.items()}
                 try:
                     with report_path.open("w", encoding="utf-8") as f:
                         json.dump(report, f, indent=2)

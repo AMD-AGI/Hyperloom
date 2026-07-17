@@ -642,7 +642,7 @@ def _parse_server_arg_value(server_args: str, flag: str) -> str | None:
         if tok == flag:
             return toks[i + 1] if i + 1 < len(toks) else None
         if tok.startswith(prefix):
-            return tok[len(prefix):]
+            return tok[len(prefix) :]
     return None
 
 
@@ -791,9 +791,7 @@ def _launch_argv_from_log(path: str, marker: str) -> str:
     """Extract + normalize the engine launch argv from one benchmark log."""
     import re as _re
 
-    pat = _re.compile(
-        r"(?:-m\s+\S*" + _re.escape(marker) + r"\S*|" + _re.escape(marker) + r")\b(.*)$"
-    )
+    pat = _re.compile(r"(?:-m\s+\S*" + _re.escape(marker) + r"\S*|" + _re.escape(marker) + r")\b(.*)$")
     try:
         with open(path, encoding="utf-8", errors="ignore") as fh:
             for line in fh:
@@ -812,9 +810,7 @@ def _launch_argv_from_log(path: str, marker: str) -> str:
     return ""
 
 
-def _scrape_resolved_launch_flags(
-    session_dir: Any, backend: str, target_tput: float = 0.0
-) -> str:
+def _scrape_resolved_launch_flags(session_dir: Any, backend: str, target_tput: float = 0.0) -> str:
     """Recover the orchestrator's FULL resolved server-launch flags from logs.
 
     The complete record of what the engine ran with is the launched argv,
@@ -845,18 +841,11 @@ def _scrape_resolved_launch_flags(
         # sibling server log.
         if target_tput and target_tput > 0:
             best_path, best_err = "", 1e9
-            for rp in _glob.glob(
-                str(runs_root / "**" / "inferencex_result.json"), recursive=True
-            ):
+            for rp in _glob.glob(str(runs_root / "**" / "inferencex_result.json"), recursive=True):
                 if "geak" in rp or "_baseline_source_overlay" in rp:
                     continue
                 try:
-                    tp = float(
-                        (json.loads(Path(rp).read_text(encoding="utf-8")) or {}).get(
-                            "output_throughput"
-                        )
-                        or 0.0
-                    )
+                    tp = float((json.loads(Path(rp).read_text(encoding="utf-8")) or {}).get("output_throughput") or 0.0)
                 except (OSError, json.JSONDecodeError, TypeError, ValueError):
                     continue
                 if tp <= 0:

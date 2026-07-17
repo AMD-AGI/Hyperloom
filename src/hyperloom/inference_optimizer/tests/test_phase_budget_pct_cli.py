@@ -41,9 +41,7 @@ def test_kernel_pct_override_reaches_kernel_agent(flag: str) -> None:
     normalized = normalize_budget_pct(raw)
     assert normalized[PHASE_KERNEL_AGENT] == pytest.approx(0.78)
     # Must not silently fall back to the default.
-    assert normalized[PHASE_KERNEL_AGENT] != pytest.approx(
-        DEFAULT_PHASE_BUDGET_PCT[PHASE_KERNEL_AGENT]
-    )
+    assert normalized[PHASE_KERNEL_AGENT] != pytest.approx(DEFAULT_PHASE_BUDGET_PCT[PHASE_KERNEL_AGENT])
 
 
 def test_kernel_pct_key_is_canonical_phase_name() -> None:
@@ -68,9 +66,7 @@ def test_framework_pct_override_reaches_framework_agent(flag: str) -> None:
     normalized = normalize_budget_pct(raw)
     assert normalized[PHASE_FRAMEWORK_AGENT] == pytest.approx(0.42)
     # Must not silently fall back to the default.
-    assert normalized[PHASE_FRAMEWORK_AGENT] != pytest.approx(
-        DEFAULT_PHASE_BUDGET_PCT[PHASE_FRAMEWORK_AGENT]
-    )
+    assert normalized[PHASE_FRAMEWORK_AGENT] != pytest.approx(DEFAULT_PHASE_BUDGET_PCT[PHASE_FRAMEWORK_AGENT])
 
 
 def test_framework_pct_key_is_canonical_phase_name() -> None:
@@ -84,12 +80,18 @@ def test_framework_pct_key_is_canonical_phase_name() -> None:
 def test_all_phase_budget_pct_spellings_parse() -> None:
     """Every phase accepts both the legacy and the phase-budget spelling."""
     argv = [
-        "--phase-budget-prelude-pct", "0.05",
-        "--phase-budget-framework-pct", "0.20",
-        "--phase-budget-explore-pct", "0.30",
-        "--phase-budget-kernel-pct", "0.40",
-        "--phase-budget-sweep-pct", "0.15",
-        "--phase-budget-close-pct", "0.03",
+        "--phase-budget-prelude-pct",
+        "0.05",
+        "--phase-budget-framework-pct",
+        "0.20",
+        "--phase-budget-explore-pct",
+        "0.30",
+        "--phase-budget-kernel-pct",
+        "0.40",
+        "--phase-budget-sweep-pct",
+        "0.15",
+        "--phase-budget-close-pct",
+        "0.03",
     ]
     args = _parse_optimize(argv)
     normalized = normalize_budget_pct(cli._build_phase_budget_pct(args))
@@ -118,9 +120,7 @@ def test_redistribute_disabled_phase_share_goes_to_work_phases() -> None:
     PRELUDE/CLOSE are fixed overhead and must not absorb; the total is preserved.
     """
     base = dict(DEFAULT_PHASE_BUDGET_PCT)
-    out = redistribute_budget_pct(
-        base, explore_enabled=False, kernel_enabled=True, framework_enabled=True
-    )
+    out = redistribute_budget_pct(base, explore_enabled=False, kernel_enabled=True, framework_enabled=True)
     assert out["EXPLORE"] == 0.0
     assert out["PRELUDE"] == base["PRELUDE"]
     assert out["CLOSE"] == base["CLOSE"]
@@ -134,19 +134,13 @@ def test_redistribute_disabled_phase_share_goes_to_work_phases() -> None:
 def test_redistribute_all_enabled_is_noop_and_idempotent() -> None:
     """No disabled phase → unchanged; re-running never drifts."""
     base = dict(DEFAULT_PHASE_BUDGET_PCT)
-    once = redistribute_budget_pct(
-        base, explore_enabled=True, kernel_enabled=True, framework_enabled=True
-    )
+    once = redistribute_budget_pct(base, explore_enabled=True, kernel_enabled=True, framework_enabled=True)
     assert once == base
     twice = redistribute_budget_pct(
-        redistribute_budget_pct(
-            base, explore_enabled=False, kernel_enabled=True, framework_enabled=True
-        ),
+        redistribute_budget_pct(base, explore_enabled=False, kernel_enabled=True, framework_enabled=True),
         explore_enabled=False,
         kernel_enabled=True,
         framework_enabled=True,
     )
-    single = redistribute_budget_pct(
-        base, explore_enabled=False, kernel_enabled=True, framework_enabled=True
-    )
+    single = redistribute_budget_pct(base, explore_enabled=False, kernel_enabled=True, framework_enabled=True)
     assert twice == single

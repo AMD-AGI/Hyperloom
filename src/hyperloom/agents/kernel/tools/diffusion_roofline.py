@@ -151,9 +151,7 @@ def dit_analytic_flops(
     }
 
 
-def dit_analytic_ceiling(
-    flops: dict[str, float], achievable_tflops: float
-) -> dict[str, Any]:
+def dit_analytic_ceiling(flops: dict[str, float], achievable_tflops: float) -> dict[str, Any]:
     """Convert a-priori FLOPs into an achievable-compute time ceiling.
 
     Args:
@@ -176,9 +174,7 @@ def dit_analytic_ceiling(
     }
 
 
-def reconcile(
-    totals: dict[str, Any], analytic: dict[str, Any]
-) -> dict[str, Any]:
+def reconcile(totals: dict[str, Any], analytic: dict[str, Any]) -> dict[str, Any]:
     """Cross-check the a-priori DiT ceiling against the trace-derived roofline.
 
     Compares the analytic compute-ideal time (from a-priori FLOPs / achievable
@@ -440,9 +436,7 @@ def build_report_from_bypass(
     )
     # Scope + count reflect all kernels under full scope, else the top-k subset.
     report["kernel_scope"] = "all_device_kernels" if full_scope else "analyzed_candidates"
-    report["kernels_aggregated"] = (
-        int(kernels_aggregated) if kernels_aggregated is not None else len(hot_kernels)
-    )
+    report["kernels_aggregated"] = int(kernels_aggregated) if kernels_aggregated is not None else len(hot_kernels)
     return report
 
 
@@ -522,11 +516,22 @@ def main() -> int:
     parser.add_argument("--top-k", type=int, default=10, help="Hottest kernels to list.")
     parser.add_argument("--output", default="", help="Optional path to write the report JSON.")
     # Approach-a absolute analytic ceiling from the model's diffusers config.
-    parser.add_argument("--model-dir", default="", help="Local diffusers model dir; enables the per-architecture analytic ceiling (diffusion_flops).")
+    parser.add_argument(
+        "--model-dir",
+        default="",
+        help="Local diffusers model dir; enables the per-architecture analytic ceiling (diffusion_flops).",
+    )
     parser.add_argument("--height", type=int, default=1024, help="Output image height (px) for the analytic ceiling.")
     parser.add_argument("--width", type=int, default=1024, help="Output image width (px) for the analytic ceiling.")
-    parser.add_argument("--precision", default="bf16", help="Runtime precision for the peak-TFLOPS ceiling (bf16 / fp8 / mxfp4).")
-    parser.add_argument("--cfg-batch", type=int, default=0, help="Forwards per denoise step (0 = family default; 2 = classifier-free guidance).")
+    parser.add_argument(
+        "--precision", default="bf16", help="Runtime precision for the peak-TFLOPS ceiling (bf16 / fp8 / mxfp4)."
+    )
+    parser.add_argument(
+        "--cfg-batch",
+        type=int,
+        default=0,
+        help="Forwards per denoise step (0 = family default; 2 = classifier-free guidance).",
+    )
     # Optional a-priori DiT ceiling cross-check (needs all geometry flags + a ceiling source).
     parser.add_argument("--dit-hidden-size", type=int, default=0, help="DiT hidden dim h (analytic ceiling).")
     parser.add_argument("--dit-num-layers", type=int, default=0, help="DiT transformer block count.")
@@ -591,9 +596,7 @@ def main() -> int:
                 # Reconcile against the trace-measured actual kernel time.
                 actual_us = report["totals"].get("sigma_actual_kernel_us", 0.0)
                 if est.get("ideal_ms") and actual_us > 0:
-                    report["analytic_within_pct"] = round(
-                        est["ideal_ms"] / (actual_us / 1e3) * 100.0, 2
-                    )
+                    report["analytic_within_pct"] = round(est["ideal_ms"] / (actual_us / 1e3) * 100.0, 2)
         except Exception as exc:  # noqa: BLE001 — analytic ceiling is best-effort
             report["analytic_ceiling_error"] = f"{type(exc).__name__}: {exc}"
 

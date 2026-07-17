@@ -62,16 +62,12 @@ from ._kernel_decisions import (
 )
 
 
-
 log = logging.getLogger(__name__)
 
 # Recognized trace-analysis routes; an unknown value falls back to ``agent``.
 _VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
-
-
-
 
 
 def _vram_guarded_server_args(extra_args: str) -> str:
@@ -451,8 +447,7 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     except OSError:
         return
     is_default = root_resolved.parent == cache_root and (
-        root_resolved.name == "TraceLens"
-        or root_resolved.name.startswith("TraceLens@")
+        root_resolved.name == "TraceLens" or root_resolved.name.startswith("TraceLens@")
     )
     if not is_default:
         return  # explicit non-default override: never auto-clone
@@ -847,10 +842,7 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
     # Substring accept (unchanged for legitimate in-tree sources) plus a narrow
     # traversal-escape rejection: a trace-supplied kernel_file that keeps a root
     # substring but uses ``..`` to climb out of the tree is refused.
-    if (
-        not any(root in lower_file for root in _reusable_source_roots())
-        or _source_escapes_reusable_roots(source_file)
-    ):
+    if not any(root in lower_file for root in _reusable_source_roots()) or _source_escapes_reusable_roots(source_file):
         return {
             "status": "failed",
             "error_class": "unstable_source_path",
@@ -1080,9 +1072,7 @@ def materialize_unified_patch_snapshot(
         raise FileNotFoundError(f"kernel repo does not exist: {root}")
 
     tool = _load_apply_tool()
-    descriptors = tool.parse_patch_manifest(
-        patch.read_text(encoding="utf-8", errors="replace")
-    )
+    descriptors = tool.parse_patch_manifest(patch.read_text(encoding="utf-8", errors="replace"))
     if not descriptors:
         raise ValueError(f"patch has no file operations: {patch}")
 
@@ -1399,9 +1389,13 @@ def _gemm_tuning_timeout_sec(payload: dict) -> int:
 
 def _forge_fusion_timeout_sec(payload: dict) -> int:
     """Resolve the forge-fusion subprocess timeout in seconds."""
-    raw = payload.get("timeout") or payload.get("timeout_sec") or os.environ.get(
-        "FORGE_FUSION_TIMEOUT",
-        "",
+    raw = (
+        payload.get("timeout")
+        or payload.get("timeout_sec")
+        or os.environ.get(
+            "FORGE_FUSION_TIMEOUT",
+            "",
+        )
     )
     try:
         value = int(float(raw))
@@ -1503,11 +1497,7 @@ def _resolve_gemm_tuning_backend(payload: dict) -> str:
     2. GEMM_TUNING_BACKEND env var
     3. Default: 'forge'
     """
-    raw = str(
-        payload.get("gemm_tuning_backend")
-        or os.environ.get("GEMM_TUNING_BACKEND")
-        or ""
-    ).strip().lower()
+    raw = str(payload.get("gemm_tuning_backend") or os.environ.get("GEMM_TUNING_BACKEND") or "").strip().lower()
     if raw in ("forge", "geak"):
         return raw
     return "forge"
@@ -1601,9 +1591,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
             server_args = str(current_best.get("extra_server_args") or "")
     extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
     ref_envs = dict(getattr(state, "reference_envs", None) or {})
-    per_token_signal = (
-        is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
-        or is_truthy(ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN"))
+    per_token_signal = is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")) or is_truthy(
+        ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")
     )
 
     quantization_arg = _parse_server_arg(server_args, "--quantization").lower()
@@ -1615,9 +1604,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
         if per_token_signal:
             quant_type = "per_token"
         else:
-            model_path = str(
-                payload.get("model_path") or getattr(state, "model_path", "") or ""
-            ).strip()
+            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
             quant_type = _resolve_fp8_quant_type(model_path)
         return precision, quant_type
 
@@ -1894,9 +1881,7 @@ def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
     return hidden in k_values
 
 
-def _resolve_forge_untuned_csv(
-    session_dir: Path, precision: str, quant_type: str, model_path: str = ""
-) -> str:
+def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str, model_path: str = "") -> str:
     """Find an aiter untuned-GEMM CSV recorded by the specialist phase.
 
     Dense fp8/fp4 forge tuners skip themselves unless real GEMM shapes are
@@ -2065,17 +2050,13 @@ async def _run_forge_gemm_tuning(
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
     workspace.mkdir(parents=True, exist_ok=True)
 
-    model_path = str(
-        payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or ""
-    ).strip()
+    model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
     if not model_path:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
 
     tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
     conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64)
-    gpu_type = str(
-        payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x"
-    ).strip().lower()
+    gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x").strip().lower()
     tokens = _normalize_tokens(payload.get("tokens"))
     # Default mp = all visible GPUs.
     from ..policy.gate import detect_gpu_count
@@ -2347,8 +2328,7 @@ async def run_gemm_tuning_handler(
 
 
 # forge-fusion (autonomous kernel fusion)
-_FORGE_FUSION_RESULT_RE = re.compile(
-    r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORGE_FUSION_RESULT_END", re.DOTALL)
+_FORGE_FUSION_RESULT_RE = re.compile(r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORGE_FUSION_RESULT_END", re.DOTALL)
 
 
 def _forge_fusion_available() -> bool:
@@ -2379,6 +2359,7 @@ def _resolve_fusion_decode_trace(state, payload: dict) -> str:
     already captured in PRELUDE (``state.last_profile_trace``); reuse it instead of
     re-profiling. Explicit ``payload['trace_path']`` wins.
     """
+
     def _trace_file(path_str: str) -> str:
         path = Path(path_str)
         if path.is_file():
@@ -2386,9 +2367,7 @@ def _resolve_fusion_decode_trace(state, payload: dict) -> str:
         if not path.is_dir():
             return ""
         candidates = sorted(
-            list(path.glob("*.trace.json.gz"))
-            + list(path.glob("*.trace.json"))
-            + list(path.glob("*.json.gz")),
+            list(path.glob("*.trace.json.gz")) + list(path.glob("*.trace.json")) + list(path.glob("*.json.gz")),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -2463,32 +2442,45 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
     if not _forge_fusion_available():
         return {
-            "status": "failed", "backend": "forge", "engine": "forge_fusion",
+            "status": "failed",
+            "backend": "forge",
+            "engine": "forge_fusion",
             "error_class": "forge_fusion_not_found",
-            "error": ("forge-fusion CLI not found. Install via "
-                      "'pip install -e <KernelForge>/src/forge_fusion'."),
-            "decision": "REVERT", "kept": False,
+            "error": ("forge-fusion CLI not found. Install via 'pip install -e <KernelForge>/src/forge_fusion'."),
+            "decision": "REVERT",
+            "kept": False,
         }
 
-    model_path = str(
-        payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
+    model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
     if not model_path:
-        return {"status": "failed", "backend": "forge", "engine": "forge_fusion",
-                "error_class": "model_path_missing", "error": "model_path is required",
-                "decision": "REVERT", "kept": False}
+        return {
+            "status": "failed",
+            "backend": "forge",
+            "engine": "forge_fusion",
+            "error_class": "model_path_missing",
+            "error": "model_path is required",
+            "decision": "REVERT",
+            "kept": False,
+        }
 
     trace_path = _resolve_fusion_decode_trace(state, payload)
     if not trace_path:
-        return {"status": "skipped", "backend": "forge", "engine": "forge_fusion",
-                "error_class": "decode_trace_missing",
-                "error": ("no decode trace available for fusion discovery "
-                          "(state.last_profile_trace empty; run profile/roofline first)"),
-                "decision": "REVERT", "kept": False}
+        return {
+            "status": "skipped",
+            "backend": "forge",
+            "engine": "forge_fusion",
+            "error_class": "decode_trace_missing",
+            "error": (
+                "no decode trace available for fusion discovery "
+                "(state.last_profile_trace empty; run profile/roofline first)"
+            ),
+            "decision": "REVERT",
+            "kept": False,
+        }
 
     framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
     gpu = str(payload.get("gpu") or "0").strip()
-    llm_model = str(
-        payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-4-6").strip()
+    llm_model = str(payload.get("llm_model") or os.environ.get("CLAUDE_MODEL") or "claude-opus-4-6").strip()
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
     timeout = _forge_fusion_timeout_sec(payload)
 
@@ -2521,10 +2513,15 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
         cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        result = {"status": "failed", "backend": "forge", "engine": "forge_fusion",
-                  "error_class": "subprocess_timeout",
-                  "error": f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}",
-                  "decision": "REVERT", "kept": False}
+        result = {
+            "status": "failed",
+            "backend": "forge",
+            "engine": "forge_fusion",
+            "error_class": "subprocess_timeout",
+            "error": f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}",
+            "decision": "REVERT",
+            "kept": False,
+        }
 
     result.setdefault("backend", "forge")
     result.setdefault("engine", "forge_fusion")
@@ -2643,19 +2640,21 @@ async def trace_analyze_handler(
     route_health_warnings: list[dict[str, Any]] = []
     if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
         log.warning(
-            "trace_analyze: unknown analysis_route %r (expected one of %s); "
-            "falling back to the default 'agent' route",
-            explicit_route, sorted(_VALID_ANALYSIS_ROUTES),
+            "trace_analyze: unknown analysis_route %r (expected one of %s); falling back to the default 'agent' route",
+            explicit_route,
+            sorted(_VALID_ANALYSIS_ROUTES),
         )
-        route_health_warnings.append({
-            "code": "invalid_analysis_route",
-            "severity": "warning",
-            "message": (
-                f"unknown analysis_route {explicit_route!r} (expected one of "
-                f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
-            ),
-            "requested_route": explicit_route,
-        })
+        route_health_warnings.append(
+            {
+                "code": "invalid_analysis_route",
+                "severity": "warning",
+                "message": (
+                    f"unknown analysis_route {explicit_route!r} (expected one of "
+                    f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
+                ),
+                "requested_route": explicit_route,
+            }
+        )
         explicit_route = ""
     analysis_route = explicit_route or "agent"
     is_bypass = analysis_route == "bypass"
@@ -3372,9 +3371,7 @@ def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) ->
     last_decision = str(entry.get("last_decision") or "").strip()
     last_status = str(entry.get("last_status") or "").lower()
     rejected_reason = str(entry.get("rejected_reason") or "").strip()
-    is_retryable_infra = (
-        last_decision == "" and last_status in {"failed", "error", "timeout"} and not rejected_reason
-    )
+    is_retryable_infra = last_decision == "" and last_status in {"failed", "error", "timeout"} and not rejected_reason
     if failure_count < max_failures and is_retryable_infra:
         return max_failures
     # High-impact infra-retry (flag-gated, default off): a high-GPU%-share kernel
@@ -3696,8 +3693,7 @@ async def _run_backend_ladder(
             if remaining <= _KERNEL_LADDER_MIN_BACKEND_SEC:
                 # Not enough budget left for another backend.
                 log.info(
-                    "kernel %s: per-kernel ladder budget exhausted (%.0fs left); "
-                    "skipping remaining backends %s",
+                    "kernel %s: per-kernel ladder budget exhausted (%.0fs left); skipping remaining backends %s",
                     kernel_id,
                     remaining,
                     backends[idx:],
@@ -4129,7 +4125,9 @@ def _trace_kernel_attempt_usage(
 
 
 def _trace_kernel_attempt_steps(
-    result: Any, *, session_dir: Path,
+    result: Any,
+    *,
+    session_dir: Path,
 ) -> None:
     """Record each forge attempt's key-step timeline to the forge_steps audit.
 
@@ -4148,6 +4146,7 @@ def _trace_kernel_attempt_steps(
         return
     from datetime import datetime, timezone
     from hyperloom.inference_optimizer.session.session_paths import forge_steps_path
+
     kernel_id = str(result.get("kernel_id") or "") or None
     rows: list[dict[str, Any]] = []
     for attempt in attempts:
@@ -4169,14 +4168,24 @@ def _trace_kernel_attempt_steps(
         for step in payload.get("steps") or []:
             if not isinstance(step, dict):
                 continue
-            rows.append({
-                "kernel_id": kernel_id, "kind": "iteration", "ts": ts, **step,
-            })
+            rows.append(
+                {
+                    "kernel_id": kernel_id,
+                    "kind": "iteration",
+                    "ts": ts,
+                    **step,
+                }
+            )
         summary = payload.get("summary")
         if isinstance(summary, dict):
-            rows.append({
-                "kernel_id": kernel_id, "kind": "summary", "ts": ts, **summary,
-            })
+            rows.append(
+                {
+                    "kernel_id": kernel_id,
+                    "kind": "summary",
+                    "ts": ts,
+                    **summary,
+                }
+            )
     if not rows:
         return
     try:
@@ -4347,9 +4356,8 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
-    env_only_validation = (
-        str(payload.get("source") or "").strip() in {"forge_gemm_tuning", "gemm_tuning"}
-        and (bool(payload.get("extra_envs")) or bool(str(payload.get("extra_server_args") or "").strip()))
+    env_only_validation = str(payload.get("source") or "").strip() in {"forge_gemm_tuning", "gemm_tuning"} and (
+        bool(payload.get("extra_envs")) or bool(str(payload.get("extra_server_args") or "").strip())
     )
     if not env_only_validation:
         payload, missing_inputs = _resolve_integrate_payload(
@@ -4603,11 +4611,7 @@ async def integrate_handler(
     # decision, so it never breaks a run.
     paired_ab: dict[str, Any] | None = None
     paired_pristine_revert: HandlerResult | None = None
-    if (
-        env_bool("HL_INTEGRATE_PAIRED_AB", False)
-        and decision == "KEEP"
-        and apply_result.get("status") == "ok"
-    ):
+    if env_bool("HL_INTEGRATE_PAIRED_AB", False) and decision == "KEEP" and apply_result.get("status") == "ok":
         paired_ab = {"status": "attempted"}
         try:
             paired_pristine_revert = _maybe_revert_kernel_patch(apply_result)
@@ -4751,40 +4755,6 @@ def get_handler(kind: str) -> HandlerFn | None:
             ``None`` when no handler is registered for ``kind``.
     """
     return KERNEL_REQUEST_HANDLERS.get(kind)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 __all__ = [

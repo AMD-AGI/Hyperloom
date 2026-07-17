@@ -147,6 +147,7 @@ class BaselineSummary:
             "source": self.source,
         }
 
+
 __all__ = [
     "BaselineQuery",
     "BaselinePoint",

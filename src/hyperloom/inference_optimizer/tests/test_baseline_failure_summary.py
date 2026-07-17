@@ -237,8 +237,7 @@ def test_classify_root_cause_ignores_mem_fraction_static_in_argv():
     # launch command must not be mislabeled kv_cache_oom.
     result = _classify_root_cause_type(
         "subprocess_nonzero",
-        "server cmd: python -m sglang.launch_server "
-        "--mem-fraction-static 0.9 --tp 8; exited 1 with a segfault",
+        "server cmd: python -m sglang.launch_server --mem-fraction-static 0.9 --tp 8; exited 1 with a segfault",
     )
     assert result != "kv_cache_oom"
 

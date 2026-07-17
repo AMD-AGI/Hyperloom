@@ -29,20 +29,49 @@ from _roofline_source import ANALYTICAL as _RL_ANALYTICAL
 # Compact AMD MAX-ACHIEVABLE (sustained) peak specs — same convention as the
 # session roofline ceiling.
 _PEAK_TFLOPS_MI300: dict[str, float] = {
-    "bf16": 708.0, "bfloat16": 708.0, "f16": 654.0, "fp16": 654.0, "float16": 654.0,
-    "fp8": 1273.0, "f8": 1273.0, "float8_e4m3fn": 1273.0, "float8_e5m2": 1273.0,
-    "fp32": 163.0, "f32": 163.0, "float32": 163.0,
+    "bf16": 708.0,
+    "bfloat16": 708.0,
+    "f16": 654.0,
+    "fp16": 654.0,
+    "float16": 654.0,
+    "fp8": 1273.0,
+    "f8": 1273.0,
+    "float8_e4m3fn": 1273.0,
+    "float8_e5m2": 1273.0,
+    "fp32": 163.0,
+    "f32": 163.0,
+    "float32": 163.0,
 }
 _PEAK_TFLOPS_MI325: dict[str, float] = {
-    "bf16": 843.0, "bfloat16": 843.0, "f16": 794.0, "fp16": 794.0, "float16": 794.0,
-    "fp8": 1519.0, "f8": 1519.0, "float8_e4m3fn": 1519.0, "float8_e5m2": 1519.0,
-    "fp32": 194.0, "f32": 194.0, "float32": 194.0,
+    "bf16": 843.0,
+    "bfloat16": 843.0,
+    "f16": 794.0,
+    "fp16": 794.0,
+    "float16": 794.0,
+    "fp8": 1519.0,
+    "f8": 1519.0,
+    "float8_e4m3fn": 1519.0,
+    "float8_e5m2": 1519.0,
+    "fp32": 194.0,
+    "f32": 194.0,
+    "float32": 194.0,
 }
 _PEAK_TFLOPS_MI355: dict[str, float] = {
-    "bf16": 1686.0, "bfloat16": 1686.0, "f16": 1686.0, "fp16": 1686.0, "float16": 1686.0,
-    "fp8": 3567.0, "f8": 3567.0, "float8_e4m3fn": 3567.0, "float8_e5m2": 3567.0,
-    "mxfp4": 5663.0, "fp4": 5663.0, "float4": 5663.0,
-    "fp32": 137.0, "f32": 137.0, "float32": 137.0,
+    "bf16": 1686.0,
+    "bfloat16": 1686.0,
+    "f16": 1686.0,
+    "fp16": 1686.0,
+    "float16": 1686.0,
+    "fp8": 3567.0,
+    "f8": 3567.0,
+    "float8_e4m3fn": 3567.0,
+    "float8_e5m2": 3567.0,
+    "mxfp4": 5663.0,
+    "fp4": 5663.0,
+    "float4": 5663.0,
+    "fp32": 137.0,
+    "f32": 137.0,
+    "float32": 137.0,
 }
 _HW_SPECS: dict[str, dict[str, Any]] = {
     "mi300x": {"hbm_bw_gbps": 5300.0, "peak_tflops": _PEAK_TFLOPS_MI300},
@@ -53,10 +82,22 @@ _HW_SPECS: dict[str, dict[str, Any]] = {
 _DEFAULT_GPU = "mi300x"
 
 _DTYPE_BYTES: dict[str, float] = {
-    "f32": 4.0, "fp32": 4.0, "float32": 4.0,
-    "bf16": 2.0, "bfloat16": 2.0, "f16": 2.0, "fp16": 2.0, "float16": 2.0,
-    "f8": 1.0, "fp8": 1.0, "float8_e4m3fn": 1.0, "float8_e5m2": 1.0,
-    "f4": 0.5, "fp4": 0.5, "mxfp4": 0.5, "float4": 0.5,
+    "f32": 4.0,
+    "fp32": 4.0,
+    "float32": 4.0,
+    "bf16": 2.0,
+    "bfloat16": 2.0,
+    "f16": 2.0,
+    "fp16": 2.0,
+    "float16": 2.0,
+    "f8": 1.0,
+    "fp8": 1.0,
+    "float8_e4m3fn": 1.0,
+    "float8_e5m2": 1.0,
+    "f4": 0.5,
+    "fp4": 0.5,
+    "mxfp4": 0.5,
+    "float4": 0.5,
 }
 
 _OPERAND_RE = re.compile(r"\(([\d,\s]*)\)\s*(\w+)?")
@@ -95,9 +136,7 @@ def _numel(dims: tuple[int, ...]) -> int:
     return n
 
 
-def _sdpa_flops_bytes(
-    four_d: list[tuple[int, ...]], dbytes: float
-) -> tuple[float, float, dict[str, Any]]:
+def _sdpa_flops_bytes(four_d: list[tuple[int, ...]], dbytes: float) -> tuple[float, float, dict[str, Any]]:
     """Attention FLOPs/bytes with operand-layout inference.
 
     Two matmuls (QK^T, A·V) each cost ``B*H*Sq*Skv*D`` mul-adds -> total
@@ -270,7 +309,9 @@ def compute_roofline(
     # compute-bound, bandwidth util when memory-bound); cross-route comparable.
     # ``efficiency_percent`` stays compute-side (drives the priority ranking) and
     # so reads ~0 for memory-bound kernels.
-    _attain = out.get("compute_utilization_pct") if bound_type == "compute_bound" else out.get("bandwidth_utilization_pct")
+    _attain = (
+        out.get("compute_utilization_pct") if bound_type == "compute_bound" else out.get("bandwidth_utilization_pct")
+    )
     if isinstance(_attain, (int, float)):
         out["roofline_attainment_pct"] = _attain
     return out

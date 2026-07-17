@@ -291,7 +291,7 @@ def test_force_exit_phase_remaining_pct_uses_chargeback_denominator():
     now = time.time()
     state = _make_explore_state(
         max_minutes=600,
-        started_hours_ago=2.0,        # 8h remain of a 10h session
+        started_hours_ago=2.0,  # 8h remain of a 10h session
         phase_started_hours_ago=0.0,  # EXPLORE just entered → 0 elapsed
     )
     total = phase_state._phase_budget_total_seconds(state, now_unix=now)

@@ -233,9 +233,7 @@ def test_baseline_exports_eval_result_dir_env(tmp_path):
     # cold-start double-run guard otherwise runs warmup+measure in
     # ``output_dir/{warmup,measure}_round`` sub-slots, which this env-wiring
     # assertion is not about.
-    ctx = _make_ctx(
-        {"output_dir": str(output_dir), "timeout_sec": 10, "baseline_double_run": False}
-    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "baseline_double_run": False})
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -396,9 +394,7 @@ def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
         default_config_path=base,
         session_dir=tmp_path,
     )
-    ctx = _make_ctx(
-        {"output_dir": str(output_dir), "timeout_sec": 10, "disable_run_eval": True}
-    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "disable_run_eval": True})
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -432,9 +428,7 @@ def test_parse_eval_results_ignores_discarded_warmup_round(tmp_path):
     """
     slot = tmp_path / "variant_00_kv"
     # Measured round eval at the slot root: slot/<model>/results_<ts>.json.
-    _write_results_score(
-        slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.90
-    )
+    _write_results_score(slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.90)
     # Discarded warmup round eval nested under warmup_round/ (worse score, and a
     # path that sorts last so the pre-fix sorted(...)[-1] would select it).
     _write_results_score(
@@ -467,9 +461,7 @@ def test_parse_eval_results_keeps_results_when_root_is_warmup_slot(tmp_path):
     ``EVAL_RESULT_DIR == .../warmup_round``) must still find its own results.
     """
     warm_slot = tmp_path / "warmup_round"
-    _write_results_score(
-        warm_slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.77
-    )
+    _write_results_score(warm_slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.77)
     out = parse_eval_results(warm_slot, framework="vllm")
     assert out.get("accuracy") == pytest.approx(0.77)
 
@@ -548,9 +540,7 @@ def test_integrate_patch_grade_ignores_discarded_warmup_round(tmp_path):
 
     slot = tmp_path / "variant_00_integrate-patch"
     # Measured round (slot root): high score that PASSES the gate vs baseline.
-    _write_results_score(
-        slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.95
-    )
+    _write_results_score(slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.95)
     # Discarded warmup round (nested): low score that would FAIL the gate, and a
     # path that sorts last so a pre-fix sorted(...)[-1] would grade it.
     _write_results_score(
@@ -625,9 +615,7 @@ def test_baseline_reads_scriptable_quality_gate_when_run_eval_disabled(tmp_path)
         default_config_path=base,
         session_dir=tmp_path,
     )
-    ctx = _make_ctx(
-        {"output_dir": str(output_dir), "timeout_sec": 10, "disable_run_eval": True}
-    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "disable_run_eval": True})
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",

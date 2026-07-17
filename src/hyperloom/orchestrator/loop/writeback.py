@@ -51,6 +51,7 @@ from .coordinator import (
     _extract_enablement_launch_log,
 )
 import logging as _logging
+
 log = _logging.getLogger(__name__)
 
 
@@ -216,9 +217,7 @@ class WritebackCollaborator:
             new_tput: The newly measured throughput to promote as the validated
                 gain anchor.
         """
-        validated_gain = (
-            (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
-        )
+        validated_gain = (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
         self.shared_state.cumulative_gain_validated = float(validated_gain)
         self.shared_state.cumulative_gain_validated_ts = datetime.now(timezone.utc).isoformat()
         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
@@ -338,7 +337,9 @@ class WritebackCollaborator:
         return result.get("status") != "failed"
 
     def _record_intervention_for_task(
-        self, task: "Task", result: Any,
+        self,
+        task: "Task",
+        result: Any,
     ) -> None:
         """Log a completed task's change_type into SharedState.intervention_mix (explore → config; integrate_patch → code_patch_attempt or code_patch when kept). Best-effort.
 
@@ -495,8 +496,7 @@ class WritebackCollaborator:
             # error_classes that split the per-class streaks still fast-fail.
             self.shared_state.baseline_total_failures += 1
             if (
-                self.shared_state.baseline_total_failures
-                >= _BASELINE_MAX_TOTAL_FAILURES
+                self.shared_state.baseline_total_failures >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason
                 and not enablement_engaged
             ):
@@ -725,20 +725,22 @@ class WritebackCollaborator:
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
         provenance_base: dict[str, Any] = {
-            "source_session_id":   source_session_id,
-            "source_task_id":      task.task_id,
-            "evidence":            list(evidence_refs or []),
-            "applicable_models":   list(models or []),
+            "source_session_id": source_session_id,
+            "source_task_id": task.task_id,
+            "evidence": list(evidence_refs or []),
+            "applicable_models": list(models or []),
             "applicable_hardware": list(hardware or []),
-            "extra":               dict(extra or {}),
-            "now":                 now_iso,
+            "extra": dict(extra or {}),
+            "now": now_iso,
         }
         if variant_name is not None:
             provenance_base["source_variant_name"] = variant_name
 
         if is_keep and gain_pct is not None and gain_pct > 0:
             statement = self._coord._build_statement(
-                change=change, gain_pct=gain_pct, kind="lesson",
+                change=change,
+                gain_pct=gain_pct,
+                kind="lesson",
             )
             impact = self._coord._build_measured_impact(
                 gain_pct=gain_pct,
@@ -754,7 +756,7 @@ class WritebackCollaborator:
             )
             self._kb_amend_recipe(
                 append_lesson={
-                    "statement":       statement,
+                    "statement": statement,
                     "measured_impact": impact,
                 },
                 recipe_overrides=recipe_overrides or None,
@@ -765,12 +767,14 @@ class WritebackCollaborator:
         severity = self._pitfall_severity_for(pitfall_severity_dict)
         if severity is not None:
             description = self._coord._build_statement(
-                change=change, severity=severity, kind="pitfall",
+                change=change,
+                severity=severity,
+                kind="pitfall",
             )
             self._kb_amend_recipe(
                 append_pitfall={
                     "description": description,
-                    "severity":    severity,
+                    "severity": severity,
                 },
                 provenance_details=provenance_base,
             )
@@ -813,24 +817,27 @@ class WritebackCollaborator:
             error_class = None
             reason = None
         else:
-            error_class = (str(result_dict.get("error_class") or "") or None)
-            reason = (str(result_dict.get("reason") or "") or None)
-        journal.append_entry(JournalEntry(
-            phase=self._journal_entry_phase(),
-            iter=int(self.shared_state.tick or 0),
-            kind=kind,
-            change=change,
-            outcome=outcome,
-            gain_pct=gain_pct,
-            throughput_after=throughput_after,
-            error_class=error_class,
-            reason=reason,
-            task_id=task.task_id,
-            tick=int(self.shared_state.tick or 0),
-            predicted_gain_pct=_predicted_gain(
-                result_dict, getattr(task, "params", None),
-            ),
-        ))
+            error_class = str(result_dict.get("error_class") or "") or None
+            reason = str(result_dict.get("reason") or "") or None
+        journal.append_entry(
+            JournalEntry(
+                phase=self._journal_entry_phase(),
+                iter=int(self.shared_state.tick or 0),
+                kind=kind,
+                change=change,
+                outcome=outcome,
+                gain_pct=gain_pct,
+                throughput_after=throughput_after,
+                error_class=error_class,
+                reason=reason,
+                task_id=task.task_id,
+                tick=int(self.shared_state.tick or 0),
+                predicted_gain_pct=_predicted_gain(
+                    result_dict,
+                    getattr(task, "params", None),
+                ),
+            )
+        )
 
         if self.cortex_kb is None:
             return
@@ -940,61 +947,63 @@ class WritebackCollaborator:
         variant_name = str(variant_outcome.get("variant_name") or "")
         metrics = variant_outcome.get("metrics") or {}
         gain_pct = to_float(metrics.get("gain_pct") if isinstance(metrics, dict) else None)
-        throughput_after = to_float(
-            metrics.get("output_throughput") if isinstance(metrics, dict) else None
-        )
+        throughput_after = to_float(metrics.get("output_throughput") if isinstance(metrics, dict) else None)
         variant_attrs = variant_outcome.get("variant") or {}
         kind = classify_change_kind(
-            task.kind, variant_attrs if isinstance(variant_attrs, dict) else None,
+            task.kind,
+            variant_attrs if isinstance(variant_attrs, dict) else None,
         )
         # Ensure the change summary is variant-specific (else every explore variant writes an identical row).
         change_attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
-        if not (
-            change_attrs.get("extra_server_args")
-            or change_attrs.get("extra_envs")
-            or change_attrs.get("name")
-        ) and variant_name:
+        if (
+            not (change_attrs.get("extra_server_args") or change_attrs.get("extra_envs") or change_attrs.get("name"))
+            and variant_name
+        ):
             change_attrs["name"] = variant_name
         change = summarize_change(task.kind, change_attrs, None)
         error_class = None
         reason = None
         if outcome == OUTCOME_REVERT:
-            error_class = (str(variant_outcome.get("error_class") or "") or None)
-            reason = (str(variant_outcome.get("reason") or "") or None)
+            error_class = str(variant_outcome.get("error_class") or "") or None
+            reason = str(variant_outcome.get("reason") or "") or None
         # Proposer attribution + per-variant measurement detail, carried from the
         # explore executor's per_variant_outcomes so the decision row records who
         # proposed the change and how it measured (beyond headline gain/tput).
         detail_metrics = {
             k: metrics[k]
             for k in (
-                "runtime_sec", "wall_clock_ratio_vs_baseline",
-                "stack_rebench_tput", "estimated_output_throughput",
+                "runtime_sec",
+                "wall_clock_ratio_vs_baseline",
+                "stack_rebench_tput",
+                "estimated_output_throughput",
             )
             if isinstance(metrics, dict) and metrics.get(k) is not None
         }
-        journal.append_entry(JournalEntry(
-            phase=self._journal_entry_phase(),
-            iter=int(self.shared_state.tick or 0),
-            kind=kind,
-            change=change,
-            outcome=outcome,
-            gain_pct=gain_pct,
-            throughput_after=throughput_after,
-            error_class=error_class,
-            reason=reason,
-            task_id=task.task_id,
-            variant_name=variant_name,
-            provenance=str(variant_outcome.get("provenance") or ""),
-            scope=str(variant_outcome.get("scope") or ""),
-            fingerprint=str(variant_outcome.get("fingerprint") or ""),
-            metrics=detail_metrics,
-            tick=int(self.shared_state.tick or 0),
-            predicted_gain_pct=_predicted_gain(
-                variant_outcome,
-                variant_attrs if isinstance(variant_attrs, dict) else None,
-                getattr(task, "params", None),
-            ),
-        ))
+        journal.append_entry(
+            JournalEntry(
+                phase=self._journal_entry_phase(),
+                iter=int(self.shared_state.tick or 0),
+                kind=kind,
+                change=change,
+                outcome=outcome,
+                gain_pct=gain_pct,
+                throughput_after=throughput_after,
+                error_class=error_class,
+                reason=reason,
+                task_id=task.task_id,
+                variant_name=variant_name,
+                provenance=str(variant_outcome.get("provenance") or ""),
+                scope=str(variant_outcome.get("scope") or ""),
+                fingerprint=str(variant_outcome.get("fingerprint") or ""),
+                metrics=detail_metrics,
+                tick=int(self.shared_state.tick or 0),
+                predicted_gain_pct=_predicted_gain(
+                    variant_outcome,
+                    variant_attrs if isinstance(variant_attrs, dict) else None,
+                    getattr(task, "params", None),
+                ),
+            )
+        )
 
         if self.cortex_kb is None:
             return
@@ -1015,7 +1024,7 @@ class WritebackCollaborator:
             pitfall_severity_dict={
                 **(metrics if isinstance(metrics, dict) else {}),
                 "error_class": variant_outcome.get("error_class"),
-                "status":      variant_outcome.get("outcome"),
+                "status": variant_outcome.get("outcome"),
             },
             variant_name=variant_name,
         )
@@ -1041,12 +1050,12 @@ class WritebackCollaborator:
         if model_name:
             out["model_name"] = model_name
         for src_attr, dst_key in (
-            ("precision",     "precision"),
-            ("tp",            "tp"),
-            ("ep",            "ep"),
-            ("conc",          "conc"),
-            ("isl",           "isl"),
-            ("osl",           "osl"),
+            ("precision", "precision"),
+            ("tp", "tp"),
+            ("ep", "ep"),
+            ("conc", "conc"),
+            ("isl", "isl"),
+            ("osl", "osl"),
             ("max_model_len", "max_model_len"),
         ):
             v = getattr(ss, src_attr, None)
@@ -1079,8 +1088,8 @@ class WritebackCollaborator:
                 if v and v != "unknown":
                     out["framework_version"] = v
             for src_key, dst_key in (
-                ("rocm",         "rocm_version"),
-                ("aiter",        "aiter_version"),
+                ("rocm", "rocm_version"),
+                ("aiter", "aiter_version"),
                 ("image_digest", "image_digest"),
             ):
                 v = str(fp_meta.get(src_key) or "").strip()
@@ -1157,18 +1166,20 @@ class WritebackCollaborator:
                         except (TypeError, ValueError):
                             e2e_tput = 0.0
                         break
-            out.append({
-                "kernel_id":     str(kid),
-                "source_file":   str(e.get("last_source_file") or ""),
-                "artifact_path": str(e.get("last_artifact_path") or ""),
-                "micro_speedup": micro,
-                "decision":      "KEEP",
-                "e2e_gain_pct":  e2e_gain,
-                "e2e_tput":      e2e_tput,
-                "e2e_decision":  e2e_decision,
-                "integrated":    integrated,
-                "ts":            str(e.get("last_ts") or ""),
-            })
+            out.append(
+                {
+                    "kernel_id": str(kid),
+                    "source_file": str(e.get("last_source_file") or ""),
+                    "artifact_path": str(e.get("last_artifact_path") or ""),
+                    "micro_speedup": micro,
+                    "decision": "KEEP",
+                    "e2e_gain_pct": e2e_gain,
+                    "e2e_tput": e2e_tput,
+                    "e2e_decision": e2e_decision,
+                    "integrated": integrated,
+                    "ts": str(e.get("last_ts") or ""),
+                }
+            )
         return out
 
     def _collect_attempt_provenance(
@@ -1241,16 +1252,12 @@ class WritebackCollaborator:
             last_entry = opt_stack[-1]
             if isinstance(last_entry, dict):
                 stack_args = str(
-                    last_entry.get("candidate_extra_server_args")
-                    or last_entry.get("extra_server_args")
-                    or "",
+                    last_entry.get("candidate_extra_server_args") or last_entry.get("extra_server_args") or "",
                 ).strip()
                 if stack_args:
                     best_config["extra_server_args"] = stack_args
         sediment_on = bool(getattr(ss, "recipe_sediment_enabled", True))
-        kept_sources, kept_by_gap, reverted_rows = (
-            self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
-        )
+        kept_sources, kept_by_gap, reverted_rows = self._collect_attempt_provenance() if sediment_on else ({}, {}, [])
         what_worked: list[dict[str, Any]] = []
         for idx, entry in enumerate(opt_stack):
             if not isinstance(entry, dict):
@@ -1258,17 +1265,12 @@ class WritebackCollaborator:
             gain_per: float | None = None
             if idx < len(gain_per_stack):
                 gain_per = gain_per_stack[idx]
-            name = str(
-                entry.get("variant_name")
-                or entry.get("name")
-                or entry.get("kernel_id")
-                or ""
-            )
+            name = str(entry.get("variant_name") or entry.get("name") or entry.get("kernel_id") or "")
             row: dict[str, Any] = {
-                "name":              name,
+                "name": name,
                 "extra_server_args": str(entry.get("extra_server_args") or ""),
-                "extra_envs":        dict(entry.get("extra_envs") or {}),
-                "gain_pct":          gain_per,
+                "extra_envs": dict(entry.get("extra_envs") or {}),
+                "gain_pct": gain_per,
             }
             # Prefer the entry's gap-id provenance (naming-independent); fall back to name/kernel_id match.
             entry_gap = str(entry.get("gap_canonical_id") or "").strip()
@@ -1283,54 +1285,53 @@ class WritebackCollaborator:
         what_failed: list[dict[str, Any]] = []
         for failure in last_failures[-10:]:
             if isinstance(failure, dict):
-                what_failed.append({
-                    "name":  str(failure.get("name") or failure.get("action") or ""),
-                    "reason": str(failure.get("reason") or failure.get("error_class") or ""),
-                })
+                what_failed.append(
+                    {
+                        "name": str(failure.get("name") or failure.get("action") or ""),
+                        "reason": str(failure.get("reason") or failure.get("error_class") or ""),
+                    }
+                )
         for rev in reverted_rows:
             what_failed.append(rev)
         kernel_optimizations = self._coord._build_kernel_optimizations_from_state()
         cumulative_validated = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
         cumulative_total = float(getattr(ss, "cumulative_gain", 0.0) or 0.0)
-        validated_stack_len = int(
-            getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0
-        )
+        validated_stack_len = int(getattr(ss, "cumulative_gain_validated_stack_len", 0) or 0)
         stack_fingerprint = getattr(ss, "stack_fingerprint", "") or ""
         # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
         workload_tags = self._coord._collect_workload_tags()
         # framework_version left unset here (manifest-derived); the T0 backfill writes it.
         return {
-            "best_config":       best_config,
-            "best_throughput":   float(current_best.get("tput", 0.0))
-                                  if isinstance(current_best, dict) else 0.0,
-            "what_worked":       what_worked,
-            "what_failed":       what_failed,
+            "best_config": best_config,
+            "best_throughput": float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0,
+            "what_worked": what_worked,
+            "what_failed": what_failed,
             "kernel_optimizations": kernel_optimizations,
             "stack_fingerprint": {"sha": str(stack_fingerprint)} if stack_fingerprint else {},
-            "last_profiled":     str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
-            "workload":          workload_tags,
-            "sessions":          [{
-                "session_id":   str(getattr(ss, "cortex_session_id", "")
-                                    or self.session_dir.name),
-                "gain_pct":     cumulative_validated or cumulative_total,
-                "stack_len":    validated_stack_len or len(opt_stack),
-                # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
-                "throughput_before": float(getattr(ss, "baseline_tput", 0.0) or 0.0),
-                "throughput_after":  (
-                    float(current_best.get("tput", 0.0))
-                    if isinstance(current_best, dict) else 0.0
-                ),
-                "date":          datetime.now(timezone.utc).isoformat(),
-                "actions_taken": [
-                    nm for nm in (
-                        str(
-                            e.get("variant_name") or e.get("name")
-                            or e.get("action") or ""
-                        ).strip()
-                        for e in opt_stack if isinstance(e, dict)
-                    ) if nm
-                ],
-            }],
+            "last_profiled": str(getattr(ss, "cumulative_gain_validated_ts", "") or ""),
+            "workload": workload_tags,
+            "sessions": [
+                {
+                    "session_id": str(getattr(ss, "cortex_session_id", "") or self.session_dir.name),
+                    "gain_pct": cumulative_validated or cumulative_total,
+                    "stack_len": validated_stack_len or len(opt_stack),
+                    # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
+                    "throughput_before": float(getattr(ss, "baseline_tput", 0.0) or 0.0),
+                    "throughput_after": (
+                        float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0
+                    ),
+                    "date": datetime.now(timezone.utc).isoformat(),
+                    "actions_taken": [
+                        nm
+                        for nm in (
+                            str(e.get("variant_name") or e.get("name") or e.get("action") or "").strip()
+                            for e in opt_stack
+                            if isinstance(e, dict)
+                        )
+                        if nm
+                    ],
+                }
+            ],
         }
 
     def cortex_finalize_recipe_and_journal(self) -> None:
@@ -1341,9 +1342,7 @@ class WritebackCollaborator:
             cb = getattr(ss, "current_best", {}) or {}
             final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
             total_gain = float(
-                getattr(ss, "cumulative_gain_validated", 0.0)
-                or getattr(ss, "cumulative_gain", 0.0)
-                or 0.0,
+                getattr(ss, "cumulative_gain_validated", 0.0) or getattr(ss, "cumulative_gain", 0.0) or 0.0,
             )
             journal.finalize(
                 final_throughput=final_tput if final_tput > 0 else None,
@@ -1359,9 +1358,9 @@ class WritebackCollaborator:
         gpu_type = getattr(ss, "gpu_type", "") or ""
         if not model_name or not gpu_type:
             log.info(
-                "cortex finalize_recipe: missing model/hardware "
-                "(model=%r hardware=%r); skipping update_recipe",
-                model_name, gpu_type,
+                "cortex finalize_recipe: missing model/hardware (model=%r hardware=%r); skipping update_recipe",
+                model_name,
+                gpu_type,
             )
             return
         try:
@@ -1371,10 +1370,7 @@ class WritebackCollaborator:
 
             # sessions[] read-modify-write: read anchor, drop prior entry with our session_id (resume safety), append ours, write back.
             my_sessions = list(attrs["sessions"] or [])
-            my_session_ids = {
-                str((s or {}).get("session_id") or "")
-                for s in my_sessions if isinstance(s, dict)
-            }
+            my_session_ids = {str((s or {}).get("session_id") or "") for s in my_sessions if isinstance(s, dict)}
             # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
             merged_sessions: list[dict[str, Any]] = list(my_sessions)
             existing_row: dict[str, Any] = {}
@@ -1384,7 +1380,7 @@ class WritebackCollaborator:
                     # Read the LOCAL row (authoritative for writes) so the merge + guard compare against it.
                     existing_row = self.cortex_kb.local.get_recipe(canonical_id=cid) or {}
                     existing_sessions: list[dict[str, Any]] = []
-                    for row in (existing_row.get("sessions") or []):
+                    for row in existing_row.get("sessions") or []:
                         if not isinstance(row, dict):
                             continue
                         if str(row.get("session_id") or "") in my_session_ids:
@@ -1402,12 +1398,9 @@ class WritebackCollaborator:
 
             # KEEP'd kernel optimizations ride the extras channel; merge with prior rows, dedup by kernel_id.
             kopts_new = list(attrs.get("kernel_optimizations") or [])
-            new_kids = {
-                str((k or {}).get("kernel_id") or "")
-                for k in kopts_new if isinstance(k, dict)
-            }
+            new_kids = {str((k or {}).get("kernel_id") or "") for k in kopts_new if isinstance(k, dict)}
             merged_kopts: list[dict[str, Any]] = list(kopts_new)
-            for prior in (existing_row.get("kernel_optimizations") or []):
+            for prior in existing_row.get("kernel_optimizations") or []:
                 if not isinstance(prior, dict):
                     continue
                 if str(prior.get("kernel_id") or "") in new_kids:
@@ -1419,26 +1412,19 @@ class WritebackCollaborator:
                 extras_payload["kernel_optimizations"] = merged_kopts
 
             overrides: dict[str, Any] = {
-                "what_worked":   attrs["what_worked"],
-                "what_failed":   attrs["what_failed"],
+                "what_worked": attrs["what_worked"],
+                "what_failed": attrs["what_failed"],
                 "last_profiled": attrs["last_profiled"],
-                "sessions":      merged_sessions,
-                "extras":        extras_payload,
+                "sessions": merged_sessions,
+                "extras": extras_payload,
             }
             # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
             my_tput = float(attrs.get("best_throughput") or 0.0)
             cb_now = getattr(ss, "current_best", {}) or {}
-            cb_args_now = (
-                str(cb_now.get("extra_server_args") or "").strip()
-                if isinstance(cb_now, dict) else ""
-            )
-            validated_gain = float(
-                getattr(ss, "cumulative_gain_validated", 0.0) or 0.0
-            )
+            cb_args_now = str(cb_now.get("extra_server_args") or "").strip() if isinstance(cb_now, dict) else ""
+            validated_gain = float(getattr(ss, "cumulative_gain_validated", 0.0) or 0.0)
             has_validated_win = bool(
-                (getattr(ss, "optimization_stack", []) or [])
-                or validated_gain > 0.0
-                or cb_args_now
+                (getattr(ss, "optimization_stack", []) or []) or validated_gain > 0.0 or cb_args_now
             )
             try:
                 live_tput = float(existing_row.get("best_throughput") or 0.0)
@@ -1490,7 +1476,9 @@ class WritebackCollaborator:
         is_empty = bool(done_payload.get("empty")) or len(proposals) == 0
 
         round_entry = self._build_specialist_round_entry(
-            task=task, done_payload=done_payload, source=source,
+            task=task,
+            done_payload=done_payload,
+            source=source,
         )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
         _scorer = getattr(self, "_proposal_scorer", None)
@@ -1499,9 +1487,7 @@ class WritebackCollaborator:
                 scores = await _scorer.score(
                     gap={
                         "domain": domain,
-                        "gap_canonical_id": done_payload.get(
-                            "gap_canonical_id", ""
-                        ),
+                        "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
                         "gap_symptom": (task.params or {}).get("gap_symptom"),
                         "gap_evidence": (task.params or {}).get("gap_evidence"),
                         "summary": done_payload.get("summary", ""),
@@ -1515,25 +1501,26 @@ class WritebackCollaborator:
                     round_entry["ensemble_scores"] = scores
             except Exception:  # noqa: BLE001 — advisory; never block
                 log.exception(
-                    "specialist bookkeeping: proposal scoring failed for "
-                    "task=%s (continuing without scores)", task.task_id,
+                    "specialist bookkeeping: proposal scoring failed for task=%s (continuing without scores)",
+                    task.task_id,
                 )
         try:
             self.shared_state.record_specialist_round(round_entry)
         except Exception:  # noqa: BLE001
             log.exception(
-                "specialist bookkeeping: record_specialist_round failed for "
-                "task=%s", task.task_id,
+                "specialist bookkeeping: record_specialist_round failed for task=%s",
+                task.task_id,
             )
 
         try:
             self.shared_state.bump_specialist_domain_empty_streak(
-                domain, empty=is_empty,
+                domain,
+                empty=is_empty,
             )
         except Exception:  # noqa: BLE001
             log.exception(
-                "specialist bookkeeping: bump_specialist_domain_empty_streak "
-                "failed for task=%s", task.task_id,
+                "specialist bookkeeping: bump_specialist_domain_empty_streak failed for task=%s",
+                task.task_id,
             )
 
         # Per-anchor coverage ledger: every specialist completion is
@@ -1544,28 +1531,28 @@ class WritebackCollaborator:
             self.shared_state.note_specialist_dispatched(domain)
         except Exception:  # noqa: BLE001
             log.exception(
-                "specialist bookkeeping: domain round-counter update failed "
-                "for task=%s", task.task_id,
+                "specialist bookkeeping: domain round-counter update failed for task=%s",
+                task.task_id,
             )
 
         try:
-            self.shared_state.update_last_specialist({
-                "task_id": task.task_id,
-                "domain": domain,
-                "gap_canonical_id": str(
-                    done_payload.get("gap_canonical_id") or ""
-                ),
-                "empty": is_empty,
-                "proposals_total": len(proposals),
-                "confidence": done_payload.get("confidence"),
-                "summary": str(done_payload.get("summary") or "")[:480],
-                "reason": str(done_payload.get("reason") or "")[:480],
-                "ts": datetime.now(timezone.utc).isoformat(),
-            })
+            self.shared_state.update_last_specialist(
+                {
+                    "task_id": task.task_id,
+                    "domain": domain,
+                    "gap_canonical_id": str(done_payload.get("gap_canonical_id") or ""),
+                    "empty": is_empty,
+                    "proposals_total": len(proposals),
+                    "confidence": done_payload.get("confidence"),
+                    "summary": str(done_payload.get("summary") or "")[:480],
+                    "reason": str(done_payload.get("reason") or "")[:480],
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
         except Exception:  # noqa: BLE001
             log.exception(
-                "specialist bookkeeping: update_last_specialist failed for "
-                "task=%s", task.task_id,
+                "specialist bookkeeping: update_last_specialist failed for task=%s",
+                task.task_id,
             )
 
         # Persist so a resume picks up the bookkeeping without re-running the specialist.
@@ -1581,7 +1568,8 @@ class WritebackCollaborator:
         # ``coordinator._record_observation`` still wins (bare-name delegation
         # resolves it back onto this class otherwise).
         await self._coord._record_observation(
-            source or "coordinator", "observation",
+            source or "coordinator",
+            "observation",
             {
                 "kind": "specialist_done_recorded",
                 "task_id": task.task_id,
@@ -1598,7 +1586,9 @@ class WritebackCollaborator:
         # no applicable variants. See :meth:`_maybe_materialize_mn_explore`.
         try:
             await self._maybe_materialize_mn_explore(
-                task=task, domain=domain, proposals=proposals,
+                task=task,
+                domain=domain,
+                proposals=proposals,
             )
         except Exception:  # noqa: BLE001 — defensive; never block bookkeeping
             log.exception(
@@ -1615,7 +1605,8 @@ class WritebackCollaborator:
         if domain == "session_steward_specialist":
             try:
                 await self._route_steward_verdict(
-                    task=task, done_payload=done_payload,
+                    task=task,
+                    done_payload=done_payload,
                 )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
@@ -1631,7 +1622,8 @@ class WritebackCollaborator:
                 self._coord._harvest_research_scout(done_payload)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "research-scout harvest failed for task=%s", task.task_id,
+                    "research-scout harvest failed for task=%s",
+                    task.task_id,
                 )
 
         # Consume static-recon bridge candidates into gaps[] so the EXPLORE
@@ -1641,7 +1633,8 @@ class WritebackCollaborator:
                 self._coord._consume_static_recon(done_payload)
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "static-recon consume failed for task=%s", task.task_id,
+                    "static-recon consume failed for task=%s",
+                    task.task_id,
                 )
 
         # Aggregate research evidence from any domain (e.g. pr_intel) that
@@ -1660,16 +1653,19 @@ class WritebackCollaborator:
         gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
         if gap_cid:
             try:
-                self.shared_state.append_gap_attempt(gap_cid, {
-                    "action": "specialist",
-                    "variant_name": domain,
-                    "outcome": "EMPTY" if is_empty else "PROPOSALS",
-                    "proposals_total": len(proposals),
-                })
+                self.shared_state.append_gap_attempt(
+                    gap_cid,
+                    {
+                        "action": "specialist",
+                        "variant_name": domain,
+                        "outcome": "EMPTY" if is_empty else "PROPOSALS",
+                        "proposals_total": len(proposals),
+                    },
+                )
             except Exception:  # noqa: BLE001 — defensive
                 log.exception(
-                    "specialist bookkeeping: append_gap_attempt failed for "
-                    "gap=%s", gap_cid,
+                    "specialist bookkeeping: append_gap_attempt failed for gap=%s",
+                    gap_cid,
                 )
         try:
             await self._refresh_gaps(reason="specialist_done")
@@ -1681,7 +1677,8 @@ class WritebackCollaborator:
         # Push specialist-authored patches to the Critic so integrate_patch can pass.
         try:
             await self._maybe_autosubmit_specialist_patches(
-                task=task, done_payload=done_payload,
+                task=task,
+                done_payload=done_payload,
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
@@ -1693,7 +1690,8 @@ class WritebackCollaborator:
         # same integrate_patch gate via its config_changes channel.
         try:
             await self._maybe_autosubmit_framework_config(
-                task=task, done_payload=done_payload,
+                task=task,
+                done_payload=done_payload,
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception(
@@ -1754,11 +1752,13 @@ class WritebackCollaborator:
         hints = block.get("hints") or []
         try:
             added, dropped = _research_hints.append_hints(
-                self.session_dir, hints,
+                self.session_dir,
+                hints,
             )
             if dropped:
                 log.info(
-                    "research-scout: dropped %d sourceless hint(s)", dropped,
+                    "research-scout: dropped %d sourceless hint(s)",
+                    dropped,
                 )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: append_hints failed")
@@ -1780,7 +1780,8 @@ class WritebackCollaborator:
             log.exception("research-scout: gap seeding failed")
         log.info(
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
-            added, len(self.shared_state.research_scout_seen_pr_ids or []),
+            added,
+            len(self.shared_state.research_scout_seen_pr_ids or []),
         )
 
     def _lift_to_current_best(
@@ -2045,9 +2046,7 @@ class WritebackCollaborator:
                 "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
                 "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
                 "cold_tput": (
-                    float(warmup_anchor)
-                    if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0
-                    else None
+                    float(warmup_anchor) if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0 else None
                 ),
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
@@ -2072,7 +2071,8 @@ class WritebackCollaborator:
                     self.shared_state.record_baseline_roofline_ceiling()
                 except Exception as exc:  # noqa: BLE001 — best-effort backup
                     log.warning(
-                        "baseline roofline-ceiling backup failed: %r", exc,
+                        "baseline roofline-ceiling backup failed: %r",
+                        exc,
                     )
             # PRELUDE bootstrap (post-baseline), ordering mandatory: (1) inject warm-recipe history, (2) warm-replay, (3) auto-analysis, (4) research scout.
             if self._should_run_prelude_bootstrap(tput):
@@ -2313,9 +2313,7 @@ class WritebackCollaborator:
                         # validated gain and clear geak_pending.
                         ps = (
                             self.shared_state.geak_result
-                            if isinstance(
-                                getattr(self.shared_state, "geak_result", None), dict
-                            )
+                            if isinstance(getattr(self.shared_state, "geak_result", None), dict)
                             else {}
                         )
                         self._promote_geak_from_candidate(
@@ -2329,7 +2327,9 @@ class WritebackCollaborator:
                         log.warning(
                             "geak 2b revalidation inconclusive "
                             "(measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
-                            measured, got_hash, (task.params or {}).get("expected_cfg_hash"),
+                            measured,
+                            got_hash,
+                            (task.params or {}).get("expected_cfg_hash"),
                         )
                         try:
                             # Routed via ``_coord`` so a test / caller that overrides
@@ -2342,7 +2342,9 @@ class WritebackCollaborator:
                 else:
                     if measured_ok and self.shared_state.baseline_tput > 0:
                         self._update_cumulative_gain_validated(measured)
-                        cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                        cb_rec = (
+                            self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                        )
                         recorded = cb_rec.get("tput")
                         floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
                         if (
@@ -2769,11 +2771,7 @@ class WritebackCollaborator:
         (not just its flags/env), closing the cross-harness baseline gap.
         """
         materialized = self._materialize_stack_config_for_resume()
-        stack = [
-            e
-            for e in (getattr(self.shared_state, "optimization_stack", []) or [])
-            if isinstance(e, dict)
-        ]
+        stack = [e for e in (getattr(self.shared_state, "optimization_stack", []) or []) if isinstance(e, dict)]
         source_snapshots: list[dict[str, Any]] = []
         for entry in stack:
             if entry.get("scope") != "source_patch":
@@ -2812,11 +2810,7 @@ class WritebackCollaborator:
         server_launch_flags = ""
         try:
             cb_now = getattr(self.shared_state, "current_best", None)
-            _target_tput = (
-                float((cb_now or {}).get("tput") or 0.0)
-                if isinstance(cb_now, Mapping)
-                else 0.0
-            )
+            _target_tput = float((cb_now or {}).get("tput") or 0.0) if isinstance(cb_now, Mapping) else 0.0
             server_launch_flags = _scrape_resolved_launch_flags(
                 getattr(self, "session_dir", ""),
                 str(os.environ.get("FRAMEWORK", "") or "sglang"),
@@ -2869,7 +2863,11 @@ class WritebackCollaborator:
         if stack:
             rebuilt = self._materialize_stack_config_for_resume()
             cb_args = str(cb.get("extra_server_args") or "")
-            cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()} if isinstance(cb.get("extra_envs"), Mapping) else {}
+            cb_envs = (
+                {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()}
+                if isinstance(cb.get("extra_envs"), Mapping)
+                else {}
+            )
             if cb_args != rebuilt["extra_server_args"] or cb_envs != rebuilt["extra_envs"]:
                 # The append-only stack is authoritative; a disagreeing
                 # current_best is the inconsistency, recorded distinctly from the
@@ -3069,13 +3067,9 @@ class WritebackCollaborator:
         else:
             summary = self._resume_rollback_pending_integrate(pending)
             if summary.get("reversed"):
-                report["fixes"].append(
-                    {"kind": "rolled_back_pending_integrate", "task_id": task_id, **summary}
-                )
+                report["fixes"].append({"kind": "rolled_back_pending_integrate", "task_id": task_id, **summary})
             elif summary.get("failed"):
-                report["warnings"].append(
-                    {"kind": "pending_integrate_rollback_failed", "task_id": task_id, **summary}
-                )
+                report["warnings"].append({"kind": "pending_integrate_rollback_failed", "task_id": task_id, **summary})
             else:
                 report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})
         state.pending_integrate = {}
@@ -3368,10 +3362,7 @@ class WritebackCollaborator:
             # self-reported speedup.
             measured = _geak_sweep_measured_tput(res)
             if measured is None:
-                log.warning(
-                    "geak 2a: succeeded sweep but no measurable throughput; "
-                    "candidate stays pending"
-                )
+                log.warning("geak 2a: succeeded sweep but no measurable throughput; candidate stays pending")
                 return {"validated": False, "status": res.get("status"), "reason": reason}
             self._promote_geak_from_candidate(
                 ps,
@@ -3387,7 +3378,9 @@ class WritebackCollaborator:
             return {"validated": True, "gain": gain_out, "reason": reason}
         log.warning(
             "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s)",
-            res.get("status"), geak_sp, reason,
+            res.get("status"),
+            geak_sp,
+            reason,
         )
         return {"validated": False, "status": res.get("status"), "reason": reason}
 
@@ -3431,9 +3424,7 @@ class WritebackCollaborator:
         history = state.phase_history or []
         row = history[-1] if history else {}
         evidence = row.get("evidence") if isinstance(row, dict) else {}
-        completed_this_phase = isinstance(evidence, dict) and isinstance(
-            evidence.get("geak"), dict
-        )
+        completed_this_phase = isinstance(evidence, dict) and isinstance(evidence.get("geak"), dict)
         if completed_this_phase:
             # The delegation landed during this phase but the SWEEP transition
             # never persisted (crash between the hook and the next tick). Re-arm
@@ -3444,9 +3435,7 @@ class WritebackCollaborator:
                 try:
                     state.save(self.session_dir)
                 except Exception:  # noqa: BLE001 — defensive
-                    log.exception(
-                        "resume: save after re-arming skip_to_sweep failed"
-                    )
+                    log.exception("resume: save after re-arming skip_to_sweep failed")
                 log.info(
                     "resume: KERNEL GEAK already completed this phase; "
                     "re-armed skip_to_sweep hint (lost before SWEEP transition)."

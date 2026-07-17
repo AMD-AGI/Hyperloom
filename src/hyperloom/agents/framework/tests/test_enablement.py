@@ -59,7 +59,7 @@ def test_hip_undefined_symbol_captured() -> None:
 
 def test_unsupported_dtype() -> None:
     """fp8 unsupported -> unsupported_dtype."""
-    sig = classify_failure('RuntimeError: "addmm" not implemented for \'Float8_e4m3fn\'')
+    sig = classify_failure("RuntimeError: \"addmm\" not implemented for 'Float8_e4m3fn'")
     assert sig.kind == UNSUPPORTED_DTYPE
     assert sig.offending_symbol == "Float8_e4m3fn"
 
@@ -72,9 +72,7 @@ def test_shape_mismatch() -> None:
 
 def test_shape_mismatch_narrow_bounds() -> None:
     """A torch .narrow() bounds error (fused-projection width mismatch) -> shape_mismatch."""
-    sig = classify_failure(
-        "RuntimeError: start (0) + length (704) exceeds dimension size (576)."
-    )
+    sig = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
     assert sig.kind == SHAPE_MISMATCH
 
 
@@ -217,7 +215,7 @@ def test_empty_log_is_unknown() -> None:
 def test_offending_file_from_last_traceback_frame() -> None:
     """The last traceback frame (closest to raise) wins over earlier frames."""
     log = (
-        'Traceback (most recent call last):\n'
+        "Traceback (most recent call last):\n"
         '  File "/opt/vllm/entrypoint.py", line 10, in main\n'
         '  File "/opt/vllm/model_executor/registry.py", line 88, in resolve\n'
         "ValueError: Model architecture 'FooForCausalLM' is not supported"
@@ -277,7 +275,7 @@ def test_offending_file_prefers_frame_near_primary_hit() -> None:
     """With two matching rules, the offending file is taken near the primary
     (earlier, more-specific) hit rather than the last frame overall."""
     log = (
-        'Traceback (most recent call last):\n'
+        "Traceback (most recent call last):\n"
         '  File "/opt/vllm/loader.py", line 3, in load\n'
         "RuntimeError: hipErrorNoBinaryForGpu: no kernel image is available\n"
         '  File "/opt/vllm/fallback.py", line 9, in retry\n'
