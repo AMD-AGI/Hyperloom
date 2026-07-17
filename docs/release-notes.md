@@ -223,7 +223,7 @@ per-release versions:
   surface; 0.3 takes the next step and wires TraceLens directly into the end-to-end inference-optimization
   loop. Profiling, trace splitting, agent invocation, and output parsing all happen inline now — the optimizer
   reasons over fresh trace evidence between actions instead of relying on stale or summarized data. The
-  integration is pinned against `release/hyperloom_integration_0.3`. A new TraceLens Agent Debug Mode also
+  integration is pinned against `release/hyperloom_integration_v0.3`. A new TraceLens Agent Debug Mode also
   exposes the full `StreamJSON` event stream for offline replay and diff against local runs.
 
 - **GEAK gets memory: RAG + Cross-Sessions** — Two long-requested capabilities land together. **GEAK RAG
