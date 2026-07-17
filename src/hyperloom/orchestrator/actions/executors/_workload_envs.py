@@ -725,6 +725,12 @@ def materialize_config_with_envs(
         log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
+    precision_from_extra = str(safe_extra_envs.get("PRECISION") or "").strip()
+    precision_from_envs = str(envs.get("PRECISION") or "").strip()
+    if precision_from_extra:
+        bench["precision"] = precision_from_extra
+    elif not precision and precision_from_envs:
+        bench["precision"] = precision_from_envs
     framework_env = server_args_env_name(bench.get("framework"))
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
     # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
