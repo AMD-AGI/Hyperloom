@@ -138,6 +138,14 @@ Requirements:
 In this scenario, `/hyperloom-setup` writes `.env` only and does **not** start a
 container. The selected demo skill owns the container lifecycle.
 
+If Slurm is available, setup also checks the current user's allocation so Docker
+runs on the intended single GPU host instead of a login host. The user chooses
+whether Docker should run on:
+
+- the current host;
+- one allocated Slurm host;
+- a custom host.
+
 The chosen host is written to `.env`:
 
 ```bash

@@ -135,13 +135,11 @@ resolved values in the launch plan before starting the optimizer.
   sweep budget.
 - Phase toggles default to enabled: kernel enabled, explore enabled, framework
   agent enabled, roofline enabled, and concurrency sweep enabled.
-- Kernel continues after FP8 GEMM by default.
 
 Collect these optional advanced values:
 
 - Phase toggles: `--no-kernel`, `--no-explore`, `--no-framework-agent`,
   `--no-enable-conc-sweep`, `--no-enable-roofline`.
-- Kernel option: `--no-continue-kernel-after-gemm` for GEMM-only validation.
 - Routing and baseline options: `--skip-variants`, `--server-args`,
   `--reference-script`, `--model-class`, `--gpu-type`, `--framework-version`,
   `--target-summary`, `--compare-against-gpu`.
@@ -287,7 +285,6 @@ OPT_FLAGS=(
 [ "${NO_FRAMEWORK_AGENT:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)
 [ "${NO_CONC_SWEEP:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-conc-sweep)
 [ "${NO_ROOFLINE:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-roofline)
-[ "${NO_CONTINUE_KERNEL_AFTER_GEMM:-0}" = "1" ] && OPT_FLAGS+=(--no-continue-kernel-after-gemm)
 
 setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   "${OPT_FLAGS[@]}" \
