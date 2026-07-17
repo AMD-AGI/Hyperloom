@@ -25,4 +25,4 @@ These policies govern contributions and community behavior:
 The following resources are available if you use or contribute to Hyperloom:
 
 - [Hyperloom repository](https://github.com/AMD-AGI/Hyperloom)
-- LLM Gateway — obtain your API key from your organization's LLM gateway.
+- LLM Gateway: obtain your API key from your organization's LLM gateway.

@@ -19,11 +19,11 @@ If you are starting fresh, skip this page and follow the
 
 These labels are used throughout this page to indicate urgency:
 
-* **Required** — Your run will fail or behave incorrectly until you do
+* **Required**: Your run will fail or behave incorrectly until you do
   this.
-* **Recommended** — Your run will still work, but you'll get a
+* **Recommended**: Your run will still work, but you'll get a
   deprecation warning or sub-optimal behavior.
-* **Optional** — Strictly improves UX or unlocks new features.
+* **Optional**: Strictly improves UX or unlocks new features.
 
 Hyperloom doesn't mutate your `.env` on upgrade; all migrations
 below are explicit.
@@ -209,8 +209,8 @@ Your local KB and historical sessions are preserved.
 
 Use these resources for related reference information:
 
-* [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md) — Full per-release notes.
-* [Hyperloom authentication and credentials](authentication.md) — Credential and path env reference.
-* [Environment variables](environment-variables.md) — Every
+* [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md): Full per-release notes.
+* [Hyperloom authentication and credentials](authentication.md): Credential and path env reference.
+* [Environment variables](environment-variables.md): Every
   environment variable read by the runtime.
-* [Hyperloom self-hosting and operations guide](operations.md) — Self-host runbook.
+* [Hyperloom self-hosting and operations guide](operations.md): Self-host runbook.
