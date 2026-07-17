@@ -5,17 +5,18 @@ ROCm™ Hyperloom is an autonomous agentic system designed to optimize end-to-en
 Hyperloom analyzes your workload, identifies performance bottlenecks, implements targeted optimizations,
 and validates the performance and correctness of the optimizations without requiring manual intervention.
  
-The system operates through a sophisticated multi-stage pipeline. First, an agent profiles your workload,
-leveraging tools like IntelliKit for low-level GPU profiling, Magpie for trace collection, and TraceLens
-for trace analysis to identify top bottlenecked kernels and create a bridge plan.
+The system operates through a sophisticated multi-stage pipeline. First TraceLens, the profiling brain of
+the workload understanding stage, consumes traces collected by Magpie (which in turn relies on IntelliKit
+for some low-level GPU profiling tools), captures bottlenecks, and derives the roofline targets that seed
+the optimization search tree.
 
 Next, Hyperloom employs a self-evolving code optimization engine following an iterative agentic loop (Think
-→ Decide → Implement → Benchmark), alongside a Dynamic Specialist Agent and Knowledge Base to intelligently
-search the optimization space. GEAK, a multi-agent GPU performance optimizer, optimizes hot kernels in
-parallel. Once optimizations are identified and validated, Hyperloom prepares the optimized code and
-generates a report with all proposed changes and expected performance improvements. This end-to-end
-automation enables developers to achieve significant performance improvements while maintaining code
-quality and reducing the manual effort traditionally required for GPU optimization.
+→ Decide → Implement → Benchmark). Arbor intelligently explores the optimization space using a Dynamic
+Specialist Agent and Knowledge Base. In parallel to Arbor, GEAK, a multi-agent GPU performance optimizer,
+optimizes hot kernels in parallel. Once optimizations are identified and validated, Hyperloom prepares
+the optimized code and generates a report with all proposed changes and expected performance improvements.
+This end-to-end automation enables developers to achieve significant performance improvements while
+maintaining code quality and reducing the manual effort traditionally required for GPU optimization.
 
 <p align="center"><img width="600" alt="Hyperloom architecture" src="docs/images/Hyperloom_architecture.png" /></p>
 
