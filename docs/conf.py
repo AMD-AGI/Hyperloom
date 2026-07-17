@@ -49,7 +49,7 @@ all_article_info_author = ""
 # for PDF output on Read the Docs
 project = "Hyperloom"
 author = "Advanced Micro Devices, Inc."
-copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved."
+copyright = "2025 Advanced Micro Devices, Inc."
 version = version_number
 release = version_number
 

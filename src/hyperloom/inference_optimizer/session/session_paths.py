@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Per-session path helpers — single source of truth for every path *inside*
 a session directory (``paths.py`` owns *where* the session lives).

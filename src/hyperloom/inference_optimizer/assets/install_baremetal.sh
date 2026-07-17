@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 # Install Hyperloom for bare-metal hosts (no-Docker / bare-host orchestrator).
 #

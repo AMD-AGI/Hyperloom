@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """SQLite WAL atomic storage backend (single
 ``$SESSION_DIR/storage/coordinator.db``). WAL + ``BEGIN IMMEDIATE`` gives
