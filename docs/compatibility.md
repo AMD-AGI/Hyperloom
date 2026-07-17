@@ -12,18 +12,74 @@ Hyperloom is validated against.
 
 ```{note}
 This matrix tracks the currently validated combinations. Other ROCm versions
-or framework builds might work but are not regularly tested.
+or framework builds might work but, are not regularly tested.
 ```
 
-## GPU support
+<table>
+  <thead>
+    <tr>
+      <th>Hyperloom Version</th>
+      <th>Component</th>
+      <th>GPU Support</th>
+      <th>ROCm Version Support</th>
+      <th>OS Support</th>
+      <th>Python</th>
+      <th>GitHub</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td rowspan="5">0.9.0</td>
+      <td>TraceLens 0.1.0</td>
+      <td>N/A</td>
+      <td>N/A</td>
+      <td>N/A</td>
+      <td>&gt;= 3.6</td>
+      <td><a href="https://github.com/AMD-AGI/TraceLens">AMD-AGI/TraceLens</a></td>
+    </tr>
+    <tr>
+      <td>GEAK 4.0</td>
+      <td>MI300, MI325, MI355</td>
+      <td>7.2.x</td>
+      <td>Ubuntu 22.04, Ubuntu 24.04</td>
+      <td>&gt; 3.8</td>
+      <td><a href="https://github.com/AMD-AGI/GEAK">AMD-AGI/GEAK</a></td>
+    </tr>
+    <tr>
+      <td>IntelliKit 0.1.0</td>
+      <td>MI300, MI325, MI355</td>
+      <td>7.2.x</td>
+      <td>Ubuntu 22.04, Ubuntu 24.04</td>
+      <td>&gt;= 3.10</td>
+      <td><a href="https://github.com/AMDResearch/intellikit">AMDResearch/intellikit</a></td>
+    </tr>
+    <tr>
+      <td>AgentKernelArena 0.1.0</td>
+      <td>MI300, MI325, MI355</td>
+      <td>7.2.x</td>
+      <td>Ubuntu 22.04, Ubuntu 24.04</td>
+      <td>&gt;= 3.10</td>
+      <td><a href="https://github.com/AMD-AGI/AgentKernelArena">AMD-AGI/AgentKernelArena</a></td>
+    </tr>
+    <tr>
+      <td>Magpie 0.1.0</td>
+      <td>MI300, MI325, MI355</td>
+      <td>7.2.x</td>
+      <td>Ubuntu 22.04, Ubuntu 24.04</td>
+      <td>&gt;= 3.10</td>
+      <td><a href="https://github.com/AMD-AGI/Magpie">AMD-AGI/Magpie</a></td>
+    </tr>
+  </tbody>
+</table>
 
-The following AMD Instinct GPUs are validated with Hyperloom:
+```{note}
+TraceLens does not have hard requirements for the GPU, ROCm version, or the OS; it has scripts to verify whether a trace is valid/parseable. TraceLens is:
 
-| GPU | Architecture | Status |
-|-----|--------------|--------|
-| AMD Instinct™ MI300X GPU | gfx942 | Supported |
-| AMD Instinct™ MI325X GPU | gfx942 | Supported |
-| AMD Instinct™ MI355X GPU | gfx950 | Supported |
+- OS-independent and runs anywhere Python does.
+- Not limited to MI300/MI325/MI355; it's hardware-agnostic.
+
+See the [TraceLens documentation](https://rocm.docs.amd.com/projects/tracelens/en/latest/reference/compatibility.html) for more information
+```
 
 ```{note}
 MI325X shares the gfx942/CDNA3 runner family with MI300X. Hyperloom
@@ -36,12 +92,12 @@ image is supplied.
 
 The following inference frameworks are supported:
 
-| Framework | ROCm version | Status | Notes |
-|-----------|--------------|--------|-------|
-| SGLang (ROCm) | 7.2.0 | Supported | Default framework |
-| vLLM (ROCm) | 7.2.0 | Supported | Do not mix frameworks within one session |
-| Atom (ROCm) | 7.2.0 | Supported | Single-node only (multi-node rejected by the IR-8 guard) |
-| xDiT (diffusion) | 7.2.0 | Supported | Scriptable diffusion pipeline (no serving server). Internal throughput is tracked in img/s, but the primary session-facing metric is end-to-end latency `e2el_mean_ms` (ms). |
+| Framework | ROCm version | Notes |
+|-----------|--------------|--------|
+| SGLang (ROCm) | 7.2.0 | Default framework |
+| vLLM (ROCm) | 7.2.0 |  Do not mix frameworks within one session |
+| Atom (ROCm) | 7.2.0 |  Single-node only (multi-node rejected by the IR-8 guard) |
+| xDiT (diffusion) | 7.2.0 | Scriptable diffusion pipeline (no serving server). Internal throughput is tracked in img/s, but the primary session-facing metric is end-to-end latency `e2el_mean_ms` (ms). |
 
 ## Container images
 
@@ -79,16 +135,3 @@ available through the container image, not pip.
 
 Framework versions are overridable via env (`SGLANG_REF`, `VLLM_VERSION`,
 `VLLM_ROCM_VARIANT`) for hosts that need a different pinned stack.
-
-## Component dependencies
-
-Hyperloom is dependent on the following components:
-
-| Component | Source |
-|-----------|--------|
-| TraceLens | <https://github.com/AMD-AGI/TraceLens> |
-| Magpie | <https://github.com/AMD-AGI/Magpie> |
-| IntelliKit | <https://github.com/AMDResearch/intellikit> |
-| GEAK | <https://github.com/AMD-AGI/GEAK> |
-| AgentKernelArena (optional; not in the default install / optimization loop) |<https://github.com/AMD-AGI/AgentKernelArena> |
-| AMD Quark (optional, quantization) | <https://quark.docs.amd.com/> |
