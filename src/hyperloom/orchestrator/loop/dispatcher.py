@@ -227,6 +227,12 @@ class DispatcherCollaborator:
                 continue
             lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
+                # SQLite lane gate. Under single-node Ray execution (§12 T7,
+                # decision 1) the authoritative GPU mutex is Ray's custom
+                # resources (``serving_slot`` + ``num_gpus`` on the leases below),
+                # not this gate — but it is kept as a cheap, resume-safe
+                # scheduling / observability view (its acquire/release events feed
+                # the lane timeline). The two layers are redundant.
                 try:
                     expanded = _expand_lanes(lanes_needed)
                 except ValueError:
@@ -254,6 +260,7 @@ class DispatcherCollaborator:
             else:
                 lease = None
             gpu_lease = None
+            gpu_specialist_lease: Any = None
             extra_context: dict[str, Any] = {}
             if task.kind == "specialist":
                 params = task.params or {}
@@ -334,6 +341,29 @@ class DispatcherCollaborator:
                                 )
                         continue
                     extra_context["gpu_ids"] = list(gpu_lease.gpu_ids)
+                    # Ray-managed GPU execution (§12 T4): route the whole
+                    # specialist subprocess into a ``num_gpus`` actor. Ray
+                    # assigns + masks the physical cards, so the SQLite ids above
+                    # are now only capacity/TTL accounting (decision 3 / §12 T5).
+                    # Advertise the logical 0..N-1 view the specialist actually
+                    # sees under Ray's mask. ``None`` off the Ray path (multi-node
+                    # / RAY_EXEC off / tests) keeps the SQLite-gpu-id device path.
+                    from ..actions.executors._ray_serving import (
+                        maybe_gpu_specialist_lease,
+                    )
+
+                    # Whole-machine / bench-capable specialists (gpu_research_lane)
+                    # also hold the ``serving_slot`` so Ray makes them mutually
+                    # exclusive with serving (§12 T6); the serving-disjoint pool
+                    # takes ``num_gpus`` only and can run on cards disjoint from
+                    # serving.
+                    gpu_specialist_lease = maybe_gpu_specialist_lease(
+                        num_gpus=gpu_count,
+                        serving_slot=whole_machine_lane,
+                    )
+                    if gpu_specialist_lease is not None:
+                        extra_context["gpu_ids"] = list(range(gpu_count))
+                        extra_context["gpu_specialist_lease"] = gpu_specialist_lease
             # Defensive audit (log-only): flag a queued task whose kind has
             # no registered executor. Kernel-owned kinds are legitimately
             # unregistered under --no-kernel, so they are excluded to avoid a
@@ -364,6 +394,7 @@ class DispatcherCollaborator:
                             prebound_lease=lease,
                             extra_context=extra_context,
                             gpu_lease=gpu_lease,
+                            gpu_specialist_lease=gpu_specialist_lease,
                         ),
                     ),
                     gpu_lease,
@@ -378,6 +409,7 @@ class DispatcherCollaborator:
         prebound_lease: Any,
         extra_context: dict[str, Any],
         gpu_lease: Any,
+        gpu_specialist_lease: Any = None,
     ) -> "SubAgentResult":
         """Run a dispatched task, releasing its GPU lease in a structured finally.
 
@@ -385,13 +417,19 @@ class DispatcherCollaborator:
         guarantees the cards are freed on completion, error, or cancellation
         even if the pump coroutine is cancelled or the reap never runs.
         ``release`` is idempotent, so the release in
-        :meth:`_reap_dispatched_task` remains harmless.
+        :meth:`_reap_dispatched_task` remains harmless. When a Ray
+        ``GpuSpecialistLease`` was acquired (§12 T4) it is closed here too so
+        the ``num_gpus`` lease is released on every exit path.
 
         Args:
             task: The dispatched task.
             prebound_lease: The already-acquired resource-lane lease (or None).
             extra_context: Per-task context (wall budget, gpu ids, …).
-            gpu_lease: The GPU specialist lease to release, or None.
+            gpu_lease: The SQLite GPU-specialist accounting lease to release, or
+                None.
+            gpu_specialist_lease: The Ray ``GpuSpecialistLease`` to close
+                (release the ``num_gpus`` actor lease), or None on the local
+                path.
 
         Returns:
             SubAgentResult: The result from ``sub.run_task``.
@@ -409,6 +447,14 @@ class DispatcherCollaborator:
                 except Exception:  # noqa: BLE001 — defensive cleanup; TTL backstops
                     log.exception(
                         "dispatcher: finally GPU-lease release failed for task=%s",
+                        task.task_id,
+                    )
+            if gpu_specialist_lease is not None:
+                try:
+                    gpu_specialist_lease.close()
+                except Exception:  # noqa: BLE001 — teardown must not raise
+                    log.exception(
+                        "dispatcher: finally GpuSpecialistLease close failed for task=%s",
                         task.task_id,
                     )
 
