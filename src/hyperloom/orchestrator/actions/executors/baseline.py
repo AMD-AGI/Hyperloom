@@ -58,6 +58,7 @@ from ._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
+from ._inferencex_patcher import ensure_benchmark_lib_eval_dest_patched
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
@@ -1021,15 +1022,47 @@ class BaselineExecutor:
         )
         return self.default_timeout_sec
 
+    @staticmethod
+    def _inferencex_root_from_config(config_path: Path) -> str:
+        """Resolve the InferenceX checkout the subprocess will ``cd`` into.
+
+        Prefers the materialized ``benchmark.inferencex_path`` (the task-local,
+        possibly local-disk-mirrored checkout) and falls back to
+        ``$INFERENCEX_PATH``. Returns ``""`` when neither is set.
+
+        Args:
+            config_path: The materialized Magpie YAML config path.
+
+        Returns:
+            The InferenceX checkout path, or ``""`` when unresolved.
+        """
+        try:
+            cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+            bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
+            path = str((bench or {}).get("inferencex_path") or "").strip()
+        except (OSError, yaml.YAMLError):
+            path = ""
+        return path or os.environ.get("INFERENCEX_PATH", "").strip()
+
     def _after_materialize_config(
         self,
         config_path: Path,
         output_dir: Path,
     ) -> dict[str, Any] | None:
-        """Hook for subclasses after YAML materialization, before launch.
+        """Hook after YAML materialization, before launch.
 
-        ProfileExecutor uses this to patch/validate the InferenceX checkout
-        named by the rendered YAML. No-op default keeps baseline unchanged.
+        Applies the eval-dest redirect patch to the InferenceX checkout the
+        subprocess will run, so ``append_lm_eval_summary``'s ``mv ./`` writes
+        lm-eval ``results*.json`` into ``$RESULT_DIR`` (the per-task session
+        dir set in :meth:`_run_single_benchmark`) instead of the process cwd —
+        which, when InferenceX is mirrored to local disk, is a dir outside the
+        session that ``parse_eval_results`` never scans (baseline then wrongly
+        stops with ``baseline_accuracy_failed`` despite eval passing). Baseline
+        previously left this to ProfileExecutor only, so pure baseline runs
+        never got the redirect. Best-effort; never blocks the run.
+
+        ProfileExecutor overrides this to additionally validate the
+        NUM_PROMPTS / PROFILE_EXTRA_BODY patches (and short-circuit on failure).
 
         Args:
             config_path: The materialized Magpie YAML config path.
@@ -1039,6 +1072,16 @@ class BaselineExecutor:
             An early-return result dict to short-circuit the launch, or
             ``None`` to proceed with the baseline run.
         """
+        ix_root = self._inferencex_root_from_config(config_path)
+        if ix_root:
+            try:
+                ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
+            except Exception as exc:  # noqa: BLE001 — patch is best-effort
+                log.warning(
+                    "baseline_executor: eval-dest patch skipped for %s: %s",
+                    ix_root,
+                    exc,
+                )
         return None
 
     @staticmethod
