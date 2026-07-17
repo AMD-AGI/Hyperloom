@@ -368,7 +368,11 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
         no_wait=False,
         recreate=False,
         poll_interval=6,
-        poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110),
+        # In-process provisioning is not bound by the foreground/MCP 120s
+        # ceiling, so use a larger default so slow cluster scheduling
+        # (workload stuck Pending) does not abort create-rayjob before it
+        # can persist head_pod_ip. Override via HYPERLOOM_MN_POLL_TIMEOUT_S.
+        poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
     )
     rc = cmd_create_rayjob(ns_create)
     if rc != 0:
@@ -381,7 +385,9 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
             force=False,
             print_logs=False,
             poll_interval=6,
-            poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "110") or 110),
+            # Same rationale as create-rayjob above: in-process provisioning
+            # gets a larger default than the foreground 120s ceiling.
+            poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
         )
         rc_boot = cmd_bootstrap(ns_boot)
         if rc_boot != 0:
