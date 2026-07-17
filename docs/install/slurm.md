@@ -188,11 +188,11 @@ cat <data-root>/<key>/$SID/state.json
 
 The artifact directory `<data-root>/<model_key>/<CLAW_SESSION_ID>/` contains:
 
-- `state.json` — live status (`baseline_tput`, `current_best`, `cumulative_gain`);
-- `manifest.json` — session manifest;
-- `ci_metrics.json` — baseline/optimized throughput plus `gain_pct`;
-- `optimizer_runs/` — `launch_<sid>.json` and logs;
-- `runtime/` — `kernel-agent.env.sh` and other files produced by the installer.
+- `state.json`: live status (`baseline_tput`, `current_best`, `cumulative_gain`);
+- `manifest.json`: session manifest;
+- `ci_metrics.json`: baseline/optimized throughput plus `gain_pct`;
+- `optimizer_runs/`: `launch_<sid>.json` and logs;
+- `runtime/`: `kernel-agent.env.sh` and other files produced by the installer.
 
 A healthy run logs, in order: container start → install complete → framework root
 discovery (`sglang=ok aiter=ok`) → model gate passed → Ray head (`--num-gpus=8`)

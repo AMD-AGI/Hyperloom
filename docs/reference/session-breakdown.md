@@ -180,15 +180,15 @@ the exact baseline benchmark.
 
 `baseline.invocation.framework_args_source` is one of:
 
-* `log_non_default_args` — Most authoritative (parsed from the
+* `log_non_default_args`: Most authoritative (parsed from the
   vllm/sglang server's own arg echo).
-* `log_args_line` — `Args: Namespace(...)` header.
-* `log_python_cmd` — Literal `python …` launch line scraped from logs.
-* `yaml_cmd` — `cmd:` / `command:` / `launch:` field in the
+* `log_args_line`: `Args: Namespace(...)` header.
+* `log_python_cmd`: Literal `python …` launch line scraped from logs.
+* `yaml_cmd`: `cmd:` / `command:` / `launch:` field in the
   materialised config YAML.
-* `yaml_benchmark` — Synthesised from Magpie's `benchmark.*` YAML
+* `yaml_benchmark`: Synthesised from Magpie's `benchmark.*` YAML
   fields.
-* `unknown` — None of the above; a warning is appended to
+* `unknown`: None of the above; a warning is appended to
   top-level `warnings`.
 
 `extra_envs` is allowlist-filtered to keep secrets out of the
@@ -252,13 +252,13 @@ Same `Invocation` shape across both lists; `backend` distinguishes
 
 The 4+1-stage kernel pipeline:
 
-* `detected` — TraceLens-identified hot kernels.
-* `recommended` — Critic-filtered candidates with backend
+* `detected`: TraceLens-identified hot kernels.
+* `recommended`: Critic-filtered candidates with backend
   recommendations.
-* `optimized` — Kernels with at least one completed backend attempt
+* `optimized`: Kernels with at least one completed backend attempt
   and `best_micro_speedup`.
-* `adopted` — Kernels promoted into the final stack (end-to-end validated).
-* `rejected` — Kernels considered then dropped, with `reason`.
+* `adopted`: Kernels promoted into the final stack (end-to-end validated).
+* `rejected`: Kernels considered then dropped, with `reason`.
 
 The same `kernel_id` appears in multiple lists as it progresses.
 
@@ -488,6 +488,6 @@ alerting.
 
 Use the following resources for related reference information.
 
-* [Hyperloom operator scripts](operator-scripts.md) — How to produce a breakdown from a finished session directory.
-* [Hyperloom self-hosting and operations guide](operations.md) — Retention recommendations.
-* [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py) — TypedDict source of truth.
+* [Hyperloom operator scripts](operator-scripts.md): How to produce a breakdown from a finished session directory.
+* [Hyperloom self-hosting and operations guide](operations.md): Retention recommendations.
+* [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py): TypedDict source of truth.

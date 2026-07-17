@@ -14,9 +14,9 @@ that skill contains and what each variable means.
 
 Pick one; both serve the same model, differ in control plane:
 
-- **infera** — GPU pods idle with sshd; Hyperloom SSHes in to (re)launch sglang
+- **infera**: GPU pods idle with sshd; Hyperloom SSHes in to (re)launch sglang
   each round. Supports **PD disaggregation** (separate prefill / decode pods).
-- **rayjob** — pods run under Ray; restarts go through the Ray dashboard.
+- **rayjob**: pods run under Ray; restarts go through the Ray dashboard.
 
 Requires `--mn-image` pointing at an operator-supplied image
 (`<INFERA_SSHD_IMAGE>` must include sshd; `<RAYJOB_IMAGE>` is a standard Ray
@@ -24,13 +24,13 @@ image).
 
 ## Two ways to connect the cluster
 
-- **Path A — SaFE-managed** *(default)*: the optimizer runs in a **Primus-SaFE**
+- **Path A: SaFE-managed** *(default)*: the optimizer runs in a **Primus-SaFE**
   sandbox with `SAFE_API_URL` + `SAFE_API_KEY` (both auto-injected by the
   platform). Hyperloom creates the GPU pods (`create-infera` / `create-rayjob`)
   and tears them down with `stop-multi-job`.
   **[Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)** is AMD's open-source
   training and inference management platform.
-- **Path B — External**: the cluster is **already running** with **no SaFE
+- **Path B: External**: the cluster is **already running** with **no SaFE
   API**; you point Hyperloom at it with `HYPERLOOM_MN_EXT_*` env vars (see below).
 
 If both SaFE creds and `HYPERLOOM_MN_EXT_*` are set, **SaFE wins** (Path A).
