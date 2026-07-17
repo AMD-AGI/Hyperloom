@@ -18,6 +18,7 @@ import pytest
 
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
 # Cross-cutting framework parametrisation; add new frameworks here.
@@ -58,6 +59,7 @@ class _StateStub:
         self.phase = "FRAMEWORK_AGENT"
         self.framework_agent_phase_done = False
         self.framework_agent_authoring_enabled = False
+        self.framework_local_explore_enabled = False
         self.framework_agent_discover_failures = 0
         self.framework_agent_empty_discoveries = 0
         self.framework_agent_batches: list[dict[str, Any]] = []
@@ -127,6 +129,12 @@ class _CoordinatorStub:
     _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
     _discover_next_framework_batch = Coordinator._discover_next_framework_batch
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
+    # Local-exploration arm surface (disabled in this stub's state, so these
+    # short-circuit; bound so the shared pump/select paths resolve).
+    _LOCAL_EXPLORE_KIND = FrameworkPhase._LOCAL_EXPLORE_KIND
+    _framework_local_explore_arm_enabled = FrameworkPhase._framework_local_explore_arm_enabled
+    _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
+    _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
     # The discovery merge calls this reverse-lookup on every repo.
     _framework_agent_repo_url_origin_framework = staticmethod(
         Coordinator._framework_agent_repo_url_origin_framework

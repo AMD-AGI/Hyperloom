@@ -2005,6 +2005,9 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
     from hyperloom.orchestrator.framework import client as _fa_client
 
     _enter_framework(coord)
+    # Arm disabled: discovery exhaustion falls back to the historical exit
+    # (the enabled arm pivots to local exploration instead — covered separately).
+    coord.shared_state.framework_local_explore_enabled = False
     coord.shared_state.framework_agent_discover_failures = 0
     # Prime the streak so this final empty discovery flips phase done.
     coord.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT - 1
