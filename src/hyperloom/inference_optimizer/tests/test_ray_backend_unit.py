@@ -868,8 +868,15 @@ def test_gpu_specialist_lease_dead_actor_degrades(monkeypatch: pytest.MonkeyPatc
 
 
 # ── coverage: ServingGroupManager empty + exception branches ─────────────────
-def test_serving_group_manager_empty_before_start():
-    """A never-started SGM: ranks_alive=[] / is_alive False / stop no-op."""
+def test_serving_group_manager_empty_before_start(monkeypatch: pytest.MonkeyPatch):
+    """A never-started SGM: ranks_alive=[] / is_alive False / stop no-op.
+
+    ``close()`` does ``import ray`` before its (empty) rank loop, so a fake ray
+    is injected to keep the test self-contained: without it the test only passed
+    by accident when another test's ``sys.modules['ray']`` leaked into the same
+    process, which breaks under xdist where tests run in separate workers.
+    """
+    monkeypatch.setitem(sys.modules, "ray", _FakeRay())
     sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8)
     assert sgm.pids() == []
     assert sgm.ranks_alive() == []  # 892-893
