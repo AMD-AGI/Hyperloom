@@ -7,7 +7,7 @@ myst:
 
 # Hyperloom release notes
 
-The current packaged version is **0.8.0** (`pyproject.toml`). For the
+The current packaged version is `0.8.0` (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
@@ -19,7 +19,7 @@ summarizes the headline capabilities.
 The first public snapshot of Hyperloom combines features from the following
 per-release versions:
 
-### v0.8.0 Highlights
+### 0.8.0 highlights
 
 - **Kernel-optimization integrity & GEAK faithfulness** — Patch-only kernel
   wins are no longer discarded by the FULL_BENCHMARK verifier (full source is
@@ -41,10 +41,10 @@ per-release versions:
   clamped to the run's `--max-model-len` (no more contradictory server config),
   and Local Mode portability groundwork removes Core42 / WekaFS hard-coding (docs).
 
-### v0.7.0 Highlights
+### 0.7.0 highlights
 
 - ***Forge: a third autonomous kernel-optimization backend (new track)** — 
-  v0.7's headline is **Forge** (**Kernel-Forge**) — a self-driving kernel-optimization
+  0.7's headline is **Forge** (**Kernel-Forge**) — a self-driving kernel-optimization
   backend that joins GEAK and OOB. It runs an autonomous edit→build→bench loop
   with kernel_kind-aware fellow routing (Triton / HIP / CK / aiter / hipBLASLt / FlyDSL),
   an aiter compiled-kernel closed loop, honest compile-only skips for
@@ -76,8 +76,8 @@ per-release versions:
   visibility lag, empty-queue clean skip, and forwarding of GEAK scoring / profiler
   knobs across the Ray boundary.
 
-- **Profiling / roofline + TraceLens v0.7** — A deterministic (no-LLM) trace-
-  analysis route, TraceLens v0.7.0, profile-scoped OSL control with a
+- **Profiling / roofline + TraceLens 0.7** — A deterministic (no-LLM) trace-
+  analysis route, TraceLens 0.7.0, profile-scoped OSL control with a
   serialization-safe capture cap, expert-parallel flag handling for MoE roofline,
   and eager-boot fallback for the SGLang profile-cuda-graph path.
 
@@ -93,10 +93,10 @@ per-release versions:
   created, alongside HF-token rotation with 429 backoff, larger daily pools, and 48h
   long-horizon budgets.
 
-### v0.6.0 Highlights
+### 0.6.0 highlights
 
-- **Search Space: looser orchestration + long-horizon runs** — v0.6 turns the
-  Orchestration theme from v0.5's "search efficiency" to **search space**: mechanical
+- **Search Space: looser orchestration + long-horizon runs** — 0.6 turns the
+  Orchestration theme from 0.5's "search efficiency" to **search space**: mechanical
   guardrails are downgraded to advisory so the optimizer drives itself, free-form
   and cross-domain specialist dispatch lets it explore beyond the fixed action
   catalogue, and 2–3 day long-horizon optimization with finer-grained start / stop
@@ -118,7 +118,7 @@ per-release versions:
   server-patcher idempotency, and parallel GEAK / OOB ladders with per-attempt cache
   isolation. rocprof-compute roofline and kernel-level roofline detail land alongside.
 
-- **TraceLens v0.6, CLI + WebUI, and budget-aware roofline** — TraceLens v0.6 ships with
+- **TraceLens 0.6, CLI + WebUI, and budget-aware roofline** — TraceLens 0.6 ships with
   open-source MAF backfill (GPU microbenchmark), a TraceLens CLI, WebUI standalone / comparative
   analysis, and roofline that is time-boxed against the total budget.
 
@@ -139,9 +139,9 @@ per-release versions:
   documentation site, the license relicensed **Apache → MIT**, requesting-access / SSO docs, and
   Python test coverage raised to ~91.5%.
 
-### v0.5.0 Highlights
+### 0.5.0 highlights
 
-- **Orchestration: vocabulary unification + search efficiency** — v0.5 advances the "search
+- **Orchestration: vocabulary unification + search efficiency** — 0.5 advances the "search
   efficiency" theme ([#272](https://github.com/AMD-AGI/Hyperloom/issues/272)): the optimizer's
   action/state vocabulary converges onto the unified explore grid-runner and the EXPLORE/specialist
   fan-out gains parallel headroom. New **Atom framework support**
@@ -159,11 +159,11 @@ per-release versions:
   timing under GEAK_RUN_MODE=full ([#337](https://github.com/AMD-AGI/Hyperloom/issues/337)), and kernel
   batch parallelism adapts to smaller pods ( [#338](https://github.com/AMD-AGI/Hyperloom/issues/338) ).
 
-- **Knowledge Base productization** — The v0.4 Knowledge Base Service moves toward operations with **KB
+- **Knowledge Base productization** — The 0.4 Knowledge Base Service moves toward operations with **KB
   Productization & Data Maintenance** ([#333](https://github.com/AMD-AGI/Hyperloom/issues/333)) and **KB Recipe
   Ingestion** ([#332](https://github.com/AMD-AGI/Hyperloom/issues/332)).
 
-- **Profiling, TraceLens & Dashboard** — **TraceLens v0.5** ([#358](https://github.com/AMD-AGI/Hyperloom/issues/358));
+- **Profiling, TraceLens & Dashboard** — **TraceLens 0.5** ([#358](https://github.com/AMD-AGI/Hyperloom/issues/358));
   a patched profiler docker image that captures HipGraphLaunch kernels so optimization-loop traces are
   complete ([#352](https://github.com/AMD-AGI/Hyperloom/issues/352)); **profiling information for all Hyperloom
   models** ([#346](https://github.com/AMD-AGI/Hyperloom/issues/346)); **kernel roofline on the dashboard**
@@ -171,7 +171,7 @@ per-release versions:
   auto-collection, alerting, TraceLens/GEAK detail capture, and kernel roofline
   ([#334](https://github.com/AMD-AGI/Hyperloom/issues/334)).
 
-- **Stability & bug fixes** — v0.5 closes a batch of orchestration / runtime defects surfaced by v0.4 runs:
+- **Stability & bug fixes** — 0.5 closes a batch of orchestration / runtime defects surfaced by 0.4 runs:
   local-mode KERNEL phase failing to dispatch GEAK plus TP variants leaking past visible-device scope
   ([#341](https://github.com/AMD-AGI/Hyperloom/issues/341)); integrate_handler early-out on a missing
   base_tput that was already in SharedState ([#319](https://github.com/AMD-AGI/Hyperloom/issues/319));
@@ -181,11 +181,11 @@ per-release versions:
   ([#268](https://github.com/AMD-AGI/Hyperloom/issues/268)); and the README cert-install script on
   RHEL/CentOS hosts ([#328](https://github.com/AMD-AGI/Hyperloom/issues/328)).
 
-### v0.4.0 Highlights
+### 0.4.0 highlights
 
-- **Hyperloom v2 architecture lands** — v0.4 is a substantial v2 leap: end-to-end Model Auto-Optimize,
+- **Hyperloom v2 architecture lands** — 0.4 is a substantial v2 leap: end-to-end Model Auto-Optimize,
   Framework Agent integration, Agent Kernel Arena, the Self-Evolving Skills & Memory layer ramping past
-  the v0.3 proposal-only stage, and the first-iteration Hyperloom Knowledge Base Service. Multi-Node
+  the 0.3 proposal-only stage, and the first-iteration Hyperloom Knowledge Base Service. Multi-Node
   CI/CD comes online as a first-class capability.
 
 - **Robustness Agent overhaul** — A foundation rewrite ships 13 independent signal detectors (preflight,
@@ -210,20 +210,20 @@ per-release versions:
   is hardened (top-2000 candidate pool, GLM5 remote mode, Windows-safe `NFS_ROOT`, per-run optimization-
   result publishing).
 
-### v0.3.0 Highlights
+### 0.3.0 highlights
 
 - **Multi-Agent architecture: Sprint + Marathon unified** — The optimizer's execution backbone is rebuilt:
   the previous single-agent harness is replaced by a multi-agent pipeline that unifies Sprint and Marathon
   under one orchestration model. Workloads now flow through a P0+P1+P2 + kernel-agent layout with each
   agent in its own Claude CLI process and JSONL-based IPC, inheriting the 24h-stable, context-isolated
-  runtime first introduced by Marathon in v0.2 — but now applied to Sprint as well, with shared scheduling,
+  runtime first introduced by Marathon in 0.2 — but now applied to Sprint as well, with shared scheduling,
   memory, and trace plumbing.
 
-- **TraceLens enters the E2E optimization loop** — v0.2 introduced TraceLens as a standalone analysis
-  surface; v0.3 takes the next step and wires TraceLens directly into the end-to-end inference-optimization
+- **TraceLens enters the E2E optimization loop** — 0.2 introduced TraceLens as a standalone analysis
+  surface; 0.3 takes the next step and wires TraceLens directly into the end-to-end inference-optimization
   loop. Profiling, trace splitting, agent invocation, and output parsing all happen inline now — the optimizer
   reasons over fresh trace evidence between actions instead of relying on stale or summarized data. The
-  integration is pinned against `release/hyperloom_integration_v0.3`. A new TraceLens Agent Debug Mode also
+  integration is pinned against `release/hyperloom_integration_0.3`. A new TraceLens Agent Debug Mode also
   exposes the full `StreamJSON` event stream for offline replay and diff against local runs.
 
 - **GEAK gets memory: RAG + Cross-Sessions** — Two long-requested capabilities land together. **GEAK RAG
@@ -234,13 +234,13 @@ per-release versions:
   retention.
 
 - **Self-Evolving Skills (first iteration)** — Skills are no longer fully static. The first version of self-
-  evolving skills ships in v0.3: skills accumulate session-level evidence and propose their own incremental
-  updates. The v0.3 surface is intentionally narrow (proposal + manual review); the deeper regression-aware
-  auto-update loop is scoped to v0.4.
+  evolving skills ships in 0.3: skills accumulate session-level evidence and propose their own incremental
+  updates. The 0.3 surface is intentionally narrow (proposal + manual review); the deeper regression-aware
+  auto-update loop is scoped to 0.4.
 
 - **Roofline-aware kernel optimization priority** — The kernel-classification heuristic that decides "what to
   optimize first" is overhauled. Instead of a fixed 5-tier kernel-class priority (`triton > aiter_ck > framework >
-  comm > hipblaslt`), v0.3 picks targets via roofline analysis combined with E2E time share. This directly
+  comm > hipblaslt`), 0.3 picks targets via roofline analysis combined with E2E time share. This directly
   addresses the regression where MoE / aiter kernels were either silently skipped (vendor mis-classification) or
   mis-prioritized away from real bottlenecks. Hyperloom now also passes complete kernel metadata to GEAK — shape,
   dtype, backend, runtime args, env vars, and kernel-specific parameters — replacing the previous path-only contract.
@@ -250,7 +250,7 @@ per-release versions:
   This unlocks training and large-model workloads that don't fit on a single node and keeps the multi-node path
   continuously validated.
 
-### v0.2.0 Highlights
+### 0.2.0 highlights
 
 - **TraceLens/OOB/Magpie standalone comes online** — Hyperloom now ships dedicated standalone workflows for
   TraceLens, OOB, and Magpie — each usable independently of the full end-to-end optimization pipeline. The
