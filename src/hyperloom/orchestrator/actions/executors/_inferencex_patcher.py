@@ -58,11 +58,9 @@ _BENCH_SERVING_PATCHED = (
 _BENCH_SERVING_SENTINEL = "PROFILE_EXTRA_BODY"
 _BENCH_SERVING_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_serving_patcher.lock")
 
-# ``append_lm_eval_summary`` moves eval artifacts to the process cwd (``mv ./``),
-# which is the InferenceX checkout — so eval results escape the per-task session
-# (and, with the shared deps cache, land in / collide on the shared checkout).
-# Redirect to ``$RESULT_DIR`` (Hyperloom sets it to the session dir), falling
-# back to ``.`` byte-for-byte when unset. Substring match => indentation-safe.
+# ``append_lm_eval_summary`` does ``mv ./`` — eval artifacts land in the process
+# cwd (the InferenceX checkout), escaping the session. Redirect to ``$RESULT_DIR``
+# (Hyperloom's session dir), falling back to ``.`` when unset.
 _EVAL_DEST_LEGACY = 'mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2'
 _EVAL_DEST_PATCHED = 'mv -f "$jf" "${RESULT_DIR:-.}/" || echo "WARN: failed to move ${jf}" >&2'
 _EVAL_DEST_SENTINEL = '"${RESULT_DIR:-.}/"'

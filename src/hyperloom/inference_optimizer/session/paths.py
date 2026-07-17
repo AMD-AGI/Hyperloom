@@ -335,21 +335,13 @@ def _dir_mtime(p: Path) -> float:
 
 
 def resolve_dep_dir(name: str, env_var: str | None = None) -> Path:
-    """Resolve a dependency checkout dir, bridging install.sh's per-revision
+    """Resolve a dependency checkout, bridging install.sh's per-revision
     ``<name>@<sha>`` layout to runtime callers.
 
-    Resolution order:
-
-    1. ``$<env_var>`` when set — install.sh writes the resolved ``@sha`` path
-       here (e.g. ``TRACELENS_ROOT`` / ``MAGPIE_PATH``): the exact, preferred
-       checkout for an inheriting process.
-    2. Newest ``<deps_cache_root>/<name>@<sha>`` directory. install.sh clones per
-       revision under this root; globbing lets a process that did *not* inherit
-       the env var still resolve the same checkout instead of a path the
-       installer never created (the bare ``<name>`` default silently broke the
-       "script and runtime agree without inherited env" invariant, ref #722).
-    3. Bare ``<deps_cache_root>/<name>`` as a last-resort default (matches a
-       non-pinned / pip-installed layout, e.g. Magpie).
+    Order: ``$<env_var>`` (installer-written exact path) → newest
+    ``<deps_cache_root>/<name>@<sha>`` → bare ``<deps_cache_root>/<name>``. The
+    glob step lets a process that did not inherit the env var still find the
+    installer's checkout rather than a path it never created (#722).
 
     Args:
         name: Dependency directory name (e.g. ``TraceLens``).
@@ -365,20 +357,14 @@ def resolve_dep_dir(name: str, env_var: str | None = None) -> Path:
     root = deps_cache_root()
     pinned = [p for p in root.glob(f"{name}@*") if p.is_dir()]
     if pinned:
-        # The env var is the exact answer; when it was not inherited, the newest
-        # pinned revision is the best guess (see the cache-growth caveat).
         return max(pinned, key=_dir_mtime)
     return root / name
 
 
 def magpie_dir() -> Path:
-    """Magpie checkout root. ``$MAGPIE_PATH`` (installer-written) wins; otherwise
-    the newest ``<deps_cache_root>/Magpie@<sha>`` checkout, else bare
-    ``<deps_cache_root>/Magpie`` (Magpie is pip-installed, so the bare default is
-    the common fallback). See :func:`resolve_dep_dir`.
-
-    ``install.sh`` resolves ``MAGPIE_PATH`` from the pip-installed package;
-    explicit overrides remain supported.
+    """Magpie checkout root, via :func:`resolve_dep_dir` (``$MAGPIE_PATH`` else
+    newest ``Magpie@<sha>`` else bare — Magpie is pip-installed, so bare is the
+    common case).
 
     Returns:
         The Magpie package/check-out root path.
@@ -387,11 +373,8 @@ def magpie_dir() -> Path:
 
 
 def tracelens_root() -> Path:
-    """TraceLens checkout root. ``$TRACELENS_ROOT`` (installer-written,
-    per-revision) wins; otherwise the newest ``<deps_cache_root>/TraceLens@<sha>``
-    checkout, else bare ``<deps_cache_root>/TraceLens``. See
-    :func:`resolve_dep_dir` — this keeps script and runtime resolving the same
-    checkout even when ``$TRACELENS_ROOT`` was not inherited.
+    """TraceLens checkout root, via :func:`resolve_dep_dir` (``$TRACELENS_ROOT``
+    else newest ``TraceLens@<sha>`` else bare).
 
     Returns:
         The TraceLens checkout path.
