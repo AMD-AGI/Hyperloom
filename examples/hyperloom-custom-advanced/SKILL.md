@@ -136,8 +136,6 @@ resolved values in the launch plan before starting the optimizer.
 - Phase toggles default to enabled: kernel enabled, explore enabled, framework
   agent enabled, roofline enabled, and concurrency sweep enabled.
 - Kernel continues after FP8 GEMM by default.
-- Multi-node defaults to disabled: `NODES=1`; do not pass multi-node or PD flags
-  unless the user explicitly asks for them.
 
 Collect these optional advanced values:
 
@@ -149,11 +147,6 @@ Collect these optional advanced values:
   `--target-summary`, `--compare-against-gpu`.
 - Concurrency sweep: `--conc-sweep-concs`, `--conc-sweep-timeout-sec`,
   `--conc-sweep-total-budget-sec`.
-- Multi-node and PD options only when the user explicitly requests them:
-  `--nodes`, `--gpus-per-node`, `--mn-backend`, `--mn-image`, `--ep`,
-  `--pd-mode disaggregated`, and the matching PD role flags. Read
-  `@src/hyperloom/inference_optimizer/multi_node/SKILL.md` before launching a
-  multi-node or PD run.
 
 Guardrails:
 
@@ -318,8 +311,8 @@ test -f "$SESSION_DIR/manifest.json" && echo "manifest_present=true session_dir=
 test -f "$SESSION_DIR/state.json" && echo "state_exists=true"
 ```
 
-If adding multi-node, PD, quantization, critic, robustness, or research-lane
-flags, append only real flags accepted by
+If adding quantization, critic, robustness, or research-lane flags, append only
+real flags accepted by
 `python3 -m hyperloom.inference_optimizer.cli optimize --help`; do not invent
 aliases.
 

@@ -123,10 +123,10 @@ The backend runs `install_baremetal.sh` in five phases:
 
 ### Scenario B: Bare Metal + Docker
 
-Use this when the agent starts from a bare host or login node, but the workload
-will run inside a ROCm container. This is the recommended path when the host
-does not have ROCm torch or a serving framework installed, or when the serving
-framework should come from a known container image.
+Use this when the workload will run inside a ROCm container. This is the
+recommended path when the host does not have ROCm torch or a serving framework
+installed, or when the serving framework should come from a known container
+image.
 
 Requirements:
 
@@ -137,13 +137,6 @@ Requirements:
 
 In this scenario, `/hyperloom-setup` writes `.env` only and does **not** start a
 container. The selected demo skill owns the container lifecycle.
-
-If Slurm is available, setup also checks for allocated nodes. The user chooses
-whether Docker should run on:
-
-- the current host;
-- one of the current user's allocated Slurm nodes; or
-- a custom host.
 
 The chosen host is written to `.env`:
 
