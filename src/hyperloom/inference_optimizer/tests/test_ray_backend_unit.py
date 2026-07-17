@@ -304,11 +304,17 @@ class _LeaseFakeRay:
         class RayTaskError(Exception):
             pass
 
+        class RayActorError(Exception):
+            pass
+
     def __init__(self):
         self.killed: list = []
 
     def get(self, ref):
-        if isinstance(ref, _LeaseFakeRay.exceptions.RayTaskError):
+        if isinstance(
+            ref,
+            (_LeaseFakeRay.exceptions.RayTaskError, _LeaseFakeRay.exceptions.RayActorError),
+        ):
             raise ref
         return ref
 
@@ -344,6 +350,25 @@ def test_serving_lease_run_session_kill_ray_error_degrades(monkeypatch: pytest.M
     rc, out, err = lease.run_session_kill(["x"], timeout=5)
     assert rc == 1
     assert "ray_worker_error" in err
+
+
+def test_serving_lease_run_session_kill_actor_death_self_heals(monkeypatch: pytest.MonkeyPatch):
+    """A dead actor degrades to a benchmark failure AND drops the handle.
+
+    Round-level lease reuse means one actor spans every variant in a round, so a
+    mid-round actor death must self-heal: the handle is reset to ``None`` so the
+    next round/variant re-creates a fresh actor via ``ensure()``, rather than
+    cascading the failure to every remaining variant or crashing the session.
+    """
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor(fake.exceptions.RayActorError("worker died"))
+    rc, out, err = lease.run_session_kill(["x"], timeout=5)
+    assert rc == 1
+    assert "ray_actor_error" in err
+    # Handle dropped so the next run re-creates the actor.
+    assert lease._actor is None
 
 
 def test_serving_lease_close_idempotent(monkeypatch: pytest.MonkeyPatch):

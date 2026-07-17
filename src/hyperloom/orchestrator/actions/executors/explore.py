@@ -1000,7 +1000,20 @@ class ExploreExecutor:
         else:
             decision_deadline_sec = None
 
-        if runnable:
+        # One Ray serving lease (actor) spans the WHOLE round; every variant
+        # reuses it. The per-variant server is still (re)booted via run_grid and
+        # reaped by teardown_lifecycle_server (a driver-side pgid kill, which is
+        # raylet-free) between variants, so switching server args never churns a
+        # Ray worker — only the actor's child server restarts inside the same
+        # long-lived worker. The lease/actor is closed exactly once at round end
+        # (the ``finally`` after the loop) instead of per variant: the old
+        # per-variant ``ray.kill`` made raylet reap a heavyweight GPU worker on
+        # every variant, which destabilised the single-node raylet and took the
+        # whole session down with it (ray_modify.plan.md §4.2 / §12 T1).
+        round_serving_lease = (
+            maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path)) if runnable else None
+        )
+        try:
             for idx, gv in enumerate(runnable):
                 fp = getattr(gv, "canonical_fp", "")
                 provenance = getattr(gv, "provenance", "llm_direct")
@@ -1043,12 +1056,14 @@ class ExploreExecutor:
                 round1_lifecycle = (
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
-                # Ray-managed GPU execution (§12 T1): one held Ray lease spans
-                # this variant's warmup + decision + stack-rebench rounds, which
-                # all reuse one persistent server, so no GPU process outlives its
-                # lease. ``None`` on the local path keeps the legacy behaviour;
-                # closed in the ``finally`` below (after the server is reaped).
-                variant_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+                # Ray-managed GPU execution (§12 T1): reuse the round-level Ray
+                # lease (actor) for this variant's warmup + decision + stack-
+                # rebench rounds; they all reuse one persistent server, so no GPU
+                # process outlives the lease. ``None`` on the local path keeps the
+                # legacy behaviour. The actor is NOT closed per variant — only its
+                # child server is reaped in the ``finally`` below (raylet-free);
+                # the lease/actor is released once at round end.
+                variant_lease = round_serving_lease
                 try:
                     # Warm-decision warmup round. Boot the variant's server once
                     # and DISCARD the cold measurement so the decision round runs
@@ -1573,17 +1588,24 @@ class ExploreExecutor:
                     if cold_tput:
                         last_run_tput = cold_tput
                 finally:
-                    # Reap the persistent server on every exit path. Idempotent
-                    # + no-op when reuse was ineligible. Reap BEFORE releasing
-                    # the Ray lease so no GPU process outlives it (§4.2).
+                    # Reap THIS variant's persistent server on every exit path
+                    # (idempotent + no-op when reuse was ineligible). This is a
+                    # driver-side pgid kill (raylet-free), so the next variant
+                    # boots a fresh server inside the SAME long-lived actor. The
+                    # Ray lease/actor itself is released once at round end (§4.2:
+                    # the server is always reaped before the lease is dropped).
                     if lifecycle_eligible:
                         teardown_lifecycle_server(
                             pid_dir=slot,
                             framework=lifecycle_framework,
                             port=lifecycle_port,
                         )
-                    if variant_lease is not None:
-                        variant_lease.close()
+        finally:
+            # Release the round's Ray serving lease/actor exactly once (this was
+            # a per-variant ``ray.kill`` before — the raylet worker churn that
+            # destabilised the single-node cluster).
+            if round_serving_lease is not None:
+                round_serving_lease.close()
 
         # ----- Ledger compaction (dedup + accepted preservation) -----------
         accepted_fps_now = {_entry_fp(v) for v in (search.get("accepted") or [])}

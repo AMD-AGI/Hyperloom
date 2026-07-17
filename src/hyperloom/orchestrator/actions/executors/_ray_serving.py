@@ -411,9 +411,28 @@ class ServingLease:
             server_log_path=server_log_path,
             server_already_ready=server_already_ready,
         )
+        # Resolve Ray's exception classes defensively. Real ray always exposes
+        # both, but this is a failure hot-path: a partial test double or a future
+        # ray rename must never turn a benchmark failure into an AttributeError
+        # *while handling* the original error. An empty-tuple fallback simply
+        # catches nothing, so an unknown error still propagates unchanged.
+        _ray_exc = getattr(ray, "exceptions", None)
+        _actor_err: Any = getattr(_ray_exc, "RayActorError", ()) if _ray_exc else ()
+        _task_err: Any = getattr(_ray_exc, "RayTaskError", ()) if _ray_exc else ()
         try:
             rc, out, err = ray.get(ref)
-        except ray.exceptions.RayTaskError as exc:
+        except _actor_err as exc:  # type: ignore[misc]
+            # The actor (worker) itself died — e.g. its server OOM-killed the
+            # worker, or raylet reaped it. Drop the dead handle so the NEXT round
+            # / variant re-creates a fresh actor via ``ensure()``, and surface
+            # this round as a benchmark failure (rc=1) instead of letting the
+            # actor error propagate and crash the session. Matters now that one
+            # lease is reused across a whole round: a mid-round actor death must
+            # self-heal rather than cascade to every remaining variant.
+            log.warning("ServingLease.run_session_kill: ray actor died: %r", exc)
+            self._actor = None
+            return 1, "", f"ray_actor_error: {exc}"[:2000]
+        except _task_err as exc:  # type: ignore[misc]
             # Worker crash / unexpected error: surface as a benchmark failure so
             # the caller's existing rc!=0 handling runs, not a session crash.
             log.warning("ServingLease.run_session_kill: ray worker error: %r", exc)
