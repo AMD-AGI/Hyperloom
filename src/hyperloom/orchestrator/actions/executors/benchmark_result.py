@@ -32,14 +32,20 @@ log = logging.getLogger(__name__)
 _DEFAULT_RESCUE_PATHS: tuple[Path, ...] = (Path("/workspace/inferencex_result.json"),)
 
 
-# Wrapper-side diagnostic files hardcoded under ``/workspace/``. They live
-# outside the per-task workspace so the NFS clone misses them;
-# :func:`harvest_leaked_artifacts` copies fresh matches in.
+# Wrapper-side diagnostic files hardcoded under ``/workspace/`` (or the
+# env-derived leak roots, e.g. ``$INFERENCEX_PATH`` where ``append_lm_eval_summary``
+# ``mv ./``-s eval output). They live outside the per-task workspace so the NFS
+# clone misses them; :func:`harvest_leaked_artifacts` copies fresh matches in.
+# ``results*.json`` is the standard lm-eval accuracy schema (#927): when eval
+# results leak outside the session, harvesting them back lets
+# ``parse_eval_results`` (which globs ``**/results*.json``) still find them even
+# if the patcher-based redirect missed.
 _DEFAULT_LEAK_ARTIFACT_GLOBS: tuple[str, ...] = (
     "server.log",
     "gpu_metrics.csv",
     "profile_*.trace.json.gz",
     "inferencex_result*.json",
+    "results*.json",
 )
 _DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 

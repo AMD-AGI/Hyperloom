@@ -329,6 +329,10 @@ def test_harvest_copies_every_default_glob(tmp_path):
         leak_root / "inferencex_result.json",
         json.dumps({"output_throughput": 1761.6, "completed_requests": 640}),
     )
+    _touch(
+        leak_root / "results_2026.json",
+        json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.42}}}),
+    )
 
     harvested = harvest_leaked_artifacts(
         destination,
@@ -337,7 +341,13 @@ def test_harvest_copies_every_default_glob(tmp_path):
     )
 
     by_name = {src.name: dst for src, dst in harvested}
-    assert {"server.log", "gpu_metrics.csv", "profile_run.trace.json.gz", "inferencex_result.json"} <= set(by_name)
+    assert {
+        "server.log",
+        "gpu_metrics.csv",
+        "profile_run.trace.json.gz",
+        "inferencex_result.json",
+        "results_2026.json",
+    } <= set(by_name)
     for dst in by_name.values():
         assert dst.parent == destination
         assert dst.exists()
@@ -526,6 +536,32 @@ def test_harvest_default_roots_include_inferencex_and_result_dir(tmp_path, monke
     harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=None)
     names = {src.name for src, _ in harvested}
     assert {"inferencex_result.json", "gpu_metrics.csv"} <= names
+
+
+def test_harvest_salvages_leaked_eval_results_json(tmp_path, monkeypatch):
+    """#927: eval ``results*.json`` that leaked to ``$INFERENCEX_PATH`` (via
+    ``append_lm_eval_summary``'s ``mv ./``) is harvested back into the session,
+    so ``parse_eval_results`` (globs ``**/results*.json``) can still find it
+    even when the patcher-based redirect missed."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", raising=False)
+    monkeypatch.delenv("RESULT_DIR", raising=False)
+    ix_root = tmp_path / "InferenceX@abc123"
+    destination = tmp_path / "session" / "runs" / "baseline"
+    destination.mkdir(parents=True)
+    _touch(
+        ix_root / "results_2026-07-17.json",
+        json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.6694}}}),
+    )
+    monkeypatch.setenv("INFERENCEX_PATH", str(ix_root))
+
+    harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=None)
+
+    by_name = {src.name: dst for src, dst in harvested}
+    assert "results_2026-07-17.json" in by_name
+    copied = by_name["results_2026-07-17.json"]
+    assert copied.parent == destination and copied.exists()
+    # The source is never moved (harvest copies).
+    assert (ix_root / "results_2026-07-17.json").exists()
 
 
 def test_rescue_candidate_paths_scan_inferencex_checkout(tmp_path, monkeypatch):

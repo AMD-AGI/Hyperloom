@@ -39,7 +39,7 @@ done
 # (this script lives at src/hyperloom/agents/kernel/scripts/install.sh, so
 # KERNEL_AGENT_ROOT is one level up and REPO_ROOT is five levels up).
 # Operator-provided read-only inputs
-# (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT, HYPERLOOM_BUNDLE)
+# (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT)
 # may stay outside USER_DATA_PATH.
 # The default public TraceLens checkout is cloned under USER_DATA_PATH/runtime
 # like Magpie/InferenceX so its env path is safe across pods.
@@ -62,12 +62,11 @@ HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
 # Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
-# Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
-# so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
-# Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
-# /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
+# Writable, repo-local base for auto-cloned open-source deps: $HYPERLOOM_CACHE_DIR
+# else $REPO_ROOT/.cache. Deps are cloned per revision (<name>@<sha>) under it, so
+# open-source runs need no privileged /opt mount. A non-ephemeral dir (NOT /tmp,
+# which a reaper can wipe mid-run, leaving TRACELENS_ROOT dangling — #722).
 _open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
-HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-}"
 # MAGPIE_PATH is the single override shared with the Python runtime; a standalone
 # run never clones upstream Magpie when MAGPIE_PATH is set.
 MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
