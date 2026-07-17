@@ -251,6 +251,39 @@ def test_seed_shared_state_falls_back_to_path_basename(
     assert state.model_name == "Qwen3-32B"
 
 
+def test_seed_passes_raw_model_path_to_model_arch_guard(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Regression for #930: the stale guard needs the raw ``--model`` path so an
+    HF cache ``models--org--repo/snapshots/<hash>`` launch can recover the repo
+    name; passing only the collapsed identity loses it."""
+    captured: dict[str, tuple] = {}
+
+    def _spy(*args, **_kwargs):
+        captured["args"] = args
+        return {}
+
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", _spy)
+    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
+    monkeypatch.setattr(
+        cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""),
+    )
+    from hyperloom.orchestrator.policy import gate as policy
+
+    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
+
+    raw = (
+        "/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/"
+        "snapshots/a09a35458c702b33eeacc393d103063234e8bc28"
+    )
+    cb._seed_shared_state(tmp_path, _args(model=raw), session_id="s-raw")
+
+    assert captured["args"][2] == raw
+
+
 def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
     """Regression: ``manifest.json`` ``model_name`` must honor the pinned
     display name from the quantize prelude, not the collapsed path basename."""
