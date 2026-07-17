@@ -785,9 +785,13 @@ def _build_restart_entrypoint(
         f"cat > \"$WORK_DIR/launch_server.sh\" <<'__MN_LAUNCH_EOF__'\n"
         f"{launch_sh}__MN_LAUNCH_EOF__\n"
         'chmod +x "$WORK_DIR/kill_server.sh" "$WORK_DIR/launch_server.sh"; '
-        f'"$WORK_DIR/kill_server.sh" {pid_file!s}; '
-        f'"$WORK_DIR/launch_server.sh" {framework!s} {args.model!s} {args.tp!s} '
-        f"{pid_file!s} {log_file!s} {wait_flag} -- {args.extra_args}"
+        f'"$WORK_DIR/kill_server.sh" {shlex.quote(str(pid_file))}; '
+        # shlex.quote every interpolated value so a path/arg carrying shell
+        # metacharacters is a single argv token, never shell control syntax.
+        f'"$WORK_DIR/launch_server.sh" {shlex.quote(str(framework))} '
+        f"{shlex.quote(str(args.model))} {shlex.quote(str(args.tp))} "
+        f"{shlex.quote(str(pid_file))} {shlex.quote(str(log_file))} "
+        f"{wait_flag} -- {args.extra_args}"
     )
     return entrypoint
 
@@ -995,9 +999,9 @@ def _build_multinode_launch_entrypoint(
         if dtp > 0:
             chunks.append(f"--pd-decode-tp {dtp}")
         if tb:
-            chunks.append(f"--pd-transfer-backend {tb}")
+            chunks.append(f"--pd-transfer-backend {shlex.quote(str(tb))}")
         if ib:
-            chunks.append(f"--pd-ib-device {ib}")
+            chunks.append(f"--pd-ib-device {shlex.quote(str(ib))}")
         if bp > 0:
             chunks.append(f"--pd-bootstrap-port {bp}")
         pd_args = " ".join(chunks) + " "
@@ -1006,7 +1010,10 @@ def _build_multinode_launch_entrypoint(
         f"cat > \"$WORK_DIR/launch_multinode.py\" <<'__MN_LAUNCH_PY_EOF__'\n"
         f"{py}__MN_LAUNCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/launch_multinode.py" '
-        f"--framework {args.framework!s} --model {args.model!s} "
+        # shlex.quote framework/model so a value with shell metacharacters
+        # stays a single argv token (tp/nnodes are int-coerced above).
+        f"--framework {shlex.quote(str(args.framework))} "
+        f"--model {shlex.quote(str(args.model))} "
         f"--tp {args.tp!s} --nnodes {nnodes!s} "
         f"--pid-dir {pid_dir!s} --log-dir {log_dir!s} "
         f"{ep_arg}{profiler_arg}{pd_args}{wait_flag} --extra-args {shlex.quote(str(extra_args))}"
