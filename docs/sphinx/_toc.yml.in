@@ -9,7 +9,7 @@ subtrees:
     title: What is Hyperloom?
   - file: release-notes.md
     title: Release notes
-  - file: compatibility.md
+  - file: compatibility.rst
     title: Compatibility matrix
 
 - caption: Install

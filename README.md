@@ -61,7 +61,7 @@ If you encounter any problem or bugs while running Hyperloom, feel free to open 
 | Authentication and credentials | [Authentication & credentials](docs/reference/authentication.md) |
 | Environment variables | [Environment variables](docs/reference/environment-variables.md) |
 | Components | [Components](docs/components/index.md) |
-| Compatibility | [Compatibility matrix](docs/compatibility.md) |
+| Compatibility | [Compatibility matrix](docs/compatibility.rst) |
 | Troubleshooting | [Troubleshooting](docs/reference/troubleshooting.md) |
 | Operations | [Operations & self-hosting](docs/reference/operations.md) |
 | Session output schema | [`session_breakdown.json`](docs/reference/session-breakdown.md) |
