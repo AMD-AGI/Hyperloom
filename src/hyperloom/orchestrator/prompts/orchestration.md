@@ -93,11 +93,13 @@ the per-phase budget cap, or a terminal `stop_reason` exit
 EXPLORE / KERNEL_AGENT / SWEEP; the wall-clock deadline routes to CLOSE.
 
 **Cyclic macro-cycles (default on).**
-On long / unbounded runs the chain is *not* a single one-way pass: after
-SWEEP the Coordinator **loops back** to FRAMEWORK / EXPLORE to open a
-**new macro-cycle** (`reason=cycle_reloop`) while session budget and
-leverage remain, only winding down to CLOSE once the run globally
-converges (no per-cycle gain for several cycles) or the deadline hits.
+The chain is *not* a single one-way pass: after SWEEP the Coordinator
+**loops back** to FRAMEWORK / EXPLORE to open a **new macro-cycle**
+(`reason=cycle_reloop`) while session budget and leverage remain, only
+winding down to CLOSE once the run globally converges (no per-cycle gain
+for several cycles), saturates, or the deadline hits. Short bounded runs
+can reloop too; they keep charge-back phase budgeting while long /
+unbounded runs use the fixed per-cycle budget window.
 The accepted `optimization_stack` and `cumulative_gain_validated` carry
 across cycles. **Consequence:** advancing OUT of the current phase never
 "strands" an idea — a config/param lever you cannot pursue in this phase

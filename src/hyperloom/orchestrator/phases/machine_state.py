@@ -308,7 +308,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "plateau_kernel",
         "explore_phase_budget_exhausted",
         "kernel_phase_budget_exhausted",
-        "explore_budget_cap",  # EXPLORE → next phase at the absolute per-phase wall-clock cap (long/unbounded runs)
+        "explore_budget_cap",  # EXPLORE → next phase at the absolute per-phase wall-clock cap
         "kernel_budget_cap",  # KERNEL_AGENT → SWEEP at the absolute per-phase wall-clock cap
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
         "sweep_done",
@@ -562,9 +562,8 @@ def decaying_keep_threshold_pct(macro_cycle: int, *, multi_node: bool = False) -
 def is_cyclic_phases_enabled() -> bool:
     """Whether the cyclic phase machine is enabled.
 
-    Enabled by default. The macro-cycle behaviour additionally requires a
-    long/unbounded budget (see :func:`is_long_run`) so short bounded runs never
-    loop in practice.
+    Enabled by default. Macro-cycle reloop is available for all session budgets;
+    :func:`is_long_run` only selects the budget accounting mode.
 
     Returns:
         bool: Always ``True``.
@@ -572,23 +571,20 @@ def is_cyclic_phases_enabled() -> bool:
     return True
 
 
-# Long-run gate. The cyclic macro-cycle behaviour (per-cycle budget window +
-# SWEEP→EXPLORE reloop) engages for unbounded runs or bounded runs at least as
-# long as this threshold. A short bounded run (``--max-hours < 24``) stays on
-# the legacy single-pass chain with whole-run phase budgets, regardless of the
-# (default-on) cyclic env flag. Gating on the budget (not just the env flag)
-# keeps short-run phase budgets spanning the whole run rather than being
-# compressed to the cycle window (DEFAULT_CYCLE_HOURS).
+# Long-run budget threshold. Long/unbounded runs use the per-cycle budget window;
+# short bounded runs keep charge-back phase budgeting against the remaining
+# session time even though they can now open new macro-cycles.
 DEFAULT_LONGRUN_THRESHOLD_MINUTES: float = 24 * 60
 
 
 def is_long_run(state: Any) -> bool:
-    """True when the session budget justifies cyclic macro-cycling.
+    """True when the session budget should use long-run budget accounting.
 
     Unbounded runs (``max_minutes`` == 0, i.e. the 14-day ceiling) and bounded
     runs at least as long as :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES` are
-    "long". Everything ``< 24h`` is a short bounded run and must behave like
-    the legacy monotonic chain.
+    "long". Everything ``< 24h`` is a short bounded run: it may still open
+    macro-cycles, but keeps charge-back phase budgeting instead of the fixed
+    per-cycle window.
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes``.
@@ -659,12 +655,6 @@ def should_reloop_to_explore(
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
     evidence: dict[str, Any] = {"cyclic": is_cyclic_phases_enabled(), "macro_cycle": cycle}
     if not is_cyclic_phases_enabled():
-        return False, evidence
-
-    # Short bounded runs (``--max-hours < 24``) never open a new macro-cycle;
-    # they wind down to CLOSE on a single pass.
-    if not is_long_run(state):
-        evidence["reloop_blocked"] = "short_run_single_pass"
         return False, evidence
 
     # Per-cycle gain since this cycle started → effective no-gain streak. A cycle
