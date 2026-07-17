@@ -279,39 +279,32 @@ def _setup_worktree(
 
 
 class _RayLeaseProcess:
-    """``Popen``-like adapter for a specialist that runs inside a Ray actor.
-
-    Ray-managed GPU execution (P2/T4): when a ``needs_gpu`` specialist runs
-    inside a :class:`~hyperloom.orchestrator.actions.executors._ray_serving.GpuSpecialistLease`
-    actor, the ``Popen`` object lives in the actor's worker, not here. This
-    exposes only the members the reap loop touches — ``poll`` / ``returncode`` /
-    ``pid`` — backed by the lease's actor methods, plus ``reap`` (reap the
-    subprocess tree via the actor; the lease itself is released by the
-    dispatcher's ``finally``). Single-node: the subprocess is on this same host,
-    so ``process.log`` and the worktree it writes are read locally.
-    """
+    """``Popen``-like adapter for a specialist that runs inside a Ray actor."""
 
     def __init__(self, lease: Any, pid: int) -> None:
-        """Wrap a started lease + the launched pid.
-
-        Args:
-            lease: The started ``GpuSpecialistLease``.
-            pid: The launched subprocess pid.
-        """
         self._lease = lease
         self.pid = pid
         self.returncode: int | None = None
 
     def poll(self) -> int | None:
-        """Return ``None`` while the actor's subprocess runs, else its exit code.
+        """Return ``None`` while running; exit code once done.
 
-        Returns:
-            ``None`` when still alive, otherwise the exit code (latched into
-            ``returncode``).
+        When the actor is unreachable (dead) and ``exit_code()`` is ``None``,
+        latches :data:`_RAY_ACTOR_DIED_RC` so the reap loop treats it as a
+        real failure immediately rather than looping until the wall-clock cap.
         """
+        from hyperloom.orchestrator.actions.executors._ray_serving import (  # noqa: PLC0415
+            _RAY_ACTOR_DIED_RC,
+        )
+
+        if self.returncode is not None:
+            return self.returncode
         if self._lease.is_alive():
             return None
-        self.returncode = self._lease.exit_code()
+        rc = self._lease.exit_code()
+        if rc is None:
+            rc = _RAY_ACTOR_DIED_RC
+        self.returncode = rc
         return self.returncode
 
     def reap(self) -> None:
