@@ -520,9 +520,7 @@ def summarize_model_config(model_path: str) -> dict:
                 num_shared = ns
                 break
         shared_evidence = (
-            num_shared > 0
-            or bool(cfg.get("shared_expert_intermediate_size"))
-            or bool(cfg.get("shared_experts"))
+            num_shared > 0 or bool(cfg.get("shared_expert_intermediate_size")) or bool(cfg.get("shared_experts"))
         )
         if shared_evidence:
             out["has_shared_expert"] = True

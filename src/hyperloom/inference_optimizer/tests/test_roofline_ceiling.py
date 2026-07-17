@@ -623,12 +623,8 @@ class TestSeparateExpertDtype:
         assert pm is not None
         assert any(op.name == "moe_fused" for op in pm.ops)
 
-        fp4_peak = compute_peak_from_state(
-            SimpleNamespace(model_path=str(tmp_path / "fp4"), **state_kwargs)
-        )
-        degraded_peak = compute_peak_from_state(
-            SimpleNamespace(model_path=str(tmp_path / "degraded"), **state_kwargs)
-        )
+        fp4_peak = compute_peak_from_state(SimpleNamespace(model_path=str(tmp_path / "fp4"), **state_kwargs))
+        degraded_peak = compute_peak_from_state(SimpleNamespace(model_path=str(tmp_path / "degraded"), **state_kwargs))
         assert fp4_peak > 0.0
         # Counting the fp4 expert IO must pull the ceiling well below the
         # attention-only (MoE-dropped) estimate that produced within% ~= 2.6%.
@@ -1077,6 +1073,7 @@ class TestComputePeakProvenance:
 
     def test_achievable_convention_and_value(self):
         from hyperloom.orchestrator.kernel.roofline_ceiling import resolve_compute_peak_provenance
+
         prov = resolve_compute_peak_provenance("mi300x", "bf16")
         assert prov["compute_peak_convention"] == "achievable"
         assert prov["compute_peak_tflops"] == _resolve_achievable_tflops("mi300x", "bf16")  # 708
@@ -1084,6 +1081,7 @@ class TestComputePeakProvenance:
 
     def test_unknown_gpu_is_unknown_convention(self):
         from hyperloom.orchestrator.kernel.roofline_ceiling import resolve_compute_peak_provenance
+
         prov = resolve_compute_peak_provenance("h100", "bf16")
         assert prov["compute_peak_convention"] == "unknown"
         assert prov["compute_peak_tflops"] == 0.0
@@ -1097,8 +1095,14 @@ class TestDiffusionComputeCeiling:
         L, H, T, steps = 20, 2240, 1024, 20
         dit_params = 12 * L * H * H
         img_s = compute_diffusion_compute_img_per_sec(
-            gpu_type="mi325x", num_gpus=1, precision_tag="bf16",
-            dit_params=dit_params, latent_tokens=T, num_layers=L, hidden_size=H, num_steps=steps,
+            gpu_type="mi325x",
+            num_gpus=1,
+            precision_tag="bf16",
+            dit_params=dit_params,
+            latent_tokens=T,
+            num_layers=L,
+            hidden_size=H,
+            num_steps=steps,
         )
         peak = _resolve_achievable_tflops("mi325x", "bf16") * 1e12  # 843e12
         flops_per_image = steps * (2.0 * dit_params * T + 4.0 * L * T * T * H)
@@ -1107,18 +1111,30 @@ class TestDiffusionComputeCeiling:
 
     def test_compute_ceiling_uses_achievable_not_vendor(self):
         common = dict(
-            gpu_type="mi300x", num_gpus=1, precision_tag="bf16",
-            dit_params=1_000_000_000, latent_tokens=1024, num_layers=20, hidden_size=2048, num_steps=20,
+            gpu_type="mi300x",
+            num_gpus=1,
+            precision_tag="bf16",
+            dit_params=1_000_000_000,
+            latent_tokens=1024,
+            num_layers=20,
+            hidden_size=2048,
+            num_steps=20,
         )
         img_s = compute_diffusion_compute_img_per_sec(**common)
-        flops = 20 * (2.0 * 1e9 * 1024 + 4.0 * 20 * 1024 ** 2 * 2048)
+        flops = 20 * (2.0 * 1e9 * 1024 + 4.0 * 20 * 1024**2 * 2048)
         assert img_s == pytest.approx((_resolve_achievable_tflops("mi300x", "bf16") * 1e12) / flops, rel=1e-9)
         assert img_s != pytest.approx((_resolve_peak_tflops("mi300x", "bf16") * 1e12) / flops, rel=1e-3)
 
     def test_compute_ceiling_zero_on_degenerate(self):
         base = dict(
-            gpu_type="mi300x", num_gpus=1, precision_tag="bf16",
-            dit_params=1_000_000_000, latent_tokens=1024, num_layers=20, hidden_size=2048, num_steps=20,
+            gpu_type="mi300x",
+            num_gpus=1,
+            precision_tag="bf16",
+            dit_params=1_000_000_000,
+            latent_tokens=1024,
+            num_layers=20,
+            hidden_size=2048,
+            num_steps=20,
         )
         assert compute_diffusion_compute_img_per_sec(**{**base, "dit_params": 0}) == 0.0
         assert compute_diffusion_compute_img_per_sec(**{**base, "num_steps": 0}) == 0.0
@@ -1126,12 +1142,20 @@ class TestDiffusionComputeCeiling:
 
     def test_read_dit_meta_from_transformer_config(self, tmp_path):
         import json as _json
+
         td = tmp_path / "transformer"
         td.mkdir()
-        (td / "config.json").write_text(_json.dumps({
-            "num_layers": 20, "num_attention_heads": 70, "attention_head_dim": 32,
-            "patch_size": 1, "sample_size": 32,
-        }))
+        (td / "config.json").write_text(
+            _json.dumps(
+                {
+                    "num_layers": 20,
+                    "num_attention_heads": 70,
+                    "attention_head_dim": 32,
+                    "patch_size": 1,
+                    "sample_size": 32,
+                }
+            )
+        )
         dit = _read_diffusion_dit_meta(str(tmp_path))
         assert dit is not None
         dit_params, latent_tokens, num_layers, hidden = dit
@@ -1144,16 +1168,24 @@ class TestDiffusionComputeCeiling:
 
     def _rt(self):
         return RuntimeWorkload(
-            model_path="/x", gpu_type="mi325x", precision="bf16", framework="xdit",
-            tp=1, concurrency=1, isl=0, osl=0, server_args="",
+            model_path="/x",
+            gpu_type="mi325x",
+            precision="bf16",
+            framework="xdit",
+            tp=1,
+            concurrency=1,
+            isl=0,
+            osl=0,
+            server_args="",
         )
 
     def test_breakdown_takes_min_compute_bound(self, monkeypatch):
         import types
         import hyperloom.orchestrator.kernel.roofline_ceiling as rc
+
         monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=3_200_000_000))
         monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
-        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp, **k: (12 * 20 * 2240 ** 2, 1024, 20, 2240))
+        monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp, **k: (12 * 20 * 2240**2, 1024, 20, 2240))
         bd = rc._compute_diffusion_breakdown_from_state(object(), self._rt())
         assert bd.cmp_tok_per_sec > 0
         assert bd.mem_tok_per_sec > bd.cmp_tok_per_sec  # memory ceiling is looser
@@ -1163,6 +1195,7 @@ class TestDiffusionComputeCeiling:
     def test_breakdown_degrades_to_memory_without_dit_config(self, monkeypatch):
         import types
         import hyperloom.orchestrator.kernel.roofline_ceiling as rc
+
         monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=3_200_000_000))
         monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
         monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp, **k: None)
@@ -1174,19 +1207,31 @@ class TestDiffusionComputeCeiling:
     # FLUX has no sample_size; latent tokens come from the runtime resolution.
     def _write_flux_configs(self, tmp_path):
         import json as _json
+
         td = tmp_path / "transformer"
         td.mkdir()
-        (td / "config.json").write_text(_json.dumps({
-            "num_layers": 19, "num_single_layers": 38,
-            "num_attention_heads": 24, "attention_head_dim": 128,
-            "patch_size": 1, "in_channels": 64,  # 16 latent ch x 2x2 pack
-        }))
+        (td / "config.json").write_text(
+            _json.dumps(
+                {
+                    "num_layers": 19,
+                    "num_single_layers": 38,
+                    "num_attention_heads": 24,
+                    "attention_head_dim": 128,
+                    "patch_size": 1,
+                    "in_channels": 64,  # 16 latent ch x 2x2 pack
+                }
+            )
+        )
         vd = tmp_path / "vae"
         vd.mkdir()
-        (vd / "config.json").write_text(_json.dumps({
-            "block_out_channels": [128, 256, 512, 512],  # 4 stages -> vae_scale 8
-            "latent_channels": 16,
-        }))
+        (vd / "config.json").write_text(
+            _json.dumps(
+                {
+                    "block_out_channels": [128, 256, 512, 512],  # 4 stages -> vae_scale 8
+                    "latent_channels": 16,
+                }
+            )
+        )
 
     def test_read_dit_meta_flux_no_sample_size_uses_resolution(self, tmp_path):
         self._write_flux_configs(tmp_path)
@@ -1208,12 +1253,20 @@ class TestDiffusionComputeCeiling:
 
     def test_read_dit_meta_sana_unchanged(self, tmp_path):
         import json as _json
+
         td = tmp_path / "transformer"
         td.mkdir()
-        (td / "config.json").write_text(_json.dumps({
-            "num_layers": 20, "num_attention_heads": 70, "attention_head_dim": 32,
-            "patch_size": 1, "sample_size": 32,
-        }))
+        (td / "config.json").write_text(
+            _json.dumps(
+                {
+                    "num_layers": 20,
+                    "num_attention_heads": 70,
+                    "attention_head_dim": 32,
+                    "patch_size": 1,
+                    "sample_size": 32,
+                }
+            )
+        )
         dit = _read_diffusion_dit_meta(str(tmp_path), height=1024, width=1024)
         assert dit is not None
         dit_params, latent_tokens, num_layers, hidden = dit
@@ -1225,13 +1278,21 @@ class TestDiffusionComputeCeiling:
     def test_breakdown_flux_gets_compute_ceiling(self, tmp_path, monkeypatch):
         import types
         import hyperloom.orchestrator.kernel.roofline_ceiling as rc
+
         self._write_flux_configs(tmp_path)
         monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=24_000_000_000))
         monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 28)
         monkeypatch.setattr(rc, "_read_diffusion_resolution", lambda state: (1024, 1024))
         rt = RuntimeWorkload(
-            model_path=str(tmp_path), gpu_type="mi325x", precision="bf16",
-            framework="xdit", tp=1, concurrency=1, isl=0, osl=0, server_args="",
+            model_path=str(tmp_path),
+            gpu_type="mi325x",
+            precision="bf16",
+            framework="xdit",
+            tp=1,
+            concurrency=1,
+            isl=0,
+            osl=0,
+            server_args="",
         )
         bd = rc._compute_diffusion_breakdown_from_state(object(), rt)
         # current code: FLUX -> _read_diffusion_dit_meta None -> cmp == 0 (memory-only)
@@ -1242,13 +1303,21 @@ class TestDiffusionComputeCeiling:
         # When load_model_meta returns None, the resolution-derived DiT meta
         # alone still drives the compute + DiT-only memory ceiling.
         import hyperloom.orchestrator.kernel.roofline_ceiling as rc
+
         self._write_flux_configs(tmp_path)
         monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: None)
         monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
         monkeypatch.setattr(rc, "_read_diffusion_resolution", lambda state: (1024, 1024))
         rt = RuntimeWorkload(
-            model_path=str(tmp_path), gpu_type="mi325x", precision="bf16",
-            framework="xdit", tp=1, concurrency=1, isl=0, osl=0, server_args="",
+            model_path=str(tmp_path),
+            gpu_type="mi325x",
+            precision="bf16",
+            framework="xdit",
+            tp=1,
+            concurrency=1,
+            isl=0,
+            osl=0,
+            server_args="",
         )
         bd = rc._compute_diffusion_breakdown_from_state(object(), rt)
         assert bd.cmp_tok_per_sec > 0  # compute ceiling from DiT meta, no full-weight needed
@@ -1258,19 +1327,31 @@ class TestDiffusionComputeCeiling:
     def test_breakdown_memory_uses_dit_only_bytes(self, monkeypatch):
         import types
         import hyperloom.orchestrator.kernel.roofline_ceiling as rc
-        dit_params = 12 * 20 * 2240 ** 2
+
+        dit_params = 12 * 20 * 2240**2
         monkeypatch.setattr(rc, "load_model_meta", lambda *a, **k: types.SimpleNamespace(weight_bytes=20_000_000_000))
         monkeypatch.setattr(rc, "_read_diffusion_num_steps", lambda state: 20)
         monkeypatch.setattr(rc, "_read_diffusion_resolution", lambda state: (0, 0))
         monkeypatch.setattr(rc, "_read_diffusion_dit_meta", lambda mp, **k: (dit_params, 1024, 20, 2240))
         rt = RuntimeWorkload(
-            model_path="/x", gpu_type="mi325x", precision="bf16",
-            framework="xdit", tp=1, concurrency=1, isl=0, osl=0, server_args="",
+            model_path="/x",
+            gpu_type="mi325x",
+            precision="bf16",
+            framework="xdit",
+            tp=1,
+            concurrency=1,
+            isl=0,
+            osl=0,
+            server_args="",
         )
         bd = rc._compute_diffusion_breakdown_from_state(object(), rt)
         dit_bytes = int(dit_params * 2)  # bf16
-        expected = rc.compute_diffusion_mem_img_per_sec(gpu_type="mi325x", num_gpus=1, weight_bytes=dit_bytes, num_steps=20)
-        full = rc.compute_diffusion_mem_img_per_sec(gpu_type="mi325x", num_gpus=1, weight_bytes=20_000_000_000, num_steps=20)
+        expected = rc.compute_diffusion_mem_img_per_sec(
+            gpu_type="mi325x", num_gpus=1, weight_bytes=dit_bytes, num_steps=20
+        )
+        full = rc.compute_diffusion_mem_img_per_sec(
+            gpu_type="mi325x", num_gpus=1, weight_bytes=20_000_000_000, num_steps=20
+        )
         # current code feeds the full 20GB checkpoint -> too-low memory ceiling
         assert bd.mem_tok_per_sec == pytest.approx(expected, rel=1e-9)
         assert bd.mem_tok_per_sec > full
@@ -1302,8 +1383,12 @@ class TestComputeBoundCeiling:
         vendor = _resolve_peak_tflops("mi300x", "bf16")
         assert 0 < ach < vendor  # distinct conventions (708 < 1307.4)
         kwargs = dict(
-            gpu_type="mi300x", num_gpus=1, precision_tag="bf16",
-            active_weight_bytes=2_000_000_000, weight_bytes=2_000_000_000, weight_dtype_bytes=2.0,
+            gpu_type="mi300x",
+            num_gpus=1,
+            precision_tag="bf16",
+            active_weight_bytes=2_000_000_000,
+            weight_bytes=2_000_000_000,
+            weight_dtype_bytes=2.0,
         )
         cmp = compute_compute_bound_ceiling_tok_per_sec(**kwargs)
         flops_per_token = 2.0 * 2_000_000_000 / 2.0
@@ -1837,6 +1922,7 @@ class TestPerfModelBreakdown:
         assert total_pct == pytest.approx(1.0, abs=1e-6)
         # bound_kind must be one of the valid values
         assert result.bound_kind in ("memory", "compute", "unknown")
+
 
 # ---------------------------------------------------------------------------
 # PerfModel MoE formula correctness
@@ -2743,14 +2829,29 @@ class TestDiffusionCeiling:
 
     def test_xdit_framework_routes_to_diffusion_branch(self, monkeypatch):
         # Avoid disk: stub the model meta + step-count readers.
-        monkeypatch.setattr(_rc, "load_model_meta", lambda *a, **k: ModelMeta(
-            weight_bytes=6_000_000_000, weight_dtype_bytes=1.0, num_layers=30,
-            num_kv_heads=0, head_dim=0, hidden_size=0,
-        ))
+        monkeypatch.setattr(
+            _rc,
+            "load_model_meta",
+            lambda *a, **k: ModelMeta(
+                weight_bytes=6_000_000_000,
+                weight_dtype_bytes=1.0,
+                num_layers=30,
+                num_kv_heads=0,
+                head_dim=0,
+                hidden_size=0,
+            ),
+        )
         monkeypatch.setattr(_rc, "_read_diffusion_num_steps", lambda state: 28)
         state = SimpleNamespace(
-            framework="xdit", gpu_type="mi300x", model_path="/fake/dit", precision="bf16",
-            tp=1, conc=1, isl=0, osl=0, last_baseline=None,
+            framework="xdit",
+            gpu_type="mi300x",
+            model_path="/fake/dit",
+            precision="bf16",
+            tp=1,
+            conc=1,
+            isl=0,
+            osl=0,
+            last_baseline=None,
         )
         bd = compute_roofline_breakdown_from_state(state, arm="baseline")
         assert bd.bound_kind == "memory"
@@ -2759,14 +2860,29 @@ class TestDiffusionCeiling:
         assert bd.peak_tok_per_sec == pytest.approx(bd.mem_tok_per_sec, rel=1e-9)
 
     def test_xdit_missing_steps_returns_empty(self, monkeypatch):
-        monkeypatch.setattr(_rc, "load_model_meta", lambda *a, **k: ModelMeta(
-            weight_bytes=6_000_000_000, weight_dtype_bytes=1.0, num_layers=30,
-            num_kv_heads=0, head_dim=0, hidden_size=0,
-        ))
+        monkeypatch.setattr(
+            _rc,
+            "load_model_meta",
+            lambda *a, **k: ModelMeta(
+                weight_bytes=6_000_000_000,
+                weight_dtype_bytes=1.0,
+                num_layers=30,
+                num_kv_heads=0,
+                head_dim=0,
+                hidden_size=0,
+            ),
+        )
         monkeypatch.setattr(_rc, "_read_diffusion_num_steps", lambda state: 0)
         state = SimpleNamespace(
-            framework="xdit", gpu_type="mi300x", model_path="/fake/dit", precision="bf16",
-            tp=1, conc=1, isl=0, osl=0, last_baseline=None,
+            framework="xdit",
+            gpu_type="mi300x",
+            model_path="/fake/dit",
+            precision="bf16",
+            tp=1,
+            conc=1,
+            isl=0,
+            osl=0,
+            last_baseline=None,
         )
         bd = compute_roofline_breakdown_from_state(state, arm="baseline")
         assert bd.bound_kind == "unknown"

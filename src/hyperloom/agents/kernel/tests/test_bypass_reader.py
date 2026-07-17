@@ -82,7 +82,7 @@ def test_timeline_union_math(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
     tl = reader.analyze_trace(tf, top_k=0)["timeline"]
     assert tl["total_time_ms"] == 0.75  # (1750 - 1000) us
-    assert tl["busy_time_ms"] == 0.55   # 200 + 300 + 50 us (disjoint)
+    assert tl["busy_time_ms"] == 0.55  # 200 + 300 + 50 us (disjoint)
     assert tl["idle_time_ms"] == 0.2
     assert tl["kernel_union_ms"] == 0.5
     assert tl["gpu_memcpy_ms"] == 0.05
@@ -182,8 +182,7 @@ def _write_capture_fragment(capture_dir: Path, batch_size: int, rank: int = 0) -
     # couple of device kernels (the real workload is not captured here).
     capture_dir.mkdir(parents=True, exist_ok=True)
     events = [
-        {"cat": "kernel", "ph": "X", "name": "graph_capture_marker",
-         "ts": 0, "dur": 1, "args": {"correlation": 1}},
+        {"cat": "kernel", "ph": "X", "name": "graph_capture_marker", "ts": 0, "dur": 1, "args": {"correlation": 1}},
     ]
     p = capture_dir / f"bs_{batch_size}_rank{rank}.json.gz"
     with gzip.open(p, "wb") as f:
@@ -375,9 +374,9 @@ def test_select_steady_window_high_count_loop_not_masked_by_spurious_step():
 
 
 def test_select_steady_window_prefers_step_marker_over_higher_count():
-    windows = [
-        {"name": f"ProfilerStep#{i}", "ts": float(i * 100), "dur": 100.0} for i in range(1, 5)
-    ] + [{"name": "elementwise_region", "ts": float(500 + i * 10), "dur": 10.0} for i in range(10)]
+    windows = [{"name": f"ProfilerStep#{i}", "ts": float(i * 100), "dur": 100.0} for i in range(1, 5)] + [
+        {"name": "elementwise_region", "ts": float(500 + i * 10), "dur": 10.0} for i in range(10)
+    ]
     win = reader.select_steady_window(windows)
     assert win is not None
     # Step marker wins over the higher-count non-step group.
@@ -414,8 +413,8 @@ def test_analyze_steady_state_filters_to_window(tmp_path):
     assert steady["attribution"]["kernel_count"] == 1
     # Timeline is scoped to the representative step's wall span (ts 200..300us).
     tl = steady["timeline"]
-    assert tl["total_time_ms"] == 0.1   # 100us window span
-    assert tl["busy_time_ms"] == 0.03   # single 30us kernel, fully inside
+    assert tl["total_time_ms"] == 0.1  # 100us window span
+    assert tl["busy_time_ms"] == 0.03  # single 30us kernel, fully inside
     assert tl["idle_time_ms"] == 0.07
     assert tl["busy_pct"] == 30.0
 
@@ -481,7 +480,14 @@ def test_truncated_trace_recovers_complete_events(tmp_path):
     # Emulate a profiler that died mid-write: a complete first kernel followed
     # by a cut-off second object. The streaming reader must yield the complete
     # event(s) and stop cleanly at the truncation instead of raising.
-    good = {"cat": "kernel", "ph": "X", "name": "paged_attention_v1", "ts": 1000, "dur": 300, "args": {"correlation": 1}}
+    good = {
+        "cat": "kernel",
+        "ph": "X",
+        "name": "paged_attention_v1",
+        "ts": 1000,
+        "dur": 300,
+        "args": {"correlation": 1},
+    }
     text = '{"traceEvents": [' + json.dumps(good) + ', {"cat": "kernel", "ph": "X", "name": "Cij'
     tf = tmp_path / "truncated.trace.json"
     tf.write_bytes(text.encode("utf-8"))

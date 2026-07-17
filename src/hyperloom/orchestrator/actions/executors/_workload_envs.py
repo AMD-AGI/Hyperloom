@@ -80,6 +80,7 @@ def _remove_moe_runner_backend_arg(args: str) -> str:
     """Remove any existing SGLang MoE runner backend flag from an args string."""
     return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
 
+
 # Warn once per process when the accuracy gate is disabled.
 _RUN_EVAL_DISABLED_WARN_EMITTED = False
 
@@ -468,10 +469,7 @@ def materialize_config_with_envs(
         # Cap captured decode steps at a serialization-safe default so the
         # torch-profiler trace can be written without starving the engine RPC.
         try:
-            cap = int(
-                os.environ.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "").strip()
-                or _DEFAULT_PROFILE_MAX_STEPS
-            )
+            cap = int(os.environ.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "").strip() or _DEFAULT_PROFILE_MAX_STEPS)
         except (TypeError, ValueError):
             cap = _DEFAULT_PROFILE_MAX_STEPS
         if cap < 1:
@@ -501,7 +499,9 @@ def materialize_config_with_envs(
                     "state, above the profile cap of %d; the trace may lack a "
                     "steady-state window (trace_split_no_steady_state). Lower "
                     "--profile-osl or raise HYPERLOOM_PROFILE_MAX_STEPS_CAP.",
-                    osl_val, steady_floor, cap,
+                    osl_val,
+                    steady_floor,
+                    cap,
                 )
             else:
                 # Auto path: lower the profile OSL so the floor fits the cap.
@@ -510,7 +510,10 @@ def materialize_config_with_envs(
                     "profile OSL %d would need %d captured steps to reach "
                     "steady state (> cap %d); lowering profile OSL to %d so the "
                     "capture stays serializable. Baseline/optimize unaffected.",
-                    osl_val, steady_floor, cap, fitted_osl,
+                    osl_val,
+                    steady_floor,
+                    cap,
+                    fitted_osl,
                 )
                 osl_val = fitted_osl
                 safe_osl = max(osl_val, 1)
@@ -541,14 +544,16 @@ def materialize_config_with_envs(
                     "HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state "
                     "floor of %d; the trace may lack a steady-state window "
                     "(trace_split_no_steady_state).",
-                    max_iters, steady_floor,
+                    max_iters,
+                    steady_floor,
                 )
             elif max_iters > cap:
                 log.warning(
                     "HYPERLOOM_PROFILE_MAX_ITERS=%d exceeds the serialization-"
                     "safe cap of %d; the trace may be too large to serialize "
                     "(EngineCore RPC timeout).",
-                    max_iters, cap,
+                    max_iters,
+                    cap,
                 )
         # NUM_PROMPTS must let the engine reach ``delay_iters + max_iters``
         # decode steps before running out of prompts (N prompts ≈ N * OSL / CONC
@@ -575,9 +580,7 @@ def materialize_config_with_envs(
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
             if not tracelens_patch_ok:
                 envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
-                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = (
-                    "tracelens_runtime_patch_unavailable"
-                )
+                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = "tracelens_runtime_patch_unavailable"
                 log.warning(
                     "TraceLens runtime patch unavailable for framework=%s; "
                     "profile will omit annotation-only flags and roofline "
@@ -687,11 +690,10 @@ def materialize_config_with_envs(
     ref_args = (reference_server_args or "").strip()
     if ref_args:
         from ._grid_runner import merge_server_args
+
         _ref_fw_env = server_args_env_name(bench.get("framework"))
         _ref_existing = str(envs.get(_ref_fw_env, "")).strip()
-        envs[_ref_fw_env] = (
-            merge_server_args(ref_args, _ref_existing) if _ref_existing else ref_args
-        )
+        envs[_ref_fw_env] = merge_server_args(ref_args, _ref_existing) if _ref_existing else ref_args
     safe_reference_envs, dropped_reference_envs = filter_untrusted_env_mapping(
         reference_envs,
         allow_predicate=valid_env_key,
@@ -751,9 +753,7 @@ def materialize_config_with_envs(
             envs["XDIT_QUALITY_REF_WRITE"] = ""
         elif establish_quality_ref:
             envs["XDIT_QUALITY_REF"] = ""
-            envs["XDIT_QUALITY_REF_WRITE"] = (
-                os.environ.get("XDIT_QUALITY_REF_WRITE", "").strip() or _qref
-            )
+            envs["XDIT_QUALITY_REF_WRITE"] = os.environ.get("XDIT_QUALITY_REF_WRITE", "").strip() or _qref
         else:
             envs["XDIT_QUALITY_REF"] = _qref
             envs["XDIT_QUALITY_REF_WRITE"] = ""
@@ -763,9 +763,7 @@ def materialize_config_with_envs(
         # registry-correct) vs the full path ("path", which fails lookup). Force
         # it onto benchmark.envs here so per-task overrides can't break model
         # resolution. Default "name".
-        envs["XDIT_MODEL_ARG"] = (
-            os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
-        )
+        envs["XDIT_MODEL_ARG"] = os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
         # ── Global model root for xDiT local-snapshot resolution ──────────
         # If set, the baked hyperloom_local_aliases map each registered name to
         # a local snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>. Leave unset in
@@ -780,9 +778,7 @@ def materialize_config_with_envs(
         # poison the reference measurement. Explore/sweep variants keep their
         # freedom to try alternative backends.
         if establish_quality_ref:
-            envs["XDIT_ATTENTION_BACKEND"] = (
-                os.environ.get("XDIT_ATTENTION_BACKEND", "").strip() or "aiter"
-            )
+            envs["XDIT_ATTENTION_BACKEND"] = os.environ.get("XDIT_ATTENTION_BACKEND", "").strip() or "aiter"
     # ── Per-model MI300X baseline work-arounds ─────────────────────────
     # A handful of flagship models SIGABRT during CUDA-graph capture on the
     # sglang ROCm image because their DEFAULT fused kernels are buggy on
@@ -917,7 +913,8 @@ def materialize_config_with_envs(
     #    compact each JSON blob to be space-free so it survives as one shell
     #    word. No-op for sglang and for arg strings with no JSON.
     resolved_server_args = compact_json_server_args(
-        resolved_server_args, bench.get("framework"),
+        resolved_server_args,
+        bench.get("framework"),
     )
     resolved_server_args = validate_server_args_shell_safe(resolved_server_args)
     if resolved_server_args:
@@ -953,9 +950,7 @@ def materialize_config_with_envs(
             from ._grid_runner import merge_server_args
 
             envs[framework_env] = (
-                merge_server_args(_trust_existing, "--trust-remote-code")
-                if _trust_existing
-                else "--trust-remote-code"
+                merge_server_args(_trust_existing, "--trust-remote-code") if _trust_existing else "--trust-remote-code"
             )
     # Accuracy eval (GSM8K) is ON by default; env / extra_envs may override.
     # Disabling it removes the per-variant accuracy gate — warn loudly, never
@@ -977,11 +972,7 @@ def materialize_config_with_envs(
     # patch, scoped to sglang + the env present. Fail-soft (a failed patch leaves
     # the env a no-op). Honors the HYPERLOOM_ENABLE_PATCH kill switch.
     _fw = str(bench.get("framework") or "").lower()
-    if (
-        _tracelens_patch_enabled()
-        and "sglang" in _fw
-        and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs
-    ):
+    if _tracelens_patch_enabled() and "sglang" in _fw and "SGLANG_FP8_BLOCKSCALE_CK_MAX_M" in envs:
         if not ensure_sglang_patched_for_ck_blockscale():
             log.warning(
                 "CK fp8 block-scale patch could not be applied; "
@@ -1002,8 +993,7 @@ def materialize_config_with_envs(
     if (
         "sglang" in _fw
         and str(bench.get("precision") or "").strip().lower() == "fp8"
-        and _resolve_amd_gpu_type(gpu_type or bench.get("runner_type"))
-        in _GFX942_GPU_TYPES
+        and _resolve_amd_gpu_type(gpu_type or bench.get("runner_type")) in _GFX942_GPU_TYPES
         and _fp8_is_per_channel_per_token(_model_for_quant)
     ):
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")

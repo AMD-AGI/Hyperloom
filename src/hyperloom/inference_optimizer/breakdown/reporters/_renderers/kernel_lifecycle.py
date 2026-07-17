@@ -182,7 +182,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             Decision(
                 kind="not_attempted",
                 subject="kernel_lifecycle",
-                rationale=(f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor Forge attempted)"),
+                rationale=(
+                    f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor Forge attempted)"
+                ),
             )
         )
 

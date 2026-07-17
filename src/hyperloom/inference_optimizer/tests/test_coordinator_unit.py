@@ -182,7 +182,6 @@ def test_skip_gemm_tuning_env(monkeypatch):
     assert Coordinator._skip_gemm_tuning() is False
 
 
-
 def test_build_sweep_params_skill_defaults():
     """No recipe → SKILL defaults marker and list-shaped sweep params."""
     st = SimpleNamespace(warm_start_recipe=None)

@@ -79,9 +79,7 @@ def test_capability_not_reverse_inferred_from_optimization_stack() -> None:
     # explore_attempts record must report explore as not_attempted (the stack
     # entry may be seeded / warm-replayed), never fabricated as kept.
     state = {
-        "optimization_stack": [
-            {"action": "explore", "variant_name": "v1", "source": "seeded_from_current_best"}
-        ],
+        "optimization_stack": [{"action": "explore", "variant_name": "v1", "source": "seeded_from_current_best"}],
         # no explore_attempts key => no real attempt evidence
     }
     cap = collectors.collect_capability_summary(state, [], [])

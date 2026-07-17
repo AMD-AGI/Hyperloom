@@ -160,10 +160,7 @@ def _enforce_expected_framework(
     expected_raw = (
         expected
         if expected is not None
-        else (
-            os.environ.get("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "")
-            or os.environ.get("EXPECTED_FRAMEWORK", "")
-        )
+        else (os.environ.get("INFERENCE_OPTIMIZER_EXPECTED_FRAMEWORK", "") or os.environ.get("EXPECTED_FRAMEWORK", ""))
     )
     wanted = _normalise_framework_name(expected_raw)
     if not wanted:
@@ -222,16 +219,14 @@ def _validate_resume_model_path(model_path: str) -> str:
         if _HF_MODEL_ID_RE.fullmatch(raw) and ".." not in raw.split("/"):
             return raw
         raise ValueError(
-            "model_path must be a HuggingFace repo id or an absolute path under "
-            "INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS"
+            "model_path must be a HuggingFace repo id or an absolute path under INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS"
         )
     resolved = path.resolve()
     roots = _resume_model_path_roots()
     if any(_path_is_under(resolved, root) for root in roots):
         return str(resolved)
     raise ValueError(
-        "model_path is outside allowed model roots; set "
-        "INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS to opt into this root"
+        "model_path is outside allowed model roots; set INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS to opt into this root"
     )
 
 
@@ -338,24 +333,14 @@ _DEFAULT_KERNEL_PROMPT = (
 )
 
 
-
 # Per-attempt read timeout for the gateway /models catalog probe. Operator
 # override via env (default 5.0s) for slow-gateway windows.
 try:
     _CATALOG_REQUEST_TIMEOUT_SEC = float(
-        os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_TIMEOUT_SEC", "5.0")
-        or "5.0"
+        os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_TIMEOUT_SEC", "5.0") or "5.0"
     )
 except (TypeError, ValueError):
     _CATALOG_REQUEST_TIMEOUT_SEC = 5.0
-
-
-
-
-
-
-
-
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
@@ -549,48 +534,6 @@ def _resume_safe_numeric(
     return default
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Sentinel returned by _probe_llm_catalog when the gateway has no /models route
 # (HTTP 404/405). Distinct from None (auth/network/server error / empty catalog)
 # so the caller can proceed for an endpoint that exposes no catalog.
@@ -718,8 +661,7 @@ def _codex_model_should_follow_claude() -> bool:
         or (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     )
     has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip()
-        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
     )
     return has_anthropic and not has_openai
 
@@ -729,8 +671,7 @@ def _claude_model_should_follow_codex() -> bool:
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return True
     has_openai = bool(
-        (os.environ.get("OPENAI_BASE_URL") or "").strip()
-        or (os.environ.get("OPENAI_API_KEY") or "").strip()
+        (os.environ.get("OPENAI_BASE_URL") or "").strip() or (os.environ.get("OPENAI_API_KEY") or "").strip()
     )
     has_anthropic = bool(
         (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
@@ -1045,8 +986,7 @@ def _resolve_choice(
         chosen = default
     if chosen not in valid:
         print(
-            f"ERROR: {attr.replace('_', ' ')} {chosen!r} not in {valid!r} "
-            f"(set by {flag_hint})",
+            f"ERROR: {attr.replace('_', ' ')} {chosen!r} not in {valid!r} (set by {flag_hint})",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -1161,20 +1101,6 @@ def _reset_state_file(session_dir: Path) -> None:
         "v0.8 §3.10 --reset-state: backed up state.json to %s; session starts blank.",
         backup_path.name,
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _argv_has_option(argv: list[str], option: str) -> bool:
@@ -1760,9 +1686,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
         # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
         framework = (
-            (args.framework or os.environ.get("FRAMEWORK", "")).strip().lower()
-            or framework_registry.DEFAULT_FRAMEWORK
-        )
+            args.framework or os.environ.get("FRAMEWORK", "")
+        ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
         if not framework_registry.is_supported(framework):
             print(
                 f"ERROR: --framework must be one of "
@@ -2343,12 +2268,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         else 1
     )
-
-
-
-
-
-
 
 
 def main(argv: list[str] | None = None) -> int:

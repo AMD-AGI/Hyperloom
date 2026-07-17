@@ -163,8 +163,12 @@ async def test_ladder_continues_to_fallback_after_timeout(tmp_path: Path, monkey
     monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
     deadline = time.monotonic() + 10_000  # plenty of budget left
     best, attempts = await krh._run_backend_ladder(
-        {}, {"kernel_id": "k1", "source_file": "x"}, "k1", ["forge", "claude"],
-        session_dir=tmp_path, deadline=deadline,
+        {},
+        {"kernel_id": "k1", "source_file": "x"},
+        "k1",
+        ["forge", "claude"],
+        session_dir=tmp_path,
+        deadline=deadline,
     )
     assert calls == ["forge", "claude"], "fallback must run after a forge timeout"
     assert len(attempts) == 2
@@ -182,8 +186,12 @@ async def test_ladder_caps_backend_timeout_to_remaining_budget(tmp_path: Path, m
     monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
     deadline = time.monotonic() + 300  # ~5 min left
     await krh._run_backend_ladder(
-        {}, {"kernel_id": "k1"}, "k1", ["forge"],
-        session_dir=tmp_path, deadline=deadline,
+        {},
+        {"kernel_id": "k1"},
+        "k1",
+        ["forge"],
+        session_dir=tmp_path,
+        deadline=deadline,
     )
     assert seen[0] is not None
     assert 250 <= seen[0] <= 300
@@ -201,8 +209,12 @@ async def test_ladder_skips_backends_when_budget_exhausted(tmp_path: Path, monke
     monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
     deadline = time.monotonic() - 1  # budget already exhausted
     best, attempts = await krh._run_backend_ladder(
-        {}, {"kernel_id": "k1"}, "k1", ["forge"],
-        session_dir=tmp_path, deadline=deadline,
+        {},
+        {"kernel_id": "k1"},
+        "k1",
+        ["forge"],
+        session_dir=tmp_path,
+        deadline=deadline,
     )
     assert calls == [], "no backend should run once the budget is exhausted"
     assert best is None

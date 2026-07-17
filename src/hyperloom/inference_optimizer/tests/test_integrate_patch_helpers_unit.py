@@ -170,12 +170,7 @@ def test_patch_touched_paths_emits_deleted_path(tmp_path):
     Post-apply the file is gone (new == /dev/null); the old path must still be
     returned, else the KEEP commits nothing and a later REVERT resurrects it.
     """
-    delete = (
-        "--- a/pkg/gone.py\n"
-        "+++ /dev/null\n"
-        "@@ -1 +0,0 @@\n"
-        "-content\n"
-    )
+    delete = "--- a/pkg/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-content\n"
     patch = tmp_path / "d.patch"
     patch.write_text(delete, encoding="utf-8")
     assert ip._patch_touched_paths(tmp_path, [patch]) == ["pkg/gone.py"]
@@ -184,20 +179,12 @@ def test_patch_touched_paths_emits_deleted_path(tmp_path):
 def test_patch_touched_paths_mixed_create_and_delete(tmp_path):
     """A patch that creates one file and deletes another emits both paths."""
     (tmp_path / "kept.py").write_text("hi\n", encoding="utf-8")
-    mixed = (
-        "--- /dev/null\n"
-        "+++ b/kept.py\n"
-        "@@ -0,0 +1 @@\n"
-        "+hi\n"
-        "--- a/dropped.py\n"
-        "+++ /dev/null\n"
-        "@@ -1 +0,0 @@\n"
-        "-bye\n"
-    )
+    mixed = "--- /dev/null\n+++ b/kept.py\n@@ -0,0 +1 @@\n+hi\n--- a/dropped.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n"
     patch = tmp_path / "m.patch"
     patch.write_text(mixed, encoding="utf-8")
     assert sorted(ip._patch_touched_paths(tmp_path, [patch])) == [
-        "dropped.py", "kept.py",
+        "dropped.py",
+        "kept.py",
     ]
 
 
@@ -239,7 +226,9 @@ def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
 
 def test_stash_if_dirty_clean_tree(tmp_path, monkeypatch):
     """Clean working tree → returns 'clean'."""
-    monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(
+        gitmod.subprocess, "run", lambda *a, **k: type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    )
     state, note = ip._git_stash_if_dirty(tmp_path)
     assert state == "clean"
 
@@ -247,11 +236,13 @@ def test_stash_if_dirty_clean_tree(tmp_path, monkeypatch):
 def test_stash_if_dirty_stash_success(tmp_path, monkeypatch):
     """Dirty tree + stash succeeds → returns 'stashed'."""
     calls = []
+
     def _run(cmd, *a, **k):
         calls.append(cmd)
         if "status" in cmd:
             return type("CP", (), {"returncode": 0, "stdout": "M foo.py\n", "stderr": ""})()
         return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
     monkeypatch.setattr(gitmod.subprocess, "run", _run)
     state, note = ip._git_stash_if_dirty(tmp_path)
     assert state == "stashed"
@@ -260,10 +251,12 @@ def test_stash_if_dirty_stash_success(tmp_path, monkeypatch):
 
 def test_stash_if_dirty_stash_fails(tmp_path, monkeypatch):
     """Dirty tree + stash push fails → returns 'failed'."""
+
     def _run(cmd, *a, **k):
         if "status" in cmd:
             return type("CP", (), {"returncode": 0, "stdout": "M foo.py\n", "stderr": ""})()
         return type("CP", (), {"returncode": 1, "stdout": "", "stderr": "cannot stash"})()
+
     monkeypatch.setattr(gitmod.subprocess, "run", _run)
     state, note = ip._git_stash_if_dirty(tmp_path)
     assert state == "failed"
@@ -280,6 +273,7 @@ def test_stash_if_dirty_status_exception(tmp_path, monkeypatch):
 def test_checkout_clean_discards_candidate_dirty_without_stashing(tmp_path):
     """Checkout fallback cleans candidate-owned dirty state without creating a stash."""
     import subprocess as sp
+
     sp.run(["git", "init", str(tmp_path)], capture_output=True)
     sp.run(["git", "-C", str(tmp_path), "config", "user.email", "t@t"], capture_output=True)
     sp.run(["git", "-C", str(tmp_path), "config", "user.name", "T"], capture_output=True)
@@ -340,10 +334,7 @@ def test_resolve_patch_paths_drops_outside_workspace(tmp_path):
     # A real, existing file that lives OUTSIDE the workspace.
     outside = tmp_path / "evil.patch"
     outside.write_text("z", encoding="utf-8")
-    out = ip._resolve_patch_paths(
-        specialist_workspace=workspace,
-        explicit_patches=[str(outside)],
-        done_payload=None)
+    out = ip._resolve_patch_paths(specialist_workspace=workspace, explicit_patches=[str(outside)], done_payload=None)
     assert out == []
 
 
@@ -353,10 +344,7 @@ def test_resolve_patch_paths_accepts_inside_workspace(tmp_path):
     (workspace / "worktree" / "patches").mkdir(parents=True)
     good = workspace / "worktree" / "patches" / "ok.patch"
     good.write_text("z", encoding="utf-8")
-    out = ip._resolve_patch_paths(
-        specialist_workspace=workspace,
-        explicit_patches=[str(good)],
-        done_payload=None)
+    out = ip._resolve_patch_paths(specialist_workspace=workspace, explicit_patches=[str(good)], done_payload=None)
     assert [p.name for p in out] == ["ok.patch"]
 
 
@@ -369,9 +357,8 @@ def test_resolve_patch_paths_containment_survives_symlinked_workspace(tmp_path):
     link = tmp_path / "link_ws"
     link.symlink_to(real)
     out = ip._resolve_patch_paths(
-        specialist_workspace=link,
-        explicit_patches=[str(link / "patches" / "ok.patch")],
-        done_payload=None)
+        specialist_workspace=link, explicit_patches=[str(link / "patches" / "ok.patch")], done_payload=None
+    )
     assert [p.name for p in out] == ["ok.patch"]
 
 

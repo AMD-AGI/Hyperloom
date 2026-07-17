@@ -166,9 +166,7 @@ def test_graph_traverse_outbound_one_hop() -> None:
 
 def test_graph_traverse_two_hops_reaches_base_arch() -> None:
     kg, _ = _client({"arch": _page(_ARCH_BODY)})
-    nodes = kg.graph_traverse(
-        start_entity="qwen3-8b", predicate_filter=["USES_ARCH", "VARIANT_OF"], max_hops=2
-    )
+    nodes = kg.graph_traverse(start_entity="qwen3-8b", predicate_filter=["USES_ARCH", "VARIANT_OF"], max_hops=2)
     entities = {n.entity for n in nodes}
     assert "qwen2forcausallm" in entities
     assert "llamaforcausallm" in entities
@@ -219,9 +217,7 @@ def test_emit_fact_appends_to_existing_fence() -> None:
 def test_emit_fact_idempotent_on_duplicate() -> None:
     pages = {"recipe/x": _page(_RECIPE_BODY)}
     kg, mcp = _client(pages)
-    wrote = kg.emit_fact(
-        page_slug="recipe/x", subject="aiter_backend", predicate="IMPROVES", object="qwen2forcausallm"
-    )
+    wrote = kg.emit_fact(page_slug="recipe/x", subject="aiter_backend", predicate="IMPROVES", object="qwen2forcausallm")
     assert wrote is False
     assert not any(t == "put_page" for t, _ in mcp.calls)
 
@@ -283,9 +279,7 @@ def test_emit_fact_preserves_frontmatter_on_structured_page() -> None:
     # emit_fact must not write a body-only page (which would drop type/tags/attrs).
     mcp = _StructuredMcp()
     kg = KGClient(mcp)
-    wrote = kg.emit_fact(
-        page_slug="recipe/x", subject="torch_compile", predicate="IMPROVES", object="qwen3"
-    )
+    wrote = kg.emit_fact(page_slug="recipe/x", subject="torch_compile", predicate="IMPROVES", object="qwen3")
     assert wrote is True
     assert mcp.put_content is not None
     assert mcp.put_content.startswith("---")
@@ -401,8 +395,9 @@ class _StubKnobKG:
         return list(self._by.get(str(key), []))
 
 
-def _knob_fact(subject: str, *, gain: str = "+10%", name: str = "k", args: str = "--x 1",
-               envs: str = "", keep_n: str = "2") -> Fact:
+def _knob_fact(
+    subject: str, *, gain: str = "+10%", name: str = "k", args: str = "--x 1", envs: str = "", keep_n: str = "2"
+) -> Fact:
     props = {"gain": gain, "name": name, "args": args, "keep_n": keep_n}
     if envs:
         props["envs"] = envs
@@ -410,15 +405,26 @@ def _knob_fact(subject: str, *, gain: str = "+10%", name: str = "k", args: str =
 
 
 def test_knob_guided_orders_by_gain_and_surfaces_args_envs() -> None:
-    kg = _StubKnobKG({
-        "KNOB_IMPROVES": [
-            _knob_fact("fp_low", gain="+5%", args="--a 1"),
-            _knob_fact("fp_high", gain="+30%", args="--moe-runner-backend aiter",
-                       envs='{"VLLM_USE_AITER":"1"}', name="moe-aiter"),
-        ],
-    })
+    kg = _StubKnobKG(
+        {
+            "KNOB_IMPROVES": [
+                _knob_fact("fp_low", gain="+5%", args="--a 1"),
+                _knob_fact(
+                    "fp_high",
+                    gain="+30%",
+                    args="--moe-runner-backend aiter",
+                    envs='{"VLLM_USE_AITER":"1"}',
+                    name="moe-aiter",
+                ),
+            ],
+        }
+    )
     out = generate_knob_candidates_graph_guided(
-        kg, architectures=["LlamaForCausalLM"], precision="bf16", hardware="mi300x", framework="sglang",
+        kg,
+        architectures=["LlamaForCausalLM"],
+        precision="bf16",
+        hardware="mi300x",
+        framework="sglang",
     )
     assert [v["knob"] for v in out] == ["fp_high", "fp_low"]
     assert out[0]["args"] == "--moe-runner-backend aiter"
@@ -430,12 +436,17 @@ def test_knob_guided_orders_by_gain_and_surfaces_args_envs() -> None:
 
 
 def test_knob_guided_drops_reverted_and_tried() -> None:
-    kg = _StubKnobKG({
-        "KNOB_IMPROVES": [_knob_fact("fp_bad"), _knob_fact("fp_tried"), _knob_fact("fp_ok")],
-        "KNOB_REVERTED_ON": [Fact(subject="fp_bad", predicate="KNOB_REVERTED_ON", object="llamaforcausallm+bf16")],
-    })
+    kg = _StubKnobKG(
+        {
+            "KNOB_IMPROVES": [_knob_fact("fp_bad"), _knob_fact("fp_tried"), _knob_fact("fp_ok")],
+            "KNOB_REVERTED_ON": [Fact(subject="fp_bad", predicate="KNOB_REVERTED_ON", object="llamaforcausallm+bf16")],
+        }
+    )
     out = generate_knob_candidates_graph_guided(
-        kg, architectures=["LlamaForCausalLM"], precision="bf16", tried=["fp_tried"],
+        kg,
+        architectures=["LlamaForCausalLM"],
+        precision="bf16",
+        tried=["fp_tried"],
     )
     knobs = [v["knob"] for v in out]
     assert "fp_bad" not in knobs  # KNOB_REVERTED_ON blocked
@@ -486,9 +497,7 @@ class _LinkGraphMcp:
                 if e["from_slug"] == f and e["to_slug"] == t and e["link_type"] == lt:
                     e["context"] = args.get("context", "{}")
                     return {"status": "ok"}
-            self.edges.append(
-                {"from_slug": f, "to_slug": t, "link_type": lt, "context": args.get("context", "{}")}
-            )
+            self.edges.append({"from_slug": f, "to_slug": t, "link_type": lt, "context": args.get("context", "{}")})
             return {"status": "ok"}
         if tool == "remove_link":
             f, t = args["from"], args["to"]
@@ -584,13 +593,16 @@ def test_native_graph_traverse_two_hops() -> None:
         pages=["qwen3-8b", "qwen2forcausallm", "llamaforcausallm"],
         edges=[
             {"from_slug": "qwen3-8b", "to_slug": "qwen2forcausallm", "link_type": "uses_arch", "context": "{}"},
-            {"from_slug": "qwen2forcausallm", "to_slug": "llamaforcausallm", "link_type": "variant_of", "context": "{}"},
+            {
+                "from_slug": "qwen2forcausallm",
+                "to_slug": "llamaforcausallm",
+                "link_type": "variant_of",
+                "context": "{}",
+            },
         ],
     )
     kg = KGClient(mcp, use_native_kg=True)
-    nodes = kg.graph_traverse(
-        start_entity="qwen3-8b", predicate_filter=["USES_ARCH", "VARIANT_OF"], max_hops=2
-    )
+    nodes = kg.graph_traverse(start_entity="qwen3-8b", predicate_filter=["USES_ARCH", "VARIANT_OF"], max_hops=2)
     entities = {n.entity for n in nodes}
     assert "qwen2forcausallm" in entities
     assert "llamaforcausallm" in entities

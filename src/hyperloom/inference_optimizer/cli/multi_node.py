@@ -106,6 +106,7 @@ def _gc_old_profile_traces(
     if removed or kept:
         print(f"multi-node: GC profile-traces removed={removed} kept={kept} retention={retention_days}d root={base}")
 
+
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
     """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob.
 
@@ -132,6 +133,7 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
         )
         sys.exit(2)
     return backend
+
 
 def _provision_multi_node_infera_stack(args: argparse.Namespace) -> None:
     """When ``--nodes >= 2`` and ``--mn-backend infera``, create an idle
@@ -252,6 +254,7 @@ def _provision_multi_node_infera_stack(args: argparse.Namespace) -> None:
 
     if not getattr(args, "no_kernel", False):
         install_geak_on_pods_best_effort()
+
 
 def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     """When ``--nodes >= 2``, create/reuse SaFE RayJob, bootstrap once, export RAY_ADDRESS.
@@ -416,6 +419,7 @@ def _provision_multi_node_rayjob_stack(args: argparse.Namespace) -> None:
     # RayJob recreate path: replay promoted patches since fresh pods lost them. Best-effort.
     _replay_kernel_patches_for_multi_node(args)
 
+
 def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
     """Replay every applied kernel-agent patch (manifest status=applied + multinode block) onto RayJob pods.
 
@@ -544,15 +548,38 @@ def _dump_mn_input_params(args: argparse.Namespace, nodes_resolved: int) -> None
                 cli[k] = _redact(k, repr(v))
 
         env_prefixes = (
-            "INFERENCE_OPTIMIZER_", "HYPERLOOM_MN_", "PD_", "SAFE_", "MAGPIE_",
-            "SGLANG_", "NCCL_", "MC_", "MORI_", "AITER_",
+            "INFERENCE_OPTIMIZER_",
+            "HYPERLOOM_MN_",
+            "PD_",
+            "SAFE_",
+            "MAGPIE_",
+            "SGLANG_",
+            "NCCL_",
+            "MC_",
+            "MORI_",
+            "AITER_",
         )
         env_exact = (
-            "MODEL_PATH", "FRAMEWORK", "TP", "EP", "NODES", "MN_BACKEND",
-            "MODEL_CLASS", "PRECISION", "USER_DATA_PATH", "SAFE_WORKSPACE",
-            "BENCHMARK_BASE_URL", "SKIP_VARIANTS", "RUN_EVAL",
-            "GPU_TYPE", "ISL", "OSL", "CONC", "RANDOM_RANGE_RATIO",
-            "INFERENCEX_PATH", "TRACELENS_ROOT",
+            "MODEL_PATH",
+            "FRAMEWORK",
+            "TP",
+            "EP",
+            "NODES",
+            "MN_BACKEND",
+            "MODEL_CLASS",
+            "PRECISION",
+            "USER_DATA_PATH",
+            "SAFE_WORKSPACE",
+            "BENCHMARK_BASE_URL",
+            "SKIP_VARIANTS",
+            "RUN_EVAL",
+            "GPU_TYPE",
+            "ISL",
+            "OSL",
+            "CONC",
+            "RANDOM_RANGE_RATIO",
+            "INFERENCEX_PATH",
+            "TRACELENS_ROOT",
         )
         env: dict[str, str] = {}
         for k, v in sorted(os.environ.items()):

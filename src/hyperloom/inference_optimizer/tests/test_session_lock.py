@@ -28,10 +28,7 @@ from hyperloom.inference_optimizer.session.lock import (
 
 def test_lock_path_under_runtime(tmp_path):
     """The lock lives at ``<session_dir>/runtime/optimizer.lock``."""
-    assert (
-        session_paths.optimizer_lock_path(tmp_path)
-        == tmp_path / "runtime" / "optimizer.lock"
-    )
+    assert session_paths.optimizer_lock_path(tmp_path) == tmp_path / "runtime" / "optimizer.lock"
 
 
 def test_acquire_writes_owner_metadata(tmp_path):
@@ -103,8 +100,7 @@ def test_pid_fallback_rejects_live_owner(tmp_path, monkeypatch):
         lock_path = session_paths.optimizer_lock_path(tmp_path)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(
-            '{"pid": %d, "hostname": "x", "started_at": "t", '
-            '"heartbeat_at": "t"}' % (live.pid),
+            '{"pid": %d, "hostname": "x", "started_at": "t", "heartbeat_at": "t"}' % (live.pid),
             encoding="utf-8",
         )
         with pytest.raises(SessionAlreadyRunning):
@@ -121,8 +117,7 @@ def test_pid_fallback_takes_over_dead_owner(tmp_path, monkeypatch):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # A pid that is essentially guaranteed to be dead.
     lock_path.write_text(
-        '{"pid": 2147480000, "hostname": "x", '
-        '"started_at": "t", "heartbeat_at": "t"}',
+        '{"pid": 2147480000, "hostname": "x", "started_at": "t", "heartbeat_at": "t"}',
         encoding="utf-8",
     )
     lock = SessionLock(tmp_path)

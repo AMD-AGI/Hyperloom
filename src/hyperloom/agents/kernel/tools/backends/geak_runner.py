@@ -60,8 +60,7 @@ def _resolve_runner() -> str:
     )
 
 
-def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
-              python_bin: str = "") -> dict:
+def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python_bin: str = "") -> dict:
     """Run GEAK e2e once and return the parsed result.json (+ run metadata).
 
     Args:
@@ -97,8 +96,12 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
     # start_new_session=True -> run_e2e + its vllm/node children share a process
     # group we can signal as a unit (prevents leaked-server orphans).
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        env=env, start_new_session=True,
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
     )
 
     def _killpg(sig: int) -> None:
@@ -135,14 +138,16 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200,
             "status": "error",
             "error": f"no parseable result.json (rc={returncode})",
         }
-    result.update({
-        "returncode": returncode,
-        "stdout_tail": stdout_tail,
-        "stderr_tail": stderr_tail,
-        "elapsed_s": round(time.time() - started, 2),
-        "handoff_path": str(handoff_path),
-        "result_path": str(result_path),
-    })
+    result.update(
+        {
+            "returncode": returncode,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+            "elapsed_s": round(time.time() - started, 2),
+            "handoff_path": str(handoff_path),
+            "result_path": str(result_path),
+        }
+    )
     return result
 
 
@@ -164,9 +169,15 @@ def _main(argv: list[str]) -> int:
 
     handoff = json.loads(Path(args.handoff_json).read_text(encoding="utf-8"))
     out = call_geak(handoff, Path(args.output_dir), timeout_s=timeout_s)
-    print(json.dumps({"status": out.get("status"),
-                      "speedup": out.get("throughput_speedup"),
-                      "result_path": out.get("result_path")}))
+    print(
+        json.dumps(
+            {
+                "status": out.get("status"),
+                "speedup": out.get("throughput_speedup"),
+                "result_path": out.get("result_path"),
+            }
+        )
+    )
     return 0 if out.get("status") not in ("error", None) else 1
 
 

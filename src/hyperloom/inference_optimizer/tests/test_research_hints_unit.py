@@ -280,9 +280,7 @@ def test_coerce_per_conc_not_dict():
 
 
 def test_coerce_per_conc_picks_fields():
-    row = rh._coerce_per_conc(
-        {"source": " v ", "conc": 8, "tput_per_gpu": 100.0, "tpot_ms": None}
-    )
+    row = rh._coerce_per_conc({"source": " v ", "conc": 8, "tput_per_gpu": 100.0, "tpot_ms": None})
     assert row["source"] == "v"
     assert row["conc"] == 8
     assert row["tput_per_gpu"] == 100.0
@@ -386,9 +384,7 @@ def test_match_variants_skips_bad_hints_and_variants():
 
 
 def test_summarise_for_prompt_extra_more(tmp_path):
-    incoming = [
-        {"what": f"hint {i}", "source": f"s{i}"} for i in range(10)
-    ]
+    incoming = [{"what": f"hint {i}", "source": f"s{i}"} for i in range(10)]
     rh.append_hints(tmp_path, incoming)
     out = rh.summarise_for_prompt(tmp_path, max_entries=3)
     assert "... and 7 more in research_hints.md." in out

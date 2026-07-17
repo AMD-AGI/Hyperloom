@@ -155,6 +155,7 @@ class LocalProbeConfig:
             return None
         return self.session_dir / "storage" / "coordinator.db"
 
+
 class LocalProbeSource:
     """Minimum-effort local data source for the reactor.
 

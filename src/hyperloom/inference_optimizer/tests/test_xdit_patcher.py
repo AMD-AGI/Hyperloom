@@ -105,8 +105,7 @@ def test_verify_false_when_only_profiler_sentinel(tmp_path: Path, monkeypatch) -
     """Partial bake (repeat=1 only, no per-step annotation) is not accepted."""
     partial = _PRISTINE_FIXTURE.replace(
         "            active=self.config.profile_active,\n",
-        "            active=self.config.profile_active,\n"
-        "            repeat=1,  # hyperloom: retain active window\n",
+        "            active=self.config.profile_active,\n            repeat=1,  # hyperloom: retain active window\n",
     )
     target = _write_fake_xdit(tmp_path, partial, monkeypatch)
     assert _PROFILER_SENTINEL in target.read_text()
@@ -114,9 +113,7 @@ def test_verify_false_when_only_profiler_sentinel(tmp_path: Path, monkeypatch) -
     assert verify_xdit_profiler_baked() is False
 
 
-def test_verify_warns_with_remediation_when_missing(
-    tmp_path: Path, monkeypatch, caplog
-) -> None:
+def test_verify_warns_with_remediation_when_missing(tmp_path: Path, monkeypatch, caplog) -> None:
     _write_fake_xdit(tmp_path, _PRISTINE_FIXTURE, monkeypatch)
     with caplog.at_level("WARNING"):
         assert verify_xdit_profiler_baked() is False
@@ -130,9 +127,7 @@ def test_verify_false_no_xdit_tree(monkeypatch) -> None:
     assert verify_xdit_profiler_baked() is False
 
 
-def test_verify_scans_all_discovered_and_accepts_any_baked(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_verify_scans_all_discovered_and_accepts_any_baked(tmp_path: Path, monkeypatch) -> None:
     """With multiple discovered files, one fully-baked copy is enough."""
     pristine = tmp_path / "a" / "base_model.py"
     pristine.parent.mkdir(parents=True)
@@ -140,9 +135,7 @@ def test_verify_scans_all_discovered_and_accepts_any_baked(
     baked = tmp_path / "b" / "base_model.py"
     baked.parent.mkdir(parents=True)
     baked.write_text(_BAKED_FIXTURE, encoding="utf-8")
-    monkeypatch.setattr(
-        _xdit_patcher, "_discover_xfuser_base_models", lambda: [pristine, baked]
-    )
+    monkeypatch.setattr(_xdit_patcher, "_discover_xfuser_base_models", lambda: [pristine, baked])
     assert verify_xdit_profiler_baked() is True
 
 

@@ -319,10 +319,9 @@ def _resolve_specialist_kb_mcp(args: Any) -> tuple[str, dict[str, str]]:
     Returns:
         A ``(url, headers)`` pair; ``("", {})`` when nothing is configured.
     """
-    override = (
-        (getattr(args, "specialist_kb_mcp_url", None) or "").strip()
-        or (os.environ.get("HYPERLOOM_SPECIALIST_KB_MCP_URL", "") or "").strip()
-    )
+    override = (getattr(args, "specialist_kb_mcp_url", None) or "").strip() or (
+        os.environ.get("HYPERLOOM_SPECIALIST_KB_MCP_URL", "") or ""
+    ).strip()
     if override:
         token = (os.environ.get("HYPERLOOM_SPECIALIST_KB_MCP_TOKEN", "") or "").strip()
         headers = {"Authorization": f"Bearer {token}"} if token else {}

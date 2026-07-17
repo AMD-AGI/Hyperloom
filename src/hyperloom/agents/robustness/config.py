@@ -26,9 +26,7 @@ log = logging.getLogger(__name__)
 # Primary data source: an optional explicit endpoint (ROBUSTNESS_SERVER_URL),
 # then generic in-cluster / local-dev fallbacks. No internal cluster DNS is
 # hardcoded; set ROBUSTNESS_SERVER_URL for a specific deployment.
-ROBUSTNESS_SERVER_CANDIDATES: list[str] = [
-    u for u in (os.environ.get("ROBUSTNESS_SERVER_URL", "").strip(),) if u
-] + [
+ROBUSTNESS_SERVER_CANDIDATES: list[str] = [u for u in (os.environ.get("ROBUSTNESS_SERVER_URL", "").strip(),) if u] + [
     "http://robustness-server:8000",
     "http://localhost:8000",
 ]
@@ -424,35 +422,35 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
         return openai_base, gateway_key, "openai"
 
     anthropic_key = (
-        os.environ.get("ANTHROPIC_API_KEY", "").strip()
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+        os.environ.get("ANTHROPIC_API_KEY", "").strip() or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
     )
     if anthropic_key:
-        return os.environ.get("ANTHROPIC_BASE_URL", "").strip() or "https://api.anthropic.com", anthropic_key, "anthropic"
+        return (
+            os.environ.get("ANTHROPIC_BASE_URL", "").strip() or "https://api.anthropic.com",
+            anthropic_key,
+            "anthropic",
+        )
 
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if deepseek_key:
-        return os.environ.get("DEEPSEEK_BASE_URL", "").strip() or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, deepseek_key, "anthropic"
+        return (
+            os.environ.get("DEEPSEEK_BASE_URL", "").strip() or DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL,
+            deepseek_key,
+            "anthropic",
+        )
 
     return "", "", "openai"
 
 
 def _discover_llm_model(provider: str) -> str:
     """Resolve the RCA model for the discovered provider."""
-    explicit = (
-        os.environ.get("ROBUSTNESS_LLM_MODEL", "").strip()
-        or os.environ.get("LLM_MODEL", "").strip()
-    )
+    explicit = os.environ.get("ROBUSTNESS_LLM_MODEL", "").strip() or os.environ.get("LLM_MODEL", "").strip()
     if explicit:
         return explicit
     if os.environ.get("DEEPSEEK_API_KEY", "").strip() or os.environ.get("DEEPSEEK_BASE_URL", "").strip():
         return os.environ.get("DEEPSEEK_MODEL", "").strip() or DEFAULT_DEEPSEEK_MODEL
     if provider == "openai":
-        return (
-            os.environ.get("OPENAI_MODEL", "").strip()
-            or os.environ.get("CODEX_MODEL", "").strip()
-            or "gpt-5.5"
-        )
+        return os.environ.get("OPENAI_MODEL", "").strip() or os.environ.get("CODEX_MODEL", "").strip() or "gpt-5.5"
     return (
         os.environ.get("ANTHROPIC_MODEL", "").strip()
         or os.environ.get("CLAUDE_MODEL", "").strip()
@@ -483,5 +481,3 @@ def _discover_workload_uid() -> str:
         if value:
             return value
     return ""
-
-

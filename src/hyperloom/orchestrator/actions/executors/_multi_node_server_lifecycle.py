@@ -27,7 +27,10 @@ from pathlib import Path
 
 from ...loop.coordinator_helpers import format_exc_brief
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
-from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import ServerArgsRejected, validate_server_args
+from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
+    ServerArgsRejected,
+    validate_server_args,
+)
 from ._multi_node_env import _read_state, is_multi_node
 
 # Scoped env flag (set by the roofline compute-bound re-profile) that tells this
@@ -160,8 +163,8 @@ def _resolve_pd_args(
     """
     state = _read_state()
     mode = (
-        pd_mode or state.get("last_restart_pd_mode") or os.environ.get("PD_MODE", "") or "aggregated"
-    ).strip().lower()
+        (pd_mode or state.get("last_restart_pd_mode") or os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
+    )
     # Canonical term is 'aggregated'; accept legacy 'colocated' / 'mixed' as
     # aliases so older state.json / env resume cleanly.
     if mode in ("colocated", "mixed"):
@@ -451,10 +454,10 @@ async def restart_server_for_round(
         external_has_server_control,
         external_service_url,
     )
+
     if external_service_url() and not external_has_server_control():
         log.info(
-            "restart_server_for_round: external service URL (benchmark-only, "
-            "no SSH control); skipping server restart"
+            "restart_server_for_round: external service URL (benchmark-only, no SSH control); skipping server restart"
         )
         return
 
@@ -616,12 +619,8 @@ async def restart_server_for_round(
             # both the launch-driver poll and our post-launch /health wait. Warm
             # restarts still return as soon as /health flips, so this only costs
             # wall-time on a genuinely cold first-use.
-            if "HYPERLOOM_MN_HEALTH_WAIT_S" not in os.environ and _uses_aiter(
-                extra_server_args, pd, extra_env
-            ):
-                _aiter_wait = int(
-                    os.environ.get("HYPERLOOM_MN_HEALTH_WAIT_AITER_S", "1800") or 1800
-                )
+            if "HYPERLOOM_MN_HEALTH_WAIT_S" not in os.environ and _uses_aiter(extra_server_args, pd, extra_env):
+                _aiter_wait = int(os.environ.get("HYPERLOOM_MN_HEALTH_WAIT_AITER_S", "1800") or 1800)
                 if _aiter_wait > health_wait_s:
                     log.info(
                         "restart_server_for_round: aiter kernels detected; widening "
@@ -780,8 +779,7 @@ async def restart_server_for_round(
                     await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
                 except Exception as reclaim_exc:  # noqa: BLE001 - reclaim is best-effort
                     log.warning(
-                        "restart_server_for_round: remote kill-inference reclaim "
-                        "raised (%s); retrying restart anyway",
+                        "restart_server_for_round: remote kill-inference reclaim raised (%s); retrying restart anyway",
                         reclaim_exc,
                     )
                 try:
@@ -945,6 +943,7 @@ def _worker_detokenizer_wedged(shared_dir: str, ip: str) -> bool:
         bool: True when a persistent detokenizer wedge is detected.
     """
     import re as _re
+
     if not shared_dir:
         return False
     log_path = Path(shared_dir) / ("mn_infera_server_" + str(ip) + "_r0.log")
@@ -979,6 +978,7 @@ def _worker_startup_crashed(shared_dir: str, ip: str) -> str | None:
         The matched crash line (truncated), or None when no fatal signature.
     """
     import re as _re
+
     if not shared_dir:
         return None
     log_path = Path(shared_dir) / ("mn_infera_server_" + str(ip) + "_r0.log")
@@ -1030,6 +1030,7 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
         ServerRestartFailed: if some worker never becomes /health-ready in time.
     """
     import time as _t
+
     try:
         import httpx as _httpx
     except ImportError:  # pragma: no cover
@@ -1039,7 +1040,7 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
     seen: set[str] = set()
     targets: list[tuple[str, str, str]] = []
     for role_key in ("prefill_pods", "decode_pods", "worker_pods"):
-        for pod in (state.get(role_key) or []):
+        for pod in state.get(role_key) or []:
             if not isinstance(pod, dict):
                 continue
             ip = str(pod.get("podIP") or "").strip()
@@ -1054,7 +1055,13 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of
     # burning the full timeout. Default on; grace lets slow boots survive.
     _wedge_grace = int(os.environ.get("HYPERLOOM_MN_WORKER_WEDGE_GRACE_S", "420") or 420)
-    _wedge_enabled = os.environ.get("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", "1").strip().lower() not in {"0", "false", "no", "off", ""}
+    _wedge_enabled = os.environ.get("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    }
     # Startup-crash fast-fail: an argparse rejection / fatal exit is terminal, so
     # bail within seconds instead of the full gate. Short grace (crash signatures
     # appear at boot); never matches a slow-but-healthy boot (see helper).
@@ -1070,25 +1077,28 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
                     resp = await client.get("http://" + ip + ":" + str(port) + "/health")
                     if resp.status_code == 200:
                         ready.add(ip)
-                        log.info("worker /health OK (%s %s) after %ds [%d/%d]",
-                                 role, ip, elapsed, len(ready), len(targets))
+                        log.info(
+                            "worker /health OK (%s %s) after %ds [%d/%d]", role, ip, elapsed, len(ready), len(targets)
+                        )
                 except Exception:  # noqa: BLE001
                     pass
             if len(ready) == len(targets):
-                log.info("all %d worker(s) /health-ready after %ds; proceeding to frontend probe",
-                         len(targets), elapsed)
+                log.info(
+                    "all %d worker(s) /health-ready after %ds; proceeding to frontend probe", len(targets), elapsed
+                )
                 return
             if elapsed > timeout_s:
                 not_ready = [ip for _r, ip, _p in targets if ip not in ready]
                 raise ServerRestartFailed(
-                    "workers not /health-ready within " + str(timeout_s) + "s: "
-                    + str(not_ready) + " (a PD leg is still initializing, e.g. prefill "
+                    "workers not /health-ready within "
+                    + str(timeout_s)
+                    + "s: "
+                    + str(not_ready)
+                    + " (a PD leg is still initializing, e.g. prefill "
                     "mooncake transfer engine)"
                 )
             if _wedge_enabled and elapsed > _crash_grace:
-                _shared_c = os.path.expandvars(
-                    os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
-                )
+                _shared_c = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
                 if _shared_c.startswith("/") and "$" not in _shared_c:
                     for _r, ip, _p in targets:
                         if ip in ready:
@@ -1098,24 +1108,27 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
                             raise ServerRestartFailed(
                                 "worker " + ip + " server crashed on startup "
                                 "(non-recoverable; /health will never come up): "
-                                + _reason + " -- fast-failed after " + str(elapsed)
-                                + "s instead of the full " + str(timeout_s) + "s gate"
+                                + _reason
+                                + " -- fast-failed after "
+                                + str(elapsed)
+                                + "s instead of the full "
+                                + str(timeout_s)
+                                + "s gate"
                             )
             if _wedge_enabled and elapsed > _wedge_grace:
-                _shared = os.path.expandvars(
-                    os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
-                )
+                _shared = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
                 if _shared.startswith("/") and "$" not in _shared:
                     wedged = [
-                        ip
-                        for _r, ip, _p in targets
-                        if ip not in ready and _worker_detokenizer_wedged(_shared, ip)
+                        ip for _r, ip, _p in targets if ip not in ready and _worker_detokenizer_wedged(_shared, ip)
                     ]
                     if wedged:
                         raise ServerRestartFailed(
                             "worker(s) detokenizer-wedged (weights loaded but "
                             "detokenizer not heartbeating; /health never up): "
-                            + str(wedged) + " after " + str(elapsed) + "s; fast-failed "
+                            + str(wedged)
+                            + " after "
+                            + str(elapsed)
+                            + "s; fast-failed "
                             "instead of waiting the full " + str(timeout_s) + "s gate"
                         )
             await asyncio.sleep(poll_every_s)
@@ -1140,6 +1153,7 @@ def _shared_worker_log_tail(ip: str, max_bytes: int = 2_000_000) -> str | None:
         The decoded log tail, or None when no shared log is available.
     """
     import glob as _glob
+
     shared = os.path.expandvars(os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip())
     if not shared.startswith("/") or "$" in shared:
         return None
@@ -1170,6 +1184,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
     the pod-local log only when the shared log is absent. Never raises.
     """
     import time as _t
+
     sess = (
         os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR")
         or os.environ.get("INFERENCE_OPTIMIZER_SESSION_DIR")
@@ -1191,11 +1206,12 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
     if key_path and known_hosts:
         try:
             from hyperloom.inference_optimizer.multi_node._internal.ssh_client import ssh_run as _ssh_run
+
             ssh_run = _ssh_run
         except Exception:
             ssh_run = None
     for role in ("prefill", "decode", "worker"):
-        for pod in (state.get(role + "_pods") or []):
+        for pod in state.get(role + "_pods") or []:
             ip = pod.get("podIP")
             if not ip:
                 continue

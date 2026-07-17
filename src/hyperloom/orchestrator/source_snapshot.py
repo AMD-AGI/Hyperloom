@@ -97,7 +97,5 @@ def snapshot_source_layer(
         manifest["extra"] = extra
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    (dest_dir / MANIFEST_NAME).write_text(
-        json.dumps(manifest, indent=2), encoding="utf-8"
-    )
+    (dest_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"snapshot_dir": str(dest_dir), **manifest}

@@ -84,8 +84,7 @@ def refresh_known_hosts(
         )
         if proc.returncode != 0 or not (proc.stdout or "").strip():
             warn(
-                f"ssh-keyscan failed for {host}:{port} "
-                f"rc={proc.returncode} stderr={(proc.stderr or '').strip()[:200]}"
+                f"ssh-keyscan failed for {host}:{port} rc={proc.returncode} stderr={(proc.stderr or '').strip()[:200]}"
             )
             continue
         with dest.open("a", encoding="utf-8") as fh:

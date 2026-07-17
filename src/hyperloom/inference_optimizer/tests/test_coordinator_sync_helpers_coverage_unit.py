@@ -29,7 +29,8 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends() -> dict[str, Backend]:
     return {
-        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        name: MockBackend(_silent_plan(), name=name)
+        for name in ("orchestration", "kernel_agent", "critic", "robustness")
     }
 
 
@@ -89,7 +90,10 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
     sentinel_lease = object()
     out = asyncio.run(
         coord._run_dispatched_with_gpu_release(
-            _Task(), prebound_lease=None, extra_context={}, gpu_lease=sentinel_lease,
+            _Task(),
+            prebound_lease=None,
+            extra_context={},
+            gpu_lease=sentinel_lease,
         )
     )
     assert out == "RESULT"
@@ -116,7 +120,10 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
     with pytest.raises(RuntimeError, match="subprocess crashed"):
         asyncio.run(
             coord._run_dispatched_with_gpu_release(
-                _Task(), prebound_lease=None, extra_context={}, gpu_lease=sentinel_lease,
+                _Task(),
+                prebound_lease=None,
+                extra_context={},
+                gpu_lease=sentinel_lease,
             )
         )
     # lease released via finally even though run_task raised.
@@ -141,7 +148,10 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
     coord.gpu_specialist_pool.release = _fake_release
     out = asyncio.run(
         coord._run_dispatched_with_gpu_release(
-            _Task(), prebound_lease=None, extra_context={}, gpu_lease=None,
+            _Task(),
+            prebound_lease=None,
+            extra_context={},
+            gpu_lease=None,
         )
     )
     assert out == "CPU"
@@ -168,7 +178,6 @@ def test_task_id_from_specialist_source(coord: Coordinator) -> None:
         )
         == "abc"
     )
-
 
 
 def test_lanes_fit(coord: Coordinator) -> None:
@@ -498,14 +507,10 @@ def test_match_framework_agent_candidate_by_id_and_pr_number(coord: Coordinator)
     assert coord._match_framework_agent_candidate("", cands) is None
 
 
-async def test_select_best_framework_agent_candidate_falls_back_to_linear(
-    coord: Coordinator, monkeypatch
-) -> None:
+async def test_select_best_framework_agent_candidate_falls_back_to_linear(coord: Coordinator, monkeypatch) -> None:
     """With the ranker client unavailable, selection degrades to discovery order."""
     ss = coord.shared_state
-    ss.framework_agent_batches = [
-        {"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}
-    ]
+    ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
     ss.framework_agent_phase_progress = []
     # Force the ranker client to be unavailable.
     monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_client", lambda: None)
@@ -522,9 +527,7 @@ async def test_select_best_framework_agent_candidate_single(coord: Coordinator) 
     assert chosen == {"candidate_id": "only"}
 
 
-async def test_select_best_framework_agent_candidate_uses_ranker_choice(
-    coord: Coordinator, monkeypatch
-) -> None:
+async def test_select_best_framework_agent_candidate_uses_ranker_choice(coord: Coordinator, monkeypatch) -> None:
     """When the ranker returns a candidate, it is used over discovery order."""
     ss = coord.shared_state
     ss.framework_agent_batches = [

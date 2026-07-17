@@ -212,9 +212,7 @@ def primary_metric_name(framework: str | None) -> str:
     return "e2el_mean_ms" if is_scriptable(framework) else "throughput_tok_s_per_gpu"
 
 
-def primary_metric_value(
-    framework: str | None, tput_per_gpu: float | int | None
-) -> float | None:
+def primary_metric_value(framework: str | None, tput_per_gpu: float | int | None) -> float | None:
     """Convert stored per-GPU throughput into the value shown for ``framework``.
 
     Scriptable image frameworks (xDiT) store throughput as ``img/s``
@@ -237,9 +235,7 @@ def primary_metric_value(
     return tput
 
 
-def format_primary_metric(
-    framework: str | None, tput_per_gpu: float | int | None, *, precision: int = 1
-) -> str:
+def format_primary_metric(framework: str | None, tput_per_gpu: float | int | None, *, precision: int = 1) -> str:
     """Format a session's primary performance metric for human-readable display.
 
     Serving frameworks report token throughput, so the value is shown as

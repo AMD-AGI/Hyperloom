@@ -470,10 +470,7 @@ def parse_backends(backends: str) -> list[str]:
     allowed = {"forge"}
     invalid = [b for b in parsed if b not in allowed]
     if invalid:
-        raise ValueError(
-            f"unsupported backend(s): {', '.join(invalid)} "
-            f"(allowed: {sorted(allowed)})"
-        )
+        raise ValueError(f"unsupported backend(s): {', '.join(invalid)} (allowed: {sorted(allowed)})")
     return parsed
 
 
@@ -499,9 +496,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
         env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
         if env_order:
             # 'geak' is the coordinator-owned e2e delegate, not per-kernel; drop it here.
-            env_tokens = ",".join(
-                t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() != "geak"
-            )
+            env_tokens = ",".join(t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() != "geak")
             if env_tokens:
                 user_backends = parse_backends(env_tokens)
     benchmark_available = has_benchmark(args, candidate)
@@ -2746,7 +2741,10 @@ def _reconstruct_source_from_patch(
             try:
                 rc = subprocess.run(
                     ["git", "apply", f"-p{strip}", "section.patch"],
-                    capture_output=True, text=True, cwd=str(tmp), check=False,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(tmp),
+                    check=False,
                 )
                 applied = rc.returncode == 0 and work.is_file()
             except (OSError, ValueError):
@@ -2756,9 +2754,11 @@ def _reconstruct_source_from_patch(
                 try:
                     with section.open(encoding="utf-8", errors="replace") as pf:
                         rc = subprocess.run(
-                            ["patch", f"-p{strip}", "--force", "--no-backup-if-mismatch",
-                             str(work)],
-                            stdin=pf, capture_output=True, text=True, check=False,
+                            ["patch", f"-p{strip}", "--force", "--no-backup-if-mismatch", str(work)],
+                            stdin=pf,
+                            capture_output=True,
+                            text=True,
+                            check=False,
                         )
                     applied = rc.returncode == 0
                 except (OSError, ValueError):
@@ -2769,8 +2769,10 @@ def _reconstruct_source_from_patch(
                 patched_text = work.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if patched_text and patched_text != original_text and _source_text_looks_complete(
-                patched_text, output_path.suffix.lower()
+            if (
+                patched_text
+                and patched_text != original_text
+                and _source_text_looks_complete(patched_text, output_path.suffix.lower())
             ):
                 try:
                     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2834,6 +2836,7 @@ def build_patch_snapshot(
             if cand.is_file() or cand.is_symlink():
                 try:
                     import shutil as _shutil
+
                     _shutil.copy2(cand, dst, follow_symlinks=False)
                     sourced = True
                 except OSError:
@@ -2841,9 +2844,11 @@ def build_patch_snapshot(
         # 2) reconstruct from clean base + patch (single-file slice).
         if not sourced and clean_base:
             base_file = Path(clean_base) / rel
-            reconstructed = _reconstruct_source_from_patch(
-                Path(patch_path), str(base_file), dst.with_suffix(dst.suffix + ".recon")
-            ) if base_file.is_file() else ""
+            reconstructed = (
+                _reconstruct_source_from_patch(Path(patch_path), str(base_file), dst.with_suffix(dst.suffix + ".recon"))
+                if base_file.is_file()
+                else ""
+            )
             if reconstructed:
                 try:
                     Path(reconstructed).replace(dst)

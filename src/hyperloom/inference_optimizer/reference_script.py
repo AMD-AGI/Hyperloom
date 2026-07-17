@@ -35,28 +35,32 @@ log = logging.getLogger(__name__)
 
 # Exports we are willing to carry from a recipe. An explicit list, not a
 # ``VLLM_*`` glob (which would drag in path-valued vars absent in our sandbox).
-_ENV_WHITELIST = frozenset({
-    "VLLM_USE_BREAKABLE_CUDAGRAPH",
-    "VLLM_USE_TRITON_FLASH_ATTN",
-    "VLLM_FP8_PADDING",
-    "VLLM_ROCM_USE_AITER",
-    "VLLM_ROCM_USE_AITER_MHA",
-    "VLLM_ROCM_USE_AITER_MOE",
-    "SGLANG_USE_AITER",
-    "SGLANG_MOE_PADDING",
-    "NCCL_MIN_NCHANNELS",
-    "NCCL_MAX_NCHANNELS",
-})
+_ENV_WHITELIST = frozenset(
+    {
+        "VLLM_USE_BREAKABLE_CUDAGRAPH",
+        "VLLM_USE_TRITON_FLASH_ATTN",
+        "VLLM_FP8_PADDING",
+        "VLLM_ROCM_USE_AITER",
+        "VLLM_ROCM_USE_AITER_MHA",
+        "VLLM_ROCM_USE_AITER_MOE",
+        "SGLANG_USE_AITER",
+        "SGLANG_MOE_PADDING",
+        "NCCL_MIN_NCHANNELS",
+        "NCCL_MAX_NCHANNELS",
+    }
+)
 
 # Flags that never belong in the lifted base: the optimizer's env seeding owns
 # the workload + I/O, so drop these even when fully resolved.
-_DROP_FLAGS = frozenset({
-    "--port",
-    "--host",
-    "--served-model-name",
-    "--result-dir",
-    "--result-filename",
-})
+_DROP_FLAGS = frozenset(
+    {
+        "--port",
+        "--host",
+        "--served-model-name",
+        "--result-dir",
+        "--result-filename",
+    }
+)
 # Flags dropped by prefix (result-*, served-model-* variants, log redirection).
 _DROP_PREFIXES = ("--result-", "--served-model")
 
@@ -78,6 +82,7 @@ def _read_source(source: str) -> str | None:
     if s.startswith(("http://", "https://")):
         try:
             from .baseline_comparison.inferencex_client import _fetch_raw
+
             return _fetch_raw(s).decode("utf-8", errors="replace")
         except Exception as exc:  # noqa: BLE001 — fail-soft, never abort launch
             log.warning("reference-script: could not fetch %r: %s", s, exc)
@@ -176,9 +181,9 @@ def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
     line = _find_entrypoint_line(text, framework)
     if not line:
         log.warning(
-            "reference-script: no %s entrypoint found in %r; "
-            "carrying exports only",
-            _entrypoint_markers(framework), source,
+            "reference-script: no %s entrypoint found in %r; carrying exports only",
+            _entrypoint_markers(framework),
+            source,
         )
         return ReferenceRecipe(server_args="", envs=envs, model=None)
 
@@ -213,7 +218,8 @@ def _extract_envs(text: str) -> dict[str, str]:
 
 
 def _extract_server_args(
-    tokens: list[str], framework: str,
+    tokens: list[str],
+    framework: str,
 ) -> tuple[str, str | None]:
     """Walk entrypoint tokens as (flag, value) pairs; keep static flags only.
 
@@ -402,10 +408,10 @@ def _parse_filename(name: str) -> tuple[str, str, str, set[str]] | None:
     # to its left (index >= 2).
     for i in range(2, len(segments)):
         if _GPU_TOKEN_RE.match(segments[i].lower()):
-            model_seg = "_".join(segments[:i - 1])
+            model_seg = "_".join(segments[: i - 1])
             precision = segments[i - 1]
             gpu = segments[i]
-            suffixes = {s for s in segments[i + 1:] if s}
+            suffixes = {s for s in segments[i + 1 :] if s}
             if model_seg and precision:
                 return model_seg, precision.lower(), gpu.lower(), suffixes
             break

@@ -586,12 +586,8 @@ class GpuSpecialistLease:
         from ._ray_backend import get_ray_backend  # noqa: PLC0415
 
         get_ray_backend().ensure(log_path=self._ensure_log_path)
-        self._actor = make_gpu_specialist_actor(
-            self._num_gpus, serving_slot=self._serving_slot
-        )
-        self._pid = int(
-            ray.get(self._actor.start.remote(cmd, env=env, cwd=cwd, log_path=log_path))
-        )
+        self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
+        self._pid = int(ray.get(self._actor.start.remote(cmd, env=env, cwd=cwd, log_path=log_path)))
         return self._pid
 
     def pid(self) -> int | None:
@@ -871,15 +867,11 @@ class ServingGroupManager:
         from ._ray_backend import get_ray_backend  # noqa: PLC0415
 
         get_ray_backend().ensure(log_path=self._ensure_log_path)
-        self._pg = _make_serving_placement_group(
-            self._nodes, self._gpus_per_node, serving_slot=self._serving_slot
-        )
+        self._pg = _make_serving_placement_group(self._nodes, self._gpus_per_node, serving_slot=self._serving_slot)
         self._ranks = []
         self._pids = []
         for i, cmd in enumerate(rank_cmds):
-            actor = _make_rank_actor(
-                self._pg, i, self._gpus_per_node, serving_slot=self._serving_slot
-            )
+            actor = _make_rank_actor(self._pg, i, self._gpus_per_node, serving_slot=self._serving_slot)
             self._ranks.append(actor)
             pid = int(
                 ray.get(

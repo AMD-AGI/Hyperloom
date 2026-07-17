@@ -553,11 +553,14 @@ def main() -> int:
     p.add_argument(
         "--drain-ports",
         default="",
-        help="comma-separated ports to wait free after kill (default: "
-        "$RAYJOB_DIST_INIT_PORT|29500,8888,30000,30001)",
+        help="comma-separated ports to wait free after kill (default: $RAYJOB_DIST_INIT_PORT|29500,8888,30000,30001)",
     )
-    p.add_argument("--death-timeout", type=float, default=30.0, help="max seconds to wait for pids to exit (default 30)")
-    p.add_argument("--port-timeout", type=float, default=60.0, help="max seconds to wait for ports to drain (default 60)")
+    p.add_argument(
+        "--death-timeout", type=float, default=30.0, help="max seconds to wait for pids to exit (default 30)"
+    )
+    p.add_argument(
+        "--port-timeout", type=float, default=60.0, help="max seconds to wait for ports to drain (default 60)"
+    )
     p.add_argument(
         "--gpu-free-threshold-mb",
         type=float,
@@ -614,11 +617,7 @@ def main() -> int:
     # Actor upper bound: per-pid grace (budgeted for up to _GRACE_PID_BUDGET pid
     # files/node) + death-wait + port-wait + gpu-wait + margin.
     get_timeout = int(
-        args.grace_sec * _GRACE_PID_BUDGET
-        + args.death_timeout
-        + args.port_timeout
-        + args.gpu_free_timeout
-        + 30
+        args.grace_sec * _GRACE_PID_BUDGET + args.death_timeout + args.port_timeout + args.gpu_free_timeout + 30
     )
     out: dict[str, dict] = {}
     for short_id, ref in refs:

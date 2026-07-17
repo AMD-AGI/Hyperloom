@@ -47,7 +47,9 @@ def test_coerce_dict_variants():
 
 
 def test_normalise_findings_and_failures():
-    assert ls._normalise_str_dicts([{"description": "d", "measured_impact": "i"}, "skip"], ("description", "measured_impact")) == [
+    assert ls._normalise_str_dicts(
+        [{"description": "d", "measured_impact": "i"}, "skip"], ("description", "measured_impact")
+    ) == [
         {"description": "d", "measured_impact": "i"},
     ]
     assert ls._normalise_str_dicts([{"description": "d", "reason": "r"}], ("description", "reason")) == [

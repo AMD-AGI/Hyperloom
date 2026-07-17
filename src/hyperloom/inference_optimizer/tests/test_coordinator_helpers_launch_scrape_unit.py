@@ -21,9 +21,7 @@ from hyperloom.orchestrator.loop import coordinator_helpers as ch
 def test_split_env_and_flags_mixed_tokens() -> None:
     # Only ``-``-prefixed tokens land in ``flags``; a bare value token following
     # a space-form flag is dropped (equals-form is the only way a value survives).
-    envs, flags = ch._split_env_and_flags(
-        "FOO=1 BAR=baz --chunked-prefill-size=2048 --disable-radix-cache"
-    )
+    envs, flags = ch._split_env_and_flags("FOO=1 BAR=baz --chunked-prefill-size=2048 --disable-radix-cache")
     assert envs == {"FOO": "1", "BAR": "baz"}
     assert flags == "--chunked-prefill-size=2048 --disable-radix-cache"
 
@@ -162,18 +160,13 @@ def test_launch_argv_from_log_falls_back_to_double_dash_scan(
 # ── _scrape_resolved_launch_flags ─────────────────────────────────────────
 
 
-def _write_bench(
-    runs_root: Path, name: str, tput: float | None, marker: str = "launch_server"
-) -> Path:
+def _write_bench(runs_root: Path, name: str, tput: float | None, marker: str = "launch_server") -> Path:
     bench_dir = runs_root / name
     bench_dir.mkdir(parents=True)
     if tput is not None:
-        (bench_dir / "inferencex_result.json").write_text(
-            json.dumps({"output_throughput": tput}), encoding="utf-8"
-        )
+        (bench_dir / "inferencex_result.json").write_text(json.dumps({"output_throughput": tput}), encoding="utf-8")
     (bench_dir / "server.log").write_text(
-        f"+ python3 -m sglang.{marker} --model-path /models/x "
-        f"--tensor-parallel-size 8 --chunked-prefill-size 2048\n",
+        f"+ python3 -m sglang.{marker} --model-path /models/x --tensor-parallel-size 8 --chunked-prefill-size 2048\n",
         encoding="utf-8",
     )
     return bench_dir
@@ -214,8 +207,7 @@ def test_scrape_resolved_launch_flags_prefers_matched_over_other_runs(
     _write_bench(runs_root, "geak_replay", 200.0)
     real_dir = _write_bench(runs_root, "orchestrator_run", 200.0)
     (real_dir / "server.log").write_text(
-        "+ python3 -m sglang.launch_server --model-path /models/x "
-        "--chunked-prefill-size 8192\n",
+        "+ python3 -m sglang.launch_server --model-path /models/x --chunked-prefill-size 8192\n",
         encoding="utf-8",
     )
 
@@ -248,8 +240,7 @@ def test_scrape_resolved_launch_flags_tolerates_corrupt_result_json(
     bench_dir.mkdir(parents=True)
     (bench_dir / "inferencex_result.json").write_text("{not-json", encoding="utf-8")
     (bench_dir / "server.log").write_text(
-        "+ python3 -m sglang.launch_server --model-path /models/x "
-        "--chunked-prefill-size 4096\n",
+        "+ python3 -m sglang.launch_server --model-path /models/x --chunked-prefill-size 4096\n",
         encoding="utf-8",
     )
 

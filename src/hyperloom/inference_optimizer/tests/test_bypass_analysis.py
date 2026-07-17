@@ -11,13 +11,15 @@ from hyperloom.orchestrator.actions.executors import bypass_analysis as ba
 
 
 def test_parse_server_log_throughput_sglang_and_vllm():
-    text = "\n".join([
-        "Decode batch. #running-req: 4 gen throughput (token/s): 100.0",
-        "Decode batch. #running-req: 4 gen throughput (token/s): 200.5",
-        "Avg generation throughput: 300 tokens/s",
-        "irrelevant line",
-        "gen throughput (token/s): 0",  # non-positive dropped
-    ])
+    text = "\n".join(
+        [
+            "Decode batch. #running-req: 4 gen throughput (token/s): 100.0",
+            "Decode batch. #running-req: 4 gen throughput (token/s): 200.5",
+            "Avg generation throughput: 300 tokens/s",
+            "irrelevant line",
+            "gen throughput (token/s): 0",  # non-positive dropped
+        ]
+    )
     samples = ba.parse_server_log_throughput(text)
     assert samples == [100.0, 200.5, 300.0]
 
@@ -85,9 +87,7 @@ def test_build_analysis_success_with_eval(tmp_path):
     )
     eval_dir = tmp_path / "lm_eval"
     eval_dir.mkdir()
-    (eval_dir / "results.json").write_text(
-        json.dumps({"results": {"gsm8k": {"acc,none": 0.7}}}), encoding="utf-8"
-    )
+    (eval_dir / "results.json").write_text(json.dumps({"results": {"gsm8k": {"acc,none": 0.7}}}), encoding="utf-8")
     analysis = ba.build_analysis(
         workspace=tmp_path,
         server_log=tmp_path / "server.log",

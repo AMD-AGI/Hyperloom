@@ -89,8 +89,7 @@ def test_load_model_arch_stale_mismatch_returns_empty(tmp_path: Path):
 # 1b. HF hub cache path: launched --model is a snapshots/<hash> dir whose
 # basename is a commit hash, but the declared clean model_name must still match.
 _HF_SNAPSHOT = (
-    "/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/"
-    "snapshots/a09a35458c702b33eeacc393d103063234e8bc28"
+    "/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28"
 )
 
 
@@ -132,9 +131,7 @@ def test_load_model_arch_flat_dir_still_matches(tmp_path: Path):
 def test_load_model_arch_true_stale_ignored_with_hf_cache(tmp_path: Path):
     """A different model's leftover file is still ignored under an HF cache launch."""
     _write(tmp_path, {**_VALID_ARCH, "model_name": "Llama-3.1-8B"})
-    assert _load_model_arch(
-        tmp_path, "a09a35458c702b33eeacc393d103063234e8bc28", _HF_SNAPSHOT
-    ) == {}
+    assert _load_model_arch(tmp_path, "a09a35458c702b33eeacc393d103063234e8bc28", _HF_SNAPSHOT) == {}
 
 
 def test_load_model_arch_cross_org_same_repo_name_ignored(tmp_path: Path):

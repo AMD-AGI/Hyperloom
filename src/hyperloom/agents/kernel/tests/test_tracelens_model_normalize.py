@@ -8,6 +8,7 @@
 (``claude-opus-4-7``) strict gateways (e.g. SAFE) accept, instead of
 forwarding it raw and 400-ing with ``Invalid model name``.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -25,7 +26,8 @@ if str(TOOLS_DIR) not in sys.path:
 @pytest.fixture(scope="module")
 def tl_module():
     spec = importlib.util.spec_from_file_location(
-        "tracelens_analysis_model_norm_under_test", TL_PATH,
+        "tracelens_analysis_model_norm_under_test",
+        TL_PATH,
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
