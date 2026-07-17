@@ -177,15 +177,15 @@ shows many `kernel_request:*` and few `kernel_response:*`.
 The same tools package also contains smaller utilities that are useful during
 incident response or launch validation:
 
-* `backfill_langfuse.py` — replay one finished session's `reports/trace/` into
+* `backfill_langfuse.py`: replay one finished session's `reports/trace/` into
   Langfuse after the fact:
   `python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD> [--dry-run]`.
-* `preflight_optimizer.py` — launcher-side local preflight for stale processes,
+* `preflight_optimizer.py`: launcher-side local preflight for stale processes,
   ROCm visibility, disk, and model path checks:
   `python src/hyperloom/inference_optimizer/tools/preflight_optimizer.py MODEL_PATH`.
-* `read_optimizer_state.py` — concise `state.json` / lifecycle summary:
+* `read_optimizer_state.py`: concise `state.json` / lifecycle summary:
   `python src/hyperloom/inference_optimizer/tools/read_optimizer_state.py SESSION_DIR`.
-* `robustness_monitor.sh.example` — shell example for polling robustness
+* `robustness_monitor.sh.example`: shell example for polling robustness
   findings around a session; copy/adapt it for local operator workflows.
 
 ---
@@ -194,6 +194,6 @@ incident response or launch validation:
 
 Use these resources for related reference information:
 
-* [`session_breakdown.json` integration in Hyperloom](session-breakdown.md) — The schema produced by `dump_session_breakdown.py`.
-* [Hyperloom self-hosting and operations guide](operations.md) — Retention recommendations, including which scripts' outputs to back up long-term.
-* [Troubleshooting Hyperloom](troubleshooting.md) — Symptoms vs which script to reach for first.
+* [`session_breakdown.json` integration in Hyperloom](session-breakdown.md): The schema produced by `dump_session_breakdown.py`.
+* [Hyperloom self-hosting and operations guide](operations.md): Retention recommendations, including which scripts' outputs to back up long-term.
+* [Troubleshooting Hyperloom](troubleshooting.md): Symptoms vs which script to reach for first.

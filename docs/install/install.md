@@ -205,12 +205,12 @@ has been written in `docker` mode, the setup skill offers a model demo run
 and hands off to the matching demo skill. Choose a fixed preset or the advanced
 custom run:
 
-- [`3h`](../../examples/hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
+- [`3h`](../../examples/hyperloom-qwen3-8b-3h/SKILL.md): Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
-- [`8h`](../../examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
-- [`24h`](../../examples/hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md) —
+- [`8h`](../../examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md): Qwen3-14B-FP8, medium-length FP8 run.
+- [`24h`](../../examples/hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md):
   Qwen3-30B-A3B-Instruct-2507, long-horizon cyclic run.
-- [`custom advanced`](../../examples/hyperloom-custom-advanced/SKILL.md) — user-selected
+- [`custom advanced`](../../examples/hyperloom-custom-advanced/SKILL.md): user-selected
   model, framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase
   toggles, and advanced CLI flags.
 
