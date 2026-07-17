@@ -216,15 +216,21 @@ def is_blocked_untrusted_env_key(key: object) -> bool:
 
 
 def is_allowed_workload_env_key(key: object) -> bool:
+    """Return whether an untrusted workload env override is safe to materialize.
+
+    Workload env maps come from KB recipes and specialist proposals where
+    unknown-but-valid tuning knobs are common. Gate only the stable hazards:
+    invalid names, loader/shell startup hooks, and non-workload credentials.
+    """
     name = str(key or "").strip()
     upper = name.upper()
     if not valid_env_key(upper) or upper in BLOCKED_UNTRUSTED_ENV_NAMES:
         return False
-    return (
-        upper in WORKLOAD_ENV_EXACT_ALLOWLIST
-        or _SERVER_ARGS_RE.fullmatch(upper) is not None
-        or any(upper.startswith(prefix) for prefix in WORKLOAD_ENV_PREFIX_ALLOWLIST)
-    )
+    if upper in _NON_SECRET_TOKEN_ENV_NAMES:
+        return True
+    if _SECRET_KEY_RE.search(upper):
+        return upper in WORKLOAD_ENV_EXACT_ALLOWLIST or upper.startswith("HF_")
+    return True
 
 
 def is_allowed_dotenv_key(key: object) -> bool:
