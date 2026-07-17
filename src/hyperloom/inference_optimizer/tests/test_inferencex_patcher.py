@@ -546,3 +546,28 @@ def test_eval_dest_patch_is_idempotent(tmp_path, monkeypatch):
     ensure_benchmark_lib_eval_dest_patched(tmp_path)
     assert lib.read_text(encoding="utf-8") == after_first
     assert after_first.count('"${RESULT_DIR:-.}/"') == 1
+
+
+def test_baseline_after_materialize_applies_eval_dest_patch(tmp_path, monkeypatch):
+    """BaselineExecutor's base hook (not just ProfileExecutor) must apply the
+    eval-dest redirect, so a pure baseline run's ``mv ./`` writes results into
+    $RESULT_DIR instead of the process cwd (the local-disk InferenceX mirror)."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    lib = _write_eval_dest_lib(ix_root)
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+
+    out = BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out")
+
+    assert out is None  # baseline is never short-circuited
+    text = lib.read_text(encoding="utf-8")
+    assert 'mv -f "$jf" "${RESULT_DIR:-.}/"' in text
+    assert 'mv -f "$jf" ./ ' not in text
