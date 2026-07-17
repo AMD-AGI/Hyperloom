@@ -240,9 +240,44 @@ def test_magpie_dir_honours_explicit_override(tmp_path, monkeypatch):
     assert paths.magpie_dir() == tmp_path / "operator-magpie"
 
 
-def test_dep_dir_pins_revision(tmp_path, monkeypatch):
+def test_resolve_dep_dir_prefers_env_var(tmp_path, monkeypatch):
+    # The installer-exported env var is the exact, preferred checkout.
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
-    assert paths.dep_dir("Magpie", "abc1234") == tmp_path / "cache" / "Magpie@abc1234"
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "operator-tl"))
+    assert paths.resolve_dep_dir("TraceLens", "TRACELENS_ROOT") == tmp_path / "operator-tl"
+
+
+def test_resolve_dep_dir_globs_pinned_checkout_when_env_unset(tmp_path, monkeypatch):
+    # install.sh clones <name>@<sha>; a process that did NOT inherit the exported
+    # env var must still resolve that checkout, not the bare path the installer
+    # never created (the #3 regression).
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    pinned = tmp_path / "cache" / "TraceLens@deadbeef"
+    pinned.mkdir(parents=True)
+    assert paths.resolve_dep_dir("TraceLens", "TRACELENS_ROOT") == pinned
+    assert paths.tracelens_root() == pinned  # rides the same resolver
+
+
+def test_resolve_dep_dir_picks_newest_pinned_checkout(tmp_path, monkeypatch):
+    import os as _os
+
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    old = tmp_path / "cache" / "Magpie@1111111"
+    new = tmp_path / "cache" / "Magpie@2222222"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    _os.utime(old, (1_000_000, 1_000_000))
+    _os.utime(new, (2_000_000, 2_000_000))  # newest wins regardless of glob order
+    assert paths.resolve_dep_dir("Magpie", "MAGPIE_PATH") == new
+
+
+def test_resolve_dep_dir_falls_back_to_bare_when_no_pinned(tmp_path, monkeypatch):
+    # No <name>@<sha> dir (pip-installed Magpie layout): bare default.
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    assert paths.resolve_dep_dir("Magpie", "MAGPIE_PATH") == tmp_path / "cache" / "Magpie"
 
 
 # TraceLens root resolution: mirrors magpie_dir so trace analysis resolves the

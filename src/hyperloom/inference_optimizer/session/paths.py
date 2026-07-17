@@ -317,7 +317,7 @@ def deps_cache_root() -> Path:
 
     Resolution: ``$HYPERLOOM_CACHE_DIR`` else ``$REPO_ROOT/.cache``
     (``REPO_ROOT`` falls back to the current working directory). Deps are cloned
-    per revision under this root; see :func:`dep_dir`.
+    per revision under this root; see :func:`resolve_dep_dir`.
     """
     override = os.environ.get(ENV_CACHE_DIR)
     if override:
@@ -326,47 +326,77 @@ def deps_cache_root() -> Path:
     return Path(repo_root) / ".cache"
 
 
-def dep_dir(name: str, sha: str) -> Path:
-    """Per-revision dependency checkout dir ``<deps_cache_root>/<name>@<sha>``.
+def _dir_mtime(p: Path) -> float:
+    """``p``'s mtime, or ``0.0`` if it vanished mid-resolution (race-safe)."""
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def resolve_dep_dir(name: str, env_var: str | None = None) -> Path:
+    """Resolve a dependency checkout dir, bridging install.sh's per-revision
+    ``<name>@<sha>`` layout to runtime callers.
+
+    Resolution order:
+
+    1. ``$<env_var>`` when set — install.sh writes the resolved ``@sha`` path
+       here (e.g. ``TRACELENS_ROOT`` / ``MAGPIE_PATH``): the exact, preferred
+       checkout for an inheriting process.
+    2. Newest ``<deps_cache_root>/<name>@<sha>`` directory. install.sh clones per
+       revision under this root; globbing lets a process that did *not* inherit
+       the env var still resolve the same checkout instead of a path the
+       installer never created (the bare ``<name>`` default silently broke the
+       "script and runtime agree without inherited env" invariant, ref #722).
+    3. Bare ``<deps_cache_root>/<name>`` as a last-resort default (matches a
+       non-pinned / pip-installed layout, e.g. Magpie).
 
     Args:
-        name: Dependency name (e.g. ``Magpie``).
-        sha: Resolved commit SHA (or immutable tag) the checkout is pinned to.
+        name: Dependency directory name (e.g. ``TraceLens``).
+        env_var: Installer-exported override env var, if any.
 
     Returns:
-        The per-revision checkout path.
+        The resolved dependency checkout path.
     """
-    return deps_cache_root() / f"{name}@{sha}"
+    if env_var:
+        override = os.environ.get(env_var)
+        if override:
+            return Path(override)
+    root = deps_cache_root()
+    pinned = [p for p in root.glob(f"{name}@*") if p.is_dir()]
+    if pinned:
+        # The env var is the exact answer; when it was not inherited, the newest
+        # pinned revision is the best guess (see the cache-growth caveat).
+        return max(pinned, key=_dir_mtime)
+    return root / name
 
 
 def magpie_dir() -> Path:
-    """Magpie checkout. ``$MAGPIE_PATH`` (installer-written, per-revision) wins;
-    otherwise falls back to ``<deps_cache_root>/Magpie``.
+    """Magpie checkout root. ``$MAGPIE_PATH`` (installer-written) wins; otherwise
+    the newest ``<deps_cache_root>/Magpie@<sha>`` checkout, else bare
+    ``<deps_cache_root>/Magpie`` (Magpie is pip-installed, so the bare default is
+    the common fallback). See :func:`resolve_dep_dir`.
 
-    ``install.sh`` resolves ``MAGPIE_PATH`` from the pip-installed package.
-    This helper keeps the old default path for back-compat with callers that
-    ask before setup has exported the resolved value.
+    ``install.sh`` resolves ``MAGPIE_PATH`` from the pip-installed package;
+    explicit overrides remain supported.
 
     Returns:
         The Magpie package/check-out root path.
     """
-    override = os.environ.get("MAGPIE_PATH")
-    if override:
-        return Path(override)
-    return deps_cache_root() / "Magpie"
+    return resolve_dep_dir("Magpie", "MAGPIE_PATH")
 
 
 def tracelens_root() -> Path:
-    """TraceLens checkout. ``$TRACELENS_ROOT`` (installer-written, per-revision)
-    wins; otherwise falls back to ``<deps_cache_root>/TraceLens``.
+    """TraceLens checkout root. ``$TRACELENS_ROOT`` (installer-written,
+    per-revision) wins; otherwise the newest ``<deps_cache_root>/TraceLens@<sha>``
+    checkout, else bare ``<deps_cache_root>/TraceLens``. See
+    :func:`resolve_dep_dir` — this keeps script and runtime resolving the same
+    checkout even when ``$TRACELENS_ROOT`` was not inherited.
 
     Returns:
         The TraceLens checkout path.
     """
-    override = os.environ.get("TRACELENS_ROOT")
-    if override:
-        return Path(override)
-    return deps_cache_root() / "TraceLens"
+    return resolve_dep_dir("TraceLens", "TRACELENS_ROOT")
 
 
 def mn_profile_trace_root() -> Path:
@@ -397,7 +427,7 @@ __all__ = [
     "make_session_dir",
     "mn_profile_trace_root",
     "deps_cache_root",
-    "dep_dir",
+    "resolve_dep_dir",
     "runtime_dir",
     "session_dir",
     "find_latest_per_session_dir",

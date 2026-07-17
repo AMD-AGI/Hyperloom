@@ -2008,6 +2008,35 @@ class TestTracelensRootResolution:
         assert called["n"] == 1
         assert called["root"] == default_root
 
+    def test_selfheal_runs_on_pinned_at_sha_default(self, tmp_path, monkeypatch):
+        # install.sh clones the default checkout as TraceLens@<sha>; a vanished
+        # per-revision default must still self-heal, not be misread as an
+        # operator override (the bare-only default_root check missed @sha dirs).
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+        default_root = tmp_path / "podlocal" / "TraceLens@deadbeef"
+        monkeypatch.setenv("TRACELENS_ROOT", str(default_root))
+        called = {"n": 0, "root": None}
+
+        def _fake_ensure(root, *, log_path=None):
+            called["n"] += 1
+            called["root"] = Path(root)
+
+        import sys as _sys
+        import types as _types
+
+        fake_mod = _types.ModuleType("tracelens_analysis")
+        fake_mod._ensure_tracelens_checkout = _fake_ensure  # type: ignore[attr-defined]
+        _sys.modules["tracelens_analysis"] = fake_mod
+        monkeypatch.setattr(
+            krh, "_kernel_agent_tool_path", lambda *_a, **_k: tmp_path / "tools" / "tracelens_analysis.py"
+        )
+        try:
+            krh._maybe_selfheal_tracelens_root(default_root)
+        finally:
+            _sys.modules.pop("tracelens_analysis", None)
+        assert called["n"] == 1
+        assert called["root"] == default_root
+
 
 class TestKernelOptArtifactBundleRecording:
     def test_materialize_unified_patch_snapshot_for_forge_fusion_patch(self, tmp_path):

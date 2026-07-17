@@ -173,7 +173,39 @@ _resolve_ref_sha() {
     return 0
   fi
   sha="$(git ls-remote "$repo" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
-  printf '%s' "${sha:-$ref}"
+  if [ -z "$sha" ]; then
+    # Loud, not silent: falling back to the raw ref as the cache key drops the
+    # per-revision guarantee (a moving branch can then reuse a stale @ref tree).
+    echo "[inference-optimizer WARN] could not resolve '$ref' at $repo to a commit SHA (network or bad ref); using '$ref' as the per-revision cache key -- stale-checkout guard weakened. Pin *_REF to a 40-hex SHA or restore network access." >&2
+    sha="$ref"
+  fi
+  printf '%s' "$sha"
+}
+
+# Bound dependency-cache growth: keep only the newest $HYPERLOOM_CACHE_KEEP
+# (default 3) <name>@<sha> checkouts per dep under $_open_source_root, pruning
+# older revisions. Branch refs (e.g. GEAK `main`) resolve to a new SHA whenever
+# upstream HEAD moves, so without this the per-revision cache grows unbounded.
+# HYPERLOOM_CACHE_KEEP=0 disables pruning (keep every revision). Best-effort and
+# lock-held; the just-installed revision is newest, so it is always retained.
+_prune_dep_cache() {
+  local keep="${HYPERLOOM_CACHE_KEEP:-3}"
+  case "$keep" in ''|*[!0-9]*) keep=3 ;; esac
+  [ "$keep" -eq 0 ] && return 0
+  local name stale listing
+  for name in "$@"; do
+    # `|| true`: a no-match glob makes `ls` fail, which under `set -euo pipefail`
+    # would otherwise abort the installer. Collect first, act second.
+    listing="$(ls -dt "${_open_source_root}/${name}@"* 2>/dev/null | tail -n +"$((keep + 1))" || true)"
+    [ -n "$listing" ] || continue
+    while IFS= read -r stale; do
+      [ -n "$stale" ] && [ -d "$stale" ] || continue
+      log "pruning stale dep cache (keeping newest ${keep} ${name}@*): ${stale}"
+      rm -rf -- "$stale" 2>/dev/null || true
+    done <<EOF
+$listing
+EOF
+  done
 }
 
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
@@ -1159,6 +1191,7 @@ PY
 _write_specialist_secret_env_opt_in
 _probe_framework_source_roots
 
+_prune_dep_cache "InferenceX" "Magpie"
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
 log "  HYPERLOOM_KERNEL_AGENT_ROOT=${HYPERLOOM_KERNEL_AGENT_ROOT}"
