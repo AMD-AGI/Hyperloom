@@ -27,7 +27,7 @@ fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 # Pod-local base for the private KernelForge checkout. Keep it decoupled from
 # USER_DATA_PATH so shared (WekaFS) workspaces never collocate pod checkouts.
-HYPERLOOM_DEPS_ROOT="${HYPERLOOM_DEPS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}}"
+HYPERLOOM_DEPS_ROOT="${HYPERLOOM_DEPS_ROOT:-${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}}"
 _open_source_root="${HYPERLOOM_DEPS_ROOT}"
 LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}"
 
@@ -87,7 +87,7 @@ done
 _open_source_root="${HYPERLOOM_DEPS_ROOT}"
 # Export the canonical open-source-root key so same-shell install.sh / optimize
 # invocations resolve the same default open-source dependency paths.
-export HYPERLOOM_OPEN_SOURCE_ROOT="${_open_source_root}"
+export HYPERLOOM_CACHE_DIR="${_open_source_root}"
 
 log() { echo "[local-setup] $*"; }
 warn() { echo "[local-setup WARN] $*" >&2; }
@@ -205,8 +205,8 @@ write_local_env() {
     # hyperloom.inference_optimizer.session.paths / the handler / the tool resolve the SAME
     # default open-source dep paths when this env file is sourced. Without it, a
     # --deps-root / HYPERLOOM_DEPS_ROOT override would leave those consumers on
-    # /opt/hyperloom/open-source-repos and mis-classify managed vs override (#722).
-    write_export HYPERLOOM_OPEN_SOURCE_ROOT "$_open_source_root"
+    # the $REPO_ROOT/.cache default and mis-classify managed vs override (#722).
+    write_export HYPERLOOM_CACHE_DIR "$_open_source_root"
     if [ -n "${FORGE_PATH:-}" ]; then
       write_export FORGE_PATH "$FORGE_PATH"
       write_export KERNEL_FORGE_ROOT "$KERNEL_FORGE_ROOT"

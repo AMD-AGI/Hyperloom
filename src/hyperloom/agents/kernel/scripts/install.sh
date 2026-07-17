@@ -39,7 +39,7 @@ done
 # (this script lives at src/hyperloom/agents/kernel/scripts/install.sh, so
 # KERNEL_AGENT_ROOT is one level up and REPO_ROOT is five levels up).
 # Operator-provided read-only inputs
-# (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT, HYPERLOOM_BUNDLE)
+# (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT)
 # may stay outside USER_DATA_PATH.
 # The default public TraceLens checkout is cloned under USER_DATA_PATH/runtime
 # like Magpie/InferenceX so its env path is safe across pods.
@@ -62,12 +62,10 @@ HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
 # Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
-# Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
-# so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
-# Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
-# /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
-_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
-HYPERLOOM_BUNDLE="${HYPERLOOM_BUNDLE:-}"
+# Writable, repo-local base for auto-cloned deps: $HYPERLOOM_CACHE_DIR else
+# $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
+# wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
+_open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
 # MAGPIE_PATH is the single override shared with the Python runtime; a standalone
 # run never clones upstream Magpie when MAGPIE_PATH is set.
 MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
@@ -154,13 +152,53 @@ _canonicalize_path() {
   [ -z "$p" ] && return 0
   readlink -f -- "$p" 2>/dev/null || printf '%s' "${p%/}"
 }
-_tracelens_default_root="$(_canonicalize_path "${_open_source_root}/TraceLens")"
+# Resolve a git ref to a commit SHA (7-40 hex passes through; branch/tag via
+# ls-remote, falling back to the raw ref). The SHA keys the per-revision cache.
+_resolve_ref_sha() {
+  local repo="$1" ref="$2" sha=""
+  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  sha="$(git ls-remote "$repo" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
+  if [ -z "$sha" ]; then
+    # Loud, not silent: a raw-ref cache key drops the per-revision guarantee.
+    echo "[kernel-agent WARN] could not resolve '$ref' at $repo to a commit SHA (network or bad ref); using '$ref' as the per-revision cache key -- stale-checkout guard weakened. Pin *_REF to a 40-hex SHA or restore network access." >&2
+    sha="$ref"
+  fi
+  printf '%s' "$sha"
+}
+
+# Bound cache growth: keep the newest $HYPERLOOM_CACHE_KEEP (default 3, 0 disables)
+# <name>@<sha> checkouts per dep, prune older ones. A moving branch ref (GEAK
+# `main`) resolves to a new SHA each HEAD bump, so the cache would grow unbounded.
+# Lock-held; the just-installed revision is newest, so always retained.
+_prune_dep_cache() {
+  local keep="${HYPERLOOM_CACHE_KEEP:-3}"
+  case "$keep" in ''|*[!0-9]*) keep=3 ;; esac
+  [ "$keep" -eq 0 ] && return 0
+  local name stale listing
+  for name in "$@"; do
+    # `|| true`: no-match glob fails `ls` under `set -euo pipefail`. Collect, then act.
+    listing="$(ls -dt "${_open_source_root}/${name}@"* 2>/dev/null | tail -n +"$((keep + 1))" || true)"
+    [ -n "$listing" ] || continue
+    while IFS= read -r stale; do
+      [ -n "$stale" ] && [ -d "$stale" ] || continue
+      log "pruning stale dep cache (keeping newest ${keep} ${name}@*): ${stale}"
+      rm -rf -- "$stale" 2>/dev/null || true
+    done <<EOF
+$listing
+EOF
+  done
+}
+_TRACELENS_SHA="$(_resolve_ref_sha "$TRACELENS_REPO" "$TRACELENS_REF")"
+_tracelens_default_root="$(_canonicalize_path "${_open_source_root}/TraceLens@${_TRACELENS_SHA}")"
 _tracelens_root_was_set=""
 if [ -n "${TRACELENS_ROOT:-}" ] \
    && [ "$(_canonicalize_path "${TRACELENS_ROOT}")" != "${_tracelens_default_root}" ]; then
   _tracelens_root_was_set=1
 fi
-TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens}"
+TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens@${_TRACELENS_SHA}}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 # Writable mirror when the optional internal extension is on a read-only mount.
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"
@@ -200,8 +238,14 @@ fi
 # repo/ref/root with GEAK_REPO / GEAK_REF / GEAK_ROOT. NOTE: only Hyperloom's
 # internal naming changed — no upstream GEAK branch was renamed.
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-GEAK_ROOT="${GEAK_ROOT:-${_open_source_root}/GEAK}"
 GEAK_REF="${GEAK_REF:-main}"
+# GEAK_REF defaults to a branch (`main`), so resolving it to a SHA hits the
+# network (git ls-remote). Only do that when GEAK_ROOT was not overridden -- an
+# operator-pinned root must not pay for (or fail on) a network round-trip.
+if [ -z "${GEAK_ROOT:-}" ]; then
+  _GEAK_SHA="$(_resolve_ref_sha "$GEAK_REPO" "$GEAK_REF")"
+  GEAK_ROOT="${_open_source_root}/GEAK@${_GEAK_SHA}"
+fi
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
 GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-4-8}}"
 if [ -z "${GEAK_CLAUDE_MODEL:-}" ] && [ -z "${CLAUDE_MODEL:-}" ] && [ -n "${DEEPSEEK_API_KEY:-${DEEPSEEK_BASE_URL:-}}" ]; then
@@ -1182,6 +1226,7 @@ main() {
   # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
   # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.
   ensure_geak
+  _prune_dep_cache "TraceLens" "GEAK"
   ensure_forge_claude_cli
   write_env_file
 
