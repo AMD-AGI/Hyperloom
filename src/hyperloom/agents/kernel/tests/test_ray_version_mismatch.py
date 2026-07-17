@@ -136,7 +136,10 @@ def test_force_restart_local_cluster_runs_stop_then_start(tmp_path):
         ray_runtime.force_restart_local_cluster(num_gpus=4, log_path=log_path)
 
     assert runs[0] == ["ray", "stop", "--force"]
-    assert runs[1][:4] == ["ray", "start", "--head", "--port=6379"]
+    # The fresh head binds a probed free port (not the fixed 6379) so co-located
+    # host-network sessions never collide on Ray's default GCS port.
+    assert runs[1][:3] == ["ray", "start", "--head"]
+    assert any(tok.startswith("--port=") for tok in runs[1])
     assert "--num-gpus=4" in runs[1]
     assert log_path.exists()
 
