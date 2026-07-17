@@ -12,6 +12,7 @@ import pytest
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.framework import paths as _framework_paths
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
 class _StateStub:
@@ -23,6 +24,9 @@ class _StateStub:
         self.framework_agent_phase_progress: list[dict[str, Any]] = []
         self.framework_agent_critic_decisions: list[dict[str, Any]] = []
         self.framework_agent_authoring_enabled = authoring
+        # Local-exploration arm off in this suite: these tests exercise the
+        # PR-authoring track; the arm has dedicated coverage elsewhere.
+        self.framework_local_explore_enabled = False
         self.framework_agent_specialist_candidate_map: dict[str, str] = {}
         self.phase_history: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
@@ -123,9 +127,17 @@ class _Stub:
     _record_framework_agent_authored_outcome = Coordinator._record_framework_agent_authored_outcome
     _record_framework_agent_audit_skip = Coordinator._record_framework_agent_audit_skip
     _framework_agent_audit_seed_lines = staticmethod(Coordinator._framework_agent_audit_seed_lines)
+    _framework_audit_use_llm_mode = staticmethod(FrameworkPhase._framework_audit_use_llm_mode)
+    _framework_audit_verdict_uncertain = staticmethod(FrameworkPhase._framework_audit_verdict_uncertain)
     _framework_agent_audit_skip_confident = staticmethod(Coordinator._framework_agent_audit_skip_confident)
     _framework_agent_roots_have_git = staticmethod(Coordinator._framework_agent_roots_have_git)
     _pump_framework_agent_phase = Coordinator._pump_framework_agent_phase
+    # Local-exploration arm surface (disabled in this suite's state, so these
+    # short-circuit; bound so the shared pump/select paths resolve).
+    _LOCAL_EXPLORE_KIND = FrameworkPhase._LOCAL_EXPLORE_KIND
+    _framework_local_explore_arm_enabled = FrameworkPhase._framework_local_explore_arm_enabled
+    _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
+    _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
     # Stub has no GPU pool, so ``_framework_gpu_params`` degrades to ``{}``.
     _coerce_needs_gpu = staticmethod(Coordinator._coerce_needs_gpu)
     _framework_authoring_lanes_ttl = Coordinator._framework_authoring_lanes_ttl
@@ -822,7 +834,12 @@ def test_audit_candidate_calls_phase_audit_when_uncached(
 
     async def _phase_audit(**_: Any) -> dict[str, Any]:
         calls.n += 1
-        return {"recommended_next_step": "direct_framework", "semantic_status": "not_present"}
+        # A confident static verdict: `auto` LLM policy does not re-run.
+        return {
+            "recommended_next_step": "direct_framework",
+            "semantic_status": "not_present",
+            "confidence": 0.9,
+        }
 
     monkeypatch.setattr(_fa_client, "phase_audit", _phase_audit)
     stub = _Stub(tmp_path, authoring=True)

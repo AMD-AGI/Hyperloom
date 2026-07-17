@@ -667,9 +667,9 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     row = c.shared_state.phase_history[0]
     assert row["to_phase"] == "PRELUDE"
     assert row["reason"] == "phase_entered"
-    # FRAMEWORK 0.15, EXPLORE 0.375, PRELUDE 0.03; budgets sum to 1.0.
-    assert c.shared_state.phase_budget_pct["FRAMEWORK_AGENT"] == 0.15
-    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.375
+    # FRAMEWORK 0.20, EXPLORE 0.35, PRELUDE 0.03; budgets sum to 1.0.
+    assert c.shared_state.phase_budget_pct["FRAMEWORK_AGENT"] == 0.20
+    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.35
     assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.03
 
 
