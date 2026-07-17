@@ -5,6 +5,9 @@
 kernel-agent/env.sh
 framework-agent/scripts/env.sh
 
+# Dependency checkout cache (deps_cache_root default: $REPO_ROOT/.cache)
+.cache/
+
 # Python
 __pycache__/
 *.py[cod]

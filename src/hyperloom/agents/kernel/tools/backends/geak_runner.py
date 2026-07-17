@@ -37,10 +37,17 @@ def _resolve_runner() -> str:
     root = os.environ.get("GEAK_ROOT", "").strip()
     if root:
         roots.append(root)
-    open_source_root = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT", "").strip()
-    if open_source_root:
-        roots.append(str(Path(open_source_root) / "GEAK"))
-    roots.append("/opt/hyperloom/open-source-repos/GEAK")
+    cache_dir = os.environ.get("HYPERLOOM_CACHE_DIR", "").strip()
+    if cache_dir:
+        # install.sh clones GEAK per revision as <cache>/GEAK@<sha>; prefer the
+        # newest such checkout, then the bare dir. Mirrors paths.resolve_dep_dir.
+        pinned = sorted(
+            (p for p in Path(cache_dir).glob("GEAK@*") if p.is_dir()),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+            reverse=True,
+        )
+        roots.extend(str(p) for p in pinned)
+        roots.append(str(Path(cache_dir) / "GEAK"))
     for root in dict.fromkeys(roots):
         cand = Path(root) / "interface" / "run_e2e.py"
         if cand.is_file():
@@ -48,7 +55,7 @@ def _resolve_runner() -> str:
     raise FileNotFoundError(
         "e2e runner not found. Set GEAK_E2E_RUNNER to "
         "<GEAK checkout>/interface/run_e2e.py (the installer exports it), "
-        "or set GEAK_ROOT/HYPERLOOM_OPEN_SOURCE_ROOT."
+        "or set GEAK_ROOT/HYPERLOOM_CACHE_DIR."
     )
 
 
