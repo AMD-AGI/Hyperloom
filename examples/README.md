@@ -191,8 +191,8 @@ run:
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
 - [`8h`](hyperloom-qwen3-14b-fp8-8h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
-- [`24h`](hyperloom-gpt-oss-120b-24h/SKILL.md) — gpt-oss-120b, long-horizon cyclic
-  run.
+- [`24h`](hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md) —
+  Qwen3-30B-A3B-Instruct-2507, long-horizon cyclic run.
 - [`custom advanced`](hyperloom-custom-advanced/SKILL.md) — user-selected model,
   framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase toggles, and
   advanced CLI flags.
