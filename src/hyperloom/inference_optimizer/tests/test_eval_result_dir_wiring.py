@@ -233,9 +233,7 @@ def test_baseline_exports_eval_result_dir_env(tmp_path):
     # cold-start double-run guard otherwise runs warmup+measure in
     # ``output_dir/{warmup,measure}_round`` sub-slots, which this env-wiring
     # assertion is not about.
-    ctx = _make_ctx(
-        {"output_dir": str(output_dir), "timeout_sec": 10, "baseline_double_run": False}
-    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "baseline_double_run": False})
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",

@@ -842,10 +842,7 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
     # Substring accept (unchanged for legitimate in-tree sources) plus a narrow
     # traversal-escape rejection: a trace-supplied kernel_file that keeps a root
     # substring but uses ``..`` to climb out of the tree is refused.
-    if (
-        not any(root in lower_file for root in _reusable_source_roots())
-        or _source_escapes_reusable_roots(source_file)
-    ):
+    if not any(root in lower_file for root in _reusable_source_roots()) or _source_escapes_reusable_roots(source_file):
         return {
             "status": "failed",
             "error_class": "unstable_source_path",

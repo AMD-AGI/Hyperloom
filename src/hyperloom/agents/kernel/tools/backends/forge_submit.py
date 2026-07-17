@@ -779,9 +779,7 @@ def _validate_test_command_argv_like(test_command: str) -> str:
     if not cmd:
         return ""
     if _UNSAFE_TEST_COMMAND_CHARS_RE.search(cmd):
-        raise ValueError(
-            "test_command must be argv-like and cannot contain shell control characters"
-        )
+        raise ValueError("test_command must be argv-like and cannot contain shell control characters")
     try:
         shlex.split(cmd)
     except ValueError as exc:

@@ -83,9 +83,7 @@ def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[s
     if any(part in _UNSAFE_COMMAND_TOKENS for part in argv) or any(
         _UNSAFE_COMMAND_CHARS_RE.search(part) for part in argv
     ):
-        raise ValueError(
-            "rebuild_command must be argv-like and cannot contain shell control operators"
-        )
+        raise ValueError("rebuild_command must be argv-like and cannot contain shell control operators")
     if any(("\n" in part or "\r" in part or "\x00" in part) for part in argv):
         raise ValueError("rebuild_command contains invalid control characters")
     exe = Path(argv[0]).name.lower()

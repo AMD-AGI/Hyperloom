@@ -764,9 +764,7 @@ class _FakeGpuSpecialistLease:
         self.env = dict(env or {})
         Path(log_path).write_text("stream-json log line\n", encoding="utf-8")
         # Graceful done — the reaper harvests this and exits.
-        (self._workspace / "specialist_done.json").write_text(
-            json.dumps({"proposal_set": []}), encoding="utf-8"
-        )
+        (self._workspace / "specialist_done.json").write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
         self.alive = False
         return 9999
 

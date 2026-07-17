@@ -700,6 +700,7 @@ class FrameworkAgentExecutor:
         # missing-target diffs are left to git apply's own check so a legitimate
         # candidate is never dropped here.
         from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
+
         for patch in patch_paths:
             try:
                 _ptext = Path(patch).read_text(encoding="utf-8", errors="replace")

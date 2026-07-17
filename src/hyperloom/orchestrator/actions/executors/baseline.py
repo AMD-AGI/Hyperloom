@@ -748,7 +748,8 @@ def _apply_warm_patches(
         if _escape is not None:
             log.warning(
                 "baseline_executor: skipping warm patch %s — path escapes tree: %r",
-                patch_file, _escape,
+                patch_file,
+                _escape,
             )
             continue
 
@@ -1399,9 +1400,7 @@ class BaselineExecutor:
         from ._grid_runner import _num_gpus_for_config
         from ._ray_serving import maybe_serving_lease
 
-        bench_lease = maybe_serving_lease(
-            num_gpus=_num_gpus_for_config(materialized_config_path)
-        )
+        bench_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(materialized_config_path))
 
         common = {
             "timeout_sec": timeout_sec,
