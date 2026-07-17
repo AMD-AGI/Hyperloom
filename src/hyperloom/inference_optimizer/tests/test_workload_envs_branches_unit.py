@@ -104,19 +104,27 @@ def test_materialize_drops_loader_env_injections(tmp_path, monkeypatch):
         tmp_path / "out",
         extra_envs={
             "LD_PRELOAD": "/tmp/evil.so",
+            "OPENAI_API_KEY": "secret",
+            "PRECISION": "fp8",
             "PYTHONSTARTUP": "/tmp/pwn.py",
             "SGLANG_USE_AITER": "1",
+            "UNKNOWN_VALID_TUNING_KNOB": "enabled",
         },
         reference_envs={
             "PYTHONPATH": "/tmp/evil",
+            "REFERENCE_ONLY_KNOB": "1",
             "VLLM_ROCM_USE_AITER": "1",
         },
     )
     envs = bench["envs"]
     assert "LD_PRELOAD" not in envs
+    assert "OPENAI_API_KEY" not in envs
     assert "PYTHONSTARTUP" not in envs
     assert "PYTHONPATH" not in envs
+    assert envs["PRECISION"] == "fp8"
+    assert envs["REFERENCE_ONLY_KNOB"] == "1"
     assert envs["SGLANG_USE_AITER"] == "1"
+    assert envs["UNKNOWN_VALID_TUNING_KNOB"] == "enabled"
     assert envs["VLLM_ROCM_USE_AITER"] == "1"
 
 
