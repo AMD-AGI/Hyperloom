@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Real ``profile`` ActionRunner — Magpie run with torch profiler on.
 
@@ -36,6 +37,7 @@ from hyperloom.common.io import safe_mtime
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
+    ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
 from ._xdit_patcher import ensure_xdit_profiler_patched
@@ -686,6 +688,7 @@ class ProfileExecutor(BaselineExecutor):
 
         ix_root = Path(inferencex_path)
         lib_ok = ensure_benchmark_lib_patched(ix_root)
+        ensure_benchmark_lib_eval_dest_patched(ix_root)
         serving_ok = ensure_benchmark_serving_patched(ix_root)
         lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
         serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"

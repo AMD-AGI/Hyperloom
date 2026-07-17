@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """CLI argument parser — ``_build_parser`` and its purely-computational helpers."""
 
@@ -582,8 +583,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Reference GPU hardware key for external baseline comparison "
-            "(e.g. b300 / mi355x / h200). target_analysis ALWAYS runs as "
-            "TODO 0 and always writes "
+            "(e.g. b300 / mi355x / h200). target_analysis ALWAYS runs first, "
+            "before baseline, and always writes "
             "$SESSION_DIR/target_analysis/target_baseline.json + a short "
             "MD report. When this flag is set, the JSON carries the "
             "matching InferenceX (https://inferencex.semianalysis.com) "

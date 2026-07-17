@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for SpecialistRunner pure helpers + workspace file protocol:
 failure classification, empty-done synthesis, redaction, path resolution, and

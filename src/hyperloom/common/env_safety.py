@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Shared environment-variable safety helpers.
 
@@ -13,7 +14,6 @@ import re
 from collections.abc import Mapping
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_SERVER_ARGS_RE = re.compile(r"^EXTRA_[A-Z0-9_]+_ARGS$")
 
 BLOCKED_UNTRUSTED_ENV_NAMES: frozenset[str] = frozenset(
     {
@@ -50,70 +50,6 @@ BLOCKED_CHILD_ENV_NAMES: frozenset[str] = frozenset(
         "RUBYOPT",
         "SHELLOPTS",
     }
-)
-
-_SECRET_KEY_RE = re.compile(r"(?:^|_)(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)(?:_|$)", re.IGNORECASE)
-_NON_SECRET_TOKEN_ENV_NAMES: frozenset[str] = frozenset(
-    {
-        # SGLang tuning switch; TOKEN describes quantization granularity, not a credential.
-        "SGLANG_USE_AITER_FP8_PER_TOKEN",
-    }
-)
-
-WORKLOAD_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
-    {
-        "CONC",
-        "EP",
-        "GPU_METRICS_CSV",
-        "HIP_VISIBLE_DEVICES",
-        "HF_HOME",
-        "HF_TOKEN",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "HSA_FORCE_FINE_GRAIN_PCIE",
-        "ISL",
-        "MAX_MODEL_LEN",
-        "MODEL_PATH",
-        "NUM_PROMPTS",
-        "NUM_WARMUPS",
-        "NO_PROXY",
-        "OSL",
-        "PORT",
-        "PROFILE",
-        "PROFILE_EXTRA_BODY",
-        "PROFILE_OSL",
-        "RANDOM_RANGE_RATIO",
-        "ROCR_VISIBLE_DEVICES",
-        "RUN_EVAL",
-        "SERVER_LOG",
-        "TP",
-    }
-)
-
-WORKLOAD_ENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
-    "AITER_",
-    "ATOM_",
-    "BENCH_",
-    "CUDA_",
-    "FLASHINFER_",
-    "HF_",
-    "HIP_",
-    "HSA_",
-    "HYPERLOOM_PROFILE_",
-    "MAGPIE_",
-    "MORI_",
-    "NCCL_",
-    "PROFILE_",
-    "PYTORCH_",
-    "RCCL_",
-    "ROCBLAS_",
-    "ROCM_",
-    "ROCR_",
-    "SGLANG_",
-    "TORCH_",
-    "TRITON_",
-    "VLLM_",
-    "XDIT_",
 )
 
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
@@ -205,28 +141,6 @@ def valid_env_key(key: object) -> bool:
     return bool(_ENV_KEY_RE.fullmatch(str(key or "")))
 
 
-def is_blocked_untrusted_env_key(key: object) -> bool:
-    name = str(key or "").strip()
-    upper = name.upper()
-    return (
-        not valid_env_key(name)
-        or upper in BLOCKED_UNTRUSTED_ENV_NAMES
-        or (upper not in _NON_SECRET_TOKEN_ENV_NAMES and bool(_SECRET_KEY_RE.search(upper)))
-    )
-
-
-def is_allowed_workload_env_key(key: object) -> bool:
-    name = str(key or "").strip()
-    upper = name.upper()
-    if not valid_env_key(upper) or upper in BLOCKED_UNTRUSTED_ENV_NAMES:
-        return False
-    return (
-        upper in WORKLOAD_ENV_EXACT_ALLOWLIST
-        or _SERVER_ARGS_RE.fullmatch(upper) is not None
-        or any(upper.startswith(prefix) for prefix in WORKLOAD_ENV_PREFIX_ALLOWLIST)
-    )
-
-
 def is_allowed_dotenv_key(key: object) -> bool:
     name = str(key or "").strip()
     upper = name.upper()
@@ -280,8 +194,6 @@ __all__ = [
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_kernel_agent_env_key",
-    "is_allowed_workload_env_key",
-    "is_blocked_untrusted_env_key",
     "scrub_child_process_env",
     "valid_env_key",
 ]

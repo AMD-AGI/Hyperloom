@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coordinator-side handlers for Kernel-agent REQUEST kinds.
 
@@ -418,11 +419,18 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     """
     from hyperloom.inference_optimizer.session import paths
 
-    default_root = paths.open_source_root() / "TraceLens"
+    # The installer-managed checkout is <deps_cache_root>/TraceLens or the
+    # per-revision <deps_cache_root>/TraceLens@<sha>; both are healable. An
+    # explicit override elsewhere must fail fast (never auto-clone).
     try:
-        is_default = Path(root).resolve() == default_root.resolve()
+        cache_root = paths.deps_cache_root().resolve()
+        root_resolved = Path(root).resolve()
     except OSError:
-        is_default = False
+        return
+    is_default = root_resolved.parent == cache_root and (
+        root_resolved.name == "TraceLens"
+        or root_resolved.name.startswith("TraceLens@")
+    )
     if not is_default:
         return  # explicit non-default override: never auto-clone
     try:

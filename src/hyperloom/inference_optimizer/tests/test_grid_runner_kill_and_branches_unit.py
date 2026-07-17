@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for ``_grid_runner`` process-reaping (``_kill_stale_servers``) and
 the ``run_grid`` per-variant failure branches (yaml build error, magpie

@@ -17,8 +17,9 @@ running the install command.
 
 - Python 3.10+ and `pip`.
 - Access to one LLM provider: Anthropic or DeepSeek.
-- `gh` access to the published GitHub release asset, or a locally downloaded
-  Hyperloom wheel.
+- `gh` (GitHub CLI), authenticated, to download the published GitHub release
+  asset (the wheel is distributed as a Release asset, not via PyPI), or a
+  locally downloaded Hyperloom wheel.
 - A dedicated workspace directory opened in the user's agent.
 
 From the agent terminal in that workspace, download the release wheel and install
@@ -123,10 +124,10 @@ The backend runs `install_baremetal.sh` in five phases:
 
 ### Scenario B: Bare Metal + Docker
 
-Use this when the agent starts from a bare host or login node, but the workload
-will run inside a ROCm container. This is the recommended path when the host
-does not have ROCm torch or a serving framework installed, or when the serving
-framework should come from a known container image.
+Use this when the workload will run inside a ROCm container. This is the
+recommended path when the host does not have ROCm torch or a serving framework
+installed, or when the serving framework should come from a known container
+image.
 
 Requirements:
 
@@ -138,11 +139,12 @@ Requirements:
 In this scenario, `/hyperloom-setup` writes `.env` only and does **not** start a
 container. The selected demo skill owns the container lifecycle.
 
-If Slurm is available, setup also checks for allocated nodes. The user chooses
+If Slurm is available, setup also checks the current user's allocation so Docker
+runs on the intended single GPU host instead of a login host. The user chooses
 whether Docker should run on:
 
 - the current host;
-- one of the current user's allocated Slurm nodes; or
+- one allocated Slurm host;
 - a custom host.
 
 The chosen host is written to `.env`:
@@ -185,22 +187,28 @@ framework setup choice.
 
 When setup finishes in `baremetal` mode (and `FRAMEWORK` is set), or when `.env`
 is written in `docker` mode, the setup skill offers a model demo run
-and hands off to the matching demo skill. Pick a length:
+and hands off to the matching demo skill. Pick a preset or the advanced custom
+run:
 
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
 - [`8h`](hyperloom-qwen3-14b-fp8-8h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
-- [`24h`](hyperloom-gpt-oss-120b-24h/SKILL.md) — gpt-oss-120b, long-horizon cyclic
-  run.
+- [`24h`](hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md) —
+  Qwen3-30B-A3B-Instruct-2507, long-horizon cyclic run.
+- [`custom advanced`](hyperloom-custom-advanced/SKILL.md) — user-selected model,
+  framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase toggles, and
+  advanced CLI flags.
 
-The demo reuses the values already in `.env`, so nothing is re-entered.
+The preset demos reuse the values already in `.env`, so nothing is re-entered.
+The custom advanced run also reuses setup values, then asks for workload and
+phase choices before launch.
 
 ## Use a Custom Model
 
-For a custom model, still start from one of the example demo skills above. Pick
-the demo whose runtime shape is closest to the model and experiment you want to
-run, then provide your model path when the skill asks for it. You can also set it
-before launching the demo:
+For a custom model with a preset workload, start from one of the fixed demo
+skills above. Pick the demo whose runtime shape is closest to the model and
+experiment you want to run, then provide your model path when the skill asks for
+it. You can also set it before launching the demo:
 
 ```bash
 export MODEL_PATH=/path/to/your/model
@@ -211,11 +219,13 @@ framework can load; a local Hugging Face-style directory should contain
 `config.json`. When `MODEL_PATH` is set and valid, the demo skill uses that
 directory instead of downloading its default model.
 
-The demo skill is still a preset workload. Replacing the model path does not
+The fixed demo skill is still a preset workload. Replacing the model path does not
 automatically retune tensor parallelism, concurrency, input/output lengths,
 precision, or the run budget. If the custom model is much larger, smaller, or
-uses a different architecture than the preset model, choose the closest preset or
-use the source/manual path to adjust the workload parameters explicitly.
+uses a different architecture than the preset model, use
+[`custom advanced`](hyperloom-custom-advanced/SKILL.md) to choose the model,
+framework, TP/EP, CONC, ISL/OSL, precision, budget, skip flags, and other
+optimizer CLI flags explicitly.
 
 ## What to Expect During a Demo
 

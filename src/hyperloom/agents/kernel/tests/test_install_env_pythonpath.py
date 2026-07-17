@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Regression tests for the PYTHONPATH written into kernel-agent runtime env.
 
@@ -136,7 +137,7 @@ write_env_file
             env_text, dotenv_text = self._run_write_env_file(
                 work,
                 repo_root=repo_root,
-                magpie_path="/opt/hyperloom/open-source-repos/Magpie",
+                magpie_path="/data/.cache/Magpie@abc1234",
             )
 
         pythonpath_line = next(
@@ -152,7 +153,7 @@ write_env_file
             f"REPO_ROOT missing from kernel-agent env PYTHONPATH: {pythonpath_line}",
         )
         # MAGPIE_PATH must still be present (append, not replace).
-        self.assertIn("/opt/hyperloom/open-source-repos/Magpie", pythonpath_line)
+        self.assertIn("/data/.cache/Magpie@abc1234", pythonpath_line)
         # And .env must carry the same reachable PYTHONPATH.
         self.assertIn(str(repo_root), dotenv_text)
 
@@ -164,7 +165,7 @@ write_env_file
             env_text, _ = self._run_write_env_file(
                 work,
                 repo_root=repo_root,
-                magpie_path="/opt/hyperloom/open-source-repos/Magpie",
+                magpie_path="/data/.cache/Magpie@abc1234",
                 preexisting_pythonpath="/pre/existing/entry",
             )
 
@@ -173,7 +174,7 @@ write_env_file
             "",
         )
         self.assertIn(str(repo_root), pythonpath_line)
-        self.assertIn("/opt/hyperloom/open-source-repos/Magpie", pythonpath_line)
+        self.assertIn("/data/.cache/Magpie@abc1234", pythonpath_line)
         # A previously-set PYTHONPATH entry must not be clobbered.
         self.assertIn("/pre/existing/entry", pythonpath_line)
 
@@ -192,8 +193,8 @@ write_env_file
             env_text, dotenv_text = self._run_write_env_file(
                 work,
                 repo_root=repo_root,
-                magpie_path="/opt/hyperloom/open-source-repos/Magpie",
-                preexisting_dotenv_pythonpath="/opt/hyperloom/open-source-repos/Magpie:",
+                magpie_path="/data/.cache/Magpie@abc1234",
+                preexisting_dotenv_pythonpath="/data/.cache/Magpie@abc1234:",
             )
 
         pythonpath_line = next(
@@ -205,11 +206,11 @@ write_env_file
             pythonpath_line,
             f"re-install dropped REPO_ROOT to stale .env PYTHONPATH: {pythonpath_line}",
         )
-        self.assertIn("/opt/hyperloom/open-source-repos/Magpie", pythonpath_line)
+        self.assertIn("/data/.cache/Magpie@abc1234", pythonpath_line)
         self.assertIn(str(repo_root), dotenv_text)
         # No duplicate Magpie entry after recomposition.
         self.assertEqual(
-            pythonpath_line.count("/opt/hyperloom/open-source-repos/Magpie"),
+            pythonpath_line.count("/data/.cache/Magpie@abc1234"),
             1,
             f"duplicate MAGPIE_PATH entry in PYTHONPATH: {pythonpath_line}",
         )

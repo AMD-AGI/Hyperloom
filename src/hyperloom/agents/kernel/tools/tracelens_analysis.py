@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """TraceLens analysis tool for the resident Kernel-agent skill.
 
@@ -4490,9 +4491,10 @@ _TRACELENS_REF_DEFAULT = "4d6e0d9f03bab0541f04a68952dcf13988475708"
 
 def _default_tracelens_root() -> Path:
     """Installer-managed default checkout path (mirrors install.sh /
-    hyperloom.inference_optimizer.session.paths.open_source_root)."""
-    base = os.environ.get("HYPERLOOM_OPEN_SOURCE_ROOT") or "/opt/hyperloom/open-source-repos"
-    return Path(base) / "TraceLens"
+    hyperloom.inference_optimizer.session.paths.deps_cache_root)."""
+    from hyperloom.inference_optimizer.session.paths import deps_cache_root
+
+    return deps_cache_root() / "TraceLens"
 
 
 def _is_default_tracelens_root(tl_root: Path) -> bool:
