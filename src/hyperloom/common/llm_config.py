@@ -100,7 +100,9 @@ def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
     Explicit ``OPENAI_BASE_URL`` always wins in callers. This fallback handles
     AMD's split gateway convention, where Anthropic traffic uses
     ``/anthropic`` and OpenAI-compatible chat completions use ``/Unified/v1``.
-    Unknown Anthropic URLs fall back to their original value.
+    The trailing path segment is matched case-insensitively so a capitalized
+    ``/Anthropic`` (AMD's default) is still recognized. Unknown Anthropic URLs
+    fall back to their original value.
     """
     if not anthropic_base_url:
         return None
@@ -109,11 +111,16 @@ def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
         return None
     parts = urlsplit(base)
     path = parts.path.rstrip("/")
-    if path.endswith("/anthropic") or path == "/anthropic":
-        prefix = path[: -len("/anthropic")] if path.endswith("/anthropic") else ""
+    # Match case-insensitively: AMD's default endpoint uses "/Anthropic" (issue #929).
+    # Keep the original path for slicing so any prefix casing is preserved, and
+    # always emit the canonical "/Unified/v1" segment.
+    path_lower = path.lower()
+    if path_lower.endswith("/anthropic"):
+        prefix = path[: -len("/anthropic")]
         return urlunsplit(parts._replace(path=f"{prefix}/Unified/v1"))
-    if path.endswith("/Unified"):
-        return urlunsplit(parts._replace(path=f"{path}/v1"))
+    if path_lower.endswith("/unified"):
+        prefix = path[: -len("/unified")]
+        return urlunsplit(parts._replace(path=f"{prefix}/Unified/v1"))
     return base
 
 
