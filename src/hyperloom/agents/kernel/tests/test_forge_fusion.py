@@ -83,6 +83,9 @@ def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/api/v1/llm-proxy/v1")
     monkeypatch.setenv("SAFE_API_KEY", "safe-token")
+    # IS_SANDBOX is only set when running as root (SWSPLAT-42390): simulate root
+    # so the sandbox default is exercised.
+    monkeypatch.setattr(forge_fusion.os, "geteuid", lambda: 0, raising=False)
 
     forge_fusion._inject_author_gateway_env()
 
@@ -93,6 +96,20 @@ def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
     assert os.environ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert os.environ["DISABLE_AUTOUPDATER"] == "1"
     assert "API_TIMEOUT_MS" not in os.environ
+
+
+def test_inject_author_gateway_env_skips_sandbox_when_non_root(monkeypatch):
+    # SWSPLAT-42390: as a non-root user, IS_SANDBOX must NOT be set (we do not
+    # defeat claude's bypassPermissions guard for sessions that never needed it).
+    for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "IS_SANDBOX"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/api/v1/llm-proxy/v1")
+    monkeypatch.setenv("SAFE_API_KEY", "safe-token")
+    monkeypatch.setattr(forge_fusion.os, "geteuid", lambda: 1000, raising=False)
+
+    forge_fusion._inject_author_gateway_env()
+
+    assert "IS_SANDBOX" not in os.environ
 
 
 def test_main_passes_timeout_to_tree_runner(tmp_path, monkeypatch, capsys):
