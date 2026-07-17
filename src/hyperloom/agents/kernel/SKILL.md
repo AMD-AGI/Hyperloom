@@ -18,7 +18,7 @@ keyed by `kernel_id`. Default `USER_DATA_PATH` is `/workspace/hyperloom`.
 Do not write outside `$USER_DATA_PATH` except for reading user-provided
 trace/source paths, the TraceLens public source at
 `$TRACELENS_ROOT` (default
-`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens`;
+`${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens`;
 `install.sh` clones `AMD-AGI/TraceLens` there and pins it to a fixed SHA. A
 pre-existing checkout you maintain is only used as an explicit operator
 override — export `TRACELENS_ROOT=<path>` to opt in, which makes the
@@ -66,7 +66,7 @@ bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
 - `ray==2.44.1` + `click<8.3.0`
 - TraceLens public editable install from `$TRACELENS_ROOT`
   (default
-  `${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens`;
+  `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens`;
   when unset, `install.sh` clones `AMD-AGI/TraceLens` there and pins it to a
   fixed SHA. Export `TRACELENS_ROOT=<path>` to point at a pre-existing
   checkout you maintain — this is an explicit operator override and
@@ -291,7 +291,7 @@ install your own checkout (`pip install -e .`) and set `$TRACELENS_INTERNAL_ROOT
 to its path. Hyperloom keeps no internal URL/path and never clones it.
 
 Default base repo (`TRACELENS_ROOT`):
-`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens`.
+`${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens`.
 When unset, `install.sh` clones `AMD-AGI/TraceLens` there and pins it to the fixed
 SHA recorded in the installer. A pre-existing checkout you maintain is
 **only** used as an explicit operator override — export
@@ -326,7 +326,7 @@ manual editable install + smoke test before analysis:
 # Operator override: export TRACELENS_ROOT (e.g.
 # /path/to/your/TraceLens) before running install.sh to skip the clone
 # and the SHA pin.
-export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens}"
+export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens}"
 cd "$TRACELENS_ROOT" && pip install -e .
 # OPTIONAL internal extension — only if TRACELENS_INTERNAL_ROOT is set:
 [ -n "${TRACELENS_INTERNAL_ROOT:-}" ] && cd "$TRACELENS_INTERNAL_ROOT" && pip install -e .

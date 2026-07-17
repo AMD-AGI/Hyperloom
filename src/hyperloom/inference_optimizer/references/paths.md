@@ -50,7 +50,7 @@ session dir printed by the CLI.
 | Session dir | `$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR` → `session.paths.session_dir()` | Per-run directory containing `manifest.json` / `state.json` / `storage/coordinator.db` |
 
 Open-source dependencies are cloned pod-local, not under `runtime/`:
-`${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/`
+`${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/`
 contains Magpie, TraceLens, GEAK, and InferenceX.
 
 **Launcher rule:** do not hand-build, create, delete, or repair paths under the
@@ -76,7 +76,7 @@ Read-only sources or warm-start caches, each overridable via its own env if you
 want a fully self-contained session:
 
 - **TraceLens** — `install.sh` clones public TraceLens into
-  `${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens`
+  `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens`
   unless `$TRACELENS_ROOT` points at an operator-managed checkout. Optional
   internal extension at `$TRACELENS_INTERNAL_ROOT` (no default; internal users
   set it to their own checkout to opt in, otherwise open-source-only). The
