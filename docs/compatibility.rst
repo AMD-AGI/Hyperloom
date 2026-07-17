@@ -5,6 +5,10 @@
 Hyperloom compatibility matrix
 ===============================
 
+.. |github-icon| raw:: html
+
+   <i class="fab fa-github"></i>
+
 This topic lists the hardware, inference frameworks, and container images that
 Hyperloom is validated against.
 
@@ -16,15 +20,15 @@ Hyperloom is validated against.
 +-------------------+-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
 | Hyperloom Version | Component             | GPU Support         | ROCm Version Support | OS Support                 | Python | GitHub                                        |
 +===================+=======================+=====================+======================+============================+========+===============================================+
-| 0.9.0             | TraceLens 0.1.0       | N/A                 | N/A                  | N/A                        | >= 3.6 | `AMD-AGI/TraceLens`_                          |
+| 0.9.0             | TraceLens 0.1.0       | N/A                 | N/A                  | N/A                        | >= 3.6 | |github-icon| `AMD-AGI/TraceLens`_            |
 +                   +-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
-|                   | GEAK 4.0              | MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | > 3.8  | `AMD-AGI/GEAK`_                               |
+|                   | GEAK 4.0              | MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | > 3.8  | |github-icon| `AMD-AGI/GEAK`_                 |
 +                   +-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
-|                   | IntelliKit 0.1.0      | MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10| `AMDResearch/intellikit`_                     |
+|                   | IntelliKit 0.1.0      | MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10| |github-icon| `AMDResearch/intellikit`_       |
 +                   +-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
-|                   | AgentKernelArena 0.1.0| MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10| `AMD-AGI/AgentKernelArena`_                   |
+|                   | AgentKernelArena 0.1.0| MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10| |github-icon| `AMD-AGI/AgentKernelArena`_     |
 +                   +-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
-|                   | Magpie 0.1.0          | MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10| `AMD-AGI/Magpie`_                             |
+|                   | Magpie 0.1.0          | MI300, MI325, MI355 | 7.2.x                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10| |github-icon| `AMD-AGI/Magpie`_               |
 +-------------------+-----------------------+---------------------+----------------------+----------------------------+--------+-----------------------------------------------+
 
 .. _AMD-AGI/TraceLens: https://github.com/AMD-AGI/TraceLens
