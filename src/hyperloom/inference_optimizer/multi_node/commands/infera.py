@@ -31,7 +31,9 @@ from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 
 import logging
+
 log = logging.getLogger(__name__)
+
 
 class _MnCliProxy:
     """Lazy proxy preserving ``inf._mn_cli`` monkeypatch compatibility."""
@@ -76,9 +78,7 @@ def _infera_pod_targets_from_lists(
     Returns:
         list[dict[str, Any]]: The resolved SSH target dicts.
     """
-    return infera_support.pod_targets_from_lists(
-        pods, ips, default_port=default_port, default_role=default_role
-    )
+    return infera_support.pod_targets_from_lists(pods, ips, default_port=default_port, default_role=default_role)
 
 
 def _infera_all_gpu_targets(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -270,9 +270,7 @@ def cmd_create_infera(args: argparse.Namespace) -> int:
                 """
                 wl = safe.get_workload(wid)
                 _pods = wl.get("pods") or []
-                _pod_summary = ",".join(
-                    (p.get("phase") or "?") for p in _pods
-                ) or "no-pods"
+                _pod_summary = ",".join((p.get("phase") or "?") for p in _pods) or "no-pods"
                 return wl, f"phase={wl.get('phase', '?')} pods=[{_pod_summary}]"
 
             def _infera_is_ok(w: dict) -> bool:
@@ -285,9 +283,7 @@ def cmd_create_infera(args: argparse.Namespace) -> int:
                 if w.get("phase") in _TERMINAL_OK_PHASES:
                     return True
                 pods = w.get("pods") or []
-                return bool(pods) and all(
-                    (p.get("phase") == "Running") for p in pods
-                )
+                return bool(pods) and all((p.get("phase") == "Running") for p in pods)
 
             workload = _mn_cli._short_poll(
                 label=f"infera workload {wid}",
@@ -312,9 +308,7 @@ def cmd_create_infera(args: argparse.Namespace) -> int:
         # Discover worker pod IPs from SaFE GetWorkload .pods (SaFE populates
         # IDEP child pods with role-indexed resourceId; see discover_role_pods).
         roles = (
-            infera_support.discover_role_pods(
-                workload, pd_mode=pd_mode, ssh_port_base=int(args.ssh_port)
-            )
+            infera_support.discover_role_pods(workload, pd_mode=pd_mode, ssh_port_base=int(args.ssh_port))
             if workload
             else {"frontend": [], "prefill": [], "decode": [], "worker": []}
         )
@@ -404,6 +398,7 @@ def cmd_create_infera(args: argparse.Namespace) -> int:
     print(json.dumps(merged, indent=2, sort_keys=True))
     return 0
 
+
 def _infera_require_state() -> dict[str, Any]:
     """Load infera state; require an ssh key + at least one GPU pod IP.
 
@@ -427,10 +422,12 @@ def _infera_require_state() -> dict[str, Any]:
         raise RuntimeError("no ssh_key_path in state; re-run create-infera")
     return state
 
+
 # Env-var prefixes forwarded from the controller's os.environ to the
 # SSH-launched framework child (sandbox-side tuning vars not present in the pod
 # container env and not recovered from pid1).
 _FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")
+
 
 def _collect_forward_env() -> dict[str, str]:
     """Read prompt-provided tuning vars from os.environ for SSH forwarding.
@@ -496,6 +493,7 @@ def _collect_forward_env() -> dict[str, str]:
     if aiter_rebuild:
         fwd["AITER_REBUILD"] = aiter_rebuild
     return filter_forward_env(fwd, warn_on_drop=True)
+
 
 def _infera_fanout_launch(
     state: dict[str, Any],
@@ -563,6 +561,7 @@ def _infera_fanout_launch(
         if print_logs:
             print(f"--- {ip}:{port} stdout ---\n{cp.stdout}\n--- {ip}:{port} stderr ---\n{cp.stderr}")
     return rc_total, results
+
 
 # Pod-side one-liner: is the recorded server PID still alive? Emits MN_ALIVE /
 # MN_DEAD so the controller can decide whether an Infera resume is safe.
@@ -684,9 +683,9 @@ def _infera_restart_config_matches(
         and int(state.get("last_restart_pd_decode_ep") or 0) == int(getattr(args, "pd_decode_ep", 0) or 0)
         and (state.get("last_restart_pd_prefill_extra_args") or "")
         == (getattr(args, "pd_prefill_extra_args", "") or "")
-        and (state.get("last_restart_pd_decode_extra_args") or "")
-        == (getattr(args, "pd_decode_extra_args", "") or "")
+        and (state.get("last_restart_pd_decode_extra_args") or "") == (getattr(args, "pd_decode_extra_args", "") or "")
     )
+
 
 def _infera_servers_alive(
     state: dict[str, Any],
@@ -723,6 +722,7 @@ def _infera_servers_alive(
         if cp.returncode != 0 or "MN_ALIVE" not in (cp.stdout or ""):
             return False
     return True
+
 
 def _infera_restart_server(args: argparse.Namespace) -> int:
     """Infera restart: SSH fan-out launch_infera_node.py to every worker pod.
@@ -938,6 +938,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     info("infera servers launched; benchmark via $service_url (frontend :8000)")
     return 0
 
+
 def _infera_all_gpu_ips(state: dict[str, Any]) -> list[str]:
     """Every GPU pod IP to act on: PD => prefill+decode, else worker.
 
@@ -949,6 +950,7 @@ def _infera_all_gpu_ips(state: dict[str, Any]) -> list[str]:
         worker).
     """
     return [str(t.get("podIP") or "").strip() for t in _infera_all_gpu_targets(state) if t.get("podIP")]
+
 
 def _infera_kill_inference(args: argparse.Namespace) -> int:
     """Infera kill: SSH fan-out launch_infera_node.py --kill-only to every GPU pod.
@@ -987,6 +989,7 @@ def _infera_kill_inference(args: argparse.Namespace) -> int:
         )
     )
     return 0 if rc == 0 else 1
+
 
 def _infera_ssh_node_op(
     state: dict[str, Any],
@@ -1031,6 +1034,7 @@ def _infera_ssh_node_op(
         "podIP": ip,
         "sshPort": port,
     }
+
 
 def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
     """Infera apply-tracelens-patch: SSH fan-out the TraceLens SGLang patch
@@ -1126,6 +1130,7 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
     )
     return 0 if not failures else 1
 
+
 def _infera_apply_patch(args: argparse.Namespace) -> int:
     """Infera apply-patch: SSH fan-out kernel_node_ops.py apply to every GPU pod.
 
@@ -1166,7 +1171,12 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
             per_node.append(parsed)
         else:
             failures.append(
-                {"host": ip, "sshPort": port, "error": (parsed or {}).get("error") or tx.get("stderr") or "unknown", **tx}
+                {
+                    "host": ip,
+                    "sshPort": port,
+                    "error": (parsed or {}).get("error") or tx.get("stderr") or "unknown",
+                    **tx,
+                }
             )
     payload = {
         "command": "apply",
@@ -1179,6 +1189,7 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if not failures else 1
+
 
 def _infera_revert_patch(args: argparse.Namespace) -> int:
     """Infera revert-patch: SSH each pod in the IP->backup_path map + restore.
@@ -1206,8 +1217,7 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         info(f"revert-patch (infera): ssh -> {ip}:{port}")
         op_args = (
-            f"revert --target-path {shlex.quote(str(args.target_path))} "
-            f"--backup-path {shlex.quote(str(backup_path))}"
+            f"revert --target-path {shlex.quote(str(args.target_path))} --backup-path {shlex.quote(str(backup_path))}"
         )
         parsed, tx = _infera_ssh_node_op(state, target, op_args, timeout=args.timeout_sec)
         if parsed and str(parsed.get("status")) in ("restored", "noop_missing_backup"):
@@ -1223,6 +1233,7 @@ def _infera_revert_patch(args: argparse.Namespace) -> int:
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if not failures else 1
+
 
 def _infera_kernel_bench(args: argparse.Namespace) -> int:
     """Infera kernel-bench: run the micro-benchmark on ONE GPU pod over SSH.
@@ -1272,6 +1283,7 @@ def _infera_kernel_bench(args: argparse.Namespace) -> int:
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if payload["status"] == "ok" else 1
 
+
 def _resolve_geak_src(explicit: str | None) -> str:
     """Resolve the shared-FS GEAK source dir the sandbox install.sh cloned.
 
@@ -1297,6 +1309,7 @@ def _resolve_geak_src(explicit: str | None) -> str:
     if udp:
         return f"{udp.rstrip('/')}/runtime/geak"
     return ""
+
 
 def cmd_install_geak(args: argparse.Namespace) -> int:
     """Install the GEAK CLI on every Infera GPU pod over SSH (idempotent).

@@ -52,15 +52,17 @@ AITER_LOCK_STALE_MINUTES = 5
 # Process names that indicate an in-flight aiter/ninja compile. hipcc is a
 # wrapper whose ``name`` can surface as ``perl``/``sh``, so we also match on
 # the cmdline's first token (see ``_any_live_compiler``).
-COMPILER_PROCESS_NAMES = frozenset({
-    "hipcc",
-    "hipcc.bin",
-    "ninja",
-    "cc1plus",
-    "clang",
-    "clang++",
-    "clang-cpp",
-})
+COMPILER_PROCESS_NAMES = frozenset(
+    {
+        "hipcc",
+        "hipcc.bin",
+        "ninja",
+        "cc1plus",
+        "clang",
+        "clang++",
+        "clang-cpp",
+    }
+)
 
 # Lock file names left by aiter / ninja under the jit dir.
 _LOCK_NAMES = {"lock", ".ninja_lock"}
@@ -116,8 +118,7 @@ def _any_live_compiler() -> bool | None:
                     first = os.path.basename(str(cmdline[0]).strip())
                     if first in COMPILER_PROCESS_NAMES:
                         return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied,
-                    psutil.ZombieProcess):
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
     except Exception as exc:  # noqa: BLE001 — enumeration failed entirely
         log.warning("aiter_jit: compiler-liveness scan failed: %s", exc)
@@ -148,13 +149,15 @@ def _resolve_lock_sweep_dir(aiter_jit_dir: Path | None) -> Path | None:
     if spec is not None and spec.origin:
         aiter_root = Path(spec.origin).parent
         candidates.append(str(aiter_root / "jit" / "build"))
-    candidates.extend([
-        "/sgl-workspace/aiter/aiter/jit/build",
-        "/usr/local/lib/python3.10/dist-packages/aiter/jit/build",
-        "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
-        "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
-        "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
-    ])
+    candidates.extend(
+        [
+            "/sgl-workspace/aiter/aiter/jit/build",
+            "/usr/local/lib/python3.10/dist-packages/aiter/jit/build",
+            "/usr/local/lib/python3.12/dist-packages/aiter/jit/build",
+            "/opt/venv/lib/python3.10/site-packages/aiter/jit/build",
+            "/opt/venv/lib/python3.12/site-packages/aiter/jit/build",
+        ]
+    )
     for cand in candidates:
         p = Path(cand)
         if p.is_dir():
@@ -263,7 +266,8 @@ def sweep_stale_aiter_locks_if_dead(
         }
     if alive is None:
         stats = clean_stale_aiter_locks(
-            aiter_jit_dir, stale_minutes=AITER_LOCK_STALE_MINUTES,
+            aiter_jit_dir,
+            stale_minutes=AITER_LOCK_STALE_MINUTES,
         )
         stats["compiler_alive"] = None
         return stats

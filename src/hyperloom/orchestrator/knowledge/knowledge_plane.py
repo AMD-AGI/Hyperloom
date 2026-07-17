@@ -104,10 +104,7 @@ class KnowledgePlane:
         """
         if not bool((self.cortex_kb_mcp_url or "").strip()):
             return False
-        return (
-            not _has_persistent_secret_header(self.cortex_kb_mcp_headers)
-            or _allow_persistent_mcp_auth_headers()
-        )
+        return not _has_persistent_secret_header(self.cortex_kb_mcp_headers) or _allow_persistent_mcp_auth_headers()
 
     def cortex_specialist_mcp_url(self) -> str:
         """KB-graph MCP URL to advertise as the specialist ``cortex_kb`` server.

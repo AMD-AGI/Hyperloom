@@ -42,15 +42,24 @@ def test_replay_real_trace_contract_and_ranking(tmp_path, capsys, monkeypatch):
     trace = _resolve_trace()
     if not trace:
         pytest.skip("no replay trace (set HYPERLOOM_BYPASS_REPLAY_TRACE)")
-    rc = bta.main([
-        "--trace-input", trace,
-        "--session-id", "replay",
-        "--workspace-path", str(tmp_path),
-        "--framework", "vllm",
-        "--target-platform", "MI300X",
-        "--model-name", "NousResearch-Llama-2-7b-hf",
-        "--top-k", "12",
-    ])
+    rc = bta.main(
+        [
+            "--trace-input",
+            trace,
+            "--session-id",
+            "replay",
+            "--workspace-path",
+            str(tmp_path),
+            "--framework",
+            "vllm",
+            "--target-platform",
+            "MI300X",
+            "--model-name",
+            "NousResearch-Llama-2-7b-hf",
+            "--top-k",
+            "12",
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr()
     lines = [ln for ln in out.out.splitlines() if ln.strip()]
@@ -61,7 +70,13 @@ def test_replay_real_trace_contract_and_ranking(tmp_path, capsys, monkeypatch):
     hot = result["hot_kernels"]
     assert hot, "expected non-empty hot kernels from a real trace"
 
-    for key in ("kernel_candidates", "kernel_roofline", "tracelens_summary", "trace_input_manifest", "trace_report_path"):
+    for key in (
+        "kernel_candidates",
+        "kernel_roofline",
+        "tracelens_summary",
+        "trace_input_manifest",
+        "trace_report_path",
+    ):
         p = result["artifact_paths"][key]
         assert p and Path(p).is_file(), f"missing artifact {key}: {p}"
 

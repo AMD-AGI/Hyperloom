@@ -5,6 +5,7 @@
 Drive the real call_geak() against a fake runner script so the process-group
 signalling and soft/hard timeout split are exercised end to end.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -16,7 +17,13 @@ import pytest
 
 _RUNNER_PY = (
     Path(__file__).resolve().parents[4]
-    / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "backends" / "geak_runner.py"
+    / "src"
+    / "hyperloom"
+    / "agents"
+    / "kernel"
+    / "tools"
+    / "backends"
+    / "geak_runner.py"
 )
 
 
@@ -38,9 +45,14 @@ def _write_fake_runner(tmp_path: Path, body: str) -> Path:
 
 
 def _handoff() -> dict:
-    return {"schema_version": 1, "model_path": "/m", "framework": "vllm",
-            "tp": 1, "workload": {"isl": 8, "osl": 8, "conc": 1},
-            "exp_root": "/tmp/x"}
+    return {
+        "schema_version": 1,
+        "model_path": "/m",
+        "framework": "vllm",
+        "tp": 1,
+        "workload": {"isl": 8, "osl": 8, "conc": 1},
+        "exp_root": "/tmp/x",
+    }
 
 
 def test_resolve_runner_falls_back_to_cache_dir(tmp_path, monkeypatch):
@@ -75,7 +87,9 @@ def test_resolve_runner_prefers_newest_pinned_geak_in_cache(tmp_path, monkeypatc
 
 def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
     """run_e2e must receive GEAK_E2E_TIMEOUT_S = timeout_s - flush_grace."""
-    runner = _write_fake_runner(tmp_path, """
+    runner = _write_fake_runner(
+        tmp_path,
+        """
         import json, os, sys
         # Echo the inner budget we were handed so the test can assert on it.
         result = {"status": "ok", "throughput_speedup": 1.16,
@@ -84,7 +98,8 @@ def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
         with open(sys.argv[2], "w") as fh:
             json.dump(result, fh)
         sys.exit(0)
-    """)
+    """,
+    )
     monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
     monkeypatch.setenv("GEAK_FLUSH_GRACE_S", "180")
 
@@ -98,7 +113,9 @@ def test_inner_timeout_is_reduced_by_flush_grace(tmp_path, monkeypatch):
 def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):
     """On the hard-timeout path, SIGTERM gives the child time to flush; the
     flushed result.json is then read back (not discarded as no_result_json)."""
-    runner = _write_fake_runner(tmp_path, """
+    runner = _write_fake_runner(
+        tmp_path,
+        """
         import json, signal, sys, time
         handoff, result_path = sys.argv[1], sys.argv[2]
         def _flush(signum, frame):
@@ -109,7 +126,8 @@ def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):
         signal.signal(signal.SIGTERM, _flush)
         # Outlive the outer hard timeout so the SIGTERM path triggers.
         time.sleep(60)
-    """)
+    """,
+    )
     monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
     monkeypatch.setenv("GEAK_FLUSH_GRACE_S", "5")
 
@@ -124,11 +142,14 @@ def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):
 def test_sigkill_escalation_when_child_ignores_sigterm(tmp_path, monkeypatch):
     """A child that ignores SIGTERM and never flushes is SIGKILLed; the runner
     reports a no-result error rather than hanging forever."""
-    runner = _write_fake_runner(tmp_path, """
+    runner = _write_fake_runner(
+        tmp_path,
+        """
         import signal, time
         signal.signal(signal.SIGTERM, signal.SIG_IGN)  # refuse to die politely
         time.sleep(120)
-    """)
+    """,
+    )
     monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
     monkeypatch.setenv("GEAK_FLUSH_GRACE_S", "2")
 

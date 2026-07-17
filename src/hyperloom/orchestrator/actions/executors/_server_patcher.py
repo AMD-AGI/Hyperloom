@@ -183,7 +183,7 @@ def _sglang_subdir_version_tuple(name: str) -> tuple[int, ...] | None:
     if not name.startswith(prefix):
         return None
     numeric: list[int] = []
-    for part in name[len(prefix):].split("_"):
+    for part in name[len(prefix) :].split("_"):
         if part.isdigit():
             numeric.append(int(part))
         else:
@@ -429,10 +429,7 @@ def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
     if running is None:
         return None
     if len(running) >= 2:
-        same_minor = [
-            vt for vt in available
-            if vt[:2] == running[:2] and vt <= running
-        ]
+        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
         if same_minor:
             return available[max(same_minor)]
     not_higher = [vt for vt in available if vt <= running]
@@ -480,14 +477,16 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
             "_server_patcher: no TraceLens patch for vLLM %s "
             "(searched %s incl. minor/nearest-lower fallback); "
             "TraceLens annotations will be unavailable",
-            version, patches_dir,
+            version,
+            patches_dir,
         )
         return None
     if patch_file.name != f"config_vllm_v{version}.patch":
         log.info(
             "_server_patcher: no exact vLLM patch for %s; using nearest %s "
             "(backward-compatible; git apply --check still guards)",
-            version, patch_file.name,
+            version,
+            patch_file.name,
         )
 
     # Apply root for the ``a/vllm/...`` prefix is site-packages.
@@ -743,8 +742,7 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
     patches_root = kernelforge_root / "serving_patches" / "sglang"
     if not patches_root.is_dir():
         log.warning(
-            "_server_patcher: KernelForge SGLang patches root missing (%s); "
-            "skip CK block-scale patch",
+            "_server_patcher: KernelForge SGLang patches root missing (%s); skip CK block-scale patch",
             patches_root,
         )
         return None
@@ -752,8 +750,7 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
     patches_dir = _resolve_sglang_patches_dir(patches_root, version)
     if patches_dir is None:
         log.warning(
-            "_server_patcher: no KernelForge CK block-scale patch found under "
-            "%s/%s/ for sglang %s; skip",
+            "_server_patcher: no KernelForge CK block-scale patch found under %s/%s/ for sglang %s; skip",
             patches_root,
             _versioned_patches_subdir_name(version) or "<unknown>",
             version,
@@ -789,17 +786,10 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     # Sentinel: the patch edits
     # ``sglang/srt/layers/quantization/fp8_utils.py`` in place (both layouts).
-    sentinel = (
-        sglang_module.parent
-        / "srt"
-        / "layers"
-        / "quantization"
-        / "fp8_utils.py"
-    )
+    sentinel = sglang_module.parent / "srt" / "layers" / "quantization" / "fp8_utils.py"
     if not sentinel.is_file():
         log.warning(
-            "_server_patcher: SGLang install layout unexpected (no %s); skip "
-            "CK block-scale patch",
+            "_server_patcher: SGLang install layout unexpected (no %s); skip CK block-scale patch",
             sentinel,
         )
         return None

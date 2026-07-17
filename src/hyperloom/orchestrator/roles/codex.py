@@ -107,16 +107,16 @@ def _extract_responses_output(resp: Any) -> tuple[str, list[str]]:
     """
     texts: list[str] = []
     citations: list[str] = []
-    for item in (_field(resp, "output") or []):
+    for item in _field(resp, "output") or []:
         if _field(item, "type") != "message":
             continue
-        for block in (_field(item, "content") or []):
+        for block in _field(item, "content") or []:
             if _field(block, "type") != "output_text":
                 continue
             chunk = _field(block, "text") or ""
             if chunk:
                 texts.append(chunk)
-            for ann in (_field(block, "annotations") or []):
+            for ann in _field(block, "annotations") or []:
                 url = _field(ann, "url")
                 if isinstance(url, str) and url:
                     citations.append(url)
@@ -144,9 +144,7 @@ class CodexBackend:
 
     # Web search: when enabled, each turn uses the OpenAI Responses API with the
     # built-in server-side ``web_search`` tool. Env: ``HYPERLOOM_CODEX_WEB_SEARCH``.
-    web_search: bool = field(
-        default_factory=lambda: env_bool("HYPERLOOM_CODEX_WEB_SEARCH", False)
-    )
+    web_search: bool = field(default_factory=lambda: env_bool("HYPERLOOM_CODEX_WEB_SEARCH", False))
     # ``low`` | ``medium`` | ``high`` — passed through as the web_search tool's
     # ``search_context_size``. Env: ``HYPERLOOM_CODEX_WEB_SEARCH_CONTEXT_SIZE``.
     web_search_context_size: str = field(
@@ -223,9 +221,7 @@ class CodexBackend:
                 system_prompt, full_prompt
             )
         else:
-            text, finish, input_tokens, output_tokens, extra_meta = await self._run_chat(
-                system_prompt, full_prompt
-            )
+            text, finish, input_tokens, output_tokens, extra_meta = await self._run_chat(system_prompt, full_prompt)
         self.calls.append(
             {
                 "prompt_chars": len(full_prompt),

@@ -29,6 +29,8 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
     REVIEW_VERDICTS,
 )
+
+
 # 1. intent_parser — envelope schema accepts verdict OR verdict_map
 def _envelope(**payload: Any) -> dict[str, Any]:
     return {

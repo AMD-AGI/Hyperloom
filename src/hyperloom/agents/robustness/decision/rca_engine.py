@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 import httpx
 
 from ..signals import Symptom, SymptomSeverity
+
 if TYPE_CHECKING:
     from ..state_store import DetectorStateView
 

@@ -35,7 +35,7 @@ from hyperloom.orchestrator.state.shared_state import (
 
 
 def test_lifecycle_label_resolves_human_labels():
- # Pipeline names map to the internal step/handler names.
+    # Pipeline names map to the internal step/handler names.
     assert lifecycle_label("trace_analyze") == "TraceLens"
     assert lifecycle_label("roofline") == "TraceLens"
     assert lifecycle_label("run_optimization") == "GEAK"

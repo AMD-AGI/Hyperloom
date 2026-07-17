@@ -150,8 +150,12 @@ def _analyze(payload: dict, sweep_workspace: Path) -> bool:
             print(f"  => [{arm}] some points failed — server may have been killed mid-ladder.")
             overall_ok = False
     print("\n" + "=" * 78)
-    print("ANSWER:", "NO — the server is booted once per arm and reused (not killed)."
-          if overall_ok else "SEE ABOVE — anomalies detected.")
+    print(
+        "ANSWER:",
+        "NO — the server is booted once per arm and reused (not killed)."
+        if overall_ok
+        else "SEE ABOVE — anomalies detected.",
+    )
     print("=" * 78 + "\n")
     return overall_ok
 

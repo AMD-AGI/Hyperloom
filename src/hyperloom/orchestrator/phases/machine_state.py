@@ -485,6 +485,7 @@ DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 3
 DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
 import os as _os_fw_ratio  # noqa: E402
 
+
 def _default_framework_force_exit_ratio() -> float:
     """FRAMEWORK force-exit ratio; env-overridable via
     ``INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO``.
@@ -493,9 +494,7 @@ def _default_framework_force_exit_ratio() -> float:
     the FRAMEWORK pipeline is the primary objective so it can process forced
     candidates instead of force-exiting with a full pending queue.
     """
-    raw = (_os_fw_ratio.environ.get(
-        "INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO", ""
-    ) or "").strip()
+    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO", "") or "").strip()
     if raw:
         try:
             v = float(raw)
@@ -865,9 +864,7 @@ def redistribute_budget_pct(
     if freed <= 0.0:
         return out
     absorbers = [
-        p
-        for p in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP)
-        if p not in disabled
+        p for p in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP) if p not in disabled
     ]
     weight = sum(float(out.get(p, 0.0)) for p in absorbers)
     if weight > 0.0:
@@ -1035,17 +1032,13 @@ def _phase_budget_total_seconds(
         # Charge-back (short bounded run). remaining_at_entry reconstructs the
         # session time left when this phase started (session_remaining shrinks as
         # phase_elapsed grows, so their sum is constant across the phase).
-        remaining_at_entry = max(
-            0.0, session_remaining + phase_elapsed_seconds(state, now_unix=now_unix)
-        )
+        remaining_at_entry = max(0.0, session_remaining + phase_elapsed_seconds(state, now_unix=now_unix))
         # Normalize ONLY over the current phase and the phases still to come:
         # already-elapsed phases (notably PRELUDE) are excluded — their spend is
         # already reflected in session_remaining — while CLOSE stays in so it
         # keeps its reserved share. Do NOT normalize over all six phases.
         denom = sum(
-            float(budget.get(p, 0.0))
-            for p in PHASE_NAMES[phase_index(phase):]
-            if float(budget.get(p, 0.0)) > 0.0
+            float(budget.get(p, 0.0)) for p in PHASE_NAMES[phase_index(phase) :] if float(budget.get(p, 0.0)) > 0.0
         )
         if denom <= 0.0:
             return None
@@ -1254,9 +1247,7 @@ def should_force_exit_explore(
         # Fraction of the phase's EFFECTIVE total budget — same helper that
         # produced phase_remaining, so numerator and denominator stay in the same
         # units (charge-back for short bounded runs, legacy window otherwise).
-        phase_total_sec = _phase_budget_total_seconds(
-            state, budget_pct=budget_pct, now_unix=now_unix
-        )
+        phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
         if phase_total_sec and phase_total_sec > 0:
             remaining_pct = phase_remaining / phase_total_sec
             evidence["phase_remaining_pct"] = round(remaining_pct, 4)
@@ -2556,7 +2547,7 @@ def record_lifecycle_event(
     # Append in place, trim only when over the cap (O(1) common path).
     events.append(event)
     if len(events) > _LIFECYCLE_CAP:
-        del events[: -_LIFECYCLE_CAP]
+        del events[:-_LIFECYCLE_CAP]
     return event
 
 

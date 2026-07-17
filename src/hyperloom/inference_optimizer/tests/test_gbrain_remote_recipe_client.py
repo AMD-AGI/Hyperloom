@@ -209,7 +209,13 @@ def test_get_recipe_uses_configured_slug_prefix(monkeypatch: Any) -> None:
 
 
 def test_get_recipe_miss_on_unknown() -> None:
-    c = _client({_default_slug("inference/modela/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/unknown_precision"): _recipe_page("modelA", "mi300x")})
+    c = _client(
+        {
+            _default_slug(
+                "inference/modela/mi300x/sglang/unknown_model_type/unknown_arch/unknown_version/unknown_precision"
+            ): _recipe_page("modelA", "mi300x")
+        }
+    )
     assert c.get_recipe(canonical_id="inference:other:mi355x:vllm:v1:fp16") is None
 
 

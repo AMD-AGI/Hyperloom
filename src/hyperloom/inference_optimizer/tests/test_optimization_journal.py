@@ -365,14 +365,18 @@ def test_derive_journal_outcome_integrate_patch_reverted_is_revert():
     """A reverted integrate_patch is promotable (status != failed) but must
     journal as REVERT, not KEEP."""
     out = derive_journal_outcome(
-        "integrate_patch", {"status": "reverted", "delta_pct": -0.44}, promotable=True,
+        "integrate_patch",
+        {"status": "reverted", "delta_pct": -0.44},
+        promotable=True,
     )
     assert out == OUTCOME_REVERT
 
 
 def test_derive_journal_outcome_integrate_patch_kept_is_keep():
     out = derive_journal_outcome(
-        "integrate_patch", {"status": "kept", "delta_pct": 7.5}, promotable=True,
+        "integrate_patch",
+        {"status": "kept", "delta_pct": 7.5},
+        promotable=True,
     )
     assert out == OUTCOME_KEEP
 
@@ -388,7 +392,15 @@ def test_derive_journal_outcome_accuracy_unavailable_reject_is_revert():
 
 def test_derive_journal_outcome_patch_failures_are_no_promote():
     # A patch that never reached a KEEP/REVERT measurement is no_promote.
-    for status in ("apply_failed", "no_patch", "no_patches", "failed", "applied_no_bench", "rejected_by_critic", "skipped"):
+    for status in (
+        "apply_failed",
+        "no_patch",
+        "no_patches",
+        "failed",
+        "applied_no_bench",
+        "rejected_by_critic",
+        "skipped",
+    ):
         out = derive_journal_outcome("integrate_patch", {"status": status}, promotable=True)
         assert out == OUTCOME_NO_PROMOTE, status
 
@@ -396,7 +408,10 @@ def test_derive_journal_outcome_patch_failures_are_no_promote():
 def test_derive_journal_outcome_framework_agent_follows_status():
     assert derive_journal_outcome("framework_agent", {"status": "kept"}, promotable=True) == OUTCOME_KEEP
     assert derive_journal_outcome("framework_agent", {"status": "reverted"}, promotable=True) == OUTCOME_REVERT
-    assert derive_journal_outcome("framework_agent", {"status": "no_result_failed"}, promotable=False) == OUTCOME_NO_PROMOTE
+    assert (
+        derive_journal_outcome("framework_agent", {"status": "no_result_failed"}, promotable=False)
+        == OUTCOME_NO_PROMOTE
+    )
 
 
 def test_derive_journal_outcome_other_kinds_keep_binary_behaviour():
@@ -471,14 +486,27 @@ def test_journal_entry_roundtrips_proposer_and_metrics():
 
 def test_journal_entry_roundtrips_predicted_gain():
     from hyperloom.orchestrator.state.optimization_journal import JournalEntry
+
     e = JournalEntry(
-        phase="EXPLORE", iter=1, kind="backend", change="x", outcome="KEEP",
-        gain_pct=4.2, predicted_gain_pct=9.0,
+        phase="EXPLORE",
+        iter=1,
+        kind="backend",
+        change="x",
+        outcome="KEEP",
+        gain_pct=4.2,
+        predicted_gain_pct=9.0,
     )
     d = e.to_dict()
     assert d["predicted_gain_pct"] == 9.0
     assert JournalEntry.from_dict(d).predicted_gain_pct == 9.0
     # Unset prediction is stripped.
-    assert "predicted_gain_pct" not in JournalEntry(
-        phase="P", iter=0, kind="baseline", change="b", outcome="KEEP",
-    ).to_dict()
+    assert (
+        "predicted_gain_pct"
+        not in JournalEntry(
+            phase="P",
+            iter=0,
+            kind="baseline",
+            change="b",
+            outcome="KEEP",
+        ).to_dict()
+    )

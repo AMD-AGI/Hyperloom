@@ -231,10 +231,7 @@ def test_exit_normal_framework_agent_phase_done_when_signalled():
 def test_exit_normal_framework_agent_plateau_at_threshold_consecutive_no_keep():
     """N consecutive benchmarked tests with no KEEP → framework_agent_plateau."""
     n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
-    progress = [
-        {"candidate_id": f"c{i}", "status": "reverted", "kept": False}
-        for i in range(n)
-    ]
+    progress = [{"candidate_id": f"c{i}", "status": "reverted", "kept": False} for i in range(n)]
     state = _State(framework_agent_phase_progress=progress)
     out = phase_state.exit_normal_framework_agent(state)
     assert out is not None

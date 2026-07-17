@@ -31,7 +31,9 @@ from .._internal import safe_client, ray_dashboard, workload_spec
 from .._internal.log import info, warn
 
 import logging
+
 log = logging.getLogger(__name__)
+
 
 def _mn_cli():
     """Import the parent CLI lazily to keep command modules acyclic."""
@@ -46,6 +48,7 @@ _SAFE_GET_WORKLOAD_404_GRACE_S = 30.0
 _TERMINAL_FAIL_PHASES = {"Failed", "Stopped", "Cancelled"}
 
 _TERMINAL_OK_PHASES = {"Running"}
+
 
 def _checkpoint_create_rayjob_state(
     *,
@@ -86,6 +89,7 @@ def _checkpoint_create_rayjob_state(
     state.setdefault("ray_address", "")
     _mn_cli()._save_state(state)
     info(f"checkpointed rayjob_id={wid} to {_mn_cli()._state_file()}")
+
 
 def _write_rayjob_meta(
     *,
@@ -135,6 +139,7 @@ def _write_rayjob_meta(
     except OSError as exc:
         warn(f"failed to write rayjob meta to {meta_path}: {exc}")
 
+
 # Helpers
 def ray_gcs_address(head_pod_ip: str) -> str:
     """Ray driver address for ``ray.init(address=...)`` (GCS on head, default port).
@@ -149,6 +154,7 @@ def ray_gcs_address(head_pod_ip: str) -> str:
     if not ip:
         return ""
     return f"{ip}:6379"
+
 
 def _is_safe_get_workload_404(exc: BaseException) -> bool:
     """Check whether an exception is a transient SaFE GET-workload 404.
@@ -165,6 +171,7 @@ def _is_safe_get_workload_404(exc: BaseException) -> bool:
         and exc.status == 404
         and "GET /api/v1/workloads/" in (exc.endpoint or "")
     )
+
 
 def _summarize_workload_failure(workload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Build a one-line diagnostic + JSON-safe snapshot (phase/message/per-pod status/dispatch) from a SaFE GetWorkloadResponse.
@@ -227,6 +234,7 @@ def _summarize_workload_failure(workload: dict[str, Any]) -> tuple[str, dict[str
     }
     return diag, snapshot
 
+
 def _find_head_pod_ip(workload: dict) -> str:
     """Pick the KubeRay head pod's PodIp from a GetWorkloadResponse.
 
@@ -253,6 +261,7 @@ def _find_head_pod_ip(workload: dict) -> str:
         if p.get("podIP"):
             return str(p["podIP"])
     return ""
+
 
 # Subcommand: create-rayjob
 def cmd_create_rayjob(args: argparse.Namespace) -> int:

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+
 if TYPE_CHECKING:
     from ..state.task_registry import Task
 from ..loop.coordinator import (
@@ -79,8 +80,7 @@ class FrameworkPhase(PhaseHandler):
         # awaits its (durable) Critic verdict, resolved on a later tick.
         try:
             if any(
-                getattr(p, "action_name", "") == "framework_agent"
-                and not getattr(p, "decided", False)
+                getattr(p, "action_name", "") == "framework_agent" and not getattr(p, "decided", False)
                 for p in self.state.pending_proposals.values()
             ):
                 return
@@ -206,9 +206,7 @@ class FrameworkPhase(PhaseHandler):
             session_fw = str(getattr(state, "framework", "") or "").strip().lower()
             cand_fw = str(next_candidate.get("framework") or "").strip().lower()
             if not cand_fw:
-                repo_token = str(
-                    next_candidate.get("repo") or next_candidate.get("discovered_repo_url") or ""
-                ).lower()
+                repo_token = str(next_candidate.get("repo") or next_candidate.get("discovered_repo_url") or "").lower()
                 for _fw_tok in ("sglang", "vllm", "atom"):
                     if f"/{_fw_tok}" in repo_token or repo_token.endswith(_fw_tok):
                         cand_fw = _fw_tok
@@ -241,10 +239,7 @@ class FrameworkPhase(PhaseHandler):
             ``True`` if a framework-owned specialist/integrate_patch task is queued or running,
             or a framework-owned undecided proposal targets an unprocessed candidate; else ``False``.
         """
-        unprocessed_ids = {
-            self._framework_candidate_key(c)
-            for c in self._unprocessed_framework_agent_candidates()
-        }
+        unprocessed_ids = {self._framework_candidate_key(c) for c in self._unprocessed_framework_agent_candidates()}
         try:
             queued = await self.tasks.queued()
             running = await self.tasks.running()
@@ -609,12 +604,10 @@ class FrameworkPhase(PhaseHandler):
         cf_dst_framework = ""
         if is_cross_framework:
             _cf_metrics = audit.get("metrics") if isinstance(audit.get("metrics"), dict) else {}
-            cf_src_framework = str(
-                _cf_metrics.get("src_framework") or candidate.get("framework") or ""
-            ).strip().lower()
-            cf_dst_framework = str(
-                _cf_metrics.get("dst_framework") or getattr(state, "framework", "") or ""
-            ).strip().lower()
+            cf_src_framework = str(_cf_metrics.get("src_framework") or candidate.get("framework") or "").strip().lower()
+            cf_dst_framework = (
+                str(_cf_metrics.get("dst_framework") or getattr(state, "framework", "") or "").strip().lower()
+            )
             cf_provenance = f"specialist:serving:framework:cross_framework:{cf_src_framework}->{cf_dst_framework}"
             notes_lines.extend(
                 [
@@ -658,11 +651,7 @@ class FrameworkPhase(PhaseHandler):
             ]
         )
         if critic_feedback:
-            req_ev = [
-                str(x).strip()
-                for x in (critic_feedback.get("required_evidence") or [])
-                if str(x).strip()
-            ]
+            req_ev = [str(x).strip() for x in (critic_feedback.get("required_evidence") or []) if str(x).strip()]
             fb_lines = [
                 "",
                 "PRIOR CRITIC FEEDBACK (re-author round — your last deliverable was",
@@ -672,11 +661,7 @@ class FrameworkPhase(PhaseHandler):
             advice = str(critic_feedback.get("advice_text") or "").strip()
             if advice:
                 fb_lines.append(f"- advice: {advice}")
-            risks = [
-                str(r).strip()
-                for r in (critic_feedback.get("risks") or [])
-                if str(r).strip()
-            ]
+            risks = [str(r).strip() for r in (critic_feedback.get("risks") or []) if str(r).strip()]
             if risks:
                 fb_lines.append("- risks: " + "; ".join(risks[:6]))
             notes_lines.extend(fb_lines)
@@ -770,9 +755,7 @@ class FrameworkPhase(PhaseHandler):
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
         try:
             if spec_tid and cand_id:
-                if not isinstance(
-                    getattr(state, "framework_agent_specialist_candidate_map", None), dict
-                ):
+                if not isinstance(getattr(state, "framework_agent_specialist_candidate_map", None), dict):
                     state.framework_agent_specialist_candidate_map = {}
                 state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
                 state.save(self.session_dir)
@@ -828,9 +811,7 @@ class FrameworkPhase(PhaseHandler):
             return {}
         return {"needs_gpu": True, "gpu_count": cap}
 
-    def _framework_authoring_lanes_ttl(
-        self, params: dict[str, Any], *, base_ttl_sec: int
-    ) -> tuple[list[str], int]:
+    def _framework_authoring_lanes_ttl(self, params: dict[str, Any], *, base_ttl_sec: int) -> tuple[list[str], int]:
         """Resolve lanes + lease TTL for an internally-dispatched framework specialist.
 
         When ``needs_gpu`` is set the task acquires the cap-1
@@ -854,14 +835,11 @@ class FrameworkPhase(PhaseHandler):
                 ttl = self._gpu_lease_ttl_sec(ttl)
             except Exception:  # noqa: BLE001 — fall back to the base TTL
                 log.exception(
-                    "framework GPU: gpu_research_lane TTL re-source failed; "
-                    "using base TTL",
+                    "framework GPU: gpu_research_lane TTL re-source failed; using base TTL",
                 )
         return lanes, ttl
 
-    def _build_enablement_specialist_params(
-        self, launch_log: str, *, attempt: int = 0
-    ) -> dict[str, Any] | None:
+    def _build_enablement_specialist_params(self, launch_log: str, *, attempt: int = 0) -> dict[str, Any] | None:
         """Build enablement-specialist params from a captured launch failure.
 
         Classifies the failure (advisory ``kind`` only — see Q1 hardening),
@@ -944,8 +922,7 @@ class FrameworkPhase(PhaseHandler):
                 "STACKED ENABLEMENT (progress so far): the following already "
                 "cleared earlier boot crashes and WILL be re-applied/re-run as a "
                 "base before your changes — do NOT redo them; fix only the CURRENT "
-                "(deeper) failure, composing on top. " + "; ".join(progress_bits)
-                + "\n\n" + notes
+                "(deeper) failure, composing on top. " + "; ".join(progress_bits) + "\n\n" + notes
             )
         elif attempt:
             notes = (
@@ -957,10 +934,7 @@ class FrameworkPhase(PhaseHandler):
         return {
             "domain": "enablement_specialist",
             "gap_canonical_id": gap_cid,
-            "gap_symptom": (
-                f"{framework or '?'} cannot launch {model or 'the target model'}: "
-                f"{signature.kind}"
-            ),
+            "gap_symptom": (f"{framework or '?'} cannot launch {model or 'the target model'}: {signature.kind}"),
             "gap_layer": "framework",
             "gap_evidence": {"model": model, "failure_kind": signature.kind},
             "framework": framework,
@@ -985,9 +959,7 @@ class FrameworkPhase(PhaseHandler):
             **self._framework_gpu_params(),
         }
 
-    def _read_enablement_source_context(
-        self, signature: Any, *, window: int = 12
-    ) -> str:
+    def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
         """Best-effort read a small source window near the offending site.
 
         Resolves ``signature.offending_file`` against the framework/ROCm source
@@ -1037,7 +1009,7 @@ class FrameworkPhase(PhaseHandler):
         Returns:
             str: A ``CHECKPOINT WEIGHT FACTS`` block, or ``""``.
         """
-        text = (launch_log or "")
+        text = launch_log or ""
         low = text.lower()
         try:
             import glob as _glob
@@ -1083,6 +1055,7 @@ class FrameworkPhase(PhaseHandler):
             if not weight_map:
                 return ""
             ckpt_keys = set(weight_map.keys())
+
             # Group offending names by a layer-index-stripped "family".
             def _family(name: str) -> str:
                 return _re.sub(r"\.\d+\.", ".{N}.", name)
@@ -1143,9 +1116,7 @@ class FrameworkPhase(PhaseHandler):
             log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
 
-    def _discover_enablement_candidate_refs(
-        self, req: Any, plan: Any
-    ) -> tuple[str, ...]:
+    def _discover_enablement_candidate_refs(self, req: Any, plan: Any) -> tuple[str, ...]:
         """Best-effort enumerate + rank bridging PRs for an enablement failure.
 
         Enumerates candidate PRs across every repo in ``plan.repos`` (framework
@@ -1186,7 +1157,9 @@ class FrameworkPhase(PhaseHandler):
                     {
                         "framework": getattr(req, "framework", "") or "sglang",
                         "repo_url": repo,
-                        "work_dir": str(getattr(req, "work_dir", None) or (Path(tempfile.gettempdir()) / "framework-agent")),
+                        "work_dir": str(
+                            getattr(req, "work_dir", None) or (Path(tempfile.gettempdir()) / "framework-agent")
+                        ),
                         "baseline": {"throughput": 1.0},
                         "search_perf_prs": True,
                         "search_modes": search_modes,
@@ -1351,8 +1324,7 @@ class FrameworkPhase(PhaseHandler):
                     "failure_kind": signature.kind,
                     "signature": signature.to_dict(),
                     "reason": (
-                        "baseline launch failure did not match any actionable "
-                        "enablement signature; needs human triage"
+                        "baseline launch failure did not match any actionable enablement signature; needs human triage"
                     ),
                 },
             )
@@ -1510,9 +1482,7 @@ class FrameworkPhase(PhaseHandler):
             return
 
         batch_id = str(
-            (candidate.get("batch_id") if isinstance(candidate, dict) else None)
-            or res.get("batch_id")
-            or ""
+            (candidate.get("batch_id") if isinstance(candidate, dict) else None) or res.get("batch_id") or ""
         )
 
         state = self.shared_state
@@ -1618,6 +1588,7 @@ class FrameworkPhase(PhaseHandler):
             )
             for fb_dict in retry_feedback[:5]:  # cap at 5 entries for prompt brevity
                 from ..actions.executors._apply_feedback import ApplyFeedback
+
                 fb = ApplyFeedback.from_dict(fb_dict) if isinstance(fb_dict, dict) else None
                 if fb is not None:
                     feedback_lines.append("")
@@ -1647,9 +1618,7 @@ class FrameworkPhase(PhaseHandler):
             if feedback_lines:
                 existing_advice = str(merged_feedback.get("advice_text") or "")
                 apply_advice = "\n".join(feedback_lines)
-                merged_feedback["advice_text"] = (
-                    apply_advice + ("\n\n" + existing_advice if existing_advice else "")
-                )
+                merged_feedback["advice_text"] = apply_advice + ("\n\n" + existing_advice if existing_advice else "")
             try:
                 new_task_id = await self._enqueue_framework_agent_authoring_specialist(
                     candidate,
@@ -1665,8 +1634,7 @@ class FrameworkPhase(PhaseHandler):
                 )
                 return ""
             log.info(
-                "AUTHORED_LANE: dispatched perf_framework retry specialist "
-                "cand=%s attempt=%d task=%s",
+                "AUTHORED_LANE: dispatched perf_framework retry specialist cand=%s attempt=%d task=%s",
                 cand_id,
                 attempt,
                 new_task_id,
@@ -1697,11 +1665,7 @@ class FrameworkPhase(PhaseHandler):
         ]
         notes_lines.extend(feedback_lines)
         if critic_feedback:
-            req_ev = [
-                str(x).strip()
-                for x in (critic_feedback.get("required_evidence") or [])
-                if str(x).strip()
-            ]
+            req_ev = [str(x).strip() for x in (critic_feedback.get("required_evidence") or []) if str(x).strip()]
             if req_ev:
                 notes_lines.append("")
                 notes_lines.append("PRIOR CRITIC FEEDBACK (also address this):")
@@ -1736,8 +1700,14 @@ class FrameworkPhase(PhaseHandler):
                 idempotency_key=idem,
                 requires_lanes=lanes,
                 allowed_tools=[
-                    "Read", "Grep", "Glob", "Write", "Edit",
-                    "Bash", "WebSearch", "WebFetch",
+                    "Read",
+                    "Grep",
+                    "Glob",
+                    "Write",
+                    "Edit",
+                    "Bash",
+                    "WebSearch",
+                    "WebFetch",
                 ],
                 side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=ttl,
@@ -1751,8 +1721,7 @@ class FrameworkPhase(PhaseHandler):
             return ""
         new_tid = str(getattr(spec_task, "task_id", "") or "")
         log.info(
-            "AUTHORED_LANE: dispatched perf_explore retry specialist "
-            "gap=%s attempt=%d task=%s",
+            "AUTHORED_LANE: dispatched perf_explore retry specialist gap=%s attempt=%d task=%s",
             gap_cid,
             attempt,
             new_tid,
@@ -2340,7 +2309,11 @@ class FrameworkPhase(PhaseHandler):
         return ""
 
     def _write_prs_tested_from_framework_agent(
-        self, *, task: "Task", result: Any, kept: bool,
+        self,
+        *,
+        task: "Task",
+        result: Any,
+        kept: bool,
     ) -> None:
         """Write framework KEEP/REVERT patch into recipe.prs_tested for warm-replay reuse."""
         if self.cortex_kb is None:
@@ -2363,7 +2336,12 @@ class FrameworkPhase(PhaseHandler):
         outcome = "KEEP" if status == "kept" else "REVERT"
         ss = self.shared_state
         entry = {
-            "repo": repo or (pr_url.split("/")[3] + "/" + pr_url.split("/")[4] if pr_url and len(pr_url.split("/")) > 4 else "unknown"),
+            "repo": repo
+            or (
+                pr_url.split("/")[3] + "/" + pr_url.split("/")[4]
+                if pr_url and len(pr_url.split("/")) > 4
+                else "unknown"
+            ),
             "number": int(candidate.get("pr_number") or candidate.get("number") or 0),
             "outcome": outcome,
             "patch_file": str(patch_path),
@@ -2384,7 +2362,9 @@ class FrameworkPhase(PhaseHandler):
             self._kb_amend_recipe(recipe_overrides={"prs_tested": existing_prs})
             log.info(
                 "framework: wrote prs_tested[%s] for %s (gain=%+.1f%%)",
-                outcome, patch_path, delta_pct,
+                outcome,
+                patch_path,
+                delta_pct,
             )
         except Exception:  # noqa: BLE001
             log.exception("framework: prs_tested write failed")
@@ -2599,9 +2579,7 @@ class FrameworkPhase(PhaseHandler):
         timeout_sec = float(
             getattr(self, "framework_agent_discover_timeout_sec", 0.0) or _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
         )
-        max_candidates = (
-            int(getattr(state, "framework_max_candidates", 0) or 0) or DEFAULT_FRAMEWORK_MAX_CANDIDATES
-        )
+        max_candidates = int(getattr(state, "framework_max_candidates", 0) or 0) or DEFAULT_FRAMEWORK_MAX_CANDIDATES
         # Cross-repo: query every pr_intel_specialist repo so discovery isn't confined to one framework repo.
         repo_urls = self._framework_agent_discover_repo_urls(framework)
         # Step A/B — feed the session working memory into discovery so fa
@@ -2666,14 +2644,13 @@ class FrameworkPhase(PhaseHandler):
                 # raw apply). Same-framework candidates (incl. kernel-level pr_intel
                 # repos with no framework mapping) are untouched, so same-framework audit
                 # behaviour is unchanged. Set the env to 0/false/no/off to fully revert.
-                cross_on = os.environ.get(
-                    "FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", "1"
-                ).strip().lower() not in ("0", "false", "no", "off")
-                origin_fw = (
-                    self._framework_agent_repo_url_origin_framework(repo_url)
-                    if cross_on
-                    else ""
+                cross_on = os.environ.get("FRAMEWORK_AGENT_CROSS_DISCOVER_TAG", "1").strip().lower() not in (
+                    "0",
+                    "false",
+                    "no",
+                    "off",
                 )
+                origin_fw = self._framework_agent_repo_url_origin_framework(repo_url) if cross_on else ""
                 for c in repo_cands:
                     if not isinstance(c, dict):
                         continue
@@ -2692,9 +2669,7 @@ class FrameworkPhase(PhaseHandler):
                         # behaviour is unchanged.
                         cand_repo = str(c.get("repo") or "").strip()
                         cand_origin = (
-                            self._framework_agent_repo_url_origin_framework(cand_repo)
-                            if cand_repo
-                            else origin_fw
+                            self._framework_agent_repo_url_origin_framework(cand_repo) if cand_repo else origin_fw
                         )
                         if cand_origin and cand_origin != framework:
                             c["framework"] = cand_origin
@@ -2946,10 +2921,7 @@ class FrameworkPhase(PhaseHandler):
                     batch_id=batch_id,
                     status="repeated_review_abort",
                     kept=False,
-                    rationale=(
-                        f"submitted for review {count} times "
-                        f"(> cap {self._MAX_REPEATED_REVIEW_SUBMISSIONS})"
-                    ),
+                    rationale=(f"submitted for review {count} times (> cap {self._MAX_REPEATED_REVIEW_SUBMISSIONS})"),
                     provenance="pump",
                     extra={"review_submissions": count},
                 )
@@ -2981,8 +2953,7 @@ class FrameworkPhase(PhaseHandler):
             payload=dict(propose_payload),
         )
         log.info(
-            "FRAMEWORK: candidate submitted for Critic review msg_id=%s "
-            "candidate=%s batch=%s audit_step=%s",
+            "FRAMEWORK: candidate submitted for Critic review msg_id=%s candidate=%s batch=%s audit_step=%s",
             msg.msg_id,
             cand_id,
             batch_id,
@@ -3025,10 +2996,7 @@ class FrameworkPhase(PhaseHandler):
         candidate = dict(payload.get("candidate") or {})
         audit = payload.get("audit") if isinstance(payload.get("audit"), dict) else {}
         audit_step = str(payload.get("audit_step") or "")
-        cand_id = str(
-            payload.get("framework_agent_candidate_id")
-            or self._framework_candidate_key(candidate)
-        )
+        cand_id = str(payload.get("framework_agent_candidate_id") or self._framework_candidate_key(candidate))
         batch_id = str(payload.get("batch_id") or candidate.get("batch_id") or "")
         authoring_enabled = bool(getattr(self.shared_state, "framework_agent_authoring_enabled", False))
         want_raw = audit_step == "direct_framework"
@@ -3130,11 +3098,7 @@ class FrameworkPhase(PhaseHandler):
         if not isinstance(progress, list):
             progress = []
             state.framework_agent_phase_progress = progress
-        if cand_id in {
-            self._framework_candidate_key(p)
-            for p in progress
-            if isinstance(p, dict)
-        }:
+        if cand_id in {self._framework_candidate_key(p) for p in progress if isinstance(p, dict)}:
             return False
         row: dict[str, Any] = {
             "candidate_id": cand_id,
@@ -3203,7 +3167,9 @@ class FrameworkPhase(PhaseHandler):
         payload = pending.payload or {}
         cand_id = str(
             payload.get("framework_agent_candidate_id")
-            or self._framework_candidate_key(payload.get("candidate") if isinstance(payload.get("candidate"), dict) else None)
+            or self._framework_candidate_key(
+                payload.get("candidate") if isinstance(payload.get("candidate"), dict) else None
+            )
         )
         batch_id = str(payload.get("batch_id") or "")
         self._stamp_framework_progress(
@@ -3266,15 +3232,9 @@ class FrameworkPhase(PhaseHandler):
                     spec_params = {}
             candidate = {
                 "candidate_id": str(
-                    params.get("framework_agent_candidate_id")
-                    or spec_params.get("framework_agent_candidate_id")
-                    or ""
+                    params.get("framework_agent_candidate_id") or spec_params.get("framework_agent_candidate_id") or ""
                 ),
-                "batch_id": str(
-                    params.get("framework_batch_id")
-                    or spec_params.get("framework_batch_id")
-                    or ""
-                ),
+                "batch_id": str(params.get("framework_batch_id") or spec_params.get("framework_batch_id") or ""),
                 "title": str(spec_params.get("gap_symptom") or ""),
                 "framework": str(spec_params.get("framework") or ""),
                 "gap_canonical_id": str(spec_params.get("gap_canonical_id") or ""),
@@ -3287,11 +3247,7 @@ class FrameworkPhase(PhaseHandler):
         if not cand_id:
             return
         batch_id = str(candidate.get("batch_id") or payload.get("batch_id") or "")
-        required_evidence = [
-            str(x).strip()
-            for x in (advisory.get("required_evidence") or [])
-            if str(x).strip()
-        ]
+        required_evidence = [str(x).strip() for x in (advisory.get("required_evidence") or []) if str(x).strip()]
         if not required_evidence:
             # needs_review with nothing to act on: no re-author is possible, so
             # this is terminal for the candidate. Stamp it so the pump advances.
@@ -3348,11 +3304,7 @@ class FrameworkPhase(PhaseHandler):
         critic_feedback = {
             "required_evidence": required_evidence,
             "advice_text": str(advisory.get("advice_text") or ""),
-            "risks": [
-                str(r).strip()
-                for r in (advisory.get("risks") or [])
-                if str(r).strip()
-            ],
+            "risks": [str(r).strip() for r in (advisory.get("risks") or []) if str(r).strip()],
         }
         new_task_id = ""
         try:
@@ -3474,11 +3426,7 @@ class FrameworkPhase(PhaseHandler):
         if isinstance(cand_map, dict) and spec_tid:
             mapped_cand = str(cand_map.get(spec_tid) or "")
         cand_id = str(
-            params.get("framework_agent_candidate_id")
-            or mapped_cand
-            or spec_tid
-            or getattr(task, "task_id", "")
-            or ""
+            params.get("framework_agent_candidate_id") or mapped_cand or spec_tid or getattr(task, "task_id", "") or ""
         )
         batch_id = str(params.get("framework_batch_id") or "")
         if not batch_id:
@@ -3615,9 +3563,7 @@ class FrameworkPhase(PhaseHandler):
             _sid_arts = str(getattr(task, "task_id", "") or "")
             if self.session_dir is not None and _sid_arts:
                 _spec_root = _runs_dir(_Path(self.session_dir), "specialist", _sid_arts)
-                if _resolvable_artifacts_from_done(
-                    inner, [_spec_root / "worktree", _spec_root]
-                ):
+                if _resolvable_artifacts_from_done(inner, [_spec_root / "worktree", _spec_root]):
                     return
         except Exception:  # noqa: BLE001 — defensive; fall through to stamp
             log.debug("FRAMEWORK: artifacts routable-check failed", exc_info=True)
@@ -3770,15 +3716,9 @@ class FrameworkPhase(PhaseHandler):
         for raw in explicit_grid or []:
             if not isinstance(raw, dict):
                 continue
-            args = str(
-                raw.get("extra_args") or raw.get("extra_server_args") or ""
-            ).strip()
+            args = str(raw.get("extra_args") or raw.get("extra_server_args") or "").strip()
             envs_raw = raw.get("extra_envs")
-            envs = (
-                {str(k): str(v) for k, v in envs_raw.items()}
-                if isinstance(envs_raw, dict)
-                else {}
-            )
+            envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
             _add(
                 str(raw.get("name") or ""),
                 args,
@@ -3795,9 +3735,7 @@ class FrameworkPhase(PhaseHandler):
 
                 seeds = _default_grid_for_framework(
                     str(getattr(self.shared_state, "framework", "") or ""),
-                    model_class=str(
-                        getattr(self.shared_state, "model_class", "") or ""
-                    ),
+                    model_class=str(getattr(self.shared_state, "model_class", "") or ""),
                 )
             except Exception:  # noqa: BLE001 -- seed grid is best-effort
                 log.debug(
@@ -3806,10 +3744,7 @@ class FrameworkPhase(PhaseHandler):
                 )
                 seeds = []
             for gv in seeds or []:
-                gv_envs = {
-                    str(k): str(v)
-                    for k, v in (getattr(gv, "extra_envs", None) or {}).items()
-                }
+                gv_envs = {str(k): str(v) for k, v in (getattr(gv, "extra_envs", None) or {}).items()}
                 _add(
                     str(getattr(gv, "name", "") or ""),
                     str(getattr(gv, "extra_server_args", "") or "").strip(),
@@ -3854,12 +3789,16 @@ class FrameworkPhase(PhaseHandler):
                 params["base_extra_args"] = cb_args
             _raw_remove = cb.get("remove_args")
             _raw_unset = cb.get("unset_envs")
-            cb_remove = [_raw_remove] if isinstance(_raw_remove, str) and _raw_remove.strip() else [
-                str(v) for v in (_raw_remove or []) if str(v).strip()
-            ]
-            cb_unset = [_raw_unset] if isinstance(_raw_unset, str) and _raw_unset.strip() else [
-                str(v) for v in (_raw_unset or []) if str(v).strip()
-            ]
+            cb_remove = (
+                [_raw_remove]
+                if isinstance(_raw_remove, str) and _raw_remove.strip()
+                else [str(v) for v in (_raw_remove or []) if str(v).strip()]
+            )
+            cb_unset = (
+                [_raw_unset]
+                if isinstance(_raw_unset, str) and _raw_unset.strip()
+                else [str(v) for v in (_raw_unset or []) if str(v).strip()]
+            )
             if cb_remove:
                 params["base_remove_args"] = cb_remove
             if cb_unset:
@@ -3923,8 +3862,7 @@ class FrameworkPhase(PhaseHandler):
             log.exception("framework_config: failed to enqueue explore round")
             return ""
         log.info(
-            "framework_config: enqueued explore task_id=%s "
-            "(variants=%d reason=%s existing=%s)",
+            "framework_config: enqueued explore task_id=%s (variants=%d reason=%s existing=%s)",
             etask.task_id,
             len(grid),
             reason,
@@ -3962,12 +3900,7 @@ class FrameworkPhase(PhaseHandler):
             The positive per-subphase round cap.
         """
         try:
-            v = int(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_MAX_ROUNDS", "0"
-                )
-                or 0
-            )
+            v = int(os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_MAX_ROUNDS", "0") or 0)
         except (TypeError, ValueError):
             v = 0
         return v if v > 0 else self._FRAMEWORK_CONFIG_MAX_ROUNDS
@@ -4000,12 +3933,16 @@ class FrameworkPhase(PhaseHandler):
         if isinstance(cb, dict):
             raw_remove = cb.get("remove_args")
             raw_unset = cb.get("unset_envs")
-            base_remove_args = [raw_remove] if isinstance(raw_remove, str) and raw_remove.strip() else [
-                str(v) for v in (raw_remove or []) if str(v).strip()
-            ]
-            base_unset_envs = [raw_unset] if isinstance(raw_unset, str) and raw_unset.strip() else [
-                str(v) for v in (raw_unset or []) if str(v).strip()
-            ]
+            base_remove_args = (
+                [raw_remove]
+                if isinstance(raw_remove, str) and raw_remove.strip()
+                else [str(v) for v in (raw_remove or []) if str(v).strip()]
+            )
+            base_unset_envs = (
+                [raw_unset]
+                if isinstance(raw_unset, str) and raw_unset.strip()
+                else [str(v) for v in (raw_unset or []) if str(v).strip()]
+            )
         out: list[dict[str, Any]] = []
         for v in grid or []:
             if not isinstance(v, dict):
@@ -4015,13 +3952,21 @@ class FrameworkPhase(PhaseHandler):
             remove_args = list(
                 dict.fromkeys(
                     base_remove_args
-                    + ([v_remove] if isinstance(v_remove, str) and v_remove.strip() else [str(x) for x in (v_remove or []) if str(x).strip()])
+                    + (
+                        [v_remove]
+                        if isinstance(v_remove, str) and v_remove.strip()
+                        else [str(x) for x in (v_remove or []) if str(x).strip()]
+                    )
                 )
             )
             unset_envs = list(
                 dict.fromkeys(
                     base_unset_envs
-                    + ([v_unset] if isinstance(v_unset, str) and v_unset.strip() else [str(x) for x in (v_unset or []) if str(x).strip()])
+                    + (
+                        [v_unset]
+                        if isinstance(v_unset, str) and v_unset.strip()
+                        else [str(x) for x in (v_unset or []) if str(x).strip()]
+                    )
                 )
             )
             fp = canonical_fingerprint(
@@ -4104,18 +4049,11 @@ class FrameworkPhase(PhaseHandler):
             ]
         discovered = getattr(state, "discovered_flags", None)
         # Match record_discovered_flags key normalization (blank -> "unknown").
-        entry = (
-            discovered.get(framework or "unknown")
-            if isinstance(discovered, dict)
-            else None
-        )
+        entry = discovered.get(framework or "unknown") if isinstance(discovered, dict) else None
         if isinstance(entry, dict):
             flag_names = [
                 str(f)
-                for f in (
-                    list(entry.get("backend_flags") or [])
-                    + list(entry.get("param_flags") or [])
-                )
+                for f in (list(entry.get("backend_flags") or []) + list(entry.get("param_flags") or []))
                 if str(f).strip()
             ][:15]
             if flag_names:
@@ -4184,9 +4122,7 @@ class FrameworkPhase(PhaseHandler):
         params: dict[str, Any] = {
             "domain": domain,
             "gap_canonical_id": gap_cid,
-            "gap_symptom": (
-                "Propose runtime config variants (server args / env) for a throughput grid"
-            ),
+            "gap_symptom": ("Propose runtime config variants (server args / env) for a throughput grid"),
             "gap_layer": "framework",
             "framework": framework,
             # Marker so completion harvest routes the proposal_set into the config
@@ -4200,9 +4136,7 @@ class FrameworkPhase(PhaseHandler):
         try:
             await self._warm_specialist_params(params)
         except Exception:  # noqa: BLE001 -- best-effort warmup
-            log.debug(
-                "framework_config: warm specialist params failed", exc_info=True
-            )
+            log.debug("framework_config: warm specialist params failed", exc_info=True)
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         idem = f"framework-config-generation:round{int(round_no)}{self._cycle_idem_suffix()}"
         try:
@@ -4261,11 +4195,7 @@ class FrameworkPhase(PhaseHandler):
                 continue
             args = str(p.get("extra_args") or p.get("extra_server_args") or "").strip()
             envs_raw = p.get("extra_envs")
-            envs = (
-                {str(k): str(v) for k, v in envs_raw.items()}
-                if isinstance(envs_raw, dict)
-                else {}
-            )
+            envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
             controls: dict[str, Any] = {}
             for key in ("remove_args", "unset_envs"):
                 raw = p.get(key)
@@ -4313,9 +4243,7 @@ class FrameworkPhase(PhaseHandler):
         params = getattr(task, "params", None) or {}
         if not bool(params.get("framework_config_generation")):
             return
-        proposals = (
-            done_payload.get("proposal_set") if isinstance(done_payload, dict) else None
-        )
+        proposals = done_payload.get("proposal_set") if isinstance(done_payload, dict) else None
         grid = self._framework_config_grid_from_proposals(proposals or [])
         state = self.shared_state
         if not isinstance(getattr(state, "framework_config_pending_grid", None), list):
@@ -4353,9 +4281,7 @@ class FrameworkPhase(PhaseHandler):
                 log.exception("framework_config: save after generation dispatch failed")
             return True
         # Generation unavailable: fall back to the deterministic default grid.
-        new_variants = self._framework_config_new_variants(
-            self._build_framework_config_grid()
-        )
+        new_variants = self._framework_config_new_variants(self._build_framework_config_grid())
         if not new_variants:
             self._finish_framework_config_lane(reason="no_candidates")
             return False
@@ -4392,18 +4318,13 @@ class FrameworkPhase(PhaseHandler):
             ``True`` when the config subphase should be given a chance to hold
             the phase; ``False`` otherwise (the default flow).
         """
-        if not bool(
-            getattr(self.shared_state, "framework_config_exploration_enabled", False)
-        ):
+        if not bool(getattr(self.shared_state, "framework_config_exploration_enabled", False)):
             return False
         if next_phase is None:
             return False
         current = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
         target = str(next_phase[0]).strip().upper()
-        return (
-            current == _phase_state.PHASE_FRAMEWORK_AGENT
-            and target != _phase_state.PHASE_FRAMEWORK_AGENT
-        )
+        return current == _phase_state.PHASE_FRAMEWORK_AGENT and target != _phase_state.PHASE_FRAMEWORK_AGENT
 
     async def _maybe_hold_for_framework_config_lane(self) -> bool:
         """(Default OFF) Drive the FRAMEWORK config-exploration subphase.
@@ -4449,9 +4370,7 @@ class FrameworkPhase(PhaseHandler):
             pending = list(getattr(state, "framework_config_pending_grid", None) or [])
             state.framework_config_pending_grid = []
             round_no = int(getattr(state, "framework_config_lane_round", 0) or 0)
-            new_variants = self._framework_config_new_variants(
-                self._build_framework_config_grid(explicit_grid=pending)
-            )
+            new_variants = self._framework_config_new_variants(self._build_framework_config_grid(explicit_grid=pending))
             if not new_variants:
                 self._finish_framework_config_lane(reason="generation_empty")
                 return False
@@ -4502,11 +4421,7 @@ class FrameworkPhase(PhaseHandler):
 
         state = self.shared_state
         outcomes = result.get("per_variant_outcomes") or []
-        kept = sum(
-            1
-            for o in outcomes
-            if isinstance(o, dict) and str(o.get("outcome") or "").upper() == "KEEP"
-        )
+        kept = sum(1 for o in outcomes if isinstance(o, dict) and str(o.get("outcome") or "").upper() == "KEEP")
         row = {
             "task_id": str(getattr(task, "task_id", "") or ""),
             "reason": str((getattr(task, "params", None) or {}).get("reason") or ""),
@@ -4515,9 +4430,7 @@ class FrameworkPhase(PhaseHandler):
             "best_gain_pct": result.get("best_gain_pct"),
             "ts": _now_iso(),
         }
-        if not isinstance(
-            getattr(state, "framework_config_exploration_results", None), list
-        ):
+        if not isinstance(getattr(state, "framework_config_exploration_results", None), list):
             state.framework_config_exploration_results = []
         state.framework_config_exploration_results.append(row)
         try:

@@ -24,9 +24,7 @@ from hyperloom.orchestrator.actions.executors import baseline
 
 # Only tests that drive psutil directly require it; sweep / _resolve_timeout
 # tests monkeypatch ``_any_live_compiler`` and run regardless.
-requires_psutil = pytest.mark.skipif(
-    psutil is None, reason="psutil not installed (optional runtime dependency)"
-)
+requires_psutil = pytest.mark.skipif(psutil is None, reason="psutil not installed (optional runtime dependency)")
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +66,8 @@ class _FakeProc:
 
 def _patch_process_iter(monkeypatch, procs):
     monkeypatch.setattr(
-        psutil, "process_iter",
+        psutil,
+        "process_iter",
         lambda attrs=None: iter(procs),
     )
 
@@ -78,28 +77,37 @@ def _patch_process_iter(monkeypatch, procs):
 # ---------------------------------------------------------------------------
 @requires_psutil
 def test_any_live_compiler_true_on_name_match(monkeypatch):
-    _patch_process_iter(monkeypatch, [
-        _FakeProc(name="bash"),
-        _FakeProc(name="hipcc"),
-    ])
+    _patch_process_iter(
+        monkeypatch,
+        [
+            _FakeProc(name="bash"),
+            _FakeProc(name="hipcc"),
+        ],
+    )
     assert _aiter_jit._any_live_compiler() is True
 
 
 @requires_psutil
 def test_any_live_compiler_false_when_no_compiler(monkeypatch):
-    _patch_process_iter(monkeypatch, [
-        _FakeProc(name="bash"),
-        _FakeProc(name="python", cmdline=["python", "serve.py"]),
-    ])
+    _patch_process_iter(
+        monkeypatch,
+        [
+            _FakeProc(name="bash"),
+            _FakeProc(name="python", cmdline=["python", "serve.py"]),
+        ],
+    )
     assert _aiter_jit._any_live_compiler() is False
 
 
 @requires_psutil
 def test_any_live_compiler_matches_cmdline_when_name_is_wrapper(monkeypatch):
     # ``name`` may surface as the wrapper (perl) while cmdline's first token is hipcc.
-    _patch_process_iter(monkeypatch, [
-        _FakeProc(name="perl", cmdline=["/opt/rocm/bin/hipcc", "-c", "x.cu"]),
-    ])
+    _patch_process_iter(
+        monkeypatch,
+        [
+            _FakeProc(name="perl", cmdline=["/opt/rocm/bin/hipcc", "-c", "x.cu"]),
+        ],
+    )
     assert _aiter_jit._any_live_compiler() is True
 
 
@@ -213,7 +221,8 @@ def test_resolve_timeout_no_sweep_on_warm(monkeypatch):
 
     monkeypatch.setattr(baseline, "_probe_aiter_jit_cache", _warm_probe)
     monkeypatch.setattr(
-        baseline, "sweep_stale_aiter_locks_if_dead",
+        baseline,
+        "sweep_stale_aiter_locks_if_dead",
         lambda *a, **k: calls.__setitem__("sweep", calls["sweep"] + 1) or {},
     )
 
@@ -232,7 +241,8 @@ def test_resolve_timeout_skips_reprobe_when_sweep_live(monkeypatch):
 
     monkeypatch.setattr(baseline, "_probe_aiter_jit_cache", _probe)
     monkeypatch.setattr(
-        baseline, "sweep_stale_aiter_locks_if_dead",
+        baseline,
+        "sweep_stale_aiter_locks_if_dead",
         lambda *a, **k: {"skipped_live": True, "deleted": 0},
     )
 

@@ -39,6 +39,7 @@ _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
 # Critic-agent skill root resolution. Env wins; else the in-tree package.
 _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
+
 def _resolve_critic_agent_root() -> Path | None:
     """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else the in-tree package), or ``None``.
 
@@ -54,6 +55,7 @@ def _resolve_critic_agent_root() -> Path | None:
 
     candidate = PACKAGE_ROOT.parent / "agents" / "critic"
     return candidate if (candidate / "runtime" / "cli.py").is_file() else None
+
 
 def _validate_critic_agent_runtime(root: Path) -> None:
     """Fail fast (SystemExit) if ``python -m hyperloom.agents.critic.runtime.cli --help`` doesn't work.
@@ -100,8 +102,10 @@ def _validate_critic_agent_runtime(root: Path) -> None:
         )
         sys.exit(2)
 
+
 # Robustness-agent runtime location resolution; mirrors the critic-agent helpers.
 _ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
+
 
 def _resolve_robustness_agent_root() -> Path | None:
     """Return robustness-agent skill root (``$ROBUSTNESS_AGENT_ROOT`` else the in-tree package), or ``None``.
@@ -119,6 +123,7 @@ def _resolve_robustness_agent_root() -> Path | None:
     candidate = PACKAGE_ROOT.parent / "agents" / "robustness"
     cli_module = candidate / "runtime" / "cli.py"
     return candidate if cli_module.is_file() else None
+
 
 def _validate_robustness_agent_runtime(root: Path) -> None:
     """Fail fast if ``python -m hyperloom.agents.robustness.runtime.cli --help`` doesn't work.
@@ -167,8 +172,10 @@ def _validate_robustness_agent_runtime(root: Path) -> None:
         )
         sys.exit(2)
 
+
 # Matches the ``base_url:`` line in a legacy / explicitly supplied GEAK litellm yaml.
 _GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
+
 
 def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url``.
@@ -215,6 +222,7 @@ def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
     except OSError:
         return False
     return True
+
 
 def _derive_anthropic_base_url(openai_base_url: str) -> str:
     """Derive ``ANTHROPIC_BASE_URL`` from ``OPENAI_BASE_URL`` by stripping a trailing ``/v1`` (SDK re-appends it).
@@ -340,6 +348,7 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
         return anthropic_url, openai_url
     return "", ""
 
+
 def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: str) -> None:
     """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway.
 
@@ -381,6 +390,7 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
     )
     claude_config_path.chmod(0o600)
     print(f"Preflight: updated ~/.claude/config.json customApiUrl -> {anthropic_base_url}")
+
 
 def _validate_credentials() -> None:
     """Fail fast when no usable LLM endpoint/key is configured.

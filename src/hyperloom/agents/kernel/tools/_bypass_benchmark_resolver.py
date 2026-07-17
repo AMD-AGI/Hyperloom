@@ -104,7 +104,9 @@ def find_benchmark_files(op_name: str, source_file: str, *, max_files: int = 10)
             try:
                 proc = subprocess.run(
                     [grep, "-rlnI", "--include=*.py", kw, str(subp)],
-                    text=True, capture_output=True, timeout=15,
+                    text=True,
+                    capture_output=True,
+                    timeout=15,
                 )
             except (OSError, subprocess.SubprocessError):
                 continue

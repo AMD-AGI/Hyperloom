@@ -101,6 +101,7 @@ class MetricsRegistry:
                 self._histograms[name] = hist
             return hist
 
+
 _registry = MetricsRegistry()
 
 

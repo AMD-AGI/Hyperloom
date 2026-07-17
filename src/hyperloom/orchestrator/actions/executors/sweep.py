@@ -264,16 +264,13 @@ class SweepExecutor:
                 or runs_dir(self.session_dir, "sweep", ctx.task.task_id)
             )
             from ._geak_sweep import sweep_via_geak
+
             return await sweep_via_geak(
                 result=ps_result,
                 conc_values=list(params.get("conc_values") or self.default_conc_values),
-                isl_osl_configs=list(
-                    params.get("isl_osl_configs") or self.default_isl_osl_configs
-                ),
+                isl_osl_configs=list(params.get("isl_osl_configs") or self.default_isl_osl_configs),
                 output_root=output_root,
-                variant_timeout_sec=int(
-                    params.get("variant_timeout_sec", self.variant_timeout_sec)
-                ),
+                variant_timeout_sec=int(params.get("variant_timeout_sec", self.variant_timeout_sec)),
             )
 
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())

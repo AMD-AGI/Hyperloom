@@ -47,9 +47,7 @@ def test_extract_head_sha_from_all_shapes() -> None:
 
 
 def test_extract_labels_from_list_and_summary() -> None:
-    got = _extract_labels(
-        {"labels": ["bug", {"name": "perf"}, {"label": "kernel"}, "   ", 5]}
-    )
+    got = _extract_labels({"labels": ["bug", {"name": "perf"}, {"label": "kernel"}, "   ", 5]})
     assert got == ("bug", "perf", "kernel")
     # Prefer the summary block when it carries labels.
     assert _extract_labels({"summary": {"labels": ["x"]}}) == ("x",)
@@ -105,18 +103,10 @@ def test_passes_filter_rejections() -> None:
     assert _passes_filter(_cand(updated_at="2020"), PrFilter(since="2021"))[0] is False
     assert _passes_filter(_cand(updated_at="2022"), PrFilter(until="2021"))[0] is False
     # Path include/exclude.
-    assert _passes_filter(
-        _cand(changed_files=("src/x.py",)), PrFilter(exclude_paths=("src/",))
-    )[0] is False
-    assert _passes_filter(
-        _cand(changed_files=("docs/y.md",)), PrFilter(include_paths=("src/",))
-    )[0] is False
+    assert _passes_filter(_cand(changed_files=("src/x.py",)), PrFilter(exclude_paths=("src/",)))[0] is False
+    assert _passes_filter(_cand(changed_files=("docs/y.md",)), PrFilter(include_paths=("src/",)))[0] is False
     # Changed-file counts.
-    assert _passes_filter(
-        _cand(changed_files=("a",)), PrFilter(min_changed_files=2)
-    )[0] is False
-    assert _passes_filter(
-        _cand(changed_files=("a", "b", "c")), PrFilter(max_changed_files=2)
-    )[0] is False
+    assert _passes_filter(_cand(changed_files=("a",)), PrFilter(min_changed_files=2))[0] is False
+    assert _passes_filter(_cand(changed_files=("a", "b", "c")), PrFilter(max_changed_files=2))[0] is False
     # Path/count filters need enrichment metadata.
     assert _passes_filter(_cand(), PrFilter(include_paths=("src/",)))[0] is False

@@ -54,11 +54,18 @@ def test_forge_attempt_usage_lands_token_row(tmp_path: Path) -> None:
     log = tmp_path / "forge-xy_stdout.log"
     stdout = (
         "forge done: baseline=92.3 best=85.1 improved=True fellow=ck gpu=gfx942\n"
-        + "FORGE_LLM_USAGE " + json.dumps({
-            "input_tokens": 5000, "output_tokens": 1200,
-            "cache_creation_input_tokens": 400, "cache_read_input_tokens": 3000,
-            "total_cost_usd": 18.5, "calls": 7,
-        }) + "\n"
+        + "FORGE_LLM_USAGE "
+        + json.dumps(
+            {
+                "input_tokens": 5000,
+                "output_tokens": 1200,
+                "cache_creation_input_tokens": 400,
+                "cache_read_input_tokens": 3000,
+                "total_cost_usd": 18.5,
+                "calls": 7,
+            }
+        )
+        + "\n"
         + "Autonomous loop complete\n"
     )
     result = {
@@ -103,13 +110,16 @@ def test_forge_steps_written_to_audit(tmp_path: Path) -> None:
     log = tmp_path / "forge-steps_stdout.log"
     payload = {
         "steps": [
-            {"iteration": 1, "decision": "KEEP", "wall_ms": 88.1,
-             "rationale": "fuse epilogue", "validation_passed": True},
-            {"iteration": 2, "decision": "REVERT", "wall_ms": 90.0,
-             "validation_passed": False},
+            {
+                "iteration": 1,
+                "decision": "KEEP",
+                "wall_ms": 88.1,
+                "rationale": "fuse epilogue",
+                "validation_passed": True,
+            },
+            {"iteration": 2, "decision": "REVERT", "wall_ms": 90.0, "validation_passed": False},
         ],
-        "summary": {"iterations": 2, "kept": 1, "speedup": 1.05,
-                    "termination_reason": "plateaued"},
+        "summary": {"iterations": 2, "kept": 1, "speedup": 1.05, "termination_reason": "plateaued"},
     }
     stdout = "FORGE_STEPS " + json.dumps(payload) + "\n"
     result = {"kernel_id": "k099", "attempts": [_attempt("forge", log, write=stdout)]}

@@ -693,6 +693,7 @@ def test_read_source_context_empty_on_blank_file(tmp_path):
 # _maybe_rearm_authored_lane
 # ---------------------------------------------------------------------------
 
+
 def _make_coord_with_phase(session_dir) -> "Coordinator":
     """Build a minimal Coordinator for authored-lane tests."""
     from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
@@ -703,8 +704,7 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
     backends = {
-        name: MockBackend(plan, name=name)
-        for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        name: MockBackend(plan, name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")
     }
     return Coordinator(session_dir, backends=backends)
 

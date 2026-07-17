@@ -82,9 +82,7 @@ async def test_sweep_via_geak_uses_validated_regimes_and_pins_num_prompts(
             "e2el_ms_median": 50.0,
         }
         (out / "bench_summary.json").write_text(json.dumps(summary), encoding="utf-8")
-        (out / "env.json").write_text(
-            json.dumps({"NUM_PROMPTS": env.get("NUM_PROMPTS")}), encoding="utf-8"
-        )
+        (out / "env.json").write_text(json.dumps({"NUM_PROMPTS": env.get("NUM_PROMPTS")}), encoding="utf-8")
         return subprocess.CompletedProcess(_cmd, 0, "", "")
 
     monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
@@ -224,9 +222,7 @@ def test_coerce_extra_envs_skips_malformed_tokens() -> None:
     assert coerce_extra_envs("; =v FOO=1") == {"FOO": "1"}
     # Token-list shape: dict item with a None key, a token without ``=``, a
     # non-string item, and an empty-key ``=v`` are all skipped.
-    assert coerce_extra_envs(
-        [{None: "x", "A": "1"}, "noeq", 123, "=v", "B=2"]
-    ) == {"A": "1", "B": "2"}
+    assert coerce_extra_envs([{None: "x", "A": "1"}, "noeq", 123, "=v", "B=2"]) == {"A": "1", "B": "2"}
 
 
 def test_parse_server_arg_value_falls_back_on_unbalanced_quotes() -> None:

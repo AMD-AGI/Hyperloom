@@ -248,9 +248,7 @@ def build_hyperloom_arch_spec(platform: str) -> dict | None:
     return out
 
 
-def write_hyperloom_arch_spec(
-    tracelens_root: Path, platform: str, log: Callable[[str], None]
-) -> Path | None:
+def write_hyperloom_arch_spec(tracelens_root: Path, platform: str, log: Callable[[str], None]) -> Path | None:
     """Write hyperloom's achievable arch spec into the TraceLens arch dir.
 
     Args:

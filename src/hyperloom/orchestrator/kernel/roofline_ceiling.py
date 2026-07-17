@@ -602,9 +602,7 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
     )
 
 
-def _resolve_tflops(
-    specs: dict[str, dict[str, Any]], gpu_type: str | None, precision_tag: str | None
-) -> float:
+def _resolve_tflops(specs: dict[str, dict[str, Any]], gpu_type: str | None, precision_tag: str | None) -> float:
     """``(gpu, precision)`` → TFLOPS from *specs*' ``peak_tflops`` table (case-insensitive); 0.0 on any miss."""
     spec = specs.get((gpu_type or "").strip().lower())
     if spec is None:
@@ -781,12 +779,7 @@ def _compute_expert_decomposition(
         A tuple of ``(active_weight_bytes, total_expert_bytes, num_experts,
         experts_per_tok)``, degrading to ``(weight_bytes, 0, 0, 0)``.
     """
-    num_experts = int(
-        cfg.get("num_experts")
-        or cfg.get("n_routed_experts")
-        or cfg.get("num_local_experts")
-        or 0
-    )
+    num_experts = int(cfg.get("num_experts") or cfg.get("n_routed_experts") or cfg.get("num_local_experts") or 0)
     experts_per_tok = int(cfg.get("num_experts_per_tok") or 0)
     if num_experts <= 0 or experts_per_tok <= 0:
         return int(weight_bytes), 0, 0, 0
@@ -1163,9 +1156,7 @@ def _read_vae_geometry(model_path: str) -> tuple[int, int]:
     return vae_scale, latent_channels
 
 
-def compute_diffusion_mem_img_per_sec(
-    *, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int
-) -> float:
+def compute_diffusion_mem_img_per_sec(*, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int) -> float:
     """Memory-roofline ceiling for diffusion image throughput (images/sec).
 
     Each denoising step must read the full model weights at least once, so the
@@ -1196,9 +1187,7 @@ def compute_diffusion_mem_img_per_sec(
     return 1.0 / total_s if total_s > 0 else 0.0
 
 
-def _read_diffusion_dit_meta(
-    model_path: str, *, height: int = 0, width: int = 0
-) -> tuple[int, int, int, int] | None:
+def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0) -> tuple[int, int, int, int] | None:
     """DiT transformer shape from ``<model>/transformer/config.json`` for the
     compute-bound diffusion ceiling.
 
@@ -1286,7 +1275,7 @@ def _diffusion_latent_tokens_from_resolution(
     pack = 2
     if in_ch > 0 and latent_channels > 0 and in_ch % latent_channels == 0:
         ratio = in_ch // latent_channels
-        root = int(round(ratio ** 0.5))
+        root = int(round(ratio**0.5))
         if root >= 1 and root * root == ratio:
             pack = root
     downscale = max(vae_scale, 1) * max(pack, 1)
@@ -1333,7 +1322,7 @@ def compute_diffusion_compute_img_per_sec(
     if peak_tflops <= 0 or dit_params <= 0 or latent_tokens <= 0 or num_steps <= 0:
         return 0.0
     linear = 2.0 * dit_params * latent_tokens
-    attn = 4.0 * max(num_layers, 0) * (latent_tokens ** 2) * max(hidden_size, 0)
+    attn = 4.0 * max(num_layers, 0) * (latent_tokens**2) * max(hidden_size, 0)
     flops_per_image = num_steps * (linear + attn)
     if flops_per_image <= 0:
         return 0.0
@@ -1451,9 +1440,7 @@ def compute_roofline_breakdown_from_state(
     # Rescale weights to the dtype the run actually read.
     rt = resolve_runtime_dtype(state, meta, arm=arm)
     meta = apply_runtime_dtype(meta, rt)
-    precision_tag = (
-        rt.compute_precision_tag or runtime.precision or "bf16"
-    )
+    precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
     mem = compute_theoretical_peak_output_tok_per_sec(
         gpu_type=gpu_type,
         num_gpus=num_gpus,
@@ -1627,9 +1614,7 @@ def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | N
     return {
         "compute_peak_convention": "vendor" if vendor > 0 else "unknown",
         "compute_peak_tflops": vendor,
-        "compute_peak_source": (
-            "vendor dense peak (achievable-table miss fallback)" if vendor > 0 else "unavailable"
-        ),
+        "compute_peak_source": ("vendor dense peak (achievable-table miss fallback)" if vendor > 0 else "unavailable"),
     }
 
 

@@ -39,8 +39,7 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
     "attention backend; increase decode batch to amortize KV reads.",
     "GEMM": "Tune GEMM tile size / precision and fuse the epilogue where possible; "
     "vendor-library GEMMs (Tensile/rocBLAS) are not rewritable — tune via library config.",
-    "Quantization": "Fuse quantization into the adjacent GEMM epilogue and drop redundant "
-    "per-tensor scaling passes.",
+    "Quantization": "Fuse quantization into the adjacent GEMM epilogue and drop redundant per-tensor scaling passes.",
     "KVCacheStore": "Fuse the KV-cache write into attention to remove the separate reshape pass.",
     "Normalization": "Use a fused RMSNorm/LayerNorm and fold the residual/quant into the norm kernel.",
     "Convolution": "Pick an NHWC/implicit-GEMM conv algorithm for the shape; fuse "
@@ -68,20 +67,31 @@ def _build_suggestion(category: str, bound_type: str) -> str:
     prefix = _BOUND_PREFIX.get(bound_type, "")
     return f"{prefix}: {action}" if prefix else action
 
+
 # torch ``Input type`` token -> compact dtype suffix for the shape-string
 # contract (e.g. ``(15360,2048) bf16``); unmapped/empty types emit a bare shape.
 _DTYPE_SUFFIX: dict[str, str] = {
     # Suffixes MUST match the shared harness dtype_map + roofline peak table; a
     # compact "f16"/"f32" makes the harness emit an invalid ``torch.f16``.
-    "c10::bfloat16": "bf16", "bfloat16": "bf16",
-    "c10::half": "fp16", "half": "fp16", "float16": "fp16",
-    "float": "fp32", "float32": "fp32",
-    "double": "fp64", "float64": "fp64",
-    "int": "i32", "int32": "i32",
-    "long": "i64", "int64": "i64",
-    "short": "i16", "int16": "i16",
-    "char": "i8", "int8": "i8",
-    "uint8": "u8", "bool": "bool",
+    "c10::bfloat16": "bf16",
+    "bfloat16": "bf16",
+    "c10::half": "fp16",
+    "half": "fp16",
+    "float16": "fp16",
+    "float": "fp32",
+    "float32": "fp32",
+    "double": "fp64",
+    "float64": "fp64",
+    "int": "i32",
+    "int32": "i32",
+    "long": "i64",
+    "int64": "i64",
+    "short": "i16",
+    "int16": "i16",
+    "char": "i8",
+    "int8": "i8",
+    "uint8": "u8",
+    "bool": "bool",
 }
 
 
@@ -348,11 +358,7 @@ def build_candidates(
             "reusable_native_kernel": kc.reusable,
             # Non-reusable keeps the classifier reason; a reusable kernel with no
             # resolved source is not dispatchable.
-            "skip_reason": (
-                kc.skip_reason
-                if not kc.reusable
-                else ("" if source_file else "source file not resolved")
-            ),
+            "skip_reason": (kc.skip_reason if not kc.reusable else ("" if source_file else "source file not resolved")),
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
             # Seeds for the GEAK harness + rocprof enrichment (only when
             # discover_benchmarks is set).
@@ -400,14 +406,14 @@ def build_candidates(
 
     # 1-based rank by optimization ROI, stamped WITHOUT reordering hot_kernels
     # (that list stays gpu_pct-sorted).
-    for rank, c in enumerate(sorted(hot_kernels, key=lambda x: x.get("optimization_priority") or 0.0, reverse=True), start=1):
+    for rank, c in enumerate(
+        sorted(hot_kernels, key=lambda x: x.get("optimization_priority") or 0.0, reverse=True), start=1
+    ):
         c["priority_rank"] = rank
 
     # ``routable_kernels`` = reusable-with-resolved-source subset dispatchable to
     # kernel-opt; ``hot_kernels`` stays the FULL ranked hotspot set.
-    routable_kernels = [
-        c for c in hot_kernels if c.get("reusable_native_kernel") and c.get("source_file")
-    ]
+    routable_kernels = [c for c in hot_kernels if c.get("reusable_native_kernel") and c.get("source_file")]
     # Complement within ``hot_kernels`` so the contract
     # ``hot_kernels == routable_kernels + skipped_kernels`` holds.
     routable_ids = {c["kernel_id"] for c in routable_kernels}
@@ -444,6 +450,7 @@ def build_summary(
     Returns:
         The ``summary.json`` payload dict.
     """
+
     # ``tasks`` / ``skipped`` reuse the SAME split build_candidates computed so
     # summary.json never disagrees with kernel_candidates.json.
     def _audit_row(c: dict[str, Any]) -> dict[str, Any]:
@@ -535,18 +542,42 @@ def _category_rollup(analyze_out: dict[str, Any]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 #: Stable column order for the per-kernel metrics CSV.
 _METRICS_COLUMNS: list[str] = [
-    "priority_rank", "optimization_priority", "kernel_id", "name", "kernel_category",
-    "device_kernel_name", "duration_us", "gpu_pct", "call_count",
-    "bound_type", "arithmetic_intensity", "efficiency_percent",
-    "compute_utilization_pct", "bandwidth_utilization_pct", "roofline_source", "roofline_measured",
-    "reusable_native_kernel", "source_file", "source_type", "recommended_backends",
-    "benchmark_files_count", "skip_reason", "representative_shape", "input_dtypes",
-    "shape_provenance", "suggestion",
+    "priority_rank",
+    "optimization_priority",
+    "kernel_id",
+    "name",
+    "kernel_category",
+    "device_kernel_name",
+    "duration_us",
+    "gpu_pct",
+    "call_count",
+    "bound_type",
+    "arithmetic_intensity",
+    "efficiency_percent",
+    "compute_utilization_pct",
+    "bandwidth_utilization_pct",
+    "roofline_source",
+    "roofline_measured",
+    "reusable_native_kernel",
+    "source_file",
+    "source_type",
+    "recommended_backends",
+    "benchmark_files_count",
+    "skip_reason",
+    "representative_shape",
+    "input_dtypes",
+    "shape_provenance",
+    "suggestion",
 ]
 
 _SUMMARY_COLUMNS: list[str] = [
-    "kernel_category", "kernel_count", "total_gpu_pct", "total_duration_us",
-    "mean_efficiency_percent", "dominant_bound_type", "routable_count",
+    "kernel_category",
+    "kernel_count",
+    "total_gpu_pct",
+    "total_duration_us",
+    "mean_efficiency_percent",
+    "dominant_bound_type",
+    "routable_count",
 ]
 
 
@@ -568,34 +599,36 @@ def build_metrics_rows(candidates: dict[str, Any]) -> list[dict[str, Any]]:
     for c in candidates.get("hot_kernels") or []:
         shapes = c.get("shapes") or []
         rep = shapes[0].get("shape", "") if shapes and isinstance(shapes[0], dict) else ""
-        rows.append({
-            "priority_rank": c.get("priority_rank", ""),
-            "optimization_priority": c.get("optimization_priority", ""),
-            "kernel_id": c.get("kernel_id", ""),
-            "name": c.get("name", ""),
-            "kernel_category": c.get("kernel_category", ""),
-            "device_kernel_name": c.get("device_kernel_name", ""),
-            "duration_us": c.get("duration_us", ""),
-            "gpu_pct": c.get("gpu_pct", ""),
-            "call_count": c.get("call_count", ""),
-            "bound_type": c.get("bound_type", ""),
-            "arithmetic_intensity": c.get("arithmetic_intensity", ""),
-            "efficiency_percent": c.get("efficiency_percent", ""),
-            "compute_utilization_pct": c.get("compute_utilization_pct", ""),
-            "bandwidth_utilization_pct": c.get("bandwidth_utilization_pct", ""),
-            "roofline_source": c.get("roofline_source", ""),
-            "roofline_measured": c.get("roofline_measured", ""),
-            "reusable_native_kernel": c.get("reusable_native_kernel", ""),
-            "source_file": c.get("source_file", ""),
-            "source_type": c.get("source_type", ""),
-            "recommended_backends": _join_list(c.get("recommended_backends")),
-            "benchmark_files_count": len(c.get("benchmark_files") or []),
-            "skip_reason": c.get("skip_reason", ""),
-            "representative_shape": rep,
-            "input_dtypes": _join_list(c.get("input_dtypes")),
-            "shape_provenance": c.get("shape_provenance", ""),
-            "suggestion": c.get("suggestion", ""),
-        })
+        rows.append(
+            {
+                "priority_rank": c.get("priority_rank", ""),
+                "optimization_priority": c.get("optimization_priority", ""),
+                "kernel_id": c.get("kernel_id", ""),
+                "name": c.get("name", ""),
+                "kernel_category": c.get("kernel_category", ""),
+                "device_kernel_name": c.get("device_kernel_name", ""),
+                "duration_us": c.get("duration_us", ""),
+                "gpu_pct": c.get("gpu_pct", ""),
+                "call_count": c.get("call_count", ""),
+                "bound_type": c.get("bound_type", ""),
+                "arithmetic_intensity": c.get("arithmetic_intensity", ""),
+                "efficiency_percent": c.get("efficiency_percent", ""),
+                "compute_utilization_pct": c.get("compute_utilization_pct", ""),
+                "bandwidth_utilization_pct": c.get("bandwidth_utilization_pct", ""),
+                "roofline_source": c.get("roofline_source", ""),
+                "roofline_measured": c.get("roofline_measured", ""),
+                "reusable_native_kernel": c.get("reusable_native_kernel", ""),
+                "source_file": c.get("source_file", ""),
+                "source_type": c.get("source_type", ""),
+                "recommended_backends": _join_list(c.get("recommended_backends")),
+                "benchmark_files_count": len(c.get("benchmark_files") or []),
+                "skip_reason": c.get("skip_reason", ""),
+                "representative_shape": rep,
+                "input_dtypes": _join_list(c.get("input_dtypes")),
+                "shape_provenance": c.get("shape_provenance", ""),
+                "suggestion": c.get("suggestion", ""),
+            }
+        )
     return rows
 
 
@@ -611,10 +644,18 @@ def build_category_summary(candidates: dict[str, Any]) -> list[dict[str, Any]]:
     agg: dict[str, dict[str, Any]] = {}
     for c in candidates.get("hot_kernels") or []:
         cat = c.get("kernel_category") or "Others"
-        a = agg.setdefault(cat, {
-            "kernel_count": 0, "total_gpu_pct": 0.0, "total_duration_us": 0.0,
-            "eff_sum": 0.0, "eff_n": 0, "bounds": Counter(), "routable": 0,
-        })
+        a = agg.setdefault(
+            cat,
+            {
+                "kernel_count": 0,
+                "total_gpu_pct": 0.0,
+                "total_duration_us": 0.0,
+                "eff_sum": 0.0,
+                "eff_n": 0,
+                "bounds": Counter(),
+                "routable": 0,
+            },
+        )
         a["kernel_count"] += 1
         a["total_gpu_pct"] += float(c.get("gpu_pct") or 0.0)
         a["total_duration_us"] += float(c.get("duration_us") or 0.0)
@@ -833,7 +874,9 @@ def _render_bypass_extra_sections(
         L.append("| Rank | Category | GPU % | Time (ms) | Kernels |")
         L.append("|------|----------|-------|-----------|---------|")
         for i, r in enumerate(rollup, start=1):
-            L.append(f"| {i} | {canonical_category(r['category'])} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |")
+            L.append(
+                f"| {i} | {canonical_category(r['category'])} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |"
+            )
     else:
         L.append("_No GPU kernels found in trace._")
     L.append("")
@@ -923,8 +966,7 @@ def _render_bypass_extra_sections(
         L.append("## Task Groups")
         L.append("")
         L.append(
-            "_Rewritable candidates sharing one editable source collapse into a single "
-            "dispatch (all observed shapes)._"
+            "_Rewritable candidates sharing one editable source collapse into a single dispatch (all observed shapes)._"
         )
         L.append("")
         L.append("| Group | Source | Kernels | GPU % | Time (ms) |")
