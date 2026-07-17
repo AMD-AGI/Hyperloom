@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
+
 if TYPE_CHECKING:
     from ..state_store import DetectorStateView
 from .symptom import Symptom, SymptomSeverity
@@ -266,6 +267,7 @@ class GpuLeakDetector:
                 "finalize at the last validated gain"
             ),
         )
+
 
 __all__ = [
     "GpuLeakConfig",

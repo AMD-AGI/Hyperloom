@@ -410,9 +410,7 @@ def _chat_backend_raising(exc: BaseException) -> CodexBackend:
 
 
 def _ws_backend_raising(exc: BaseException) -> CodexBackend:
-    return CodexBackend(
-        model="gpt-5.5", web_search=True, client_factory=lambda: _RaisingChatClient(exc)
-    )
+    return CodexBackend(model="gpt-5.5", web_search=True, client_factory=lambda: _RaisingChatClient(exc))
 
 
 @pytest.mark.asyncio

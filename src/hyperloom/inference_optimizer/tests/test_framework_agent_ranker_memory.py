@@ -140,9 +140,8 @@ class _FakeStream:
 
     def __aiter__(self):
         async def _gen():
-            yield SimpleNamespace(
-                choices=[SimpleNamespace(delta=SimpleNamespace(content=self._text))]
-            )
+            yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=self._text))])
+
         return _gen()
 
 
@@ -167,7 +166,9 @@ def test_ranker_prompt_includes_tried_block_and_returns_match():
         {"candidate_id": "PR:723", "status": "reverted", "gain_pct": 0.0, "rationale": "no-op on SD3 path"},
     ]
     captured: dict[str, Any] = {}
-    coord._framework_agent_ranker_client = lambda: _FakeClient(captured, '{"candidate_id": "PR:2000", "reason": "attacks mem-bw"}')  # type: ignore[attr-defined]
+    coord._framework_agent_ranker_client = lambda: _FakeClient(
+        captured, '{"candidate_id": "PR:2000", "reason": "attacks mem-bw"}'
+    )  # type: ignore[attr-defined]
     coord._framework_agent_ranker_model = lambda: "m"  # type: ignore[attr-defined]
 
     candidates = [

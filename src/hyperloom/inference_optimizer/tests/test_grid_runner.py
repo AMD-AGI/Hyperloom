@@ -1113,10 +1113,7 @@ class TestDedupVllmServerArgs:
         assert "{cudagraph_mode:PIECEWISE}" not in out
 
     def test_speculative_config_quotes_survive_dedup(self):
-        raw = (
-            '--speculative-config {"method":"eagle"} '
-            "--max-num-seqs 256 --max-num-seqs 256"
-        )
+        raw = '--speculative-config {"method":"eagle"} --max-num-seqs 256 --max-num-seqs 256'
         out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
         assert '{"method":"eagle"}' in out
 
@@ -1197,9 +1194,7 @@ class TestCompactJsonServerArgs:
     explore variants always crash the server at boot)."""
 
     def test_compilation_config_separator_space_removed(self):
-        out = _grid_runner.compact_json_server_args(
-            '--compilation-config {"full_cuda_graph": true}', "vllm"
-        )
+        out = _grid_runner.compact_json_server_args('--compilation-config {"full_cuda_graph": true}', "vllm")
         assert out == '--compilation-config {"full_cuda_graph":true}'
         # the JSON value is now a single shell word under bash word-splitting
         assert len(out.split()) == 2
@@ -1209,18 +1204,14 @@ class TestCompactJsonServerArgs:
             '--speculative-config {"method": "eagle", "num_speculative_tokens": 3}',
             "vllm",
         )
-        assert out == (
-            '--speculative-config {"method":"eagle","num_speculative_tokens":3}'
-        )
+        assert out == ('--speculative-config {"method":"eagle","num_speculative_tokens":3}')
         assert len(out.split()) == 2
 
     def test_compact_json_server_args_internal_space_unsupported(self):
         # Spaces inside JSON string values are not collapsed, so the value is not
         # a single shell word under Magpie's unquoted expansion; this flag shape
         # is unsupported. The value is left intact, not corrupted.
-        out = _grid_runner.compact_json_server_args(
-            '--speculative-config {"model": "draft model name"}', "vllm"
-        )
+        out = _grid_runner.compact_json_server_args('--speculative-config {"model": "draft model name"}', "vllm")
         # Value is preserved verbatim (separator space after ':' removed only).
         assert out == '--speculative-config {"model":"draft model name"}'
         # ...but it still splits into MORE than the ideal 2 words: the two
@@ -1229,9 +1220,7 @@ class TestCompactJsonServerArgs:
         assert len(out.split()) == 4
 
     def test_other_flags_around_json_untouched(self):
-        out = _grid_runner.compact_json_server_args(
-            '--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm"
-        )
+        out = _grid_runner.compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm")
         assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
 
     def test_sglang_is_noop(self):

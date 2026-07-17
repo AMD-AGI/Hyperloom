@@ -74,18 +74,26 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("FRAMEWORK_VERSION", "0.21.0")
     monkeypatch.setenv("GPU_TYPE", "mi300x")
-    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {
-        "architectures": ["KimiK2ForCausalLM"],
-        "model_type": "kimi_k25",
-    })
+    monkeypatch.setattr(
+        cb,
+        "_load_model_config_tags",
+        lambda _p: {
+            "architectures": ["KimiK2ForCausalLM"],
+            "model_type": "kimi_k25",
+        },
+    )
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {"layers": 61})
     monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: (
-        "--block-size 64",
-        {"ENV_A": "1"},
-        "Kimi-K2.6",
-        "/recipes/kimi.sh",
-    ))
+    monkeypatch.setattr(
+        cb,
+        "_resolve_reference_recipe",
+        lambda _args: (
+            "--block-size 64",
+            {"ENV_A": "1"},
+            "Kimi-K2.6",
+            "/recipes/kimi.sh",
+        ),
+    )
 
     from hyperloom.orchestrator.policy import gate as policy
 
@@ -136,7 +144,9 @@ def test_seed_shared_state_preserves_quantized_model_identity(
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(
-        cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""),
+        cb,
+        "_resolve_reference_recipe",
+        lambda _args: ("", {}, "", ""),
     )
 
     from hyperloom.orchestrator.policy import gate as policy
@@ -166,7 +176,9 @@ def test_seed_shared_state_falls_back_to_path_basename(
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(
-        cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""),
+        cb,
+        "_resolve_reference_recipe",
+        lambda _args: ("", {}, "", ""),
     )
 
     from hyperloom.orchestrator.policy import gate as policy
@@ -175,7 +187,9 @@ def test_seed_shared_state_falls_back_to_path_basename(
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
     state = cb._seed_shared_state(
-        tmp_path, _args(model="/models/Qwen3-32B"), session_id="s-plain",
+        tmp_path,
+        _args(model="/models/Qwen3-32B"),
+        session_id="s-plain",
     )
     assert state.model_name == "Qwen3-32B"
 
@@ -223,10 +237,24 @@ def test_target_summary_and_conc_sweep_parser(caplog) -> None:
         _args(model="/m/foo", target_gain=None, target_tput=None, max_hours=4)
     )
     assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="")) == [
-        256, 128, 64, 32, 16, 8, 4, 2,
+        256,
+        128,
+        64,
+        32,
+        16,
+        8,
+        4,
+        2,
     ]
     assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="bad,")) == [
-        256, 128, 64, 32, 16, 8, 4, 2,
+        256,
+        128,
+        64,
+        32,
+        16,
+        8,
+        4,
+        2,
     ]
     assert "ignoring non-integer CONC token" in caplog.text
 
@@ -236,13 +264,15 @@ def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -
     reports = tmp_path / "reports"
     reports.mkdir()
     (reports / "final.json").write_text(
-        json.dumps({
-            "failure_summary": {
-                "root_cause_type": "config",
-                "root_cause": "bad flag",
-                "server_log": "/tmp/server.log",
-            },
-        }),
+        json.dumps(
+            {
+                "failure_summary": {
+                    "root_cause_type": "config",
+                    "root_cause": "bad flag",
+                    "server_log": "/tmp/server.log",
+                },
+            }
+        ),
         encoding="utf-8",
     )
     assert cb._read_failure_summary(tmp_path)["root_cause"] == "bad flag"

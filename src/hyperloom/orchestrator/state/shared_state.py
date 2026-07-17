@@ -85,6 +85,7 @@ def _request_handlers():
     global _RH
     if _RH is None:
         from ..kernel import request_handlers as _m
+
         _RH = _m
     return _RH
 
@@ -935,7 +936,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 "cumulative_gain",
                 "cumulative_gain_validated",
                 "optimization_stack",
-                "reference_server_args", "reference_envs",
+                "reference_server_args",
+                "reference_envs",
                 "last_remaining_gaps_assessment",
                 "remaining_gaps_assessments",
             )
@@ -1139,6 +1141,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             cb = self.current_best or {}
             if cb:
                 from hyperloom.inference_optimizer.reference_script import render_reference_script
+
                 text = render_reference_script(
                     framework=os.environ.get("FRAMEWORK", "sglang"),
                     server_args=str(cb.get("extra_server_args") or ""),
@@ -1146,7 +1149,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     model=self.reference_model or os.environ.get("MODEL_PATH"),
                 )
                 (Path(session_dir) / "current_setting.sh").write_text(
-                    text, encoding="utf-8",
+                    text,
+                    encoding="utf-8",
                 )
         except Exception:  # noqa: BLE001 — derived artifact, never fatal
             log.debug("current_setting.sh render failed", exc_info=True)
@@ -1208,7 +1212,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "degraded_mode": bool(self.degraded_mode),
             "cumulative_gain": round(float(self.cumulative_gain or 0.0), 2),
             "cumulative_gain_validated": round(
-                float(self.cumulative_gain_validated or 0.0), 2,
+                float(self.cumulative_gain_validated or 0.0),
+                2,
             ),
             "baseline_failure_streak": int(self.baseline_failure_streak or 0),
             "macro_cycle": int(self.macro_cycle or 0),
@@ -1226,11 +1231,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 summary["last_lifecycle_status"] = str(last.get("status"))
             if last.get("phase"):
                 summary["last_lifecycle_phase"] = str(last.get("phase"))
-        return {
-            k: v
-            for k, v in summary.items()
-            if isinstance(v, (str, bool, int, float))
-        }
+        return {k: v for k, v in summary.items() if isinstance(v, (str, bool, int, float))}
 
     # Mutators (Coordinator only — LLM agents go via intents)
     def add_pruned_family(self, family: str) -> bool:
@@ -1273,11 +1274,21 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     ) -> int:
         """Forwarding shim — implementation in :mod:`.policy`."""
         from ..policy import gate as _m
-        return _m.record_policy_denial(self, action_name=action_name, rule=rule, hint=hint, intent_type=intent_type, tick=tick, intent_payload=intent_payload)
+
+        return _m.record_policy_denial(
+            self,
+            action_name=action_name,
+            rule=rule,
+            hint=hint,
+            intent_type=intent_type,
+            tick=tick,
+            intent_payload=intent_payload,
+        )
 
     def reset_policy_denial_streak(self, action_name: str) -> None:
         """Forwarding shim — implementation in :mod:`.policy`."""
         from ..policy import gate as _m
+
         return _m.reset_policy_denial_streak(self, action_name)
 
     # stop_reason ENUM validator
@@ -1402,7 +1413,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     ) -> dict[str, Any]:
         """Forwarding shim — implementation in :mod:`.phase_state`."""
         from ..phases import machine_state as _m
-        return _m.record_phase_transition(self, to_phase=to_phase, reason=reason, evidence=evidence, ts=ts, ts_unix=ts_unix)
+
+        return _m.record_phase_transition(
+            self, to_phase=to_phase, reason=reason, evidence=evidence, ts=ts, ts_unix=ts_unix
+        )
 
     def current_top_bottleneck(self) -> str:
         """Return the latest roofline snapshot's ``top_bottleneck`` ("" when none).
@@ -1479,8 +1493,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     ) -> dict[str, Any]:
         """Forwarding shim — implementation in :mod:`.phase_state`."""
         from ..phases import machine_state as _m
-        return _m.record_lifecycle_event(self, step=step, status=status, phase=phase, label=label, artifacts=artifacts, detail=detail, duration_s=duration_s, ts=ts)
 
+        return _m.record_lifecycle_event(
+            self,
+            step=step,
+            status=status,
+            phase=phase,
+            label=label,
+            artifacts=artifacts,
+            detail=detail,
+            duration_s=duration_s,
+            ts=ts,
+        )
 
     def increment_crash_count(self, by: int = 1) -> int:
         """Increment the cumulative crash counter and record crash times.
@@ -1594,13 +1618,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             applied[key] = value
         return applied
 
-
     def _resolve_kernel_patch_identity(
         self,
         payload: dict[str, Any] | None,
     ) -> tuple[str, str, str, str]:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m._resolve_kernel_patch_identity(self, payload)
 
     def find_rejected_kernel_patch(
@@ -1609,6 +1633,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     ) -> dict[str, Any] | None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m.find_rejected_kernel_patch(self, payload)
 
     @staticmethod
@@ -1637,6 +1662,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     ) -> dict[str, Any] | None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m.record_kernel_integrate_result(
             self,
             result,
@@ -1648,47 +1674,56 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     def record_kernel_opt(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m.record_kernel_opt(self, result)
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m.record_gemm_tuning(self, result)
 
     # Multi-KEEP integrate queue helpers.
     def _kernel_ids_in_optimization_stack(self) -> set[str]:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m._kernel_ids_in_optimization_stack(self)
 
     def _source_files_in_optimization_stack(self) -> set[str]:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m._source_files_in_optimization_stack(self)
 
     def _kernel_ids_with_integrate_attempts(self) -> set[str]:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m._kernel_ids_with_integrate_attempts(self)
 
     def integrate_attempt_count_for_kernel(self, kernel_id: str) -> int:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m.integrate_attempt_count_for_kernel(self, kernel_id)
 
     def _kernel_trace_impact_pct(self, kernel_id: str) -> float:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m._kernel_trace_impact_pct(self, kernel_id)
 
     def next_pending_keep_kernel_id(self) -> str:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m.next_pending_keep_kernel_id(self)
 
     def pending_keep_kernel_ids(self) -> list[str]:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m.pending_keep_kernel_ids(self)
 
     @property
@@ -1699,12 +1734,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         crash-recovery sentinel.
         """
         from ..kernel import _kernel_decisions as _m
+
         return _m.has_keep_pending_integrate(self)
 
     @property
     def kernel_opt_attempts_count(self) -> int:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m.kernel_opt_attempts_count(self)
 
     # Hot-kernel report gate: report blocked until meaningful reusable hot kernels are attempted/rejected.
@@ -1716,6 +1753,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     ) -> list[str]:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
+
         return _m.untried_hot_reusable_kernels(self, min_gpu_pct=min_gpu_pct, top_n=top_n)
 
     # Per-action audit (kernel parity for non-kernel actions)
@@ -1956,9 +1994,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if session_dir:
             try:
                 sidecars = [
-                    p
-                    for p in Path(session_dir).glob("kernel-agent/runs/**/diffusion_roofline.json")
-                    if p.is_file()
+                    p for p in Path(session_dir).glob("kernel-agent/runs/**/diffusion_roofline.json") if p.is_file()
                 ]
                 if sidecars:
                     return max(sidecars, key=lambda p: p.stat().st_mtime)
@@ -1993,9 +2029,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             if not framework_registry.is_scriptable(framework):
                 return 0.0, 0.0
             # img/s -> per-image e2e latency (ms); the achieved metric.
-            e2e_mean_ms = float(
-                framework_registry.primary_metric_value(framework, achieved_tput) or 0.0
-            )
+            e2e_mean_ms = float(framework_registry.primary_metric_value(framework, achieved_tput) or 0.0)
             # Ideal per-image latency floor from the diffusion roofline sidecar.
             roofline_ideal_ms = 0.0
             sidecar = self._locate_diffusion_roofline_sidecar(kernel_roofline_path)
@@ -2056,7 +2090,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
         try:
             breakdown = compute_roofline_breakdown_from_state(
-                self, arm="baseline",
+                self,
+                arm="baseline",
             )
         except Exception:  # noqa: BLE001 — ceiling is best-effort
             pass
@@ -2306,9 +2341,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             # compute-latency roofline (measured per-image e2e latency vs the
             # ideal floor from the sidecar). Best-effort → 0 leaves serving unchanged.
             fw = str(getattr(self, "framework", "") or "")
-            e2e_mean_ms, roofline_ideal_ms = self._scriptable_latency_roofline(
-                fw, achieved_tput, kernel_roofline_path
-            )
+            e2e_mean_ms, roofline_ideal_ms = self._scriptable_latency_roofline(fw, achieved_tput, kernel_roofline_path)
             history_entry = build_roofline_snapshot(
                 snapshot_id=snapshot_id,
                 ts=ts_iso,
@@ -2388,8 +2421,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                         else None
                     ),
                     "bound_kind_changed": (
-                        bool(prev_sat)
-                        and str(prev_sat.get("bound_kind") or "") != str(sat.get("bound_kind") or "")
+                        bool(prev_sat) and str(prev_sat.get("bound_kind") or "") != str(sat.get("bound_kind") or "")
                     ),
                     "current": sat,
                     "previous": prev_sat,
@@ -2443,9 +2475,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             "pareto_front": result.get("pareto_front") or [],
             "workspace": result.get("workspace", ""),
             # Watermark of validated gain at the moment this manual/full sweep ran.
-            "cumulative_gain_validated_at_record": float(
-                getattr(self, "cumulative_gain_validated", 0.0) or 0.0
-            ),
+            "cumulative_gain_validated_at_record": float(getattr(self, "cumulative_gain_validated", 0.0) or 0.0),
         }
 
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
@@ -2470,39 +2500,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if status in ("succeeded", "partial", "completed") and not self.last_conc_sweep.get("was_skipped"):
             self.last_conc_sweep_watermark = {
                 **self.last_conc_sweep,
-                "cumulative_gain_validated_at_record": float(
-                    getattr(self, "cumulative_gain_validated", 0.0) or 0.0
-                ),
+                "cumulative_gain_validated_at_record": float(getattr(self, "cumulative_gain_validated", 0.0) or 0.0),
             }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     # No action-score API; ``increment_tick`` is a pure monotonic counter for plateau/phase budget math.
     def increment_tick(self) -> int:
@@ -2622,31 +2621,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 ``cumulative_gain_validated_stack_len``.
         """
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 __all__ = ["SharedState", "render_model_arch_compact"]

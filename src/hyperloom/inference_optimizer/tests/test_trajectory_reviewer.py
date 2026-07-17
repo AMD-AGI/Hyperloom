@@ -1,4 +1,5 @@
 """Tests for trajectory_reviewer — coverage boost for CI threshold."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -70,9 +71,13 @@ def test_exhausted_clusters_none_gain():
 def test_stalled_cycle_count_no_stall():
     state = _FakeState(
         macro_cycle=3,
-        explore_search={"winners_history": [
-            {"cycle": 1}, {"cycle": 2}, {"cycle": 3},
-        ]},
+        explore_search={
+            "winners_history": [
+                {"cycle": 1},
+                {"cycle": 2},
+                {"cycle": 3},
+            ]
+        },
     )
     assert _stalled_cycle_count(state) == 0
 
@@ -80,9 +85,13 @@ def test_stalled_cycle_count_no_stall():
 def test_stalled_cycle_count_two_stalled():
     state = _FakeState(
         macro_cycle=5,
-        explore_search={"winners_history": [
-            {"cycle": 1}, {"cycle": 2}, {"cycle": 3},
-        ]},
+        explore_search={
+            "winners_history": [
+                {"cycle": 1},
+                {"cycle": 2},
+                {"cycle": 3},
+            ]
+        },
     )
     assert _stalled_cycle_count(state) == 2
 
@@ -136,14 +145,23 @@ def test_build_trajectory_digest_stall_without_validated(tmp_path):
 def test_build_trajectory_digest_with_dead_clusters(tmp_path):
     """Cover exhausted_directions formatting."""
     from hyperloom.orchestrator.state.optimization_journal import (
-        Journal, JournalEntry,
+        Journal,
+        JournalEntry,
     )
+
     journal = Journal.load_or_create(tmp_path, session_id="s1", model="m", hardware="h")
     for i in range(3):
-        journal.append_entry(JournalEntry(
-            phase="EXPLORE", iter=i + 1, kind="explore", change="--disable-radix",
-            outcome="REVERT", gain_pct=-1.0, task_id=f"task-{i}",
-        ))
+        journal.append_entry(
+            JournalEntry(
+                phase="EXPLORE",
+                iter=i + 1,
+                kind="explore",
+                change="--disable-radix",
+                outcome="REVERT",
+                gain_pct=-1.0,
+                task_id=f"task-{i}",
+            )
+        )
 
     state = _FakeState(
         session_id="s1",
@@ -159,6 +177,7 @@ def test_build_trajectory_digest_with_dead_clusters(tmp_path):
 def test_load_journal_entries_swallows_errors(tmp_path, monkeypatch):
     """A Journal.load_or_create failure yields an empty entry list."""
     from hyperloom.orchestrator.knowledge import trajectory_reviewer as tr
+
     def boom(*_a, **_k):
         raise RuntimeError("journal unreadable")
 
@@ -182,6 +201,7 @@ def test_build_trajectory_digest_snaps_without_direction_returns_empty(tmp_path)
 def test_build_trajectory_digest_outer_exception_returns_empty(tmp_path, monkeypatch):
     """An unexpected error inside the digest builder is swallowed."""
     from hyperloom.orchestrator.knowledge import trajectory_reviewer as tr
+
     def boom(*_a, **_k):
         raise RuntimeError("kaboom")
 

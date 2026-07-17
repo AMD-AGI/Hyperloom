@@ -308,7 +308,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "plateau_kernel",
         "explore_phase_budget_exhausted",
         "kernel_phase_budget_exhausted",
-        "explore_budget_cap",  # EXPLORE → next phase at the absolute per-phase wall-clock cap (long/unbounded runs)
+        "explore_budget_cap",  # EXPLORE → next phase at the absolute per-phase wall-clock cap
         "kernel_budget_cap",  # KERNEL_AGENT → SWEEP at the absolute per-phase wall-clock cap
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
         "sweep_done",
@@ -487,6 +487,7 @@ DEFAULT_FRAMEWORK_PLATEAU_LOOKBACK: int = 3
 DEFAULT_FRAMEWORK_PLATEAU_KEEP_GAIN_PCT: float = 1.0
 import os as _os_fw_ratio  # noqa: E402
 
+
 def _default_framework_force_exit_ratio() -> float:
     """FRAMEWORK force-exit ratio; env-overridable via
     ``INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO``.
@@ -495,9 +496,7 @@ def _default_framework_force_exit_ratio() -> float:
     the FRAMEWORK pipeline is the primary objective so it can process forced
     candidates instead of force-exiting with a full pending queue.
     """
-    raw = (_os_fw_ratio.environ.get(
-        "INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO", ""
-    ) or "").strip()
+    raw = (_os_fw_ratio.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_FORCE_EXIT_HOURS_REMAINING_RATIO", "") or "").strip()
     if raw:
         try:
             v = float(raw)
@@ -564,9 +563,8 @@ def decaying_keep_threshold_pct(macro_cycle: int, *, multi_node: bool = False) -
 def is_cyclic_phases_enabled() -> bool:
     """Whether the cyclic phase machine is enabled.
 
-    Enabled by default. The macro-cycle behaviour additionally requires a
-    long/unbounded budget (see :func:`is_long_run`) so short bounded runs never
-    loop in practice.
+    Enabled by default. Macro-cycle reloop is available for all session budgets;
+    :func:`is_long_run` only selects the budget accounting mode.
 
     Returns:
         bool: Always ``True``.
@@ -574,23 +572,20 @@ def is_cyclic_phases_enabled() -> bool:
     return True
 
 
-# Long-run gate. The cyclic macro-cycle behaviour (per-cycle budget window +
-# SWEEP→EXPLORE reloop) engages for unbounded runs or bounded runs at least as
-# long as this threshold. A short bounded run (``--max-hours < 24``) stays on
-# the legacy single-pass chain with whole-run phase budgets, regardless of the
-# (default-on) cyclic env flag. Gating on the budget (not just the env flag)
-# keeps short-run phase budgets spanning the whole run rather than being
-# compressed to the cycle window (DEFAULT_CYCLE_HOURS).
+# Long-run budget threshold. Long/unbounded runs use the per-cycle budget window;
+# short bounded runs keep charge-back phase budgeting against the remaining
+# session time even though they can now open new macro-cycles.
 DEFAULT_LONGRUN_THRESHOLD_MINUTES: float = 24 * 60
 
 
 def is_long_run(state: Any) -> bool:
-    """True when the session budget justifies cyclic macro-cycling.
+    """True when the session budget should use long-run budget accounting.
 
     Unbounded runs (``max_minutes`` == 0, i.e. the 14-day ceiling) and bounded
     runs at least as long as :data:`DEFAULT_LONGRUN_THRESHOLD_MINUTES` are
-    "long". Everything ``< 24h`` is a short bounded run and must behave like
-    the legacy monotonic chain.
+    "long". Everything ``< 24h`` is a short bounded run: it may still open
+    macro-cycles, but keeps charge-back phase budgeting instead of the fixed
+    per-cycle window.
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes``.
@@ -661,12 +656,6 @@ def should_reloop_to_explore(
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
     evidence: dict[str, Any] = {"cyclic": is_cyclic_phases_enabled(), "macro_cycle": cycle}
     if not is_cyclic_phases_enabled():
-        return False, evidence
-
-    # Short bounded runs (``--max-hours < 24``) never open a new macro-cycle;
-    # they wind down to CLOSE on a single pass.
-    if not is_long_run(state):
-        evidence["reloop_blocked"] = "short_run_single_pass"
         return False, evidence
 
     # Per-cycle gain since this cycle started → effective no-gain streak. A cycle
@@ -877,9 +866,7 @@ def redistribute_budget_pct(
     if freed <= 0.0:
         return out
     absorbers = [
-        p
-        for p in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP)
-        if p not in disabled
+        p for p in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP) if p not in disabled
     ]
     weight = sum(float(out.get(p, 0.0)) for p in absorbers)
     if weight > 0.0:
@@ -1047,17 +1034,13 @@ def _phase_budget_total_seconds(
         # Charge-back (short bounded run). remaining_at_entry reconstructs the
         # session time left when this phase started (session_remaining shrinks as
         # phase_elapsed grows, so their sum is constant across the phase).
-        remaining_at_entry = max(
-            0.0, session_remaining + phase_elapsed_seconds(state, now_unix=now_unix)
-        )
+        remaining_at_entry = max(0.0, session_remaining + phase_elapsed_seconds(state, now_unix=now_unix))
         # Normalize ONLY over the current phase and the phases still to come:
         # already-elapsed phases (notably PRELUDE) are excluded — their spend is
         # already reflected in session_remaining — while CLOSE stays in so it
         # keeps its reserved share. Do NOT normalize over all six phases.
         denom = sum(
-            float(budget.get(p, 0.0))
-            for p in PHASE_NAMES[phase_index(phase):]
-            if float(budget.get(p, 0.0)) > 0.0
+            float(budget.get(p, 0.0)) for p in PHASE_NAMES[phase_index(phase) :] if float(budget.get(p, 0.0)) > 0.0
         )
         if denom <= 0.0:
             return None
@@ -1266,9 +1249,7 @@ def should_force_exit_explore(
         # Fraction of the phase's EFFECTIVE total budget — same helper that
         # produced phase_remaining, so numerator and denominator stay in the same
         # units (charge-back for short bounded runs, legacy window otherwise).
-        phase_total_sec = _phase_budget_total_seconds(
-            state, budget_pct=budget_pct, now_unix=now_unix
-        )
+        phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
         if phase_total_sec and phase_total_sec > 0:
             remaining_pct = phase_remaining / phase_total_sec
             evidence["phase_remaining_pct"] = round(remaining_pct, 4)
@@ -2568,7 +2549,7 @@ def record_lifecycle_event(
     # Append in place, trim only when over the cap (O(1) common path).
     events.append(event)
     if len(events) > _LIFECYCLE_CAP:
-        del events[: -_LIFECYCLE_CAP]
+        del events[:-_LIFECYCLE_CAP]
     return event
 
 

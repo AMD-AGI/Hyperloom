@@ -89,9 +89,7 @@ def test_conc_sweep_module_default_concs():
     """conc_sweep.DEFAULT_CONCS must be kept in sync with CLI/state defaults."""
     from hyperloom.orchestrator.kernel.conc_sweep import DEFAULT_CONCS
 
-    assert DEFAULT_CONCS == _EXPECTED_CONCS, (
-        f"DEFAULT_CONCS mismatch: expected {_EXPECTED_CONCS}, got {DEFAULT_CONCS}"
-    )
+    assert DEFAULT_CONCS == _EXPECTED_CONCS, f"DEFAULT_CONCS mismatch: expected {_EXPECTED_CONCS}, got {DEFAULT_CONCS}"
 
 
 def test_cli_custom_concs():

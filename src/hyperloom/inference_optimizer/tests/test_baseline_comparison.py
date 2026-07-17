@@ -216,7 +216,10 @@ def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
     assert all(row["source"] == summary.source for row in ct["per_conc"])
 
     gap = research_hints.gap_analysis(
-        ct, our_tput_per_gpu=100.0, our_tpot_ms=50.0, conc=64,
+        ct,
+        our_tput_per_gpu=100.0,
+        our_tpot_ms=50.0,
+        conc=64,
     )
     assert gap is not None
     assert gap["source"] == summary.source

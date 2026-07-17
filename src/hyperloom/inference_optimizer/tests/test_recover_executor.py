@@ -957,11 +957,7 @@ class TestMultiNodeShortCircuit:
 class TestParseRocmSmiCsvEdgeCases:
     def test_blank_cells_line_is_skipped(self):
         """A line that splits to all-empty cells doesn't crash."""
-        text = (
-            "device,VRAM Total Memory (B),VRAM Total Used Memory (B)\n"
-            ",,\n"
-            "card0,206158430208,5242880\n"
-        )
+        text = "device,VRAM Total Memory (B),VRAM Total Used Memory (B)\n,,\ncard0,206158430208,5242880\n"
         rows = RecoverExecutor._parse_rocm_smi_vram_csv(text)
         assert [r["gpu_id"] for r in rows] == [0]
 

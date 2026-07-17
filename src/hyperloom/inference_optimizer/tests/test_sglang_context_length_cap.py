@@ -197,9 +197,7 @@ def test_inject_clamps_to_max_model_len(tmp_path):
     --max-model-len must clamp --context-length down to --max-model-len."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     # cap = 80000 + 2000 + 2048 = 84048, but max_model_len pins the ceiling.
-    out = inject_sglang_context_length(
-        "", "sglang", model, 80000, 2000, max_model_len=82000
-    )
+    out = inject_sglang_context_length("", "sglang", model, 80000, 2000, max_model_len=82000)
     assert _context_length_value(out) == 82000
 
 
@@ -207,18 +205,14 @@ def test_inject_max_model_len_above_cap_is_noop(tmp_path):
     """A max-model-len larger than the workload cap leaves the cap untouched."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     # cap = 4096 + 4096 + 2048 = 10240 < max_model_len -> cap wins.
-    out = inject_sglang_context_length(
-        "", "sglang", model, 4096, 4096, max_model_len=131072
-    )
+    out = inject_sglang_context_length("", "sglang", model, 4096, 4096, max_model_len=131072)
     assert _context_length_value(out) == 10240
 
 
 def test_inject_native_window_still_wins_when_smallest(tmp_path):
     """When max_position_embeddings is the smallest ceiling it still wins."""
     model = _write_model(tmp_path, 4096)
-    out = inject_sglang_context_length(
-        "", "sglang", model, 80000, 2000, max_model_len=82000
-    )
+    out = inject_sglang_context_length("", "sglang", model, 80000, 2000, max_model_len=82000)
     assert _context_length_value(out) == 4096
 
 
@@ -226,9 +220,7 @@ def test_inject_native_window_still_wins_when_smallest(tmp_path):
 def test_inject_ignores_absent_or_nonpositive_max_model_len(tmp_path, bad):
     """An unset / non-positive max-model-len falls back to the prior behaviour."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
-    out = inject_sglang_context_length(
-        "", "sglang", model, 4096, 4096, max_model_len=bad
-    )
+    out = inject_sglang_context_length("", "sglang", model, 4096, 4096, max_model_len=bad)
     assert _context_length_value(out) == 10240
 
 

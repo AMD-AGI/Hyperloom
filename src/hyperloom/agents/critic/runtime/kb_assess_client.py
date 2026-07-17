@@ -36,6 +36,7 @@ def _require_http_url(url: str) -> None:
     if scheme not in {"http", "https"}:
         raise ValueError(f"unsupported URL scheme: {scheme!r}")
 
+
 log = logging.getLogger(__name__)
 
 ASSESS_PATH = "/v2/reasoning/assess"

@@ -97,8 +97,13 @@ def test_mmdit_forward_flops_matches_formula(tmp_path):
 
 
 def test_ceiling_scales_with_steps_and_precision(tmp_path):
-    cfg = {"_class_name": "SD3Transformer2DModel", "num_layers": 4,
-           "num_attention_heads": 8, "attention_head_dim": 8, "patch_size": 2}
+    cfg = {
+        "_class_name": "SD3Transformer2DModel",
+        "num_layers": 4,
+        "num_attention_heads": 8,
+        "attention_head_dim": 8,
+        "patch_size": 2,
+    }
     d = _write_denoiser(tmp_path / "m", cfg)
     e10 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=10, cfg_batch=1)
     e20 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=20, cfg_batch=1)
@@ -115,9 +120,16 @@ def test_ceiling_scales_with_steps_and_precision(tmp_path):
 
 def test_moe_uses_active_experts(tmp_path):
     # 64 experts, top-2 active -> FFN counts only 2 experts.
-    cfg = {"_class_name": "NucleusMoEImageTransformer2DModel", "num_layers": 4,
-           "num_attention_heads": 8, "attention_head_dim": 16, "num_experts": 64,
-           "num_experts_per_tok": 2, "moe_intermediate_dim": 512, "patch_size": 2}
+    cfg = {
+        "_class_name": "NucleusMoEImageTransformer2DModel",
+        "num_layers": 4,
+        "num_attention_heads": 8,
+        "attention_head_dim": 16,
+        "num_experts": 64,
+        "num_experts_per_tok": 2,
+        "moe_intermediate_dim": 512,
+        "patch_size": 2,
+    }
     d = _write_denoiser(tmp_path / "m", cfg)
     g = df.resolve_geometry(d)
     assert g.num_experts == 64 and g.active_experts == 2
@@ -126,17 +138,27 @@ def test_moe_uses_active_experts(tmp_path):
 
 
 def test_moe_defaults_active_when_topk_absent(tmp_path):
-    cfg = {"_class_name": "NucleusMoEImageTransformer2DModel", "num_layers": 2,
-           "num_attention_heads": 8, "attention_head_dim": 16, "num_experts": 64,
-           "moe_intermediate_dim": 512}
+    cfg = {
+        "_class_name": "NucleusMoEImageTransformer2DModel",
+        "num_layers": 2,
+        "num_attention_heads": 8,
+        "attention_head_dim": 16,
+        "num_experts": 64,
+        "moe_intermediate_dim": 512,
+    }
     g = df.resolve_geometry(_write_denoiser(tmp_path / "m", cfg))
     assert g.active_experts == 2  # documented fallback
 
 
 def test_unet_flops_positive_and_resolution_scales(tmp_path):
-    cfg = {"_class_name": "UNet2DConditionModel", "block_out_channels": [320, 640, 1280],
-           "layers_per_block": 2, "transformer_layers_per_block": [1, 2, 10],
-           "cross_attention_dim": 2048, "in_channels": 4}
+    cfg = {
+        "_class_name": "UNet2DConditionModel",
+        "block_out_channels": [320, 640, 1280],
+        "layers_per_block": 2,
+        "transformer_layers_per_block": [1, 2, 10],
+        "cross_attention_dim": 2048,
+        "in_channels": 4,
+    }
     d = _write_denoiser(tmp_path / "u", cfg, sub="unet")
     g = df.resolve_geometry(d)
     assert g.family == "unet"
@@ -154,14 +176,27 @@ def test_sana_linear_attention_cheaper_than_full(tmp_path):
 # ---- real model configs (skipped when /primus/models is not mounted) -----
 _MODELS_ROOT = Path("/primus/models")
 _REAL = [
-    "stabilityai-stable-diffusion-xl-base-1.0", "black-forest-labs-FLUX.1-dev",
-    "black-forest-labs-FLUX.1-schnell", "Tongyi-MAI-Z-Image", "Tongyi-MAI-Z-Image-Turbo",
-    "stabilityai-stable-diffusion-3.5-medium", "stabilityai-stable-diffusion-3.5-large",
-    "stabilityai-stable-diffusion-3.5-large-turbo", "stabilityai-stable-diffusion-3-medium-diffusers",
-    "Qwen-Qwen-Image", "Qwen-Qwen-Image-2512", "baidu-ERNIE-Image", "baidu-ERNIE-Image-Turbo",
-    "HiDream-ai-HiDream-I1-Fast", "ideogram-ai-ideogram-4-fp8", "fal-AuraFlow",
-    "NucleusAI-Nucleus-Image", "hunyuanvideo-community-HunyuanImage-2.1-Diffusers",
-    "Warlord-K-Sana-1024", "tencent-SRPO", "stabilityai-stable-diffusion-3-medium",
+    "stabilityai-stable-diffusion-xl-base-1.0",
+    "black-forest-labs-FLUX.1-dev",
+    "black-forest-labs-FLUX.1-schnell",
+    "Tongyi-MAI-Z-Image",
+    "Tongyi-MAI-Z-Image-Turbo",
+    "stabilityai-stable-diffusion-3.5-medium",
+    "stabilityai-stable-diffusion-3.5-large",
+    "stabilityai-stable-diffusion-3.5-large-turbo",
+    "stabilityai-stable-diffusion-3-medium-diffusers",
+    "Qwen-Qwen-Image",
+    "Qwen-Qwen-Image-2512",
+    "baidu-ERNIE-Image",
+    "baidu-ERNIE-Image-Turbo",
+    "HiDream-ai-HiDream-I1-Fast",
+    "ideogram-ai-ideogram-4-fp8",
+    "fal-AuraFlow",
+    "NucleusAI-Nucleus-Image",
+    "hunyuanvideo-community-HunyuanImage-2.1-Diffusers",
+    "Warlord-K-Sana-1024",
+    "tencent-SRPO",
+    "stabilityai-stable-diffusion-3-medium",
 ]
 
 
@@ -275,8 +310,13 @@ def test_unet_int_transformer_layers_per_block():
 
 # ---- _fmt + CLI ----------------------------------------------------------
 def test_fmt_with_and_without_ideal_ms(tmp_path):
-    cfg = {"_class_name": "SD3Transformer2DModel", "num_layers": 4,
-           "num_attention_heads": 8, "attention_head_dim": 8, "patch_size": 2}
+    cfg = {
+        "_class_name": "SD3Transformer2DModel",
+        "num_layers": 4,
+        "num_attention_heads": 8,
+        "attention_head_dim": 8,
+        "patch_size": 2,
+    }
     d = _write_denoiser(tmp_path / "m", cfg)
     est = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16")
     line = df._fmt(est)
@@ -287,8 +327,13 @@ def test_fmt_with_and_without_ideal_ms(tmp_path):
 
 
 def test_main_text_and_json_and_failure(tmp_path, monkeypatch, capsys):
-    cfg = {"_class_name": "SD3Transformer2DModel", "num_layers": 4,
-           "num_attention_heads": 8, "attention_head_dim": 8, "patch_size": 2}
+    cfg = {
+        "_class_name": "SD3Transformer2DModel",
+        "num_layers": 4,
+        "num_attention_heads": 8,
+        "attention_head_dim": 8,
+        "patch_size": 2,
+    }
     d = _write_denoiser(tmp_path / "m", cfg)
 
     monkeypatch.setattr(sys, "argv", ["diffusion_flops", "--model-dir", str(d)])

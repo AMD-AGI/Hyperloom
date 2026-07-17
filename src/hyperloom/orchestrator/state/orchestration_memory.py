@@ -52,6 +52,7 @@ def context_window_for_model(model: str) -> int:
     """
     return MODEL_CONTEXT_WINDOWS.get((model or "").strip(), DEFAULT_MODEL_CONTEXT_WINDOW)
 
+
 # List threads that carry forward when a checkpoint reply omits them
 # (``learnings`` accumulates separately).
 _MEMORY_LIST_KEYS: tuple[str, ...] = ("hypotheses", "tried_and_why", "pending")
@@ -229,10 +230,7 @@ def deterministic_memory_fallback(state: Any) -> dict[str, Any]:
         gain = 0.0
     phase = str(getattr(state, "phase", "") or "")
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
-    plan = (
-        f"[auto] phase={phase} cycle={cycle} "
-        f"best_tput={cb.get('tput')} validated_gain={gain:.2f}%"
-    )
+    plan = f"[auto] phase={phase} cycle={cycle} best_tput={cb.get('tput')} validated_gain={gain:.2f}%"
     return {
         "current_plan": plan,
         "hypotheses": [],

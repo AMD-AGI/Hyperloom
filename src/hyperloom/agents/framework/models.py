@@ -333,7 +333,9 @@ def _parse_pr_states(raw: Any) -> tuple[str, ...]:
         raise ValueError(f"pr_states must be string or list, got {type(raw).__name__}")
     for item in items:
         if item not in _VALID_PR_STATES:
-            raise ValueError(f"pr_states contains unknown state {item!r}; valid values are {sorted(_VALID_PR_STATES)!r}")
+            raise ValueError(
+                f"pr_states contains unknown state {item!r}; valid values are {sorted(_VALID_PR_STATES)!r}"
+            )
     return tuple(items) or ("open",)
 
 

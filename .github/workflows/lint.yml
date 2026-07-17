@@ -17,6 +17,9 @@ name: Lint
 # into the single ``hyperloom`` distribution (``hyperloom.agents.*``); the
 # single editable install below covers all of them (no more per-agent
 # editable installs / separate PYTHONPATH entries / bare ``runtime`` module).
+#
+# Bandit scans production Python code only (tests excluded) for medium+ security
+# findings. It remains advisory while the security baseline is being ratcheted.
 on:
   # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
   # PR does not double-trigger (one run per event class).
@@ -79,6 +82,32 @@ jobs:
            steps.ruff_format.outcome == 'failure')
         run: |
           echo "::warning::Ruff reported issues (advisory: step uses continue-on-error). Flip to hard-fail in this workflow after backlog is zero."
+
+  bandit:
+    name: bandit (medium+, production code)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install Bandit
+        run: |
+          pip install --upgrade pip
+          pip install "bandit>=1.7,<2"
+
+      - name: Bandit scan
+        id: bandit_scan
+        continue-on-error: true
+        run: |
+          bandit -r src/hyperloom -x "*/tests/*" -q --severity-level medium
+
+      - name: Advisory notice when Bandit failed
+        if: always() && steps.bandit_scan.outcome == 'failure'
+        run: |
+          echo "::warning::Bandit reported medium-or-higher security findings (advisory: step uses continue-on-error). Review findings before making this a hard gate."
 
   pylint:
     name: pylint (errors-only, multi-package)

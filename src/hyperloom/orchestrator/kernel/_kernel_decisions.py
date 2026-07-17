@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 # (set it to an explicit falsey value to opt a single fix out of the umbrella).
 _HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
 
+
 def _honest_flag(specific_env: str) -> bool:
     """Resolve a per-fix honest-E2E flag against the umbrella flag.
 
@@ -67,6 +68,7 @@ def _honest_flag(specific_env: str) -> bool:
         bool: Whether the gated behavior should be enabled.
     """
     return env_flag(specific_env, default=env_bool(_HONEST_E2E_UMBRELLA_ENV, True))
+
 
 # ===========================================================================
 # Kernel-decision write-owner functions. SharedState is a passive
@@ -96,21 +98,19 @@ def _format_last_kernel_opt(state) -> str:
     history_tag = ""
     if attempts_entry:
         history_tag = (
-            f" history=attempts={attempts_entry.get('attempts', 0)}"
-            f"/partial={attempts_entry.get('partial_count', 0)}"
+            f" history=attempts={attempts_entry.get('attempts', 0)}/partial={attempts_entry.get('partial_count', 0)}"
         )
         rej_reason = attempts_entry.get("rejected_reason")
         if rej_reason:
             history_tag += f"/retired={rej_reason}"
     return (
-        f"kernel_id={kid or '?'} "
-        f"decision={ko.get('decision','?')} "
-        f"speedup={ko.get('micro_speedup','?')}"
-        f"{history_tag}"
+        f"kernel_id={kid or '?'} decision={ko.get('decision', '?')} speedup={ko.get('micro_speedup', '?')}{history_tag}"
     )
 
+
 def _resolve_kernel_patch_identity(
-    state, payload: dict[str, Any] | None,
+    state,
+    payload: dict[str, Any] | None,
 ) -> tuple[str, str, str, str]:
     """Resolve a kernel patch's identity tuple from a result/intent payload.
 
@@ -131,28 +131,17 @@ def _resolve_kernel_patch_identity(
     """
     payload = payload or {}
     kernel_id = str(payload.get("kernel_id") or "")
-    patch_path = str(
-        payload.get("patch_path")
-        or payload.get("best_artifact_path")
-        or ""
-    )
-    if (
-        not patch_path
-        and kernel_id
-        and str((state.last_kernel_opt or {}).get("kernel_id") or "") == kernel_id
-    ):
+    patch_path = str(payload.get("patch_path") or payload.get("best_artifact_path") or "")
+    if not patch_path and kernel_id and str((state.last_kernel_opt or {}).get("kernel_id") or "") == kernel_id:
         patch_path = str(
             (state.last_kernel_opt or {}).get("best_artifact_path")
             or (state.last_kernel_opt or {}).get("patch_path")
             or ""
         )
-    target_file = str(
-        payload.get("target_file")
-        or payload.get("source_file")
-        or ""
-    )
+    target_file = str(payload.get("target_file") or payload.get("source_file") or "")
     extra_args = str(payload.get("extra_server_args") or "").strip()
     return kernel_id, patch_path, target_file, extra_args
+
 
 def kernel_patch_key(state, payload: dict[str, Any] | None) -> str:
     """Compute the dedup key for a kernel patch.
@@ -165,12 +154,11 @@ def kernel_patch_key(state, payload: dict[str, Any] | None) -> str:
         str: ``"<kernel_id>|<patch_path>|<extra_args>"``, or ``""`` when
             either ``kernel_id`` or ``patch_path`` cannot be resolved.
     """
-    kernel_id, patch_path, _target_file, extra_args = (
-        _resolve_kernel_patch_identity(state, payload)
-    )
+    kernel_id, patch_path, _target_file, extra_args = _resolve_kernel_patch_identity(state, payload)
     if not kernel_id or not patch_path:
         return ""
     return "|".join([kernel_id, patch_path, extra_args])
+
 
 def find_rejected_kernel_patch(
     state,
@@ -193,6 +181,7 @@ def find_rejected_kernel_patch(
         if isinstance(entry, dict) and entry.get("key") == key:
             return entry
     return None
+
 
 def record_kernel_integrate_result(
     state,
@@ -242,9 +231,7 @@ def record_kernel_integrate_result(
     key = kernel_patch_key(state, result)
     if not key:
         return None
-    kernel_id, patch_path, target_file, extra_args = (
-        _resolve_kernel_patch_identity(state, result)
-    )
+    kernel_id, patch_path, target_file, extra_args = _resolve_kernel_patch_identity(state, result)
     is_fault = state._is_integrate_fault(result)
     entry = dict(state.kernel_integrate_attempts.get(key) or {})
     attempts = list(entry.get("attempts") or [])
@@ -269,27 +256,27 @@ def record_kernel_integrate_result(
         default=0.0,
     )
     # Quota accounting: faults and gate verdicts draw from separate budgets.
-    fault_count = sum(
-        1 for a in attempts if isinstance(a, dict) and a.get("is_fault")
-    )
+    fault_count = sum(1 for a in attempts if isinstance(a, dict) and a.get("is_fault"))
     verdict_attempt_count = len(attempts) - fault_count
-    entry.update({
-        "key": key,
-        "kernel_id": kernel_id,
-        "patch_path": patch_path,
-        "target_file": target_file,
-        "extra_server_args": extra_args,
-        "attempts": attempts,
-        "attempt_count": len(attempts),
-        "fault_count": fault_count,
-        "verdict_attempt_count": verdict_attempt_count,
-        "best_gain_pct": best_gain,
-        "last_decision": result.get("decision"),
-        "last_status": result.get("status"),
-        "last_error_class": result.get("error_class"),
-        "last_was_fault": is_fault,
-        "updated_at": _now_iso(),
-    })
+    entry.update(
+        {
+            "key": key,
+            "kernel_id": kernel_id,
+            "patch_path": patch_path,
+            "target_file": target_file,
+            "extra_server_args": extra_args,
+            "attempts": attempts,
+            "attempt_count": len(attempts),
+            "fault_count": fault_count,
+            "verdict_attempt_count": verdict_attempt_count,
+            "best_gain_pct": best_gain,
+            "last_decision": result.get("decision"),
+            "last_status": result.get("status"),
+            "last_error_class": result.get("error_class"),
+            "last_was_fault": is_fault,
+            "updated_at": _now_iso(),
+        }
+    )
     # Clear any stale retryable flag; re-set below only for un-exhausted faults.
     entry.pop("retryable", None)
     state.kernel_integrate_attempts[key] = entry
@@ -298,6 +285,7 @@ def record_kernel_integrate_result(
     # kernel_id, best-effort).
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
         sdir = getattr(state, "_session_dir", None)
         if sdir and kernel_id:
             _dec = str(result.get("decision") or "").upper()
@@ -329,16 +317,11 @@ def record_kernel_integrate_result(
     else:
         # Gate verdict path: a genuine REVERT, or too many non-fault attempts
         # without a KEEP.
-        should_reject = (
-            result.get("decision") == "REVERT"
-            or verdict_attempt_count >= max_attempts
-        )
+        should_reject = result.get("decision") == "REVERT" or verdict_attempt_count >= max_attempts
         if not should_reject:
             return entry
         reason = (
-            "revert_decision"
-            if result.get("decision") == "REVERT"
-            else f"max_e2e_attempts_{max_attempts}_without_keep"
+            "revert_decision" if result.get("decision") == "REVERT" else f"max_e2e_attempts_{max_attempts}_without_keep"
         )
     rejected = {
         "key": key,
@@ -356,8 +339,7 @@ def record_kernel_integrate_result(
         "ts": _now_iso(),
     }
     state.rejected_kernel_patches = [
-        r for r in state.rejected_kernel_patches
-        if not (isinstance(r, dict) and r.get("key") == key)
+        r for r in state.rejected_kernel_patches if not (isinstance(r, dict) and r.get("key") == key)
     ]
     state.rejected_kernel_patches.append(rejected)
     if kernel_id and kernel_id not in state.rejected_kernel_ids:
@@ -365,6 +347,7 @@ def record_kernel_integrate_result(
     entry["rejected"] = rejected
     state.kernel_integrate_attempts[key] = entry
     return entry
+
 
 def record_kernel_opt(state, result: dict[str, Any]) -> None:
     """Capture kernel_optimization_handler result for the next Orch turn; empty kernel_id no-op, non-KEEP can't overwrite a pending KEEP, retires kernel_id (r24 guard) after >= max_partial PARTIALs (INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL).
@@ -394,6 +377,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     # metadata-less early return so no failed attempt becomes invisible.
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
         sdir = getattr(state, "_session_dir", None)
         instrument.record_kernel_invocations(sdir, result)
         # Record dispatch and per-backend attempts.
@@ -417,11 +401,9 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             # consistent.
             _status = str(result.get("status") or "").lower()
             _err_class = str(result.get("error_class") or "")
-            _decision = str(
-                (result.get("proposal") or {}).get("decision") or "").upper()
+            _decision = str((result.get("proposal") or {}).get("decision") or "").upper()
             _failed_predispatch = (not _attempts) and (
-                _status in {"failed", "error", "crashed", "timeout"}
-                or (_decision == "REVERT" and bool(_err_class))
+                _status in {"failed", "error", "crashed", "timeout"} or (_decision == "REVERT" and bool(_err_class))
             )
             if _failed_predispatch and not _backends:
                 # Never default an unattributable failure to GEAK; "unknown"
@@ -434,8 +416,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                 kernel_id=_kid,
                 dispatched=_dispatched,
                 backends=_backends,
-                skip_reason="" if _dispatched else str(
-                    result.get("error_class") or result.get("status") or ""),
+                skip_reason="" if _dispatched else str(result.get("error_class") or result.get("status") or ""),
                 orchestration_commit=str(getattr(state, "code_revision", "") or ""),
             )
             instrument.record_kernel_backend_result(sdir, result)
@@ -459,15 +440,11 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     deploy_patch_path = str(verification.get("deploy_patch_path", "") or "")
     deploy_repo_root = str(verification.get("deploy_repo_root", "") or "")
     best_artifact_bundle = dict(verification.get("best_artifact_bundle") or {})
-    source_file = str(
-        result.get("source_file")
-        or (result.get("candidate") or {}).get("source_file")
-        or ""
-    )
+    source_file = str(result.get("source_file") or (result.get("candidate") or {}).get("source_file") or "")
     # Extract test_command from the first attempt that recorded one so
     # after_kernel_opt rocprof can reuse it.
     test_command = ""
-    for _attempt in (result.get("attempts") or []):
+    for _attempt in result.get("attempts") or []:
         if isinstance(_attempt, dict):
             _tc = str((_attempt.get("backend_paths") or {}).get("test_command") or "").strip()
             if _tc:
@@ -477,27 +454,29 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     err_class = str(result.get("error_class") or "")
     # Pure infra failure = backend ladder with no verdict; kept distinct from
     # REVERT/PARTIAL so retirement counters don't double-count.
-    is_infra_failure = (
-        decision == ""
-        and (
-            status in {"failed", "error", "timeout"}
-            or err_class in {
-                "subtask_exception",
-                "handler_exception",
-                "subprocess_timeout",
-                "kernel_agent_root_missing",
-                "missing_integration_inputs",
-            }
-        )
+    is_infra_failure = decision == "" and (
+        status in {"failed", "error", "timeout"}
+        or err_class
+        in {
+            "subtask_exception",
+            "handler_exception",
+            "subprocess_timeout",
+            "kernel_agent_root_missing",
+            "missing_integration_inputs",
+        }
     )
     ts = _now_iso()
 
     entry = dict(state.kernel_opt_attempts.get(kernel_id) or {})
     history = list(entry.get("history") or [])
-    history.append({
-        "decision": decision, "micro": micro_float,
-        "status": status, "ts": ts,
-    })
+    history.append(
+        {
+            "decision": decision,
+            "micro": micro_float,
+            "status": status,
+            "ts": ts,
+        }
+    )
     history = history[-10:]
     entry["attempts"] = int(entry.get("attempts", 0)) + 1
     # Per-source attempts so a Python wrapper and its device file don't share a
@@ -619,6 +598,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
 
     state.kernel_opt_attempts[kernel_id] = entry
 
+
 def record_gemm_tuning(state, result: dict[str, Any]) -> None:
     """Capture the GEAK GEMM tuning result for sequencing and prompts.
 
@@ -638,6 +618,7 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
     attempts.append(entry)
     state.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
 
+
 def _kernel_ids_in_optimization_stack(state) -> set[str]:
     """kernel_ids already absorbed into optimization_stack as integrate entries.
 
@@ -648,10 +629,9 @@ def _kernel_ids_in_optimization_stack(state) -> set[str]:
     return {
         str(e.get("kernel_id"))
         for e in (state.optimization_stack or [])
-        if isinstance(e, dict)
-        and e.get("action") == "integrate"
-        and e.get("kernel_id")
+        if isinstance(e, dict) and e.get("action") == "integrate" and e.get("kernel_id")
     }
+
 
 def _source_files_in_optimization_stack(state) -> set[str]:
     """source_file paths already touched by an integrate entry; enforces "same source_file, only strongest KEEP integrated" (apply_kernel_patch is a whole-file overwrite).
@@ -662,13 +642,14 @@ def _source_files_in_optimization_stack(state) -> set[str]:
             :attr:`optimization_stack`.
     """
     sources: set[str] = set()
-    for e in (state.optimization_stack or []):
+    for e in state.optimization_stack or []:
         if not isinstance(e, dict) or e.get("action") != "integrate":
             continue
         src = str(e.get("target_file") or e.get("source_file") or "")
         if src:
             sources.add(src)
     return sources
+
 
 def _kernel_ids_with_integrate_attempts(state) -> set[str]:
     """kernel_ids that already received a *terminal* E2E integrate verdict.
@@ -695,6 +676,7 @@ def _kernel_ids_with_integrate_attempts(state) -> set[str]:
             continue
         terminal.add(kid)
     return terminal
+
 
 def integrate_attempt_count_for_kernel(state, kernel_id: str) -> int:
     """Total *recorded* integrate attempts for a kernel_id.
@@ -728,6 +710,7 @@ def integrate_attempt_count_for_kernel(state, kernel_id: str) -> int:
             continue
     return total
 
+
 def _kernel_trace_impact_pct(state, kernel_id: str) -> float:
     """Return TraceLens gpu_pct for a kernel_id; unknown kernels sort last.
 
@@ -754,6 +737,7 @@ def _kernel_trace_impact_pct(state, kernel_id: str) -> float:
             return 0.0
     return 0.0
 
+
 def next_pending_keep_kernel_id(state) -> str:
     """Return next KEEP kernel_id awaiting integrate ("" if drained).
 
@@ -767,6 +751,7 @@ def next_pending_keep_kernel_id(state) -> str:
     """
     pending = pending_keep_kernel_ids(state)
     return pending[0] if pending else ""
+
 
 def pending_keep_kernel_ids(state) -> list[str]:
     """All KEEP kernel_ids awaiting integrate, sorted impact-first.
@@ -833,6 +818,7 @@ def pending_keep_kernel_ids(state) -> list[str]:
         result.append(kid)
     return result
 
+
 def has_keep_pending_integrate(state) -> bool:
     """Whether any KEEP kernel is still awaiting integrate.
 
@@ -842,6 +828,7 @@ def has_keep_pending_integrate(state) -> bool:
     """
     return bool(next_pending_keep_kernel_id(state))
 
+
 def kernel_opt_attempts_count(state) -> int:
     """Number of distinct kernels with recorded kernel_opt attempts.
 
@@ -849,6 +836,7 @@ def kernel_opt_attempts_count(state) -> int:
         int: The size of the ``kernel_opt_attempts`` ledger.
     """
     return len(state.kernel_opt_attempts or {})
+
 
 def untried_hot_reusable_kernels(
     state,
@@ -876,18 +864,22 @@ def untried_hot_reusable_kernels(
 
     if min_gpu_pct is None:
         try:
-            min_gpu_pct = float(os.environ.get(
-                "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
-                _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
-            ))
+            min_gpu_pct = float(
+                os.environ.get(
+                    "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
+                    _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
+                )
+            )
         except (TypeError, ValueError):
             min_gpu_pct = _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
     if top_n is None:
         try:
-            top_n = int(os.environ.get(
-                "HYPERLOOM_KERNEL_OPT_GATE_TOP_N",
-                _DEFAULT_HOT_KERNEL_GATE_TOP_N,
-            ))
+            top_n = int(
+                os.environ.get(
+                    "HYPERLOOM_KERNEL_OPT_GATE_TOP_N",
+                    _DEFAULT_HOT_KERNEL_GATE_TOP_N,
+                )
+            )
         except (TypeError, ValueError):
             top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
     top_n = max(1, int(top_n))
@@ -945,8 +937,7 @@ def untried_hot_reusable_kernels(
             continue
         if src and src in integrated_sources:
             continue
-        if any(int((attempts.get(m) or {}).get("attempts", 0)) > 0
-               for m in members):
+        if any(int((attempts.get(m) or {}).get("attempts", 0)) > 0 for m in members):
             continue
         untried.append(kid)
     return untried

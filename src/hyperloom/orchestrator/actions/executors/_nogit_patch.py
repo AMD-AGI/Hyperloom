@@ -225,11 +225,16 @@ def _apply_patch_no_git(
 
     def _fail(err_message: str, recs: list[dict[str, Any]]) -> "tuple[bool, str, list[dict[str, Any]], Any]":
         """Return the canonical 4-tuple failure result with structured feedback."""
-        return False, err_message, recs, ApplyFeedback(
-            patch=str(patch_path),
-            channel="nogit",
-            tried_levels=tried_levels,
-            stderr=err_message,
+        return (
+            False,
+            err_message,
+            recs,
+            ApplyFeedback(
+                patch=str(patch_path),
+                channel="nogit",
+                tried_levels=tried_levels,
+                stderr=err_message,
+            ),
         )
 
     # Resolve target files to back up before mutation.
@@ -274,11 +279,7 @@ def _apply_patch_no_git(
     for old_raw, new_raw in patch_file_targets(patch_text):
         is_create = old_raw == _PATCH_DEV_NULL or not old_raw
         is_delete = new_raw == _PATCH_DEV_NULL or not new_raw
-        is_rename = (
-            not is_create
-            and not is_delete
-            and old_raw != new_raw
-        )
+        is_rename = not is_create and not is_delete and old_raw != new_raw
 
         if is_create:
             # New file created by patch: track for deletion on revert.
@@ -287,12 +288,14 @@ def _apply_patch_no_git(
             rel_new, abs_new, err = _resolve_target(new_raw)
             if err:
                 return _fail(err, backups)
-            backups.append({
-                "target": str(abs_new),
-                "existed": False,
-                "backup_path": None,
-                "revert_action": "delete",
-            })
+            backups.append(
+                {
+                    "target": str(abs_new),
+                    "existed": False,
+                    "backup_path": None,
+                    "revert_action": "delete",
+                }
+            )
 
         elif is_delete:
             # Existing file deleted by patch: back it up to restore on revert.
@@ -307,12 +310,14 @@ def _apply_patch_no_git(
                     return _fail(err, backups)
                 backups.append(rec)  # type: ignore[arg-type]
             else:
-                backups.append({
-                    "target": str(abs_old),
-                    "existed": False,
-                    "backup_path": None,
-                    "revert_action": "delete",
-                })
+                backups.append(
+                    {
+                        "target": str(abs_old),
+                        "existed": False,
+                        "backup_path": None,
+                        "revert_action": "delete",
+                    }
+                )
 
         elif is_rename:
             # Rename/move: back up old source (to restore on revert) and
@@ -330,12 +335,14 @@ def _apply_patch_no_git(
                     return _fail(err, backups)
                 backups.append(rec)  # type: ignore[arg-type]
             # Track new destination for deletion on revert.
-            backups.append({
-                "target": str(abs_new),
-                "existed": False,
-                "backup_path": None,
-                "revert_action": "delete",
-            })
+            backups.append(
+                {
+                    "target": str(abs_new),
+                    "existed": False,
+                    "backup_path": None,
+                    "revert_action": "delete",
+                }
+            )
 
         else:
             # Modification: back up existing target to restore on revert.
@@ -351,12 +358,14 @@ def _apply_patch_no_git(
                     return _fail(err, backups)
                 backups.append(rec)  # type: ignore[arg-type]
             else:
-                backups.append({
-                    "target": str(abs_t),
-                    "existed": False,
-                    "backup_path": None,
-                    "revert_action": "delete",
-                })
+                backups.append(
+                    {
+                        "target": str(abs_t),
+                        "existed": False,
+                        "backup_path": None,
+                        "revert_action": "delete",
+                    }
+                )
 
     # Apply for real. --reject writes .rej files for failed hunks so we can
     # collect them for reauthor feedback.

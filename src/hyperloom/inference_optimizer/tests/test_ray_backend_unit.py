@@ -395,9 +395,7 @@ def test_maybe_serving_lease_pytest_default_none(monkeypatch: pytest.MonkeyPatch
     assert maybe_serving_lease(num_gpus=1) is None
 
 
-def test_maybe_serving_lease_explicit_on_single_node(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_maybe_serving_lease_explicit_on_single_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
@@ -406,9 +404,7 @@ def test_maybe_serving_lease_explicit_on_single_node(
     assert lease._num_gpus == 2.0
 
 
-def test_maybe_serving_lease_multi_node_none(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_maybe_serving_lease_multi_node_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Multi-node is out of scope this round: no lease even with RAY_EXEC=1."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
@@ -429,20 +425,13 @@ class _RecordingLease:
         return self.result
 
 
-def test_run_magpie_routes_through_lease_and_strips_devices(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_run_magpie_routes_through_lease_and_strips_devices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """With a lease, _run_magpie runs in its actor on a device-stripped config."""
     from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
-        "benchmark:\n"
-        "  framework: sglang\n"
-        "  envs:\n"
-        "    TP: 1\n"
-        "    ROCR_VISIBLE_DEVICES: '0'\n"
-        "    FOO: bar\n",
+        "benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n    ROCR_VISIBLE_DEVICES: '0'\n    FOO: bar\n",
         encoding="utf-8",
     )
     out_dir = tmp_path / "out"
@@ -593,9 +582,7 @@ def test_maybe_gpu_specialist_lease_zero_gpus_none(monkeypatch: pytest.MonkeyPat
     assert rs.maybe_gpu_specialist_lease(num_gpus=0) is None
 
 
-def test_maybe_gpu_specialist_lease_single_node_on(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_maybe_gpu_specialist_lease_single_node_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
@@ -603,9 +590,7 @@ def test_maybe_gpu_specialist_lease_single_node_on(
     assert isinstance(lease, rs.GpuSpecialistLease)
 
 
-def test_maybe_gpu_specialist_lease_multi_node_none(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_maybe_gpu_specialist_lease_multi_node_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
@@ -624,9 +609,7 @@ def test_serving_slot_declared_in_ray_start_args():
     assert _json.loads(args[1]) == {"serving_slot": 1}
 
 
-def test_maybe_serving_lease_holds_serving_slot_by_default(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_maybe_serving_lease_holds_serving_slot_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Serving-family leases hold the whole-machine serving_slot (§12 T6)."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
@@ -636,9 +619,7 @@ def test_maybe_serving_lease_holds_serving_slot_by_default(
     assert lease._serving_slot is True
 
 
-def test_maybe_gpu_specialist_lease_serving_slot_passthrough(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_maybe_gpu_specialist_lease_serving_slot_passthrough(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Serving-disjoint pool takes no slot; whole-machine specialists take it."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
@@ -695,9 +676,7 @@ def test_serving_group_manager_lifecycle(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(rs, "_make_rank_actor", _fake_make_rank)
     removed: dict = {"pg": None}
-    monkeypatch.setattr(
-        rs, "_remove_serving_placement_group", lambda pg: removed.__setitem__("pg", pg)
-    )
+    monkeypatch.setattr(rs, "_remove_serving_placement_group", lambda pg: removed.__setitem__("pg", pg))
 
     sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8, serving_slot=True)
     pids = sgm.start([["srv", "rank0"], ["srv", "rank1"]])
@@ -731,18 +710,14 @@ def test_maybe_serving_group_manager_default_none(monkeypatch: pytest.MonkeyPatc
     assert rs.maybe_serving_group_manager(nodes=2, gpus_per_node=8) is None
 
 
-def test_maybe_serving_group_manager_flag_on_single_node_none(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_maybe_serving_group_manager_flag_on_single_node_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
     assert rs.maybe_serving_group_manager(nodes=2, gpus_per_node=8) is None
 
 
-def test_maybe_serving_group_manager_flag_on_multi_node(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_maybe_serving_group_manager_flag_on_multi_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
@@ -750,25 +725,20 @@ def test_maybe_serving_group_manager_flag_on_multi_node(
     assert isinstance(sgm, rs.ServingGroupManager)
 
 
-def test_maybe_serving_group_manager_zero_nodes_none(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_maybe_serving_group_manager_zero_nodes_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_MN_SERVING", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
     assert rs.maybe_serving_group_manager(nodes=0, gpus_per_node=8) is None
 
 
-def test_run_magpie_local_path_untouched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_run_magpie_local_path_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """serving_lease=None keeps the local run_with_session_kill path + config."""
     from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
-        "benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n"
-        "    ROCR_VISIBLE_DEVICES: '0'\n",
+        "benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n    ROCR_VISIBLE_DEVICES: '0'\n",
         encoding="utf-8",
     )
     out_dir = tmp_path / "out"
@@ -814,18 +784,14 @@ def test_run_subprocess_sync_passthrough(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "ray", fake)
     backend = rb.RayExecutionBackend()
     backend._ensured = True
-    result = backend.run_subprocess_sync(
-        ["echo", "sync-ray"], num_gpus=1, resources={"serving_slot": 1}, timeout_s=30
-    )
+    result = backend.run_subprocess_sync(["echo", "sync-ray"], num_gpus=1, resources={"serving_slot": 1}, timeout_s=30)
     assert isinstance(result, rb.SubprocessResult)
     assert result.returncode == 0
     assert "sync-ray" in result.stdout
     assert fake.last_ref["num_gpus"] == 1
 
 
-def test_resolve_shared_artifact_root_multi_node(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_resolve_shared_artifact_root_multi_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Multi-node + HYPERLOOM_MN_PROFILE_TRACE_DIR -> the shared root wins."""
     mn_root = tmp_path / "shared"
     monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(mn_root))
@@ -894,10 +860,10 @@ def test_gpu_specialist_lease_dead_actor_degrades(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setitem(sys.modules, "ray", _RaisingRay())
     lease = rs.GpuSpecialistLease(num_gpus=1)
     lease._actor = _RaisingActor()  # force the ray.get/kill paths
-    assert lease.is_alive() is False       # 598-600
-    assert lease.exit_code() is None       # 613-615
-    lease.stop()                           # 628-630 (no raise)
-    lease.close()                          # 639-641 (kill raises, swallowed)
+    assert lease.is_alive() is False  # 598-600
+    assert lease.exit_code() is None  # 613-615
+    lease.stop()  # 628-630 (no raise)
+    lease.close()  # 639-641 (kill raises, swallowed)
     assert lease._actor is None
 
 
@@ -906,10 +872,10 @@ def test_serving_group_manager_empty_before_start():
     """A never-started SGM: ranks_alive=[] / is_alive False / stop no-op."""
     sgm = rs.ServingGroupManager(nodes=2, gpus_per_node=8)
     assert sgm.pids() == []
-    assert sgm.ranks_alive() == []   # 892-893
+    assert sgm.ranks_alive() == []  # 892-893
     assert sgm.is_alive() is False
-    sgm.stop()                       # 915-916 (no ranks -> return)
-    sgm.close()                      # no pg / no ranks -> clean
+    sgm.stop()  # 915-916 (no ranks -> return)
+    sgm.close()  # no pg / no ranks -> clean
 
 
 def test_serving_group_manager_rank_errors_degrade(monkeypatch: pytest.MonkeyPatch):
@@ -927,8 +893,8 @@ def test_serving_group_manager_rank_errors_degrade(monkeypatch: pytest.MonkeyPat
     )
     assert sgm.ranks_alive() == [False, False]  # 899-901
     assert sgm.is_alive() is False
-    sgm.stop()                                  # 921-923 swallowed
-    sgm.close()                                 # 931-933 + 939-940 swallowed
+    sgm.stop()  # 921-923 swallowed
+    sgm.close()  # 931-933 + 939-940 swallowed
     assert sgm._ranks == [] and sgm._pg is None
 
 
@@ -1099,7 +1065,8 @@ def test_serving_lease_context_manager_and_ensure(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setitem(sys.modules, "ray", fake)
     made: list = []
     monkeypatch.setattr(
-        rs, "make_serving_actor",
+        rs,
+        "make_serving_actor",
         lambda n, *, serving_slot=True: made.append((n, serving_slot)) or _FakeActor((0, "", "")),
     )
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
@@ -1144,7 +1111,7 @@ def test_make_serving_actor_slot_modes(monkeypatch: pytest.MonkeyPatch):
 def test_gpu_specialist_lease_stop_no_actor_noop():
     """stop()/close() on a never-started GpuSpecialistLease are safe no-ops."""
     lease = rs.GpuSpecialistLease(num_gpus=1)
-    lease.stop()   # 623-624: no actor -> return
+    lease.stop()  # 623-624: no actor -> return
     lease.close()  # no actor -> return
     assert lease.pid() is None
 
@@ -1156,14 +1123,12 @@ def test_gpu_specialist_lease_close_kills_live_actor(monkeypatch: pytest.MonkeyP
     lease = rs.GpuSpecialistLease(num_gpus=1)
     actor = _FakeGpuActor()
     lease._actor = actor
-    lease.close()                      # 432-435: ray.kill path
+    lease.close()  # 432-435: ray.kill path
     assert actor in fake.killed
     assert lease._actor is None
 
 
-def test_should_use_ray_backend_unset_single_node_true(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_should_use_ray_backend_unset_single_node_true(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Env unset + not-under-pytest + single-node -> True (production default)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)  # bypass the pytest gate
@@ -1172,9 +1137,7 @@ def test_should_use_ray_backend_unset_single_node_true(
     assert rb._should_use_ray_backend() is True  # 80-82
 
 
-def test_strip_visible_devices_write_error_returns_src(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_strip_visible_devices_write_error_returns_src(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A write failure on the .ray.yaml sibling returns the original path."""
     cfg = tmp_path / "c.yaml"
     cfg.write_text(
@@ -1208,7 +1171,7 @@ def test_managed_process_start_with_log_path(tmp_path: Path):
     pid = mgr.start(["sh", "-c", "echo hi; sleep 0.2"], log_path=str(log))  # 98-100
     try:
         assert pid > 0
-        assert log.parent.is_dir()      # os.makedirs ran
+        assert log.parent.is_dir()  # os.makedirs ran
     finally:
         mgr.stop()
     assert log.exists()

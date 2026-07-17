@@ -36,7 +36,7 @@ def test_preflight_gates_magpie_on_backend():
     assert "resolve_backend_name" in src
     assert "_magpie_backend_active" in src
     # The gate wraps the import check and the clone/install branch.
-    assert 'import Magpie' in src
+    assert "import Magpie" in src
     assert "if _magpie_backend_active and" in src
     # InferenceX must NOT be gated away (bypass still needs it): the InferenceX
     # section marker exists and is not inside the magpie-only branch.
@@ -67,11 +67,7 @@ def test_preflight_resolves_interpreter_via_backend_not_magpie():
 
 
 def test_install_sh_gates_magpie_calls():
-    install_sh = (
-        Path(preflight_mod.__file__).resolve().parent.parent
-        / "assets"
-        / "install.sh"
-    )
+    install_sh = Path(preflight_mod.__file__).resolve().parent.parent / "assets" / "install.sh"
     text = install_sh.read_text(encoding="utf-8")
     # Backend-based gate present.
     assert "HYPERLOOM_BENCHMARK_BACKEND" in text
@@ -84,7 +80,7 @@ def test_install_sh_gates_magpie_calls():
     assert "sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'" in text
     assert "tr -d '[:space:]'" not in text
     # Magpie stages are inside the else branch (only run for non-bypass).
-    gate_idx = text.index('HYPERLOOM_BENCHMARK_BACKEND_LC=')
+    gate_idx = text.index("HYPERLOOM_BENCHMARK_BACKEND_LC=")
     else_idx = text.index("else", gate_idx)
     fi_idx = text.index("\nfi\n", gate_idx)
     magpie_idx = text.index("ensure_magpie\n", gate_idx)
@@ -94,6 +90,7 @@ def test_install_sh_gates_magpie_calls():
     # InferenceX stays unconditional (after the fi).
     inferencex_idx = text.index("ensure_inferencex\n", fi_idx)
     assert inferencex_idx > fi_idx
+
 
 def test_lifecycle_delegates_to_bypass_backend(tmp_path, monkeypatch):
     """bypass backend reports server_lifecycle ineligible with a clear reason."""

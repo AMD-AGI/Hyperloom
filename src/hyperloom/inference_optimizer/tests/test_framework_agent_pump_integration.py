@@ -137,9 +137,7 @@ class _CoordinatorStub:
     _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
     _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
     # The discovery merge calls this reverse-lookup on every repo.
-    _framework_agent_repo_url_origin_framework = staticmethod(
-        Coordinator._framework_agent_repo_url_origin_framework
-    )
+    _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
 
     def __init__(self, tmp_path: Path, *, framework: str = "sglang") -> None:
         self.session_dir = tmp_path
@@ -154,9 +152,7 @@ class _CoordinatorStub:
     async def _record_observation(self, *_a: Any, **_k: Any) -> None:
         return None
 
-    async def _rank_framework_agent_candidates_llm(
-        self, candidates: list[dict[str, Any]]
-    ) -> dict[str, Any] | None:
+    async def _rank_framework_agent_candidates_llm(self, candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
         # Force the deterministic discovery-order fallback.
         return None
 
@@ -183,11 +179,7 @@ def _pump(stub: _CoordinatorStub) -> None:
 
 
 def _framework_agent_pendings(stub: _CoordinatorStub) -> list[Any]:
-    return [
-        p
-        for p in stub.state.pending_proposals.values()
-        if getattr(p, "action_name", "") == "framework_agent"
-    ]
+    return [p for p in stub.state.pending_proposals.values() if getattr(p, "action_name", "") == "framework_agent"]
 
 
 @pytest.mark.parametrize("framework", _FRAMEWORK_PARAMETRISATION)
@@ -342,9 +334,7 @@ def test_pump_retries_empty_discover_before_marking_phase_done(
         assert stub.shared_state.framework_agent_phase_done is False
         assert stub.shared_state.framework_agent_empty_discoveries == i + 1
         assert _framework_agent_pendings(stub) == []
-        assert [
-            r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"
-        ] == []
+        assert [r for r in stub.shared_state.phase_history if r.get("event") == "framework_agent_phase_done"] == []
 
     # The limit-th consecutive empty batch ends the phase with a summary row.
     _pump(stub)

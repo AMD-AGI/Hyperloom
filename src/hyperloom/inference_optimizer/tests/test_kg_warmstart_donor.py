@@ -67,10 +67,12 @@ _KW = {"architectures": _ARCHS, "precision": "fp8", "hardware": "mi300x", "frame
 
 
 def test_single_top_donor_picks_highest_gain() -> None:
-    kg = _FakeKG([
-        _knob_fact(fp="low", gain="+5%", args="--low"),
-        _knob_fact(fp="high", gain="+40%", args="--high", envs_json='{"Y": "2"}'),
-    ])
+    kg = _FakeKG(
+        [
+            _knob_fact(fp="low", gain="+5%", args="--low"),
+            _knob_fact(fp="high", gain="+40%", args="--high", envs_json='{"Y": "2"}'),
+        ]
+    )
     donor = generate_warmstart_donor_graph_guided(kg, model_type="qwen2", **_KW)
     assert donor is not None
     assert donor["best_config"]["extra_server_args"] == "--high"
@@ -125,9 +127,7 @@ def test_cortex_helper_requires_native_kg(monkeypatch) -> None:
         def query_facts_safe(self, **kwargs: Any) -> list[Fact]:
             return [_knob_fact(fp="x", gain="+20%")]
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _SimKG()
-    )
+    monkeypatch.setattr("hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _SimKG())
     out = cortex_t0._kg_native_config_donor(
         architectures=_ARCHS, precision="fp8", hardware="mi300x", framework="sglang", model_type="qwen2"
     )
@@ -149,9 +149,7 @@ def test_cortex_helper_returns_native_donor(monkeypatch) -> None:
                 return [_knob_fact(fp="x", gain="+25%", args="--win")]
             return []
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _NativeKG()
-    )
+    monkeypatch.setattr("hyperloom.orchestrator.knowledge.recipe_kb.kg_client.get_kg_client", lambda: _NativeKG())
     out = cortex_t0._kg_native_config_donor(
         architectures=_ARCHS, precision="fp8", hardware="mi300x", framework="sglang", model_type="qwen2"
     )

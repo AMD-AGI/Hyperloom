@@ -44,7 +44,8 @@ def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.Monke
 
 def _build_backends() -> dict[str, Backend]:
     return {
-        name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "kernel_agent", "critic", "robustness")
+        name: MockBackend(_silent_plan(), name=name)
+        for name in ("orchestration", "kernel_agent", "critic", "robustness")
     }
 
 
@@ -153,10 +154,7 @@ async def test_resume_consistency_marks_unvalidated_and_rebuilds_current_best(co
     assert coord.shared_state.current_best["extra_server_args"] == "--a 1 --b 2"
     assert coord.shared_state.current_best["extra_envs"] == {"A": "1", "B": "2"}
     assert "rebuilt_current_best_config_from_stack" in report["fixes"]
-    assert any(
-        isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench"
-        for f in report["fixes"]
-    )
+    assert any(isinstance(f, dict) and f.get("kind") == "queued_resume_stack_rebench" for f in report["fixes"])
 
 
 @pytest.mark.asyncio
@@ -316,8 +314,7 @@ async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: 
 
     assert any(w.get("kind") == "orphaned_keep_discarded" for w in report["warnings"])
     assert not any(
-        isinstance(e, dict) and e.get("variant_name") == "spec-gone"
-        for e in coord.shared_state.optimization_stack
+        isinstance(e, dict) and e.get("variant_name") == "spec-gone" for e in coord.shared_state.optimization_stack
     )
 
 
@@ -379,8 +376,7 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
     assert any(isinstance(f, dict) and f.get("kind") == "replayed_pending_integrate" for f in report["fixes"])
     assert coord.shared_state.pending_integrate == {}
     assert any(
-        isinstance(e, dict) and e.get("variant_name") == "spec-half"
-        for e in coord.shared_state.optimization_stack
+        isinstance(e, dict) and e.get("variant_name") == "spec-half" for e in coord.shared_state.optimization_stack
     )
 
 
@@ -601,7 +597,9 @@ def test_progress_signal_flags_stall(coord: Coordinator) -> None:
 async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator) -> None:
     p1 = Message.new("kernel_agent", "orchestration", "proposal", {"action_name": "explore", "predicted_gain_pct": 3.0})
     await coord.bus.append_and_seq(p1)
-    p2 = Message.new("kernel_agent", "orchestration", "proposal", {"action_name": "baseline", "predicted_gain_pct": 1.0})
+    p2 = Message.new(
+        "kernel_agent", "orchestration", "proposal", {"action_name": "baseline", "predicted_gain_pct": 1.0}
+    )
     await coord.bus.append_and_seq(p2)
     await coord.bus.append_and_seq(
         Message.new(
@@ -767,10 +765,14 @@ def _make_conversational(coord: Coordinator, *, raw_text: str | None = None) -> 
     backend.conversational = True  # type: ignore[attr-defined]
     backend.reset_conversation = lambda: None  # type: ignore[attr-defined]
     # Well-formed checkpoint reply exercises the compaction "taken" path; raw_text= exercises the degenerate path.
-    reply = raw_text if raw_text is not None else (
-        '```json\n{"current_plan": "tune MoE", "hypotheses": ["h1"], '
-        '"tried_and_why": ["explored attention backends"], "pending": ["p1"], '
-        '"learnings": ["l1"]}\n```'
+    reply = (
+        raw_text
+        if raw_text is not None
+        else (
+            '```json\n{"current_plan": "tune MoE", "hypotheses": ["h1"], '
+            '"tried_and_why": ["explored attention backends"], "pending": ["p1"], '
+            '"learnings": ["l1"]}\n```'
+        )
     )
 
     async def _run(**kw):
@@ -841,6 +843,7 @@ async def test_checkpoint_history_ring_caps_at_ten(coord: Coordinator) -> None:
     backend.reset_conversation = lambda: None  # type: ignore[attr-defined]
 
     for i in range(12):
+
         async def _run(**kw):
             return _FakeRunResult(
                 f'```json\n{{"current_plan": "plan {i}", "hypotheses": ["h{i}"], '
@@ -940,11 +943,7 @@ async def test_checkpoint_degenerate_three_times_emits_medium_observation(coord:
         assert await coord._maybe_checkpoint_orchestration(tick=tick) is False
 
     rows = await coord.bus.tail(topic="observation", n=20)
-    degraded = [
-        m.payload
-        for m in rows
-        if m.payload.get("kind") == "orchestration_checkpoint_degraded"
-    ]
+    degraded = [m.payload for m in rows if m.payload.get("kind") == "orchestration_checkpoint_degraded"]
     assert any(p.get("severity") == "medium" and p.get("consecutive") == 3 for p in degraded)
 
 
@@ -1121,6 +1120,7 @@ async def test_promote_baseline_materialized_parse_raises(
 ) -> None:
     coord.shared_state.auto_roofline_pending_task_id = "pending-x"
     import hyperloom.orchestrator.loop.writeback as mod
+
     def _boom(path):
         raise RuntimeError("parse failed")
 
@@ -1386,6 +1386,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
     from hyperloom.orchestrator.state import shared_state as ss_mod
+
     monkeypatch.setattr(ss_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
     from hyperloom.orchestrator.framework import paths as fp
 
@@ -2086,7 +2087,10 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) 
     )
     coord.state.pending_proposals["m1"] = pending
     await coord._handle_single_verdict(
-        source="critic", pending=pending, verdict="reject", reasoning="unsafe",
+        source="critic",
+        pending=pending,
+        verdict="reject",
+        reasoning="unsafe",
     )
     prog = coord.shared_state.framework_agent_phase_progress
     assert any(p.get("status") == "critic_denied" and p.get("candidate_id") == "c1" for p in prog)
@@ -2117,7 +2121,10 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
     )
     coord.state.pending_proposals["m2"] = pending
     await coord._handle_single_verdict(
-        source="critic", pending=pending, verdict="approve", reasoning="ok",
+        source="critic",
+        pending=pending,
+        verdict="approve",
+        reasoning="ok",
     )
     assert enq
 
@@ -2172,9 +2179,7 @@ async def test_run_action_now_sync_on_loop_thread_emits_audit(coord: Coordinator
 
     monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _fake_schedule)
 
-    with caplog.at_level(
-        logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"
-    ):
+    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
         out = coord._run_action_now_sync("report")
 
     assert any("run_action_now:" in r.getMessage() for r in caplog.records)

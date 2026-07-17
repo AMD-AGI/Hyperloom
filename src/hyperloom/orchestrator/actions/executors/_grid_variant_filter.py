@@ -24,6 +24,7 @@ from ._grid_base import (
 
 log = logging.getLogger(__name__)
 
+
 def resolve_skip_spec(params: dict | None) -> str:
     """Resolve the active skip spec from task params + process env.
 
@@ -50,6 +51,7 @@ def resolve_skip_spec(params: dict | None) -> str:
         val = os.environ.get("SKIP_VARIANTS", "")
     return (val or "").strip()
 
+
 def _parse_skip_spec(spec: str) -> list[str]:
     """Split ``spec`` on commas and whitespace; drop empties.
 
@@ -72,6 +74,7 @@ def _parse_skip_spec(spec: str) -> list[str]:
             if t:
                 out.append(t)
     return out
+
 
 # Matches ``--cuda-graph-max-bs 64`` and ``--cuda_graph_max_bs=64``; captures
 # the integer value.
@@ -103,6 +106,7 @@ _MN_BACKENDS_PRIORITY: tuple[str, ...] = (
     "comm_custom_ar",
 )
 
+
 def _mn_priority_index(variant: "GridVariant", priority_tags: "tuple[str, ...] | list[str]") -> int:
     """Return the rank of ``variant`` against ``priority_tags`` (lower = first).
 
@@ -125,6 +129,7 @@ def _mn_priority_index(variant: "GridVariant", priority_tags: "tuple[str, ...] |
         if tag and tag in haystack:
             return idx
     return len(priority_tags)
+
 
 def reorder_grid_for_multi_node(
     grid: list["GridVariant"],
@@ -154,6 +159,7 @@ def reorder_grid_for_multi_node(
         return grid
     # ``sorted`` is stable, so ties keep input order.
     return sorted(grid, key=lambda v: _mn_priority_index(v, priority_tags))
+
 
 def apply_multi_node_invalid_variants(
     grid: list["GridVariant"],
@@ -204,6 +210,7 @@ def apply_multi_node_invalid_variants(
         kept.append(v)
     return kept, dropped
 
+
 # Framework / hardware compatibility filter: each entry maps an
 # ``extra_server_args`` substring to a required model class.
 _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
@@ -219,8 +226,7 @@ _COMPATIBILITY_FLAG_RULES: tuple[tuple[str, str], ...] = (
 _XDIT_ENV_BLACKLIST: dict[str, tuple[frozenset[str], str]] = {
     "XDIT_ATTENTION_BACKEND": (
         frozenset({"aiter_fp8", "aiter_sage", "aiter_sage_v2"}),
-        "approximate/quantized attention regresses on Ulysses>=4 "
-        "(attention is ~2% of FLOPS at small tokens/GPU)",
+        "approximate/quantized attention regresses on Ulysses>=4 (attention is ~2% of FLOPS at small tokens/GPU)",
     ),
     "XDIT_USE_FP4_GEMMS": (frozenset({"*"}), "precision locked to BF16 (FP4 = different model)"),
     "XDIT_USE_FP8_GEMMS": (frozenset({"*"}), "precision locked to BF16 (FP8 = different model)"),
@@ -237,6 +243,7 @@ _XDIT_ENV_COMBO_BLACKLIST: tuple[tuple[tuple[str, ...], str], ...] = (
         "AMD_DIRECT_DISPATCH=1 + AMDGCN_USE_BUFFER_OPS=1 is a known crash (-28.6%)",
     ),
 )
+
 
 def xdit_blacklist_reason(
     extra_envs: dict[str, str] | None,
@@ -264,6 +271,7 @@ def xdit_blacklist_reason(
             return reason
     return None
 
+
 # Per-framework cache for ``_probe_server_help_text`` (avoids a subprocess per
 # variant). Empty results are NOT cached so a transient failure re-probes.
 _HELP_TEXT_CACHE: dict[str, str] = {}
@@ -290,6 +298,7 @@ _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
         "p.print_help()",
     ),
 }
+
 
 def _probe_server_help_text(framework: str) -> str:
     """Best-effort fetch of ``<framework> --help`` text for flag validation.
@@ -325,6 +334,7 @@ def _probe_server_help_text(framework: str) -> str:
         _HELP_TEXT_CACHE[fw] = out
     return out
 
+
 def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     """Heuristic detect of (is_mla_model, is_moe_model) from model path.
 
@@ -356,6 +366,7 @@ def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     is_mla = any(k in p for k in mla_keys)
     is_moe = any(k in p for k in moe_keys)
     return is_mla, is_moe
+
 
 def apply_compatibility_filter(
     grid: list["GridVariant"],
@@ -433,6 +444,7 @@ def apply_compatibility_filter(
         else:
             kept.append(v)
     return kept, dropped
+
 
 def apply_user_skip_list(
     grid: list["GridVariant"],

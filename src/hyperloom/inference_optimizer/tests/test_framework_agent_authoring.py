@@ -120,9 +120,7 @@ class _Stub:
     _materialize_framework_agent_candidate = Coordinator._materialize_framework_agent_candidate
     _record_framework_agent_critic_denied = Coordinator._record_framework_agent_critic_denied
     _discover_next_framework_batch = Coordinator._discover_next_framework_batch
-    _framework_agent_repo_url_origin_framework = staticmethod(
-        Coordinator._framework_agent_repo_url_origin_framework
-    )
+    _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
     _enqueue_framework_agent_task = Coordinator._enqueue_framework_agent_task
     _enqueue_framework_agent_authoring_specialist = Coordinator._enqueue_framework_agent_authoring_specialist
     _framework_agent_authoring_inflight = Coordinator._framework_agent_authoring_inflight
@@ -161,9 +159,7 @@ class _Stub:
     async def _record_observation(self, *_a: Any, **_k: Any) -> None:
         return None
 
-    async def _rank_framework_agent_candidates_llm(
-        self, candidates: list[dict[str, Any]]
-    ) -> dict[str, Any] | None:
+    async def _rank_framework_agent_candidates_llm(self, candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
         # Force deterministic discovery-order fallback (no LLM call).
         return None
 
@@ -244,6 +240,7 @@ def test_pump_submits_candidate_proposal(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The pump submits the candidate as a ``framework_agent`` proposal; no task is created inline."""
+
     async def _discover(**_: Any) -> dict[str, Any]:
         return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
 
@@ -298,9 +295,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
     # One unprocessed candidate so the signal has a valid target.
     _CAND_ID = "https://github.com/ROCm/vllm/pull/999"
-    stub.shared_state.framework_agent_batches = [
-        {"batch_id": "b1", "candidates": [{"candidate_id": _CAND_ID}]}
-    ]
+    stub.shared_state.framework_agent_batches = [{"batch_id": "b1", "candidates": [{"candidate_id": _CAND_ID}]}]
     stub.shared_state.framework_agent_phase_progress = []
 
     assert (
@@ -353,9 +348,7 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub.tasks._queued.clear()
 
     # A bare kernel integrate_patch task (no framework_agent_authoring) does NOT count.
-    stub.tasks._queued.append(
-        SimpleNamespace(kind="integrate_patch", task_id="k2", params={})
-    )
+    stub.tasks._queued.append(SimpleNamespace(kind="integrate_patch", task_id="k2", params={}))
     assert (
         asyncio.run(
             Coordinator._framework_agent_authoring_inflight(stub)  # type: ignore[arg-type]
@@ -602,13 +595,13 @@ def test_config_levers_helper_extracts_from_proposal_set():
     assert levers["--enable-mtp"] == ""
 
     # A patch deliverable is NOT a config-only outcome.
-    assert _framework_config_levers_from_done(
-        {"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}
-    ) == {}
+    assert (
+        _framework_config_levers_from_done({"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}) == {}
+    )
     # No levers → empty.
-    assert _framework_config_levers_from_done(
-        {"patches_written": [], "proposal_set": [{"name": "research-only"}]}
-    ) == {}
+    assert (
+        _framework_config_levers_from_done({"patches_written": [], "proposal_set": [{"name": "research-only"}]}) == {}
+    )
 
 
 def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
@@ -627,9 +620,7 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
     )
     done_payload = {
         "patches_written": [],
-        "proposal_set": [
-            {"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}}
-        ],
+        "proposal_set": [{"name": "shared-expert-fusion", "extra_envs": {"VLLM_FUSE_SHARED_EXPERTS": "1"}}],
         "summary": "PR maps to a config lever on this build",
     }
 
@@ -752,9 +743,7 @@ def test_pump_audit_skip_low_confidence_downgrades_to_author(
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["specialist"]  # not skipped
     # No terminal already_present row was written (it wasn't skipped).
-    assert not any(
-        r.get("status") == "already_present" for r in stub.shared_state.framework_agent_phase_progress
-    )
+    assert not any(r.get("status") == "already_present" for r in stub.shared_state.framework_agent_phase_progress)
 
 
 def test_pump_audit_skip_no_evidence_downgrades_to_author(
@@ -937,12 +926,10 @@ def test_audit_candidate_cross_framework_sets_target_framework(
 
 def test_framework_agent_repo_url_origin_framework_known() -> None:
     """Reverse-lookup resolves each repo_map-known framework's canonical repo URL."""
-    assert Coordinator._framework_agent_repo_url_origin_framework(
-        "https://github.com/ROCm/vllm.git"
-    ) == "vllm"
-    assert Coordinator._framework_agent_repo_url_origin_framework(
-        "https://github.com/sgl-project/sglang.git"
-    ) == "sglang"
+    assert Coordinator._framework_agent_repo_url_origin_framework("https://github.com/ROCm/vllm.git") == "vllm"
+    assert (
+        Coordinator._framework_agent_repo_url_origin_framework("https://github.com/sgl-project/sglang.git") == "sglang"
+    )
 
 
 def test_framework_agent_repo_url_origin_framework_unknown_or_kernel_repo() -> None:
@@ -966,9 +953,7 @@ def test_discover_batch_tags_cross_repo_candidates_by_default(
         if repo_url == vllm_url:
             return {
                 "batch_id": "b1",
-                "candidates": [
-                    {"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}
-                ],
+                "candidates": [{"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}],
             }
         return {
             "batch_id": "b1",
@@ -1002,9 +987,7 @@ def test_discover_batch_does_not_tag_cross_repo_candidates_when_kill_switch_set(
         if repo_url == vllm_url:
             return {
                 "batch_id": "b1",
-                "candidates": [
-                    {"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}
-                ],
+                "candidates": [{"pr_url": "https://github.com/ROCm/vllm/pull/9", "repo": "ROCm/vllm", "ref": "PR:9"}],
             }
         return {"batch_id": "b1", "candidates": [dict(_CANDIDATE)]}
 

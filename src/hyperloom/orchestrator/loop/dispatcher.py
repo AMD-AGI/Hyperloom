@@ -36,6 +36,7 @@ from .coordinator import (
     _format_inbox_event,
 )
 import logging as _logging
+
 log = _logging.getLogger(__name__)
 
 
@@ -280,9 +281,7 @@ class DispatcherCollaborator:
                     )
 
                     whole_machine_lane = uses_whole_machine_gpu_lane(params)
-                    is_framework_authoring = bool(
-                        params.get("framework_agent_authoring")
-                    )
+                    is_framework_authoring = bool(params.get("framework_agent_authoring"))
                     if whole_machine_lane:
                         gpu_pool = self.framework_gpu_pool
                         if is_framework_authoring:
@@ -290,9 +289,7 @@ class DispatcherCollaborator:
                             default_gpu_count = gpu_pool.capacity or 1
                         else:
                             # Bench specialist: size to the serving TP.
-                            default_gpu_count = (
-                                self._resolve_serving_tp() or gpu_pool.capacity or 1
-                            )
+                            default_gpu_count = self._resolve_serving_tp() or gpu_pool.capacity or 1
                     else:
                         gpu_pool = self.gpu_specialist_pool
                         # Default gpu_count to the serving TP; explicit wins.
@@ -379,9 +376,9 @@ class DispatcherCollaborator:
                     and task.kind not in KERNEL_AGENT_OWNED_ACTIONS
                 ):
                     log.warning(
-                        "dispatch audit: queued task_id=%s kind=%r "
-                        "has no registered executor (dispatch unchanged)",
-                        task.task_id, task.kind,
+                        "dispatch audit: queued task_id=%s kind=%r has no registered executor (dispatch unchanged)",
+                        task.task_id,
+                        task.kind,
                     )
             except Exception:  # noqa: BLE001 - audit must never affect dispatch
                 pass
@@ -466,9 +463,9 @@ class DispatcherCollaborator:
 
             budget_min = min(base × (macro_cycle + 1), 240)
 
-        ``macro_cycle`` only grows on long/unbounded runs (``is_long_run`` >=24h
-        gate), so <24h bounded runs always get the base value (cpu 10 / gpu 60)
-        and never degrade.
+        ``macro_cycle`` grows whenever a new macro-cycle opens, including short
+        bounded runs. As cycles progress, specialists get more room to complete
+        larger attempts, up to the 4h cap.
 
         Args:
             needs_gpu: Whether the specialist holds a GPU lease (selects the
@@ -906,7 +903,7 @@ class DispatcherCollaborator:
             eligible = framework in ("sglang", "vllm", "vllm-aiter")
         else:
             # GEAK: legacy FP8 + SGLang only.
-            eligible = (precision == "fp8" and framework == "sglang")
+            eligible = precision == "fp8" and framework == "sglang"
 
         if not eligible:
             return False
@@ -1003,8 +1000,7 @@ class DispatcherCollaborator:
             _running = asyncio.get_running_loop()
             if _running is loop:
                 log.warning(
-                    "run_action_now: invoked on the coordinator "
-                    "loop thread (action=%r)",
+                    "run_action_now: invoked on the coordinator loop thread (action=%r)",
                     name,
                 )
         except RuntimeError:

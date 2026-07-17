@@ -239,9 +239,7 @@ def _gpu_family(gpu_type: str) -> str:
     return g
 
 
-def entries_for(
-    *, model_class: str = "", gpu_type: str = "", precision: str = ""
-) -> list[ChecklistEntry]:
+def entries_for(*, model_class: str = "", gpu_type: str = "", precision: str = "") -> list[ChecklistEntry]:
     """Return the checklist entries applicable to a ``(model_class, gpu, precision)``.
 
     ``model_class`` is currently advisory (entries gate on gpu/precision only);
@@ -267,9 +265,7 @@ def entries_for(
     return out
 
 
-def source_hint_directories_for(
-    *, model_class: str = "", gpu_type: str = "", precision: str = ""
-) -> tuple[str, ...]:
+def source_hint_directories_for(*, model_class: str = "", gpu_type: str = "", precision: str = "") -> tuple[str, ...]:
     """Return the de-duplicated source subdirectories to point the specialist at.
 
     Built from the ``source_dirs`` of every applicable checklist entry, in first
@@ -285,9 +281,7 @@ def source_hint_directories_for(
     """
     seen: set[str] = set()
     out: list[str] = []
-    for e in entries_for(
-        model_class=model_class, gpu_type=gpu_type, precision=precision
-    ):
+    for e in entries_for(model_class=model_class, gpu_type=gpu_type, precision=precision):
         for d in e.source_dirs:
             d = (d or "").strip()
             if d and d not in seen:
@@ -346,9 +340,7 @@ def checklist_as_dicts(entries: list[ChecklistEntry]) -> list[dict[str, object]]
     return out
 
 
-def filter_entries_for_model(
-    entries: list[ChecklistEntry], model_info: dict
-) -> list[ChecklistEntry]:
+def filter_entries_for_model(entries: list[ChecklistEntry], model_info: dict) -> list[ChecklistEntry]:
     """Filter checklist entries based on model metadata.
 
     Currently gates ``rocm.moe.shared_expert_fusion`` on

@@ -151,21 +151,21 @@ async def test_prune_events_protects_pending_proposal(conn):
 
     # Pending proposal must survive even though it's processed + old.
     await dbm.prune_events(conn, cursors, keep_recent=0)
-    rows = await conn.fetchall(
-        "SELECT msg_id FROM events WHERE topic='proposal'"
-    )
+    rows = await conn.fetchall("SELECT msg_id FROM events WHERE topic='proposal'")
     assert [r["msg_id"] for r in rows] == [prop.msg_id]
 
     # Now a verdict decides it → it becomes prunable.
-    await bus.append_and_seq(Message.new(
-        "critic", "*", "review_verdict",
-        {"target_proposal_msg_id": prop.msg_id, "verdict": "approve"},
-    ))
+    await bus.append_and_seq(
+        Message.new(
+            "critic",
+            "*",
+            "review_verdict",
+            {"target_proposal_msg_id": prop.msg_id, "verdict": "approve"},
+        )
+    )
     await cursors.advance("orchestration", seq=200, msg_id="z2")
     await dbm.prune_events(conn, cursors, keep_recent=0)
-    rows = await conn.fetchall(
-        "SELECT msg_id FROM events WHERE topic='proposal'"
-    )
+    rows = await conn.fetchall("SELECT msg_id FROM events WHERE topic='proposal'")
     assert rows == []
 
 
@@ -180,15 +180,23 @@ async def test_pending_proposal_seqs_matches_reconstruct_logic(conn):
     await bus.append_and_seq(p_pending)
     await bus.append_and_seq(p_decided)
     # Decided one gets a real verdict.
-    await bus.append_and_seq(Message.new(
-        "critic", "*", "review_verdict",
-        {"target_proposal_msg_id": p_decided.msg_id, "verdict": "reject"},
-    ))
+    await bus.append_and_seq(
+        Message.new(
+            "critic",
+            "*",
+            "review_verdict",
+            {"target_proposal_msg_id": p_decided.msg_id, "verdict": "reject"},
+        )
+    )
     # An empty-target verdict must NOT decide any proposal (NULL-trap guard).
-    await bus.append_and_seq(Message.new(
-        "critic", "*", "review_verdict",
-        {"target_proposal_msg_id": "", "verdict": "approve"},
-    ))
+    await bus.append_and_seq(
+        Message.new(
+            "critic",
+            "*",
+            "review_verdict",
+            {"target_proposal_msg_id": "", "verdict": "approve"},
+        )
+    )
 
     rows = await conn.fetchall(dbm._PENDING_PROPOSAL_SEQS_SQL)
     pending = {int(r["seq"]) for r in rows or []}
@@ -196,14 +204,8 @@ async def test_pending_proposal_seqs_matches_reconstruct_logic(conn):
     # Cross-check against the same join replay_for_resume uses.
     proposals = await bus.tail(topic="proposal", n=1000)
     verdicts = await bus.tail(topic="review_verdict", n=1000)
-    decided = {
-        v.payload.get("target_proposal_msg_id")
-        for v in verdicts
-        if v.payload.get("target_proposal_msg_id")
-    }
-    expected_pending_seqs = {
-        p.seq for p in proposals if p.msg_id not in decided
-    }
+    decided = {v.payload.get("target_proposal_msg_id") for v in verdicts if v.payload.get("target_proposal_msg_id")}
+    expected_pending_seqs = {p.seq for p in proposals if p.msg_id not in decided}
     assert pending == expected_pending_seqs
     # Concretely: only the undecided proposal is protected.
     assert pending == {p_pending.seq}

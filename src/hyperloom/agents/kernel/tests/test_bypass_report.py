@@ -65,15 +65,17 @@ def test_build_workload_roofline_totals_covers_all_kernels():
     # 20 kernels > any top-k cap: the workload totals must sum every device
     # kernel, not just the top-k candidate list.
     kernels = [
-        {"name": "aten::mm", "op_name": "aten::mm", "gpu_time_us": float(100 - i), "count": 1}
-        for i in range(20)
+        {"name": "aten::mm", "op_name": "aten::mm", "gpu_time_us": float(100 - i), "count": 1} for i in range(20)
     ]
     analyze = _analyze([dict(k) for k in kernels])
     totals = report.build_workload_roofline_totals(analyze, target_platform="MI300X")
     assert totals["sigma_actual_kernel_us"] == round(sum(k["gpu_time_us"] for k in kernels), 3)
     for key in (
-        "sigma_ideal_roofline_us", "kernel_roofline_efficiency",
-        "compute_bound_us", "memory_bound_us", "no_perf_model_us",
+        "sigma_ideal_roofline_us",
+        "kernel_roofline_efficiency",
+        "compute_bound_us",
+        "memory_bound_us",
+        "no_perf_model_us",
     ):
         assert key in totals
 
@@ -82,16 +84,28 @@ def test_build_workload_roofline_totals_splits_compute_and_memory():
     # With real shapes the workload totals must populate the attainment-weighted
     # sigma_ideal AND the compute/memory split (not all no_perf_model).
     kernels = [
-        {"name": "Cijk_Alik_Bljk_HHS", "op_name": "aten::mm", "gpu_time_us": 500.0, "count": 1,
-         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
-        {"name": "vectorized_elementwise_kernel", "op_name": "aten::add", "gpu_time_us": 200.0, "count": 1,
-         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+        {
+            "name": "Cijk_Alik_Bljk_HHS",
+            "op_name": "aten::mm",
+            "gpu_time_us": 500.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        },
+        {
+            "name": "vectorized_elementwise_kernel",
+            "op_name": "aten::add",
+            "gpu_time_us": 200.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        },
     ]
     analyze = _analyze([dict(k) for k in kernels])
     t = report.build_workload_roofline_totals(analyze, target_platform="mi300x")
     assert t["sigma_actual_kernel_us"] == 700.0
-    assert t["compute_bound_us"] > 0.0   # the GEMM
-    assert t["memory_bound_us"] > 0.0    # the elementwise
+    assert t["compute_bound_us"] > 0.0  # the GEMM
+    assert t["memory_bound_us"] > 0.0  # the elementwise
     assert t["sigma_ideal_roofline_us"] > 0.0
     assert 0.0 < t["kernel_roofline_efficiency"] <= 1.0
 
@@ -115,19 +129,13 @@ def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
     # guaranteed source-less regardless of the ambient op_to_source table.
     monkeypatch.setattr(report, "editable_trace_source", lambda *a, **k: "")
     monkeypatch.setattr(report, "resolve_source", lambda *a, **k: ("", "unresolved"))
-    cands = report.build_candidates(
-        _analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X"
-    )
+    cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     hot_ids = {c["kernel_id"] for c in cands["hot_kernels"]}
     routable_ids = {c["kernel_id"] for c in cands["routable_kernels"]}
     skipped_ids = {c["kernel_id"] for c in cands["skipped_kernels"]}
 
     # Guard: the fixture really did produce a reusable-but-source-less kernel.
-    gap = [
-        c
-        for c in cands["hot_kernels"]
-        if c.get("reusable_native_kernel") and not c.get("source_file")
-    ]
+    gap = [c for c in cands["hot_kernels"] if c.get("reusable_native_kernel") and not c.get("source_file")]
     assert gap, "fixture must contain a reusable kernel with unresolved source"
     # Such a kernel is dispatch-blocked -> skipped with an explicit reason.
     assert all(c["kernel_id"] in skipped_ids for c in gap)
@@ -136,9 +144,7 @@ def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
     # Partition invariant: hot == routable + skipped, no overlap, no leakage.
     assert routable_ids | skipped_ids == hot_ids
     assert routable_ids & skipped_ids == set()
-    assert len(cands["hot_kernels"]) == len(cands["routable_kernels"]) + len(
-        cands["skipped_kernels"]
-    )
+    assert len(cands["hot_kernels"]) == len(cands["routable_kernels"]) + len(cands["skipped_kernels"])
 
 
 def test_build_summary_counts(monkeypatch):
@@ -167,10 +173,24 @@ def test_build_kernel_roofline_shape():
     assert all(r["rocprof_roofline"] is None for r in rows)
     # rows are a superset of the TraceLens kernel_roofline row schema.
     tracelens_row_keys = {
-        "kernel_id", "name", "gpu_pct", "duration_us", "call_count", "kernel_category",
-        "source_file", "bottleneck", "bound_type", "arithmetic_intensity", "flops_per_byte",
-        "efficiency_percent", "compute_utilization_pct", "bandwidth_utilization_pct",
-        "suggestion", "roofline_name", "recommended_actions", "reusable_native_kernel",
+        "kernel_id",
+        "name",
+        "gpu_pct",
+        "duration_us",
+        "call_count",
+        "kernel_category",
+        "source_file",
+        "bottleneck",
+        "bound_type",
+        "arithmetic_intensity",
+        "flops_per_byte",
+        "efficiency_percent",
+        "compute_utilization_pct",
+        "bandwidth_utilization_pct",
+        "suggestion",
+        "roofline_name",
+        "recommended_actions",
+        "reusable_native_kernel",
         "rocprof_roofline",
     }
     for r in rows:
@@ -186,11 +206,16 @@ def test_build_kernel_roofline_shape():
 def test_build_candidates_fills_analytical_roofline_incl_vendor():
     # A vendor GEMM (Cijk_, non-reusable) with captured shapes gets an analytical
     # bound purely from shapes + measured time, not the "—" placeholder.
-    kernels = [{
-        "name": "Cijk_Alik_Bljk_HHS", "op_name": "aten::mm",
-        "gpu_time_us": 500.0, "count": 1,
-        "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
-    }]
+    kernels = [
+        {
+            "name": "Cijk_Alik_Bljk_HHS",
+            "op_name": "aten::mm",
+            "gpu_time_us": 500.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        }
+    ]
     cand = report.build_candidates(_analyze(kernels), framework="xdit", target_platform="mi300x")["hot_kernels"][0]
     assert cand["reusable_native_kernel"] is False  # vendor, non-rewritable
     assert cand["bound_type"] == "compute_bound"
@@ -209,11 +234,16 @@ def test_build_candidates_no_shapes_stays_placeholder_roofline():
 
 
 def test_optimization_priority_and_suggestion_are_attributable():
-    kernels = [{
-        "name": "Cijk_Alik_Bljk_HHS", "op_name": "aten::mm",
-        "gpu_time_us": 500.0, "count": 1,
-        "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
-    }]
+    kernels = [
+        {
+            "name": "Cijk_Alik_Bljk_HHS",
+            "op_name": "aten::mm",
+            "gpu_time_us": 500.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        }
+    ]
     cand = report.build_candidates(_analyze(kernels), framework="xdit", target_platform="mi300x")["hot_kernels"][0]
     # priority = gpu_pct * (1 - eff/100): reproducible from two columns in the row.
     expected = round(cand["gpu_pct"] * (1.0 - cand["efficiency_percent"] / 100.0), 4)
@@ -234,10 +264,22 @@ def test_priority_falls_back_to_gpu_pct_without_efficiency():
 
 def test_priority_rank_orders_by_roi():
     kernels = [
-        {"name": "big_elementwise_kernel", "op_name": "aten::add", "gpu_time_us": 900.0, "count": 1,
-         "op_shapes": [[8192, 8192], [8192, 8192]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
-        {"name": "small_mm_kernel", "op_name": "aten::mm", "gpu_time_us": 100.0, "count": 1,
-         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+        {
+            "name": "big_elementwise_kernel",
+            "op_name": "aten::add",
+            "gpu_time_us": 900.0,
+            "count": 1,
+            "op_shapes": [[8192, 8192], [8192, 8192]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        },
+        {
+            "name": "small_mm_kernel",
+            "op_name": "aten::mm",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        },
     ]
     hot = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="mi300x")["hot_kernels"]
     # The big high-share kernel out-ranks the small one by ROI.
@@ -247,8 +289,14 @@ def test_priority_rank_orders_by_roi():
 
 def test_metrics_csv_has_all_kernels_and_columns():
     kernels = [
-        {"name": "Cijk_x", "op_name": "aten::mm", "gpu_time_us": 500.0, "count": 1,
-         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+        {
+            "name": "Cijk_x",
+            "op_name": "aten::mm",
+            "gpu_time_us": 500.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        },
         {"name": "mystery", "op_name": "aten::mystery", "gpu_time_us": 100.0, "count": 2},
     ]
     cands = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="mi300x")
@@ -261,12 +309,30 @@ def test_metrics_csv_has_all_kernels_and_columns():
 
 def test_category_summary_aggregates_by_category():
     kernels = [
-        {"name": "Cijk_a", "op_name": "aten::mm", "gpu_time_us": 300.0, "count": 1,
-         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
-        {"name": "Cijk_b", "op_name": "aten::mm", "gpu_time_us": 300.0, "count": 1,
-         "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
-        {"name": "add_elementwise", "op_name": "aten::add", "gpu_time_us": 100.0, "count": 1,
-         "op_shapes": [[1024, 1024], [1024, 1024]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]},
+        {
+            "name": "Cijk_a",
+            "op_name": "aten::mm",
+            "gpu_time_us": 300.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        },
+        {
+            "name": "Cijk_b",
+            "op_name": "aten::mm",
+            "gpu_time_us": 300.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        },
+        {
+            "name": "add_elementwise",
+            "op_name": "aten::add",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_shapes": [[1024, 1024], [1024, 1024]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        },
     ]
     cands = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="mi300x")
     summ = report.build_category_summary(cands)
@@ -278,8 +344,16 @@ def test_category_summary_aggregates_by_category():
 
 
 def test_summary_csv_parseable():
-    kernels = [{"name": "Cijk_a", "op_name": "aten::mm", "gpu_time_us": 300.0, "count": 1,
-                "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"]}]
+    kernels = [
+        {
+            "name": "Cijk_a",
+            "op_name": "aten::mm",
+            "gpu_time_us": 300.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        }
+    ]
     cands = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="mi300x")
     rows = list(csv.DictReader(io.StringIO(report.build_category_summary_csv(cands))))
     assert rows and rows[0]["kernel_category"] == "GEMM"
@@ -328,15 +402,26 @@ def test_render_analysis_md_sections_textgen():
 
 
 def test_render_analysis_md_top10_and_csv_and_no_stale_text():
-    kernels = [{
-        "name": "Cijk_x", "op_name": "aten::mm", "gpu_time_us": 500.0, "count": 1,
-        "op_shapes": [[4096, 4096], [4096, 4096]], "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
-    }]
+    kernels = [
+        {
+            "name": "Cijk_x",
+            "op_name": "aten::mm",
+            "gpu_time_us": 500.0,
+            "count": 1,
+            "op_shapes": [[4096, 4096], [4096, 4096]],
+            "op_dtypes": ["c10::BFloat16", "c10::BFloat16"],
+        }
+    ]
     analyze = _analyze(kernels)
     cands = report.build_candidates(analyze, framework="vllm", target_platform="mi300x")
     md = report.render_analysis_md(
-        cands, analyze, model_name="M", framework="vllm", target_platform="mi300x",
-        metrics_csv_path="/x/kernel_metrics.csv", summary_csv_path="/x/kernel_summary.csv",
+        cands,
+        analyze,
+        model_name="M",
+        framework="vllm",
+        target_platform="mi300x",
+        metrics_csv_path="/x/kernel_metrics.csv",
+        summary_csv_path="/x/kernel_summary.csv",
     )
     assert "## Top 10 Kernels by Optimization Priority" in md
     assert "| # | kernel_id | Name | Category | GPU% | Bound | AI | Eff% | Priority | Suggestion |" in md
@@ -376,11 +461,18 @@ def test_source_file_from_trace_kernel_file_wins(monkeypatch):
         raise AssertionError("resolve_source must not run when trace kernel_file hits")
 
     monkeypatch.setattr(report, "resolve_source", _boom)
-    kernels = [{
-        "name": "triton_silu", "op_name": "aten::silu", "gpu_time_us": 100.0, "count": 1,
-        "op_kernel_file": "/repo/aiter/triton/silu.py", "op_kernel_backend": "triton",
-        "op_shapes": [[8, 16]], "op_dtypes": ["c10::BFloat16"],
-    }]
+    kernels = [
+        {
+            "name": "triton_silu",
+            "op_name": "aten::silu",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_kernel_file": "/repo/aiter/triton/silu.py",
+            "op_kernel_backend": "triton",
+            "op_shapes": [[8, 16]],
+            "op_dtypes": ["c10::BFloat16"],
+        }
+    ]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_file"] == "/repo/aiter/triton/silu.py"
     assert cand["source_resolution_method"] == "trace_kernel_file"
@@ -394,14 +486,23 @@ def test_routable_candidate_carries_shapes_for_orchestrator_gate():
     # The orchestrator shape gate reads candidate["shapes"] and rejects dispatch
     # with "empty_kernel_shape" when empty, so a routable candidate with real
     # trace-captured dims must expose a non-empty "shapes" list.
-    kernels = [{
-        "name": "triton_silu", "op_name": "aten::silu", "gpu_time_us": 100.0, "count": 1,
-        "op_kernel_file": "/repo/aiter/triton/silu.py", "op_kernel_backend": "triton",
-        "op_shapes": [[8, 16]], "op_dtypes": ["c10::BFloat16"],
-    }]
+    kernels = [
+        {
+            "name": "triton_silu",
+            "op_name": "aten::silu",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_kernel_file": "/repo/aiter/triton/silu.py",
+            "op_kernel_backend": "triton",
+            "op_shapes": [[8, 16]],
+            "op_dtypes": ["c10::BFloat16"],
+        }
+    ]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     shapes = cand.get("shapes")
-    assert isinstance(shapes, list) and shapes, "routable candidate must expose a non-empty 'shapes' for the orchestrator gate"
+    assert isinstance(shapes, list) and shapes, (
+        "routable candidate must expose a non-empty 'shapes' for the orchestrator gate"
+    )
     assert cand["shape_provenance"] in {"torch_trace", "tuning_csv"}
     # shapes mirrors input_shapes in the harness-consumable contract form.
     assert cand["shapes"] == cand["input_shapes"] == [{"call_num": 1, "shape": "(8,16) bf16"}]
@@ -455,10 +556,15 @@ def test_source_unresolved_when_both_miss(monkeypatch):
 def test_inductor_kernel_file_rejected_falls_through(monkeypatch):
     # A /tmp inductor kernel_file is not editable; must fall through to lookup.
     monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("", "unresolved"))
-    kernels = [{
-        "name": "triton_poi_fused", "op_name": "aten::add", "gpu_time_us": 100.0, "count": 1,
-        "op_kernel_file": "/tmp/torchinductor_root/cabc.py",
-    }]
+    kernels = [
+        {
+            "name": "triton_poi_fused",
+            "op_name": "aten::add",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_kernel_file": "/tmp/torchinductor_root/cabc.py",
+        }
+    ]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_file"] == ""
     assert cand["source_resolution_method"] == "unresolved"
@@ -506,8 +612,8 @@ def test_task_groups_merge_same_native_source():
 def test_task_groups_py_keys_on_operation():
     hot = [
         _cand("k001", "op_x", "/repo/triton/fused.py", dur=100.0),
-        _cand("k002", "op_x", "/repo/triton/fused.py", dur=50.0),   # same file+op -> merge
-        _cand("k003", "op_y", "/repo/triton/fused.py", dur=40.0),   # same file, diff op -> separate
+        _cand("k002", "op_x", "/repo/triton/fused.py", dur=50.0),  # same file+op -> merge
+        _cand("k003", "op_y", "/repo/triton/fused.py", dur=40.0),  # same file, diff op -> separate
     ]
     groups = report._build_task_groups(hot)
     by_op = {g["operation"]: g for g in groups}
@@ -518,9 +624,9 @@ def test_task_groups_py_keys_on_operation():
 
 def test_task_groups_skip_unresolved_and_nonreusable():
     hot = [
-        _cand("k001", "no_src", "", dur=500.0),                       # unresolved source -> skip
+        _cand("k001", "no_src", "", dur=500.0),  # unresolved source -> skip
         _cand("k002", "vendor", "/x/g.cu", reusable=False, dur=400.0),  # not reusable -> skip
-        _cand("k003", "ok", "/x/act.cu", dur=100.0),                  # routable -> grouped
+        _cand("k003", "ok", "/x/act.cu", dur=100.0),  # routable -> grouped
     ]
     groups = report._build_task_groups(hot)
     assert len(groups) == 1
@@ -541,13 +647,19 @@ def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
     # One candidate resolves a source, one does not -> report must reflect the
     # real dispatchable split, show the source line, and render a Task Groups table.
     monkeypatch.setattr(
-        report, "resolve_source",
+        report,
+        "resolve_source",
         lambda op, **k: ("/opt/aiter/csrc/act.cu", "op_to_source") if op == "aiter::act" else ("", "unresolved"),
     )
     kernels = [
         {"name": "aiter_act_kernel", "op_name": "aiter::act", "gpu_time_us": 300.0, "count": 3},
         {"name": "aiter_act_kernel2", "op_name": "aiter::act", "gpu_time_us": 50.0, "count": 1},  # same src -> group
-        {"name": "rms_norm_kernel", "op_name": "vllm::rms_norm", "gpu_time_us": 100.0, "count": 1},  # reusable, unresolved
+        {
+            "name": "rms_norm_kernel",
+            "op_name": "vllm::rms_norm",
+            "gpu_time_us": 100.0,
+            "count": 1,
+        },  # reusable, unresolved
     ]
     analyze = _analyze(kernels)
     cands = report.build_candidates(analyze, framework="vllm", target_platform="MI300X")
@@ -570,10 +682,15 @@ def test_source_type_from_resolved_source(monkeypatch):
 
 
 def test_source_type_python_from_trace_kernel_file():
-    kernels = [{
-        "name": "op", "op_name": "op", "gpu_time_us": 100.0, "count": 1,
-        "op_kernel_file": "/repo/triton/k.py",
-    }]
+    kernels = [
+        {
+            "name": "op",
+            "op_name": "op",
+            "gpu_time_us": 100.0,
+            "count": 1,
+            "op_kernel_file": "/repo/triton/k.py",
+        }
+    ]
     cand = report.build_candidates(_analyze(kernels), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
     assert cand["source_file"] == "/repo/triton/k.py"
     assert cand["source_type"] == "python"
@@ -598,9 +715,9 @@ def test_build_candidates_discovers_benchmark_files_when_enabled(tmp_path, monke
     assert any(Path(f).name == "test_foo.py" for f in on["benchmark_files"])
     assert on["kernel_repo"] == str(repo.resolve())
 
-    off = report.build_candidates(
-        _analyze([dict(k) for k in base]), framework="vllm", target_platform="MI300X"
-    )["hot_kernels"][0]
+    off = report.build_candidates(_analyze([dict(k) for k in base]), framework="vllm", target_platform="MI300X")[
+        "hot_kernels"
+    ][0]
     assert off["benchmark_files"] == [] and off["kernel_repo"] == ""
 
 

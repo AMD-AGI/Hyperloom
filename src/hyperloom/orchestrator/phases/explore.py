@@ -98,9 +98,7 @@ class ExplorePhase(PhaseHandler):
                 reasons.setdefault(d, [])
                 if bool(row.get("saturated")):
                     scores[d] -= 100.0
-                    reasons[d].append(
-                        f"saturated at {row.get('within_pct')}% within roofline; deprioritized"
-                    )
+                    reasons[d].append(f"saturated at {row.get('within_pct')}% within roofline; deprioritized")
                 else:
                     scores[d] += 1.0
                     reasons[d].append("not saturated in latest roofline snapshot")
@@ -247,7 +245,11 @@ class ExplorePhase(PhaseHandler):
             if not isinstance(progress, list):
                 progress = []
                 state.framework_agent_phase_progress = progress
-            if not (progress and isinstance(progress[-1], dict) and str(progress[-1].get("status") or "") == "cycle_boundary"):
+            if not (
+                progress
+                and isinstance(progress[-1], dict)
+                and str(progress[-1].get("status") or "") == "cycle_boundary"
+            ):
                 progress.append(
                     {
                         "candidate_id": "",
@@ -712,10 +714,7 @@ class ExplorePhase(PhaseHandler):
             try:
                 ttl = self._gpu_lease_ttl_sec(int(ttl or 0))
             except Exception:  # noqa: BLE001
-                log.exception(
-                    "specialist auto-retry: gpu_research_lane TTL re-source failed; "
-                    "using registry default"
-                )
+                log.exception("specialist auto-retry: gpu_research_lane TTL re-source failed; using registry default")
 
         # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
         base_key = str(task.idempotency_key or task.task_id or "")
@@ -1112,7 +1111,15 @@ class ExplorePhase(PhaseHandler):
             A ``(layer, domain_hint)`` tuple for the action.
         """
         a = str(action or "").strip().lower()
-        if a in {"kernel_opt", "integrate", "trace_analyze", "run_gemm_tuning", "run_optimization", "profile", "roofline"}:
+        if a in {
+            "kernel_opt",
+            "integrate",
+            "trace_analyze",
+            "run_gemm_tuning",
+            "run_optimization",
+            "profile",
+            "roofline",
+        }:
             return ("kernel_agent", "kernel_switch_specialist")
         if a in {"sweep", "explore"}:
             return ("framework", "serving_specialist")
@@ -1270,12 +1277,16 @@ class ExplorePhase(PhaseHandler):
                 params["base_extra_args"] = cb_args
             _raw_remove = cb.get("remove_args")
             _raw_unset = cb.get("unset_envs")
-            cb_remove = [_raw_remove] if isinstance(_raw_remove, str) and _raw_remove.strip() else [
-                str(v) for v in (_raw_remove or []) if str(v).strip()
-            ]
-            cb_unset = [_raw_unset] if isinstance(_raw_unset, str) and _raw_unset.strip() else [
-                str(v) for v in (_raw_unset or []) if str(v).strip()
-            ]
+            cb_remove = (
+                [_raw_remove]
+                if isinstance(_raw_remove, str) and _raw_remove.strip()
+                else [str(v) for v in (_raw_remove or []) if str(v).strip()]
+            )
+            cb_unset = (
+                [_raw_unset]
+                if isinstance(_raw_unset, str) and _raw_unset.strip()
+                else [str(v) for v in (_raw_unset or []) if str(v).strip()]
+            )
             if cb_remove:
                 params["base_remove_args"] = cb_remove
             if cb_unset:
@@ -1571,8 +1582,7 @@ class ExplorePhase(PhaseHandler):
             },
         )
         log.info(
-            "FRAMEWORK: config-lever deliverable routed to integrate_patch "
-            "candidate=%s keys=%s",
+            "FRAMEWORK: config-lever deliverable routed to integrate_patch candidate=%s keys=%s",
             fa_cand or sid,
             sorted(config_changes.keys()),
         )

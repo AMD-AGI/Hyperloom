@@ -63,22 +63,14 @@ KNOWN_LANES = (
 # ``_expand_lanes`` only expands the *requested* lane's own conflict set, so
 # two lanes block each other only if each side lists the other.
 LANE_CONFLICTS: dict[str, frozenset[str]] = {
-    "benchmark_lane": frozenset(
-        {"profile_lane", "server_lifecycle", "gpu_research_lane"}
-    ),
-    "profile_lane": frozenset(
-        {"benchmark_lane", "server_lifecycle", "gpu_research_lane"}
-    ),
-    "server_lifecycle": frozenset(
-        {"benchmark_lane", "profile_lane", "gpu_research_lane"}
-    ),
+    "benchmark_lane": frozenset({"profile_lane", "server_lifecycle", "gpu_research_lane"}),
+    "profile_lane": frozenset({"benchmark_lane", "server_lifecycle", "gpu_research_lane"}),
+    "server_lifecycle": frozenset({"benchmark_lane", "profile_lane", "gpu_research_lane"}),
     "workspace_mutation": frozenset(),
     # research_lane does not conflict with any serving-side lane.
     "research_lane": frozenset(),
     # gpu_research_lane ⊥ serving lanes; capacity-1 so GPU specialists serialize.
-    "gpu_research_lane": frozenset(
-        {"benchmark_lane", "profile_lane", "server_lifecycle"}
-    ),
+    "gpu_research_lane": frozenset({"benchmark_lane", "profile_lane", "server_lifecycle"}),
 }
 
 

@@ -21,8 +21,6 @@ from typing import Any
 from ._shared import GitHubPr, _repo_slug
 
 
-
-
 def _require_http_url(url: str) -> None:
     scheme = urllib.parse.urlparse(url).scheme
     if scheme not in {"http", "https"}:

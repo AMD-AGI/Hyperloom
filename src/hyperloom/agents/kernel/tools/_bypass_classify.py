@@ -51,7 +51,11 @@ _RULES: list[tuple[re.Pattern, str, int]] = [
     # Rotary embedding -> elementwise family.
     (re.compile(r"(?i)rotary|\brope\b"), "Elementwise", 18),
     # Quantization (fp8/fp4 scale/quant kernels).
-    (re.compile(r"(?i)per_tensor_quant|per_token.*quant|dynamic.*quant|scaled_quant|data_to_scale|initializeScale"), "Quantization", 18),
+    (
+        re.compile(r"(?i)per_tensor_quant|per_token.*quant|dynamic.*quant|scaled_quant|data_to_scale|initializeScale"),
+        "Quantization",
+        18,
+    ),
     (re.compile(r"(?i)\bquant\b|quantize"), "Quantization", 6),
     # Activation / elementwise.
     (re.compile(r"(?i)silu|swish|\bgelu\b|act_and_mul"), "Elementwise", 15),
@@ -68,9 +72,7 @@ _RULES: list[tuple[re.Pattern, str, int]] = [
 ]
 
 # Vendor precompiled kernels: rankable but not rewritable.
-_VENDOR_BINARY_RE = re.compile(
-    r"(?i)Cijk_|wvSplitK|splitKreduce|hipblaslt|rocblas|cublas|nvjet_tst|miopen|cudnn"
-)
+_VENDOR_BINARY_RE = re.compile(r"(?i)Cijk_|wvSplitK|splitKreduce|hipblaslt|rocblas|cublas|nvjet_tst|miopen|cudnn")
 # Native-source kernels that are rewritable (triton / aiter / CK / vLLM native).
 _REUSABLE_RE = re.compile(
     r"(?i)triton_|^_fwd_kernel|aiter|ck_tile|paged_attention|reshape_and_cache|"
@@ -85,8 +87,13 @@ _REUSABLE_RE = re.compile(
 # ``*_norm`` names so a bare ``\bnorm\b`` does not mis-map ``aten::norm``.
 _OP_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?i)convolution|conv[123]d|conv_transpose|_convolution"), "Convolution"),
-    (re.compile(r"(?i)scaled_dot_product_attention|efficient_attention|flash_attention|"
-                r"memory_efficient_attention|\bsdpa\b|_attention_forward|multi_head_attention"), "SDPA"),
+    (
+        re.compile(
+            r"(?i)scaled_dot_product_attention|efficient_attention|flash_attention|"
+            r"memory_efficient_attention|\bsdpa\b|_attention_forward|multi_head_attention"
+        ),
+        "SDPA",
+    ),
     (re.compile(r"(?i)layer_norm|layernorm|rms_norm|rmsnorm|group_norm|groupnorm|batch_norm"), "Normalization"),
     (re.compile(r"(?i)reshape_and_cache|concat_and_cache"), "KVCacheStore"),
     (re.compile(r"(?i)\bmoe\b|fused_moe|topk|routing|expert"), "MoE"),
@@ -94,8 +101,13 @@ _OP_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?i)addmm|baddbmm|\bbmm\b|\bmm\b|matmul|\blinear\b|\bgemm\b|scaled_mm"), "GEMM"),
     (re.compile(r"(?i)silu|swish|\bgelu\b|\brelu\b|sigmoid|\btanh\b|gelu_and_mul|act_and_mul"), "Elementwise"),
     (re.compile(r"(?i)rotary|\brope\b|embedding"), "Elementwise"),
-    (re.compile(r"(?i)elementwise|\bmul\b|\badd\b|\bsub\b|\bdiv\b|\bcopy_?\b|\bcat\b|concat|"
-                r"index_select|slice|\bview\b|reshape|transpose|permute|fill|clamp|to_copy"), "Elementwise"),
+    (
+        re.compile(
+            r"(?i)elementwise|\bmul\b|\badd\b|\bsub\b|\bdiv\b|\bcopy_?\b|\bcat\b|concat|"
+            r"index_select|slice|\bview\b|reshape|transpose|permute|fill|clamp|to_copy"
+        ),
+        "Elementwise",
+    ),
 ]
 
 
