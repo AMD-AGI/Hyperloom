@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
 class _StateStub:
@@ -36,6 +37,7 @@ class _StateStub:
 
 
 class _MemCoord:
+    _LOCAL_EXPLORE_KIND = FrameworkPhase._LOCAL_EXPLORE_KIND
     _FRAMEWORK_KEEP_STATUSES = Coordinator._FRAMEWORK_KEEP_STATUSES
     _FRAMEWORK_TRIED_MEMORY_CAP = Coordinator._FRAMEWORK_TRIED_MEMORY_CAP
     _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)

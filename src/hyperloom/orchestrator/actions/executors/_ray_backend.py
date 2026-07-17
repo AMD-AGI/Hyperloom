@@ -1,19 +1,10 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Ray-managed GPU execution backend (P0 skeleton).
+"""Ray-managed GPU execution backend.
 
-Unifies GPU/serving/benchmark execution onto Ray so a single node is just a
-1-node Ray cluster. Behind ``INFERENCE_OPTIMIZER_RAY_EXEC`` (default off); when
-disabled, callers keep using the existing local-subprocess path.
-
-Only GPU/serving-class work runs through here. CPU/LLM steps (orchestration,
-critic, target_analysis, report, session_breakdown, trace_analyze) stay local.
-
-Hard invariant (see ray_modify.plan.md §4.2): any GPU process must live inside a
-Ray task/actor lease. This module runs ``run_with_session_kill`` *inside* a Ray
-worker; the worker inherits Ray's ``*_VISIBLE_DEVICES`` assignment, and the
-caller's env is overlaid **without** overriding those (forcing them breaks Ray's
-GPU isolation and triggers ROCm ``set_visible_accelerator_ids`` errors).
+Runs GPU/serving/benchmark subprocesses inside Ray tasks/actors so every GPU
+process lives inside a Ray lease and inherits Ray's ``*_VISIBLE_DEVICES``
+assignment. CPU/LLM steps stay on the local subprocess path.
 """
 
 from __future__ import annotations
@@ -38,14 +29,8 @@ _RAY_OWNED_VISIBLE_DEVICE_VARS = (
 def ray_exec_enabled() -> bool:
     """Return whether GPU/serving work should run through the Ray backend.
 
-    Owner decision (ray_modify.plan.md §10.1): **single-node forced**. When
-    ``INFERENCE_OPTIMIZER_RAY_EXEC`` is unset, the backend is ON for single-node
-    and OFF for multi-node (multi-node is out of scope this round — its
-    maintainer mirrors the single-node changes separately). The env var remains
-    an explicit override / emergency escape valve.
-
-    Returns:
-        ``True`` when the Ray execution backend should be used.
+    When ``INFERENCE_OPTIMIZER_RAY_EXEC`` is unset: ON for single-node, OFF for
+    multi-node. The env var is an explicit override / emergency escape valve.
     """
     val = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower()
     if val in {"1", "true", "yes", "on"}:
@@ -61,14 +46,8 @@ def ray_exec_enabled() -> bool:
 def _should_use_ray_backend() -> bool:
     """Like :func:`ray_exec_enabled` but stays OFF under pytest when unset.
 
-    The whole test suite runs the local subprocess path by default (no Ray
-    cluster needed); an explicit ``INFERENCE_OPTIMIZER_RAY_EXEC=1`` still opts a
-    specific test into the Ray path. Execution/materialization call sites use
-    this (not the bare flag) so production single-node is forced onto Ray while
-    tests stay hermetic.
-
-    Returns:
-        ``True`` when GPU/serving work should route through the Ray backend.
+    Tests run the local subprocess path by default; ``INFERENCE_OPTIMIZER_RAY_EXEC=1``
+    still opts a specific test into the Ray path.
     """
     val = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower()
     if val in {"1", "true", "yes", "on"}:
@@ -326,18 +305,10 @@ class RayExecutionBackend:
 
 
 def resolve_shared_artifact_root(session_dir: Path | str) -> Path:
-    """Resolve the session-level shared root for per-task artifacts (§4.6).
+    """Resolve the shared artifact root for per-task artifacts.
 
-    Single-node: the local session dir (a Ray worker on the same host sees it).
-    Multi-node: the shared filesystem root (``$HYPERLOOM_MN_PROFILE_TRACE_DIR``
-    or the session dir under the shared mount) so a worker on another node can
-    write artifacts the collector still resolves by relative path.
-
-    Args:
-        session_dir: The session directory.
-
-    Returns:
-        The shared artifact root path.
+    Single-node: the local session dir. Multi-node: ``$HYPERLOOM_MN_PROFILE_TRACE_DIR``
+    (or the session dir) so workers on other nodes can still write artifacts.
     """
     session_dir = Path(session_dir)
     mn_root = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
@@ -349,26 +320,11 @@ def resolve_shared_artifact_root(session_dir: Path | str) -> Path:
 
 
 def strip_visible_devices_from_config(config_path: Path | str) -> Path:
-    """Drop ``benchmark.envs.*_VISIBLE_DEVICES`` from a benchmark YAML (§12 T2).
+    """Drop ``benchmark.envs.*_VISIBLE_DEVICES`` from a benchmark YAML.
 
-    In the Ray execution branch the worker already has ``*_VISIBLE_DEVICES`` set
-    by Ray's ``num_gpus`` lease. Leaving the device list in the YAML would let
-    Magpie re-export it and override Ray's assignment (the server would target
-    the wrong physical cards), so it is stripped **at execution time** — only on
-    the branch that actually runs through Ray. The local fallback path keeps the
-    YAML untouched (its server relies on the YAML's device list).
-
-    Best-effort: on any read/parse error the original path is returned unchanged
-    (the run then behaves exactly as before, keeping the device list). A no-op
-    (returns the input path) when no device var is present, so byte-identical
-    configs are not needlessly rewritten.
-
-    Args:
-        config_path: Path to the materialized benchmark YAML.
-
-    Returns:
-        The path to a sibling ``<name>.ray.yaml`` with the device vars removed,
-        or the original path when nothing changed / on error.
+    Ray sets device vars in the worker; leaving them in the YAML would override
+    Ray's assignment. Best-effort: returns the original path on any parse/write
+    error, and is a no-op when no device var is present.
     """
     import yaml
 
