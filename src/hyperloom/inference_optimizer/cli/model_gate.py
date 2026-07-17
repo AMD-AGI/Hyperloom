@@ -240,7 +240,7 @@ def _load_model_arch(
         dict: The advisory architecture profile, or ``{}`` when missing,
             unreadable, invalid, or stale.
     """
-    from hyperloom.common.model_paths import model_identity_candidates
+    from hyperloom.common.model_paths import model_identities_match
     arch_path = workspace_root / "model_arch.json"
     try:
         raw = arch_path.read_text(encoding="utf-8")
@@ -265,16 +265,14 @@ def _load_model_arch(
             "model_arch_missing_model_name: %s (cannot verify freshness)", arch_path
         )
         return {}
-    launched = model_identity_candidates(model_name) | model_identity_candidates(
-        launched_model
-    )
-    if not (model_identity_candidates(declared) & launched):
+    if not model_identities_match(declared, model_name, launched_model):
         logging.warning(
             "model_arch_stale_or_mismatch: %s declares model_name=%r but "
-            "launching %r — ignoring",
+            "launching model_name=%r (--model=%r) — ignoring",
             arch_path,
             declared,
             model_name,
+            launched_model,
         )
         return {}
     return data

@@ -136,6 +136,21 @@ def test_load_model_arch_true_stale_ignored_with_hf_cache(tmp_path: Path):
     ) == {}
 
 
+def test_load_model_arch_cross_org_same_repo_name_ignored(tmp_path: Path):
+    """Two different orgs sharing a repo name must NOT match when both qualify org."""
+    _write(tmp_path, {**_VALID_ARCH, "model_name": "MyOrg--Llama-8B"})
+    launch = "/root/.cache/huggingface/hub/models--OtherOrg--Llama-8B/snapshots/deadbeef"
+    assert _load_model_arch(tmp_path, "deadbeef", launch) == {}
+
+
+def test_load_model_arch_bare_name_matches_any_org(tmp_path: Path):
+    """A declared clean name with no org still matches its launched org/repo form."""
+    _write(tmp_path, {**_VALID_ARCH, "model_name": "Llama-8B"})
+    launch = "/root/.cache/huggingface/hub/models--OtherOrg--Llama-8B/snapshots/deadbeef"
+    out = _load_model_arch(tmp_path, "deadbeef", launch)
+    assert out["attention"] == "MLA"
+
+
 # 2. SharedState serialization round-trip
 def test_model_arch_round_trips_through_dict():
     state = SharedState(model_name="DeepSeek-R1-0528", model_arch=dict(_VALID_ARCH))
