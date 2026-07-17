@@ -85,6 +85,57 @@ def test_load_model_arch_stale_mismatch_returns_empty(tmp_path: Path):
     assert _load_model_arch(tmp_path, "DeepSeek-R1-0528") == {}
 
 
+# 1b. HF hub cache path: launched --model is a snapshots/<hash> dir whose
+# basename is a commit hash, but the declared clean model_name must still match.
+_HF_SNAPSHOT = (
+    "/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/"
+    "snapshots/a09a35458c702b33eeacc393d103063234e8bc28"
+)
+
+
+def test_load_model_arch_matches_hf_cache_snapshot_clean_name(tmp_path: Path):
+    """Declared clean name matches an HF cache snapshot launch path."""
+    _write(tmp_path, {**_VALID_ARCH, "model_name": "Qwen2.5-7B-Instruct"})
+    out = _load_model_arch(tmp_path, "a09a35458c702b33eeacc393d103063234e8bc28", _HF_SNAPSHOT)
+    assert out["attention"] == "MLA"
+
+
+def test_load_model_arch_matches_hf_cache_snapshot_org_repo(tmp_path: Path):
+    """Declared org--repo form matches an HF cache snapshot launch path."""
+    _write(tmp_path, {**_VALID_ARCH, "model_name": "Qwen--Qwen2.5-7B-Instruct"})
+    out = _load_model_arch(tmp_path, "a09a35458c702b33eeacc393d103063234e8bc28", _HF_SNAPSHOT)
+    assert out["attention"] == "MLA"
+
+
+def test_load_model_arch_matches_hf_cache_snapshot_models_form(tmp_path: Path):
+    """Declared models--org--repo form matches an HF cache snapshot launch path."""
+    _write(tmp_path, {**_VALID_ARCH, "model_name": "models--Qwen--Qwen2.5-7B-Instruct"})
+    out = _load_model_arch(tmp_path, "a09a35458c702b33eeacc393d103063234e8bc28", _HF_SNAPSHOT)
+    assert out["attention"] == "MLA"
+
+
+def test_load_model_arch_matches_repo_id(tmp_path: Path):
+    """A bare HF repo id launch matches a declared clean name."""
+    _write(tmp_path, {**_VALID_ARCH, "model_name": "Qwen2.5-7B-Instruct"})
+    out = _load_model_arch(tmp_path, "Qwen/Qwen2.5-7B-Instruct", "Qwen/Qwen2.5-7B-Instruct")
+    assert out["attention"] == "MLA"
+
+
+def test_load_model_arch_flat_dir_still_matches(tmp_path: Path):
+    """A flat model dir basename still matches (no regression)."""
+    _write(tmp_path, {**_VALID_ARCH, "model_name": "Qwen3-8B"})
+    out = _load_model_arch(tmp_path, "Qwen3-8B", "/primus/models/Qwen3-8B")
+    assert out["attention"] == "MLA"
+
+
+def test_load_model_arch_true_stale_ignored_with_hf_cache(tmp_path: Path):
+    """A different model's leftover file is still ignored under an HF cache launch."""
+    _write(tmp_path, {**_VALID_ARCH, "model_name": "Llama-3.1-8B"})
+    assert _load_model_arch(
+        tmp_path, "a09a35458c702b33eeacc393d103063234e8bc28", _HF_SNAPSHOT
+    ) == {}
+
+
 # 2. SharedState serialization round-trip
 def test_model_arch_round_trips_through_dict():
     state = SharedState(model_name="DeepSeek-R1-0528", model_arch=dict(_VALID_ARCH))

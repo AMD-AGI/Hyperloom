@@ -238,7 +238,7 @@ def _seed_shared_state(
         model_class=args.model_class or "",
         # Advisory architecture profile; fresh-launch only. Soft-degrade to {}.
         model_arch=_load_model_arch(
-            _workspace_root_resolve(), _model_identity
+            _workspace_root_resolve(), _model_identity, str(args.model),
         ),
         # Architecture-identity tags from config.json.
         model_architectures=_cfg_tags.get("architectures", []),

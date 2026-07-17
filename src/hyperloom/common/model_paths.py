@@ -21,6 +21,41 @@ from __future__ import annotations
 from pathlib import Path
 
 
+def _normalize_identity_leaf(seg: str) -> str:
+    """Collapse a single identity segment to its bare repo name.
+
+    ``models--Qwen--Qwen2.5-7B-Instruct`` / ``Qwen--Qwen2.5-7B-Instruct`` /
+    ``Qwen/Qwen2.5-7B-Instruct`` all reduce to ``Qwen2.5-7B-Instruct``.
+    """
+    s = seg.strip().strip("/").split("/")[-1]
+    if s.startswith("models--"):
+        s = s[len("models--"):]
+    if "--" in s:
+        s = s.rsplit("--", 1)[-1]
+    return s
+
+
+def model_identity_candidates(model: str | Path | None) -> set[str]:
+    """Return casefolded identity candidates for a ``--model`` / model_name value.
+
+    Covers flat dirs, bare names, HF repo ids, and HF hub cache paths (whose
+    ``snapshots/<hash>`` basename hides the repo name in an upstream
+    ``models--org--repo`` segment). Used by the model_arch stale guard so a
+    declared clean name matches whatever launch form the CLI received.
+    """
+    raw = ("" if model is None else str(model)).strip()
+    if not raw:
+        return set()
+    p = Path(raw)
+    out = {_normalize_identity_leaf(p.name)}
+    # HF hub cache hides the repo name in a mid-path models--org--repo segment;
+    # the snapshots/<hash> basename alone cannot recover it.
+    for part in p.parts:
+        if part.startswith("models--"):
+            out.add(_normalize_identity_leaf(part))
+    return {c.casefold() for c in out if c}
+
+
 def resolve_local_model_dir(model: str | Path | None) -> Path | None:
     """Resolve a ``--model`` value (local path OR HF repo id) to a local dir.
 

@@ -406,9 +406,11 @@ Steps for the launching agent:
    `model_arch.json` at the workspace root. Do not create a subdirectory
    such as `model_arch_advisory/`; the CLI only reads the root-level
    convention file. Include `model_name` (required for the stale-file
-   guard — its basename must match the launched `--model` basename or
-   Hyperloom ignores the file). All other fields are optional; renderers
-   drop empty fields.
+   guard). Set it to the **clean model name** (e.g. `Qwen2.5-7B-Instruct`);
+   the guard normalizes launch forms — flat dirs, HF repo ids, and HF hub
+   cache `models--org--repo/snapshots/<hash>` paths — so do NOT use the
+   snapshot commit hash. All other fields are optional; renderers drop
+   empty fields.
 
 ```json
 {
