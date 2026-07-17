@@ -62,14 +62,14 @@ After that, run all remaining commands for this demo inside the same container w
 docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
 ```
 
-## Long-Horizon Gate
+## Long-Horizon Budget Mode
 
-Current Hyperloom treats `--max-hours 24` as a long-horizon run. Long-horizon cyclic macro-cycles require one of:
+Current Hyperloom can open cyclic macro-cycles for all time budgets while budget and leverage remain. `--max-hours 24` still selects long-horizon budget accounting, which uses the fixed per-cycle budget window. Long-horizon budget mode requires one of:
 
 1. `--max-hours >= 24`
 2. an unbounded run (`max_minutes == 0`)
 
-Cyclic macro-cycling is always on; the long-horizon behavior is gated purely by the budget above (`--max-hours >= 24` or an unbounded run).
+Shorter bounded runs can also reloop, but they keep charge-back phase budgeting against the remaining session time instead of the fixed per-cycle window.
 
 ## Environment
 
