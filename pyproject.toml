@@ -144,6 +144,9 @@ where = ["src"]
 ".agents/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
 ".claude/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
 ".cursor/skills/hyperloom-gpt-oss-120b-24h" = ["examples/hyperloom-gpt-oss-120b-24h/SKILL.md"]
+".agents/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
+".claude/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
+".cursor/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 
 [tool.setuptools.package-data]
 # tree-reform.MD P2.3: orchestrator/prompts/*.md moved with the

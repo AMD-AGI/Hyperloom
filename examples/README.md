@@ -185,22 +185,28 @@ framework setup choice.
 
 When setup finishes in `baremetal` mode (and `FRAMEWORK` is set), or when `.env`
 is written in `docker` mode, the setup skill offers a model demo run
-and hands off to the matching demo skill. Pick a length:
+and hands off to the matching demo skill. Pick a preset or the advanced custom
+run:
 
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
 - [`8h`](hyperloom-qwen3-14b-fp8-8h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
 - [`24h`](hyperloom-gpt-oss-120b-24h/SKILL.md) — gpt-oss-120b, long-horizon cyclic
   run.
+- [`custom advanced`](hyperloom-custom-advanced/SKILL.md) — user-selected model,
+  framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase toggles, and
+  advanced CLI flags.
 
-The demo reuses the values already in `.env`, so nothing is re-entered.
+The preset demos reuse the values already in `.env`, so nothing is re-entered.
+The custom advanced run also reuses setup values, then asks for workload and
+phase choices before launch.
 
 ## Use a Custom Model
 
-For a custom model, still start from one of the example demo skills above. Pick
-the demo whose runtime shape is closest to the model and experiment you want to
-run, then provide your model path when the skill asks for it. You can also set it
-before launching the demo:
+For a custom model with a preset workload, start from one of the fixed demo
+skills above. Pick the demo whose runtime shape is closest to the model and
+experiment you want to run, then provide your model path when the skill asks for
+it. You can also set it before launching the demo:
 
 ```bash
 export MODEL_PATH=/path/to/your/model
@@ -211,11 +217,13 @@ framework can load; a local Hugging Face-style directory should contain
 `config.json`. When `MODEL_PATH` is set and valid, the demo skill uses that
 directory instead of downloading its default model.
 
-The demo skill is still a preset workload. Replacing the model path does not
+The fixed demo skill is still a preset workload. Replacing the model path does not
 automatically retune tensor parallelism, concurrency, input/output lengths,
 precision, or the run budget. If the custom model is much larger, smaller, or
-uses a different architecture than the preset model, choose the closest preset or
-use the source/manual path to adjust the workload parameters explicitly.
+uses a different architecture than the preset model, use
+[`custom advanced`](hyperloom-custom-advanced/SKILL.md) to choose the model,
+framework, TP/EP, CONC, ISL/OSL, precision, budget, skip flags, and other
+optimizer CLI flags explicitly.
 
 ## What to Expect During a Demo
 
