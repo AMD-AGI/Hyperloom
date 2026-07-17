@@ -51,14 +51,6 @@ BLOCKED_CHILD_ENV_NAMES: frozenset[str] = frozenset(
     }
 )
 
-_SECRET_KEY_RE = re.compile(r"(?:^|_)(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)(?:_|$)", re.IGNORECASE)
-_NON_SECRET_TOKEN_ENV_NAMES: frozenset[str] = frozenset(
-    {
-        # SGLang tuning switch; TOKEN describes quantization granularity, not a credential.
-        "SGLANG_USE_AITER_FP8_PER_TOKEN",
-    }
-)
-
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -148,16 +140,6 @@ def valid_env_key(key: object) -> bool:
     return bool(_ENV_KEY_RE.fullmatch(str(key or "")))
 
 
-def is_blocked_untrusted_env_key(key: object) -> bool:
-    name = str(key or "").strip()
-    upper = name.upper()
-    return (
-        not valid_env_key(name)
-        or upper in BLOCKED_UNTRUSTED_ENV_NAMES
-        or (upper not in _NON_SECRET_TOKEN_ENV_NAMES and bool(_SECRET_KEY_RE.search(upper)))
-    )
-
-
 def is_allowed_dotenv_key(key: object) -> bool:
     name = str(key or "").strip()
     upper = name.upper()
@@ -211,7 +193,6 @@ __all__ = [
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_kernel_agent_env_key",
-    "is_blocked_untrusted_env_key",
     "scrub_child_process_env",
     "valid_env_key",
 ]
