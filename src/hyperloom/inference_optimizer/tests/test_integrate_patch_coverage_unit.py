@@ -159,6 +159,47 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch):
+    # SWSPLAT-42420 (all-or-nothing): the Critic gate must fire BEFORE setup
+    # replay / patch apply, so a forged enablement task never runs its
+    # setup_commands (no pip install / live-tree mutation) before being refused.
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    called = {"setup": False}
+
+    def _spy_setup(*args, **kwargs):
+        called["setup"] = True
+        return {"applied": [], "skipped": [], "failed": []}
+
+    monkeypatch.setattr(ip, "_run_setup_commands", _spy_setup)
+
+    class _SS:
+        def get_specialist_patch_verdict(self, tid):
+            return ""  # no verdict -> must reject before setup
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "enablement": True,
+                "setup_commands": ["pip install evil"],
+            },
+            extra={"shared_state": _SS()},
+        )
+    )
+    assert res["status"] == "rejected_by_critic"
+    assert called["setup"] is False, "setup_commands ran before the Critic gate"
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
 async def test_forged_task_bypass_env_allows_without_verdict(tmp_path, monkeypatch):
     # The out-of-band operator override still forces through with no verdict.
     session = tmp_path / "s"
