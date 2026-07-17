@@ -1239,10 +1239,78 @@ class BaselineExecutor:
             return
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or self.shared_state
+        # Session-level salvage (complements #942): the cold-start guard and the
+        # coordinator's retries each run in their own ``runs/baseline/<attempt>``
+        # dir. #942 keeps every attempt's eval output inside that attempt's
+        # ``$RESULT_DIR``, but the accuracy-stop decision runs on the *deciding*
+        # attempt -- whose dir can be empty when a prior sibling attempt already
+        # produced a valid ``results*.json``. Before halting, reuse a positive
+        # accuracy measured by any sibling attempt rather than discarding a good
+        # baseline and stopping the whole run.
+        salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
+        if salvaged is not None:
+            acc_val = float(salvaged["accuracy"])
+            result["accuracy"] = acc_val
+            result["accuracy_task"] = salvaged.get("task", "gsm8k")
+            result["accuracy_metric"] = salvaged.get("metric", "")
+            result["accuracy_source"] = salvaged.get("source_file", "")
+            result.setdefault("nonfatal_warnings", [])
+            result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
+            if shared_state is not None:
+                try:
+                    shared_state.baseline_accuracy = acc_val
+                except Exception:  # noqa: BLE001 — salvage must never break baseline
+                    log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
+            log.warning(
+                "baseline_executor: this attempt's RESULT_DIR had no accuracy, "
+                "but salvaged a valid baseline accuracy=%.4f from a sibling "
+                "attempt (%s); not stopping the run",
+                acc_val,
+                salvaged.get("source_file", ""),
+            )
+            return
         request_baseline_accuracy_stop(
             shared_state,
             context=f"baseline:{framework or 'unknown'}",
         )
+
+    def _salvage_sibling_baseline_accuracy(
+        self,
+        result: dict[str, Any],
+        framework: str | None,
+    ) -> dict[str, Any] | None:
+        """Return a positive accuracy from a sibling baseline attempt, if any.
+
+        Scans the shared ``runs/baseline`` root (the parent of this attempt's
+        ``output_dir``) so eval output written by any sibling attempt is seen.
+        Discarded warmup rounds are excluded by :func:`parse_eval_results`.
+        Best-effort: any error yields ``None`` (the caller then stops as before).
+
+        Args:
+            result: The final baseline result dict (carries ``output_dir``).
+            framework: Framework name threaded into the eval parser.
+
+        Returns:
+            The parsed eval dict when a positive accuracy is found, else
+            ``None``.
+        """
+        out = result.get("output_dir")
+        if not out:
+            return None
+        runs_root = Path(out).parent  # .../runs/baseline
+        if not runs_root.exists():
+            return None
+        try:
+            from ._accuracy_gate import parse_eval_results
+
+            eval_data = parse_eval_results(runs_root, framework=framework)
+        except Exception:  # noqa: BLE001 — salvage must never break the stop path
+            log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
+            return None
+        acc = eval_data.get("accuracy")
+        if acc is not None and float(acc) > 0.0:
+            return eval_data
+        return None
 
     async def _run_once(
         self,
