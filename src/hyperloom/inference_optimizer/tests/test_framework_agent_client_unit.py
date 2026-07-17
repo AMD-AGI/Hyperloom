@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Coverage for ``framework_agent_client``: fa binary resolution, the sync
 subprocess wrapper (success / not-found / timeout), the async phase runner

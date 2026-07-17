@@ -1,4 +1,5 @@
-# Copyright Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 """Unit coverage for the launch-flag / config-blob helpers in
 ``coordinator_helpers`` that back the GEAK handoff and resume/revalidation
