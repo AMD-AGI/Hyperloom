@@ -30,7 +30,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
-    is_allowed_workload_env_key,
+    valid_env_key,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
 from ._grid_runner import (
@@ -693,10 +693,10 @@ def materialize_config_with_envs(
         )
     safe_reference_envs, dropped_reference_envs = filter_untrusted_env_mapping(
         reference_envs,
-        allow_predicate=is_allowed_workload_env_key,
+        allow_predicate=valid_env_key,
     )
     for _rk in dropped_reference_envs:
-        log.warning("Dropping unsafe reference_envs key %s before benchmark materialization", _rk)
+        log.warning("Dropping invalid reference_envs key %s before benchmark materialization", _rk)
     for _rk, _rv in safe_reference_envs.items():
         envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
     if server_args:
@@ -719,18 +719,12 @@ def materialize_config_with_envs(
             envs[framework_env] = server_args
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
         extra_envs,
-        allow_predicate=is_allowed_workload_env_key,
+        allow_predicate=valid_env_key,
     )
     for _dk in dropped_extra_envs:
-        log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
+        log.warning("Dropping invalid extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
-    precision_from_extra = str(safe_extra_envs.get("PRECISION") or "").strip()
-    precision_from_envs = str(envs.get("PRECISION") or "").strip()
-    if precision_from_extra:
-        bench["precision"] = precision_from_extra
-    elif not precision and precision_from_envs:
-        bench["precision"] = precision_from_envs
     framework_env = server_args_env_name(bench.get("framework"))
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
     # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
