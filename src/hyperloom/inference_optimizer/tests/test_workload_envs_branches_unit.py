@@ -94,7 +94,7 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert envs["SGLANG_REMOVE_ME"] == "override"
 
 
-def test_materialize_drops_loader_env_injections(tmp_path, monkeypatch):
+def test_materialize_preserves_valid_workload_env_keys(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     _stub_server_arg_injectors(monkeypatch)
     src = tmp_path / "base.yaml"
@@ -119,12 +119,12 @@ def test_materialize_drops_loader_env_injections(tmp_path, monkeypatch):
         },
     )
     envs = bench["envs"]
-    assert "ANTHROPIC_API_KEY" not in envs
-    assert "LD_PRELOAD" not in envs
-    assert "OPENAI_API_KEY" not in envs
-    assert "PYTHONSTARTUP" not in envs
-    assert "PYTHONPATH" not in envs
-    assert "SAFE_API_KEY" not in envs
+    assert envs["ANTHROPIC_API_KEY"] == "anthropic-secret"
+    assert envs["LD_PRELOAD"] == "/tmp/evil.so"
+    assert envs["OPENAI_API_KEY"] == "secret"
+    assert envs["PYTHONSTARTUP"] == "/tmp/pwn.py"
+    assert envs["PYTHONPATH"] == "/tmp/evil"
+    assert envs["SAFE_API_KEY"] == "safe-secret"
     assert bench["precision"] == "fp8"
     assert envs["PRECISION"] == "fp8"
     assert envs["REFERENCE_ONLY_KNOB"] == "1"
