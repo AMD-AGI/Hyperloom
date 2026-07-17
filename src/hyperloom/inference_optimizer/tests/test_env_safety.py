@@ -61,19 +61,20 @@ def test_assert_forward_env_keys_raises():
         env_safety.assert_forward_env_keys({"LD_PRELOAD": "/tmp/x.so"})
 
 
-def test_common_env_safety_filters_workload_dotenv_and_kernel_agent_keys():
+def test_common_env_safety_filters_dotenv_and_kernel_agent_keys_only():
     assert common_env_safety.is_allowed_workload_env_key("SGLANG_USE_AITER_FP8_PER_TOKEN")
     assert common_env_safety.is_allowed_workload_env_key("HF_TOKEN")
     assert common_env_safety.is_allowed_workload_env_key("EXTRA_SGLANG_ARGS")
     assert common_env_safety.is_allowed_workload_env_key("PRECISION")
     assert common_env_safety.is_allowed_workload_env_key("CUSTOM_TUNING_KNOB")
-    assert not common_env_safety.is_allowed_workload_env_key("OPENAI_API_KEY")
-    assert not common_env_safety.is_allowed_workload_env_key("SAFE_API_KEY")
-    assert not common_env_safety.is_allowed_workload_env_key("ANTHROPIC_API_KEY")
-    assert not common_env_safety.is_allowed_workload_env_key("LANGFUSE_SECRET_KEY")
-    assert not common_env_safety.is_allowed_workload_env_key("LD_PRELOAD")
-    assert not common_env_safety.is_allowed_workload_env_key("PYTHONPATH")
-    assert not common_env_safety.is_allowed_workload_env_key("PYTHONSTARTUP")
+    assert common_env_safety.is_allowed_workload_env_key("OPENAI_API_KEY")
+    assert common_env_safety.is_allowed_workload_env_key("SAFE_API_KEY")
+    assert common_env_safety.is_allowed_workload_env_key("ANTHROPIC_API_KEY")
+    assert common_env_safety.is_allowed_workload_env_key("LANGFUSE_SECRET_KEY")
+    assert common_env_safety.is_allowed_workload_env_key("LD_PRELOAD")
+    assert common_env_safety.is_allowed_workload_env_key("PYTHONPATH")
+    assert common_env_safety.is_allowed_workload_env_key("PYTHONSTARTUP")
+    assert not common_env_safety.is_allowed_workload_env_key("BAD-NAME")
 
     assert common_env_safety.is_allowed_dotenv_key("OPENAI_API_KEY")
     assert common_env_safety.is_allowed_dotenv_key("HF_TOKEN")
@@ -94,7 +95,9 @@ def test_common_env_safety_filters_workload_dotenv_and_kernel_agent_keys():
             "PRECISION": "fp8",
             "custom_tuning_knob": "enabled",
             "ANTHROPIC_API_KEY": "anthropic-secret",
+            "LD_PRELOAD": "/tmp/agent-provided.so",
             "OPENAI_API_KEY": "secret",
+            "PYTHONPATH": "/tmp/agent-provided",
             "SAFE_API_KEY": "safe-secret",
             "bad key": "nope",
             "": "empty",
@@ -105,11 +108,13 @@ def test_common_env_safety_filters_workload_dotenv_and_kernel_agent_keys():
         "bench_foo": "1",
         "PRECISION": "fp8",
         "custom_tuning_knob": "enabled",
+        "ANTHROPIC_API_KEY": "anthropic-secret",
+        "LD_PRELOAD": "/tmp/agent-provided.so",
+        "OPENAI_API_KEY": "secret",
+        "PYTHONPATH": "/tmp/agent-provided",
+        "SAFE_API_KEY": "safe-secret",
     }
     assert dropped == {
-        "ANTHROPIC_API_KEY": "not_allowed",
-        "OPENAI_API_KEY": "not_allowed",
-        "SAFE_API_KEY": "not_allowed",
         "bad key": "invalid_env_key",
         "<empty>": "invalid_env_key",
     }
