@@ -55,8 +55,8 @@ def _checkpoint_create_rayjob_state(
     """Persist ``rayjob_id`` as soon as SaFE returns it, so a concurrent ``create-rayjob`` doesn't leak a second RayJob.
 
     Args:
-        wid (str): The SaFE workload id to checkpoint.
-        workspace (str): The SaFE workspace the workload belongs to.
+        wid (str): The workload id to checkpoint.
+        workspace (str): The Kubernetes namespace the workload runs in.
         args (argparse.Namespace): Parsed ``create-rayjob`` args (supplies
             ``nodes`` / ``gpus_per_node`` / ``image``).
     """
@@ -102,8 +102,8 @@ def _write_rayjob_meta(
     filesystem errors are logged at WARN and swallowed.
 
     Args:
-        wid (str): The SaFE workload (RayJob) id.
-        workspace (str): The SaFE workspace.
+        wid (str): The workload (RayJob) id.
+        workspace (str): The Kubernetes namespace.
         session_id (str | None): The sandbox session id (used as the filename);
             the write is skipped when empty.
         owner_id (str | None): The owning sandbox workload id, if any.
