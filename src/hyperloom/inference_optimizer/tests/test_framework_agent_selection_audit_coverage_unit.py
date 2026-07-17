@@ -318,7 +318,7 @@ def test_ranker_client_builds_from_env(coord: Coordinator, monkeypatch) -> None:
     pytest.importorskip("openai")
     coord._fa_ranker_client = None  # type: ignore[attr-defined]
     coord._proposal_scorer = None  # type: ignore[attr-defined]
-    monkeypatch.setenv("SAFE_API_KEY", "sk-test")
+    monkeypatch.setenv("SAFE_API_KEY", "safe-test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://gateway.example/v1")
     client = coord._framework_agent_ranker_client()
     assert client is not None

@@ -107,8 +107,8 @@ def _install_fake_sdk(monkeypatch, client: _FakeClient) -> None:
 def _enable_env(monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "1")
     monkeypatch.setenv("LANGFUSE_HOST", "https://lf.test")
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "langfuse-public-value")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "langfuse-secret-value")
 
 
 def _write_manifest(session_dir: Path, **fields) -> None:
@@ -1065,7 +1065,7 @@ def test_receipt_counts_and_redaction_when_enabled(tmp_path, monkeypatch):
     # Pre-flush: not final yet.
     assert r["counts_final"] is False
     blob = json.dumps(r)
-    assert "pk-test" not in blob and "sk-test" not in blob
+    assert "langfuse-public-value" not in blob and "langfuse-secret-value" not in blob
 
 
 def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):

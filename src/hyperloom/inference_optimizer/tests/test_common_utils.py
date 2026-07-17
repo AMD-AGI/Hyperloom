@@ -232,14 +232,14 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
     assert exc.value.code == 2
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test-key")
     credentials._validate_credentials()
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    credentials._reset_claude_config_to_upstream("sk-ant", "https://anthropic.example")
+    credentials._reset_claude_config_to_upstream("anthropic-test-key", "https://anthropic.example")
     cfg_path = tmp_path / ".claude" / "config.json"
     payload = json.loads(cfg_path.read_text(encoding="utf-8"))
-    assert payload["primaryApiKey"] == "sk-ant"
+    assert payload["primaryApiKey"] == "anthropic-test-key"
     assert payload["customApiUrl"] == "https://anthropic.example"
     assert oct(cfg_path.stat().st_mode & 0o777) == "0o600"
     credentials._reset_claude_config_to_upstream("ignored", "https://anthropic.example")

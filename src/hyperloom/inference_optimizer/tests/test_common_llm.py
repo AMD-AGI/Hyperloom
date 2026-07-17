@@ -34,7 +34,7 @@ def test_openai_chat_completions_posts_and_returns_content(monkeypatch: pytest.M
 
     result = llm.call_openai_chat_completions(
         base_url="https://openai.example/v1/",
-        api_key="sk-test",
+        api_key="openai-test-key",
         model="m",
         system="sys",
         user="user",
@@ -45,7 +45,7 @@ def test_openai_chat_completions_posts_and_returns_content(monkeypatch: pytest.M
 
     assert result == "hello"
     assert captured["url"] == "https://openai.example/v1/chat/completions"
-    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+    assert captured["headers"]["Authorization"] == "Bearer openai-test-key"
     assert captured["body"]["messages"][0]["content"] == "sys"
     assert captured["body"]["temperature"] == 0.0
     assert captured["timeout"] == 3.0

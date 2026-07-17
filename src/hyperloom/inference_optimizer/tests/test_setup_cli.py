@@ -252,7 +252,7 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
         "\n".join(
             [
                 "HYPERLOOM_LLM_MODE=deepseek",
-                "DEEPSEEK_API_KEY=sk-deepseek",
+                "DEEPSEEK_API_KEY=deepseek-test-key",
                 "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic",
                 "OPENAI_BASE_URL=https://gateway.example/v1",
                 "OPENAI_API_KEY=stale-openai-key",
@@ -306,7 +306,7 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
     subprocess.run(["bash", str(runner)], check=True)
 
     text = dotenv.read_text(encoding="utf-8")
-    assert "DEEPSEEK_API_KEY=sk-deepseek" in text
+    assert "DEEPSEEK_API_KEY=deepseek-test-key" in text
     assert "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic" in text
     assert "OPENAI_BASE_URL=" not in text
     assert "OPENAI_API_KEY=" not in text
@@ -320,7 +320,7 @@ def test_baremetal_setup_authoritative_deepseek_env_does_not_require_openai(tmp_
         "ANTHROPIC_BASE_URL=\n"
         "ANTHROPIC_API_KEY=\n"
         "SAFE_API_KEY=\n"
-        "DEEPSEEK_API_KEY=sk-deepseek\n"
+        "DEEPSEEK_API_KEY=deepseek-test-key\n"
         "DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic\n"
     )
 
@@ -351,7 +351,7 @@ def test_install_preflights_accept_deepseek_only_without_openai(tmp_path: Path):
                     f"REPO_ROOT={tmp_path}",
                     "CHECK_ONLY=0",
                     "DRY_RUN=0",
-                    "DEEPSEEK_API_KEY=sk-deepseek",
+                    "DEEPSEEK_API_KEY=deepseek-test-key",
                     "log() { :; }",
                     "warn() { :; }",
                     'die() { echo "$*" >&2; exit 99; }',
@@ -631,7 +631,7 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     dotenv.write_text(
         "\n".join(
             [
-                "ANTHROPIC_API_KEY=sk-ant-real-key",
+                "ANTHROPIC_API_KEY=anthropic-real-key",
                 "ANTHROPIC_BASE_URL=https://api.anthropic.com",
                 "HYPERLOOM_RUN_MODE=baremetal",
             ]
@@ -652,7 +652,7 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
                 "CHECK_ONLY=0",
                 "DRY_RUN=0",
                 "_ANTHROPIC_BASE_URL_VAL=https://api.anthropic.com",
-                "_ANTHROPIC_KEY_VAL=sk-ant-real-key",
+                "_ANTHROPIC_KEY_VAL=anthropic-real-key",
                 "_OPENAI_BASE_URL_VAL=",
                 "_OPENAI_KEY_VAL=",
                 "GEAK_API_KEY_VAL=",
@@ -692,10 +692,10 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     kernel_text = kernel_env.read_text(encoding="utf-8")
     dotenv_text = dotenv.read_text(encoding="utf-8")
     # .env must still carry the Anthropic creds after install.
-    assert "ANTHROPIC_API_KEY=sk-ant-real-key" in dotenv_text
+    assert "ANTHROPIC_API_KEY=anthropic-real-key" in dotenv_text
     assert "ANTHROPIC_BASE_URL=https://api.anthropic.com" in dotenv_text
     # kernel-agent env mirrors the same Anthropic values and no OpenAI leak.
-    assert "export ANTHROPIC_API_KEY='sk-ant-real-key'" in kernel_text
+    assert "export ANTHROPIC_API_KEY='anthropic-real-key'" in kernel_text
     assert "export ANTHROPIC_BASE_URL='https://api.anthropic.com'" in kernel_text
     assert "export OPENAI_API_KEY=" not in kernel_text
     assert "OPENAI_API_KEY=" not in dotenv_text
