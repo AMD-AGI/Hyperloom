@@ -103,6 +103,44 @@ def test_all_phase_budget_pct_spellings_parse() -> None:
     assert normalized["CLOSE"] == pytest.approx(0.03)
 
 
+def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
+    """The 3h demo budget stays normalized after disabling framework/kernel.
+
+    The demo passes explicit EXPLORE/SWEEP caps because disabled phase shares are
+    redistributed onto the remaining work phases. A lone EXPLORE=0.95 override
+    would combine with defaults to over-budget after redistribution.
+    """
+    args = _parse_optimize(
+        [
+            "--max-hours",
+            "3",
+            "--max-minutes-explore-pct",
+            "0.46",
+            "--max-minutes-sweep-pct",
+            "0.01",
+            "--no-framework-agent",
+            "--no-kernel",
+            "--no-enable-conc-sweep",
+        ]
+    )
+    normalized = normalize_budget_pct(cli._build_phase_budget_pct(args))
+    assert sum(normalized.values()) == pytest.approx(1.0)
+
+    out = redistribute_budget_pct(
+        normalized,
+        explore_enabled=not args.no_explore,
+        kernel_enabled=not args.no_kernel,
+        framework_enabled=not args.no_framework_agent,
+    )
+    assert out[PHASE_FRAMEWORK_AGENT] == 0.0
+    assert out[PHASE_KERNEL_AGENT] == 0.0
+    assert out["PRELUDE"] == pytest.approx(0.03)
+    assert out["CLOSE"] == pytest.approx(0.02)
+    assert out["EXPLORE"] == pytest.approx(0.9297872340425532)
+    assert out["SWEEP"] == pytest.approx(0.02021276595744681)
+    assert sum(out.values()) == pytest.approx(1.0)
+
+
 def test_optimize_path_is_wired_to_helper() -> None:
     """Guard: the live optimize path must build the budget via the helper.
 
