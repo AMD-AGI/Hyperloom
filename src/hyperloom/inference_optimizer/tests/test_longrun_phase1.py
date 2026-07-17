@@ -126,8 +126,7 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
     assert evidence["reloop_blocked"] == "insufficient_remaining"
 
 
-def test_exactly_24h_is_long_run(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CYCLIC_PHASES", "1")
+def test_exactly_24h_is_long_run():
     st = _sweep_state(max_minutes=24 * 60, started_hours_ago=1.0)
     assert ps.is_long_run(st) is True
     reloop, ev = ps.should_reloop_to_explore(st)
