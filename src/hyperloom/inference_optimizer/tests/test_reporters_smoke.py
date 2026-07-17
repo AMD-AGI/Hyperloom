@@ -200,21 +200,29 @@ def test_geak_not_attempted_never_emits_kept_decision() -> None:
             )
 
 
-def test_attribution_method_marks_single_source_when_path_len_1() -> None:
+def test_attribution_unattributed_when_no_validated_split_path_len_1() -> None:
+    # With no validated source_breakdown, a single action_path entry must NOT
+    # be stamped "100% via 1 KEEP" (it may be a seeded/warm-replayed entry).
     r = render_session_report(_fixture_breakdown())
     g = r.global_facts
-    assert g.attribution_method.startswith("single-source")
+    assert g.attribution_method.startswith("unattributed")
     assert g.gain_attribution_lines, "expected at least one attribution line"
-    assert g.gain_attribution_lines[0].startswith("100% via 1 explore KEEP")
+    line = g.gain_attribution_lines[0]
+    assert "unattributed" in line
+    assert "KEEP" not in line
+    assert "explore" in line
 
 
-def test_legacy_backends_action_path_still_attributed() -> None:
+def test_legacy_backends_action_path_reported_as_unattributed() -> None:
     bd = _fixture_breakdown()
     bd["final"]["action_path"] = ["backends:vllm_kv_fp8"]
 
     r = render_session_report(bd)
 
-    assert r.global_facts.gain_attribution_lines[0].startswith("100% via 1 backends KEEP")
+    line = r.global_facts.gain_attribution_lines[0]
+    assert "unattributed" in line
+    assert "KEEP" not in line
+    assert "backends:vllm_kv_fp8" in line
 
 
 def test_legacy_source_buckets_survive_alongside_explore() -> None:
