@@ -237,7 +237,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    explicit operator override — that skips both the clone and the SHA
    pin:
    ```bash
-   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}/TraceLens}"
+   export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens}"
    cd "$TRACELENS_ROOT"
    pip install -e .
    TraceLens_generate_perf_report_pytorch_inference --help
@@ -248,35 +248,36 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
 
 ---
 
-## TraceLens root dangling after the `/tmp` to `/opt` default move
+## TraceLens root dangling after a deps-cache default change
 
 **Symptom**: `trace_analyze` fails with `TraceLens root not found` or
 `incomplete (not a git checkout)` even after re-running `install.sh`,
 and the runtime never self-heals the checkout.
 
-**Cause**: The open-source deps default moved from the ephemeral
-`${TMPDIR:-/tmp}/hyperloom/open-source-repos` to the pod-internal
-`/opt/hyperloom/open-source-repos`. A stale `kernel-agent.env.sh` or
-`.env` that still pins `TRACELENS_ROOT` to the old `/tmp/...` path is
-treated as an explicit operator override — self-heal is scoped to the
-installer-managed default only, so a non-default `/tmp` path is never
-auto-re-cloned and fails fast once `/tmp` is reaped.
+**Cause**: The open-source deps now default to the writable, repo-local
+`${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}`, cloned per revision as
+`TraceLens@<sha>`. A stale `kernel-agent.env.sh` or `.env` that still
+pins `TRACELENS_ROOT` to an old path (e.g. `/tmp/...` or
+`/opt/hyperloom/open-source-repos/...`) is treated as an explicit
+operator override — self-heal is scoped to the installer-managed default
+only, so a non-default path is never auto-re-cloned and fails fast when
+that path is missing or reaped.
 
 **Fix**: Pick one:
 
 1. **Re-run the installer (preferred).** Remove the stale pin so the
-   default is re-resolved to `/opt`, then reinstall:
+   default is re-resolved to the cache root, then reinstall:
    ```bash
-   unset TRACELENS_ROOT   # remove any hard-coded /tmp path from env or .env first
+   unset TRACELENS_ROOT   # remove any hard-coded old path from env or .env first
    bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```
-   The installer rewrites `kernel-agent.env.sh` with the `/opt` default
-   and clones and pins TraceLens there.
-2. **Point the deps root at a writable directory** if the pod runs as
-   non-root or `/opt` is read-only (the installer `mkdir -p`s the root,
-   so it must be writable):
+   The installer rewrites `kernel-agent.env.sh` with the
+   `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` default and
+   clones and pins TraceLens there.
+2. **Point the deps cache at a different writable directory** (e.g. a
+   shared or larger volume):
    ```bash
-   export HYPERLOOM_OPEN_SOURCE_ROOT="$USER_DATA_PATH/open-source-repos"
+   export HYPERLOOM_CACHE_DIR="$USER_DATA_PATH/.hyperloom-cache"
    unset TRACELENS_ROOT
    bash "$REPO_ROOT/src/hyperloom/agents/kernel/scripts/install.sh"
    ```

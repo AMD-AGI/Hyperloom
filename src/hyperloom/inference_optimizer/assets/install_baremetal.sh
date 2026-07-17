@@ -105,7 +105,7 @@ prompt (TTY + not --yes). Configure Anthropic
 (DEEPSEEK_API_KEY, optional DEEPSEEK_BASE_URL), matching runtime credential
 rules.
 Env overrides honored: REPO_ROOT,
-USER_DATA_PATH, HYPERLOOM_RUNTIME_DIR, HYPERLOOM_DEPS_ROOT / _OPEN_SOURCE_ROOT,
+USER_DATA_PATH, HYPERLOOM_RUNTIME_DIR, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON, TRACELENS_INTERNAL_ROOT,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
@@ -373,7 +373,7 @@ PY
 
 # Return the shared dependency root used for bare-metal framework sources.
 framework_deps_root() {
-  printf '%s' "${HYPERLOOM_OPEN_SOURCE_ROOT:-${HYPERLOOM_DEPS_ROOT:-/opt/hyperloom/open-source-repos}}"
+  printf '%s' "${HYPERLOOM_CACHE_DIR:-${HYPERLOOM_DEPS_ROOT:-${REPO_ROOT}/.cache}}"
 }
 
 # Return the first visible AMD GPU arch, e.g. gfx942.
@@ -1272,7 +1272,7 @@ main() {
 
   if [ -n "$DEPS_ROOT_ARG" ]; then
     export HYPERLOOM_DEPS_ROOT="$DEPS_ROOT_ARG"
-    export HYPERLOOM_OPEN_SOURCE_ROOT="$DEPS_ROOT_ARG"
+    export HYPERLOOM_CACHE_DIR="$DEPS_ROOT_ARG"
   fi
 
   log "REPO_ROOT=${REPO_ROOT}"

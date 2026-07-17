@@ -142,11 +142,10 @@ HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
 # Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
-# Pod-local base for auto-cloned open-source deps, decoupled from USER_DATA_PATH
-# so a shared (WekaFS) workspace root never collocates concurrent pods' checkouts.
-# Default is a pod-internal, non-ephemeral dir (NOT /tmp): a tmp-reaper wiping
-# /tmp mid-run left TRACELENS_ROOT dangling and broke trace_analyze (#722).
-_open_source_root="${HYPERLOOM_OPEN_SOURCE_ROOT:-/opt/hyperloom/open-source-repos}"
+# Writable, repo-local base for auto-cloned deps: $HYPERLOOM_CACHE_DIR else
+# $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
+# wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
+_open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
 # tree-reform.MD P2.5: kernel-agent/framework-agent live under the hyperloom
 # package tree in both source and pip-installed layouts. A missing pyproject at
 # REPO_ROOT means setup is running from a pip --target workspace rather than a
@@ -164,6 +163,46 @@ FRAMEWORK_AGENT_ROOT="${FRAMEWORK_AGENT_ROOT:-${_hyperloom_pkg_root}/agents/fram
 # installer/venv, so FRAMEWORK_AGENT_ROOT now just points at that in-tree
 # package (still overridable) and the old chain_framework_agent() delegation
 # below is a no-op.
+# Resolve a git ref to a commit SHA: 7-40 hex passes through; branch/tag via
+# ls-remote (falls back to the raw ref). The SHA keys the per-revision cache.
+_resolve_ref_sha() {
+  local repo="$1" ref="$2" sha=""
+  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  sha="$(git ls-remote "$repo" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
+  if [ -z "$sha" ]; then
+    # Loud, not silent: a raw-ref cache key drops the per-revision guarantee.
+    echo "[inference-optimizer WARN] could not resolve '$ref' at $repo to a commit SHA (network or bad ref); using '$ref' as the per-revision cache key -- stale-checkout guard weakened. Pin *_REF to a 40-hex SHA or restore network access." >&2
+    sha="$ref"
+  fi
+  printf '%s' "$sha"
+}
+
+# Bound cache growth: keep the newest $HYPERLOOM_CACHE_KEEP (default 3, 0 disables)
+# <name>@<sha> checkouts per dep, prune older ones. A moving branch ref (GEAK
+# `main`) resolves to a new SHA each HEAD bump, so the cache would grow unbounded.
+# Lock-held; the just-installed revision is newest, so always retained.
+_prune_dep_cache() {
+  local keep="${HYPERLOOM_CACHE_KEEP:-3}"
+  case "$keep" in ''|*[!0-9]*) keep=3 ;; esac
+  [ "$keep" -eq 0 ] && return 0
+  local name stale listing
+  for name in "$@"; do
+    # `|| true`: no-match glob fails `ls` under `set -euo pipefail`. Collect, then act.
+    listing="$(ls -dt "${_open_source_root}/${name}@"* 2>/dev/null | tail -n +"$((keep + 1))" || true)"
+    [ -n "$listing" ] || continue
+    while IFS= read -r stale; do
+      [ -n "$stale" ] && [ -d "$stale" ] || continue
+      log "pruning stale dep cache (keeping newest ${keep} ${name}@*): ${stale}"
+      rm -rf -- "$stale" 2>/dev/null || true
+    done <<EOF
+$listing
+EOF
+  done
+}
+
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a release commit/tag instead of the default branch. Operators can
 # re-pin with MAGPIE_REF=<tag|sha>.
@@ -183,7 +222,8 @@ INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX
 # per-install clone is reproducible (same rationale as MAGPIE_REF). Operators
 # can re-pin with INFERENCEX_REF=<tag|branch|sha>.
 INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
-INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX}"
+_INFERENCEX_SHA="$(_resolve_ref_sha "$INFERENCEX_REPO" "$INFERENCEX_REF")"
+INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX@${_INFERENCEX_SHA}}"
 
 DRY_RUN=0
 CHECK_ONLY=0
@@ -1146,6 +1186,7 @@ PY
 _write_specialist_secret_env_opt_in
 _probe_framework_source_roots
 
+_prune_dep_cache "InferenceX" "Magpie"
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
 log "  HYPERLOOM_KERNEL_AGENT_ROOT=${HYPERLOOM_KERNEL_AGENT_ROOT}"
