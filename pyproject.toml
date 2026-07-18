@@ -293,6 +293,13 @@ markers = [
 #     consumed by the runtime, not import-level libraries
 [tool.coverage.run]
 branch = false
+# Record source paths relative to the repo root, not as absolute
+# ``/home/runner/work/...`` paths. Required for the sharded CI: each shard runs
+# on a separate GitHub runner and its ``.coverage.shard*`` is merged by a
+# dependent job via ``coverage combine``. Without this, differing absolute
+# checkout paths across runners would make combine treat the same file as
+# distinct entries, corrupting the merged totals. Harmless for local/serial use.
+relative_files = true
 source = [
     # tree-reform.MD P2.3: orchestrator moved under src/hyperloom. tree-reform.MD
     # P2.4: inference_optimizer moved under src/hyperloom too (both were
