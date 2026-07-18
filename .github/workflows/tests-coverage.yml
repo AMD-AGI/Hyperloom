@@ -81,6 +81,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+          # Cache the pip download/wheel cache keyed on the dependency spec, so
+          # the per-shard installs (this job runs total_shards x python-version
+          # times) don't re-download every run. Cache miss just falls back to a
+          # normal install.
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -91,6 +97,29 @@ jobs:
           else
             echo "::notice::OOB/ not in checkout (no pyproject.toml); skipping editable OOB install."
           fi
+
+      # Restore the shared test-timing DB (read-only). pytest-split uses it to
+      # balance shards by measured duration instead of by test count. The cache
+      # is written only on push-to-main by the ``update-durations`` job below, so
+      # PR runs (including repeated pushes to a PR) only ever read it -- no write
+      # contention, no PR-diff pollution. A miss (new branch / 7-day eviction /
+      # first rollout) simply means pytest-split falls back to count-based
+      # splitting for that run; correctness and the 90% gate are unaffected.
+      - name: Restore test durations
+        id: durations
+        uses: actions/cache/restore@v4
+        with:
+          path: .test_durations
+          # GitHub cache keys are immutable, so update-durations saves under a
+          # rolling key (``...-v1-<run_id>``). We therefore never expect an exact
+          # hit on the bare prefix here; ``restore-keys`` prefix-matching returns
+          # the MOST RECENT cache under ``test-durations-v1-``. A single shared DB
+          # covers both Python legs (3.10/3.11 timings are close enough). The
+          # prefix is version-pinned (``-v1-``) so it survives main's
+          # force-pushes and can be rotated by bumping the version.
+          key: test-durations-v1-none
+          restore-keys: |
+            test-durations-v1-
 
       - name: Run tests with coverage (shard ${{ matrix.shard }})
         id: pytest
@@ -115,6 +144,17 @@ jobs:
           print("--splits"); print(str(t.get("total_shards", 4)))
           PY
           )
+          # Duration-based splitting when the DB is present; otherwise
+          # pytest-split falls back to count-based (no flag needed). Always
+          # (re)store this shard's own timing slice so the update-durations job
+          # can merge a fresh full DB on push-to-main.
+          SPLIT_ARGS=()
+          if [ -f .test_durations ]; then
+            SPLIT_ARGS+=(--splitting-algorithm=least_duration)
+            echo "::notice::Using cached .test_durations for duration-based sharding."
+          else
+            echo "::notice::No .test_durations cache; sharding by test count this run."
+          fi
           RELAX="${COVERAGE_RELAX_FAIL_UNDER:-}"
           EXTRA=()
           if echo "$RELAX" | grep -qiE '^(1|true|yes|on)$'; then
@@ -125,8 +165,12 @@ jobs:
           # Parallel-mode data file (unique per shard) so the combine job can
           # merge every shard without clobbering. ``--group`` selects this
           # shard's slice of the ``--splits`` partition (from PARGS).
+          # ``--store-durations`` records THIS shard's per-test timings into a
+          # shard-scoped file for the update-durations merge job.
           export COVERAGE_FILE=".coverage.shard${SHARD}"
-          pytest "${PARGS[@]}" --group "${SHARD}" --cov-fail-under=0 "${EXTRA[@]}"
+          pytest "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
+            --store-durations --durations-path ".test_durations.shard${SHARD}" \
+            --cov-fail-under=0 "${EXTRA[@]}"
 
       - name: Record shard outcome
         if: always()
@@ -142,6 +186,19 @@ jobs:
           path: |
             .coverage.shard${{ matrix.shard }}
             shard-status/*.outcome
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: warn
+
+      # Upload this shard's timing slice so update-durations (push-to-main only)
+      # can merge a full fresh .test_durations. Only the 3.10 leg is uploaded to
+      # keep a single shared DB (see the restore key rationale above).
+      - name: Upload shard durations
+        if: always() && matrix.python-version == '3.10'
+        uses: actions/upload-artifact@v4
+        with:
+          name: durations-shard${{ matrix.shard }}
+          path: .test_durations.shard${{ matrix.shard }}
           include-hidden-files: true
           retention-days: 1
           if-no-files-found: warn
@@ -392,3 +449,67 @@ jobs:
         run: |
           echo "::error::One or more test shards failed (see the shard jobs' \"Run tests with coverage\" logs)."
           exit 1
+
+  # ---------------------------------------------------------------------------
+  # Refresh the shared test-timing DB. Runs ONLY on push-to-main and ONLY when
+  # every shard passed (needs: [test, coverage] + success()), so the cache is
+  # only ever updated from a complete, all-green main run -- never from a
+  # partial/failed suite and never from a PR. It merges the per-shard timing
+  # slices into one .test_durations and saves it under the fixed cache key that
+  # the test jobs restore. PRs consume this via main's cache scope (read-only).
+  # ---------------------------------------------------------------------------
+  update-durations:
+    name: update test durations (main)
+    needs: [test, coverage]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && success()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Download shard durations
+        uses: actions/download-artifact@v4
+        with:
+          pattern: durations-shard*
+          merge-multiple: true
+
+      - name: Merge shard durations into one DB
+        run: |
+          python3 <<'PY'
+          import glob, json, sys
+          merged = {}
+          files = sorted(glob.glob(".test_durations.shard*"))
+          if not files:
+              print("::warning::No shard duration files found; skipping durations refresh.")
+              sys.exit(0)
+          for f in files:
+              try:
+                  data = json.load(open(f, encoding="utf-8"))
+              except Exception as e:  # noqa: BLE001
+                  print(f"::warning::Skipping unreadable {f}: {e}")
+                  continue
+              # pytest-split writes a flat {nodeid: seconds} mapping. Shards are
+              # disjoint, so a plain update reconstructs the full-suite DB.
+              if isinstance(data, dict):
+                  merged.update(data)
+          if not merged:
+              print("::warning::Merged durations are empty; skipping refresh.")
+              sys.exit(0)
+          with open(".test_durations", "w", encoding="utf-8") as fh:
+              json.dump(merged, fh, indent=2, sort_keys=True)
+          print(f"Merged {len(files)} shard file(s) -> {len(merged)} test timings.")
+          PY
+
+      - name: Save merged durations to cache
+        if: hashFiles('.test_durations') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .test_durations
+          # Rolling key (run_id suffix) because cache entries are immutable --
+          # a fixed key would only ever save once and never refresh. The test
+          # jobs restore the newest one via the ``test-durations-v1-`` prefix.
+          # Old entries fall out via LRU / 7-day eviction on their own.
+          key: test-durations-v1-${{ github.run_id }}
