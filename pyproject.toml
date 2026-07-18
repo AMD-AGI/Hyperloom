@@ -70,10 +70,17 @@ test = [
 ci = [
     "pytest-cov>=5.0",
     "coverage>=7.0",
-    # Parallel test execution for the coverage job (``-n auto`` in
-    # ``pytest_ci_args``). pytest-cov merges the per-worker coverage data, so
-    # the reported total is identical to a serial run.
+    # In-runner parallelism (``-n`` in ``pytest_ci_args``). pytest-cov merges
+    # the per-worker coverage data, so a single job's total is identical to a
+    # serial run. GitHub-hosted ``ubuntu-latest`` on a private/internal repo is
+    # a 2-vCPU VM, so ``-n auto`` resolves to a single worker (no speedup); the
+    # CI argv pins an explicit worker count instead (see ``pytest_ci_args``).
     "pytest-xdist>=3.5",
+    # Cross-job sharding for the coverage matrix (``--splits``/``--group`` in
+    # tests-coverage.yml). Splits the suite across N GitHub jobs; each job's
+    # partial coverage is uploaded and ``coverage combine``-d in a dependent
+    # job before the fail_under gate, so the merged total matches a full run.
+    "pytest-split>=0.8",
     "tomli>=2.0.1; python_version < '3.11'",
 ]
 # Optional live-Langfuse trace push (HYPERLOOM_LANGFUSE_ENABLE=1). The local
@@ -286,6 +293,13 @@ markers = [
 #     consumed by the runtime, not import-level libraries
 [tool.coverage.run]
 branch = false
+# Record source paths relative to the repo root, not as absolute
+# ``/home/runner/work/...`` paths. Required for the sharded CI: each shard runs
+# on a separate GitHub runner and its ``.coverage.shard*`` is merged by a
+# dependent job via ``coverage combine``. Without this, differing absolute
+# checkout paths across runners would make combine treat the same file as
+# distinct entries, corrupting the merged totals. Harmless for local/serial use.
+relative_files = true
 source = [
     # tree-reform.MD P2.3: orchestrator moved under src/hyperloom. tree-reform.MD
     # P2.4: inference_optimizer moved under src/hyperloom too (both were
@@ -417,17 +431,29 @@ ignore_errors = true
 # Line coverage across all ``[tool.coverage.run].source`` trees (UT run in CI).
 fail_under = 90
 
-# GitHub Actions ``tests-coverage.yml`` reads ``pytest_ci_args`` from this table
-# using inline Python.
+# GitHub Actions ``tests-coverage.yml`` reads this table with inline Python.
 [tool.hyperloom.tests_coverage]
-# Full trailing argv for ``pytest`` in ``tests-coverage.yml`` (marker filter + cov).
+# Base trailing argv for ``pytest`` in ``tests-coverage.yml`` (marker filter +
+# coverage output). Coverage is written in parallel-data mode so each matrix
+# shard produces its own ``.coverage.*`` file; a dependent job ``coverage
+# combine``-s them before the fail_under gate, so the merged total equals a
+# full serial run. Sharding (``--splits``/``--group``) and the in-runner worker
+# count (``-n``) are appended by the workflow from ``total_shards`` /
+# ``xdist_workers`` below, not pinned here (they vary with the matrix / runner).
 pytest_ci_args = [
     "-m", "not critic_agent_e2e and not robustness_agent_e2e",
-    # Parallel workers (pytest-xdist). Coverage is merged across workers, so the
-    # total matches a serial run; cuts wall-clock roughly in half.
-    "-n", "auto",
-    "--cov=.", "--cov-report=xml", "--cov-report=term",
+    "--cov=.", "--cov-report=term",
 ]
+# In-runner pytest-xdist workers per shard job. Pinned to an explicit count
+# because GitHub-hosted ``ubuntu-latest`` on a private/internal repo is a
+# 2-vCPU VM where ``-n auto`` resolves to a single worker (verified in CI:
+# ``created: 1/1 worker``), giving no speedup. ``2`` fills both vCPUs.
+xdist_workers = 2
+# Number of GitHub matrix shards the suite is split across (pytest-split). The
+# suite is partitioned by test count into this many groups; per-shard coverage
+# is combined in a dependent job. Raising this shortens wall-clock at the cost
+# of more concurrent jobs (and Actions minutes).
+total_shards = 4
 # Repository variable name: when set to 1/true/yes/on, CI skips fail_under
 # enforcement (``--cov-fail-under=0`` + no ``coverage report --fail-under`` gate).
 relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
