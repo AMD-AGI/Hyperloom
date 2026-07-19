@@ -278,6 +278,7 @@ class DispatcherCollaborator:
                     # whole machine from ``framework_gpu_pool``; every other GPU
                     # specialist leases from ``gpu_specialist_pool``.
                     from ..specialists.profile import (
+                        holds_serving_slot,
                         uses_whole_machine_gpu_lane,
                     )
 
@@ -350,14 +351,20 @@ class DispatcherCollaborator:
                         maybe_gpu_specialist_lease,
                     )
 
-                    # Whole-machine / bench-capable specialists (gpu_research_lane)
-                    # also hold the ``serving_slot`` so Ray makes them mutually
-                    # exclusive with serving (§12 T6); the serving-disjoint pool
-                    # takes ``num_gpus`` only and can run on cards disjoint from
-                    # serving.
+                    # serving_slot (phase-3 §4 / invariant §6.3): only
+                    # bench-capable specialists that start their OWN serving
+                    # loop hold the whole-machine serving_slot mutex. Authoring-
+                    # only specialists (incl. framework authoring, which does not
+                    # self-bench — its real benchmark runs through integrate_patch
+                    # / _bench_candidate under a run_grid serving lease, §3.1)
+                    # take ``num_gpus`` only, so they share the GPU queue with
+                    # other specialists instead of blocking serving for their
+                    # whole (mostly CPU-bound authoring) lifetime. Physical GPU
+                    # mutual-exclusion with serving is still enforced by Ray's
+                    # ``num_gpus`` accounting.
                     gpu_specialist_lease = maybe_gpu_specialist_lease(
                         num_gpus=gpu_count,
-                        serving_slot=whole_machine_lane,
+                        serving_slot=holds_serving_slot(params),
                     )
                     if gpu_specialist_lease is not None:
                         extra_context["gpu_ids"] = list(range(gpu_count))
