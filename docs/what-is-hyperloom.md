@@ -15,7 +15,7 @@ the optimization search tree.
 Next, Hyperloom employs a self-evolving code optimization engine following an iterative agentic loop (Think
 → Decide → Implement → Benchmark). Arbor intelligently explores the optimization space using a Dynamic
 Specialist Agent and Knowledge Base. In parallel to Arbor, GEAK, a multi-agent GPU performance optimizer,
-optimizes hot kernels in parallel. Once optimizations are identified and validated, Hyperloom prepares
+optimizes hot kernels. Once optimizations are identified and validated, Hyperloom prepares
 the optimized code and generates a report with all proposed changes and expected performance improvements.
 This end-to-end automation enables developers to achieve significant performance improvements while
 maintaining code quality and reducing the manual effort traditionally required for GPU optimization.
