@@ -278,6 +278,25 @@ def _setup_worktree(
     return worktree_path, ""
 
 
+# §3.3: how often to poll a PENDING GPU-specialist Ray actor for its pid.
+_RAY_PENDING_POLL_INTERVAL_SEC: float = 1.0
+
+
+def _ray_specialist_pending_deadline_sec() -> float:
+    """Max seconds to wait for a GPU-specialist actor to schedule before failing.
+
+    Mirrors ``_ray_serving._RAY_SPECIALIST_SCHED_TIMEOUT_SEC`` (same env var) so
+    the async dispatch path and the legacy blocking ``start()`` agree. A pending
+    request that exceeds this becomes a structured task failure rather than an
+    unbounded stall (§3.3 / invariant §6.4: pending time is bounded and tracked
+    separately from the running wall budget).
+    """
+    try:
+        return float(os.environ.get("INFERENCE_OPTIMIZER_RAY_SPECIALIST_SCHED_TIMEOUT_SEC", "300"))
+    except (TypeError, ValueError):
+        return 300.0
+
+
 class _RayLeaseProcess:
     """``Popen``-like adapter for a specialist that runs inside a Ray actor."""
 
@@ -440,28 +459,72 @@ class SpecialistSubprocessDispatcher:
             for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
                 env.pop(var, None)
 
-        proc_started = time.monotonic()
         log_fh: Any = None
+        proc_started: float
         if gpu_lease is not None:
-            # The actor opens process.log inside its worker (same host on
-            # single-node), so the reaper below still reads it directly.
+            # §3.3 non-blocking start: submit the actor launch, then poll for
+            # the pid with ``asyncio.sleep`` between polls. This keeps the
+            # Coordinator event loop responsive while Ray schedules the actor
+            # (no blocking ``ray.get``), and — combined with the timing split
+            # below — excludes Ray *pending* time from the specialist's running
+            # wall budget. A bounded pending deadline turns a permanently
+            # unschedulable request into a structured task failure instead of an
+            # unbounded stall. The actor opens process.log inside its worker
+            # (same host on single-node), so the reaper below reads it directly.
             try:
-                pid = gpu_lease.start(
+                gpu_lease.start_async(
                     cmd,
                     env=env,
                     cwd=str(worktree or workspace),
                     log_path=str(process_log),
                 )
-            except Exception as exc:  # noqa: BLE001 — surface a start failure as a result
+            except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
                 return SpecialistSubprocessResult(
                     done_payload=None,
                     exit_code=None,
                     elapsed_seconds=0.0,
                     process_log_path=str(process_log),
-                    error=f"failed to start specialist GPU actor: {exc!r}",
+                    error=f"failed to submit specialist GPU actor: {exc!r}",
                 )
+            pending_deadline_sec = _ray_specialist_pending_deadline_sec()
+            pending_start = time.monotonic()
+            pid: int | None = None
+            while True:
+                try:
+                    pid = gpu_lease.poll_started()
+                except Exception as exc:  # noqa: BLE001 — dead actor / ray error mid-schedule
+                    gpu_lease.close()
+                    return SpecialistSubprocessResult(
+                        done_payload=None,
+                        exit_code=None,
+                        elapsed_seconds=0.0,
+                        process_log_path=str(process_log),
+                        error=f"specialist GPU actor start failed: {exc!r}",
+                    )
+                if pid is not None:
+                    break
+                pending_elapsed = time.monotonic() - pending_start
+                if pending_elapsed >= pending_deadline_sec:
+                    gpu_lease.close()
+                    return SpecialistSubprocessResult(
+                        done_payload=None,
+                        exit_code=None,
+                        elapsed_seconds=0.0,
+                        process_log_path=str(process_log),
+                        error=(
+                            f"specialist GPU actor did not schedule within "
+                            f"{pending_deadline_sec:.0f}s (Ray pending deadline); "
+                            "cluster fully occupied"
+                        ),
+                    )
+                await asyncio.sleep(_RAY_PENDING_POLL_INTERVAL_SEC)
             proc: Any = _RayLeaseProcess(gpu_lease, pid)
+            # §3.3 timing split (invariant §6.4): the wall-budget clock starts
+            # only now that a real pid exists — the Ray pending time above is
+            # excluded so a slow-to-schedule actor is never mis-reaped.
+            proc_started = time.monotonic()
         else:
+            proc_started = time.monotonic()
             log_fh = process_log.open("w", encoding="utf-8")
             try:
                 proc = subprocess.Popen(

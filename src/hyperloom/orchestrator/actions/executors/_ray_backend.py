@@ -61,6 +61,44 @@ def _should_use_ray_backend() -> bool:
     return not is_multi_node()
 
 
+def ray_gpu_specialist_exec_enabled() -> bool:
+    """Whether ``needs_gpu`` specialists route through the Ray backend.
+
+    Mirrors the gate inside
+    :func:`hyperloom.orchestrator.actions.executors._ray_serving.maybe_gpu_specialist_lease`
+    (single-node + ``INFERENCE_OPTIMIZER_RAY_EXEC`` on + not the pytest default)
+    so the dispatcher can pick the Ray admission path (§3.2 count-based pending
+    limit, physical mutex owned by Ray ``num_gpus``) over the legacy SQLite
+    physical-capacity hard gate. Multi-node / RAY_EXEC off / pytest keep the
+    legacy SQLite pool.
+
+    Returns:
+        ``True`` when GPU specialists run through Ray on this (single) node.
+    """
+    from ._multi_node_env import is_multi_node
+
+    return _should_use_ray_backend() and not is_multi_node()
+
+
+def ray_gpu_pending_limit() -> int:
+    """Max in-flight (pending + running) GPU specialists admitted to Ray at once.
+
+    Backpressure so a burst of GPU specialists cannot flood the single-node Ray
+    queue and starve serving (§3.2 / invariant §6.5). Ray still runs only as
+    many as fit ``num_gpus`` concurrently; this bounds how many may be *queued*.
+    Override via ``INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT`` (default 4,
+    floored at 1).
+
+    Returns:
+        The pending-admission ceiling (>= 1).
+    """
+    try:
+        v = int(os.environ.get("INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT", "4"))
+    except (TypeError, ValueError):
+        return 4
+    return max(1, v)
+
+
 @dataclass
 class SubprocessResult:
     """Result of a subprocess executed inside a Ray worker.

@@ -565,11 +565,72 @@ def test_gpu_specialist_lease_lifecycle(monkeypatch: pytest.MonkeyPatch):
     lease.close()  # idempotent
 
 
+def test_ray_gpu_pending_limit_default_and_override(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT", raising=False)
+    assert rb.ray_gpu_pending_limit() == 4
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT", "8")
+    assert rb.ray_gpu_pending_limit() == 8
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT", "0")
+    assert rb.ray_gpu_pending_limit() == 1  # floored at 1
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT", "junk")
+    assert rb.ray_gpu_pending_limit() == 4  # falls back on garbage
+
+
+def test_ray_gpu_specialist_exec_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    assert rb.ray_gpu_specialist_exec_enabled() is True
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "0")
+    assert rb.ray_gpu_specialist_exec_enabled() is False
+    # multi-node -> off even with RAY_EXEC=1
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    assert rb.ray_gpu_specialist_exec_enabled() is False
+
+
 def test_gpu_specialist_lease_is_alive_false_before_start():
     lease = rs.GpuSpecialistLease(num_gpus=1)
     assert lease.is_alive() is False
     assert lease.exit_code() is None
     lease.close()  # no-op, no actor
+
+
+def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.MonkeyPatch):
+    """§3.3 non-blocking start: start_async submits without blocking; poll_started
+    returns None while pending (ray.wait empty) and the pid once ready;
+    pending_seconds is > 0 while pending and 0 after the pid is obtained."""
+
+    class _FakeRayWait(_FakeRayP2):
+        def __init__(self):
+            super().__init__()
+            self.ready = False
+
+        def wait(self, refs, num_returns=1, timeout=None):
+            return (list(refs), []) if self.ready else ([], list(refs))
+
+    fake = _FakeRayWait()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    actor = _FakeGpuActor()
+    monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda n, *, serving_slot=False: actor)
+    monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
+
+    lease = rs.GpuSpecialistLease(num_gpus=2)
+    lease.start_async(["claude"], env={"A": "1"}, cwd="/tmp", log_path="/tmp/p.log")
+
+    # Pending: no pid yet, positive pending time, remote call submitted (ref
+    # stored) without blocking on a result.
+    assert lease._start_ref is not None
+    assert lease.poll_started() is None
+    assert lease.pid() is None
+    assert lease.pending_seconds() >= 0.0
+
+    # Scheduled: wait reports ready -> pid resolves, pending resets to 0.
+    fake.ready = True
+    assert lease.poll_started() == 4242
+    assert lease.pid() == 4242
+    assert lease.pending_seconds() == 0.0
+    lease.close()
 
 
 def test_maybe_gpu_specialist_lease_pytest_default_none(monkeypatch: pytest.MonkeyPatch):

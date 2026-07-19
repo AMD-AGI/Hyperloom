@@ -324,12 +324,33 @@ class DispatcherCollaborator:
                     # kill <= gpu_lease TTL <= gpu_research_lane TTL. Both TTLs
                     # come from ``_gpu_lease_ttl_sec`` so they never drift apart.
                     gpu_ttl_sec = self._gpu_lease_ttl_sec(int(task.lease_ttl_sec or 0))
-                    gpu_lease = await gpu_pool.try_acquire(
-                        count=gpu_count,
-                        holder_id=task.task_id,
-                        task_id=task.task_id,
-                        ttl_sec=gpu_ttl_sec,
+                    # §3.2: under single-node Ray the physical GPU mutex is Ray's
+                    # ``num_gpus``, not this SQLite pool. Admit by a count-based
+                    # pending limit so multiple specialists can queue on one
+                    # physical GPU (Ray time-multiplexes them) instead of the
+                    # legacy physical-capacity hard gate that pinned it to one at
+                    # a time. Off the Ray path (multi-node / RAY_EXEC off /
+                    # pytest) the SQLite pool stays the physical mutex
+                    # (invariant §6.7).
+                    from ..actions.executors._ray_backend import (
+                        ray_gpu_pending_limit,
+                        ray_gpu_specialist_exec_enabled,
                     )
+
+                    if ray_gpu_specialist_exec_enabled():
+                        gpu_lease = await gpu_pool.try_acquire_ray_observation(
+                            holder_id=task.task_id,
+                            task_id=task.task_id,
+                            pending_limit=ray_gpu_pending_limit(),
+                            ttl_sec=gpu_ttl_sec,
+                        )
+                    else:
+                        gpu_lease = await gpu_pool.try_acquire(
+                            count=gpu_count,
+                            holder_id=task.task_id,
+                            task_id=task.task_id,
+                            ttl_sec=gpu_ttl_sec,
+                        )
                     if gpu_lease is None:
                         if lease is not None:
                             await self.locks.release(lease)
