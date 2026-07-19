@@ -662,6 +662,58 @@ async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinat
     assert not coord.state.pending_proposals
 
 
+def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        task_id=task_id,
+        params={
+            "framework_agent_authoring": True,
+            "framework_agent_candidate_id": "cand-e",
+            "framework_batch_id": "batch-e",
+            "enablement": True,
+            "enablement_before_signature": {"kind": "unregistered_arch"},
+            "enablement_setup_commands": ["pip install -U vllm==0.21.0"],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: Coordinator) -> None:
+    """Regression: a config-lever ENABLEMENT deliverable must carry the
+    ``enablement`` marker + setup commands into integrate_patch, otherwise the
+    integrate result never gets ``enablement=True`` and ``_maybe_rearm_enablement``
+    no-ops — leaving ``enablement_dispatched`` stuck and the run spinning until
+    wall-clock instead of firing ``enablement_stalled``.
+    """
+    done = {
+        "proposal_set": [{"name": "v4-serve-flags", "extra_args": "--tokenizer-mode deepseek_v4"}],
+        # NEW setup command proposed by the specialist in this deliverable.
+        "setup_commands": ["pip install -U aiter"],
+    }
+    before = len(coord.state.pending_proposals)
+    await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    assert len(coord.state.pending_proposals) == before + 1
+    prop = next(iter(coord.state.pending_proposals.values()))
+    params = (prop.payload or {}).get("params") or {}
+    assert params.get("enablement") is True
+    assert params["enablement_before_signature"] == {"kind": "unregistered_arch"}
+    # Base setup (from spec_params) + new setup (from done_payload), deduped/merged.
+    assert params["enablement_setup_commands"] == ["pip install -U vllm==0.21.0", "pip install -U aiter"]
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coordinator) -> None:
+    """An enablement deliverable with NO config levers (setup-only stack upgrade)
+    must still reach integrate_patch so the stall accounting can advance."""
+    done = {"proposal_set": [], "setup_commands": ["pip install -U vllm==0.21.0"]}
+    before = len(coord.state.pending_proposals)
+    await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
+    assert len(coord.state.pending_proposals) == before + 1
+    prop = next(iter(coord.state.pending_proposals.values()))
+    params = (prop.payload or {}).get("params") or {}
+    assert params.get("enablement") is True
+    assert params.get("config_changes") == {}
+
+
 # --------------------------------------------------------------------------
 # _record_framework_agent_authored_outcome
 # --------------------------------------------------------------------------

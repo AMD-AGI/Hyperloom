@@ -1318,7 +1318,7 @@ class IntegratePatchExecutor:
         # when there is truly nothing.
         _setup_ran = bool(setup_result.get("applied"))
         if not patch_paths and not config_changes and not artifact_specs and not _setup_ran:
-            return {
+            _no_patches: dict[str, Any] = {
                 "status": "no_patches",
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
@@ -1333,6 +1333,11 @@ class IntegratePatchExecutor:
                     "this specialist task"
                 ),
             }
+            # Mark enablement so _maybe_rearm_enablement accounts this empty round
+            # toward the stall cap instead of leaving enablement_dispatched stuck.
+            if params.get("enablement"):
+                _no_patches["enablement"] = True
+            return _no_patches
 
         framework_root = _resolve_framework_root(
             params.get("framework_source_root") or None,
