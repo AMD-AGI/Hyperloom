@@ -118,6 +118,27 @@ _REMOTE_DIRECT_PATCHED_BLOCK = (
 _EVAL_CONCURRENCY_FLAG_MARKER = "--concurrent-requests"
 _EVAL_CONCURRENCY_FLAG_RE = re.compile(r"\s*--concurrent-requests\s+(?:\"\$CONC\"|\$\{CONC\}|\$CONC)")
 
+# Belt-and-suspenders for the run-time re-copy: Magpie's
+# ``_prepare_benchmark_scripts`` re-copies its (possibly still-flagged) generic
+# scripts into ``$INFERENCEX_PATH/benchmarks`` on every run, so a stray
+# ``--concurrent-requests`` can survive the strip. Teach InferenceX's
+# ``benchmark_lib.sh::run_lm_eval`` arg-parser to accept the flag (it already
+# owns a ``concurrent_requests`` local, wired into ``num_concurrent=``); this
+# turns a fatal ``Unknown parameter`` abort into a no-op. Idempotent via the
+# sentinel comment.
+_RUN_LM_EVAL_PARSER_SENTINEL = "HYPERLOOM_EVAL_CONCURRENCY_ARG"
+_RUN_LM_EVAL_PARSER_LEGACY_BLOCK = (
+    '            --top-p)          top_p="$2"; shift 2 ;;\n'
+    '            *)                echo "Unknown parameter: $1"; return 1 ;;\n'
+)
+_RUN_LM_EVAL_PARSER_PATCHED_BLOCK = (
+    '            --top-p)          top_p="$2"; shift 2 ;;\n'
+    "            # HYPERLOOM_EVAL_CONCURRENCY_ARG: accept the redundant flag\n"
+    "            # (concurrency also flows via EVAL_CONCURRENT_REQUESTS/CONC).\n"
+    '            --concurrent-requests|--concurrent_requests) concurrent_requests="$2"; shift 2 ;;\n'
+    '            *)                echo "Unknown parameter: $1"; return 1 ;;\n'
+)
+
 # InferenceX benchmark_lib.sh::run_lm_eval reads concurrency from env
 # (EVAL_CONCURRENT_REQUESTS, fallback CONC). Passing --concurrent-requests to
 # run_eval is rejected as an unknown argument.
@@ -224,6 +245,58 @@ def _resolve_benchmark_scripts_dir(
     return candidate if candidate.is_dir() else None
 
 
+def _resolve_inferencex_benchmarks_dir(
+    inferencex_dir: Path | str | None,
+) -> Path | None:
+    """Resolve InferenceX's ``benchmarks`` directory when present.
+
+    Magpie's ``_prepare_benchmark_scripts`` copies its generic ``*.sh`` scripts
+    INTO ``$INFERENCEX_PATH/benchmarks`` at run time, and those copies are what
+    actually execute (they source InferenceX's ``benchmark_lib.sh``). The
+    redundant ``--concurrent-requests`` eval flag therefore also has to be
+    scrubbed here, not just in the Magpie source dir.
+
+    Args:
+        inferencex_dir: InferenceX root override; falls back to
+            ``$INFERENCEX_PATH`` when falsy.
+
+    Returns:
+        The resolved ``benchmarks`` directory, or ``None`` when unconfigured or
+        absent on disk.
+    """
+    root: Path | None = None
+    if inferencex_dir:
+        root = Path(inferencex_dir)
+    else:
+        env = (os.environ.get("INFERENCEX_PATH") or "").strip()
+        if env:
+            root = Path(env)
+    if root is None:
+        return None
+    candidate = root / "benchmarks"
+    return candidate if candidate.is_dir() else None
+
+
+def _resolve_inferencex_benchmark_lib(
+    inferencex_dir: Path | str | None,
+) -> Path | None:
+    """Resolve InferenceX's ``benchmarks/benchmark_lib.sh`` when present.
+
+    Args:
+        inferencex_dir: InferenceX root override; falls back to
+            ``$INFERENCEX_PATH`` when falsy.
+
+    Returns:
+        The resolved ``benchmark_lib.sh`` path, or ``None`` when unconfigured
+        or absent on disk.
+    """
+    scripts_dir = _resolve_inferencex_benchmarks_dir(inferencex_dir)
+    if scripts_dir is None:
+        return None
+    candidate = scripts_dir / "benchmark_lib.sh"
+    return candidate if candidate.is_file() else None
+
+
 def _strip_eval_concurrency_flag(text: str) -> str | None:
     """Return ``text`` with the redundant ``--concurrent-requests <CONC>`` flag
     removed, or ``None`` when nothing needed changing.
@@ -296,6 +369,106 @@ def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
             _EVAL_CONCURRENCY_FLAG_MARKER,
             script,
         )
+    return ok
+
+
+def _apply_run_lm_eval_arg_patch_atomic(benchmark_lib: Path) -> bool:
+    """Teach InferenceX's ``benchmark_lib.sh::run_lm_eval`` to accept the
+    ``--concurrent-requests`` flag instead of aborting on ``Unknown parameter``.
+
+    Defence-in-depth for the run-time re-copy: even when the strip above misses
+    a script (wrong ``MAGPIE_PATH`` at strip time, or Magpie re-copies an
+    unstripped source over a stripped ``benchmarks`` copy), the parser now
+    tolerates the flag. Idempotent via the sentinel; a genuinely-unrecognised
+    parser shape returns ``False`` so the caller can warn.
+
+    Args:
+        benchmark_lib: The InferenceX ``benchmark_lib.sh`` file to patch.
+
+    Returns:
+        ``True`` when the parser already tolerates the flag or was patched to,
+        ``False`` when the expected parser block was not found or an IO step
+        failed.
+    """
+    try:
+        original = benchmark_lib.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot read %s: %s", benchmark_lib, e)
+        return False
+
+    # Already tolerant (our sentinel, or an upstream that added the flag).
+    if _RUN_LM_EVAL_PARSER_SENTINEL in original or _EVAL_CONCURRENCY_FLAG_MARKER in original:
+        return True
+
+    if _RUN_LM_EVAL_PARSER_LEGACY_BLOCK not in original:
+        log.warning(
+            "_magpie_patcher: run_lm_eval arg-parser block not found in %s; "
+            "cannot make it tolerate '--concurrent-requests'. RUN_EVAL=true "
+            "baselines may still abort if a stray flag survives the strip.",
+            benchmark_lib,
+        )
+        return False
+
+    patched = original.replace(
+        _RUN_LM_EVAL_PARSER_LEGACY_BLOCK,
+        _RUN_LM_EVAL_PARSER_PATCHED_BLOCK,
+        1,
+    )
+    if patched == original:
+        return False
+
+    if not atomic_write_text(
+        benchmark_lib,
+        patched,
+        tmp_prefix=".benchmark_lib.sh.hyperloom_",
+        log_prefix="_magpie_patcher",
+    ):
+        return False
+
+    log.info(
+        "_magpie_patcher: patched %s run_lm_eval to accept '--concurrent-requests'",
+        benchmark_lib,
+    )
+    return True
+
+
+def _apply_eval_concurrency_fixes(
+    magpie_dir: Path | str | None,
+    inferencex_dir: Path | str | None,
+) -> bool:
+    """Apply every eval-concurrency compatibility fix, independent of the
+    ``benchmarker.py`` atomic-copy patch.
+
+    Scrubs the redundant ``--concurrent-requests`` flag from the Magpie source
+    scripts dir AND the InferenceX ``benchmarks`` dir (where Magpie copies them
+    to execute), then makes InferenceX's ``run_lm_eval`` tolerant of the flag as
+    a belt for the run-time re-copy. Missing dirs / files are treated as
+    not-applicable (no failure).
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH``.
+        inferencex_dir: InferenceX root override; falls back to
+            ``$INFERENCEX_PATH``.
+
+    Returns:
+        ``True`` when every resolved target is clean / successfully patched,
+        ``False`` when a target was found in an unrecognised shape or an IO step
+        failed.
+    """
+    ok = True
+    scanned: set[Path] = set()
+    for scripts_dir in (
+        _resolve_benchmark_scripts_dir(magpie_dir),
+        _resolve_inferencex_benchmarks_dir(inferencex_dir),
+    ):
+        if scripts_dir is None or scripts_dir in scanned:
+            continue
+        scanned.add(scripts_dir)
+        if not _apply_eval_flag_patch_atomic(scripts_dir):
+            ok = False
+    benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
+    if benchmark_lib is not None and not _apply_run_lm_eval_arg_patch_atomic(benchmark_lib):
+        ok = False
     return ok
 
 
@@ -631,36 +804,57 @@ class MagpiePatchStatus:
 
 def magpie_scripts_patch_status(
     magpie_dir: Path | str | None = None,
+    inferencex_dir: Path | str | None = None,
 ) -> MagpiePatchStatus:
     """Return independent status for atomic-copy and remote-trust patches.
 
     Keeps a drift in the optional SGLang remote-client trust patch from being
     reported as a generic atomic-copy failure.
 
+    The eval-concurrency fixes (strip the redundant ``--concurrent-requests``
+    flag from the Magpie + InferenceX benchmark scripts, and make InferenceX's
+    ``run_lm_eval`` tolerant of it) are applied **independently** of the
+    ``benchmarker.py`` atomic-copy patch: a missing / stale ``benchmarker.py``
+    used to early-return and silently skip them, so an unresolved ``MAGPIE_PATH``
+    left the fatal flag live in the InferenceX copies that actually execute.
+
     Args:
         magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
             falsy.
+        inferencex_dir: InferenceX root override; falls back to
+            ``$INFERENCEX_PATH`` when falsy.
 
     Returns:
         A ``MagpiePatchStatus`` carrying the atomic-copy and remote-trust
         outcomes plus the classified ``atomic_reason``.
     """
     src = _resolve_benchmarker_path(magpie_dir)
-    if src is None:
-        log.info(
-            "_magpie_patcher: MAGPIE_PATH unset or benchmarker.py missing — skipping patch (fine for tests / dry-runs)",
-        )
-        # remote_trust_ok / eval_flag_ok True here mean "not applicable" (no
-        # Magpie tree to inspect); atomic_ok=False + reason=missing is fail-soft
-        # (install.sh warns, does not abort) and is NOT a genuine failure.
-        return MagpiePatchStatus(
-            atomic_ok=False,
-            remote_trust_ok=True,
-            atomic_reason=_ATOMIC_REASON_MISSING,
-            eval_flag_ok=True,
-        )
 
     with _file_lock(_LOCK_PATH):
+        if src is None:
+            # Eval-concurrency fixes run REGARDLESS of benchmarker.py resolution:
+            # the fatal --concurrent-requests flag lives in the generic *.sh
+            # scripts (Magpie source + the InferenceX/benchmarks copies that
+            # actually execute), not in benchmarker.py. A missing / stale
+            # benchmarker.py must NOT silently skip them.
+            eval_flag_ok = _apply_eval_concurrency_fixes(magpie_dir, inferencex_dir)
+            log.info(
+                "_magpie_patcher: MAGPIE_PATH unset or benchmarker.py missing — "
+                "skipping atomic-copy patch (fine for tests / dry-runs); "
+                "eval-concurrency fixes still applied where scripts were found "
+                "(eval_flag_ok=%s)",
+                eval_flag_ok,
+            )
+            # remote_trust_ok True here means "not applicable" (no Magpie tree to
+            # inspect); atomic_ok=False + reason=missing is fail-soft (install.sh
+            # warns, does not abort) and is NOT a genuine failure.
+            return MagpiePatchStatus(
+                atomic_ok=False,
+                remote_trust_ok=True,
+                atomic_reason=_ATOMIC_REASON_MISSING,
+                eval_flag_ok=eval_flag_ok,
+            )
+
         atomic_reason = _apply_patch_atomic_reason(src)
         atomic_ok = atomic_reason not in _ATOMIC_REASONS_GENUINE_FAILURE
         sglang_script = _resolve_sglang_mi300x_script_path(magpie_dir)
@@ -679,12 +873,10 @@ def magpie_scripts_patch_status(
                 "MAGPIE_TRUST_REMOTE_CODE=1 will not reach remote "
                 "benchmark_serving.py for custom-code models",
             )
-        scripts_dir = _resolve_benchmark_scripts_dir(magpie_dir)
-        if scripts_dir is None:
-            # No scripts/benchmark dir: nothing to scrub (not-applicable).
-            eval_flag_ok = True
-        else:
-            eval_flag_ok = _apply_eval_flag_patch_atomic(scripts_dir)
+        # Eval-concurrency fixes run LAST so the remote-trust patch on
+        # sglang_mi300x.sh still finds its (flagged) legacy run_eval block
+        # before the generic strip removes the flag from it.
+        eval_flag_ok = _apply_eval_concurrency_fixes(magpie_dir, inferencex_dir)
         return MagpiePatchStatus(
             atomic_ok=atomic_ok,
             remote_trust_ok=remote_trust_ok,
