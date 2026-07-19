@@ -1,6 +1,6 @@
 ---
 name: hyperloom-qwen3-30b-a3b-instruct-2507-24h
-description: Run a long-horizon Hyperloom Qwen3-30B-A3B-Instruct-2507 optimization session. Use when the user wants the cyclic macro-cycle behavior for a roughly 24-hour demo.
+description: Run a long-horizon Hyperloom Qwen3-30B-A3B-Instruct-2507 optimization session. Use when the user wants long-horizon budget accounting (fixed per-cycle budget window) for a roughly 24-hour demo.
 ---
 
 # Hyperloom Qwen3-30B-A3B-Instruct-2507 Long-Horizon Run

@@ -6,12 +6,27 @@ name: Tests with Coverage
 # Runs on push and pull_request for all branches. Skips when every changed file
 # matches paths-ignore (documentation-only and repo-metadata edits).
 #
-# Pytest argv for CI lives in ``pyproject.toml`` → ``[tool.hyperloom.tests_coverage]``.
+# Pytest argv for CI lives in ``pyproject.toml`` -> ``[tool.hyperloom.tests_coverage]``.
 # This workflow reads that table with inline Python.
+#
+# Parallelism has two independent layers so a 2-vCPU GitHub runner is not the
+# ceiling:
+#   1. Cross-job sharding (pytest-split): the suite is split into
+#      ``total_shards`` groups, one GitHub job each (matrix ``shard`` axis).
+#   2. In-runner workers (pytest-xdist ``-n xdist_workers``): each shard job
+#      fills its own vCPUs.
+# Effective parallelism is ``total_shards * xdist_workers`` per Python version.
+#
+# Each shard writes a partial, parallel-mode coverage data file and uploads it.
+# A dependent ``coverage`` job (one per Python version) downloads every shard's
+# data, ``coverage combine``-s them, renders the Job Summary, and enforces
+# ``fail_under``. Merging is exact -- the combined total equals a full serial
+# run -- so the 90% gate is unchanged.
+#
 # Coverage per-tree summary reads ``[tool.coverage.run].source`` the same way.
-# When ``OOB/`` is present, ``pip install -e \"./OOB\"`` enables ``agent_mcp_server``
+# When ``OOB/`` is present, ``pip install -e "./OOB"`` enables ``agent_mcp_server``
 # UTs; if absent, install is skipped (``importorskip`` in OOB tests).
-# Two matrix legs (Python 3.10 + 3.11).
+# Two Python legs (3.10 + 3.11).
 # pull_request runs use the workflow definition from the PR merge ref.
 on:
   # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
@@ -44,8 +59,160 @@ permissions:
   checks: write
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Shard matrix: (python-version x shard). Each job runs its slice of the suite
+  # with pytest-split and in-runner xdist, then uploads a partial coverage data
+  # file. No gate here -- a single shard's coverage is intentionally incomplete.
+  # ---------------------------------------------------------------------------
   test:
-    name: test (Python ${{ matrix.python-version }})
+    name: test (py${{ matrix.python-version }} shard ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+        # NOTE: keep this list length in sync with ``total_shards`` in
+        # pyproject.toml ([tool.hyperloom.tests_coverage]). GitHub matrices
+        # cannot read that value dynamically, so it is mirrored here.
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          # Cache the pip download/wheel cache keyed on the dependency spec, so
+          # the per-shard installs (this job runs total_shards x python-version
+          # times) don't re-download every run. Cache miss just falls back to a
+          # normal install.
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[test,ci]"
+          if [ -f OOB/pyproject.toml ]; then
+            pip install -e "./OOB"
+          else
+            echo "::notice::OOB/ not in checkout (no pyproject.toml); skipping editable OOB install."
+          fi
+
+      # Restore the shared test-timing DB (read-only). pytest-split uses it to
+      # balance shards by measured duration instead of by test count. The cache
+      # is written only on push-to-main by the ``update-durations`` job below, so
+      # PR runs (including repeated pushes to a PR) only ever read it -- no write
+      # contention, no PR-diff pollution. A miss (new branch / 7-day eviction /
+      # first rollout) simply means pytest-split falls back to count-based
+      # splitting for that run; correctness and the 90% gate are unaffected.
+      - name: Restore test durations
+        id: durations
+        uses: actions/cache/restore@v4
+        with:
+          path: .test_durations
+          # GitHub cache keys are immutable, so update-durations saves under a
+          # rolling key (``...-v1-<run_id>``). We therefore never expect an exact
+          # hit on the bare prefix here; ``restore-keys`` prefix-matching returns
+          # the MOST RECENT cache under ``test-durations-v1-``. A single shared DB
+          # covers both Python legs (3.10/3.11 timings are close enough). The
+          # prefix is version-pinned (``-v1-``) so it survives main's
+          # force-pushes and can be rotated by bumping the version.
+          key: test-durations-v1-none
+          restore-keys: |
+            test-durations-v1-
+
+      - name: Run tests with coverage (shard ${{ matrix.shard }})
+        id: pytest
+        continue-on-error: true
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          # Base argv + worker/shard counts come from pyproject.toml so all
+          # tuning lives in one place.
+          readarray -t PARGS < <(python3 <<'PY'
+          import pathlib
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
+          cfg = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          t = cfg["tool"]["hyperloom"]["tests_coverage"]
+          for a in t["pytest_ci_args"]:
+              print(a)
+          print("-n"); print(str(t.get("xdist_workers", 2)))
+          print("--splits"); print(str(t.get("total_shards", 4)))
+          PY
+          )
+          # Duration-based splitting when the DB is present; otherwise
+          # pytest-split falls back to count-based (no flag needed). Always
+          # (re)store this shard's own timing slice so the update-durations job
+          # can merge a fresh full DB on push-to-main.
+          SPLIT_ARGS=()
+          if [ -f .test_durations ]; then
+            SPLIT_ARGS+=(--splitting-algorithm=least_duration)
+            echo "::notice::Using cached .test_durations for duration-based sharding."
+          else
+            echo "::notice::No .test_durations cache; sharding by test count this run."
+          fi
+          RELAX="${COVERAGE_RELAX_FAIL_UNDER:-}"
+          EXTRA=()
+          if echo "$RELAX" | grep -qiE '^(1|true|yes|on)$'; then
+            # Gate is enforced later in the combine job; keep pytest-cov quiet here.
+            EXTRA=(--cov-fail-under=0)
+            echo "::notice::COVERAGE_RELAX_FAIL_UNDER is set: fail_under not enforced by pytest-cov."
+          fi
+          # Parallel-mode data file (unique per shard) so the combine job can
+          # merge every shard without clobbering. ``--group`` selects this
+          # shard's slice of the ``--splits`` partition (from PARGS).
+          # ``--store-durations`` records THIS shard's per-test timings into a
+          # shard-scoped file for the update-durations merge job.
+          export COVERAGE_FILE=".coverage.shard${SHARD}"
+          pytest "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
+            --store-durations --durations-path ".test_durations.shard${SHARD}" \
+            --cov-fail-under=0 "${EXTRA[@]}"
+
+      - name: Record shard outcome
+        if: always()
+        run: |
+          mkdir -p shard-status
+          echo "${{ steps.pytest.outcome }}" > "shard-status/py${{ matrix.python-version }}-shard${{ matrix.shard }}.outcome"
+
+      - name: Upload shard coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: covdata-py${{ matrix.python-version }}-shard${{ matrix.shard }}
+          path: |
+            .coverage.shard${{ matrix.shard }}
+            shard-status/*.outcome
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: warn
+
+      # Upload this shard's timing slice so update-durations (push-to-main only)
+      # can merge a full fresh .test_durations. Only the 3.10 leg is uploaded to
+      # keep a single shared DB (see the restore key rationale above).
+      - name: Upload shard durations
+        if: always() && matrix.python-version == '3.10'
+        uses: actions/upload-artifact@v4
+        with:
+          name: durations-shard${{ matrix.shard }}
+          path: .test_durations.shard${{ matrix.shard }}
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Combine + gate: one job per Python version. Downloads all shard artifacts
+  # for its version, ``coverage combine``-s them, renders the Job Summary, and
+  # enforces fail_under -- exactly the pre-sharding behaviour, on the merged
+  # data. Also fails if any shard's pytest run failed.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: coverage (Python ${{ matrix.python-version }})
+    needs: test
+    if: always()
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -68,34 +235,49 @@ jobs:
             echo "::notice::OOB/ not in checkout (no pyproject.toml); skipping editable OOB install."
           fi
 
-      - name: Run tests with coverage
-        id: pytest
-        continue-on-error: true
+      - name: Download shard coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: covdata-py${{ matrix.python-version }}-shard*
+          merge-multiple: true
+
+      - name: Combine shard coverage
         run: |
           set -euo pipefail
-          readarray -t PARGS < <(python3 <<'PY'
-          import pathlib
-          try:
-              import tomllib
-          except ModuleNotFoundError:
-              import tomli as tomllib
-          cfg = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
-          for a in cfg["tool"]["hyperloom"]["tests_coverage"]["pytest_ci_args"]:
-              print(a)
-          PY
-          )
-          RELAX="${COVERAGE_RELAX_FAIL_UNDER:-}"
-          EXTRA=()
-          if echo "$RELAX" | grep -qiE '^(1|true|yes|on)$'; then
-            EXTRA=(--cov-fail-under=0)
-            echo "::notice::COVERAGE_RELAX_FAIL_UNDER is set: fail_under not enforced by pytest-cov."
+          shopt -s nullglob
+          files=(.coverage.shard*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No shard coverage data files downloaded."
+            exit 1
           fi
-          pytest "${PARGS[@]}" "${EXTRA[@]}"
+          echo "Combining ${#files[@]} shard data file(s): ${files[*]}"
+          # ``combine`` consumes the parallel-mode files and writes ``.coverage``.
+          coverage combine "${files[@]}"
+          test -f .coverage || { echo "::error::coverage combine produced no .coverage"; exit 1; }
+
+      - name: Aggregate shard test outcomes
+        id: outcomes
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          failed=0
+          for f in shard-status/*.outcome; do
+            val="$(cat "$f")"
+            echo "$(basename "$f"): $val"
+            if [ "$val" != "success" ]; then
+              failed=1
+            fi
+          done
+          if [ "$failed" -eq 1 ]; then
+            echo "tests_ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tests_ok=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Coverage summary
         if: always()
         env:
-          PYTEST_OUTCOME: ${{ steps.pytest.outcome }}
+          PYTEST_OUTCOME: ${{ steps.outcomes.outputs.tests_ok == 'true' && 'success' || 'failure' }}
         run: |
           python3 <<'PY'
           from __future__ import annotations
@@ -209,7 +391,8 @@ jobs:
                   "## Coverage (UT)",
                   "",
                   f"Python {sys.version_info.major}.{sys.version_info.minor}; "
-                  "roots and CI pytest argv from `pyproject.toml`.",
+                  "roots and CI pytest argv from `pyproject.toml`. "
+                  "Combined across sharded jobs.",
                   "",
                   "### Combined measured source (all configured trees)",
                   f"**TOTAL (line): {total}**",
@@ -234,7 +417,7 @@ jobs:
           PY
 
       - name: Enforce coverage fail_under (strict mode)
-        if: always() && steps.pytest.outcome == 'success'
+        if: always() && steps.outcomes.outputs.tests_ok == 'true'
         run: |
           python3 <<'PY'
           import os
@@ -262,7 +445,71 @@ jobs:
           PY
 
       - name: Enforce test success
-        if: always() && steps.pytest.outcome == 'failure'
+        if: always() && steps.outcomes.outputs.tests_ok != 'true'
         run: |
-          echo "::error::Tests failed (see the \"Run tests with coverage\" step log)."
+          echo "::error::One or more test shards failed (see the shard jobs' \"Run tests with coverage\" logs)."
           exit 1
+
+  # ---------------------------------------------------------------------------
+  # Refresh the shared test-timing DB. Runs ONLY on push-to-main and ONLY when
+  # every shard passed (needs: [test, coverage] + success()), so the cache is
+  # only ever updated from a complete, all-green main run -- never from a
+  # partial/failed suite and never from a PR. It merges the per-shard timing
+  # slices into one .test_durations and saves it under the fixed cache key that
+  # the test jobs restore. PRs consume this via main's cache scope (read-only).
+  # ---------------------------------------------------------------------------
+  update-durations:
+    name: update test durations (main)
+    needs: [test, coverage]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && success()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Download shard durations
+        uses: actions/download-artifact@v4
+        with:
+          pattern: durations-shard*
+          merge-multiple: true
+
+      - name: Merge shard durations into one DB
+        run: |
+          python3 <<'PY'
+          import glob, json, sys
+          merged = {}
+          files = sorted(glob.glob(".test_durations.shard*"))
+          if not files:
+              print("::warning::No shard duration files found; skipping durations refresh.")
+              sys.exit(0)
+          for f in files:
+              try:
+                  data = json.load(open(f, encoding="utf-8"))
+              except Exception as e:  # noqa: BLE001
+                  print(f"::warning::Skipping unreadable {f}: {e}")
+                  continue
+              # pytest-split writes a flat {nodeid: seconds} mapping. Shards are
+              # disjoint, so a plain update reconstructs the full-suite DB.
+              if isinstance(data, dict):
+                  merged.update(data)
+          if not merged:
+              print("::warning::Merged durations are empty; skipping refresh.")
+              sys.exit(0)
+          with open(".test_durations", "w", encoding="utf-8") as fh:
+              json.dump(merged, fh, indent=2, sort_keys=True)
+          print(f"Merged {len(files)} shard file(s) -> {len(merged)} test timings.")
+          PY
+
+      - name: Save merged durations to cache
+        if: hashFiles('.test_durations') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .test_durations
+          # Rolling key (run_id suffix) because cache entries are immutable --
+          # a fixed key would only ever save once and never refresh. The test
+          # jobs restore the newest one via the ``test-durations-v1-`` prefix.
+          # Old entries fall out via LRU / 7-day eviction on their own.
+          key: test-durations-v1-${{ github.run_id }}
