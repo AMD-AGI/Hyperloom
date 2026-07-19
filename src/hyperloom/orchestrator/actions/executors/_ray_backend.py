@@ -99,6 +99,46 @@ def ray_gpu_pending_limit() -> int:
     return max(1, v)
 
 
+def ray_serving_priority_enabled() -> bool:
+    """Whether serving is prioritized over GPU research specialists (§3.4).
+
+    When on (the default), the dispatcher pauses admitting NEW GPU research
+    specialists while serving currently holds the whole-machine slot, so a
+    research pile-up cannot starve serving. Disable with
+    ``INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY=0``.
+
+    Returns:
+        ``True`` unless the env var explicitly disables it.
+    """
+    val = os.environ.get("INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY", "").strip().lower()
+    return val not in {"0", "false", "no", "off"}
+
+
+def serving_slot_busy() -> bool:
+    """Best-effort check: is Ray's whole-machine ``serving_slot`` currently held?
+
+    ``True`` when a serving benchmark (or a bench-capable specialist) currently
+    holds the slot — i.e. serving is active. Used by the §3.4 serving-priority
+    gate to defer new GPU research specialists. Any error (Ray not initialised,
+    resource absent, probe failure) returns ``False`` so it NEVER blocks
+    dispatch, and it is a no-op off the single-node Ray path.
+
+    Returns:
+        ``True`` only when Ray reports ``serving_slot`` availability below 1.
+    """
+    if not ray_gpu_specialist_exec_enabled():
+        return False
+    try:
+        import ray  # noqa: PLC0415
+
+        if not ray.is_initialized():
+            return False
+        avail = ray.available_resources()
+        return float(avail.get("serving_slot", 1.0)) < 1.0
+    except Exception:  # noqa: BLE001 — best-effort; never block dispatch
+        return False
+
+
 @dataclass
 class SubprocessResult:
     """Result of a subprocess executed inside a Ray worker.

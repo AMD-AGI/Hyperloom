@@ -576,6 +576,45 @@ def test_ray_gpu_pending_limit_default_and_override(monkeypatch: pytest.MonkeyPa
     assert rb.ray_gpu_pending_limit() == 4  # falls back on garbage
 
 
+def test_ray_serving_priority_enabled_default_and_off(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY", raising=False)
+    assert rb.ray_serving_priority_enabled() is True  # default on
+    for off in ("0", "false", "no", "off"):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY", off)
+        assert rb.ray_serving_priority_enabled() is False
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY", "1")
+    assert rb.ray_serving_priority_enabled() is True
+
+
+def test_serving_slot_busy_off_ray_path_is_false(monkeypatch: pytest.MonkeyPatch):
+    """Off the single-node Ray path (pytest default), serving_slot_busy never
+    probes Ray and returns False (no serving-priority pause)."""
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
+    assert rb.serving_slot_busy() is False
+
+
+def test_serving_slot_busy_reads_available_resources(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Under Ray, serving_slot_busy is True iff available serving_slot < 1."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
+
+    class _FakeRayAvail:
+        def __init__(self, slot_avail: float):
+            self._slot = slot_avail
+
+        def is_initialized(self) -> bool:
+            return True
+
+        def available_resources(self) -> dict:
+            return {"GPU": 0.0, "serving_slot": self._slot}
+
+    monkeypatch.setitem(sys.modules, "ray", _FakeRayAvail(0.0))
+    assert rb.serving_slot_busy() is True  # slot held -> serving active
+    monkeypatch.setitem(sys.modules, "ray", _FakeRayAvail(1.0))
+    assert rb.serving_slot_busy() is False  # slot free -> no pause
+
+
 def test_ray_gpu_specialist_exec_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))

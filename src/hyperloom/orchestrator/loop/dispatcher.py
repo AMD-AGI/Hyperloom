@@ -223,6 +223,21 @@ class DispatcherCollaborator:
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
         spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
+        # §3.4 serving priority: if serving currently holds the whole-machine
+        # slot, pause admitting NEW GPU research specialists this pass (they stay
+        # in the SQLite queue and are re-considered next pass) so a research
+        # pile-up cannot starve serving. Computed once per pass (a single cheap
+        # Ray probe); best-effort — any failure leaves it False (no pause).
+        serving_priority_pause = False
+        try:
+            from ..actions.executors._ray_backend import (
+                ray_serving_priority_enabled,
+                serving_slot_busy,
+            )
+
+            serving_priority_pause = ray_serving_priority_enabled() and serving_slot_busy()
+        except Exception:  # noqa: BLE001 — never block dispatch on the probe
+            serving_priority_pause = False
         for task in queued:
             if task.task_id in exclude_ids:
                 # Already dispatched in a prior pass of this pump.
@@ -273,6 +288,16 @@ class DispatcherCollaborator:
                     needs_gpu=needs_gpu,
                 )
                 if needs_gpu:
+                    if serving_priority_pause:
+                        # §3.4: serving is active — defer this GPU specialist to a
+                        # later pass (keep it queued) rather than piling onto the
+                        # contended GPU. Release the SQLite lane lease taken above
+                        # so it does not sit held while the task waits.
+                        if lease is not None:
+                            await self.locks.release(lease)
+                            for lane in lease.lanes:
+                                holders[lane] = max(0, int(holders.get(lane, 0)) - 1)
+                        continue
                     # Whole-machine, time-shared lane vs serving-disjoint pool:
                     # framework-authoring and bench-capable specialists lease the
                     # whole machine from ``framework_gpu_pool``; every other GPU
