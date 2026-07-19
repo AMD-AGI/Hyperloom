@@ -19,6 +19,43 @@ summarizes the headline capabilities.
 The first public snapshot of Hyperloom combines features from the following
 per-release versions:
 
+### 0.9.0 highlights
+
+- **Ray-managed single-node execution**: Every GPU/serving unit (baseline,
+  profile/roofline, explore, sweep, conc_sweep, and `needs_gpu` specialists)
+  now runs on a Ray-managed GPU lease, with Ray owning GPU queueing, device
+  isolation, and a whole-machine serving mutex. The path fails fast on an
+  infeasible cluster, times out stuck specialist scheduling, detects dead
+  actors, and keeps the raylet stable across per-round server reboots.
+  Multi-node is unchanged (gated off).
+
+- **Accuracy-gate & eval-result integrity**: lm-eval output is wired to a
+  session-scoped `EVAL_RESULT_DIR`; a baseline that produces no accuracy
+  verdict now hard-stops instead of optimizing an unvalidated baseline; leaked
+  eval results are salvaged back from the InferenceX checkout / local-disk
+  mirror; and session-breakdown attribution no longer fabricates credit from a
+  seeded stack.
+
+- **Provider-direct LLM configuration**: Hyperloom runs against Anthropic +
+  DeepSeek directly (provider-only paths), with env-driven, consistent gateway
+  auth/endpoint resolution and case-insensitive Anthropic-endpoint handling;
+  the Critic can run over the native provider endpoint.
+
+- **Model-path & workload-default consistency**: A single `--model` value (local
+  path or HF repo id) resolves identically across baseline, roofline, and the
+  kernel agent; prompt-stated ISL/OSL/CONC/TP are honored as flags instead of
+  silently defaulting; and the `model_arch` freshness guard is org-aware across
+  HF-cache snapshot paths.
+
+- **Kernel / Forge / GEAK**: forge-fusion is adopted end-to-end with hardened
+  subprocess timeouts, GEAK v4 installs via `pip`/one-click, advertised kernel
+  backends are aligned with the runtime, and a TraceLens-free bypass benchmark
+  harness ships as a Magpie drop-in for text-gen + xDiT.
+
+- **Framework agent**: The FRAMEWORK phase gains cross-framework rating + PR-KB
+  discovery, a flag-gated config-exploration subphase, and a candidate-free
+  local-exploration arm so a dry PR feed no longer wastes the phase.
+
 ### 0.8.0 highlights
 
 - **Kernel-optimization integrity & GEAK faithfulness**: Patch-only kernel
