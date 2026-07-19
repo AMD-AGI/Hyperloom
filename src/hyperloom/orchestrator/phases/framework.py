@@ -38,6 +38,12 @@ log = _logging.getLogger(__name__)
 # whose integrate proposal is about to be emitted, small enough that a genuinely
 # stuck flag self-heals within a few minutes rather than spinning to wall-clock.
 _ENABLEMENT_WATCHDOG_GRACE_TICKS: int = 20
+# Hard backstop: past this many ticks since dispatch, an in-flight enablement
+# round whose specialist has finished is counted as a stall unconditionally —
+# even if an integrate_patch proposal is still pending (dropped / never
+# executed). Larger than the soft grace so a normally-progressing integrate has
+# ample room to resolve first.
+_ENABLEMENT_WATCHDOG_HARD_TICKS: int = 60
 
 
 def _deterministic_enablement_setup_commands(signature: Any, launch_log: str) -> list[str]:
@@ -1478,21 +1484,21 @@ class FrameworkPhase(PhaseHandler):
             done_path = self.session_dir / "runs" / "specialist" / tid / "specialist_done.json"
             if not done_path.exists():
                 return False
-            # No pending enablement integrate_patch proposal for this task.
-            for p in (self.state.pending_proposals or {}).values():
-                try:
-                    if getattr(p, "action_name", "") != "integrate_patch":
+            # A pending enablement integrate_patch proposal for this task means the
+            # round may still resolve normally — but only honor that within a
+            # bounded window: an integrate proposal that has sat pending for the
+            # full HARD grace never rearmed (dropped / stuck), so the watchdog
+            # still fires. Below HARD grace, defer to the in-flight proposal.
+            if (cur_tick - dispatch_tick) < _ENABLEMENT_WATCHDOG_HARD_TICKS:
+                for p in (getattr(self.state, "pending_proposals", None) or {}).values():
+                    try:
+                        if getattr(p, "action_name", "") != "integrate_patch":
+                            continue
+                        pl = getattr(p, "payload", {}) or {}
+                        if (pl.get("params") or {}).get("specialist_task_id") == tid:
+                            return False
+                    except Exception:  # noqa: BLE001 — defensive
                         continue
-                    pl = getattr(p, "payload", {}) or {}
-                    if (pl.get("params") or {}).get("specialist_task_id") == tid:
-                        return False
-                except Exception:  # noqa: BLE001 — defensive
-                    continue
-            # No task currently running (an integrate/baseline in flight means the
-            # round may still resolve normally).
-            running = getattr(self.state, "running_tasks", None)
-            if running and len(running) > 0:
-                return False
             log.info(
                 "ENABLEMENT watchdog: in-flight round task=%s finished without a rearm "
                 "(tick %d, dispatched %d); counting as a stall",
