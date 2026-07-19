@@ -85,9 +85,10 @@ The Coordinator owns a strict 6-phase pipeline:
 (FRAMEWORK is skipped when the operator passes `--no-framework-agent`;
 the chain then collapses to PRELUDE → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE.)
 
-It enters PRELUDE at session start and advances **only forward**. The
-phase chain itself is monotonic; the Coordinator owns the transitions
-and writes them to `phase_history` for resume / audit. The hard
+It enters PRELUDE at session start and advances **forward within each
+macro-cycle**; SWEEP can reloop back to EXPLORE / FRAMEWORK_AGENT to open
+a new macro-cycle (see below). The Coordinator owns the transitions and
+writes them to `phase_history` (cycle-stamped) for resume / audit. The hard
 advance gates are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit,
 the per-phase budget cap, or a terminal `stop_reason` exit
 EXPLORE / KERNEL_AGENT / SWEEP; the wall-clock deadline routes to CLOSE.

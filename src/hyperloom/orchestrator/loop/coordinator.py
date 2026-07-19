@@ -770,10 +770,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except ValueError:
             self._maintenance_every_ticks = MAINTENANCE_EVERY_TICKS
 
-        # In cyclic mode, pin a per-macro-cycle budget window so per-phase budget
-        # fractions apply per cycle. Only takes effect for long/unbounded runs;
-        # short bounded runs stay anchored on the whole session.
-        if _phase_state.is_cyclic_phases_enabled() and float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
+        # Pin a per-macro-cycle budget window so per-phase budget fractions
+        # apply per cycle. Only takes effect for long/unbounded runs; short
+        # bounded runs stay anchored on the whole session.
+        if float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
             try:
                 _cycle_hours = float(
                     os.environ.get(
