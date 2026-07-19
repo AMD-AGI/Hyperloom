@@ -1516,6 +1516,14 @@ async def run_conc_sweep(
         )
         _last_variant_runtime_sec: float = float(variant_timeout_sec)
 
+        # phase-3 §3.1 / invariant §6.2: the legacy Option-B path restarts a
+        # server per variant, so each run_grid holds its own serving lease
+        # (num_gpus=TP + serving_slot). Releasing between variants also lets a
+        # queued serving task interleave (serving priority, §3.4). ``None`` on
+        # the local path (multi-node / RAY_EXEC off / pytest default).
+        from ..actions.executors._grid_runner import _num_gpus_for_config
+        from ..actions.executors._ray_serving import maybe_serving_lease
+
         for idx, variant in enumerate(grid):
             remaining = (deadline - time.time()) if has_budget and deadline is not None else None
             if has_budget and remaining is not None and remaining <= 0:
@@ -1588,16 +1596,22 @@ async def run_conc_sweep(
             soft_deadline: float | None = _session_soft_dl
 
             _variant_start = time.time()
-            sub_results = await run_grid(
-                base_yaml_path=base_yaml_path,
-                base_extra_args="",
-                grid=[variant],
-                output_root=workspace,
-                variant_timeout_sec=effective_timeout,
-                model_path=resolved_model,
-                gpu_type=resolved_gpu,
-                soft_deadline_sec=soft_deadline,
-            )
+            _legacy_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(base_yaml_path))
+            try:
+                sub_results = await run_grid(
+                    base_yaml_path=base_yaml_path,
+                    base_extra_args="",
+                    grid=[variant],
+                    output_root=workspace,
+                    variant_timeout_sec=effective_timeout,
+                    model_path=resolved_model,
+                    gpu_type=resolved_gpu,
+                    soft_deadline_sec=soft_deadline,
+                    serving_lease=_legacy_lease,
+                )
+            finally:
+                if _legacy_lease is not None:
+                    _legacy_lease.close()
             _last_variant_runtime_sec = time.time() - _variant_start
             results.extend(sub_results)
 
