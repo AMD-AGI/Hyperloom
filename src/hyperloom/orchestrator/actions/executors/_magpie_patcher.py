@@ -336,6 +336,13 @@ def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
     """
     ok = True
     for script in sorted(scripts_dir.glob("*.sh")):
+        # ``benchmark_lib.sh`` is the shared library, not a caller script: it
+        # legitimately references ``--concurrent-requests`` in run_lm_eval's arg
+        # parser (patched separately by _apply_run_lm_eval_arg_patch_atomic).
+        # Stripping there would corrupt the parser and the regex miss would be
+        # mis-reported as an "unrecognised shape" failure — skip it.
+        if script.name == "benchmark_lib.sh":
+            continue
         try:
             original = script.read_text(encoding="utf-8")
         except OSError as e:

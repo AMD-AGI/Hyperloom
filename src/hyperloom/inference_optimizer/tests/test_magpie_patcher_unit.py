@@ -370,6 +370,22 @@ def test_eval_flag_stripped_from_inferencex_dir(tmp_path):
     assert mp._RUN_LM_EVAL_PARSER_SENTINEL in lib
 
 
+def test_eval_concurrency_fixes_idempotent(tmp_path):
+    """Regression: a 2nd pass must stay ok. The parser patch leaves a legit
+    ``--concurrent-requests`` case in benchmark_lib.sh; the flag-strip scan must
+    skip the library rather than mis-report it as an unrecognised shape."""
+    _make_inferencex(tmp_path)
+    assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
+    # Second pass: benchmark_lib.sh now carries the parser sentinel + flag.
+    assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
+    lib = (tmp_path / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
+    # The parser case survived (not stripped) and stayed idempotent.
+    assert lib.count("--concurrent-requests|--concurrent_requests") == 1
+    assert "--concurrent-requests" not in (
+        tmp_path / "benchmarks" / "vllm_mi355x.sh"
+    ).read_text(encoding="utf-8")
+
+
 def test_eval_fixes_run_when_benchmarker_missing(monkeypatch, tmp_path):
     """Regression: a missing/stale benchmarker.py must NOT skip the eval fixes.
 
