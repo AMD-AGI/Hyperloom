@@ -343,7 +343,7 @@ which option:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
 - `8h` — medium-length Qwen3-14B-FP8 run.
-- `24h` — long-horizon Qwen3-30B-A3B-Instruct-2507 cyclic run.
+- `24h` — long-horizon Qwen3-30B-A3B-Instruct-2507 run (long-run budget accounting: fixed per-cycle budget window).
 - `custom advanced` — user-selected model, framework, workload, budget, phase
   toggles, and advanced CLI flags.
 
