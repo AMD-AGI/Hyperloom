@@ -97,6 +97,27 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     assert "GLM-5" in params["notes"]
 
 
+_TRANSFORMERS_UNRECOGNIZED_LOG = (
+    "pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig\n"
+    "  Value error, The checkpoint you are trying to load has model type "
+    "`deepseek_v4` but Transformers does not recognize this architecture."
+)
+
+
+def test_build_params_seeds_deterministic_setup_commands_for_stack_arch_miss(monkeypatch):
+    """A 'Transformers does not recognize' arch miss seeds concrete upgrade
+    install commands into enablement_setup_commands, so the enablement round has
+    a real action to execute (which integrate_patch then replays before boot)."""
+    _stub_enumerate(monkeypatch, [])
+    fake = _fake_self(model_name="deepseek-ai/DeepSeek-V4-Flash")
+    params = Coordinator._build_enablement_specialist_params(fake, _TRANSFORMERS_UNRECOGNIZED_LOG)
+    assert params is not None
+    assert params["enablement_failure_kind"] == "missing_model_arch"
+    setup = params.get("enablement_setup_commands") or []
+    assert "pip install -U transformers" in setup
+    assert "pip install -U vllm" in setup
+
+
 def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch):
     from hyperloom.agents.framework.models import Candidate
 

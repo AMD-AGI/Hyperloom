@@ -43,6 +43,23 @@ def test_missing_model_arch() -> None:
     assert sig.is_actionable
 
 
+def test_missing_model_arch_transformers_unrecognized() -> None:
+    """Transformers 'does not recognize this architecture' (the DeepSeek-V4
+    brand-new-arch-on-old-stack signature, wrapped in a vLLM ModelConfig
+    ValidationError) -> missing_model_arch with the model_type as symbol."""
+    log = (
+        "pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig\n"
+        "  Value error, The checkpoint you are trying to load has model type "
+        "`deepseek_v4` but Transformers does not recognize this architecture."
+    )
+    sig = classify_failure(log)
+    assert sig.kind == MISSING_MODEL_ARCH
+    assert sig.offending_symbol == "deepseek_v4"
+    assert sig.bridge_layer == "framework"
+    assert sig.confidence > 0.9
+    assert sig.is_actionable
+
+
 def test_hip_kernel_missing_no_binary() -> None:
     """hipErrorNoBinaryForGpu -> hip_kernel_missing at the rocm_hip layer."""
     sig = classify_failure("RuntimeError: hipErrorNoBinaryForGpu: no kernel image is available")

@@ -123,6 +123,15 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"[Mm]odel architecture[s]?\s+['\"]?([A-Za-z0-9_]+)['\"]?\s+(?:is|are)?\s*not\s+supported"),
             re.compile(r"[Uu]nsupported\s+model\s+architecture[:\s]+['\"]?([A-Za-z0-9_]+)"),
             re.compile(r"[Aa]rchitectures?\s+\[?['\"]([A-Za-z0-9_]+)['\"].*?not\s+(?:yet\s+)?supported"),
+            # Transformers/HF: a checkpoint whose ``model_type`` predates the
+            # installed transformers (or vLLM's ModelConfig validation wrapping
+            # it). Captures the model_type token so the bridge can name it. This
+            # is the DeepSeek-V4 "brand-new arch on an old stack" signature.
+            re.compile(
+                r"model type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?\s+but\s+Transformers\s+does\s+not\s+recognize"
+            ),
+            re.compile(r"does\s+not\s+recognize\s+this\s+architecture"),
+            re.compile(r"[Tt]he\s+checkpoint\s+.*?model\s+type\s+[`'\"]?([A-Za-z0-9_]+)[`'\"]?"),
         ),
         confidence=0.95,
         symbol_from=_grp,

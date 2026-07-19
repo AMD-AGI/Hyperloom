@@ -33,6 +33,41 @@ from .base import PhaseHandler
 log = _logging.getLogger(__name__)
 
 
+def _deterministic_enablement_setup_commands(signature: Any, launch_log: str) -> list[str]:
+    """Seed concrete install commands for an ``missing_model_arch`` failure whose
+    root cause is a too-old inference stack (Transformers / vLLM predating the
+    checkpoint's ``model_type``).
+
+    This is a deterministic best-effort bridge so an enablement round always has
+    a real action to execute even when the LLM specialist is offline/uncertain:
+    a brand-new architecture on an outdated stack is most often fixed by
+    upgrading Transformers (which ships the modeling code) and, where possible,
+    the serving framework. The commands are install-only (subject to
+    integrate_patch's allowlist + boot re-probe as the source of truth), so a
+    wrong guess costs one bounded install + boot, never correctness.
+
+    Returns an empty list for any other failure kind, so non-arch gaps keep the
+    LLM-authored bridging path unchanged.
+    """
+    from hyperloom.agents.framework.enablement import MISSING_MODEL_ARCH
+
+    kind = getattr(signature, "kind", "") or ""
+    if kind != MISSING_MODEL_ARCH:
+        return []
+    text = (launch_log or "").lower()
+    cmds: list[str] = []
+    # Transformers-side "does not recognize this architecture" -> the modeling
+    # code lives in a newer transformers release; upgrade it first.
+    if "transformers" in text or "does not recognize" in text or "model type" in text:
+        cmds.append("pip install -U transformers")
+    # vLLM registry miss (arch absent from model_executor/models/registry) is
+    # usually fixed by a newer vLLM; best-effort upgrade (will no-op / fail
+    # cleanly on a stack that has no compatible wheel, feeding the stall gate).
+    if "vllm" in text or "modelconfig" in text or "validationerror" in text:
+        cmds.append("pip install -U vllm")
+    return cmds
+
+
 class FrameworkPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -1005,6 +1040,12 @@ class FrameworkPhase(PhaseHandler):
         # round's patch (serial-gap stacking); author a fix composing on top.
         base_patches = [str(p) for p in (getattr(state, "enablement_kept_patches", None) or [])]
         base_setup = [str(c) for c in (getattr(state, "enablement_setup_commands", None) or [])]
+        # Seed deterministic install commands for a too-old-stack arch miss so the
+        # enablement round has a concrete action even without LLM authoring; the
+        # boot re-probe remains the source of truth for runnability.
+        for _c in _deterministic_enablement_setup_commands(signature, text):
+            if _c and _c not in base_setup:
+                base_setup.append(_c)
         notes = mandate.task_description
         if base_patches or base_setup:
             progress_bits = []
