@@ -1472,6 +1472,43 @@ def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
     assert f"launch_server.sh sglang {evil}" not in ep
 
 
+def test_restart_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
+    """A shell-metacharacter extra_args must not inject a second command into
+    the restart entrypoint; the `;` stays inside a quoted argv token."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    ns = argparse.Namespace(
+        framework="sglang",
+        model="m",
+        tp=8,
+        no_wait_health=False,
+        extra_args="--foo 1; touch /tmp/pwned",
+    )
+    ep = mn_cli._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
+    # The raw injection form (a bare `; touch`) must NOT appear as shell syntax.
+    assert "1; touch /tmp/pwned" not in ep
+    # The metacharacter is confined to a single quoted token.
+    assert "'1;'" in ep
+
+
+def test_restart_entrypoint_preserves_legit_multi_token_extra_args(monkeypatch):
+    """Legitimate multi-token extra_args survive unchanged (no functional
+    regression from the shell-safe re-quoting)."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    ns = argparse.Namespace(
+        framework="sglang",
+        model="m",
+        tp=8,
+        no_wait_health=False,
+        extra_args="--mem-fraction-static 0.85 --enable-torch-compile",
+    )
+    ep = mn_cli._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
+    assert "-- --mem-fraction-static 0.85 --enable-torch-compile" in ep
+
+
 def test_multinode_op_args_shlex_quotes_malicious_value():
     """The Infera SSH op_args builder path (bench) must also shlex-quote."""
     import shlex
