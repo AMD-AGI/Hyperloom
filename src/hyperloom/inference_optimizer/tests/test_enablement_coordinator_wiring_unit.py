@@ -193,6 +193,9 @@ def _enqueue_self(**state_kw):
         baseline_tput=state_kw.get("baseline_tput", 0.0),
         baseline_failure_streak=state_kw.get("baseline_failure_streak", 1),
         enablement_launch_log=state_kw.get("enablement_launch_log", _MISSING_ARCH_LOG),
+        enablement_inflight_task_id=state_kw.get("enablement_inflight_task_id", ""),
+        enablement_dispatch_tick=state_kw.get("enablement_dispatch_tick", -1),
+        tick=state_kw.get("tick", 0),
         stop_reason=state_kw.get("stop_reason", ""),
         save=lambda *a, **k: None,
     )
@@ -231,6 +234,12 @@ def _enqueue_self(**state_kw):
         Coordinator._maybe_record_enablement_human_review, fake
     )
     fake._maybe_rearm_enablement = types.MethodType(Coordinator._maybe_rearm_enablement, fake)
+    fake._enablement_round_silently_finished = types.MethodType(
+        Coordinator._enablement_round_silently_finished, fake
+    )
+    # pending_proposals lives on the coordinator's `state`; the silently-finished
+    # watchdog reads it, so give the fake a `state` with an empty mapping.
+    fake.state = types.SimpleNamespace(pending_proposals={}, running_tasks={})
     return fake
 
 
@@ -307,6 +316,57 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
     assert fake.tasks.created[1]["params"]["enablement_attempt"] == 1
     # Retry mandate flags the prior revert.
     assert "RETRY" in fake.tasks.created[1]["params"]["notes"]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_rearms_silently_finished_round(monkeypatch, tmp_path):
+    """If an enablement round is marked in-flight but its specialist finished and
+    no integrate/task is pending (a round that ended without a rearm), the
+    watchdog inside _maybe_enqueue_enablement_specialist counts it as a stall and
+    clears the guard — preventing the enablement_dispatched-stuck infinite spin."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    _stub_enumerate(monkeypatch, [])
+    # Create a finished specialist marker for the in-flight task.
+    tid = "spec-stuck"
+    done_dir = tmp_path / "runs" / "specialist" / tid
+    done_dir.mkdir(parents=True)
+    (done_dir / "specialist_done.json").write_text("{}")
+    fake = _enqueue_self(
+        enablement_dispatched=True,
+        enablement_stall_streak=1,
+        enablement_inflight_task_id=tid,
+        enablement_dispatch_tick=0,
+        tick=999,  # well past the watchdog grace period
+    )
+    fake.session_dir = tmp_path
+    # Watchdog should fire: stall streak advances and the guard clears, so a
+    # fresh round is dispatched this same tick.
+    await Coordinator._maybe_enqueue_enablement_specialist(fake)
+    assert fake.shared_state.enablement_stall_streak == 2
+
+
+@pytest.mark.asyncio
+async def test_watchdog_does_not_fire_within_grace(monkeypatch, tmp_path):
+    """The watchdog must not race a just-dispatched round: within the grace
+    period it stays a no-op even if the flag is set."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(
+        enablement_dispatched=True,
+        enablement_stall_streak=1,
+        enablement_inflight_task_id="spec-recent",
+        enablement_dispatch_tick=998,
+        tick=999,  # only 1 tick elapsed, < grace
+    )
+    fake.session_dir = tmp_path
+    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    # Untouched: still in-flight, streak unchanged.
+    assert fake.shared_state.enablement_dispatched is True
+    assert fake.shared_state.enablement_stall_streak == 1
 
 
 @pytest.mark.asyncio

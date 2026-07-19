@@ -418,6 +418,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_dispatched: bool = False
     enablement_attempts: int = 0
     enablement_succeeded: bool = False
+    # Watchdog bookkeeping for the in-flight enablement round: the dispatched
+    #   specialist task id and the tick it was dispatched on. If a round ends
+    #   without ever calling ``_maybe_rearm_enablement`` (e.g. the deliverable
+    #   was approved-but-empty and routed to plain baseline retries, or any other
+    #   path that never produces an integrate result), ``enablement_dispatched``
+    #   would stay stuck True forever and the run could never reach
+    #   ``enablement_stalled``. The watchdog in ``_maybe_enqueue_enablement_specialist``
+    #   uses these to detect a silently-finished round and count it as a stall.
+    enablement_inflight_task_id: str = ""
+    enablement_dispatch_tick: int = -1
     # Ordered, deduped patch paths from prior enablement rounds that made forward
     #   progress; re-applied as a base before the next round's patch so serial
     #   gaps stack. See ``_maybe_rearm_enablement``.

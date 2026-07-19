@@ -32,6 +32,13 @@ from .base import PhaseHandler
 
 log = _logging.getLogger(__name__)
 
+# Watchdog grace period (in coordinator ticks) before an in-flight enablement
+# round whose specialist has finished — but which never produced a rearm — is
+# counted as a stall. Generous enough not to race a just-completed specialist
+# whose integrate proposal is about to be emitted, small enough that a genuinely
+# stuck flag self-heals within a few minutes rather than spinning to wall-clock.
+_ENABLEMENT_WATCHDOG_GRACE_TICKS: int = 20
+
 
 def _deterministic_enablement_setup_commands(signature: Any, launch_log: str) -> list[str]:
     """Seed concrete install commands for an ``missing_model_arch`` failure whose
@@ -1354,7 +1361,23 @@ class FrameworkPhase(PhaseHandler):
         if bool(getattr(state, "enablement_succeeded", False)):
             return ""
         if bool(getattr(state, "enablement_dispatched", False)):
-            return ""
+            # Watchdog: an enablement round is marked in-flight. If it has
+            # silently finished without ever calling _maybe_rearm_enablement
+            # (e.g. an approved-but-empty deliverable that routed to plain
+            # baseline retries, or any other path that never yields an integrate
+            # result), enablement_dispatched would stay stuck True forever and
+            # the run could never reach enablement_stalled. Detect the stuck flag
+            # and count the round as a stall so the loop keeps advancing.
+            if self._enablement_round_silently_finished():
+                self._maybe_rearm_enablement(
+                    {"enablement": True, "status": "reverted", "reason": "round_finished_without_rearm"}
+                )
+                # Fall through: if the rearm cleared the guard (not at stall cap),
+                # a fresh round can be dispatched below this tick.
+                if bool(getattr(state, "enablement_dispatched", False)) or bool(getattr(state, "stop_reason", "")):
+                    return ""
+            else:
+                return ""
         if float(getattr(state, "baseline_tput", 0.0) or 0.0) > 0:
             return ""
         if int(getattr(state, "baseline_failure_streak", 0) or 0) < 1:
@@ -1399,13 +1422,15 @@ class FrameworkPhase(PhaseHandler):
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
+        spec_tid = str(getattr(spec_task, "task_id", "") or "")
         state.enablement_dispatched = True
         state.enablement_attempts = attempt + 1
+        state.enablement_inflight_task_id = spec_tid
+        state.enablement_dispatch_tick = int(getattr(state, "tick", 0) or 0)
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
             log.debug("enablement: save after dispatch failed", exc_info=True)
-        spec_tid = str(getattr(spec_task, "task_id", "") or "")
         log.info(
             "ENABLEMENT: dispatched authoring specialist kind=%s attempt=%d task=%s",
             params.get("enablement_failure_kind"),
@@ -1413,6 +1438,72 @@ class FrameworkPhase(PhaseHandler):
             spec_tid,
         )
         return spec_tid
+
+    def _enablement_round_silently_finished(self) -> bool:
+        """True when an in-flight enablement round has ended without a rearm.
+
+        A round is considered silently finished when ALL hold:
+        - the dispatched specialist has written its ``specialist_done.json``
+          (authoring is over), and
+        - a grace period of ticks has elapsed since dispatch (so we never race a
+          just-completed specialist whose integrate proposal is about to be
+          emitted), and
+        - no enablement ``integrate_patch`` proposal for this task is still
+          pending review, and
+        - no task is currently running.
+
+        This is the phase-independent backstop for every code path that finishes
+        an enablement round without calling :meth:`_maybe_rearm_enablement`
+        (approved-but-empty deliverables routed to baseline retries, dropped
+        proposals, etc.). Fully guarded: any error returns ``False`` (never
+        force a false stall).
+        """
+        state = self.shared_state
+        try:
+            if not bool(getattr(state, "enablement_dispatched", False)):
+                return False
+            # NB: use an explicit None-check, not ``or -1`` — a legitimate
+            # dispatch tick of 0 is falsy and would be corrupted to -1.
+            _raw_dt = getattr(state, "enablement_dispatch_tick", -1)
+            dispatch_tick = int(_raw_dt if _raw_dt is not None else -1)
+            cur_tick = int(getattr(state, "tick", 0) or 0)
+            tid = str(getattr(state, "enablement_inflight_task_id", "") or "")
+            if not tid:
+                # No recorded task id (older state / dispatch without id): fall
+                # back to a pure grace-tick check so we still self-heal.
+                return dispatch_tick >= 0 and (cur_tick - dispatch_tick) >= _ENABLEMENT_WATCHDOG_GRACE_TICKS
+            if dispatch_tick < 0 or (cur_tick - dispatch_tick) < _ENABLEMENT_WATCHDOG_GRACE_TICKS:
+                return False
+            # Specialist must have finished authoring.
+            done_path = self.session_dir / "runs" / "specialist" / tid / "specialist_done.json"
+            if not done_path.exists():
+                return False
+            # No pending enablement integrate_patch proposal for this task.
+            for p in (self.state.pending_proposals or {}).values():
+                try:
+                    if getattr(p, "action_name", "") != "integrate_patch":
+                        continue
+                    pl = getattr(p, "payload", {}) or {}
+                    if (pl.get("params") or {}).get("specialist_task_id") == tid:
+                        return False
+                except Exception:  # noqa: BLE001 — defensive
+                    continue
+            # No task currently running (an integrate/baseline in flight means the
+            # round may still resolve normally).
+            running = getattr(self.state, "running_tasks", None)
+            if running and len(running) > 0:
+                return False
+            log.info(
+                "ENABLEMENT watchdog: in-flight round task=%s finished without a rearm "
+                "(tick %d, dispatched %d); counting as a stall",
+                tid,
+                cur_tick,
+                dispatch_tick,
+            )
+            return True
+        except Exception:  # noqa: BLE001 — watchdog must never wedge the loop
+            log.debug("enablement watchdog check failed", exc_info=True)
+            return False
 
     async def _maybe_record_enablement_human_review(self, launch_log: str) -> None:
         """Record a one-shot ``needs_human_review`` for an UNKNOWN launch failure.
@@ -1555,6 +1646,11 @@ class FrameworkPhase(PhaseHandler):
                 stop_set = "enablement_stalled"
             else:
                 state.enablement_dispatched = False
+        # Whenever the in-flight guard is cleared (or the run is stopping), drop
+        # the watchdog bookkeeping so a stale task id can't mis-fire next round.
+        if not bool(getattr(state, "enablement_dispatched", False)) or stop_set:
+            state.enablement_inflight_task_id = ""
+            state.enablement_dispatch_tick = -1
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
