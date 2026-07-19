@@ -186,6 +186,29 @@ async def test_reject_verdict_records_critic_denied(coord: Coordinator) -> None:
     assert "out of scope" in denied[0]["rationale"]
 
 
+@pytest.mark.asyncio
+async def test_reject_enablement_integrate_patch_advances_stall(coord: Coordinator) -> None:
+    """A Critic-rejected ENABLEMENT integrate_patch never reaches the executor,
+    so it must still advance the enablement stall accounting (bump streak, clear
+    the in-flight guard) — otherwise enablement_dispatched stays stuck True and
+    the run spins forever instead of converging to enablement_stalled."""
+    coord.shared_state.enablement_dispatched = True
+    coord.shared_state.enablement_stall_streak = 0
+    pending = PendingProposal(
+        proposal_msg_id="m-enable",
+        from_agent="coordinator",
+        action_name="integrate_patch",
+        predicted_gain_pct=0.0,
+        payload={"params": {"enablement": True, "specialist_task_id": "spec-e"}},
+    )
+    coord.state.pending_proposals[pending.proposal_msg_id] = pending
+    await coord._handle_single_verdict(
+        source="critic", pending=pending, verdict="reject", reasoning="empty deliverable; nothing to enable"
+    )
+    assert coord.shared_state.enablement_stall_streak == 1
+    assert coord.shared_state.enablement_dispatched is False
+
+
 def _append(bucket: list, candidate) -> "object":
     """Sync→awaitable shim so monkeypatched enqueue helpers stay awaitable."""
 
