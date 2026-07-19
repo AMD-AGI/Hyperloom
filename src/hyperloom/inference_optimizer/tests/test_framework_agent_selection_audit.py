@@ -569,21 +569,10 @@ def test_dispatch_pause_phase_not_gated(coord: Coordinator) -> None:
     assert coord._dispatch_paused_for_phase_budget() is False
 
 
-def test_dispatch_pause_short_run_budget_spent(coord: Coordinator, monkeypatch) -> None:
-    # is_long_run no longer gates the pause: a short bounded run whose charge-back
-    # phase budget is spent pauses new dispatch just like a long/unbounded run,
-    # keeping dispatch consistent with the phase-advance gates.
-    coord.shared_state.phase = "EXPLORE"
-    monkeypatch.setattr(coord_mod._phase_state, "is_long_run", lambda _s: False)
-    monkeypatch.setattr(
-        coord_mod._phase_state,
-        "phase_budget_remaining_seconds",
-        lambda _s, budget_pct=None: 0.0,
-    )
-    assert coord._dispatch_paused_for_phase_budget() is True
-
-
 def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
+    # The pause is length-agnostic: it fires whenever the phase budget is spent,
+    # regardless of is_long_run (the dispatcher no longer reads it), so short and
+    # long runs both pause new dispatch — consistent with the phase-advance gates.
     coord.shared_state.phase = "EXPLORE"
     monkeypatch.setattr(
         coord_mod._phase_state,

@@ -645,7 +645,7 @@ def should_reloop_to_explore(
         streak and any ``reloop_blocked`` reason).
     """
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
-    evidence: dict[str, Any] = {"cyclic": True, "macro_cycle": cycle}
+    evidence: dict[str, Any] = {"macro_cycle": cycle}
 
     # Per-cycle gain since this cycle started → effective no-gain streak. A cycle
     # "gained" only when its validated gain rose by at least the decaying KEEP bar.
