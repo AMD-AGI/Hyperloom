@@ -636,10 +636,9 @@ class ConversationCollaborator:
         """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK). Returns "" when no plateau signal is active.
 
         KERNEL / FRAMEWORK plateaus are advisory only (never auto-exit the
-        phase). An EXPLORE plateau is advisory in non-cyclic mode, but in cyclic
-        mode (default) it deterministically advances EXPLORE → KERNEL_AGENT via
-        ``explore_no_more_leverage`` (a non-terminal lever switch); the rendered
-        footer states which regime is active.
+        phase). An EXPLORE plateau deterministically advances
+        EXPLORE → KERNEL_AGENT via ``explore_no_more_leverage`` (a non-terminal
+        lever switch).
 
         Returns:
             The rendered plateau advisory text, or ``""`` when no plateau
@@ -859,7 +858,7 @@ class ConversationCollaborator:
 
         Returns:
             The rendered acceptance-threshold advisory text, or ``""`` when not
-            applicable (non-cyclic mode or first cycle).
+            applicable (first cycle, before any threshold decay).
         """
         state = self.shared_state
         keep = self._decaying_keep_threshold_pct()
