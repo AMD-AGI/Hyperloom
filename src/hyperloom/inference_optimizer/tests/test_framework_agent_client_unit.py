@@ -29,9 +29,7 @@ def test_repo_url_for_framework_known_and_unknown() -> None:
 
 # -- _resolve_fa_command ---------------------------------------------------
 def test_resolve_fa_command_is_module_invocation(monkeypatch) -> None:
-    """``fa`` always runs as ``[python, -m, <module>]`` — mirroring the critic /
-    robustness backends, so it never depends on $PATH (root-cause fix for
-    #fa-not-found)."""
+    """``fa`` runs as ``[python, -m, <module>]``, independent of $PATH."""
     monkeypatch.setattr(fac.sys, "executable", "/fake/python3")
     assert fac._resolve_fa_command() == ["/fake/python3", "-m", _FA_MODULE]
 
@@ -82,10 +80,8 @@ def test_run_fa_subcommand_sync_timeout(monkeypatch) -> None:
 
 
 def test_module_fallback_entry_starts_in_real_subprocess() -> None:
-    """Smoke: the ``python -m <module>`` fallback must actually launch and emit
-    JSON, guarding the PATH-independent path (root-cause fix for #fa-not-found)."""
-    # Pass the parent env verbatim so the child inherits any PYTHONPATH the CI
-    # relies on (a PYTHONPATH=src runner would otherwise ModuleNotFoundError).
+    """Smoke: ``python -m <module> schema`` launches and emits valid JSON."""
+    # Inherit the parent env so the child keeps PYTHONPATH.
     proc = subprocess.run(
         [sys.executable, "-m", _FA_MODULE, "schema"],
         capture_output=True,

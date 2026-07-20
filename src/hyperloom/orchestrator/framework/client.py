@@ -24,18 +24,12 @@ from typing import Any
 
 from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
-# Importable module entry for the ``fa`` CLI. Always invoked via the current
-# interpreter, mirroring the critic / robustness runtime.cli backends so the
-# call never depends on $PATH or an installed console script.
+# Module entry for the ``fa`` CLI, invoked via the current interpreter.
 _FA_MODULE = "hyperloom.agents.framework.runtime.cli"
 
 
 def _resolve_fa_command() -> list[str]:
-    """Return the argv prefix for the ``fa`` CLI: ``[python, -m, <module>]``.
-
-    Matches the sibling agents' ``python -m <module>`` invocation; the
-    subcommand and IO flags are appended by the caller.
-    """
+    """Return the ``fa`` argv prefix ``[python, -m, <module>]``."""
     return [sys.executable, "-m", _FA_MODULE]
 
 
@@ -53,8 +47,7 @@ def _run_fa_subcommand_sync(
     """Sync helper: run ``<prefix> <subcommand> --request <path> --out -``. Never raises.
 
     Args:
-        cmd_prefix: The resolved ``fa`` command prefix (binary path or
-            ``[python, -m, module]``).
+        cmd_prefix: The resolved ``fa`` command prefix.
         subcommand: The ``fa`` subcommand to run.
         request_path: Path to the request JSON file.
         timeout_sec: Subprocess wall-clock timeout in seconds.

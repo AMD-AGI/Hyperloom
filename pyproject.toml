@@ -104,11 +104,8 @@ claude = [
 [project.scripts]
 inference_optimizer = "hyperloom.inference_optimizer.cli:main"
 hyperloom = "hyperloom.inference_optimizer.setup:main"
-# tree-reform.MD P2.5: framework-agent's own ``[project.scripts]`` entries
-# (``framework-agent`` / ``fa``), kept for interactive / manual use. The
-# orchestrator does NOT use these console scripts: ``framework/client.py``
-# invokes ``python -m hyperloom.agents.framework.runtime.cli`` directly,
-# mirroring the critic / robustness backends (PATH-independent).
+# Console scripts for interactive / manual use; the orchestrator invokes
+# ``python -m hyperloom.agents.framework.runtime.cli`` directly instead.
 framework-agent = "hyperloom.agents.framework.runtime.cli:main"
 fa = "hyperloom.agents.framework.runtime.cli:main"
 # tree-reform.MD P2.5: robustness-agent's own ``[project.scripts]`` entry,
