@@ -658,6 +658,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             session_dir=self.session_dir,
             shared_state=self.shared_state,
         )
+        self.sub.policy = self.policy
         # Attach read-only context-pull MCP tools to Orchestration backend.
         self._attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
@@ -770,10 +771,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except ValueError:
             self._maintenance_every_ticks = MAINTENANCE_EVERY_TICKS
 
-        # In cyclic mode, pin a per-macro-cycle budget window so per-phase budget
-        # fractions apply per cycle. Only takes effect for long/unbounded runs;
-        # short bounded runs stay anchored on the whole session.
-        if _phase_state.is_cyclic_phases_enabled() and float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
+        # Pin a per-macro-cycle budget window so per-phase budget fractions
+        # apply per cycle. Only takes effect for long/unbounded runs; short
+        # bounded runs stay anchored on the whole session.
+        if float(getattr(self.shared_state, "cycle_minutes", 0) or 0) <= 0:
             try:
                 _cycle_hours = float(
                     os.environ.get(

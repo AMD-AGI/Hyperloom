@@ -18,6 +18,7 @@ from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
 from ..policy.gate import (
+    INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
@@ -70,7 +71,7 @@ class DispatcherCollaborator:
 
     def _cycle_idem_suffix(self) -> str:
         """Idempotency-key suffix scoping a per-cycle internal singleton to the
-        current macro-cycle. Empty for cycle 0 / non-cyclic runs.
+        current macro-cycle. Empty for cycle 0 (the first macro-cycle).
 
         Returns:
             ``"-c<cycle>"`` for macro-cycle > 0, else an empty string.
@@ -90,11 +91,14 @@ class DispatcherCollaborator:
             await self.cursors.advance(agent_name, seq=top.seq, msg_id=top.msg_id)
 
     def _dispatch_paused_for_phase_budget(self) -> bool:
-        """True when the current phase's cyclic budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
+        """True when the current phase's budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
 
         Pausing new spawns lets in-flight tasks finish and the pump return so
-        the tick can advance the phase. Scoped to cyclic long-runs and the
-        discretionary search phases.
+        the tick can advance the phase. Scoped to the discretionary search
+        phases. Applies to every session budget: the pause is driven purely by
+        the phase budget remaining (charge-back for short bounded runs, the
+        per-cycle window for long/unbounded runs), keeping dispatch consistent
+        with the phase-advance gates that consume the same helper.
 
         Returns:
             ``True`` when new phase-scoped dispatch should pause for budget.
@@ -104,8 +108,6 @@ class DispatcherCollaborator:
         if phase not in self._BUDGET_GATED_DISPATCH_PHASES:
             return False
         try:
-            if not _phase_state.is_cyclic_phases_enabled() or not _phase_state.is_long_run(state):
-                return False
             remaining = _phase_state.phase_budget_remaining_seconds(
                 state,
                 budget_pct=self._phase_budget_pct,
@@ -158,6 +160,10 @@ class DispatcherCollaborator:
                 )
         except Exception:  # noqa: BLE001 — self-heal never aborts the pump
             log.exception("dispatcher: expired-running task reclaim failed")
+        try:
+            await self._reconcile_cancelled_policy_denied_integrate_tasks()
+        except Exception:  # noqa: BLE001 — reconcile must not abort the pump
+            log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set, so a
         # fast task reaped before its queued->running transition is visible is
@@ -196,6 +202,103 @@ class DispatcherCollaborator:
             for task, maybe_result, gpu_lease in completed:
                 await self._reap_dispatched_task(task, maybe_result, gpu_lease)
 
+    async def _reconcile_cancelled_policy_denied_integrate_tasks(self) -> list[str]:
+        """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
+
+        Covers the resume gap where ``coordinator.db`` retained a cancelled task
+        but ``SharedState.specialist_patch_verdicts`` was restored later. Only
+        ``integrate_patch_requires_critic_verdict`` denials are retried; forged
+        params that still fail :meth:`PolicyGate.validate_dispatched_task` are
+        left terminal.
+
+        Returns:
+            list[str]: New queued task ids created by reconcile (may be empty).
+        """
+        gate = getattr(self.sub, "policy", None)
+        state = getattr(self, "shared_state", None)
+        if gate is None or state is None:
+            return []
+        get_verdict = getattr(state, "get_specialist_patch_verdict", None)
+        if get_verdict is None:
+            return []
+
+        created: list[str] = []
+        try:
+            cancelled = await self.tasks.by_state("cancelled")
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("dispatcher: reconcile could not list cancelled tasks")
+            return []
+
+        for task in cancelled:
+            if task.kind != "integrate_patch":
+                continue
+            evidence = _dispatch_policy_denied_evidence(task)
+            if not evidence:
+                continue
+            if str(evidence.get("rule") or "") != "integrate_patch_requires_critic_verdict":
+                continue
+            params = dict(task.params or {})
+            sid = str(params.get("specialist_task_id") or "").strip()
+            if not sid:
+                continue
+            verdict = str(get_verdict(sid) or "").strip().lower()
+            if verdict not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS:
+                continue
+            try:
+                gate.validate_dispatched_task(task.kind, params)
+            except PolicyDenied:
+                continue
+            base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
+            if await self._integrate_reconcile_child_exists(
+                base_key,
+                states=("succeeded",),
+            ):
+                continue
+            if await self._integrate_reconcile_child_exists(
+                base_key,
+                states=("queued", "running"),
+            ):
+                continue
+            for attempt in range(1, 6):
+                new_key = f"{base_key}-reconcile{attempt}"
+                new_task, was_existing = await self.tasks.create_or_return_existing(
+                    kind=task.kind,
+                    params=params,
+                    idempotency_key=new_key,
+                    requires_lanes=list(task.requires_lanes or []),
+                    lease_ttl_sec=int(task.lease_ttl_sec or 0),
+                )
+                if not was_existing:
+                    created.append(new_task.task_id)
+                    log.info(
+                        "dispatcher: reconciled cancelled integrate_patch %s -> %s (key=%s)",
+                        task.task_id,
+                        new_task.task_id,
+                        new_key,
+                    )
+                    break
+                if new_task.state in ("queued", "running", "succeeded"):
+                    break
+        return created
+
+    async def _integrate_reconcile_child_exists(
+        self,
+        base_key: str,
+        *,
+        states: tuple[str, ...],
+    ) -> bool:
+        """Return whether a reconcile child idempotency key exists in any of ``states``."""
+        if not states:
+            return False
+        prefix = f"{base_key}-reconcile%"
+        placeholders = ",".join("?" for _ in states)
+        row = await self.tasks.db.fetchone(
+            "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
+            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",
+            (prefix, *states),
+        )
+        return row is not None
+
     async def _spawn_fitting_queued(
         self,
         *,
@@ -222,6 +325,21 @@ class DispatcherCollaborator:
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
         spawned: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
+        # §3.4 serving priority: if serving currently holds the whole-machine
+        # slot, pause admitting NEW GPU research specialists this pass (they stay
+        # in the SQLite queue and are re-considered next pass) so a research
+        # pile-up cannot starve serving. Computed once per pass (a single cheap
+        # Ray probe); best-effort — any failure leaves it False (no pause).
+        serving_priority_pause = False
+        try:
+            from ..actions.executors._ray_backend import (
+                ray_serving_priority_enabled,
+                serving_slot_busy,
+            )
+
+            serving_priority_pause = ray_serving_priority_enabled() and serving_slot_busy()
+        except Exception:  # noqa: BLE001 — never block dispatch on the probe
+            serving_priority_pause = False
         for task in queued:
             if task.task_id in exclude_ids:
                 # Already dispatched in a prior pass of this pump.
@@ -272,11 +390,22 @@ class DispatcherCollaborator:
                     needs_gpu=needs_gpu,
                 )
                 if needs_gpu:
+                    if serving_priority_pause:
+                        # §3.4: serving is active — defer this GPU specialist to a
+                        # later pass (keep it queued) rather than piling onto the
+                        # contended GPU. Release the SQLite lane lease taken above
+                        # so it does not sit held while the task waits.
+                        if lease is not None:
+                            await self.locks.release(lease)
+                            for lane in lease.lanes:
+                                holders[lane] = max(0, int(holders.get(lane, 0)) - 1)
+                        continue
                     # Whole-machine, time-shared lane vs serving-disjoint pool:
                     # framework-authoring and bench-capable specialists lease the
                     # whole machine from ``framework_gpu_pool``; every other GPU
                     # specialist leases from ``gpu_specialist_pool``.
                     from ..specialists.profile import (
+                        holds_serving_slot,
                         uses_whole_machine_gpu_lane,
                     )
 
@@ -322,12 +451,33 @@ class DispatcherCollaborator:
                     # kill <= gpu_lease TTL <= gpu_research_lane TTL. Both TTLs
                     # come from ``_gpu_lease_ttl_sec`` so they never drift apart.
                     gpu_ttl_sec = self._gpu_lease_ttl_sec(int(task.lease_ttl_sec or 0))
-                    gpu_lease = await gpu_pool.try_acquire(
-                        count=gpu_count,
-                        holder_id=task.task_id,
-                        task_id=task.task_id,
-                        ttl_sec=gpu_ttl_sec,
+                    # §3.2: under single-node Ray the physical GPU mutex is Ray's
+                    # ``num_gpus``, not this SQLite pool. Admit by a count-based
+                    # pending limit so multiple specialists can queue on one
+                    # physical GPU (Ray time-multiplexes them) instead of the
+                    # legacy physical-capacity hard gate that pinned it to one at
+                    # a time. Off the Ray path (multi-node / RAY_EXEC off /
+                    # pytest) the SQLite pool stays the physical mutex
+                    # (invariant §6.7).
+                    from ..actions.executors._ray_backend import (
+                        ray_gpu_pending_limit,
+                        ray_gpu_specialist_exec_enabled,
                     )
+
+                    if ray_gpu_specialist_exec_enabled():
+                        gpu_lease = await gpu_pool.try_acquire_ray_observation(
+                            holder_id=task.task_id,
+                            task_id=task.task_id,
+                            pending_limit=ray_gpu_pending_limit(),
+                            ttl_sec=gpu_ttl_sec,
+                        )
+                    else:
+                        gpu_lease = await gpu_pool.try_acquire(
+                            count=gpu_count,
+                            holder_id=task.task_id,
+                            task_id=task.task_id,
+                            ttl_sec=gpu_ttl_sec,
+                        )
                     if gpu_lease is None:
                         if lease is not None:
                             await self.locks.release(lease)
@@ -349,14 +499,20 @@ class DispatcherCollaborator:
                         maybe_gpu_specialist_lease,
                     )
 
-                    # Whole-machine / bench-capable specialists (gpu_research_lane)
-                    # also hold the ``serving_slot`` so Ray makes them mutually
-                    # exclusive with serving (§12 T6); the serving-disjoint pool
-                    # takes ``num_gpus`` only and can run on cards disjoint from
-                    # serving.
+                    # serving_slot (phase-3 §4 / invariant §6.3): only
+                    # bench-capable specialists that start their OWN serving
+                    # loop hold the whole-machine serving_slot mutex. Authoring-
+                    # only specialists (incl. framework authoring, which does not
+                    # self-bench — its real benchmark runs through integrate_patch
+                    # / _bench_candidate under a run_grid serving lease, §3.1)
+                    # take ``num_gpus`` only, so they share the GPU queue with
+                    # other specialists instead of blocking serving for their
+                    # whole (mostly CPU-bound authoring) lifetime. Physical GPU
+                    # mutual-exclusion with serving is still enforced by Ray's
+                    # ``num_gpus`` accounting.
                     gpu_specialist_lease = maybe_gpu_specialist_lease(
                         num_gpus=gpu_count,
-                        serving_slot=whole_machine_lane,
+                        serving_slot=holds_serving_slot(params),
                     )
                     if gpu_specialist_lease is not None:
                         extra_context["gpu_ids"] = list(range(gpu_count))
@@ -1130,3 +1286,14 @@ class DispatcherCollaborator:
             )
         )
         return f"inline run complete: {rendered}"
+
+
+def _dispatch_policy_denied_evidence(task: Task) -> dict[str, Any]:
+    """Return policy-denied evidence from a queued→cancelled dispatch transition."""
+    for entry in reversed(task.history or []):
+        if entry.get("from") != "queued" or entry.get("to") != "cancelled":
+            continue
+        evidence = entry.get("evidence") or {}
+        if evidence.get("reason") == "policy_denied":
+            return dict(evidence)
+    return {}

@@ -397,11 +397,9 @@ class ExplorePhase(PhaseHandler):
         # At the start of each macro-cycle (SWEEP→EXPLORE loopback), force a
         # fresh roofline/profile so the new cycle re-targets the current
         # bottleneck.
-        if (
-            _phase_state.is_cyclic_phases_enabled()
-            and (from_phase or "").upper() == _phase_state.PHASE_SWEEP
-            and int(getattr(self.shared_state, "macro_cycle", 0) or 0) > 0
-        ):
+        if (from_phase or "").upper() == _phase_state.PHASE_SWEEP and int(
+            getattr(self.shared_state, "macro_cycle", 0) or 0
+        ) > 0:
             try:
                 task = await self._enqueue_internal_analysis_task(
                     reason="cycle_start",

@@ -97,3 +97,53 @@ def validate_server_args(raw: str, *, context: str = "") -> None:
     if denied:
         where = f" ({context})" if context else ""
         raise ServerArgsRejected(f"denied server flags {denied!r}{where}")
+
+
+def prepare_shell_safe_extra_args(raw: str, *, context: str = "") -> str:
+    """Validate ``raw`` and return a shell-safe extra-args string for fan-out.
+
+    Args:
+        raw: Whitespace-separated server CLI flags (may be empty).
+        context: Optional label for error messages.
+
+    Returns:
+        str: The re-quoted, shell-safe token string (empty when ``raw`` blank).
+
+    Raises:
+        ServerArgsRejected: When ``raw`` is denied or not shell-tokenizable.
+    """
+    validate_server_args(raw, context=context)
+    return shell_safe_extra_args(raw, context=context)
+
+
+def shell_safe_extra_args(raw: str, *, context: str = "") -> str:
+    """Return ``raw`` re-quoted per shell token so it can be spliced after ``--``.
+
+    ``extra_args`` is forwarded verbatim after a ``--`` separator into a Ray
+    Dashboard shell entrypoint and word-split by the pod launcher into argv. A
+    raw splice lets a value like ``--foo 1; touch x`` inject a second shell
+    command. This tokenises with shlex (the same word-splitting the pod applies)
+    and re-quotes each token, so multi-token flag/value semantics are preserved
+    while any shell metacharacter (``;`` ``|`` ``$()`` …) stays inside a single
+    quoted argv token and can no longer act as shell control syntax.
+
+    Args:
+        raw: Whitespace-separated server CLI flags (may be empty).
+        context: Optional label for error messages.
+
+    Returns:
+        str: The re-quoted, shell-safe token string (empty when ``raw`` blank).
+
+    Raises:
+        ServerArgsRejected: When ``raw`` is not shell-tokenizable (e.g. an
+            unbalanced quote), which a raw splice would carry through unchecked.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    try:
+        tokens = shlex.split(text)
+    except ValueError as exc:
+        where = f" ({context})" if context else ""
+        raise ServerArgsRejected(f"extra_args is not shell-tokenizable: {exc}{where}") from exc
+    return " ".join(shlex.quote(tok) for tok in tokens)

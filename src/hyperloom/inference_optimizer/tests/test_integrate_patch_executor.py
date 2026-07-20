@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from .conftest import git_commit_all, init_git_repo
+from .conftest import git_commit_all, init_git_repo, patch_integrate_patch_allowlist
 
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -68,6 +68,11 @@ index 0000000..1111111 100644
 -OLD
 +NEW
 """
+
+
+@pytest.fixture(autouse=True)
+def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
+    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
 
 
 def _write_specialist_workspace(
@@ -255,9 +260,13 @@ def test_git_apply_auto_detects_deep_p_level(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path):
+def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path, monkeypatch):
     repo = tmp_path / "repo"
     init_git_repo(repo)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_source_file_allowlist",
+        lambda: [str(repo)],
+    )
     root = _resolve_framework_root(str(repo))
     assert root is not None
     assert root.samefile(repo)
@@ -959,3 +968,44 @@ def test_derive_lane_perf_explore():
 
     assert _derive_lane({}) == "perf_explore"
     assert _derive_lane({"specialist_task_id": "abc"}) == "perf_explore"
+
+
+@pytest.mark.asyncio
+async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
+    """phase-3 §3.1: the patch benchmark forwards a serving lease to run_grid
+    and closes it, so it serializes on the whole-machine serving_slot instead
+    of colliding with a concurrent GPU-specialist server (the observed
+    ``reverted_smoke_fail`` root cause)."""
+    from unittest.mock import MagicMock, patch
+
+    from hyperloom.orchestrator.actions.executors import _ray_serving
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    captured: dict[str, Any] = {}
+
+    async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
+        captured["serving_lease"] = kwargs.get("serving_lease")
+        return [VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")]
+
+    lease = MagicMock()
+    with (
+        patch.object(ip_mod, "run_grid", new=fake_run_grid),
+        patch.object(ip_mod, "materialize_config_with_envs", return_value=config_path),
+        patch.object(_ray_serving, "maybe_serving_lease", return_value=lease),
+    ):
+        await executor._bench_patch(
+            params={"config_path": str(config_path)},
+            output_root=tmp_path / "out",
+            config_changes_applied={},
+            specialist_task_id="task-abcd1234",
+        )
+
+    assert captured["serving_lease"] is lease
+    lease.close.assert_called_once()

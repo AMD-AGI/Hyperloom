@@ -4,8 +4,10 @@
 """Phase state machine.
 
 Pure functions over a frozen SharedState; Coordinator is the only writer.
-Monotonic chain PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE
-(any phase → CLOSE on terminal/abort); ``recover`` is phase-orthogonal.
+Chain PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE
+(monotonic within a macro-cycle; SWEEP reloops back to EXPLORE / FRAMEWORK_AGENT
+across macro-cycles until convergence, budget, or the cycle cap forces CLOSE).
+Any phase → CLOSE on terminal/abort; ``recover`` is phase-orthogonal.
 """
 
 from __future__ import annotations
@@ -458,8 +460,8 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
 # per-phase cap so an unbounded run still forces phase rotation.
 DEFAULT_LONGRUN_MAX_MINUTES: int = 14 * 24 * 60
 # Reference window the absolute per-phase cap applies its budget fraction to.
-# Short bounded runs bind on the (smaller) session-derived term — identical to
-# legacy behaviour; long/unbounded runs bind on this 24h reference.
+# Short bounded runs bind on the (smaller) session-derived term; long/unbounded
+# runs bind on this 24h reference.
 PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
 
 
@@ -560,18 +562,6 @@ def decaying_keep_threshold_pct(macro_cycle: int, *, multi_node: bool = False) -
     return base * MULTI_NODE_KEEP_THRESHOLD_FACTOR if multi_node else base
 
 
-def is_cyclic_phases_enabled() -> bool:
-    """Whether the cyclic phase machine is enabled.
-
-    Enabled by default. Macro-cycle reloop is available for all session budgets;
-    :func:`is_long_run` only selects the budget accounting mode.
-
-    Returns:
-        bool: Always ``True``.
-    """
-    return True
-
-
 # Long-run budget threshold. Long/unbounded runs use the per-cycle budget window;
 # short bounded runs keep charge-back phase budgeting against the remaining
 # session time even though they can now open new macro-cycles.
@@ -632,9 +622,10 @@ def should_reloop_to_explore(
     carries the *effective* no-gain streak for the cycle that just completed so
     the Coordinator can persist it on the loopback/close transition.
 
-    Loops back iff cyclic mode is on AND below the macro-cycle safety cap AND
-    the run has not globally converged (R7: ``no_gain_cycles`` consecutive
-    no-gain cycles) AND enough session budget remains to use a fresh cycle.
+    Loops back iff below the macro-cycle safety cap AND the run has not globally
+    converged (R7: ``no_gain_cycles`` consecutive no-gain cycles) AND no
+    roofline direction is saturated AND enough session budget remains to use a
+    fresh cycle.
 
     Args:
         state (Any): Frozen SharedState view.
@@ -654,9 +645,7 @@ def should_reloop_to_explore(
         streak and any ``reloop_blocked`` reason).
     """
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
-    evidence: dict[str, Any] = {"cyclic": is_cyclic_phases_enabled(), "macro_cycle": cycle}
-    if not is_cyclic_phases_enabled():
-        return False, evidence
+    evidence: dict[str, Any] = {"macro_cycle": cycle}
 
     # Per-cycle gain since this cycle started → effective no-gain streak. A cycle
     # "gained" only when its validated gain rose by at least the decaying KEEP bar.
@@ -954,15 +943,16 @@ def _max_minutes(state: Any) -> float:
 def _budget_minutes(state: Any) -> float:
     """Wall-clock minutes the PER-PHASE budget fractions apply to (R2).
 
-    In cyclic mode the Coordinator sets ``cycle_minutes`` > 0 so each phase's
-    budget (``DEFAULT_PHASE_BUDGET_PCT``) is a fraction of ONE macro-cycle's
-    window rather than the whole run. 0 (legacy/non-cyclic) falls back to the
-    total ``max_minutes`` so behaviour is identical to the monotonic chain.
+    The Coordinator sets ``cycle_minutes`` > 0 so each phase's budget
+    (``DEFAULT_PHASE_BUDGET_PCT``) is a fraction of ONE macro-cycle's window
+    rather than the whole run. When ``cycle_minutes`` is 0 this falls back to
+    the total ``max_minutes`` (the whole-session anchor).
 
-    The per-cycle window only applies to long/unbounded runs (:func:`is_long_run`).
-    A short bounded run (``--max-hours < 24``) always anchors its phase budgets
-    on the whole session even when ``cycle_minutes`` is set, so its phases are
-    never silently compressed to the cycle window (DEFAULT_CYCLE_HOURS).
+    Used by :func:`_phase_budget_total_seconds` as the charge-back *base* (and
+    planning cap) for long/unbounded runs (:func:`is_long_run`). A short bounded
+    run (``--max-hours < 24``) does not use this — it charges back against the
+    remaining session time — so its phases are never silently compressed to the
+    cycle window (DEFAULT_CYCLE_HOURS).
     Note: ``session_remaining_seconds`` deliberately keeps using ``max_minutes``
     — the global deadline is per-run, not per-cycle.
     """
@@ -1004,14 +994,22 @@ def _phase_budget_total_seconds(
 ) -> float | None:
     """Effective TOTAL budget (seconds) allotted to the current phase.
 
-    Short bounded runs (``max_minutes>0`` and not :func:`is_long_run`) use
-    "charge-back": the phase gets its share of the time still remaining in the
-    session, renormalized over the current phase and the phases yet to come. This
-    makes an earlier phase's overrun (e.g. a slow PRELUDE) transparently reduce
-    every later phase's budget instead of the fixed ``max_minutes*pct`` allotment.
+    Bounded runs (a wall-clock ``start_ts`` + ``max_minutes`` are set) use
+    "charge-back": the phase gets its share of the time still available,
+    renormalized over the current phase and the phases yet to come, so an earlier
+    phase's overrun (e.g. a slow PRELUDE) transparently reduces every later
+    phase's budget instead of a fixed ``base*pct`` allotment. The charge-back
+    *base* differs by session length (:func:`is_long_run`):
 
-    Long/cyclic and unbounded runs keep the legacy per-window allotment
-    (``_budget_minutes*60*pct``) so per-cycle budgeting is untouched.
+    - Short bounded runs charge back against the remaining SESSION time.
+    - Long bounded runs charge back against the remaining session time too, but
+      the per-cycle window (``cycle_minutes`` via :func:`_budget_minutes`) caps
+      the base as a planning ceiling — so one cycle never plans beyond one
+      macro-cycle window.
+
+    Unbounded runs (or a state with no parseable ``start_ts``) have no clock to
+    charge back against, so they fall back to the flat per-window allotment
+    (``_budget_minutes*60*pct``).
 
     Args:
         state (Any): Frozen SharedState view.
@@ -1029,22 +1027,31 @@ def _phase_budget_total_seconds(
     pct = float(budget.get(phase, 0.0))
     if pct <= 0.0:
         return None
+
     session_remaining = session_remaining_seconds(state, now_unix=now_unix)
-    if session_remaining is not None and not is_long_run(state):
-        # Charge-back (short bounded run). remaining_at_entry reconstructs the
-        # session time left when this phase started (session_remaining shrinks as
-        # phase_elapsed grows, so their sum is constant across the phase).
+    if session_remaining is not None:
+        # Charge-back. remaining_at_entry reconstructs the time left when this
+        # phase started (session_remaining shrinks as phase_elapsed grows, so
+        # their sum is constant across the phase).
         remaining_at_entry = max(0.0, session_remaining + phase_elapsed_seconds(state, now_unix=now_unix))
+        if is_long_run(state):
+            # Long bounded run: the per-cycle window caps the base as a planning
+            # ceiling so one cycle never plans beyond one macro-cycle window.
+            cycle_window = _budget_minutes(state) * 60.0
+            if cycle_window > 0.0:
+                remaining_at_entry = min(cycle_window, remaining_at_entry)
         # Normalize ONLY over the current phase and the phases still to come:
         # already-elapsed phases (notably PRELUDE) are excluded — their spend is
-        # already reflected in session_remaining — while CLOSE stays in so it
-        # keeps its reserved share. Do NOT normalize over all six phases.
+        # already reflected in the base — while CLOSE stays in so it keeps its
+        # reserved share. Do NOT normalize over all six phases.
         denom = sum(
             float(budget.get(p, 0.0)) for p in PHASE_NAMES[phase_index(phase) :] if float(budget.get(p, 0.0)) > 0.0
         )
         if denom <= 0.0:
             return None
         return remaining_at_entry * pct / denom
+    # No session clock (unbounded run, or ``start_ts`` unset): fall back to the
+    # flat per-window allotment — charge-back needs a wall-clock reference.
     mm = _budget_minutes(state)
     if mm <= 0:
         return None
@@ -1101,8 +1108,10 @@ def phase_cap_seconds(
     ``max_minutes`` is 0 (unbounded), where ``phase_budget_remaining_seconds``
     returns ``None``. Equals the smaller of the session-derived term and a
     fixed 24h reference, each scaled by the phase budget fraction: short bounded
-    runs bind on the session term (legacy behaviour), long/unbounded runs bind
-    on the 24h reference so no single phase can monopolise the run.
+    runs bind on the (smaller) session term, long/unbounded runs bind on the
+    24h reference so no single phase can monopolise the run. (Emergent from
+    ``min(proportional, abs_cap)`` — this cap does not branch on
+    :func:`is_long_run`.)
 
     Returns:
         float | None: Cap in seconds, or ``None`` when no fraction applies.
@@ -1248,7 +1257,9 @@ def should_force_exit_explore(
     if phase_remaining is not None:
         # Fraction of the phase's EFFECTIVE total budget — same helper that
         # produced phase_remaining, so numerator and denominator stay in the same
-        # units (charge-back for short bounded runs, legacy window otherwise).
+        # units (charge-back against the session for short runs, against the
+        # cycle-window-capped base for long bounded runs, flat per-window for
+        # unbounded runs).
         phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
         if phase_total_sec and phase_total_sec > 0:
             remaining_pct = phase_remaining / phase_total_sec
@@ -1698,15 +1709,14 @@ def exit_normal_explore(
         }
     # A detected EXPLORE plateau is not terminal: switch lever (→ KERNEL_AGENT)
     # and flag that the next macro-cycle should steer off the bottleneck.
-    if is_cyclic_phases_enabled():
-        plateaued, plateau_ev = compute_plateau_explore(state)
-        if plateaued:
-            return "explore_no_more_leverage", {
-                "evidence": "plateau_explore",
-                "plateau": True,
-                "switch_bottleneck": True,
-                **plateau_ev,
-            }
+    plateaued, plateau_ev = compute_plateau_explore(state)
+    if plateaued:
+        return "explore_no_more_leverage", {
+            "evidence": "plateau_explore",
+            "plateau": True,
+            "switch_bottleneck": True,
+            **plateau_ev,
+        }
     remaining = phase_budget_remaining_seconds(
         state,
         budget_pct=budget_pct,
@@ -2242,9 +2252,9 @@ def compute_next_phase(
             # stop_reason instead of opening another macro-cycle.
             if exit_reason == "conc_sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
-            # R1: in cyclic mode, loop back to EXPLORE (a new macro-cycle)
-            # while budget remains and the run hasn't globally converged (R7);
-            # otherwise wind down to CLOSE (the monotonic-chain behaviour).
+            # R1: loop back to EXPLORE (a new macro-cycle) while budget remains
+            # and the run hasn't globally converged (R7); wind down to CLOSE
+            # only when reloop is blocked (budget, convergence, or max_cycles).
             reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
             if reloop and (framework_agent_phase_enabled or explore_enabled):
                 # Reloop to the highest-leverage layer available: FRAMEWORK when
@@ -2293,7 +2303,7 @@ def make_history_row(
     """Construct a canonical phase_history row; ``reason`` unvalidated for resume tools.
 
     ``cycle`` stamps the R1 macro-cycle this transition belongs to (0 for the
-    first pass / legacy non-cyclic runs).
+    first macro-cycle, or resume from a pre-cyclic session).
 
     Args:
         from_phase (str): Source phase name; normalized to upper-case.
@@ -2603,7 +2613,6 @@ __all__ = [
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
     "DEFAULT_CYCLE_MIN_GAIN_PCT",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
-    "is_cyclic_phases_enabled",
     "is_long_run",
     "should_reloop_to_explore",
     "abort_prelude",

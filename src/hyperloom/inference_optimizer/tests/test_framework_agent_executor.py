@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from .conftest import init_git_repo
+from .conftest import init_git_repo, patch_integrate_patch_allowlist
 
 from hyperloom.orchestrator.actions.executors.framework_agent import (
     FrameworkAgentExecutor,
@@ -50,6 +50,11 @@ index 0000000..1111111 100644
 -OLD
 +NEW
 """
+
+
+@pytest.fixture(autouse=True)
+def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
+    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
 
 
 def _make_candidate(
@@ -956,6 +961,44 @@ async def test_bench_candidate_accuracy_gate_reads_accuracy_key(
     assert bench["status"] == "succeeded"
     # A real accuracy verdict, never None when an eval result + positive baseline are present.
     assert gate["accuracy_pass"] is expected_pass
+
+
+@pytest.mark.asyncio
+async def test_bench_candidate_holds_and_closes_serving_lease(tmp_path: Path):
+    """phase-3 §3.1: the candidate benchmark forwards a serving lease to
+    run_grid and closes it (so it serializes on the whole-machine serving_slot
+    instead of colliding with a concurrent GPU-specialist server)."""
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
+    captured: dict[str, Any] = {}
+
+    async def fake_run_grid(*args, **kwargs):  # noqa: ARG001
+        captured["serving_lease"] = kwargs.get("serving_lease")
+        return [_mk_variant_result(tput=1100.0, status="succeeded")]
+
+    lease = MagicMock()
+    from hyperloom.orchestrator.actions.executors import framework_agent as fp_mod
+    from hyperloom.orchestrator.actions.executors import _ray_serving
+
+    with (
+        patch.object(fp_mod, "run_grid", new=fake_run_grid),
+        patch.object(fp_mod, "materialize_config_with_envs", return_value=config_path),
+        patch.object(_ray_serving, "maybe_serving_lease", return_value=lease),
+    ):
+        await executor._bench_candidate(
+            params={"config_path": str(config_path)},
+            output_root=tmp_path / "out",
+            slug="lease",
+        )
+
+    assert captured["serving_lease"] is lease
+    lease.close.assert_called_once()
 
 
 @pytest.mark.asyncio

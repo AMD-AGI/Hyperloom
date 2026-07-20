@@ -246,7 +246,8 @@ class _RenderMixin:
             )
             session_buffer = int(session_remaining - hours_thresh * 3600.0) if session_remaining is not None else None
             # Same effective-total helper as `remaining` so the fraction stays in
-            # one unit (charge-back for short bounded runs, legacy otherwise).
+            # one unit (charge-back against the session for short runs, against
+            # the cycle-window-capped base for long bounded runs).
             phase_total_sec = _phase_budget_total_seconds(self, budget_pct=budget, now_unix=now_unix)
             if remaining is not None and phase_total_sec and phase_total_sec > 0:
                 phase_remaining_pct = remaining / phase_total_sec

@@ -948,6 +948,29 @@ async def run_grid(
     auto_warmup_requested = bool(warmup_before_measure and server_lifecycle is None)
     results: list[VariantResult] = []
 
+    # Reap orphaned aiter JIT build locks before booting any server. A prior GPU
+    # process killed mid-``hipcc`` (e.g. an OOM'd co-scheduled server, or a
+    # specialist reaped mid-compile) leaves a zero-byte ``FileBaton`` lock, and
+    # aiter's ``FileBaton.wait()`` spins forever with no timeout — hanging every
+    # later cold server boot (observed as repeated conc_sweep boot timeouts).
+    # ``baseline.py`` sweeps on its own cold path; this covers the grid serving
+    # paths (explore / sweep / conc_sweep / integrate_patch / framework bench).
+    # Gated on no live compiler so a genuine in-flight build is never disturbed.
+    try:
+        from ._aiter_jit import sweep_stale_aiter_locks_if_dead
+
+        _lock_sweep = sweep_stale_aiter_locks_if_dead()
+        if _lock_sweep.get("deleted"):
+            log.warning(
+                "grid_runner: reaped %d orphaned aiter JIT lock(s) under %s "
+                "before server launch (compiler_alive=%s)",
+                _lock_sweep.get("deleted"),
+                _lock_sweep.get("dir"),
+                _lock_sweep.get("compiler_alive"),
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort hygiene, never blocks the grid
+        log.debug("grid_runner: aiter lock sweep swallowed: %r", exc)
+
     # Variant-boundary robustness pulse: a bounded tick after every variant so
     # a mid-grid leak/crash surfaces between variants. Best-effort.
     async def _pulse_after_variant(idx: int) -> None:

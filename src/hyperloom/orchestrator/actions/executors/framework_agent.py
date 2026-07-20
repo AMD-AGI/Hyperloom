@@ -22,6 +22,7 @@ from ._git import _run_git, _run_git_cp
 from ._grid_runner import (
     GridVariant,
     VariantResult,
+    _num_gpus_for_config,
     _resolve_session_dir,
     run_grid,
     sanitize_result_dir,
@@ -494,18 +495,26 @@ class FrameworkAgentExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
-        framework_root = _resolve_framework_root(
-            params.get("framework_source_root") or None,
-        )
+        explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
+        framework_root = _resolve_framework_root(explicit_framework_root)
         if framework_root is None:
-            return {
-                "status": "apply_failed",
-                "error_class": "no_framework_agent_root",
-                "error": (
+            if explicit_framework_root:
+                _error_class = "framework_source_root_rejected"
+                _error = (
+                    f"framework_source_root {explicit_framework_root!r} is not "
+                    "under the configured source allowlist"
+                )
+            else:
+                _error_class = "no_framework_agent_root"
+                _error = (
                     "no framework_source_root resolved; cannot apply "
                     "candidate PR. Configure $INFERENCEX_PATH or pass "
                     "params.framework_source_root."
-                ),
+                )
+            return {
+                "status": "apply_failed",
+                "error_class": _error_class,
+                "error": _error,
                 "candidate": candidate,
                 "batch_id": batch_id,
                 "patches_applied": [],
@@ -1154,21 +1163,36 @@ class FrameworkAgentExecutor:
             note=f"framework:{slug}",
         )
 
-        results: list[VariantResult] = await run_grid(
-            base_yaml_path=config_path,
-            base_extra_args=str(params.get("base_extra_args") or "").strip(),
-            grid=[variant],
-            output_root=output_root,
-            magpie_python=params.get("magpie_python") or None,
-            variant_timeout_sec=int(
-                params.get("variant_timeout_sec", self.variant_timeout_sec),
-            ),
-            keep_going_on_failure=False,
-            model_path=resolved_model or None,
-            gpu_type=resolved_gpu or None,
-            benchmark_script=override_script,
-            result_dir=override_result_dir,
-        )
+        # Ray-managed GPU execution (phase-3 §3.1 / invariant §6.2): the
+        # candidate benchmark holds a serving lease (num_gpus=TP + serving_slot)
+        # for the whole run_grid, so it serializes against other serving on the
+        # whole-machine mutex instead of colliding with a concurrently-running
+        # GPU specialist server on the same card. ``None`` keeps the local path
+        # (multi-node / RAY_EXEC off / pytest default). Closed right after the
+        # grid; the accuracy parse below reads result files and needs no GPU.
+        from ._ray_serving import maybe_serving_lease
+
+        serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+        try:
+            results: list[VariantResult] = await run_grid(
+                base_yaml_path=config_path,
+                base_extra_args=str(params.get("base_extra_args") or "").strip(),
+                grid=[variant],
+                output_root=output_root,
+                magpie_python=params.get("magpie_python") or None,
+                variant_timeout_sec=int(
+                    params.get("variant_timeout_sec", self.variant_timeout_sec),
+                ),
+                keep_going_on_failure=False,
+                model_path=resolved_model or None,
+                gpu_type=resolved_gpu or None,
+                benchmark_script=override_script,
+                result_dir=override_result_dir,
+                serving_lease=serving_lease,
+            )
+        finally:
+            if serving_lease is not None:
+                serving_lease.close()
 
         bench: dict[str, Any] = {}
         if results:
