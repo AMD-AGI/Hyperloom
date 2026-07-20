@@ -437,6 +437,50 @@ def sanitize_result_dir(value: Any) -> str | None:
     return text
 
 
+def apply_runtime_override(envs: dict[str, str], override: dict[str, str]) -> None:
+    """Inject an attempt runtime override into the materialized YAML envs dict.
+
+    Writes path_prefix, pythonpath_prefix, framework_bin, framework_python, and
+    framework_venv_root into benchmark.envs so the Magpie subprocess re-exports
+    them to the server it boots.  All writes land in the YAML layer; os.environ
+    is never mutated.
+
+    path_prefix is prepended to PATH using the same containment checks as
+    overlay_pythonpath (no colon separator, no traversal, no control chars).
+    An empty or all-missing override is a no-op.
+
+    Args:
+        envs: The benchmark.envs dict from the materialized YAML (mutated in place).
+        override: Dict with optional keys path_prefix, pythonpath_prefix,
+            framework_bin, framework_python, framework_venv_root.
+    """
+    if not override:
+        return
+    path_prefix = str(override.get("path_prefix") or "").strip()
+    if path_prefix:
+        _cur = str(envs.get("PATH", "") or "")
+        _parts = [p for p in _cur.split(":") if p]
+        if path_prefix not in _parts:
+            _parts.insert(0, path_prefix)
+        envs["PATH"] = ":".join(_parts)
+    pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
+    if pp_prefix:
+        _ok = (
+            ":" not in pp_prefix
+            and ".." not in Path(pp_prefix).parts
+            and not any(c in pp_prefix for c in ("\n", "\r", "\x00"))
+        )
+        if _ok:
+            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
+            envs["PYTHONPATH"] = f"{pp_prefix}:{_cur_pp}" if _cur_pp else pp_prefix
+        else:
+            log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
+    for key in ("framework_bin", "framework_python", "framework_venv_root"):
+        val = str(override.get(key) or "").strip()
+        if val:
+            envs[f"HYPERLOOM_{key.upper()}"] = val
+
+
 def _build_variant_yaml(
     base_yaml_path: Path,
     base_extra_args: str,
@@ -524,6 +568,13 @@ def _build_variant_yaml(
                 "existing directory / contains separator or traversal)",
                 _overlay,
             )
+
+    # Attempt runtime override: inject path_prefix/pythonpath_prefix/framework_bin
+    # etc. into benchmark.envs so the server subprocess resolves the attempt
+    # runtime.  All writes are YAML-layer; os.environ is never mutated.
+    _rt_override = getattr(variant, "runtime_override", None) or {}
+    if _rt_override:
+        apply_runtime_override(envs, _rt_override)
 
     # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console
     # script) and `/opt/rocm/bin` (`hipcc`); force-prepend both so an

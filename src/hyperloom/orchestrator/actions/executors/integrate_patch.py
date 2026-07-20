@@ -2408,6 +2408,9 @@ class IntegratePatchExecutor:
             args_mode=str(params.get("base_args_mode") or "append"),
             note=f"integrate_patch:{specialist_task_id}",
         )
+        _rt = params.get("runtime_override")
+        if isinstance(_rt, dict) and _rt:
+            variant.runtime_override = {str(k): str(v) for k, v in _rt.items()}
 
         results: list[VariantResult] = await run_grid(
             base_yaml_path=config_path,
@@ -2584,6 +2587,9 @@ class IntegratePatchExecutor:
             args_mode=str(params.get("base_args_mode") or "append"),
             note=f"integrate_patch_rebench:{specialist_task_id}",
         )
+        _rt_rb = params.get("runtime_override")
+        if isinstance(_rt_rb, dict) and _rt_rb:
+            variant.runtime_override = {str(k): str(v) for k, v in _rt_rb.items()}
         rebench = await measure_stack_rebench(
             config_path=config_path,
             base_extra_args=base_extra_args,

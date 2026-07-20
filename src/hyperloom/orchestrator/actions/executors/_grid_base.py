@@ -125,6 +125,9 @@ class GridVariant:
         mode = str(args_mode or "append").strip().lower()
         self.args_mode = mode if mode in {"append", "replace"} else "append"
         self.note = note
+        # Optional runtime override; injected into materialized YAML benchmark.envs
+        # by _build_variant_yaml so the server subprocess resolves the attempt runtime.
+        self.runtime_override: dict[str, str] = {}
 
     @property
     def fingerprint(self) -> str:
