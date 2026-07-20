@@ -180,7 +180,7 @@ jobs:
 
       - name: Upload shard coverage data
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: covdata-py${{ matrix.python-version }}-shard${{ matrix.shard }}
           path: |
@@ -195,7 +195,7 @@ jobs:
       # keep a single shared DB (see the restore key rationale above).
       - name: Upload shard durations
         if: always() && matrix.python-version == '3.10'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: durations-shard${{ matrix.shard }}
           path: .test_durations.shard${{ matrix.shard }}
