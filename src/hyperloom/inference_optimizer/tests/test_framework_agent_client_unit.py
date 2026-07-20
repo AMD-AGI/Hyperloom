@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``framework_agent_client``: fa binary resolution, the sync
+"""Coverage for ``framework_agent_client``: fa command resolution, the sync
 subprocess wrapper (success / not-found / timeout), the async phase runner
 error branches, and the ``phase_discover`` request shaping."""
 
@@ -79,7 +79,7 @@ def test_run_fa_subcommand_sync_timeout(monkeypatch) -> None:
     assert "timed out" in err
 
 
-def test_module_fallback_entry_starts_in_real_subprocess() -> None:
+def test_module_entry_starts_in_real_subprocess() -> None:
     """Smoke: ``python -m <module> schema`` launches and emits valid JSON."""
     # Inherit the parent env so the child keeps PYTHONPATH.
     proc = subprocess.run(
