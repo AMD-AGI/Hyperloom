@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from .conftest import git_commit_all, init_git_repo
+from .conftest import git_commit_all, init_git_repo, patch_integrate_patch_allowlist
 
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -68,6 +68,11 @@ index 0000000..1111111 100644
 -OLD
 +NEW
 """
+
+
+@pytest.fixture(autouse=True)
+def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
+    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
 
 
 def _write_specialist_workspace(
@@ -255,9 +260,13 @@ def test_git_apply_auto_detects_deep_p_level(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path):
+def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path, monkeypatch):
     repo = tmp_path / "repo"
     init_git_repo(repo)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_source_file_allowlist",
+        lambda: [str(repo)],
+    )
     root = _resolve_framework_root(str(repo))
     assert root is not None
     assert root.samefile(repo)
