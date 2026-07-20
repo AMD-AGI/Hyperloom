@@ -454,6 +454,19 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_attempt_runtimes: list = field(default_factory=list)
     enablement_kept_stack_action: dict = field(default_factory=dict)
     enablement_localization_manifest: list = field(default_factory=list)
+    # Rung 5 (S2) off-loop targeted-build state. All optional; NOT in
+    # fact_layer_keys and do NOT bump schema_version (default via from_dict).
+    # ``pending_targeted_build``: in-flight build sentinel (task_id/pid/pgid/
+    #   attempt_root/aiter_jit_dir/deadline/action); own sentinel, resume-cleared.
+    # ``enablement_build_actions``: TargetedBuildAction dicts considered.
+    # ``enablement_build_manifest``: repo/ref/sha -> artifact -> hash records.
+    # ``enablement_last_build_failure``: failure_class + failure_summary (framework channel §9).
+    # ``enablement_build_novelty``: compact repeat-vs-novel ledger (D6).
+    pending_targeted_build: dict = field(default_factory=dict)
+    enablement_build_actions: list = field(default_factory=list)
+    enablement_build_manifest: list = field(default_factory=list)
+    enablement_last_build_failure: dict = field(default_factory=dict)
+    enablement_build_novelty: list = field(default_factory=list)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
