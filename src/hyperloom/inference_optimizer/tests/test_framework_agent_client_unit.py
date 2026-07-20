@@ -1,18 +1,24 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``framework_agent_client``: fa binary resolution, the sync
+"""Coverage for ``framework_agent_client``: fa command resolution, the sync
 subprocess wrapper (success / not-found / timeout), the async phase runner
 error branches, and the ``phase_discover`` request shaping."""
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from hyperloom.orchestrator.framework import client as fac
+
+# Reference the resolver's own constant so the two never drift apart.
+_FA_MODULE = fac._FA_MODULE
 
 
 # -- repo_url_for_framework -----------------------------------------------
@@ -21,36 +27,11 @@ def test_repo_url_for_framework_known_and_unknown() -> None:
     assert fac.repo_url_for_framework("nope") == ""
 
 
-# -- _resolve_fa_binary ----------------------------------------------------
-def test_resolve_fa_binary_explicit_env(tmp_path, monkeypatch) -> None:
-    fa = tmp_path / "fa"
-    fa.write_text("#!/bin/sh\n")
-    monkeypatch.setenv("FA_BIN", str(fa))
-    assert fac._resolve_fa_binary() == str(fa)
-
-
-def test_resolve_fa_binary_via_path(monkeypatch) -> None:
-    monkeypatch.delenv("FA_BIN", raising=False)
-    monkeypatch.delenv("FRAMEWORK_AGENT_ROOT", raising=False)
-    monkeypatch.setattr(fac.shutil, "which", lambda _n: "/usr/bin/fa")
-    assert fac._resolve_fa_binary() == "/usr/bin/fa"
-
-
-def test_resolve_fa_binary_via_root(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("FA_BIN", raising=False)
-    monkeypatch.setattr(fac.shutil, "which", lambda _n: None)
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    (scripts / "fa").write_text("#!/bin/sh\n")
-    monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", str(tmp_path))
-    assert fac._resolve_fa_binary() == str(scripts / "fa")
-
-
-def test_resolve_fa_binary_none(monkeypatch) -> None:
-    monkeypatch.delenv("FA_BIN", raising=False)
-    monkeypatch.delenv("FRAMEWORK_AGENT_ROOT", raising=False)
-    monkeypatch.setattr(fac.shutil, "which", lambda _n: None)
-    assert fac._resolve_fa_binary() is None
+# -- _resolve_fa_command ---------------------------------------------------
+def test_resolve_fa_command_is_module_invocation(monkeypatch) -> None:
+    """``fa`` runs as ``[python, -m, <module>]``, independent of $PATH."""
+    monkeypatch.setattr(fac.sys, "executable", "/fake/python3")
+    assert fac._resolve_fa_command() == ["/fake/python3", "-m", _FA_MODULE]
 
 
 # -- _run_fa_subcommand_sync ----------------------------------------------
@@ -59,8 +40,23 @@ def test_run_fa_subcommand_sync_ok(monkeypatch) -> None:
         return subprocess.CompletedProcess(cmd, 0, '{"ok": 1}', "")
 
     monkeypatch.setattr(fac.subprocess, "run", _run)
-    rc, out, err = fac._run_fa_subcommand_sync("fa", "phase-discover", Path("/x"), 5.0)
+    rc, out, err = fac._run_fa_subcommand_sync(["fa"], "phase-discover", Path("/x"), 5.0)
     assert (rc, out, err) == (0, '{"ok": 1}', "")
+
+
+def test_run_fa_subcommand_sync_builds_full_command(monkeypatch) -> None:
+    """The cmd prefix is preserved verbatim and the subcommand + IO flags are
+    appended, so a multi-token module fallback prefix runs correctly."""
+    captured: dict = {}
+
+    def _run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, "{}", "")
+
+    monkeypatch.setattr(fac.subprocess, "run", _run)
+    prefix = [sys.executable, "-m", _FA_MODULE]
+    fac._run_fa_subcommand_sync(prefix, "phase-discover", Path("/req.json"), 5.0)
+    assert captured["cmd"] == [*prefix, "phase-discover", "--request", "/req.json", "--out", "-"]
 
 
 def test_run_fa_subcommand_sync_not_found(monkeypatch) -> None:
@@ -68,7 +64,7 @@ def test_run_fa_subcommand_sync_not_found(monkeypatch) -> None:
         raise FileNotFoundError("missing")
 
     monkeypatch.setattr(fac.subprocess, "run", _run)
-    rc, _out, err = fac._run_fa_subcommand_sync("fa", "phase-discover", Path("/x"), 5.0)
+    rc, _out, err = fac._run_fa_subcommand_sync(["fa"], "phase-discover", Path("/x"), 5.0)
     assert rc == 127
     assert "not found" in err
 
@@ -78,26 +74,50 @@ def test_run_fa_subcommand_sync_timeout(monkeypatch) -> None:
         raise subprocess.TimeoutExpired(cmd="fa", timeout=5.0)
 
     monkeypatch.setattr(fac.subprocess, "run", _run)
-    rc, _out, err = fac._run_fa_subcommand_sync("fa", "phase-discover", Path("/x"), 5.0)
+    rc, _out, err = fac._run_fa_subcommand_sync(["fa"], "phase-discover", Path("/x"), 5.0)
     assert rc == 124
     assert "timed out" in err
 
 
+def test_module_entry_starts_in_real_subprocess() -> None:
+    """Smoke: ``python -m <module> schema`` launches and emits valid JSON."""
+    # Inherit the parent env so the child keeps PYTHONPATH.
+    proc = subprocess.run(
+        [sys.executable, "-m", _FA_MODULE, "schema"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=os.environ.copy(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert "schema" in payload.get("subcommands_available", [])
+
+
 # -- _invoke_fa_phase ------------------------------------------------------
 @pytest.mark.asyncio
-async def test_invoke_fa_phase_no_binary(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(fac, "_resolve_fa_binary", lambda: None)
-    with pytest.raises(RuntimeError, match="fa binary not found"):
-        await fac._invoke_fa_phase(
-            subcommand="phase-discover",
-            request={},
-            session_dir=tmp_path,
-        )
+async def test_invoke_fa_phase_uses_resolved_command(tmp_path, monkeypatch) -> None:
+    """The resolved command prefix is threaded verbatim into the sync runner."""
+    captured: dict = {}
+
+    def _fake_run(cmd_prefix, subcommand, request_path, timeout_sec):
+        captured["cmd_prefix"] = cmd_prefix
+        return (0, '{"candidates": []}', "")
+
+    monkeypatch.setattr(fac, "_resolve_fa_command", lambda: [sys.executable, "-m", _FA_MODULE])
+    monkeypatch.setattr(fac, "_run_fa_subcommand_sync", _fake_run)
+    out = await fac._invoke_fa_phase(
+        subcommand="phase-discover",
+        request={},
+        session_dir=tmp_path,
+    )
+    assert out == {"candidates": []}
+    assert captured["cmd_prefix"] == [sys.executable, "-m", _FA_MODULE]
 
 
 @pytest.mark.asyncio
 async def test_invoke_fa_phase_nonzero_rc(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(fac, "_resolve_fa_binary", lambda: "fa")
+    monkeypatch.setattr(fac, "_resolve_fa_command", lambda: ["fa"])
     monkeypatch.setattr(
         fac,
         "_run_fa_subcommand_sync",
@@ -115,7 +135,7 @@ async def test_invoke_fa_phase_nonzero_rc(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_invoke_fa_phase_invalid_json(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(fac, "_resolve_fa_binary", lambda: "fa")
+    monkeypatch.setattr(fac, "_resolve_fa_command", lambda: ["fa"])
     monkeypatch.setattr(
         fac,
         "_run_fa_subcommand_sync",
@@ -131,7 +151,7 @@ async def test_invoke_fa_phase_invalid_json(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_invoke_fa_phase_happy_path(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(fac, "_resolve_fa_binary", lambda: "fa")
+    monkeypatch.setattr(fac, "_resolve_fa_command", lambda: ["fa"])
     monkeypatch.setattr(
         fac,
         "_run_fa_subcommand_sync",
