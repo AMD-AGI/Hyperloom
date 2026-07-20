@@ -16,37 +16,21 @@ import asyncio
 import contextlib
 import json
 import os
-import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
+# Module entry for the ``fa`` CLI, invoked via the current interpreter.
+_FA_MODULE = "hyperloom.agents.framework.runtime.cli"
 
-def _resolve_fa_binary() -> str | None:
-    """Return the absolute path to the ``fa`` binary, or ``None``.
 
-    Resolution order: ``$FA_BIN``; ``shutil.which('fa')``;
-    ``$FRAMEWORK_AGENT_ROOT/scripts/fa``.
-
-    Returns:
-        The absolute path to the ``fa`` binary, or ``None`` when it cannot be
-        located.
-    """
-    explicit = (os.environ.get("FA_BIN") or "").strip()
-    if explicit and Path(explicit).exists():
-        return explicit
-    via_path = shutil.which("fa")
-    if via_path:
-        return via_path
-    fa_root = (os.environ.get("FRAMEWORK_AGENT_ROOT") or "").strip()
-    if fa_root:
-        candidate = Path(fa_root) / "scripts" / "fa"
-        if candidate.exists():
-            return str(candidate)
-    return None
+def _resolve_fa_command() -> list[str]:
+    """Return the ``fa`` argv prefix ``[python, -m, <module>]``."""
+    return [sys.executable, "-m", _FA_MODULE]
 
 
 DEFAULT_FA_PHASE_TIMEOUT_SEC: float = 180.0
@@ -55,24 +39,24 @@ DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 
 def _run_fa_subcommand_sync(
-    fa_bin: str,
+    cmd_prefix: list[str],
     subcommand: str,
     request_path: Path,
     timeout_sec: float,
 ) -> "tuple[int, str, str]":
-    """Sync helper: run ``fa <subcommand> --request <path> --out -``. Never raises.
+    """Sync helper: run ``<prefix> <subcommand> --request <path> --out -``. Never raises.
 
     Args:
-        fa_bin: Path to the ``fa`` binary.
+        cmd_prefix: The resolved ``fa`` command prefix.
         subcommand: The ``fa`` subcommand to run.
         request_path: Path to the request JSON file.
         timeout_sec: Subprocess wall-clock timeout in seconds.
 
     Returns:
         A ``(returncode, stdout, stderr)`` tuple; failures map to ``127``
-        (missing binary) or ``124`` (timeout).
+        (command not found) or ``124`` (timeout).
     """
-    cmd = [fa_bin, subcommand, "--request", str(request_path), "--out", "-"]
+    cmd = [*cmd_prefix, subcommand, "--request", str(request_path), "--out", "-"]
     try:
         cp = subprocess.run(
             cmd,
@@ -82,7 +66,7 @@ def _run_fa_subcommand_sync(
             check=False,
         )
     except FileNotFoundError as exc:
-        return 127, "", f"fa binary not found: {exc!r}"
+        return 127, "", f"fa command not found (prefix={cmd_prefix!r}): {exc!r}"
     except subprocess.TimeoutExpired as exc:
         return 124, "", f"fa {subcommand} timed out after {timeout_sec}s: {exc!r}"
     return cp.returncode, cp.stdout, cp.stderr
@@ -98,8 +82,7 @@ async def _invoke_fa_phase(
     """Generic async runner for ``fa phase-*`` subcommands.
 
     Writes ``request`` as temp JSON, runs the subcommand, returns parsed
-    JSON. Raises :class:`RuntimeError` on missing binary / non-zero exit /
-    parse failure.
+    JSON. Raises :class:`RuntimeError` on non-zero exit / parse failure.
 
     Args:
         subcommand: The ``fa phase-*`` subcommand to run.
@@ -111,14 +94,10 @@ async def _invoke_fa_phase(
         The parsed JSON payload returned by the subcommand.
 
     Raises:
-        RuntimeError: If the ``fa`` binary is missing, the subcommand exits
-            non-zero, or its output is not valid JSON.
+        RuntimeError: If the subcommand exits non-zero or its output is not
+            valid JSON.
     """
-    fa_bin = _resolve_fa_binary()
-    if not fa_bin:
-        raise RuntimeError(
-            f"fa binary not found (subcommand={subcommand!r}); checked $FA_BIN, $PATH, $FRAMEWORK_AGENT_ROOT/scripts/fa"
-        )
+    cmd_prefix = _resolve_fa_command()
     tmp_dir = session_dir / ".fa-tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     request_path = tmp_dir / f"phase-{subcommand}-{uuid.uuid4().hex[:12]}.json"
@@ -129,7 +108,7 @@ async def _invoke_fa_phase(
     try:
         rc, stdout, stderr = await asyncio.to_thread(
             _run_fa_subcommand_sync,
-            fa_bin,
+            cmd_prefix,
             subcommand,
             request_path,
             timeout_sec,
@@ -252,9 +231,9 @@ async def phase_audit(
     """FRAMEWORK-phase semantic-audit shim (``fa phase-audit``).
 
     Builds the request and runs the subcommand; returns the
-    ``semantic_audit`` verdict. The caller treats a missing binary / non-zero
-    exit / parse failure (raised as :class:`RuntimeError`) as ``unknown`` and
-    preserves legacy routing.
+    ``semantic_audit`` verdict. The caller treats a non-zero exit / parse
+    failure (raised as :class:`RuntimeError`) as ``unknown`` and preserves
+    legacy routing.
 
     Args:
         candidate: The discovered candidate row (carries repo / pr_number /

@@ -51,3 +51,14 @@ def test_is_denied_server_flag_suffix_rule():
 
 def test_find_denied_flags_empty_for_blank():
     assert sas.find_denied_flags("") == []
+
+
+def test_shell_safe_extra_args_quotes_metacharacters():
+    out = sas.shell_safe_extra_args("--foo 1; touch /tmp/x")
+    assert "'1;'" in out
+    assert "touch" in out
+
+
+def test_prepare_shell_safe_extra_args_rejects_denied():
+    with pytest.raises(sas.ServerArgsRejected):
+        sas.prepare_shell_safe_extra_args("--model-path /evil")
