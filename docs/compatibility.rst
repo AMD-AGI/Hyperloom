@@ -65,7 +65,7 @@ Component support matrix
 The following table lists the validated Hyperloom version and component combinations.
 
 .. role:: version-start
-  
+
 .. table::
    :widths: 19 27 24 28 14 9 29
    :align: left
@@ -96,7 +96,7 @@ The following table lists the validated Hyperloom version and component combinat
    TraceLens does not have hard requirements for the GPU, ROCm version, or the OS; it has scripts to verify whether a trace is valid/parseable. TraceLens is:
 
    - OS-independent and runs anywhere Python does.
-   - Not limited to MI300/MI325/MI355; it's hardware-agnostic.
+   - Not limited to MI300X/MI325X/MI355X; it's hardware-agnostic.
 
    See the `TraceLens documentation <https://rocm.docs.amd.com/projects/tracelens/en/latest/reference/compatibility.html>`_ for more information.
 

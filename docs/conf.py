@@ -65,6 +65,9 @@ suppress_warnings = [
     "etoc.toctree",
 ]
 
+html_static_path = ["sphinx/static/css"]
+html_css_files = ["rocm_custom.css"]
+
 """
 Doxygen Settings
 Ensure Doxyfile is located at docs/doxygen.
