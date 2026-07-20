@@ -168,14 +168,13 @@ async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
             _sym(
                 "recover_unsuccessful",
                 SymptomSeverity.HIGH,
-                summary="recover state=needs_review (gpu_unhealthy_after_gpureset)",
+                summary="recover state=needs_review (gpu_unhealthy_after_soft_cleanup)",
                 evidence={
                     "task_id": "tsk-1",
                     "kind": "recover",
-                    "error_class": "gpu_unhealthy_after_gpureset",
+                    "error_class": "gpu_unhealthy_after_soft_cleanup",
                     "force_gpu_cleanup": True,
-                    "gpureset_attempted": True,
-                    "post_free_mb_per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
+                    "mid_free_mb_per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
                 },
                 subject={},
                 suggestion="delegate(report) to finalize at the last validated gain",
@@ -192,7 +191,7 @@ async def test_recover_unsuccessful_emits_alert_plus_delegate_report():
     delegate = next(i for i in out.intents if i.type is IntentType.DELEGATE)
     assert delegate.payload["action_name"] == "report"
     assert delegate.payload["params"]["reason"] == "recover_unsuccessful"
-    assert delegate.payload["params"]["evidence"]["error_class"] == "gpu_unhealthy_after_gpureset"
+    assert delegate.payload["params"]["evidence"]["error_class"] == "gpu_unhealthy_after_soft_cleanup"
     assert delegate.payload["idempotency_key"] == ("report-recover-unsuccessful-tick-7")
 
 
@@ -970,7 +969,7 @@ async def test_wind_down_idempotency_key_varies_per_tick():
         "recover_unsuccessful",
         SymptomSeverity.HIGH,
         subject={},
-        evidence={"error_class": "gpu_unhealthy_after_gpureset"},
+        evidence={"error_class": "gpu_unhealthy_after_soft_cleanup"},
     )
     first = await ladder.decide([sym], tick_index=3, now_unix=1.0)
     second = await ladder.decide([sym], tick_index=20, now_unix=2.0)

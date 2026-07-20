@@ -142,55 +142,6 @@ def test_session_remaining_seconds() -> None:
     assert rem is not None and 0.0 < rem <= 3600.0
 
 
-def test_interleave_kernel_strips_explore_when_disabled() -> None:
-    # interleave ON, explore_enabled default True: KERNEL gets the explore triple.
-    full = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_KERNEL_AGENT,
-        interleave=True,
-    )
-    assert "explore" in full
-    assert "specialist" in full
-    assert "integrate_patch" in full
-
-    # --no-explore: KERNEL loses `explore` but keeps specialist/integrate_patch.
-    stripped = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_KERNEL_AGENT,
-        interleave=True,
-        explore_enabled=False,
-    )
-    assert "explore" not in stripped
-    assert "specialist" in stripped
-    assert "integrate_patch" in stripped
-
-    # EXPLORE phase extras (kernel_agent-owned) are unaffected by explore_enabled.
-    explore_set = ps.llm_proposable_actions_for_with_interleave(
-        ps.PHASE_EXPLORE,
-        interleave=True,
-        explore_enabled=False,
-    )
-    assert "kernel_opt" in explore_set
-
-    # is_action_* mirror honours the strip.
-    assert (
-        ps.is_action_llm_proposable_in_phase_with_interleave(
-            "explore",
-            ps.PHASE_KERNEL_AGENT,
-            interleave=True,
-            explore_enabled=False,
-        )
-        is False
-    )
-    assert (
-        ps.is_action_llm_proposable_in_phase_with_interleave(
-            "specialist",
-            ps.PHASE_KERNEL_AGENT,
-            interleave=True,
-            explore_enabled=False,
-        )
-        is True
-    )
-
-
 def test_post_prelude_target() -> None:
     assert ps._post_prelude_target(explore_enabled=True, kernel_enabled=True) == ps.PHASE_EXPLORE
     assert ps._post_prelude_target(explore_enabled=False, kernel_enabled=True) == ps.PHASE_KERNEL_AGENT

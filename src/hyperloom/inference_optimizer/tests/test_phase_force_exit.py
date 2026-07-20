@@ -26,12 +26,6 @@ from hyperloom.orchestrator.phases import machine_state as phase_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-@pytest.fixture(autouse=True)
-def _interleave_off():
-    """These tests assert the strict non-interleave IR-6 thresholds."""
-    assert phase_state.is_phase_interleave_enabled() is False
-
-
 def _make_explore_state(
     *,
     max_minutes: int,
@@ -230,54 +224,6 @@ def test_force_exit_thresholds_routed_through_overrides():
     target, reason, _ = nxt
     assert target == phase_state.PHASE_KERNEL_AGENT
     assert reason == "explore_force_exit_low_budget"
-
-
-def test_interleave_env_no_longer_narrows_force_exit_hours(monkeypatch):
-    """The retired interleave env no longer narrows the strict 3h gate."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
-    # 2.5h remaining; strict mode fires.
-    state = _make_explore_state(
-        max_minutes=600,
-        started_hours_ago=7.5,
-        phase_started_hours_ago=4.0,
-    )
-    fired, evidence = phase_state.should_force_exit_explore(state)
-    assert fired is True
-    assert evidence["hours_remaining_threshold"] == phase_state.DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING
-    assert evidence["budget_pct_threshold"] == phase_state.DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT
-    assert evidence["interleave_aware_ir6"] is False
-
-
-def test_interleave_still_fires_inside_close_buffer(monkeypatch):
-    """The retired interleave env does not disable the strict close buffer."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
-    # 0.5h remaining, so strict mode fires.
-    state = _make_explore_state(
-        max_minutes=600,
-        started_hours_ago=9.5,
-        phase_started_hours_ago=6.0,
-    )
-    fired, evidence = phase_state.should_force_exit_explore(state)
-    assert fired is True
-    assert "session_remaining" in evidence["fired_reasons"]
-    assert evidence["interleave_aware_ir6"] is False
-
-
-def test_interleave_respects_explicit_override(monkeypatch):
-    """An explicit non-default threshold from the caller still wins."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PHASE_INTERLEAVE", "1")
-    state = _make_explore_state(
-        max_minutes=600,
-        started_hours_ago=7.5,
-        phase_started_hours_ago=4.0,
-    )
-    fired, evidence = phase_state.should_force_exit_explore(
-        state,
-        hours_remaining_threshold=3.0001,
-    )
-    assert fired is True  # 2.5h remaining < 3.0001h explicit threshold
-    assert evidence["hours_remaining_threshold"] == 3.0001
-    assert evidence["interleave_aware_ir6"] is False
 
 
 def test_force_exit_phase_remaining_pct_uses_chargeback_denominator():

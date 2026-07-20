@@ -108,76 +108,6 @@ def test_is_action_llm_proposable_in_phase_handles_unknowns():
     assert "roofline" not in explore and "profile" not in explore
 
 
-def test_phase_interleave_off_matches_default_proposable_set():
-    """With the env flag off, the interleave-aware helpers match the default set."""
-    for phase in phase_state.PHASE_NAMES:
-        base = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS.get(
-            phase,
-            frozenset(),
-        )
-        assert (
-            phase_state.llm_proposable_actions_for_with_interleave(
-                phase,
-                interleave=False,
-            )
-            == base
-        )
-    # And kernel_agent-owned actions are denied in EXPLORE under default mode.
-    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
-        "kernel_opt",
-        "EXPLORE",
-        interleave=False,
-    )
-    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
-        "explore",
-        "KERNEL_AGENT",
-        interleave=False,
-    )
-
-
-def test_phase_interleave_on_widens_explore_and_kernel():
-    """With interleave=True, EXPLORE gains kernel_agent-owned actions and KERNEL gains explore/specialist/integrate_patch."""
-    explore = phase_state.llm_proposable_actions_for_with_interleave(
-        "EXPLORE",
-        interleave=True,
-    )
-    assert "kernel_opt" in explore
-    assert "integrate" in explore
-    assert "gemm_tuning" in explore
-    assert "explore" in explore  # native EXPLORE actions still present
-    assert "specialist" in explore
-    kernel = phase_state.llm_proposable_actions_for_with_interleave(
-        "KERNEL_AGENT",
-        interleave=True,
-    )
-    assert "explore" in kernel
-    assert "specialist" in kernel
-    assert "integrate_patch" in kernel
-    assert "kernel_opt" in kernel  # native KERNEL actions still present
-    # SWEEP / CLOSE / PRELUDE / FRAMEWORK are unchanged.
-    for phase in ("PRELUDE", "FRAMEWORK_AGENT", "SWEEP", "CLOSE"):
-        base = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS.get(
-            phase,
-            frozenset(),
-        )
-        assert (
-            phase_state.llm_proposable_actions_for_with_interleave(
-                phase,
-                interleave=True,
-            )
-            == base
-        )
-
-
-def test_phase_interleave_policy_is_disabled():
-    """The default helper keeps interleave off."""
-    assert phase_state.is_phase_interleave_enabled() is False
-    assert not phase_state.is_action_llm_proposable_in_phase_with_interleave(
-        "kernel_opt",
-        "EXPLORE",
-    )
-
-
 def test_phase_exit_reasons_includes_required_vocab():
     for reason in (
         "prelude_done",
@@ -586,7 +516,7 @@ def test_policy_gate_does_not_widen_explore_for_kernel_request():
 
 
 def test_policy_gate_does_not_widen_kernel_for_explore_propose():
-    """KERNEL no longer accepts explore proposals via interleave."""
+    """KERNEL does not accept explore proposals."""
     state = SharedState()
     state.record_phase_transition(
         to_phase="KERNEL_AGENT",
@@ -624,7 +554,7 @@ def test_policy_gate_sweep_rejects_explore_lever():
         shared_state=state,
         strict_phase=True,
     )
-    # ``explore`` is not widened into SWEEP by interleave, so R1 rejects it.
+    # ``explore`` is not in the SWEEP proposable set, so R1 rejects it.
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "explore", "predicted_gain_pct": 1.0},

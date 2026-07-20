@@ -34,9 +34,6 @@ directory is **platform isolation** (one Claw job). The optimizer then creates
     /hyperloom/users/<uid>/deepseek-ai-DeepSeek-V3-20260522_034024/   ← USER_DATA_PATH (Claw)
         deepseek-ai-DeepSeek-V3/20260522T035359Z/                      ← session_dir (optimizer)
 
-**Legacy flat layout:** set `INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat` so
-`session_dir == workspace_root` (no `<model>/<ts>` subdirs).
-
 ## Path resolution (do not guess)
 
 `session/paths.py` is the single authority for Hyperloom paths. The launching

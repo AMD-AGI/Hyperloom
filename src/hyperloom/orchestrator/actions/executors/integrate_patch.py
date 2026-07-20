@@ -1220,17 +1220,8 @@ class IntegratePatchExecutor:
         # CORE_STATE_FIELD an LLM/forged row cannot write, and a legitimate
         # integrate_patch always has its verdict persisted before the queued task
         # is created (see intent_router._handle_single_verdict), so a genuine
-        # task is unaffected. No-op when SharedState is absent. Override is
-        # out-of-band only (HYPERLOOM_BYPASS_CRITIC=1); an in-band
-        # params.bypass_critic is ignored so an LLM cannot self-approve.
-        if shared_state is not None and os.environ.get("HYPERLOOM_BYPASS_CRITIC") != "1":
-            if params.get("bypass_critic"):
-                log.warning(
-                    "integrate_patch executor: in-band bypass_critic ignored; "
-                    "enforcing Critic verdict for specialist_task_id=%r (operator "
-                    "override is HYPERLOOM_BYPASS_CRITIC=1, out-of-band only).",
-                    specialist_task_id,
-                )
+        # task is unaffected. No-op when SharedState is absent.
+        if shared_state is not None:
             try:
                 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS as _PERMISSIVE
             except Exception:  # noqa: BLE001 - avoid a hard import-cycle dependency
@@ -1251,8 +1242,7 @@ class IntegratePatchExecutor:
                     "reason": (
                         f"integrate_patch requires a permissive Critic verdict "
                         f"(approve/advise) for specialist task "
-                        f"{specialist_task_id!r}; {_detail}. Refusing to run. "
-                        f"Set HYPERLOOM_BYPASS_CRITIC=1 out-of-band to force."
+                        f"{specialist_task_id!r}; {_detail}. Refusing to run."
                     ),
                 }
 

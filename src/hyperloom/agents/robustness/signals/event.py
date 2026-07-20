@@ -314,8 +314,7 @@ def _recover_unsuccessful_symptoms(
                 "state": state,
                 "error_class": error_class,
                 "force_gpu_cleanup": latest.get("force_gpu_cleanup"),
-                "gpureset_attempted": latest.get("gpureset_attempted"),
-                "post_free_mb_per_gpu": latest.get("post_free_mb_per_gpu"),
+                "mid_free_mb_per_gpu": latest.get("mid_free_mb_per_gpu"),
             },
             subject={},  # session-wide
             source="coordinator_events",
@@ -343,7 +342,7 @@ def _is_recover_payload(payload: dict[str, Any]) -> bool:
     if str(payload.get("family") or "").strip() == "recover":
         return True
     # Executor signature — recover-only fields.
-    if "force_gpu_cleanup" in payload and "gpureset_attempted" in payload:
+    if "force_gpu_cleanup" in payload and "mid_free_mb_per_gpu" in payload:
         return True
     return False
 

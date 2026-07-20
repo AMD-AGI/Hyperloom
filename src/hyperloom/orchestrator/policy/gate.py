@@ -30,8 +30,8 @@ from ..phases.machine_state import (
     PHASE_NAMES,
     PHASE_SWEEP,
     is_action_allowed_in_phase,
-    is_action_llm_proposable_in_phase_with_interleave,
-    llm_proposable_actions_for_with_interleave,
+    is_action_llm_proposable_in_phase,
+    llm_proposable_actions_for,
 )
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
@@ -1243,21 +1243,20 @@ class PolicyGate:
         if not phase or phase not in PHASE_NAMES:
             return
         explore_enabled = bool(getattr(state, "explore_enabled", True))
-        # --no-explore disables EXPLORE for the whole run, so the interleave
-        # channel must not let KERNEL re-introduce an ``explore`` grid. Always
-        # fail-closed (independent of ``strict_phase``): it is an operator decision.
+        # --no-explore disables EXPLORE for the whole run, so KERNEL must not
+        # re-introduce an ``explore`` grid. Always fail-closed (independent of
+        # ``strict_phase``): it is an operator decision.
         if not explore_enabled and phase == PHASE_KERNEL_AGENT and action_name == EXPLORE_ACTION_NAME:
             raise PolicyDenied(
                 f"action {EXPLORE_ACTION_NAME!r} is disabled for this run "
-                f"(--no-explore); KERNEL may not borrow the interleave "
-                f"channel to run an explore grid",
+                f"(--no-explore); KERNEL may not run an explore grid",
                 rule="explore_disabled",
                 hint=(
-                    "--no-explore skips the EXPLORE phase entirely. The "
-                    "phase-interleave grey channel cannot reintroduce "
-                    "`explore` into KERNEL. Use kernel_agent-owned actions "
-                    "(kernel_opt / integrate / ...), or `specialist` / "
-                    "`integrate_patch` if you need patch research/integration."
+                    "--no-explore skips the EXPLORE phase entirely, so "
+                    "`explore` cannot be reintroduced into KERNEL. Use "
+                    "kernel_agent-owned actions (kernel_opt / integrate / ...), "
+                    "or `specialist` / `integrate_patch` if you need patch "
+                    "research/integration."
                 ),
             )
         # Robustness-delegate-only actions (e.g. ``recover``) are absent from the LLM-proposable set but still delegatable by robustness; accept if phase-allowed.
@@ -1267,20 +1266,9 @@ class PolicyGate:
             and is_action_allowed_in_phase(action_name, phase)
         ):
             return
-        if is_action_llm_proposable_in_phase_with_interleave(
-            action_name,
-            phase,
-            explore_enabled=explore_enabled,
-        ):
+        if is_action_llm_proposable_in_phase(action_name, phase):
             return
-        allowed = tuple(
-            sorted(
-                llm_proposable_actions_for_with_interleave(
-                    phase,
-                    explore_enabled=explore_enabled,
-                )
-            )
-        )
+        allowed = llm_proposable_actions_for(phase)
         hint = (
             f"you are in phase={phase}; action {action_name!r} is not in "
             f"the LLM-proposable set {list(allowed)!r}. Either propose an "
@@ -1572,7 +1560,7 @@ class PolicyGate:
         self,
         payload: dict[str, Any],
     ) -> None:
-        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict, unless operator sets ``HYPERLOOM_BYPASS_CRITIC=1``).
+        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict).
 
         Args:
             payload (dict[str, Any]): the integrate_patch intent payload
@@ -1581,8 +1569,7 @@ class PolicyGate:
         Raises:
             PolicyDenied: when ``params`` is malformed, ``specialist_task_id``
                 is missing, no Critic verdict is on record, or the verdict is
-                not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS` (and the
-                operator has not set ``HYPERLOOM_BYPASS_CRITIC=1``).
+                not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS`.
         """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
@@ -1602,19 +1589,6 @@ class PolicyGate:
                     "the patches you want to apply."
                 ),
             )
-        # Bypass must come from the out-of-band operator env the LLM cannot
-        # author; an in-band params.bypass_critic is ignored (self-approval).
-        bypass = os.environ.get("HYPERLOOM_BYPASS_CRITIC") == "1"
-        if bypass:
-            return
-        if params.get("bypass_critic"):
-            # In-band bypass is ignored; log the attempted override.
-            log.warning(
-                "integrate_patch: in-band params.bypass_critic ignored; Critic gate "
-                "enforced for specialist_task_id=%r (operator override is "
-                "HYPERLOOM_BYPASS_CRITIC=1, out-of-band only).",
-                sid,
-            )
         ss = getattr(self, "shared_state", None)
         verdict = ""
         if ss is not None:
@@ -1631,9 +1605,7 @@ class PolicyGate:
                     "Wait for the Critic to emit a "
                     "review_verdict{target_proposal_msg_id=<patch "
                     "proposal>, verdict=approve|reject|...} for this "
-                    "specialist. An operator may override out-of-band with "
-                    "HYPERLOOM_BYPASS_CRITIC=1 (in-band bypass_critic is "
-                    "ignored). The Critic verdict "
+                    "specialist. The Critic verdict "
                     "is recorded on SharedState.specialist_patch_verdicts."
                 ),
             )
@@ -1646,11 +1618,8 @@ class PolicyGate:
                 rule="integrate_patch_requires_critic_verdict",
                 hint=(
                     "Either ask the Critic to re-review (next "
-                    "review_verdict overwrites this one), drop the "
-                    "patch (specialist_done.patches_written=[]), or "
-                    "have an operator set HYPERLOOM_BYPASS_CRITIC=1 "
-                    "out-of-band to force integration with an explicit "
-                    "operator audit trail (in-band bypass_critic is ignored)."
+                    "review_verdict overwrites this one), or drop the "
+                    "patch (specialist_done.patches_written=[])."
                 ),
             )
 

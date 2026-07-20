@@ -132,10 +132,9 @@ sweep cannot run at all — where `robustness_escalated` is the truthful
 label. `skip_to_kernel` / `skip_to_sweep` are unaffected (non-terminal
 lever switches); this caveat applies only to `skip_to_close`.
 
-Phase interleave is disabled by policy: EXPLORE and KERNEL_AGENT keep
-strict per-phase action contracts. Cross-phase ideas should be recorded as
-gaps or requested through explicit phase advancement rather than widened
-in-place action sets.
+EXPLORE and KERNEL_AGENT keep strict per-phase action contracts.
+Cross-phase ideas should be recorded as gaps or requested through explicit
+phase advancement rather than widened in-place action sets.
 
 Every tick the per-tick prompt includes a `=== Phase ===` block with:
 
@@ -283,20 +282,19 @@ grid-runner entry):
     SWEEP when a REVERT streak builds or the budget cap hits. Roofline
     is auto-managed (not proposable); see "Roofline" below.
 
-    **Drain pending KEEPs before interleaving away.** When
+    **Drain pending KEEPs before advancing away.** When
     `has_keep_pending_integrate=true` (kernel KEEP queue; see the
     `pending_keep_kernels=` state line), those kernels have a verified micro-speedup but are NOT
     yet in `optimization_stack` and have NOT been e2e re-baselined. You
     MUST first `integrate` each `pending_keep_kernels` entry (REQUEST
     `kind='integrate'`, patch → re-baseline → KEEP/REVERT) and drain the
-    list before using interleave to switch to `explore` / `specialist`
-    or emitting a `skip_to_*` hint. Reason: `explore` benchmarks the
-    *current* `current_best`, which does NOT include an un-integrated
-    KEEP patch — so any e2e gain you measure while a KEEP is pending
-    silently omits that kernel's contribution, and the phase can advance
-    with the kernel's real e2e benefit never validated. Only after
-    `pending_keep_kernels` is empty is interleaving to explore-side work
-    safe.
+    list before emitting a `skip_to_*` hint. Reason: a later phase's
+    `explore` benchmarks the *current* `current_best`, which does NOT
+    include an un-integrated KEEP patch — so any e2e gain you measure
+    while a KEEP is pending silently omits that kernel's contribution,
+    and the phase can advance with the kernel's real e2e benefit never
+    validated. Only after `pending_keep_kernels` is empty is advancing to
+    the next phase safe.
 
     **No actionable kernel lever → `skip_to_sweep`, do not stall.** KERNEL
     optimizes *source kernels you can rewrite*. When `last_trace_analyze`

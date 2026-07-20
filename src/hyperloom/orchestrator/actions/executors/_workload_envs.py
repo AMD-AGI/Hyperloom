@@ -87,24 +87,6 @@ _RUN_EVAL_DISABLED_WARN_EMITTED = False
 # Truthy-false spellings that disable the accuracy gate.
 _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
-# Truthy spellings that (re)enable a normally-off toggle.
-_RUN_EVAL_TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
-
-
-def sweep_run_eval_enabled() -> bool:
-    """Whether ``sweep`` / ``conc_sweep`` variants should run the accuracy eval.
-
-    The GSM8K accuracy eval is invariant to concurrency / workload shape, so it
-    is OFF by default for sweeps (the accuracy gate still runs on every
-    ``explore`` / ``baseline`` benchmark). Opt back in with
-    ``INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL=1`` (truthy).
-
-    Returns:
-        ``True`` only when ``INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL`` is set to a
-        truthy value; ``False`` otherwise (the default).
-    """
-    return str(os.environ.get("INFERENCE_OPTIMIZER_SWEEP_RUN_EVAL", "")).strip().lower() in _RUN_EVAL_TRUE_VALUES
-
 
 def _model_requires_remote_code(model_path: str | None) -> bool:
     """Return whether benchmark server/client must trust custom HF code.

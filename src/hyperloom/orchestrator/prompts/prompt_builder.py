@@ -167,7 +167,6 @@ def _section_phase_semantics(
         Markdown lines for the phase-contract section.
     """
     from ..phases.machine_state import (
-        is_phase_interleave_enabled,
         render_phase_proposable_bullets,
     )
 
@@ -180,7 +179,6 @@ def _section_phase_semantics(
     if not kernel_enabled:
         disabled_suffix["KERNEL_AGENT"] = "--no-kernel"
 
-    interleave = is_phase_interleave_enabled()
     lines: list[str] = [
         "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
         "",
@@ -195,8 +193,6 @@ def _section_phase_semantics(
         lines.append("")
     lines.extend(
         render_phase_proposable_bullets(
-            interleave=interleave,
-            explore_enabled=explore_enabled,
             disabled_suffix=disabled_suffix,
         )
     )
@@ -225,28 +221,6 @@ def _section_phase_semantics(
             "so emitting it on a normal finish mislabels the run.",
         ]
     )
-    if interleave:
-        lines.extend(
-            [
-                "",
-                "**Phase interleave mode is ON**:",
-                "- EXPLORE may also REQUEST kernel_agent-owned kinds "
-                + "(kernel_opt / integrate / deep_kernel_analysis / "
-                + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
-                + "a probe of the kernel surface is needed mid-EXPLORE.",
-                "- KERNEL_AGENT may also propose / delegate explore / specialist /",
-                "  integrate_patch when a config / patch refinement is needed",
-                "  mid-KERNEL_AGENT.",
-                "- The phase chain stays monotonic within a macro-cycle (SWEEP",
-                "  reloops to EXPLORE / FRAMEWORK_AGENT across cycles) for",
-                "  resume / audit / the CLOSE sequencer, which read the",
-                "  cycle-stamped ordered history; only the per-phase action",
-                "  contract is",
-                "  widened. Data-dependency (trace_analyze→run_optimization),",
-                "  the integrate_patch Critic gate, and sweep singletons are",
-                "  unchanged.",
-            ]
-        )
     return lines
 
 
