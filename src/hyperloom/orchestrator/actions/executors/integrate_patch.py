@@ -41,6 +41,7 @@ from ._grid_runner import (
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._grid_server_args import merge_server_args, split_config_changes
 from ._stack_rebench import DEFAULT_STACK_STABLE_PCT, measure_stack_rebench
 from ._workload_envs import (
     FrameworkScriptMismatchError,
@@ -2395,11 +2396,13 @@ class IntegratePatchExecutor:
             out_name="integrate_patch.with_envs.yaml",
         )
 
-        # Single-variant grid with config_changes_applied as extra_envs.
+        # Split config_changes into server args (--flags) and env vars so that
+        # --prefixed flags reach EXTRA_{FW}_ARGS instead of being silently dropped.
+        _cc_args, _cc_envs = split_config_changes(config_changes_applied)
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}",
-            extra_server_args=str(params.get("base_extra_args") or "").strip(),
-            extra_envs=dict(config_changes_applied),
+            extra_server_args=merge_server_args(str(params.get("base_extra_args") or "").strip(), _cc_args),
+            extra_envs=_cc_envs,
             remove_args=to_str_list(params.get("base_remove_args")),
             unset_envs=to_str_list(params.get("base_unset_envs")),
             args_mode=str(params.get("base_args_mode") or "append"),
@@ -2571,10 +2574,11 @@ class IntegratePatchExecutor:
             args_mode=str(params.get("base_args_mode") or "append"),
             out_name="integrate_patch.rebench.yaml",
         )
+        _cc_args_rb, _cc_envs_rb = split_config_changes(config_changes_applied)
         variant = GridVariant(
             name=f"integrate-patch-rebench-{specialist_task_id[:8]}",
-            extra_server_args=base_extra_args,
-            extra_envs=dict(config_changes_applied),
+            extra_server_args=merge_server_args(base_extra_args, _cc_args_rb),
+            extra_envs=_cc_envs_rb,
             remove_args=to_str_list(params.get("base_remove_args")),
             unset_envs=to_str_list(params.get("base_unset_envs")),
             args_mode=str(params.get("base_args_mode") or "append"),
