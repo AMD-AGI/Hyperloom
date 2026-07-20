@@ -37,7 +37,7 @@ from ._internal import ssh_client, ssh_known_hosts
 from ._internal.log import info, warn, err
 from ._internal.server_args_safety import (
     ServerArgsRejected,
-    shell_safe_extra_args,
+    prepare_shell_safe_extra_args,
     validate_server_args,
 )
 from .state_paths import resolve_state_file
@@ -738,10 +738,11 @@ def _build_restart_entrypoint(
     # by launch_server.sh into argv. Denylist path/model flags, then re-quote
     # each token so a value like ``--foo 1; touch x`` cannot inject a second
     # shell command (metacharacters stay inside a single quoted token).
-    raw_extra_args = args.extra_args or ""
     try:
-        validate_server_args(raw_extra_args, context="restart-server --extra-args")
-        safe_extra_args = shell_safe_extra_args(raw_extra_args, context="restart-server --extra-args")
+        safe_extra_args = prepare_shell_safe_extra_args(
+            args.extra_args or "",
+            context="restart-server --extra-args",
+        )
     except ServerArgsRejected as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -924,9 +925,11 @@ def _build_multinode_launch_entrypoint(
     """
     py = _read_pod_script("launch_multinode.py")
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
-    extra_args = args.extra_args or ""
     try:
-        validate_server_args(extra_args, context="rayjob restart-server --extra-args")
+        extra_args = prepare_shell_safe_extra_args(
+            args.extra_args or "",
+            context="rayjob restart-server --extra-args",
+        )
     except ServerArgsRejected as exc:
         raise RuntimeError(str(exc)) from exc
     # Pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path from env, else derive

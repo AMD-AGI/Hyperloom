@@ -99,6 +99,23 @@ def validate_server_args(raw: str, *, context: str = "") -> None:
         raise ServerArgsRejected(f"denied server flags {denied!r}{where}")
 
 
+def prepare_shell_safe_extra_args(raw: str, *, context: str = "") -> str:
+    """Validate ``raw`` and return a shell-safe extra-args string for fan-out.
+
+    Args:
+        raw: Whitespace-separated server CLI flags (may be empty).
+        context: Optional label for error messages.
+
+    Returns:
+        str: The re-quoted, shell-safe token string (empty when ``raw`` blank).
+
+    Raises:
+        ServerArgsRejected: When ``raw`` is denied or not shell-tokenizable.
+    """
+    validate_server_args(raw, context=context)
+    return shell_safe_extra_args(raw, context=context)
+
+
 def shell_safe_extra_args(raw: str, *, context: str = "") -> str:
     """Return ``raw`` re-quoted per shell token so it can be spliced after ``--``.
 

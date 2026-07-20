@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .server_args_safety import shell_safe_extra_args
+
 # Frontend HTTP port (SaFE common.InferaFrontendPort). Benchmarks target this
 # OpenAI-compatible endpoint, never sglang rank-0 :8888.
 INFERA_FRONTEND_PORT = 8000
@@ -459,5 +461,6 @@ def build_node_launch_args(
     if df:
         merged_extra = (merged_extra + " " + df).strip()
     if merged_extra:
-        quoted += " --extra-args " + shlex.quote(merged_extra)
+        safe_extra = shell_safe_extra_args(merged_extra)
+        quoted += " --extra-args " + shlex.quote(safe_extra)
     return quoted
