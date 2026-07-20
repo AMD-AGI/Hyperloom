@@ -169,6 +169,36 @@ def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
     return resolve_specialist_profile(p).reserves_benchmark_lane
 
 
+def holds_serving_slot(params: dict[str, Any] | None) -> bool:
+    """True when a GPU specialist must hold the whole-machine ``serving_slot``
+    Ray resource (mutually exclusive with production serving).
+
+    Only **bench-capable** patch specialists (``mode=patch`` & ``bench=true``,
+    i.e. :attr:`SpecialistProfile.reserves_benchmark_lane`) start their own
+    serving + benchmark loop and therefore must serialize against production
+    serving on the ``serving_slot`` mutex for that window.
+
+    **Authoring-only** specialists — including framework authoring, which by
+    default does NOT self-bench (its real benchmark runs through
+    ``integrate_patch`` / ``framework_agent._bench_candidate`` under a run_grid
+    serving lease, phase-3 §3.1) — hold ``num_gpus`` only. They therefore do
+    NOT block the whole-machine serving mutex for their entire (largely
+    CPU-bound authoring) lifetime and can share the GPU queue with other
+    specialists (phase-3 §4 / invariant §6.3).
+
+    Note this is deliberately narrower than :func:`uses_whole_machine_gpu_lane`,
+    which still returns ``True`` for framework authoring (it selects the
+    whole-machine *pool*); only the ``serving_slot`` Ray resource is decoupled.
+
+    Args:
+        params: The specialist dispatch params, or ``None``.
+
+    Returns:
+        ``True`` only for bench-capable patch specialists.
+    """
+    return resolve_specialist_profile(params or {}).reserves_benchmark_lane
+
+
 def resolve_specialist_profile(params: dict[str, Any] | None) -> SpecialistProfile:
     """Read ``scope`` / ``mode`` / ``bench`` / ``lane`` from dispatch params.
 
@@ -229,6 +259,7 @@ __all__ = [
     "SCOPE_FREEFORM",
     "SCOPE_VALUES",
     "SpecialistProfile",
+    "holds_serving_slot",
     "resolve_specialist_profile",
     "uses_whole_machine_gpu_lane",
 ]

@@ -759,14 +759,28 @@ class _FakeGpuSpecialistLease:
         self.alive = True
         self.stopped = False
 
-    def start(self, cmd, *, env=None, cwd=None, log_path=None) -> int:
+    def start_async(self, cmd, *, env=None, cwd=None, log_path=None) -> None:
+        # §3.3 non-blocking start: record + stage the done file, mark the pid
+        # ready so poll_started() returns immediately on the next tick.
         self.started = {"cmd": cmd, "cwd": cwd, "log_path": log_path}
         self.env = dict(env or {})
         Path(log_path).write_text("stream-json log line\n", encoding="utf-8")
         # Graceful done — the reaper harvests this and exits.
         (self._workspace / "specialist_done.json").write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
         self.alive = False
-        return 9999
+        self._pid = 9999
+
+    def poll_started(self) -> int | None:
+        return getattr(self, "_pid", None)
+
+    def pending_seconds(self) -> float:
+        return 0.0
+
+    def start(self, cmd, *, env=None, cwd=None, log_path=None) -> int:
+        self.start_async(cmd, env=env, cwd=cwd, log_path=log_path)
+        pid = self.poll_started()
+        assert pid is not None
+        return pid
 
     def is_alive(self) -> bool:
         return self.alive
@@ -776,6 +790,9 @@ class _FakeGpuSpecialistLease:
 
     def stop(self) -> None:
         self.stopped = True
+        self.alive = False
+
+    def close(self) -> None:
         self.alive = False
 
 

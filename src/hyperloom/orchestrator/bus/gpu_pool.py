@@ -33,6 +33,15 @@ from .storage.connection import SqliteConnection
 
 DEFAULT_GPU_LEASE_TTL_SEC = 1800
 
+# Reserved synthetic gpu_id base for single-node Ray pending-observation slots
+# (§3.2). Ray owns the physical card assignment, so under Ray this pool is a
+# count-based admission ledger, not a physical-id allocator: admissions take a
+# synthetic slot id in ``[_RAY_OBS_ID_BASE, _RAY_OBS_ID_BASE + pending_limit)``
+# so multiple specialists can queue on a single physical GPU (Ray serializes
+# them via ``num_gpus``) while TTL / reap / resume / release keep working on the
+# same ``gpu_leases`` table. The base is far above any real device id.
+_RAY_OBS_ID_BASE = 100000
+
 # GPU-lease / gpu_research_lane TTL grace over the agent wall budget. Iron law:
 # ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — the lease must outlive the
 # agent's wall-budget kill so cards are not reclaimed mid-compute. TTL =
@@ -279,6 +288,80 @@ class SpecialistGpuPool:
             holder_id=holder_id,
             task_id=task_id,
             gpu_ids=tuple(selected),
+            acquired_at=now_iso,
+            expires_at=expires_iso,
+        )
+
+    async def try_acquire_ray_observation(
+        self,
+        *,
+        holder_id: str,
+        task_id: str,
+        pending_limit: int,
+        ttl_sec: int = DEFAULT_GPU_LEASE_TTL_SEC,
+    ) -> GpuLease | None:
+        """Admit a GPU specialist under single-node Ray by COUNT, not physical id.
+
+        Under single-node Ray execution the physical card is Ray's (the
+        specialist runs inside a ``GpuSpecialistActor(num_gpus=…)``), so this
+        pool becomes a count-based admission ledger (§3.2): it hands out a
+        synthetic slot id from ``[_RAY_OBS_ID_BASE, _RAY_OBS_ID_BASE +
+        pending_limit)`` so up to ``pending_limit`` specialists can be in-flight
+        (pending + running) at once — Ray then serializes them on ``num_gpus``.
+        Returns ``None`` when the pending limit is already reached (backpressure;
+        the task stays queued). TTL / :meth:`reap_expired` / :meth:`release` all
+        work unchanged on the synthetic rows (same ``gpu_leases`` table).
+
+        Args:
+            holder_id: Identifier of the lease holder.
+            task_id: Identifier of the task the lease is for.
+            pending_limit: Max concurrent in-flight GPU specialists (>= 1).
+            ttl_sec: Lease time-to-live in seconds.
+
+        Returns:
+            A :class:`GpuLease` over a synthetic slot id, or ``None`` when the
+            pending limit is reached.
+        """
+        limit = max(1, int(pending_limit or 1))
+        now_ts = time.time()
+        now_iso = _now_iso()
+        expires_ts = now_ts + max(1, int(ttl_sec or DEFAULT_GPU_LEASE_TTL_SEC))
+        expires_iso = datetime.fromtimestamp(
+            expires_ts,
+            tz=timezone.utc,
+        ).isoformat(timespec="microseconds")
+
+        async with self.db.transaction() as cur:
+            cur.execute(
+                "DELETE FROM gpu_leases WHERE expires_at <= ?",
+                (now_iso,),
+            )
+            cur.execute(
+                "SELECT gpu_id FROM gpu_leases WHERE gpu_id >= ?",
+                (_RAY_OBS_ID_BASE,),
+            )
+            used = {int(r["gpu_id"]) for r in cur.fetchall()}
+            slot: int | None = None
+            for i in range(limit):
+                cand = _RAY_OBS_ID_BASE + i
+                if cand not in used:
+                    slot = cand
+                    break
+            if slot is None:
+                return None
+            cur.execute(
+                """
+                INSERT INTO gpu_leases(
+                    gpu_id, holder_id, task_id,
+                    acquired_at, expires_at, heartbeat_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (slot, holder_id, task_id, now_iso, expires_iso, now_iso),
+            )
+        return GpuLease(
+            holder_id=holder_id,
+            task_id=task_id,
+            gpu_ids=(slot,),
             acquired_at=now_iso,
             expires_at=expires_iso,
         )
