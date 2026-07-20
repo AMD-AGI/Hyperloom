@@ -5,7 +5,6 @@
 
 import os
 import sys
-import re
 
 # -- Path setup --------------------------------------------------------------
 # Add repo root and ``src`` for autodoc.
