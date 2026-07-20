@@ -127,6 +127,19 @@ endpoint is OpenAI-compatible and supports the Responses API `web_search` tool.
 
 ---
 
+## Single-node Ray GPU scheduling
+
+These variables tune the single-node Ray execution path (active when
+`INFERENCE_OPTIMIZER_RAY_EXEC=1` and `--nodes=1`). They have no effect on
+multi-node runs or when the Ray backend is disabled.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT` | `4` | Maximum number of GPU specialists that may be simultaneously in-flight (pending Ray scheduling + running) on the single-node Ray path. Ray still serialises execution on the physical GPU(s) via `num_gpus`; this limit caps how many actors can queue behind the current one. Floored at `1`. **Reduce to `1` or `2` when GPU memory or per-process overhead is a concern** (each queued actor holds a Ray worker slot even while it waits). |
+| `INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY` | On | When enabled (default), the dispatcher defers admitting new GPU research specialists while a serving benchmark holds the whole-machine `serving_slot`, preventing research work from starving serving. The slot is probed immediately before each specialist is admitted so a serving start that races the dispatch pass is caught. Set to `0`, `false`, `no`, or `off` to disable. |
+
+---
+
 ## Multi-node / prefill-decode (PD)
 
 Use CLI flags for multi-node topology and prefill-decode configuration:
