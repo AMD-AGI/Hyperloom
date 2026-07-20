@@ -67,23 +67,62 @@ The following table lists the validated Hyperloom version and component combinat
 .. raw:: html
 
    <div style="overflow-x: auto;">
-
-+-------------------+----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-| Hyperloom version | Component                  | GPU                    | ROCm version support         | OS                         | Python  | GitHub                      |
-+===================+============================+========================+==============================+============================+=========+=============================+
-| 0.9.0             | `TraceLens 0.1.0`_         | N/A                    | N/A                          | N/A                        | >= 3.6  | |tracelens-github|          |
-+                   +----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-|                   | `GEAK 4.0`_                | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x   | Ubuntu 22.04, Ubuntu 24.04 | > 3.8   | |geak-github|               |
-+                   +----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-|                   | `IntelliKit 0.1.0`_        | MI300X, MI325X, MI355X | 7.2.x                        | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |intellikit-github|         |
-+                   +----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-|                   | `AgentKernelArena 0.2.0`_  | MI300X, MI325X, MI355X | 7.2.x                        | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |agent-kernel-arena-github| |
-+                   +----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-|                   | `Magpie 0.1.0`_            | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x          | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |magpie-github|             |
-+-------------------+----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-
-.. raw:: html
-
+   <table class="docutils">
+     <thead>
+       <tr>
+         <th>Hyperloom version</th>
+         <th>Component</th>
+         <th>GPU</th>
+         <th>ROCm version support</th>
+         <th>Ubuntu</th>
+         <th>Python</th>
+         <th>GitHub</th>
+       </tr>
+     </thead>
+     <tbody>
+       <tr>
+         <td rowspan="5">0.9.0</td>
+         <td><a href="https://rocm.docs.amd.com/projects/tracelens/en/latest/">TraceLens 0.1.0</a></td>
+         <td>N/A</td>
+         <td>N/A</td>
+         <td>N/A</td>
+         <td>&gt;= 3.6</td>
+         <td><a href="https://github.com/AMD-AGI/TraceLens"><i class="fab fa-github"></i></a></td>
+       </tr>
+       <tr>
+         <td><a href="https://rocm.docs.amd.com/projects/geak/en/latest/">GEAK 4.0</a></td>
+         <td>MI300X, MI325X, MI355X</td>
+         <td>6.4.x, 7.0.x, 7.1.x, 7.2.x</td>
+         <td>22.04, 24.04</td>
+         <td>&gt; 3.8</td>
+         <td><a href="https://github.com/AMD-AGI/GEAK"><i class="fab fa-github"></i></a></td>
+       </tr>
+       <tr>
+         <td><a href="https://rocm.docs.amd.com/projects/intellikit/en/latest/">IntelliKit 0.1.0</a></td>
+         <td>MI300X, MI325X, MI355X</td>
+         <td>7.2.x</td>
+         <td>22.04, 24.04</td>
+         <td>&gt;= 3.10</td>
+         <td><a href="https://github.com/AMDResearch/intellikit"><i class="fab fa-github"></i></a></td>
+       </tr>
+       <tr>
+         <td><a href="https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/">AgentKernelArena 0.2.0</a></td>
+         <td>MI300X, MI325X, MI355X</td>
+         <td>7.2.x</td>
+         <td>22.04, 24.04</td>
+         <td>&gt;= 3.10</td>
+         <td><a href="https://github.com/AMD-AGI/AgentKernelArena"><i class="fab fa-github"></i></a></td>
+       </tr>
+       <tr>
+         <td><a href="https://rocm.docs.amd.com/projects/magpie/en/latest">Magpie 0.1.0</a></td>
+         <td>MI300X, MI325X, MI355X</td>
+         <td>7.0.x, 7.1.x, 7.2.x</td>
+         <td>22.04, 24.04</td>
+         <td>&gt;= 3.10</td>
+         <td><a href="https://github.com/AMD-AGI/Magpie"><i class="fab fa-github"></i></a></td>
+       </tr>
+     </tbody>
+   </table>
    </div>
 
 .. _TraceLens 0.1.0: https://rocm.docs.amd.com/projects/tracelens/en/latest/
