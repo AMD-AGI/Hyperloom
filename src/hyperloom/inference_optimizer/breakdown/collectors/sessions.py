@@ -1301,16 +1301,37 @@ def _runtime_summary(runtime: dict[str, Any], *, promoted: bool) -> dict[str, An
     }
 
 
+def _build_attempt_summary(manifest_entry: dict[str, Any]) -> dict[str, Any]:
+    """Project a BuildResult.to_state() entry onto TargetedBuildAttemptSummary."""
+    action = manifest_entry.get("action") or {}
+    installed = manifest_entry.get("installed_versions") or {}
+    artifacts = manifest_entry.get("built_artifacts") or []
+    return {
+        "component": str(action.get("component") or manifest_entry.get("component") or ""),
+        "ref": str(installed.get("aiter_ref") or installed.get("vllm_ref") or installed.get("sgl_kernel_ref") or action.get("ref") or ""),
+        "gpu_arch": str(installed.get("arch") or action.get("gpu_arch") or ""),
+        "max_jobs": int(action.get("max_jobs") or 0),
+        "ok": bool(manifest_entry.get("ok")),
+        "failure_class": str(manifest_entry.get("failure_class") or "ok"),
+        "failure_summary": str(manifest_entry.get("failure_summary") or ""),
+        "installed_versions": {str(k): str(v) for k, v in installed.items()} if isinstance(installed, dict) else {},
+        "built_artifacts": [str(p) for p in artifacts[:8]],
+        "build_log_path": str(manifest_entry.get("build_log_path") or ""),
+        "attempt_root": str(manifest_entry.get("attempt_root") or ""),
+    }
+
+
 def collect_enablement(
     session_dir: Path,
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the Rung 3 (M1) enablement attempt-runtime observability section.
+    """Collect the enablement observability section (Rung 3 M1 + Rung 5).
 
-    Reads the ``enablement_*`` attempt-runtime state written by the executor /
-    rearm. Returns ``{}`` when no attempt runtime was ever considered so the
-    dashboard hides the block.
+    Reads ``enablement_*`` attempt-runtime state (Rung 3) and
+    ``enablement_build_manifest`` / ``enablement_last_build_failure`` (Rung 5).
+    Returns ``{}`` when nothing was ever attempted, so the dashboard hides the
+    block.
 
     Args:
         session_dir (Path): Absolute session root (unused; signature parity).
@@ -1324,11 +1345,15 @@ def collect_enablement(
     active_runtime_raw = state.get("enablement_active_runtime")
     attempt_runtimes_raw = state.get("enablement_attempt_runtimes")
     failure_kind = str(state.get("enablement_failure_kind") or "")
+    build_manifest_raw = state.get("enablement_build_manifest")
+    last_build_failure_raw = state.get("enablement_last_build_failure")
 
     have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
     have_attempts = isinstance(attempt_runtimes_raw, list) and bool(attempt_runtimes_raw)
     have_actions = isinstance(stack_actions_raw, list) and bool(stack_actions_raw)
-    if not (have_active or have_attempts or have_actions):
+    have_build_manifest = isinstance(build_manifest_raw, list) and bool(build_manifest_raw)
+    have_last_failure = isinstance(last_build_failure_raw, dict) and bool(last_build_failure_raw)
+    if not (have_active or have_attempts or have_actions or have_build_manifest or have_last_failure):
         return {}
 
     out: dict[str, Any] = {}
@@ -1362,4 +1387,19 @@ def collect_enablement(
         ]
     if failure_kind:
         out["failure_kind"] = failure_kind
+    # Rung 5: targeted-build attempt history
+    if have_build_manifest:
+        build_attempts = [
+            _build_attempt_summary(e)
+            for e in build_manifest_raw
+            if isinstance(e, dict) and e.get("ok") is not None  # skip routing sentinels
+        ]
+        if build_attempts:
+            out["build_attempts"] = build_attempts
+            out["build_attempt_count"] = len(build_attempts)
+    if have_last_failure:
+        out["last_build_failure"] = {
+            "failure_class": str(last_build_failure_raw.get("failure_class") or ""),
+            "failure_summary": str(last_build_failure_raw.get("failure_summary") or ""),
+        }
     return out

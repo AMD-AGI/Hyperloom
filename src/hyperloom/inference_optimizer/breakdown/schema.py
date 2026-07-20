@@ -2071,26 +2071,60 @@ class EnablementAttemptRuntime(TypedDict, total=False):
     promoted: bool
 
 
+class TargetedBuildAttemptSummary(TypedDict, total=False):
+    """One Rung 5 targeted-build attempt (AITER / sgl-kernel / vLLM-source).
+
+    Attributes:
+        component: ``aiter`` / ``sgl_kernel`` / ``vllm_source`` / ``framework_ext``.
+        ref: Git ref / tag used for the build.
+        gpu_arch: Explicit target arch (``gfx942`` / ``gfx950`` / ...).
+        max_jobs: Parallelism cap passed to the compile.
+        ok: Whether the build + verify passed.
+        failure_class: One of the ``FAILURE_CLASSES`` values, or ``"ok"``.
+        failure_summary: Human-readable reason (agent decision input).
+        installed_versions: torch/ref/sha/arch recorded after a successful build.
+        built_artifacts: Verified artifact paths (up to 8).
+        build_log_path: Path to the compile log inside the attempt dir.
+        attempt_root: Attempt directory anchoring the build.
+    """
+
+    component: str
+    ref: str
+    gpu_arch: str
+    max_jobs: int
+    ok: bool
+    failure_class: str
+    failure_summary: str
+    installed_versions: dict[str, str]
+    built_artifacts: list[str]
+    build_log_path: str
+    attempt_root: str
+
+
 class EnablementBreakdown(TypedDict, total=False):
-    """Rung 3 (M1) enablement attempt-runtime observability section.
+    """Enablement attempt-runtime observability section (Rung 3 M1 + Rung 5).
 
     Empty {} on sessions that never provisioned an attempt runtime, so the
     dashboard hides the block.
 
     Attributes:
-        stack_actions (list[EnablementStackActionSummary]): Candidate stack
-            actions considered this session.
-        active_runtime (EnablementAttemptRuntime): The currently-promoted
-            attempt runtime, or {} when none.
-        attempt_runtimes (list[EnablementAttemptRuntime]): Retained attempt
-            runtime records (capped).
-        failure_kind (str): Last classified enablement failure kind.
+        stack_actions: Candidate Rung 3 stack actions considered this session.
+        active_runtime: The currently-promoted attempt runtime, or {} when none.
+        attempt_runtimes: Retained Rung 3 attempt-runtime records (capped).
+        failure_kind: Last classified enablement failure kind.
+        build_attempts: Rung 5 targeted-build attempt history (newest last).
+        last_build_failure: ``{failure_class, failure_summary}`` from the most
+            recent failed build attempt (framework-channel decision input).
+        build_attempt_count: Total number of targeted-build rows attempted.
     """
 
     stack_actions: list[EnablementStackActionSummary]
     active_runtime: EnablementAttemptRuntime
     attempt_runtimes: list[EnablementAttemptRuntime]
     failure_kind: str
+    build_attempts: list[TargetedBuildAttemptSummary]
+    last_build_failure: dict[str, str]
+    build_attempt_count: int
 
 
 class SessionBreakdown(TypedDict, total=False):
