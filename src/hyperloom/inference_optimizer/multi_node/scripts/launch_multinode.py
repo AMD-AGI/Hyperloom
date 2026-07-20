@@ -884,7 +884,7 @@ def main() -> int:
         dtp = 0
         ib_dev = ""
 
-    extra_args = args.extra_args.split() if args.extra_args else []
+    extra_args = shlex.split(args.extra_args) if args.extra_args else []
     denied = _denied_extra_args(args.extra_args)
     if denied:
         _log(f"ERROR denied server flags in --extra-args: {denied}")

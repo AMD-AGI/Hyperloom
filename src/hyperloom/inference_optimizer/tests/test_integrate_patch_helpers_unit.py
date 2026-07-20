@@ -23,15 +23,53 @@ def test_now_iso():
     assert "T" in ip._now_iso()
 
 
-def test_resolve_framework_root_explicit_dir(tmp_path):
+def test_resolve_framework_root_explicit_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(tmp_path)])
     assert ip._resolve_framework_root(str(tmp_path)) == tmp_path
 
 
-def test_resolve_framework_root_explicit_missing_then_git(tmp_path, monkeypatch):
+def test_resolve_framework_root_explicit_outside_allowlist_rejected(tmp_path, monkeypatch):
+    """An explicit override outside the source allowlist must not be honoured."""
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(allowed)])
+    assert ip._resolve_framework_root(str(outside)) is None
+
+
+def test_resolve_framework_root_explicit_nested_under_allowlist(tmp_path, monkeypatch):
+    """A subdirectory of an allowlisted root may be selected explicitly."""
+    fw = tmp_path / "fw"
+    nested = fw / "pkg"
+    nested.mkdir(parents=True)
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    assert ip._resolve_framework_root(str(nested)) == nested
+
+
+def test_resolve_framework_root_slash_override_rejected(tmp_path, monkeypatch):
+    """An explicit ``/`` override must never be returned as the framework root."""
+    fw = tmp_path / "fw"
+    fw.mkdir()
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    assert ip._resolve_framework_root("/") is None
+
+
+def test_resolve_framework_root_unresolvable_explicit_rejected(tmp_path, monkeypatch):
+    """Broken symlinks for explicit overrides are rejected without raising."""
+    fw = tmp_path / "fw"
+    fw.mkdir()
+    broken = tmp_path / "broken-link"
+    broken.symlink_to(tmp_path / "missing-target")
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    assert ip._resolve_framework_root(str(broken)) is None
+
+
+def test_resolve_framework_root_explicit_missing_rejected(tmp_path, monkeypatch):
     gitroot = tmp_path / "fw"
     (gitroot / ".git").mkdir(parents=True)
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(gitroot)])
-    assert ip._resolve_framework_root("/no/such/dir") == gitroot
+    assert ip._resolve_framework_root("/no/such/dir") is None
 
 
 def test_resolve_framework_root_non_git_fallback(tmp_path, monkeypatch):
