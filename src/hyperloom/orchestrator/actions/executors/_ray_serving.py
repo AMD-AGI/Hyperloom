@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -482,6 +483,12 @@ class GpuSpecialistLease:
         self._ensure_log_path = ensure_log_path
         self._actor: Any = None
         self._pid: int | None = None
+        # §3.3 non-blocking start: the pending ObjectRef for the actor's
+        # ``start`` remote call, and the monotonic clock at submit time so the
+        # caller can measure Ray *pending* time separately from the subprocess's
+        # *running* wall budget.
+        self._start_ref: Any = None
+        self._pending_started_monotonic: float | None = None
 
     def start(
         self,
@@ -493,26 +500,24 @@ class GpuSpecialistLease:
     ) -> int:
         """Ensure the cluster, create the actor, launch the subprocess; return its pid.
 
-        Raises :exc:`RayInfeasibleError` for unschedulable resource requests or
-        :exc:`RaySchedTimeoutError` if the actor does not schedule within
-        :data:`_RAY_SPECIALIST_SCHED_TIMEOUT_SEC`.
+        Blocking convenience wrapper around :meth:`start_async` +
+        :meth:`poll_started` kept for callers / tests that want the legacy
+        synchronous contract. Raises :exc:`RayInfeasibleError` for unschedulable
+        resource requests or :exc:`RaySchedTimeoutError` if the actor does not
+        schedule within :data:`_RAY_SPECIALIST_SCHED_TIMEOUT_SEC`.
+
+        Prefer :meth:`start_async` + :meth:`poll_started` on the hot dispatch
+        path so Ray pending time neither blocks the event loop nor counts
+        against the specialist's wall budget (§3.3).
         """
         import ray  # noqa: PLC0415
 
-        from ._ray_backend import get_ray_backend  # noqa: PLC0415
-
-        get_ray_backend().ensure(log_path=self._ensure_log_path)
-        _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
-        self._actor = make_gpu_specialist_actor(
-            self._num_gpus, serving_slot=self._serving_slot
-        )
+        self.start_async(cmd, env=env, cwd=cwd, log_path=log_path)
         try:
             self._pid = int(
-                ray.get(
-                    self._actor.start.remote(cmd, env=env, cwd=cwd, log_path=log_path),
-                    timeout=_RAY_SPECIALIST_SCHED_TIMEOUT_SEC,
-                )
+                ray.get(self._start_ref, timeout=_RAY_SPECIALIST_SCHED_TIMEOUT_SEC)
             )
+            self._start_ref = None
         except ray.exceptions.GetTimeoutError as exc:
             self.close()
             raise RaySchedTimeoutError(
@@ -521,6 +526,66 @@ class GpuSpecialistLease:
                 "cluster may be fully occupied"
             ) from exc
         return self._pid
+
+    def start_async(
+        self,
+        cmd: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        log_path: str | None = None,
+    ) -> None:
+        """Create the actor and SUBMIT the subprocess launch without blocking.
+
+        Stores the pending ObjectRef; the caller must poll :meth:`poll_started`
+        until it returns a pid (non-``None``). This is the §3.3 non-blocking
+        start: Ray scheduling time is neither charged to the specialist's wall
+        budget nor allowed to block the Coordinator's event loop.
+
+        Raises :exc:`RayInfeasibleError` for a permanently-unschedulable request
+        (caller turns this into a structured task failure).
+        """
+        from ._ray_backend import get_ray_backend  # noqa: PLC0415
+
+        get_ray_backend().ensure(log_path=self._ensure_log_path)
+        _assert_cluster_feasible(num_gpus=self._num_gpus, serving_slot=self._serving_slot)
+        self._actor = make_gpu_specialist_actor(
+            self._num_gpus, serving_slot=self._serving_slot
+        )
+        self._start_ref = self._actor.start.remote(cmd, env=env, cwd=cwd, log_path=log_path)
+        self._pending_started_monotonic = time.monotonic()
+
+    def poll_started(self) -> int | None:
+        """Non-blocking poll for the launched pid.
+
+        Returns the pid once Ray has scheduled the actor and the subprocess has
+        launched, else ``None`` while still pending. Never blocks (uses
+        ``ray.wait(..., timeout=0)``), so a caller can interleave it with
+        ``asyncio.sleep`` and keep the event loop responsive (§3.3).
+        """
+        if self._pid is not None:
+            return self._pid
+        if self._start_ref is None:
+            return None
+        import ray  # noqa: PLC0415
+
+        ready, _ = ray.wait([self._start_ref], num_returns=1, timeout=0)
+        if not ready:
+            return None
+        self._pid = int(ray.get(self._start_ref))
+        self._start_ref = None
+        return self._pid
+
+    def pending_seconds(self) -> float:
+        """Seconds the actor has been PENDING (submitted, not yet scheduled).
+
+        Zero before :meth:`start_async` and after the pid is obtained. Used by
+        the caller to enforce a pending-time deadline separate from the running
+        wall budget (§3.3 / invariant §6.4).
+        """
+        if self._pending_started_monotonic is None or self._pid is not None:
+            return 0.0
+        return max(0.0, time.monotonic() - self._pending_started_monotonic)
 
     def pid(self) -> int | None:
         """Return the launched pid, or ``None`` before :meth:`start`.

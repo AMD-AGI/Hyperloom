@@ -32,7 +32,9 @@ from hyperloom.orchestrator.specialists.profile import (
     SCOPE_DOMAIN,
     SCOPE_FREEFORM,
     SpecialistProfile,
+    holds_serving_slot,
     resolve_specialist_profile,
+    uses_whole_machine_gpu_lane,
 )
 
 
@@ -106,6 +108,24 @@ def test_bench_falsy_values(falsy):
     prof = resolve_specialist_profile({"mode": "patch", "bench": falsy})
     assert prof.bench is False
     assert prof.reserves_benchmark_lane is False
+
+
+def test_holds_serving_slot_only_for_bench_capable():
+    """phase-3 §4 / invariant §6.3: only bench-capable patch specialists hold
+    the whole-machine serving_slot; authoring-only (incl. framework authoring)
+    holds num_gpus only so it can share the GPU queue."""
+    # Bench-capable patch specialist -> holds the slot.
+    assert holds_serving_slot({"mode": "patch", "bench": True}) is True
+    # Framework authoring is NOT bench-capable by default -> no slot, but it
+    # still draws from the whole-machine pool (uses_whole_machine_gpu_lane).
+    fw = {"framework_agent_authoring": True, "domain": "serving_specialist"}
+    assert holds_serving_slot(fw) is False
+    assert uses_whole_machine_gpu_lane(fw) is True
+    # A bench-capable framework specialist DOES hold the slot for that window.
+    assert holds_serving_slot({"framework_agent_authoring": True, "mode": "patch", "bench": True}) is True
+    # Plain research / non-bench GPU probe -> no slot.
+    assert holds_serving_slot({"mode": "research"}) is False
+    assert holds_serving_slot(None) is False
 
 
 def test_bench_is_meaningless_for_research_mode():

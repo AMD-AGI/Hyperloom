@@ -61,6 +61,84 @@ def _should_use_ray_backend() -> bool:
     return not is_multi_node()
 
 
+def ray_gpu_specialist_exec_enabled() -> bool:
+    """Whether ``needs_gpu`` specialists route through the Ray backend.
+
+    Mirrors the gate inside
+    :func:`hyperloom.orchestrator.actions.executors._ray_serving.maybe_gpu_specialist_lease`
+    (single-node + ``INFERENCE_OPTIMIZER_RAY_EXEC`` on + not the pytest default)
+    so the dispatcher can pick the Ray admission path (§3.2 count-based pending
+    limit, physical mutex owned by Ray ``num_gpus``) over the legacy SQLite
+    physical-capacity hard gate. Multi-node / RAY_EXEC off / pytest keep the
+    legacy SQLite pool.
+
+    Returns:
+        ``True`` when GPU specialists run through Ray on this (single) node.
+    """
+    from ._multi_node_env import is_multi_node
+
+    return _should_use_ray_backend() and not is_multi_node()
+
+
+def ray_gpu_pending_limit() -> int:
+    """Max in-flight (pending + running) GPU specialists admitted to Ray at once.
+
+    Backpressure so a burst of GPU specialists cannot flood the single-node Ray
+    queue and starve serving (§3.2 / invariant §6.5). Ray still runs only as
+    many as fit ``num_gpus`` concurrently; this bounds how many may be *queued*.
+    Override via ``INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT`` (default 4,
+    floored at 1).
+
+    Returns:
+        The pending-admission ceiling (>= 1).
+    """
+    try:
+        v = int(os.environ.get("INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT", "4"))
+    except (TypeError, ValueError):
+        return 4
+    return max(1, v)
+
+
+def ray_serving_priority_enabled() -> bool:
+    """Whether serving is prioritized over GPU research specialists (§3.4).
+
+    When on (the default), the dispatcher pauses admitting NEW GPU research
+    specialists while serving currently holds the whole-machine slot, so a
+    research pile-up cannot starve serving. Disable with
+    ``INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY=0``.
+
+    Returns:
+        ``True`` unless the env var explicitly disables it.
+    """
+    val = os.environ.get("INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY", "").strip().lower()
+    return val not in {"0", "false", "no", "off"}
+
+
+def serving_slot_busy() -> bool:
+    """Best-effort check: is Ray's whole-machine ``serving_slot`` currently held?
+
+    ``True`` when a serving benchmark (or a bench-capable specialist) currently
+    holds the slot — i.e. serving is active. Used by the §3.4 serving-priority
+    gate to defer new GPU research specialists. Any error (Ray not initialised,
+    resource absent, probe failure) returns ``False`` so it NEVER blocks
+    dispatch, and it is a no-op off the single-node Ray path.
+
+    Returns:
+        ``True`` only when Ray reports ``serving_slot`` availability below 1.
+    """
+    if not ray_gpu_specialist_exec_enabled():
+        return False
+    try:
+        import ray  # noqa: PLC0415
+
+        if not ray.is_initialized():
+            return False
+        avail = ray.available_resources()
+        return float(avail.get("serving_slot", 1.0)) < 1.0
+    except Exception:  # noqa: BLE001 — best-effort; never block dispatch
+        return False
+
+
 @dataclass
 class SubprocessResult:
     """Result of a subprocess executed inside a Ray worker.
