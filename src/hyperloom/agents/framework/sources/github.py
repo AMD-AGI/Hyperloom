@@ -34,7 +34,7 @@ PERF_TERMS = (
 def _state_qualifier(states: tuple[str, ...]) -> str:
     """Map pr_states to a GitHub search state qualifier.
 
-    Open-only (default) keeps ``is:open``; any merged/closed/all broadens to
+    Open-only keeps ``is:open``; the default ``all`` and any merged/closed/all broaden to
     all PR states (omit the state qualifier) so merged PRs are searchable.
 
     Args:
@@ -43,11 +43,11 @@ def _state_qualifier(states: tuple[str, ...]) -> str:
     Returns:
         ``"is:open"`` for open-only, else ``""`` (all states).
     """
-    broad = any(s in ("merged", "closed", "all") for s in (states or ("open",)))
+    broad = any(s in ("merged", "closed", "all") for s in (states or ("all",)))
     return "" if broad else "is:open"
 
 
-def _build_query(repo: str, gap_description: str, states: tuple[str, ...] = ("open",)) -> str:
+def _build_query(repo: str, gap_description: str, states: tuple[str, ...] = ("all",)) -> str:
     """Compose a GitHub Search query string from gap_description + repo scope.
 
     Keywords extracted from ``gap_description`` drive the OR-term clause;
@@ -57,8 +57,8 @@ def _build_query(repo: str, gap_description: str, states: tuple[str, ...] = ("op
         repo (str): Repository slug in ``owner/name`` form to scope the search.
         gap_description (str): Free-text gap description used to derive search
             keywords.
-        states (tuple[str, ...]): PR states to include (``("open",)`` default;
-            merged/closed/all broadens beyond open).
+        states (tuple[str, ...]): PR states to include (``("all",)`` default;
+            ``("open",)`` keeps open-only).
 
     Returns:
         str: A GitHub Search query scoped to ``repo`` and the requested states.
@@ -81,10 +81,10 @@ def search_perf_prs(
     *,
     gap_description: str = "",
     limit: int = 5,
-    states: tuple[str, ...] = ("open",),
+    states: tuple[str, ...] = ("all",),
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """Return open perf-ish PRs via anonymous GitHub Search API.
+    """Return perf-ish PRs via anonymous GitHub Search API.
 
     Best-effort: rate-limits or non-GitHub remotes return an empty list
     rather than raising. Callers that need hard-fail behaviour should
@@ -99,7 +99,7 @@ def search_perf_prs(
         timeout_sec (float): Per-request HTTP timeout in seconds. Defaults to 10.
 
     Returns:
-        list[GitHubPr]: Matching open PRs (at most ``limit``), or an empty list
+        list[GitHubPr]: Matching PRs (at most ``limit``), or an empty list
             on any failure or non-GitHub remote.
     """
     try:

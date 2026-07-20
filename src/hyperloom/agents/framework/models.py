@@ -312,7 +312,7 @@ _VALID_PR_STATES = frozenset({"open", "merged", "closed", "all"})
 def _parse_pr_states(raw: Any) -> tuple[str, ...]:
     """Coerce an optional ``pr_states`` field into a validated tuple.
 
-    None/empty -> ``("open",)``; string -> single; list/tuple -> items.
+    None/empty -> ``("all",)``; string -> single; list/tuple -> items.
 
     Args:
         raw: The raw ``pr_states`` value.
@@ -324,7 +324,7 @@ def _parse_pr_states(raw: Any) -> tuple[str, ...]:
         ValueError: If ``raw`` is the wrong type or contains an unknown state.
     """
     if raw is None or raw == "":
-        return ("open",)
+        return ("all",)
     if isinstance(raw, str):
         items = [raw.strip()] if raw.strip() else []
     elif isinstance(raw, (list, tuple)):
@@ -336,7 +336,7 @@ def _parse_pr_states(raw: Any) -> tuple[str, ...]:
             raise ValueError(
                 f"pr_states contains unknown state {item!r}; valid values are {sorted(_VALID_PR_STATES)!r}"
             )
-    return tuple(items) or ("open",)
+    return tuple(items) or ("all",)
 
 
 def _parse_keywords(raw: Any) -> tuple[str, ...]:
@@ -421,7 +421,7 @@ class ExploreRequest:
     keywords: tuple[str, ...] = ()
     search_modes: tuple[str, ...] = ("primus_cortex", "github")
     # PR states to include in discovery.
-    pr_states: tuple[str, ...] = ("open",)
+    pr_states: tuple[str, ...] = ("all",)
     # Empty string disables the KB contribute hook.
     kb_domain: str = ""
     # True: return all candidates sorted by score; False: short-circuit on first winner.

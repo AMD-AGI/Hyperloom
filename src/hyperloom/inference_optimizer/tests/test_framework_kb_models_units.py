@@ -74,7 +74,7 @@ def test_build_llm_prompt_embeds_domain_and_findings() -> None:
 # models.py
 # --------------------------------------------------------------------------
 def test_parse_pr_states() -> None:
-    assert _parse_pr_states(None) == ("open",)
+    assert _parse_pr_states(None) == ("all",)
     assert _parse_pr_states("open") == ("open",)
     assert _parse_pr_states(["open"]) == ("open",)
     with pytest.raises(ValueError):
@@ -112,7 +112,7 @@ def test_explore_request_from_dict_valid() -> None:
             "primus_cortex": {"base_url": "http://primus"},
             "pr_filter": {"require_labels": ["perf"]},
             "search_modes": ["github"],
-            "pr_states": ["open"],
+            "pr_states": ["all"],
             "keywords": "decode",
         }
     )

@@ -42,20 +42,20 @@ def test_dispatch_explicit_refs_only() -> None:
     assert sources == {"explicit"}
 
 
-def test_pr_states_defaults_to_open() -> None:
+def test_pr_states_defaults_to_all() -> None:
     req = _minimal_request()
-    assert req.pr_states == ("open",)
+    assert req.pr_states == ("all",)
 
 
 def test_pr_states_parsed_and_validated() -> None:
-    req = _minimal_request(pr_states=["open", "merged", "closed"])
-    assert req.pr_states == ("open", "merged", "closed")
+    req = _minimal_request(pr_states=["all"])
+    assert req.pr_states == ("all",)
     with pytest.raises(ValueError):
         _minimal_request(pr_states=["bogus"])
 
 
 def test_primus_search_state_broadens_with_pr_states(monkeypatch) -> None:
-    """pr_states including merged/closed -> primus search queried with state='all'."""
+    """pr_states=all -> primus search queried with state='all'."""
     from hyperloom.agents.framework.models import PrimusCortexConfig
 
     captured: dict[str, str] = {}
@@ -67,7 +67,7 @@ def test_primus_search_state_broadens_with_pr_states(monkeypatch) -> None:
     monkeypatch.setattr(src, "search_perf_prs_via_primus_search", _fake_search)
     req = _minimal_request(
         gap_description="speed up decode",
-        pr_states=["open", "merged", "closed"],
+        pr_states=["all"],
         primus_cortex={"base_url": "http://primus.local"},
     )
     assert isinstance(req.primus_cortex, PrimusCortexConfig)
@@ -76,7 +76,7 @@ def test_primus_search_state_broadens_with_pr_states(monkeypatch) -> None:
     assert out and out[0].source == "primus_cortex"
 
 
-def test_primus_search_state_open_only_default(monkeypatch) -> None:
+def test_primus_search_state_all_default(monkeypatch) -> None:
     captured: dict[str, str] = {}
 
     def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
@@ -90,7 +90,7 @@ def test_primus_search_state_open_only_default(monkeypatch) -> None:
         primus_cortex={"base_url": "http://primus.local"},
     )
     src._run_primus_cortex(req)
-    assert captured["state"] == "open"
+    assert captured["state"] == "all"
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
@@ -121,7 +121,7 @@ def test_dispatch_primus_search_per_framework(framework: str, monkeypatch) -> No
 
     seen_repo_urls: list[str] = []
 
-    def fake_primus(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+    def fake_primus(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
         seen_repo_urls.append(repo_url)
         return [
             GitHubPr(number=11, title=f"{framework}-pr-1", html_url="u1"),
@@ -154,13 +154,13 @@ def test_dispatch_unions_primus_and_github(monkeypatch) -> None:
         candidate_refs=["main"],
     )
 
-    def fake_primus(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+    def fake_primus(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
         return [
             GitHubPr(number=1, title="a", html_url="u1"),
             GitHubPr(number=2, title="b", html_url="u2"),
         ]
 
-    def fake_github(repo_url, *, gap_description, limit, states=("open",)):  # noqa: ARG001
+    def fake_github(repo_url, *, gap_description, limit, states=("all",)):  # noqa: ARG001
         return [
             GitHubPr(number=2, title="dup", html_url="dup"),
             GitHubPr(number=3, title="c", html_url="u3"),
@@ -225,7 +225,7 @@ def test_primus_falls_back_to_list_when_search_returns_empty(monkeypatch) -> Non
         calls.append("search")
         return []
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
         calls.append("list")
         return [
             GitHubPr(number=40, title="NPU Ascend backend", html_url="u40"),
@@ -255,7 +255,7 @@ def test_primus_falls_back_to_list_when_search_unavailable(monkeypatch) -> None:
     def fake_search(*_a, **_kw):
         raise src.PrimusCortexError("404 Not Found at /v1/search/prs")
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
         captured["called"] = "list"
         captured["limit"] = limit
         return [
@@ -289,7 +289,7 @@ def test_primus_no_gap_uses_label_only_path(monkeypatch) -> None:
         captured["called"] = "search"
         return []
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
         captured["called"] = "list"
         captured["limit"] = limit
         return [
@@ -467,7 +467,7 @@ def test_candidate_score_defaults_to_zero_for_label_only_path(monkeypatch) -> No
     def fake_search(*a, **kw):  # would never be called when keywords empty
         raise AssertionError("search must not be called on the no-keyword path")
 
-    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec):  # noqa: ARG001
+    def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
         return [GitHubPr(number=30, title="generic PR", html_url="u30")]
 
     monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)

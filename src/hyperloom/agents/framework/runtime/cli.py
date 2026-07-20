@@ -410,7 +410,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                 # explicit-refs-only and returns 0 candidates here.
                 "search_perf_prs": True,
                 "search_modes": search_modes,
-                "pr_states": request.get("pr_states") or ["open"],
+                "pr_states": request.get("pr_states") or ["all"],
                 "max_search_candidates": max_candidates,
                 "keywords": gap_keywords,
                 # Forced refs are emitted first (source='explicit'); empty by default.

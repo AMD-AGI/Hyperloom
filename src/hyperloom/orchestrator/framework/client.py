@@ -180,7 +180,7 @@ async def phase_discover(
             the default keyword extraction.
         max_candidates: Maximum number of candidate PRs to request.
         batch_id: Optional batch identifier.
-        pr_states: Optional PR-state filter (open / merged / closed).
+        pr_states: Optional PR-state filter (all / open / merged / closed).
         excluded_candidate_ids: Candidate ids (pr_url / ref / ``PR:<n>``) the
             session has already discovered or reached a terminal verdict on;
             fa hard-filters these out of the batch (Step B hard-dedup).

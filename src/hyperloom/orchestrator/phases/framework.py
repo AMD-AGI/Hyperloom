@@ -1312,7 +1312,7 @@ class FrameworkPhase(PhaseHandler):
                         "search_perf_prs": True,
                         "search_modes": search_modes,
                         "keywords": list(plan.keywords),
-                        "pr_states": ["open"],
+                        "pr_states": ["all"],
                         "max_search_candidates": max_candidates,
                         **primus_block,
                     }
@@ -3118,7 +3118,7 @@ class FrameworkPhase(PhaseHandler):
                     repo_url=repo_url,
                     keywords=directed_keywords,
                     max_candidates=max_candidates,
-                    pr_states=["open", "merged", "closed"],
+                    pr_states=["all"],
                     excluded_candidate_ids=excluded_candidate_ids,
                     failed_candidate_context=failed_candidate_context,
                     timeout_sec=per_repo_timeout,
