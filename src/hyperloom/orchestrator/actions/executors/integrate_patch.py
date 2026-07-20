@@ -36,6 +36,7 @@ from ._nogit_patch import (
 from ._grid_runner import (
     GridVariant,
     VariantResult,
+    _num_gpus_for_config,
     _resolve_session_dir,
     run_grid,
     sanitize_result_dir,
@@ -1951,23 +1952,20 @@ class IntegratePatchExecutor:
             tps_delta_pct=float(delta_pct or 0.0),
             extra=extra,
         )
-        # In cyclic mode, commit the KEEP so a later REVERT checkout fallback
-        # can't wipe this win (best-effort, non-fatal).
+        # Commit the KEEP so a later REVERT checkout fallback can't wipe this
+        # win (best-effort, non-fatal).
         try:
-            from ...phases.machine_state import is_cyclic_phases_enabled
-
-            if is_cyclic_phases_enabled():
-                touched = _patch_touched_paths(framework_root, applied)
-                ok, note = _git_commit_kept(
-                    framework_root,
-                    f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
-                    touched,
+            touched = _patch_touched_paths(framework_root, applied)
+            ok, note = _git_commit_kept(
+                framework_root,
+                f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
+                touched,
+            )
+            if not ok:
+                log.warning(
+                    "integrate_patch: commit-on-KEEP failed (%s); win remains uncommitted in the working tree",
+                    note,
                 )
-                if not ok:
-                    log.warning(
-                        "integrate_patch: commit-on-KEEP failed (%s); win remains uncommitted in the working tree",
-                        note,
-                    )
         except Exception:  # noqa: BLE001 — commit durability is best-effort
             log.exception("integrate_patch: commit-on-KEEP raised")
         # Durability: snapshot the KEEP's realized source layer into a
@@ -2334,22 +2332,37 @@ class IntegratePatchExecutor:
             note=f"integrate_patch:{specialist_task_id}",
         )
 
-        results: list[VariantResult] = await run_grid(
-            base_yaml_path=config_path,
-            base_extra_args=str(params.get("base_extra_args") or "").strip(),
-            grid=[variant],
-            output_root=output_root,
-            magpie_python=params.get("magpie_python") or None,
-            variant_timeout_sec=int(
-                params.get("variant_timeout_sec", self.variant_timeout_sec),
-            ),
-            keep_going_on_failure=False,
-            model_path=resolved_model or None,
-            gpu_type=resolved_gpu or None,
-            benchmark_script=override_script,
-            result_dir=override_result_dir,
-            base_args_mode=str(params.get("base_args_mode") or "append"),
-        )
+        # Ray-managed GPU execution (phase-3 §3.1 / invariant §6.2): hold a
+        # serving lease (num_gpus=TP + serving_slot) for the whole run_grid so
+        # the patch benchmark serializes against other serving on the
+        # whole-machine mutex instead of colliding with a concurrently-running
+        # GPU specialist server on the same card (the observed
+        # ``reverted_smoke_fail`` root cause). ``None`` keeps the local path
+        # (multi-node / RAY_EXEC off / pytest default).
+        from ._ray_serving import maybe_serving_lease
+
+        serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+        try:
+            results: list[VariantResult] = await run_grid(
+                base_yaml_path=config_path,
+                base_extra_args=str(params.get("base_extra_args") or "").strip(),
+                grid=[variant],
+                output_root=output_root,
+                magpie_python=params.get("magpie_python") or None,
+                variant_timeout_sec=int(
+                    params.get("variant_timeout_sec", self.variant_timeout_sec),
+                ),
+                keep_going_on_failure=False,
+                model_path=resolved_model or None,
+                gpu_type=resolved_gpu or None,
+                benchmark_script=override_script,
+                result_dir=override_result_dir,
+                base_args_mode=str(params.get("base_args_mode") or "append"),
+                serving_lease=serving_lease,
+            )
+        finally:
+            if serving_lease is not None:
+                serving_lease.close()
 
         bench: dict[str, Any] = {}
         if results:

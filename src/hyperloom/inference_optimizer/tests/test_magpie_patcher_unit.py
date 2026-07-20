@@ -287,3 +287,147 @@ def test_patch_status_remote_trust_fails(tmp_path):
 def test_ensure_wrapper(tmp_path):
     _make_magpie(tmp_path)
     assert mp.ensure_magpie_atomic_scripts_patch(tmp_path) is True
+
+
+# ---- eval-concurrency fixes (--concurrent-requests) -----------------------
+_VLLM_LEGACY = (
+    "#!/bin/bash\n"
+    'if [[ "$RUN_EVAL" = "true" ]]; then\n'
+    '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n'
+    "fi\n"
+)
+
+_BENCHMARK_LIB_LEGACY = (
+    "#!/bin/bash\n"
+    "run_lm_eval() {\n"
+    '    local concurrent_requests="${EVAL_CONCURRENT_REQUESTS:-${CONC:-64}}"\n'
+    "    while [[ $# -gt 0 ]]; do\n"
+    "        case $1 in\n"
+    '            --port)           port="$2"; shift 2 ;;\n'
+    '            --top-p)          top_p="$2"; shift 2 ;;\n'
+    '            *)                echo "Unknown parameter: $1"; return 1 ;;\n'
+    "        esac\n"
+    "    done\n"
+    "}\n"
+)
+
+
+def _make_inferencex(
+    root: Path,
+    *,
+    vllm: str | None = _VLLM_LEGACY,
+    benchmark_lib: str | None = _BENCHMARK_LIB_LEGACY,
+) -> Path:
+    bench = root / "benchmarks"
+    bench.mkdir(parents=True, exist_ok=True)
+    if vllm is not None:
+        (bench / "vllm_mi355x.sh").write_text(vllm, encoding="utf-8")
+    if benchmark_lib is not None:
+        (bench / "benchmark_lib.sh").write_text(benchmark_lib, encoding="utf-8")
+    return root
+
+
+def test_resolve_inferencex_benchmarks_dir(monkeypatch, tmp_path):
+    _make_inferencex(tmp_path)
+    assert mp._resolve_inferencex_benchmarks_dir(tmp_path) == tmp_path / "benchmarks"
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    assert mp._resolve_inferencex_benchmarks_dir(None) == tmp_path / "benchmarks"
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    assert mp._resolve_inferencex_benchmarks_dir(None) is None
+    assert mp._resolve_inferencex_benchmarks_dir(tmp_path / "nope") is None
+
+
+def test_resolve_inferencex_benchmark_lib(tmp_path):
+    _make_inferencex(tmp_path)
+    lib = mp._resolve_inferencex_benchmark_lib(tmp_path)
+    assert lib is not None and lib.name == "benchmark_lib.sh"
+    assert mp._resolve_inferencex_benchmark_lib(tmp_path / "nope") is None
+
+
+def test_run_lm_eval_arg_patch_applied(tmp_path):
+    _make_inferencex(tmp_path)
+    lib = tmp_path / "benchmarks" / "benchmark_lib.sh"
+    assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is True
+    text = lib.read_text(encoding="utf-8")
+    assert "--concurrent-requests|--concurrent_requests" in text
+    assert mp._RUN_LM_EVAL_PARSER_SENTINEL in text
+    # Idempotent second call.
+    assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is True
+
+
+def test_run_lm_eval_arg_patch_unrecognized(tmp_path):
+    lib = tmp_path / "benchmark_lib.sh"
+    lib.write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
+    assert mp._apply_run_lm_eval_arg_patch_atomic(lib) is False
+
+
+def test_eval_flag_stripped_from_inferencex_dir(tmp_path):
+    _make_inferencex(tmp_path)
+    assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
+    vllm = (tmp_path / "benchmarks" / "vllm_mi355x.sh").read_text(encoding="utf-8")
+    assert "--concurrent-requests" not in vllm
+    lib = (tmp_path / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
+    assert mp._RUN_LM_EVAL_PARSER_SENTINEL in lib
+
+
+def test_eval_concurrency_fixes_idempotent(tmp_path):
+    """Regression: a 2nd pass must stay ok. The parser patch leaves a legit
+    ``--concurrent-requests`` case in benchmark_lib.sh; the flag-strip scan must
+    skip the library rather than mis-report it as an unrecognised shape."""
+    _make_inferencex(tmp_path)
+    assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
+    # Second pass: benchmark_lib.sh now carries the parser sentinel + flag.
+    assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
+    lib = (tmp_path / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
+    # The parser case survived (not stripped) and stayed idempotent.
+    assert lib.count("--concurrent-requests|--concurrent_requests") == 1
+    assert "--concurrent-requests" not in (
+        tmp_path / "benchmarks" / "vllm_mi355x.sh"
+    ).read_text(encoding="utf-8")
+
+
+def test_eval_fixes_run_when_benchmarker_missing(monkeypatch, tmp_path):
+    """Regression: a missing/stale benchmarker.py must NOT skip the eval fixes.
+
+    Previously ``magpie_scripts_patch_status`` early-returned when
+    ``benchmarker.py`` was unresolved, leaving the fatal ``--concurrent-requests``
+    flag live in the InferenceX copies that actually execute.
+    """
+    ix = _make_inferencex(tmp_path / "ix")
+    monkeypatch.delenv("MAGPIE_PATH", raising=False)
+    monkeypatch.setenv("INFERENCEX_PATH", str(ix))
+    status = mp.magpie_scripts_patch_status(None, str(ix))
+    # Atomic patch is a no-op (no benchmarker.py) but the eval fixes ran.
+    assert status.atomic_reason == mp._ATOMIC_REASON_MISSING
+    assert status.eval_flag_ok is True
+    vllm = (ix / "benchmarks" / "vllm_mi355x.sh").read_text(encoding="utf-8")
+    assert "--concurrent-requests" not in vllm
+    lib = (ix / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
+    assert mp._RUN_LM_EVAL_PARSER_SENTINEL in lib
+
+
+def test_full_flow_covers_inferencex_and_ordering(tmp_path):
+    """Full status flow: atomic + remote-trust + eval strip across both dirs,
+    with the remote-trust patch on sglang running BEFORE the generic strip."""
+    magpie = _make_magpie(tmp_path / "magpie")
+    # Add a flagged generic vllm script to the Magpie scripts dir too.
+    (magpie / "Magpie" / "scripts" / "benchmark" / "vllm_mi355x.sh").write_text(
+        _VLLM_LEGACY, encoding="utf-8"
+    )
+    ix = _make_inferencex(tmp_path / "ix")
+    status = mp.magpie_scripts_patch_status(str(magpie), str(ix))
+    assert status.atomic_ok is True
+    assert status.remote_trust_ok is True  # sglang patched before strip removed its flag
+    assert status.eval_flag_ok is True
+    assert status.ok is True
+    # sglang got the remote-trust rewrite (no bare flag left).
+    sglang = (magpie / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh").read_text(encoding="utf-8")
+    assert "MAGPIE_TRUST_REMOTE_CODE" in sglang
+    assert "--concurrent-requests" not in sglang
+    # Both Magpie's and InferenceX's generic vllm scripts were stripped.
+    assert "--concurrent-requests" not in (
+        magpie / "Magpie" / "scripts" / "benchmark" / "vllm_mi355x.sh"
+    ).read_text(encoding="utf-8")
+    assert "--concurrent-requests" not in (
+        ix / "benchmarks" / "vllm_mi355x.sh"
+    ).read_text(encoding="utf-8")
