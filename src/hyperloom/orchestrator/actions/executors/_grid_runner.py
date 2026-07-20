@@ -24,7 +24,11 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env import is_truthy
-from hyperloom.common.env_safety import scrub_child_process_env
+from hyperloom.common.env_safety import (
+    BLOCKED_CHILD_ENV_NAMES,
+    _ENV_KEY_RE,
+    scrub_child_process_env,
+)
 
 from ...roles.robustness_pulse import pulse as _robustness_pulse
 from ._subprocess_kill import (
@@ -437,48 +441,105 @@ def sanitize_result_dir(value: Any) -> str | None:
     return text
 
 
-def apply_runtime_override(envs: dict[str, str], override: dict[str, str]) -> None:
+def _is_safe_path_entry(entry: str) -> bool:
+    """A single path entry is safe iff it has no ``:``, no ``..``, no control chars."""
+    return (
+        bool(entry)
+        and ":" not in entry
+        and ".." not in Path(entry).parts
+        and not any(c in entry for c in ("\n", "\r", "\x00"))
+    )
+
+
+def _prepend_path_entry(envs: dict[str, str], var: str, entry: str) -> None:
+    """Prepend a single already-validated entry onto a ``:``-joined env var."""
+    parts = [p for p in str(envs.get(var, "") or "").split(":") if p]
+    if entry not in parts:
+        parts.insert(0, entry)
+    envs[var] = ":".join(parts)
+
+
+# Reserved keys carried by dedicated override fields; never accepted via runtime_env.
+_RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIBRARY_PATH"})
+
+
+def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> None:
     """Inject an attempt runtime override into the materialized YAML envs dict.
 
-    Writes path_prefix, pythonpath_prefix, framework_bin, framework_python, and
-    framework_venv_root into benchmark.envs so the Magpie subprocess re-exports
-    them to the server it boots.  All writes land in the YAML layer; os.environ
-    is never mutated.
+    Writes the Rung-3 keys (path_prefix, pythonpath_prefix, framework_bin,
+    framework_python, framework_venv_root) and the Rung-5 compiled-artifact keys
+    (pythonpath_prefixes, ld_library_path_prefix, runtime_env, entrypoint_bin_dir)
+    into benchmark.envs so the Magpie subprocess re-exports them to the server it
+    boots. All writes land in the YAML layer; os.environ is never mutated.
 
-    path_prefix is prepended to PATH using the same containment checks as
-    overlay_pythonpath (no colon separator, no traversal, no control chars).
+    Path entries use the same containment checks as overlay_pythonpath (no colon
+    separator, no traversal, no control chars); unsafe entries are dropped with a
+    warning. runtime_env entries with an invalid/blocked/reserved key are dropped.
     An empty or all-missing override is a no-op.
 
     Args:
         envs: The benchmark.envs dict from the materialized YAML (mutated in place).
         override: Dict with optional keys path_prefix, pythonpath_prefix,
-            framework_bin, framework_python, framework_venv_root.
+            framework_bin, framework_python, framework_venv_root,
+            pythonpath_prefixes (list), ld_library_path_prefix (list),
+            runtime_env (dict), entrypoint_bin_dir.
     """
     if not override:
         return
     path_prefix = str(override.get("path_prefix") or "").strip()
     if path_prefix:
-        _cur = str(envs.get("PATH", "") or "")
-        _parts = [p for p in _cur.split(":") if p]
-        if path_prefix not in _parts:
-            _parts.insert(0, path_prefix)
-        envs["PATH"] = ":".join(_parts)
+        _prepend_path_entry(envs, "PATH", path_prefix)
+    entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
+    if entrypoint_bin:
+        if _is_safe_path_entry(entrypoint_bin):
+            _prepend_path_entry(envs, "PATH", entrypoint_bin)
+        else:
+            log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
     pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
     if pp_prefix:
-        _ok = (
-            ":" not in pp_prefix
-            and ".." not in Path(pp_prefix).parts
-            and not any(c in pp_prefix for c in ("\n", "\r", "\x00"))
-        )
-        if _ok:
+        if _is_safe_path_entry(pp_prefix):
             _cur_pp = str(envs.get("PYTHONPATH", "") or "")
             envs["PYTHONPATH"] = f"{pp_prefix}:{_cur_pp}" if _cur_pp else pp_prefix
         else:
             log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
+    # Multi-entry prefixes (Rung 5): prepend in order so the first entry wins,
+    # ahead of any single-dir pythonpath_prefix and the inherited value.
+    for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
+        if _is_safe_path_entry(entry):
+            _cur_pp = str(envs.get("PYTHONPATH", "") or "")
+            envs["PYTHONPATH"] = f"{entry}:{_cur_pp}" if _cur_pp else entry
+        else:
+            log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
+    # Native loader path (Rung 5): prepend attempt entries while preserving any
+    # inherited entries (e.g. /opt/rocm/lib), which _prepend_path_entry never drops.
+    for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
+        if _is_safe_path_entry(entry):
+            _prepend_path_entry(envs, "LD_LIBRARY_PATH", entry)
+        else:
+            log.warning("apply_runtime_override: dropping unsafe ld_library_path entry %r", entry)
+    _runtime_env = override.get("runtime_env")
+    if isinstance(_runtime_env, dict):
+        for raw_k, raw_v in _runtime_env.items():
+            key = str(raw_k)
+            if not _ENV_KEY_RE.match(key) or key in BLOCKED_CHILD_ENV_NAMES or key in _RUNTIME_ENV_RESERVED:
+                log.warning("apply_runtime_override: dropping unsafe runtime_env key %r", key)
+                continue
+            envs[key] = str(raw_v)
     for key in ("framework_bin", "framework_python", "framework_venv_root"):
         val = str(override.get(key) or "").strip()
         if val:
             envs[f"HYPERLOOM_{key.upper()}"] = val
+
+
+def _coerce_prefix_list(value: Any) -> list[str]:
+    """Normalize a runtime-prefix field (list/tuple/str) to a list of entries."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
 
 
 def _build_variant_yaml(

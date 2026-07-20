@@ -125,3 +125,112 @@ def test_no_runtime_override_field_is_noop(tmp_path):
         materialized = yaml.safe_load(f)
     envs = materialized["benchmark"]["envs"]
     assert "HYPERLOOM_FRAMEWORK_BIN" not in envs
+
+
+# ---------------------------------------------------------------------------
+# Rung 5: compiled-artifact runtime prefixes
+# ---------------------------------------------------------------------------
+
+def test_pythonpath_prefixes_multi_entry_ordered_prepended():
+    envs = {"PYTHONPATH": "/opt/venv"}
+    apply_runtime_override(envs, {"pythonpath_prefixes": ["/a/pkg", "/b/pkg"]})
+    assert envs["PYTHONPATH"] == "/a/pkg:/b/pkg:/opt/venv"
+
+
+def test_pythonpath_prefixes_drops_unsafe_entry():
+    envs = {}
+    apply_runtime_override(envs, {"pythonpath_prefixes": ["/good", "../evil"]})
+    assert envs.get("PYTHONPATH") == "/good"
+
+
+def test_ld_library_path_prefix_prepends_and_preserves_rocm():
+    envs = {"LD_LIBRARY_PATH": "/opt/rocm/lib"}
+    apply_runtime_override(envs, {"ld_library_path_prefix": ["/attempt/lib"]})
+    assert envs["LD_LIBRARY_PATH"] == "/attempt/lib:/opt/rocm/lib"
+
+
+def test_ld_library_path_prefix_multi_entry_order():
+    envs = {}
+    apply_runtime_override(envs, {"ld_library_path_prefix": ["/a", "/b"]})
+    assert envs["LD_LIBRARY_PATH"] == "/a:/b"
+
+
+def test_runtime_env_merged():
+    envs = {}
+    apply_runtime_override(envs, {"runtime_env": {"INFERENCE_OPTIMIZER_AITER_JIT_DIR": "/j", "AITER_REBUILD": "1"}})
+    assert envs["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] == "/j"
+    assert envs["AITER_REBUILD"] == "1"
+
+
+def test_runtime_env_rejects_reserved_and_blocked_keys():
+    envs = {}
+    apply_runtime_override(envs, {"runtime_env": {"PATH": "/evil", "LD_PRELOAD": "/x", "1BAD": "y", "OK_KEY": "v"}})
+    assert envs == {"OK_KEY": "v"}
+
+
+def test_entrypoint_bin_dir_prepended_to_path():
+    envs = {"PATH": "/usr/bin"}
+    apply_runtime_override(envs, {"entrypoint_bin_dir": "/attempt/bin"})
+    assert envs["PATH"] == "/attempt/bin:/usr/bin"
+
+
+def test_entrypoint_bin_dir_unsafe_dropped():
+    envs = {"PATH": "/usr/bin"}
+    apply_runtime_override(envs, {"entrypoint_bin_dir": "/a:/b"})
+    assert envs["PATH"] == "/usr/bin"
+
+
+def test_extended_framework_runtime_lands_in_yaml(tmp_path):
+    """An extended FrameworkRuntime.to_runtime_override lands end-to-end in YAML."""
+    from hyperloom.orchestrator.framework.stack_actions import FrameworkRuntime
+
+    base_yaml = _base_yaml(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    rt = FrameworkRuntime(
+        bin_path="/attempt/bin",
+        pythonpath_prefixes=(str(tmp_path / "pkg"),),
+        ld_library_path_prefix=("/attempt/lib",),
+        runtime_env={"INFERENCE_OPTIMIZER_AITER_JIT_DIR": str(tmp_path / "jit")},
+        entrypoint_bin_dir="/attempt/console",
+    )
+    variant = GridVariant(name="rt5")
+    variant.runtime_override = rt.to_runtime_override()
+
+    out_yaml = _build_variant_yaml(
+        base_yaml_path=base_yaml,
+        base_extra_args="",
+        variant=variant,
+        output_subdir=tmp_path / "out5",
+    )
+    with out_yaml.open(encoding="utf-8") as f:
+        envs = yaml.safe_load(f)["benchmark"]["envs"]
+    assert str(tmp_path / "pkg") in envs["PYTHONPATH"]
+    assert "/attempt/lib" in envs["LD_LIBRARY_PATH"]
+    assert envs["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] == str(tmp_path / "jit")
+    assert "/attempt/console" in envs["PATH"]
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint: runtime_override participates but stays back-compatible
+# ---------------------------------------------------------------------------
+
+def test_fingerprint_unchanged_for_empty_override():
+    plain = GridVariant(name="a", extra_server_args="--x 1")
+    with_empty = GridVariant(name="b", extra_server_args="--x 1")
+    with_empty.runtime_override = {}
+    assert plain.fingerprint == with_empty.fingerprint
+
+
+def test_fingerprint_changes_with_runtime_override():
+    base = GridVariant(name="a", extra_server_args="--x 1")
+    overridden = GridVariant(name="a", extra_server_args="--x 1")
+    overridden.runtime_override = {"pythonpath_prefixes": ["/a/pkg"]}
+    assert base.fingerprint != overridden.fingerprint
+
+
+def test_fingerprint_order_independent_for_override():
+    v1 = GridVariant(name="a")
+    v1.runtime_override = {"pythonpath_prefixes": ["/a", "/b"], "runtime_env": {"X": "1", "Y": "2"}}
+    v2 = GridVariant(name="a")
+    v2.runtime_override = {"runtime_env": {"Y": "2", "X": "1"}, "pythonpath_prefixes": ["/b", "/a"]}
+    assert v1.fingerprint == v2.fingerprint
