@@ -29,6 +29,7 @@ from hyperloom.agents.framework.enablement import (
     FailureSignature,
     classify_failure,
     enablement_made_progress,
+    is_targeted_build_candidate,
     runnable_decision,
 )
 
@@ -494,3 +495,51 @@ def test_oom_classify_and_gap_no_code_acquisition() -> None:
     assert sig.kind == RESOURCE_CONSTRAINT
     gap = CapabilityGap.from_signature(sig)
     assert gap.requires_code_acquisition is False
+
+
+# --- is_targeted_build_candidate (Rung 5 eligibility) ----------------------
+
+
+def test_targeted_build_candidate_build_bridge_layer() -> None:
+    sig = FailureSignature(kind=IMPORT_ERROR, bridge_layer="build")
+    assert is_targeted_build_candidate(sig) is True
+
+
+def test_targeted_build_candidate_rocm_hip_bridge_layer() -> None:
+    sig = FailureSignature(kind=HIP_KERNEL_MISSING, bridge_layer="rocm_hip")
+    assert is_targeted_build_candidate(sig) is True
+
+
+def test_targeted_build_candidate_hip_kernel_missing_kind() -> None:
+    sig = FailureSignature(kind=HIP_KERNEL_MISSING, bridge_layer="")
+    assert is_targeted_build_candidate(sig) is True
+
+
+def test_targeted_build_candidate_pure_python_dtype_rejected() -> None:
+    """A dtype guard with no native evidence stays Rung 4 (pure Python)."""
+    sig = FailureSignature(kind=UNSUPPORTED_DTYPE, bridge_layer="framework", raw_excerpt="dtype bf16 is not supported")
+    assert is_targeted_build_candidate(sig) is False
+
+
+def test_targeted_build_candidate_native_dtype_from_symbol() -> None:
+    sig = FailureSignature(
+        kind=UNSUPPORTED_DTYPE,
+        bridge_layer="framework",
+        offending_symbol="aiter::fp4_moe",
+    )
+    assert is_targeted_build_candidate(sig) is True
+
+
+def test_targeted_build_candidate_native_dtype_from_log() -> None:
+    sig = FailureSignature(kind=UNSUPPORTED_DTYPE, bridge_layer="framework")
+    log = "torch.ops._C.fp4_gemm undefined symbol: _ZN5aiter..."
+    assert is_targeted_build_candidate(sig, log) is True
+
+
+def test_targeted_build_candidate_framework_python_gap_rejected() -> None:
+    sig = FailureSignature(kind=MISSING_MODEL_ARCH, bridge_layer="framework")
+    assert is_targeted_build_candidate(sig) is False
+
+
+def test_targeted_build_candidate_none_signature() -> None:
+    assert is_targeted_build_candidate(None) is False  # type: ignore[arg-type]

@@ -33,6 +33,10 @@ _ACTION_KINDS: frozenset[str] = frozenset({"runtime_candidate", "pr_backport", "
 class FrameworkRuntime:
     """The explicit runtime the bench subprocess must resolve to.
 
+    Rung-3 (M1) fields describe an attempt venv; the Rung-5 additive fields
+    (``pythonpath_prefixes`` .. ``attempt_root``) describe a compiled-artifact
+    prefix. All new fields default to empty so a Rung-3 runtime is unchanged.
+
     Attributes:
         bin_path: Attempt-local bin dir prepended to the YAML PATH (holds the
             server console script, e.g. ``.../venv/bin``).
@@ -42,6 +46,15 @@ class FrameworkRuntime:
             editable checkout's package dir); empty when a wheel install.
         server_args: Extra server args to route into ``EXTRA_{FW}_ARGS``.
         envs: Extra benchmark envs to merge (never mutates os.environ).
+        pythonpath_prefixes: Multi-entry PYTHONPATH prefix for compiled
+            artifacts (Rung 5); prepended before inherited PYTHONPATH.
+        ld_library_path_prefix: Native ``.so`` loader path prefix; prepended
+            into LD_LIBRARY_PATH while preserving existing ROCm entries.
+        runtime_env: Per-attempt env (e.g. ``INFERENCE_OPTIMIZER_AITER_JIT_DIR``,
+            ``AITER_REBUILD``); merged into benchmark envs.
+        entrypoint_bin_dir: Optional PATH prefix for a built console script.
+        source_root: Isolated worktree / installed source root (provenance).
+        attempt_root: Attempt directory anchoring the build (provenance).
     """
 
     bin_path: str = ""
@@ -50,19 +63,24 @@ class FrameworkRuntime:
     pythonpath_prefix: str = ""
     server_args: str = ""
     envs: Mapping[str, str] = field(default_factory=dict)
+    pythonpath_prefixes: tuple[str, ...] = ()
+    ld_library_path_prefix: tuple[str, ...] = ()
+    runtime_env: Mapping[str, str] = field(default_factory=dict)
+    entrypoint_bin_dir: str = ""
+    source_root: str = ""
+    attempt_root: str = ""
 
-    def to_runtime_override(self) -> dict[str, str]:
+    def to_runtime_override(self) -> dict[str, Any]:
         """Project onto the dict consumed by ``apply_runtime_override``.
 
-        Maps this runtime onto the exact keys ``apply_runtime_override``
-        recognizes (``path_prefix`` / ``pythonpath_prefix`` /
-        ``framework_bin`` / ``framework_python`` / ``framework_venv_root``) so
+        Maps this runtime onto the keys ``apply_runtime_override`` recognizes so
         the attempt runtime lands in the materialized YAML ``benchmark.envs``.
+        Rung-3 keys stay ``str``; the Rung-5 keys carry ``list``/``dict``.
 
         Returns:
-            dict[str, str]: The runtime-override dict (empty values omitted).
+            dict[str, Any]: The runtime-override payload (empty values omitted).
         """
-        out: dict[str, str] = {}
+        out: dict[str, Any] = {}
         if self.bin_path:
             out["path_prefix"] = self.bin_path
         if self.pythonpath_prefix:
@@ -73,6 +91,14 @@ class FrameworkRuntime:
             out["framework_python"] = self.python_path
         if self.venv_root:
             out["framework_venv_root"] = self.venv_root
+        if self.pythonpath_prefixes:
+            out["pythonpath_prefixes"] = list(self.pythonpath_prefixes)
+        if self.ld_library_path_prefix:
+            out["ld_library_path_prefix"] = list(self.ld_library_path_prefix)
+        if self.runtime_env:
+            out["runtime_env"] = dict(self.runtime_env)
+        if self.entrypoint_bin_dir:
+            out["entrypoint_bin_dir"] = self.entrypoint_bin_dir
         return out
 
     def to_state(self) -> dict[str, Any]:
@@ -84,21 +110,40 @@ class FrameworkRuntime:
             "pythonpath_prefix": self.pythonpath_prefix,
             "server_args": self.server_args,
             "envs": dict(self.envs),
+            "pythonpath_prefixes": list(self.pythonpath_prefixes),
+            "ld_library_path_prefix": list(self.ld_library_path_prefix),
+            "runtime_env": dict(self.runtime_env),
+            "entrypoint_bin_dir": self.entrypoint_bin_dir,
+            "source_root": self.source_root,
+            "attempt_root": self.attempt_root,
         }
 
     @classmethod
     def from_state(cls, d: Mapping[str, Any] | None) -> "FrameworkRuntime":
         """Rehydrate from a plain dict; missing keys default to empty."""
         d = d or {}
-        raw_envs = d.get("envs")
-        envs = {str(k): str(v) for k, v in raw_envs.items()} if isinstance(raw_envs, dict) else {}
+
+        def _str_map(key: str) -> dict[str, str]:
+            raw = d.get(key)
+            return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+        def _str_tuple(key: str) -> tuple[str, ...]:
+            raw = d.get(key)
+            return tuple(str(x) for x in raw) if isinstance(raw, (list, tuple)) else ()
+
         return cls(
             bin_path=str(d.get("bin_path") or ""),
             python_path=str(d.get("python_path") or ""),
             venv_root=str(d.get("venv_root") or ""),
             pythonpath_prefix=str(d.get("pythonpath_prefix") or ""),
             server_args=str(d.get("server_args") or ""),
-            envs=envs,
+            envs=_str_map("envs"),
+            pythonpath_prefixes=_str_tuple("pythonpath_prefixes"),
+            ld_library_path_prefix=_str_tuple("ld_library_path_prefix"),
+            runtime_env=_str_map("runtime_env"),
+            entrypoint_bin_dir=str(d.get("entrypoint_bin_dir") or ""),
+            source_root=str(d.get("source_root") or ""),
+            attempt_root=str(d.get("attempt_root") or ""),
         )
 
 

@@ -654,6 +654,48 @@ def enablement_made_progress(
     return _failure_identity(after_signature) != _failure_identity(before_signature)
 
 
+# Evidence that a dtype/capability miss is backed by a *compiled* op rather
+# than pure-Python guard logic: a native symbol, an .so/kernel/op reference, or
+# a named compiled backend. Used only to promote UNSUPPORTED_DTYPE to a build
+# candidate (Rung 5); never fires for a plain Python NotImplementedError guard.
+_NATIVE_EVIDENCE_RE = re.compile(
+    r"undefined symbol|\.so\b|_C\b|aiter|sgl[_-]?kernel|hip[a-z]*kernel|"
+    r"\bkernel\b|custom[_ ]?op|torch\.ops|extension module|"
+    r"\bfp4\b|\bfp8\b|marlin|cutlass",
+    re.IGNORECASE,
+)
+
+
+def is_targeted_build_candidate(
+    signature: FailureSignature,
+    launch_log: str = "",
+) -> bool:
+    """Whether a residual gap is a *compiled* component miss (Rung 5).
+
+    Pure logic gate the escalation layer calls before enqueueing any build. A
+    pure-Python miss (Rung 4 territory) must never qualify here.
+
+    Args:
+        signature: The classified launch/import failure.
+        launch_log: Raw failure text; searched (with ``offending_symbol``) for
+            native-op evidence when the kind alone is ambiguous.
+
+    Returns:
+        bool: ``True`` for a build/native/HIP-kernel gap, or an
+        ``UNSUPPORTED_DTYPE`` gap whose evidence names a compiled symbol/op.
+    """
+    if signature is None:
+        return False
+    if signature.bridge_layer in ("build", "rocm_hip"):
+        return True
+    if signature.kind == HIP_KERNEL_MISSING:
+        return True
+    if signature.kind == UNSUPPORTED_DTYPE:
+        evidence = f"{signature.offending_symbol or ''}\n{signature.raw_excerpt or ''}\n{launch_log or ''}"
+        return bool(_NATIVE_EVIDENCE_RE.search(evidence))
+    return False
+
+
 __all__ = [
     "CAPABILITY_DISABLED",
     "FAILURE_KINDS",
@@ -673,5 +715,6 @@ __all__ = [
     "FailureSignature",
     "classify_failure",
     "enablement_made_progress",
+    "is_targeted_build_candidate",
     "runnable_decision",
 ]
