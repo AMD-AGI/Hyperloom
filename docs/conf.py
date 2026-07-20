@@ -67,9 +67,6 @@ suppress_warnings = [
     "etoc.toctree",
 ]
 
-html_static_path = ["sphinx/static/css"]
-html_css_files = ["rocm_custom.css"]
-
 """
 Doxygen Settings
 Ensure Doxyfile is located at docs/doxygen.
@@ -92,5 +89,3 @@ extensions = [
 html_title = f"{project} {version_number} documentation"
 
 external_projects_current_project = "Hyperloom"
-
-exclude_patterns = ['.venv']
