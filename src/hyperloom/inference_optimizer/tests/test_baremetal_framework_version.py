@@ -88,6 +88,23 @@ def test_version_matches_is_loose_and_rejects_empty(tmp_path: Path):
     assert out == ["v_vs_plain_MATCH", "suffix_MATCH", "diff_NO", "empty_NO"]
 
 
+def test_version_matches_exact_preserves_local_tag(tmp_path: Path):
+    runner = _write_runner(
+        tmp_path,
+        "match-exact.sh",
+        [
+            _version_helpers(),
+            'version_matches_exact 0.22.0+rocm722 0.22.0+rocm722 && echo same_MATCH || echo same_NO',
+            'version_matches_exact 0.22.0+rocm720 0.22.0+rocm722 && echo variant_MATCH || echo variant_NO',
+            'version_matches_exact 0.22.0 0.22.0+rocm722 && echo bare_MATCH || echo bare_NO',
+            'version_matches_exact v0.22.0+rocm722 0.22.0+rocm722 && echo vprefix_MATCH || echo vprefix_NO',
+            'version_matches_exact "" 0.22.0+rocm722 && echo empty_MATCH || echo empty_NO',
+        ],
+    )
+    out = _run(runner).stdout.splitlines()
+    assert out == ["same_MATCH", "variant_NO", "bare_NO", "vprefix_MATCH", "empty_NO"]
+
+
 def test_sglang_target_version_empty_for_wheel_path(tmp_path: Path):
     # The 3.10 wheel path has no comparable sglang release target (7.2.0 is the
     # AMD ROCm PyPI index version, not the sglang package version), so it must
@@ -244,7 +261,12 @@ def _vllm_framework_fn() -> str:
     )
 
 
-def _vllm_runner_body(tmp_path: Path, installed_version: str, target_version: str) -> list[str]:
+def _vllm_runner_body(
+    tmp_path: Path,
+    installed_version: str,
+    target_version: str,
+    target_variant: str = "rocm722",
+) -> list[str]:
     # Stub interpreter: heredoc (`python - <<PY`) prints 3.12 for py_mm; any
     # other invocation exits 0 so import/version guards pass.
     marker = tmp_path / "vllm-calls.txt"
@@ -266,7 +288,7 @@ def _vllm_runner_body(tmp_path: Path, installed_version: str, target_version: st
         "DRY_RUN=0",
         "FRAMEWORK_ENV=shared",
         f"VLLM_VERSION={target_version}",
-        "VLLM_ROCM_VARIANT=rocm722",
+        f"VLLM_ROCM_VARIANT={target_variant}",
         "VLLM_ROCM_INDEX=https://example.invalid/wheels",
         "VLLM_VENV_ROOT=/tmp/does-not-exist-venv",
         f"MARKER={marker}",
@@ -285,17 +307,48 @@ def _vllm_runner_body(tmp_path: Path, installed_version: str, target_version: st
 
 
 def test_vllm_reinstalls_when_installed_version_differs(tmp_path: Path):
-    body = _vllm_runner_body(tmp_path, installed_version="0.21.0", target_version="0.22.0")
+    body = _vllm_runner_body(
+        tmp_path, installed_version="0.21.0+rocm722", target_version="0.22.0"
+    )
     runner = _write_runner(tmp_path, "vllm-diff.sh", body)
     out = _run(runner).stdout
     assert "MARKER_CONTENT:pip" in out
 
 
-def test_vllm_skips_when_installed_version_matches(tmp_path: Path):
-    body = _vllm_runner_body(tmp_path, installed_version="0.22.0", target_version="0.22.0")
+def test_vllm_skips_when_installed_full_version_matches(tmp_path: Path):
+    # Installed version carries the ROCm local tag, matching the full target
+    # (0.22.0+rocm722).
+    body = _vllm_runner_body(
+        tmp_path, installed_version="0.22.0+rocm722", target_version="0.22.0"
+    )
     runner = _write_runner(tmp_path, "vllm-same.sh", body)
     out = _run(runner).stdout
     assert "MARKER_CONTENT:none" in out
+
+
+def test_vllm_reinstalls_when_only_rocm_variant_differs(tmp_path: Path):
+    # Regression: same version 0.22.0 but installed rocm720 vs target rocm722
+    # must reinstall (previously skipped because +local was normalized away).
+    body = _vllm_runner_body(
+        tmp_path,
+        installed_version="0.22.0+rocm720",
+        target_version="0.22.0",
+        target_variant="rocm722",
+    )
+    runner = _write_runner(tmp_path, "vllm-variant.sh", body)
+    out = _run(runner).stdout
+    assert "MARKER_CONTENT:pip" in out
+
+
+def test_vllm_reinstalls_when_installed_lacks_rocm_local_tag(tmp_path: Path):
+    # A bare 0.22.0 (e.g. a stray PyPI CUDA wheel) must not be treated as the
+    # ROCm target 0.22.0+rocm722.
+    body = _vllm_runner_body(
+        tmp_path, installed_version="0.22.0", target_version="0.22.0"
+    )
+    runner = _write_runner(tmp_path, "vllm-bare.sh", body)
+    out = _run(runner).stdout
+    assert "MARKER_CONTENT:pip" in out
 
 
 # --- C: CLI version flags (end-to-end dry-run) ---------------------------------

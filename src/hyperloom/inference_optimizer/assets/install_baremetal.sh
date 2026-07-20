@@ -431,6 +431,17 @@ version_matches() {
   [ -n "$a" ] && [ -n "$b" ] && [ "$a" = "$b" ]
 }
 
+# Strict match preserving the PEP 440 local tag (e.g. +rocm722): only a leading
+# v/V and surrounding whitespace are stripped. Used for vLLM where the ROCm
+# variant lives in the local tag and must not be treated as equal across
+# variants (0.22.0+rocm720 != 0.22.0+rocm722).
+version_matches_exact() {
+  local a b
+  a="$(printf '%s' "$1" | sed -E 's/^[[:space:]]*[vV]?//; s/[[:space:]]*$//')"
+  b="$(printf '%s' "$2" | sed -E 's/^[[:space:]]*[vV]?//; s/[[:space:]]*$//')"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" = "$b" ]
+}
+
 # Comparable sglang release target. Only the source path has one: SGLANG_REF is
 # the sglang release tag. The 3.10 wheel path pins an AMD ROCm PyPI index version
 # (e.g. 7.2.0), which is not the sglang package version, so it has no comparable
@@ -771,7 +782,7 @@ link_vllm_into_shared_bin() {
 
 # Install vLLM from the official ROCm wheel index without replacing ROCm torch.
 install_vllm_framework() {
-  local py base_py py_mm constraint_file package_spec rocm_torch_ver
+  local py base_py py_mm constraint_file package_spec rocm_torch_ver vllm_target_full
   base_py="$(resolve_python)" || die "no usable Python found for vLLM install"
   py="$base_py"
   if [ "$FRAMEWORK_ENV" = "isolated" ]; then
@@ -794,6 +805,9 @@ PY
     *+*) package_spec="vllm==${VLLM_VERSION}" ;;
     *) package_spec="vllm==${VLLM_VERSION}+${VLLM_ROCM_VARIANT}" ;;
   esac
+  # Full target version incl. the ROCm local tag; skip checks compare against
+  # this so a variant change (e.g. rocm720 -> rocm722) is not treated as equal.
+  vllm_target_full="${package_spec#vllm==}"
 
   log "Phase 2: installing vLLM ROCm framework layer"
   log "framework env: ${FRAMEWORK_ENV}"
@@ -809,10 +823,10 @@ PY
     elif _py_has "$py" vllm; then
       local co_vllm_current
       co_vllm_current="$(installed_dist_version "$py" vllm 2>/dev/null || true)"
-      if version_matches "$co_vllm_current" "$VLLM_VERSION" && verify_vllm_rocm "$py" >/dev/null 2>&1; then
-        log "vllm ${co_vllm_current} (ROCm) matches target ${VLLM_VERSION}"
+      if version_matches_exact "$co_vllm_current" "$vllm_target_full" && verify_vllm_rocm "$py" >/dev/null 2>&1; then
+        log "vllm ${co_vllm_current} (ROCm) matches target ${vllm_target_full}"
       else
-        warn "vllm ${co_vllm_current:-unknown} MISMATCH target ${VLLM_VERSION} or not a ROCm build (check-only; would reinstall)"
+        warn "vllm ${co_vllm_current:-unknown} MISMATCH target ${vllm_target_full} or not a ROCm build (check-only; would reinstall)"
       fi
     else
       warn "vllm missing (check-only; would install ${package_spec} from ${VLLM_ROCM_INDEX})"
@@ -838,17 +852,18 @@ PY
 
   [ "$py_mm" = "3.12" ] || die "vLLM ROCm wheels require Python 3.12; current Python is ${py_mm}"
 
-  # Skip only when an existing vLLM is a ROCm build and matches VLLM_VERSION;
-  # otherwise fall through and (re)install so version upgrades are not lost.
+  # Skip only when an existing vLLM matches the full target incl. ROCm local tag
+  # and is a ROCm build; otherwise fall through and (re)install so version or
+  # ROCm variant upgrades are not lost.
   if [ -x "$py" ] && _py_has "$py" vllm; then
     local vllm_current
     vllm_current="$(installed_dist_version "$py" vllm 2>/dev/null || true)"
-    if version_matches "$vllm_current" "$VLLM_VERSION" && verify_vllm_rocm "$py" >/dev/null 2>&1; then
-      log "vllm ${vllm_current} (ROCm) already matches target ${VLLM_VERSION}; skipping install"
+    if version_matches_exact "$vllm_current" "$vllm_target_full" && verify_vllm_rocm "$py" >/dev/null 2>&1; then
+      log "vllm ${vllm_current} (ROCm) already matches target ${vllm_target_full}; skipping install"
       [ "$FRAMEWORK_ENV" = "isolated" ] && link_vllm_into_shared_bin "$base_py" "$py"
       return 0
     fi
-    [ -n "$vllm_current" ] && log "vllm ${vllm_current} differs from target ${VLLM_VERSION} or not a ROCm build; reinstalling"
+    [ -n "$vllm_current" ] && log "vllm ${vllm_current} differs from target ${vllm_target_full} or not a ROCm build; reinstalling"
   fi
 
   if [ "$FRAMEWORK_ENV" = "isolated" ]; then
