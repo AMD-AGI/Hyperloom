@@ -48,7 +48,7 @@ def test_build_query_uses_extracted_keywords() -> None:
     q = gh._build_query("sgl-project/sglang", "improve fp8 MoE attention")
     assert "repo:sgl-project/sglang" in q
     assert "is:pr" in q
-    assert "is:open" not in q
+    assert "is:open" in q
     assert "fp8" in q
     assert "moe" in q
     assert "attention" in q
@@ -62,14 +62,14 @@ def test_build_query_falls_back_to_perf_terms_when_empty() -> None:
 
 
 def test_build_query_open_only_keeps_is_open() -> None:
-    """Explicit open-only keeps the is:open qualifier."""
+    """Default open-only keeps the is:open qualifier."""
     q = gh._build_query("sgl-project/sglang", "fp8", states=("open",))
     assert "is:open" in q
 
 
-def test_build_query_default_all_drops_is_open() -> None:
-    """Default all-state search omits the is:open qualifier."""
-    q = gh._build_query("sgl-project/sglang", "fp8")
+def test_build_query_all_drops_is_open() -> None:
+    """Explicit all-state search omits the is:open qualifier."""
+    q = gh._build_query("sgl-project/sglang", "fp8", states=("all",))
     assert "is:open" not in q
     assert "is:pr" in q
 

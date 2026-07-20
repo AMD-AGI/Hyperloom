@@ -312,10 +312,10 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
     label = cfg.default_label
     requested = max(1, request.max_search_candidates)
 
-    # Step 4: broad PR-state coverage. merged/closed PRs are the
+    # Step 4: optionally broaden PR-state coverage. merged/closed PRs are the
     # backport-relevant ones that may already be in the local dev build;
-    # semantic audit downstream judges + dedups them. "all" is the default
-    # broad filter; callers can explicitly narrow to open-only.
+    # semantic audit downstream judges + dedups them. Default remains open-only
+    # for perf discovery; enablement explicitly requests "all".
     states = request.pr_states
     broad = any(s in ("merged", "closed", "all") for s in states)
     search_state = "all" if broad else "open"

@@ -42,9 +42,9 @@ def test_dispatch_explicit_refs_only() -> None:
     assert sources == {"explicit"}
 
 
-def test_pr_states_defaults_to_all() -> None:
+def test_pr_states_defaults_to_open() -> None:
     req = _minimal_request()
-    assert req.pr_states == ("all",)
+    assert req.pr_states == ("open",)
 
 
 def test_pr_states_parsed_and_validated() -> None:
@@ -76,7 +76,7 @@ def test_primus_search_state_broadens_with_pr_states(monkeypatch) -> None:
     assert out and out[0].source == "primus_cortex"
 
 
-def test_primus_search_state_all_default(monkeypatch) -> None:
+def test_primus_search_state_open_only_default(monkeypatch) -> None:
     captured: dict[str, str] = {}
 
     def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
@@ -90,7 +90,7 @@ def test_primus_search_state_all_default(monkeypatch) -> None:
         primus_cortex={"base_url": "http://primus.local"},
     )
     src._run_primus_cortex(req)
-    assert captured["state"] == "all"
+    assert captured["state"] == "open"
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
@@ -160,7 +160,7 @@ def test_dispatch_unions_primus_and_github(monkeypatch) -> None:
             GitHubPr(number=2, title="b", html_url="u2"),
         ]
 
-    def fake_github(repo_url, *, gap_description, limit, states=("all",)):  # noqa: ARG001
+    def fake_github(repo_url, *, gap_description, limit, states=("open",)):  # noqa: ARG001
         return [
             GitHubPr(number=2, title="dup", html_url="dup"),
             GitHubPr(number=3, title="c", html_url="u3"),

@@ -3118,7 +3118,7 @@ class FrameworkPhase(PhaseHandler):
                     repo_url=repo_url,
                     keywords=directed_keywords,
                     max_candidates=max_candidates,
-                    pr_states=["all"],
+                    pr_states=["open"],
                     excluded_candidate_ids=excluded_candidate_ids,
                     failed_candidate_context=failed_candidate_context,
                     timeout_sec=per_repo_timeout,
