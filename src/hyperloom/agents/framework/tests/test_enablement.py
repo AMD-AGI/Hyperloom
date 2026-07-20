@@ -18,9 +18,13 @@ from hyperloom.agents.framework.enablement import (
     MISSING_MODEL_ARCH,
     MISSING_WEIGHT,
     NOT_IMPLEMENTED,
+    RESOURCE_CONSTRAINT,
+    SERVE_FLAG,
     SHAPE_MISMATCH,
+    TOKENIZER_ERROR,
     UNKNOWN,
     UNSUPPORTED_DTYPE,
+    CapabilityGap,
     EnablementRequest,
     FailureSignature,
     classify_failure,
@@ -404,3 +408,89 @@ def test_runnable_pass_when_post_signature_clean() -> None:
         after_signature=after,
     )
     assert runs is True
+
+
+# --- New kinds: tokenizer_error, serve_flag, resource_constraint -----------
+
+
+def test_tokenizer_error_classified() -> None:
+    """A vLLM --tokenizer-mode not supported message -> tokenizer_error."""
+    sig = classify_failure("Error: Tokenizer mode 'deepseek_v4' is not supported")
+    assert sig.kind == TOKENIZER_ERROR
+
+
+def test_tokenizer_unknown_backend() -> None:
+    sig = classify_failure("Unknown tokenizer class: FastTokenizerV2")
+    assert sig.kind == TOKENIZER_ERROR
+
+
+def test_serve_flag_classified() -> None:
+    """Argparse unrecognized flag -> serve_flag."""
+    sig = classify_failure("unrecognized arguments: --enable-mtp-speculative-decoding")
+    assert sig.kind == SERVE_FLAG
+
+
+def test_serve_flag_invalid_choice() -> None:
+    sig = classify_failure("error: argument --tokenizer-mode: invalid choice: 'deepseek_v4'")
+    assert sig.kind in (SERVE_FLAG, TOKENIZER_ERROR)
+
+
+def test_resource_constraint_oom() -> None:
+    """Out-of-memory -> resource_constraint."""
+    sig = classify_failure("RuntimeError: CUDA out of memory. Tried to allocate 20 GiB")
+    assert sig.kind == RESOURCE_CONSTRAINT
+
+
+def test_resource_constraint_hip_oom() -> None:
+    sig = classify_failure("RuntimeError: HIP out of memory.")
+    assert sig.kind == RESOURCE_CONSTRAINT
+
+
+def test_resource_constraint_tp() -> None:
+    sig = classify_failure("requires at least 8 GPUs for tensor parallel size 8, but only 4 are available")
+    assert sig.kind == RESOURCE_CONSTRAINT
+
+
+def test_resource_constraint_no_kv_cache() -> None:
+    sig = classify_failure("No GPU memory left for the KV cache. Please try enabling quantization")
+    assert sig.kind == RESOURCE_CONSTRAINT
+
+
+# --- CapabilityGap projection -----------------------------------------------
+
+
+def test_capability_gap_from_resource_constraint() -> None:
+    """resource_constraint -> requires_code_acquisition=False."""
+    sig = FailureSignature(kind=RESOURCE_CONSTRAINT, confidence=0.88)
+    gap = CapabilityGap.from_signature(sig)
+    assert gap.kind == RESOURCE_CONSTRAINT
+    assert gap.requires_code_acquisition is False
+
+
+def test_capability_gap_from_import_error() -> None:
+    """import_error -> requires_code_acquisition=True."""
+    sig = FailureSignature(kind=IMPORT_ERROR, confidence=0.7, bridge_layer="build")
+    gap = CapabilityGap.from_signature(sig)
+    assert gap.requires_code_acquisition is True
+    assert gap.bridge_layer == "build"
+
+
+def test_capability_gap_from_tokenizer_error() -> None:
+    sig = FailureSignature(kind=TOKENIZER_ERROR, confidence=0.75, bridge_layer="framework")
+    gap = CapabilityGap.from_signature(sig)
+    assert gap.requires_code_acquisition is True
+
+
+def test_capability_gap_to_dict() -> None:
+    gap = CapabilityGap(kind=RESOURCE_CONSTRAINT, requires_code_acquisition=False)
+    d = gap.to_dict()
+    assert d["kind"] == RESOURCE_CONSTRAINT
+    assert d["requires_code_acquisition"] is False
+
+
+def test_oom_classify_and_gap_no_code_acquisition() -> None:
+    """End-to-end: OOM log -> classify -> CapabilityGap.requires_code_acquisition is False."""
+    sig = classify_failure("RuntimeError: Out of memory on GPU. Tried to allocate 80 GiB")
+    assert sig.kind == RESOURCE_CONSTRAINT
+    gap = CapabilityGap.from_signature(sig)
+    assert gap.requires_code_acquisition is False

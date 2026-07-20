@@ -28,17 +28,24 @@ SHAPE_MISMATCH = "shape_mismatch"
 MISSING_WEIGHT = "missing_weight"
 NOT_IMPLEMENTED = "not_implemented"
 CAPABILITY_DISABLED = "capability_disabled"
+TOKENIZER_ERROR = "tokenizer_error"
+SERVE_FLAG = "serve_flag"
+# Resource constraints (OOM, TP/GPU count) are NOT code acquisition targets.
+RESOURCE_CONSTRAINT = "resource_constraint"
 UNKNOWN = "unknown"
 
 # Ordered most-specific to least-specific.
 FAILURE_KINDS: tuple[str, ...] = (
     MISSING_MODEL_ARCH,
+    RESOURCE_CONSTRAINT,
     HIP_KERNEL_MISSING,
     UNSUPPORTED_DTYPE,
     SHAPE_MISMATCH,
     MISSING_WEIGHT,
     NOT_IMPLEMENTED,
     CAPABILITY_DISABLED,
+    TOKENIZER_ERROR,
+    SERVE_FLAG,
     IMPORT_ERROR,
     UNKNOWN,
 )
@@ -91,6 +98,57 @@ class FailureSignature:
             dict[str, Any]: A dataclass-derived dict of all fields.
         """
         return asdict(self)
+
+
+# --- CapabilityGap projection -----------------------------------------------
+
+
+@dataclass(frozen=True)
+class CapabilityGap:
+    """Thin overlay on FailureSignature exposing code-acquisition semantics.
+
+    ``requires_code_acquisition`` is False for resource-constraint failures
+    (OOM / GPU count) since those cannot be fixed by patching source code.
+
+    Attributes:
+        kind: Forwarded from the underlying :class:`FailureSignature`.
+        bridge_layer: Forwarded from the underlying signature.
+        requires_code_acquisition: False when the failure kind is
+            :data:`RESOURCE_CONSTRAINT`; True otherwise.
+    """
+
+    kind: str
+    bridge_layer: str = ""
+    requires_code_acquisition: bool = True
+
+    @classmethod
+    def from_signature(cls, sig: FailureSignature) -> "CapabilityGap":
+        """Project a :class:`FailureSignature` onto a :class:`CapabilityGap`.
+
+        Args:
+            sig: The classified failure signature.
+
+        Returns:
+            CapabilityGap: Projection with ``requires_code_acquisition=False``
+            when ``sig.kind`` is :data:`RESOURCE_CONSTRAINT`.
+        """
+        return cls(
+            kind=sig.kind,
+            bridge_layer=sig.bridge_layer,
+            requires_code_acquisition=(sig.kind != RESOURCE_CONSTRAINT),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict.
+
+        Returns:
+            dict[str, Any]: A dataclass-derived dict of all fields.
+        """
+        return {
+            "kind": self.kind,
+            "bridge_layer": self.bridge_layer,
+            "requires_code_acquisition": self.requires_code_acquisition,
+        }
 
 
 # --- Rule table ------------------------------------------------------------
@@ -209,6 +267,51 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"disabled on (?:ROCm|HIP|AMD)"),
         ),
         confidence=0.6,
+        symbol_from=_grp,
+    ),
+    _Rule(
+        # Resource constraints: OOM, insufficient GPU count, TP requirements.
+        # bridge_layer="" means no bridge repo is searched and CapabilityGap marks
+        # requires_code_acquisition=False — do not try to patch for these.
+        kind=RESOURCE_CONSTRAINT,
+        bridge_layer="",
+        patterns=(
+            re.compile(r"[Oo]ut\s+of\s+memory"),
+            re.compile(r"[Hh][Ii][Pp]\s+out\s+of\s+memory"),
+            re.compile(r"[Cc][Uu][Dd][Aa]\s+out\s+of\s+memory"),
+            re.compile(r"no\s+GPU\s+memory\s+(?:for|left\s+for)\s+the\s+KV\s+[Cc]ache", re.IGNORECASE),
+            re.compile(r"[Cc]annot\s+allocate\s+(?:memory|cuda|hip)"),
+            re.compile(r"[Oo]ut[Oo]f[Mm]emory[Ee]rror"),
+            re.compile(r"requires?\s+(?:at\s+least\s+)?(\d+)\s+GPU[s]?"),
+            re.compile(r"[Tt]ensor\s+[Pp]arallel\s+[Ss]ize\s+.*?(\d+).*?GPU"),
+            re.compile(r"available\s+GPU\s+count\s+\((\d+)\)\s+(?:is\s+)?less\s+than"),
+        ),
+        confidence=0.88,
+        symbol_from=_grp,
+    ),
+    _Rule(
+        kind=TOKENIZER_ERROR,
+        bridge_layer="framework",
+        patterns=(
+            re.compile(r"[Tt]okenizer(?:\s+mode)?\s+['\"]?([A-Za-z0-9_]+)['\"]?\s+(?:is\s+)?not\s+(?:supported|found|recognized)"),
+            re.compile(r"[Uu]nknown\s+tokenizer\s+(?:class|type|backend):\s*['\"]?([A-Za-z0-9_]+)"),
+            re.compile(r"[Ff]ailed\s+to\s+(?:load|initialize)\s+tokenizer"),
+            re.compile(r"[Cc]annot\s+(?:load|find|locate)\s+tokenizer"),
+            re.compile(r"--tokenizer-mode\s+([A-Za-z0-9_]+)\s+(?:is\s+)?not\s+supported"),
+        ),
+        confidence=0.75,
+        symbol_from=_grp,
+    ),
+    _Rule(
+        kind=SERVE_FLAG,
+        bridge_layer="framework",
+        patterns=(
+            re.compile(r"unrecognized arguments?:\s*(-+[A-Za-z0-9_-]+)"),
+            re.compile(r"error:\s+argument\s+(-+[A-Za-z0-9_-]+)"),
+            re.compile(r"invalid\s+choice.*?for.*?argument\s+(-+[A-Za-z0-9_-]+)"),
+            re.compile(r"([A-Za-z][A-Za-z0-9_-]+):\s+error:\s+unrecognized"),
+        ),
+        confidence=0.70,
         symbol_from=_grp,
     ),
     _Rule(
@@ -559,9 +662,13 @@ __all__ = [
     "MISSING_MODEL_ARCH",
     "MISSING_WEIGHT",
     "NOT_IMPLEMENTED",
+    "RESOURCE_CONSTRAINT",
+    "SERVE_FLAG",
     "SHAPE_MISMATCH",
+    "TOKENIZER_ERROR",
     "UNKNOWN",
     "UNSUPPORTED_DTYPE",
+    "CapabilityGap",
     "EnablementRequest",
     "FailureSignature",
     "classify_failure",

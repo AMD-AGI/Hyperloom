@@ -1079,6 +1079,9 @@ class FrameworkPhase(PhaseHandler):
                 f"bridging approach / candidate than before.\n\n" + notes
             )
         gap_cid = f"gap.enablement.{signature.kind}"
+        from hyperloom.agents.framework.enablement import CapabilityGap
+
+        capability_gap = CapabilityGap.from_signature(signature)
         return {
             "domain": "enablement_specialist",
             "gap_canonical_id": gap_cid,
@@ -1094,6 +1097,8 @@ class FrameworkPhase(PhaseHandler):
             "enablement_search_repos": list(plan.repos),
             # Pre-patch failure signature, replayed by integrate_patch.
             "enablement_before_signature": signature.to_dict(),
+            # CapabilityGap projection: marks resource_constraint as not actionable.
+            "enablement_capability_gap": capability_gap.to_dict(),
             "enablement_candidate_refs": list(candidate_refs),
             # Progressing patches from prior rounds, stacked as a base.
             "enablement_base_patches": base_patches,
