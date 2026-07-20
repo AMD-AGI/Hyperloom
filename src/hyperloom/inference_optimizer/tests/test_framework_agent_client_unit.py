@@ -28,53 +28,12 @@ def test_repo_url_for_framework_known_and_unknown() -> None:
 
 
 # -- _resolve_fa_command ---------------------------------------------------
-def test_resolve_fa_command_explicit_env(tmp_path, monkeypatch) -> None:
-    fa = tmp_path / "fa"
-    fa.write_text("#!/bin/sh\n")
-    monkeypatch.setenv("FA_BIN", str(fa))
-    assert fac._resolve_fa_command() == [str(fa)]
-
-
-def test_resolve_fa_command_via_path(monkeypatch) -> None:
-    monkeypatch.delenv("FA_BIN", raising=False)
-    monkeypatch.delenv("FRAMEWORK_AGENT_ROOT", raising=False)
-    monkeypatch.setattr(fac.shutil, "which", lambda _n: "/usr/bin/fa")
-    assert fac._resolve_fa_command() == ["/usr/bin/fa"]
-
-
-def test_resolve_fa_command_via_interpreter_sibling(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("FA_BIN", raising=False)
-    monkeypatch.delenv("FRAMEWORK_AGENT_ROOT", raising=False)
-    monkeypatch.setattr(fac.shutil, "which", lambda _n: None)
-    fake_python = tmp_path / "python3"
-    fake_python.write_text("")
-    sibling_fa = tmp_path / "fa"
-    sibling_fa.write_text("#!/bin/sh\n")
-    monkeypatch.setattr(fac.sys, "executable", str(fake_python))
-    assert fac._resolve_fa_command() == [str(sibling_fa)]
-
-
-def test_resolve_fa_command_via_root(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("FA_BIN", raising=False)
-    monkeypatch.setattr(fac.shutil, "which", lambda _n: None)
-    # No interpreter-sibling fa so the legacy root fallback is reached.
-    monkeypatch.setattr(fac.sys, "executable", str(tmp_path / "nobin" / "python3"))
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    (scripts / "fa").write_text("#!/bin/sh\n")
-    monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", str(tmp_path))
-    assert fac._resolve_fa_command() == [str(scripts / "fa")]
-
-
-def test_resolve_fa_command_falls_back_to_module(tmp_path, monkeypatch) -> None:
-    """No FA_BIN / no PATH fa / no interpreter-sibling fa / no legacy script:
-    the runtime must fall back to the current interpreter's module entry so
-    discovery never dies on a lost PATH (root-cause fix for #fa-not-found)."""
-    monkeypatch.delenv("FA_BIN", raising=False)
-    monkeypatch.delenv("FRAMEWORK_AGENT_ROOT", raising=False)
-    monkeypatch.setattr(fac.shutil, "which", lambda _n: None)
-    monkeypatch.setattr(fac.sys, "executable", str(tmp_path / "nobin" / "python3"))
-    assert fac._resolve_fa_command() == [str(tmp_path / "nobin" / "python3"), "-m", _FA_MODULE]
+def test_resolve_fa_command_is_module_invocation(monkeypatch) -> None:
+    """``fa`` always runs as ``[python, -m, <module>]`` — mirroring the critic /
+    robustness backends, so it never depends on $PATH (root-cause fix for
+    #fa-not-found)."""
+    monkeypatch.setattr(fac.sys, "executable", "/fake/python3")
+    assert fac._resolve_fa_command() == ["/fake/python3", "-m", _FA_MODULE]
 
 
 # -- _run_fa_subcommand_sync ----------------------------------------------

@@ -16,7 +16,6 @@ import asyncio
 import contextlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import uuid
@@ -25,37 +24,18 @@ from typing import Any
 
 from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
-# Importable module entry for the ``fa`` CLI. Used as the final,
-# environment-independent fallback so discovery never dies on a lost $PATH.
+# Importable module entry for the ``fa`` CLI. Always invoked via the current
+# interpreter, mirroring the critic / robustness runtime.cli backends so the
+# call never depends on $PATH or an installed console script.
 _FA_MODULE = "hyperloom.agents.framework.runtime.cli"
 
 
 def _resolve_fa_command() -> list[str]:
-    """Resolve the command prefix used to invoke the ``fa`` CLI.
+    """Return the argv prefix for the ``fa`` CLI: ``[python, -m, <module>]``.
 
-    Resolution order: ``$FA_BIN``; ``shutil.which('fa')``; the ``fa`` script
-    next to the current interpreter; ``$FRAMEWORK_AGENT_ROOT/scripts/fa``;
-    finally ``[sys.executable, '-m', <module>]``. The module fallback never
-    depends on $PATH, so a run whose shell lost the venv bin dir still works.
-
-    Returns:
-        A non-empty argv prefix; the subcommand and IO flags are appended by
-        the caller.
+    Matches the sibling agents' ``python -m <module>`` invocation; the
+    subcommand and IO flags are appended by the caller.
     """
-    explicit = (os.environ.get("FA_BIN") or "").strip()
-    if explicit and Path(explicit).exists():
-        return [explicit]
-    via_path = shutil.which("fa")
-    if via_path:
-        return [via_path]
-    sibling = Path(sys.executable).with_name("fa")
-    if sibling.exists():
-        return [str(sibling)]
-    fa_root = (os.environ.get("FRAMEWORK_AGENT_ROOT") or "").strip()
-    if fa_root:
-        candidate = Path(fa_root) / "scripts" / "fa"
-        if candidate.exists():
-            return [str(candidate)]
     return [sys.executable, "-m", _FA_MODULE]
 
 
