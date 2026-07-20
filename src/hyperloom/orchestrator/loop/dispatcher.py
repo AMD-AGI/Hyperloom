@@ -248,7 +248,15 @@ class DispatcherCollaborator:
             except PolicyDenied:
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
-            if await self._integrate_reconcile_already_pending(base_key):
+            if await self._integrate_reconcile_child_exists(
+                base_key,
+                states=("succeeded",),
+            ):
+                continue
+            if await self._integrate_reconcile_child_exists(
+                base_key,
+                states=("queued", "running"),
+            ):
                 continue
             for attempt in range(1, 6):
                 new_key = f"{base_key}-reconcile{attempt}"
@@ -268,25 +276,27 @@ class DispatcherCollaborator:
                         new_key,
                     )
                     break
-                if new_task.state in ("queued", "running"):
+                if new_task.state in ("queued", "running", "succeeded"):
                     break
         return created
 
-    async def _integrate_reconcile_already_pending(self, base_key: str) -> bool:
-        """Return whether a reconcile child for ``base_key`` is already queued or running."""
-        prefix = f"{base_key}-reconcile"
-        for live_state in ("queued", "running"):
-            try:
-                rows = await self.tasks.by_state(live_state)
-            except Exception:  # noqa: BLE001 — defensive
-                continue
-            for row in rows:
-                if row.kind != "integrate_patch":
-                    continue
-                key = str(row.idempotency_key or "")
-                if key.startswith(prefix):
-                    return True
-        return False
+    async def _integrate_reconcile_child_exists(
+        self,
+        base_key: str,
+        *,
+        states: tuple[str, ...],
+    ) -> bool:
+        """Return whether a reconcile child idempotency key exists in any of ``states``."""
+        if not states:
+            return False
+        prefix = f"{base_key}-reconcile%"
+        placeholders = ",".join("?" for _ in states)
+        row = await self.tasks.db.fetchone(
+            "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
+            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",
+            (prefix, *states),
+        )
+        return row is not None
 
     async def _spawn_fitting_queued(
         self,

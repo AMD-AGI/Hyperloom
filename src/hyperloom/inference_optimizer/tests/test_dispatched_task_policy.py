@@ -331,6 +331,40 @@ async def test_reconcile_cancelled_integrate_patch_when_verdict_restored(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_reconcile_does_not_spawn_second_child_after_first_succeeds(tmp_path, monkeypatch):
+    """A succeeded reconcile child must not trigger reconcile2 on later pump passes."""
+    sub = _runner_with_policy(tmp_path, monkeypatch)
+    task = await sub.tasks.create(
+        kind="integrate_patch",
+        params={"specialist_task_id": "spec-once", "apply_only": True},
+        idempotency_key="approved-prop-once",
+    )
+    await sub.run_task(task)
+
+    state = sub.shared_state
+    assert isinstance(state, SharedState)
+    state.record_specialist_patch_verdict("spec-once", "approve")
+    assert sub.policy is not None
+    sub.policy.shared_state = state
+
+    disp = DispatcherCollaborator(_ReconcileCoordStub(sub=sub, tasks=sub.tasks, shared_state=state))
+    created = await disp._reconcile_cancelled_policy_denied_integrate_tasks()
+    assert len(created) == 1
+    child = await sub.tasks.get(created[0])
+    await sub.tasks.transition(child.task_id, "running")
+    await sub.tasks.transition(child.task_id, "succeeded", evidence={"status": "ok"})
+
+    assert await disp._reconcile_cancelled_policy_denied_integrate_tasks() == []
+    rows = await sub.tasks.db.fetchall(
+        "SELECT idempotency_key FROM tasks WHERE kind='integrate_patch' "
+        "AND idempotency_key LIKE ?",
+        ("approved-prop-once-reconcile%",),
+    )
+    assert len(rows) == 1
+    assert rows[0]["idempotency_key"] == "approved-prop-once-reconcile1"
+
+
+@pytest.mark.asyncio
 async def test_reconcile_skips_when_verdict_still_missing(tmp_path, monkeypatch):
     sub = _runner_with_policy(tmp_path, monkeypatch)
     task = await sub.tasks.create(

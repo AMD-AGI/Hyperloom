@@ -1542,6 +1542,20 @@ def test_infera_build_node_launch_args_neutralizes_malicious_extra_args():
     assert "'1;'" in la
 
 
+def test_infera_build_node_launch_args_rejects_denied_extra_args():
+    from hyperloom.inference_optimizer.multi_node._internal import infera_support
+    from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import ServerArgsRejected
+
+    with pytest.raises(ServerArgsRejected, match="denied server flags"):
+        infera_support.build_node_launch_args(
+            framework="sglang",
+            model="/m",
+            tp=8,
+            nnodes=1,
+            extra_args="--model-path /evil",
+        )
+
+
 def test_multinode_op_args_shlex_quotes_malicious_value():
     """The Infera SSH op_args builder path (bench) must also shlex-quote."""
     import shlex

@@ -141,9 +141,9 @@ async def test_rejected_by_critic(tmp_path):
 
 @pytest.mark.asyncio
 async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
-    # SWSPLAT-42420: a queued/resume-dispatched task is NOT re-validated by
-    # PolicyGate. With a live SharedState but no recorded verdict (a forged
-    # coordinator.db row), integrate_patch must refuse to apply the patch.
+    # Dispatch replays PolicyGate before queued→running (see test_dispatched_task_policy).
+    # This case still covers the executor-layer critic gate: with SharedState present
+    # but no recorded verdict, integrate_patch must refuse to apply the patch.
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
