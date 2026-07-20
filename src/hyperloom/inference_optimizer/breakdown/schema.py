@@ -2029,6 +2029,70 @@ class LangfusePush(TypedDict, total=False):
     receipt_source: str
 
 
+class EnablementStackActionSummary(TypedDict, total=False):
+    """One Rung 3 (M1) attempt-runtime stack action considered/applied.
+
+    Attributes:
+        kind: Stack-action kind (``runtime_candidate`` / ...).
+        framework: Target framework.
+        capability: Missing capability being repaired.
+        acquisition_method: ``wheel`` / ``editable_ref`` / ...
+        repo_url: Origin git URL (source acquisition), or "".
+        ref: Pinned ref (source acquisition), or "".
+        index_url: Pip index (wheel acquisition), or "".
+        reason: Human-readable justification.
+    """
+
+    kind: str
+    framework: str
+    capability: str
+    acquisition_method: str
+    repo_url: str
+    ref: str
+    index_url: str
+    reason: str
+
+
+class EnablementAttemptRuntime(TypedDict, total=False):
+    """One provisioned Rung 3 attempt runtime (promoted or discarded).
+
+    Attributes:
+        venv_root: Attempt venv root (``$SESSION_DIR/enablement/stacks/...``).
+        bin_path: Attempt bin dir prepended to the materialized-YAML PATH.
+        python_path: Attempt interpreter.
+        installed_versions: Package -> version installed into the attempt venv.
+        promoted: True when this runtime was KEPT (survives rearm).
+    """
+
+    venv_root: str
+    bin_path: str
+    python_path: str
+    installed_versions: dict[str, str]
+    promoted: bool
+
+
+class EnablementBreakdown(TypedDict, total=False):
+    """Rung 3 (M1) enablement attempt-runtime observability section.
+
+    Empty {} on sessions that never provisioned an attempt runtime, so the
+    dashboard hides the block.
+
+    Attributes:
+        stack_actions (list[EnablementStackActionSummary]): Candidate stack
+            actions considered this session.
+        active_runtime (EnablementAttemptRuntime): The currently-promoted
+            attempt runtime, or {} when none.
+        attempt_runtimes (list[EnablementAttemptRuntime]): Retained attempt
+            runtime records (capped).
+        failure_kind (str): Last classified enablement failure kind.
+    """
+
+    stack_actions: list[EnablementStackActionSummary]
+    active_runtime: EnablementAttemptRuntime
+    attempt_runtimes: list[EnablementAttemptRuntime]
+    failure_kind: str
+
+
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -2131,6 +2195,8 @@ class SessionBreakdown(TypedDict, total=False):
     kernel_journey: KernelJourney
     # Authoritative external-tool versions keyed by tool name; {} when absent.
     versions: dict[str, KernelToolMetadata]
+    # Rung 3 (M1) enablement attempt-runtime observability; {} → dashboard hides the block.
+    enablement: EnablementBreakdown
 
     warnings: list[str]
     source_files: SourceFiles
@@ -2155,6 +2221,9 @@ __all__ = [
     "DecisionTraceEntry",
     "DetectedKernel",
     "DiscoveredHotKernel",
+    "EnablementAttemptRuntime",
+    "EnablementBreakdown",
+    "EnablementStackActionSummary",
     "KernelBackendAttempt",
     "KernelDiscoveryRun",
     "KernelDispatch",

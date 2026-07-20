@@ -274,6 +274,11 @@ def build(
         "baseline", _safe_collect("baseline", lambda: collectors.collect_baseline(sd, state, warnings), warnings)
     )
     final = _pick("final", _safe_collect("final", lambda: collectors.collect_final(sd, state, warnings), warnings))
+    # Rung 3 (M1) enablement attempt-runtime observability; {} → dashboard hides the block.
+    enablement = _pick(
+        "enablement",
+        _safe_collect("enablement", lambda: collectors.collect_enablement(sd, state, warnings), warnings, default={}),
+    )
     # Merge (not _pick replace): the recorder fragment only carries audit-action
     # attempts, while the collector also folds in optimization_journal KEEP/REVERT
     # and the kernel lanes; union + dedupe instead of fragment-wins.
@@ -570,6 +575,8 @@ def build(
         # Authoritative external-tool versions, one object per tool keyed by
         # tool name. Each carries ``{tool, root_dir, commit, version}``.
         "versions": versions,
+        # Rung 3 (M1) enablement attempt-runtime observability; {} → hidden.
+        "enablement": enablement,
         "warnings": warnings,
         "source_files": source_files,
     }

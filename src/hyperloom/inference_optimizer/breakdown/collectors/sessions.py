@@ -1287,3 +1287,79 @@ def _build_final_invocation(
         "config_path": _rel(config_path, session_dir) if config_path else None,
         "server_log_path": _rel(server_log_path, session_dir) if server_log_path else None,
     }
+
+
+def _runtime_summary(runtime: dict[str, Any], *, promoted: bool) -> dict[str, Any]:
+    """Project a FrameworkRuntime-shaped dict onto EnablementAttemptRuntime."""
+    versions = runtime.get("installed_versions")
+    return {
+        "venv_root": str(runtime.get("venv_root") or ""),
+        "bin_path": str(runtime.get("bin_path") or ""),
+        "python_path": str(runtime.get("python_path") or ""),
+        "installed_versions": {str(k): str(v) for k, v in versions.items()} if isinstance(versions, dict) else {},
+        "promoted": bool(promoted),
+    }
+
+
+def collect_enablement(
+    session_dir: Path,
+    state: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Collect the Rung 3 (M1) enablement attempt-runtime observability section.
+
+    Reads the ``enablement_*`` attempt-runtime state written by the executor /
+    rearm. Returns ``{}`` when no attempt runtime was ever considered so the
+    dashboard hides the block.
+
+    Args:
+        session_dir (Path): Absolute session root (unused; signature parity).
+        state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
+        warnings (list[str]): Shared warnings list (mutated in place).
+
+    Returns:
+        dict[str, Any]: The ``EnablementBreakdown`` section, or ``{}``.
+    """
+    stack_actions_raw = state.get("enablement_stack_actions")
+    active_runtime_raw = state.get("enablement_active_runtime")
+    attempt_runtimes_raw = state.get("enablement_attempt_runtimes")
+    failure_kind = str(state.get("enablement_failure_kind") or "")
+
+    have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
+    have_attempts = isinstance(attempt_runtimes_raw, list) and bool(attempt_runtimes_raw)
+    have_actions = isinstance(stack_actions_raw, list) and bool(stack_actions_raw)
+    if not (have_active or have_attempts or have_actions):
+        return {}
+
+    out: dict[str, Any] = {}
+    if have_actions:
+        summaries: list[dict[str, Any]] = []
+        for a in stack_actions_raw:
+            if not isinstance(a, dict):
+                continue
+            summaries.append(
+                {
+                    "kind": str(a.get("kind") or ""),
+                    "framework": str(a.get("framework") or ""),
+                    "capability": str(a.get("capability") or ""),
+                    "acquisition_method": str(a.get("acquisition_method") or ""),
+                    "repo_url": str(a.get("repo_url") or ""),
+                    "ref": str(a.get("ref") or ""),
+                    "index_url": str(a.get("index_url") or ""),
+                    "reason": str(a.get("reason") or ""),
+                }
+            )
+        if summaries:
+            out["stack_actions"] = summaries
+    active_root = str(active_runtime_raw.get("venv_root") or "") if have_active else ""
+    if have_active:
+        out["active_runtime"] = _runtime_summary(active_runtime_raw, promoted=True)
+    if have_attempts:
+        out["attempt_runtimes"] = [
+            _runtime_summary(r, promoted=(str(r.get("venv_root") or "") == active_root))
+            for r in attempt_runtimes_raw
+            if isinstance(r, dict)
+        ]
+    if failure_kind:
+        out["failure_kind"] = failure_kind
+    return out
