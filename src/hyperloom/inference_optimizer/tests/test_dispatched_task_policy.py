@@ -79,6 +79,9 @@ async def test_dispatched_integrate_patch_without_critic_verdict_fails(tmp_path,
     assert res.state == "failed"
     assert "no Critic verdict on record" in (res.error or "")
     assert executed["ran"] is False
+    updated = await sub.tasks.get(task.task_id)
+    assert updated.state == "cancelled"
+    assert updated.attempts == 0
 
 
 @pytest.mark.asyncio

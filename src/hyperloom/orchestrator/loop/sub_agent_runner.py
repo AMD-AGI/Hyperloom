@@ -190,7 +190,6 @@ class SubAgentRunner:
     ) -> SubAgentResult:
         """Acquire required lanes, transition queued→running, execute, transition out.
 
-        Always transitions to ``running`` first (state machine constraint).
         With ``prebound_lease`` the runner skips its own acquire but still
         owns the release in its finally block.
 
@@ -204,29 +203,7 @@ class SubAgentRunner:
         Returns:
             The :class:`SubAgentResult` capturing terminal state and payload.
         """
-        # queued → running first (state machine constraint).
-        await self._transition_resilient(
-            task.task_id,
-            "running",
-            context="enter_running",
-        )
-
         runner = self.executor_registry.get(task.kind)
-        if runner is None:
-            await self._transition_resilient(
-                task.task_id,
-                "failed",
-                evidence={"reason": "no_executor", "kind": task.kind},
-                context="no_executor",
-            )
-            if prebound_lease is not None:
-                await self.locks.release(prebound_lease)
-            return SubAgentResult(
-                task_id=task.task_id,
-                state="failed",
-                result={},
-                error=f"no runner registered for kind={task.kind!r}",
-            )
 
         if self.policy is not None:
             try:
@@ -237,7 +214,7 @@ class SubAgentRunner:
             except PolicyDenied as denied:
                 await self._transition_resilient(
                     task.task_id,
-                    "failed",
+                    "cancelled",
                     evidence={
                         "reason": "policy_denied",
                         "rule": getattr(denied, "rule", None),
@@ -253,6 +230,28 @@ class SubAgentRunner:
                     result={},
                     error=str(denied),
                 )
+
+        await self._transition_resilient(
+            task.task_id,
+            "running",
+            context="enter_running",
+        )
+
+        if runner is None:
+            await self._transition_resilient(
+                task.task_id,
+                "failed",
+                evidence={"reason": "no_executor", "kind": task.kind},
+                context="no_executor",
+            )
+            if prebound_lease is not None:
+                await self.locks.release(prebound_lease)
+            return SubAgentResult(
+                task_id=task.task_id,
+                state="failed",
+                result={},
+                error=f"no runner registered for kind={task.kind!r}",
+            )
 
         lease: Lease | None = prebound_lease
         owned_lease = prebound_lease is None

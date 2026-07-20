@@ -259,27 +259,28 @@ def _resolve_framework_root(
             p = Path(explicit).resolve()
         except (OSError, RuntimeError):
             log.warning(
-                "integrate_patch: framework_source_root override %r could not be resolved; falling back to allowlist",
+                "integrate_patch: framework_source_root override %r could not be resolved",
                 explicit,
             )
-        else:
-            if p.is_dir():
-                for r in resolve_source_file_allowlist():
-                    try:
-                        root = Path(r).resolve()
-                    except (OSError, RuntimeError):
-                        continue
-                    if _is_within(p, root):
-                        return p
-                log.warning(
-                    "integrate_patch: framework_source_root override %r rejected (not under allowlist); falling back to allowlist",
-                    explicit,
-                )
-            else:
-                log.warning(
-                    "integrate_patch: framework_source_root override %r does not exist; falling back to allowlist",
-                    explicit,
-                )
+            return None
+        if not p.is_dir():
+            log.warning(
+                "integrate_patch: framework_source_root override %r does not exist",
+                explicit,
+            )
+            return None
+        for r in resolve_source_file_allowlist():
+            try:
+                root = Path(r).resolve()
+            except (OSError, RuntimeError):
+                continue
+            if _is_within(p, root):
+                return p
+        log.warning(
+            "integrate_patch: framework_source_root override %r rejected (not under allowlist)",
+            explicit,
+        )
+        return None
     roots = [Path(r) for r in resolve_source_file_allowlist()]
     # Target-aware: prefer the root that actually holds the patch's targets.
     if patch_paths:
@@ -1353,21 +1354,31 @@ class IntegratePatchExecutor:
                 ),
             }
 
+        explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
         framework_root = _resolve_framework_root(
-            params.get("framework_source_root") or None,
+            explicit_framework_root,
             patch_paths=patch_paths,
         )
         # Pure config_changes path works without a framework root.
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
-            _early: dict[str, Any] = {
-                "status": "apply_failed",
-                "error_class": "no_framework_agent_root",
-                "error": (
+            if explicit_framework_root:
+                _error_class = "framework_source_root_rejected"
+                _error = (
+                    f"framework_source_root {explicit_framework_root!r} is not "
+                    "under the configured source allowlist"
+                )
+            else:
+                _error_class = "no_framework_agent_root"
+                _error = (
                     "no framework_source_root resolved; cannot apply "
                     "patches. Configure $INFERENCEX_PATH or pass "
                     "params.framework_source_root."
-                ),
+                )
+            _early: dict[str, Any] = {
+                "status": "apply_failed",
+                "error_class": _error_class,
+                "error": _error,
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],

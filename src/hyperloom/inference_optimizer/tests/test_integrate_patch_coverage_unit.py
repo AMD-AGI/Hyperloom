@@ -168,9 +168,7 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_executor_slash_framework_root_override_applies_to_allowlist(tmp_path):
-    # Plan A: params.framework_source_root="/" must not write outside the
-    # allowlisted framework tree; patch side effects stay under tmp_path/fw.
+async def test_executor_slash_framework_root_override_rejected(tmp_path):
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -193,8 +191,9 @@ async def test_executor_slash_framework_root_override_applies_to_allowlist(tmp_p
             extra={"shared_state": _SS()},
         )
     )
-    assert res["status"] == "applied_no_bench"
-    assert (repo / "src.py").read_text().endswith("return 2\n")
+    assert res["status"] == "apply_failed"
+    assert res["error_class"] == "framework_source_root_rejected"
+    assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 @pytest.mark.asyncio
