@@ -64,6 +64,8 @@ Component support matrix
 
 The following table lists the validated Hyperloom version and component combinations.
 
+.. role:: version-start
+  
 .. table::
    :widths: 19 27 24 28 14 9 29
    :align: left
