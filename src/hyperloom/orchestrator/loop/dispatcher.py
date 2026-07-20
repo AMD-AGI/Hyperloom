@@ -18,6 +18,7 @@ from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
 from ..policy.gate import (
+    INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
@@ -159,6 +160,10 @@ class DispatcherCollaborator:
                 )
         except Exception:  # noqa: BLE001 — self-heal never aborts the pump
             log.exception("dispatcher: expired-running task reclaim failed")
+        try:
+            await self._reconcile_cancelled_policy_denied_integrate_tasks()
+        except Exception:  # noqa: BLE001 — reconcile must not abort the pump
+            log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set, so a
         # fast task reaped before its queued->running transition is visible is
@@ -196,6 +201,103 @@ class DispatcherCollaborator:
             inflight = remaining
             for task, maybe_result, gpu_lease in completed:
                 await self._reap_dispatched_task(task, maybe_result, gpu_lease)
+
+    async def _reconcile_cancelled_policy_denied_integrate_tasks(self) -> list[str]:
+        """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
+
+        Covers the resume gap where ``coordinator.db`` retained a cancelled task
+        but ``SharedState.specialist_patch_verdicts`` was restored later. Only
+        ``integrate_patch_requires_critic_verdict`` denials are retried; forged
+        params that still fail :meth:`PolicyGate.validate_dispatched_task` are
+        left terminal.
+
+        Returns:
+            list[str]: New queued task ids created by reconcile (may be empty).
+        """
+        gate = getattr(self.sub, "policy", None)
+        state = getattr(self, "shared_state", None)
+        if gate is None or state is None:
+            return []
+        get_verdict = getattr(state, "get_specialist_patch_verdict", None)
+        if get_verdict is None:
+            return []
+
+        created: list[str] = []
+        try:
+            cancelled = await self.tasks.by_state("cancelled")
+        except Exception:  # noqa: BLE001 — defensive
+            log.exception("dispatcher: reconcile could not list cancelled tasks")
+            return []
+
+        for task in cancelled:
+            if task.kind != "integrate_patch":
+                continue
+            evidence = _dispatch_policy_denied_evidence(task)
+            if not evidence:
+                continue
+            if str(evidence.get("rule") or "") != "integrate_patch_requires_critic_verdict":
+                continue
+            params = dict(task.params or {})
+            sid = str(params.get("specialist_task_id") or "").strip()
+            if not sid:
+                continue
+            verdict = str(get_verdict(sid) or "").strip().lower()
+            if verdict not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS:
+                continue
+            try:
+                gate.validate_dispatched_task(task.kind, params)
+            except PolicyDenied:
+                continue
+            base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
+            if await self._integrate_reconcile_child_exists(
+                base_key,
+                states=("succeeded",),
+            ):
+                continue
+            if await self._integrate_reconcile_child_exists(
+                base_key,
+                states=("queued", "running"),
+            ):
+                continue
+            for attempt in range(1, 6):
+                new_key = f"{base_key}-reconcile{attempt}"
+                new_task, was_existing = await self.tasks.create_or_return_existing(
+                    kind=task.kind,
+                    params=params,
+                    idempotency_key=new_key,
+                    requires_lanes=list(task.requires_lanes or []),
+                    lease_ttl_sec=int(task.lease_ttl_sec or 0),
+                )
+                if not was_existing:
+                    created.append(new_task.task_id)
+                    log.info(
+                        "dispatcher: reconciled cancelled integrate_patch %s -> %s (key=%s)",
+                        task.task_id,
+                        new_task.task_id,
+                        new_key,
+                    )
+                    break
+                if new_task.state in ("queued", "running", "succeeded"):
+                    break
+        return created
+
+    async def _integrate_reconcile_child_exists(
+        self,
+        base_key: str,
+        *,
+        states: tuple[str, ...],
+    ) -> bool:
+        """Return whether a reconcile child idempotency key exists in any of ``states``."""
+        if not states:
+            return False
+        prefix = f"{base_key}-reconcile%"
+        placeholders = ",".join("?" for _ in states)
+        row = await self.tasks.db.fetchone(
+            "SELECT 1 FROM tasks WHERE kind='integrate_patch' "
+            f"AND idempotency_key LIKE ? AND state IN ({placeholders}) LIMIT 1",
+            (prefix, *states),
+        )
+        return row is not None
 
     async def _spawn_fitting_queued(
         self,
@@ -1198,3 +1300,14 @@ class DispatcherCollaborator:
             )
         )
         return f"inline run complete: {rendered}"
+
+
+def _dispatch_policy_denied_evidence(task: Task) -> dict[str, Any]:
+    """Return policy-denied evidence from a queued→cancelled dispatch transition."""
+    for entry in reversed(task.history or []):
+        if entry.get("from") != "queued" or entry.get("to") != "cancelled":
+            continue
+        evidence = entry.get("evidence") or {}
+        if evidence.get("reason") == "policy_denied":
+            return dict(evidence)
+    return {}

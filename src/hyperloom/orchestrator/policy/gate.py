@@ -751,6 +751,41 @@ class PolicyGate:
         # Path-containment guard for PATH_LIKE_FIELDS in the payload.
         self._validate_payload_paths(role, intent.type, payload)
 
+    def validate_dispatched_task(
+        self,
+        action_name: str,
+        params: dict[str, Any] | None,
+    ) -> None:
+        """Re-validate a persisted queued task before executor dispatch.
+
+        Defense-in-depth for forged ``coordinator.db`` rows: replays path
+        containment and delegate action gates that normally run at intent
+        ingress. Coordinator-managed internal actions receive path checks
+        only (they are never LLM-delegated). Phase compatibility is
+        intentionally skipped so legitimately queued work is not rejected
+        after a phase transition.
+
+        Args:
+            action_name: The task ``kind`` / delegate action name.
+            params: Task params deserialized from the DB row.
+
+        Raises:
+            PolicyDenied: When the task would have been rejected had it
+                arrived via ``IntentRouter`` delegate validation.
+        """
+        kind = str(action_name or "").strip()
+        if not kind:
+            raise PolicyDenied("dispatched task missing kind", rule="payload")
+        params_dict = dict(params or {}) if isinstance(params, dict) else {}
+        payload = {"action_name": kind, "params": params_dict}
+        role = self.role_registry.get("orchestration")
+        if role is None:
+            raise PolicyDenied("unknown agent 'orchestration'", rule="role")
+        self._validate_payload_paths(role, IntentType.DELEGATE, payload)
+        if kind in COORDINATOR_INTERNAL_ACTIONS:
+            return
+        self._validate_delegate_body(role, payload, check_phase=False)
+
     def _closing_phase_denial(
         self,
         source: str,
@@ -834,6 +869,26 @@ class PolicyGate:
             PolicyDenied: if any delegate rule fails; the ``rule``
                 attribute identifies which guard fired.
         """
+        self._validate_delegate_body(role, payload, check_phase=True)
+
+    def _validate_delegate_body(
+        self,
+        role: "AgentRole",
+        payload: dict[str, Any],
+        *,
+        check_phase: bool,
+    ) -> None:
+        """Shared delegate validation for intents and dispatched task rows.
+
+        Args:
+            role: The resolved role of the emitting agent.
+            payload: Delegate payload with ``action_name`` and optional
+                ``params``.
+            check_phase: When True, enforce the phase-compatibility gate
+                (intent ingress). Dispatch-time replay passes False so
+                legitimately queued tasks are not rejected after a phase
+                transition.
+        """
         if not role.can_delegate_side_effects:
             raise PolicyDenied(
                 f"role={role.name!r} cannot delegate side-effecting actions",
@@ -853,7 +908,8 @@ class PolicyGate:
         # R2 ``specialist`` bypasses ActionRegistry; its contract is enforced by ``_validate_specialist_dispatch``.
         if action_name == SPECIALIST_ACTION_NAME:
             self._validate_specialist_dispatch(role, payload)
-            self._validate_phase_action(role, action_name, intent_kind="delegate")
+            if check_phase:
+                self._validate_phase_action(role, action_name, intent_kind="delegate")
             return
         # ``integrate_patch`` requires a non-reject Critic verdict.
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
@@ -900,7 +956,8 @@ class PolicyGate:
                     ),
                 )
         # R1 phase_incompatible; after structural checks so cheaper denials win.
-        self._validate_phase_action(role, action_name, intent_kind="delegate")
+        if check_phase:
+            self._validate_phase_action(role, action_name, intent_kind="delegate")
         # R4 / R5 — block a delegate whose action_name invokes an external tool.
         self._validate_no_kb_write_collision(
             action_name,
@@ -1825,7 +1882,9 @@ class PolicyGate:
                 rule="specialist_gpu_request_invalid",
             )
         ceiling = gpu_specialist_ceiling(self.shared_state)
-        if ceiling <= 0:
+        if ceiling <= 0 and not (
+            uses_whole_machine_gpu_lane(params) and _whole_machine_pool_size() > 0
+        ):
             raise PolicyDenied(
                 "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",
                 rule="specialist_gpu_pool_disabled",

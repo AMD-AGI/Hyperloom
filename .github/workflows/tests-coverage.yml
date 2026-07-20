@@ -78,7 +78,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           # Cache the pip download/wheel cache keyed on the dependency spec, so
@@ -107,7 +107,7 @@ jobs:
       # splitting for that run; correctness and the 90% gate are unaffected.
       - name: Restore test durations
         id: durations
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .test_durations
           # GitHub cache keys are immutable, so update-durations saves under a
@@ -180,7 +180,7 @@ jobs:
 
       - name: Upload shard coverage data
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: covdata-py${{ matrix.python-version }}-shard${{ matrix.shard }}
           path: |
@@ -195,7 +195,7 @@ jobs:
       # keep a single shared DB (see the restore key rationale above).
       - name: Upload shard durations
         if: always() && matrix.python-version == '3.10'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: durations-shard${{ matrix.shard }}
           path: .test_durations.shard${{ matrix.shard }}
@@ -221,7 +221,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -236,7 +236,7 @@ jobs:
           fi
 
       - name: Download shard coverage data
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: covdata-py${{ matrix.python-version }}-shard*
           merge-multiple: true
@@ -466,12 +466,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
 
       - name: Download shard durations
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: durations-shard*
           merge-multiple: true
@@ -505,7 +505,7 @@ jobs:
 
       - name: Save merged durations to cache
         if: hashFiles('.test_durations') != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .test_durations
           # Rolling key (run_id suffix) because cache entries are immutable --

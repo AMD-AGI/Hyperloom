@@ -132,3 +132,25 @@ def git_commit_all(path: Path, message: str) -> None:
         capture_output=True,
         env=env,
     )
+
+
+def patch_integrate_patch_allowlist(monkeypatch, tmp_path: Path) -> None:
+    """Register common tmp_path framework repos for integrate_patch allowlist tests."""
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+    from hyperloom.orchestrator.framework import paths as fp
+
+    real = fp.resolve_source_file_allowlist
+
+    def _merged() -> tuple[str, ...]:
+        extras: list[str] = []
+        for name in ("fw", "repo", "framework"):
+            cand = tmp_path / name
+            if cand.is_dir():
+                extras.append(str(cand.resolve()))
+        merged = list(real())
+        for extra in extras:
+            if extra not in merged:
+                merged.append(extra)
+        return tuple(merged)
+
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", _merged)

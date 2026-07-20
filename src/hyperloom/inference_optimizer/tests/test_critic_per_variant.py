@@ -190,8 +190,11 @@ async def test_executor_short_circuits_on_recorded_reject(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_executor_proceeds_when_verdict_is_approve(tmp_path: Path):
+async def test_executor_proceeds_when_verdict_is_approve(tmp_path: Path, monkeypatch):
     """No short-circuit when the recorded verdict is approve."""
+    from hyperloom.inference_optimizer.tests.conftest import patch_integrate_patch_allowlist
+
+    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
     import os
     import subprocess
 

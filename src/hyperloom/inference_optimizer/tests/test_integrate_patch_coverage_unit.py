@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+from .conftest import patch_integrate_patch_allowlist
+
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -37,6 +39,11 @@ index 0000000..1111111 100644
 -    return 1
 +    return 2
 """
+
+
+@pytest.fixture(autouse=True)
+def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
+    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
 
 
 def _init_git_repo(path: Path) -> None:
@@ -134,9 +141,9 @@ async def test_rejected_by_critic(tmp_path):
 
 @pytest.mark.asyncio
 async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
-    # SWSPLAT-42420: a queued/resume-dispatched task is NOT re-validated by
-    # PolicyGate. With a live SharedState but no recorded verdict (a forged
-    # coordinator.db row), integrate_patch must refuse to apply the patch.
+    # Dispatch replays PolicyGate before queued→running (see test_dispatched_task_policy).
+    # This case still covers the executor-layer critic gate: with SharedState present
+    # but no recorded verdict, integrate_patch must refuse to apply the patch.
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -157,6 +164,35 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
     )
     assert res["status"] == "rejected_by_critic"
     # patch not applied: the source file is untouched.
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_slash_framework_root_override_rejected(tmp_path):
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    class _SS:
+        def get_specialist_patch_verdict(self, tid):
+            return "approve"
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": "/",
+                "apply_only": True,
+            },
+            extra={"shared_state": _SS()},
+        )
+    )
+    assert res["status"] == "apply_failed"
+    assert res["error_class"] == "framework_source_root_rejected"
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 

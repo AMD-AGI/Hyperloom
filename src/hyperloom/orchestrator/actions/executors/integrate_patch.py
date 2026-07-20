@@ -240,14 +240,15 @@ def _resolve_framework_root(
 ) -> Path | None:
     """Pick the framework source root for patches.
 
-    Precedence: explicit param → first allowlist root whose tree actually
-    contains the patch targets (target-aware: a ``vllm/...`` patch must apply
-    under the vllm root, not the first allowlist entry which is ``aiter``) →
-    first existing git root → first existing dir. None when nothing resolves.
+    Precedence: explicit param (must lie under
+    :func:`resolve_source_file_allowlist`) → first allowlist root whose tree
+    actually contains the patch targets (target-aware: a ``vllm/...`` patch must
+    apply under the vllm root, not the first allowlist entry which is ``aiter``)
+    → first existing git root → first existing dir. None when nothing resolves.
 
     Args:
         explicit: Explicit framework-root override, or ``None`` to use the
-            allowlist.
+            allowlist. Overrides outside the allowlist are rejected.
         patch_paths: Patch target paths used to pick the allowlist root whose
             tree actually contains them.
 
@@ -255,13 +256,32 @@ def _resolve_framework_root(
         The resolved framework source root, or ``None`` when nothing resolves.
     """
     if explicit:
-        p = Path(explicit)
-        if p.is_dir():
-            return p
+        try:
+            p = Path(explicit).resolve()
+        except (OSError, RuntimeError):
+            log.warning(
+                "integrate_patch: framework_source_root override %r could not be resolved",
+                explicit,
+            )
+            return None
+        if not p.is_dir():
+            log.warning(
+                "integrate_patch: framework_source_root override %r does not exist",
+                explicit,
+            )
+            return None
+        for r in resolve_source_file_allowlist():
+            try:
+                root = Path(r).resolve()
+            except (OSError, RuntimeError):
+                continue
+            if _is_within(p, root):
+                return p
         log.warning(
-            "integrate_patch: framework_source_root override %r does not exist; falling back to allowlist",
+            "integrate_patch: framework_source_root override %r rejected (not under allowlist)",
             explicit,
         )
+        return None
     roots = [Path(r) for r in resolve_source_file_allowlist()]
     # Target-aware: prefer the root that actually holds the patch's targets.
     if patch_paths:
@@ -1325,21 +1345,31 @@ class IntegratePatchExecutor:
                 ),
             }
 
+        explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
         framework_root = _resolve_framework_root(
-            params.get("framework_source_root") or None,
+            explicit_framework_root,
             patch_paths=patch_paths,
         )
         # Pure config_changes path works without a framework root.
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
-            _early: dict[str, Any] = {
-                "status": "apply_failed",
-                "error_class": "no_framework_agent_root",
-                "error": (
+            if explicit_framework_root:
+                _error_class = "framework_source_root_rejected"
+                _error = (
+                    f"framework_source_root {explicit_framework_root!r} is not "
+                    "under the configured source allowlist"
+                )
+            else:
+                _error_class = "no_framework_agent_root"
+                _error = (
                     "no framework_source_root resolved; cannot apply "
                     "patches. Configure $INFERENCEX_PATH or pass "
                     "params.framework_source_root."
-                ),
+                )
+            _early: dict[str, Any] = {
+                "status": "apply_failed",
+                "error_class": _error_class,
+                "error": _error,
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
