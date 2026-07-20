@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+from .conftest import patch_integrate_patch_allowlist
+
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -37,6 +39,11 @@ index 0000000..1111111 100644
 -    return 1
 +    return 2
 """
+
+
+@pytest.fixture(autouse=True)
+def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
+    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
 
 
 def _init_git_repo(path: Path) -> None:
@@ -158,6 +165,36 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
     assert res["status"] == "rejected_by_critic"
     # patch not applied: the source file is untouched.
     assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_executor_slash_framework_root_override_applies_to_allowlist(tmp_path):
+    # Plan A: params.framework_source_root="/" must not write outside the
+    # allowlisted framework tree; patch side effects stay under tmp_path/fw.
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    class _SS:
+        def get_specialist_patch_verdict(self, tid):
+            return "approve"
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": "/",
+                "apply_only": True,
+            },
+            extra={"shared_state": _SS()},
+        )
+    )
+    assert res["status"] == "applied_no_bench"
+    assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
 @pytest.mark.asyncio

@@ -658,6 +658,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             session_dir=self.session_dir,
             shared_state=self.shared_state,
         )
+        self.sub.policy = self.policy
         # Attach read-only context-pull MCP tools to Orchestration backend.
         self._attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.

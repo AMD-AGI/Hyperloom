@@ -14,13 +14,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 import logging
 
 from hyperloom.inference_optimizer.session.session_paths import _runs_actions, runs_dir
 from ..bus.resource_lock import Lease, ResourceLockManager
+from ..policy.gate import PolicyDenied
 from ..state.task_registry import Task, TaskNotFound, TaskRegistry
+
+if TYPE_CHECKING:
+    from ..policy.gate import PolicyGate
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +83,7 @@ class SubAgentRunner:
         executor_registry: dict[str, ExecutorFn] | None = None,
         session_dir: Path | None = None,
         shared_state: object | None = None,
+        policy: PolicyGate | None = None,
     ):
         """Initialise the runner with its lock manager + task registry.
 
@@ -91,6 +96,10 @@ class SubAgentRunner:
                 initial map of ``task.kind`` to executor function (copied).
             session_dir (Path | None): Session root used to pre-create
                 per-action workspaces; None disables workspace pre-mkdir.
+            shared_state (object | None): Live session state forwarded to
+                executors via ``ctx.extra``.
+            policy (PolicyGate | None): Optional gate replayed at dispatch
+                time for defense against forged queued task rows.
         """
         self.locks = locks
         self.tasks = tasks
@@ -99,6 +108,7 @@ class SubAgentRunner:
         # Live SharedState threaded into each executor's ctx.extra so gain-computing
         # executors can recover a baseline anchor when params['base_tput'] is absent.
         self.shared_state = shared_state
+        self.policy = policy
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
         """Register (or replace) the executor for a task kind.
@@ -217,6 +227,32 @@ class SubAgentRunner:
                 result={},
                 error=f"no runner registered for kind={task.kind!r}",
             )
+
+        if self.policy is not None:
+            try:
+                self.policy.validate_dispatched_task(
+                    task.kind,
+                    dict(task.params or {}),
+                )
+            except PolicyDenied as denied:
+                await self._transition_resilient(
+                    task.task_id,
+                    "failed",
+                    evidence={
+                        "reason": "policy_denied",
+                        "rule": getattr(denied, "rule", None),
+                        "error": str(denied),
+                    },
+                    context="dispatch_policy_denied",
+                )
+                if prebound_lease is not None:
+                    await self.locks.release(prebound_lease)
+                return SubAgentResult(
+                    task_id=task.task_id,
+                    state="failed",
+                    result={},
+                    error=str(denied),
+                )
 
         lease: Lease | None = prebound_lease
         owned_lease = prebound_lease is None

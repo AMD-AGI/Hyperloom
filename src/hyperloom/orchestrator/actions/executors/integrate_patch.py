@@ -239,14 +239,15 @@ def _resolve_framework_root(
 ) -> Path | None:
     """Pick the framework source root for patches.
 
-    Precedence: explicit param → first allowlist root whose tree actually
-    contains the patch targets (target-aware: a ``vllm/...`` patch must apply
-    under the vllm root, not the first allowlist entry which is ``aiter``) →
-    first existing git root → first existing dir. None when nothing resolves.
+    Precedence: explicit param (must lie under
+    :func:`resolve_source_file_allowlist`) → first allowlist root whose tree
+    actually contains the patch targets (target-aware: a ``vllm/...`` patch must
+    apply under the vllm root, not the first allowlist entry which is ``aiter``)
+    → first existing git root → first existing dir. None when nothing resolves.
 
     Args:
         explicit: Explicit framework-root override, or ``None`` to use the
-            allowlist.
+            allowlist. Overrides outside the allowlist are rejected.
         patch_paths: Patch target paths used to pick the allowlist root whose
             tree actually contains them.
 
@@ -254,13 +255,31 @@ def _resolve_framework_root(
         The resolved framework source root, or ``None`` when nothing resolves.
     """
     if explicit:
-        p = Path(explicit)
-        if p.is_dir():
-            return p
-        log.warning(
-            "integrate_patch: framework_source_root override %r does not exist; falling back to allowlist",
-            explicit,
-        )
+        try:
+            p = Path(explicit).resolve()
+        except (OSError, RuntimeError):
+            log.warning(
+                "integrate_patch: framework_source_root override %r could not be resolved; falling back to allowlist",
+                explicit,
+            )
+        else:
+            if p.is_dir():
+                for r in resolve_source_file_allowlist():
+                    try:
+                        root = Path(r).resolve()
+                    except (OSError, RuntimeError):
+                        continue
+                    if _is_within(p, root):
+                        return p
+                log.warning(
+                    "integrate_patch: framework_source_root override %r rejected (not under allowlist); falling back to allowlist",
+                    explicit,
+                )
+            else:
+                log.warning(
+                    "integrate_patch: framework_source_root override %r does not exist; falling back to allowlist",
+                    explicit,
+                )
     roots = [Path(r) for r in resolve_source_file_allowlist()]
     # Target-aware: prefer the root that actually holds the patch's targets.
     if patch_paths:
