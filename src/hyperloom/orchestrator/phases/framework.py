@@ -87,6 +87,54 @@ def _maybe_build_runtime_candidate(
         return None
 
 
+def _maybe_build_localization_candidate(
+    capability_gap: Any,
+    *,
+    framework: str,
+    model: str,
+    repo_url: str,
+    candidate_refs: tuple[str, ...],
+) -> dict[str, Any] | None:
+    """Build a serialized localization stack action, or None (Rung 4 / M2).
+
+    Returns None when the gap does not require code acquisition, the run is
+    multi-node, there is no merged-PR candidate ref, or the framework adapter
+    cannot localize. The closure/Rung-5 gate runs later in the executor.
+
+    Args:
+        capability_gap: The :class:`CapabilityGap` projection.
+        framework: Target framework name.
+        model: Model id/path being enabled.
+        repo_url: Origin repo URL to localize from.
+        candidate_refs: Ranked discovered PR refs (best first).
+
+    Returns:
+        dict | None: ``EnablementStackAction.to_state()`` or ``None``.
+    """
+    if not getattr(capability_gap, "requires_code_acquisition", False):
+        return None
+    ref = next((r for r in (candidate_refs or ()) if str(r).strip()), "")
+    if not ref or not repo_url:
+        return None
+    try:
+        from ..actions.executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return None
+        from ..framework.adapters import get_adapter
+
+        adapter = get_adapter(framework)
+        action = adapter.build_localization_action(
+            capability_gap, framework=framework, model=model, candidate_ref=ref, repo_url=repo_url
+        )
+        if action is None:
+            return None
+        return action.to_state()
+    except Exception:  # noqa: BLE001 — candidate construction is best-effort
+        log.debug("enablement: localization-candidate construction failed", exc_info=True)
+        return None
+
+
 def _deterministic_enablement_setup_commands(signature: Any, launch_log: str) -> list[str]:
     """Seed concrete install commands for an ``missing_model_arch`` failure whose
     root cause is a too-old inference stack (Transformers / vLLM predating the
@@ -1131,6 +1179,16 @@ class FrameworkPhase(PhaseHandler):
         runtime_candidate = _maybe_build_runtime_candidate(
             capability_gap, framework=framework, model=model, gpu_type=req.gpu_type
         )
+        # Rung 4 (M2): when a merged-PR candidate exists, attach a
+        # ``localization_candidate`` so integrate_patch localizes the closure
+        # into the source tree (compiled closures defer to Rung 5 at apply).
+        localization_candidate = _maybe_build_localization_candidate(
+            capability_gap,
+            framework=framework,
+            model=model,
+            repo_url=repo_url,
+            candidate_refs=tuple(candidate_refs),
+        )
 
         params_out: dict[str, Any] = {
             "domain": "enablement_specialist",
@@ -1168,6 +1226,8 @@ class FrameworkPhase(PhaseHandler):
         kept_action = getattr(state, "enablement_kept_stack_action", None)
         if isinstance(kept_action, dict) and kept_action and "runtime_candidate" not in params_out:
             params_out["runtime_candidate"] = kept_action
+        if localization_candidate is not None:
+            params_out["localization_candidate"] = localization_candidate
         return params_out
 
     def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
@@ -1687,7 +1747,8 @@ class FrameworkPhase(PhaseHandler):
             state.baseline_total_failures = 0
 
         def _stack_kept_runtime() -> None:
-            """Persist the KEEP'd attempt runtime so it survives rearm (§8.5)."""
+            """Persist the KEEP'd attempt runtime + localization manifest so they
+            survive rearm (§8.5)."""
             action = res.get("enablement_kept_stack_action")
             if isinstance(action, dict) and action:
                 state.enablement_kept_stack_action = action
@@ -1698,6 +1759,13 @@ class FrameworkPhase(PhaseHandler):
                 records = list(getattr(state, "enablement_attempt_runtimes", None) or [])
                 records.append(runtime)
                 state.enablement_attempt_runtimes = records[-5:]
+            # Rung 4 (M2): record the localized closure manifest so it is not
+            # re-fetched on the next round.
+            manifest = res.get("enablement_localization_manifest")
+            if isinstance(manifest, dict) and manifest:
+                existing = list(getattr(state, "enablement_localization_manifest", None) or [])
+                existing.append(manifest)
+                state.enablement_localization_manifest = existing
 
         if status == "kept":
             state.enablement_succeeded = True
