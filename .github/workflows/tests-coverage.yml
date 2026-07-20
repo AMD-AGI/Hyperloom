@@ -236,7 +236,7 @@ jobs:
           fi
 
       - name: Download shard coverage data
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: covdata-py${{ matrix.python-version }}-shard*
           merge-multiple: true
@@ -471,7 +471,7 @@ jobs:
           python-version: "3.10"
 
       - name: Download shard durations
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: durations-shard*
           merge-multiple: true
