@@ -107,7 +107,7 @@ jobs:
       # splitting for that run; correctness and the 90% gate are unaffected.
       - name: Restore test durations
         id: durations
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .test_durations
           # GitHub cache keys are immutable, so update-durations saves under a
@@ -505,7 +505,7 @@ jobs:
 
       - name: Save merged durations to cache
         if: hashFiles('.test_durations') != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .test_durations
           # Rolling key (run_id suffix) because cache entries are immutable --
