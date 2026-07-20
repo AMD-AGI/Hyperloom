@@ -441,3 +441,67 @@ def test_revert_patches_checkout_fails(tmp_path, monkeypatch):
     applied = [tmp_path / "a.patch"]
     reverted = ex._revert_patches(tmp_path, applied)
     assert reverted == []
+
+
+class _Verdict:
+    def __init__(self, verdict: str):
+        self._v = verdict
+
+    def get_specialist_patch_verdict(self, tid: str) -> str:
+        return self._v
+
+
+def test_enforce_critic_gate_noop_when_no_shared_state():
+    assert ip._enforce_critic_gate(None, {}, "spec") is None
+
+
+def test_enforce_critic_gate_noop_when_bypass_env(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_BYPASS_CRITIC", "1")
+    # Even a rejecting verdict is ignored when the operator override is set.
+    assert ip._enforce_critic_gate(_Verdict("reject"), {}, "spec") is None
+
+
+def test_enforce_critic_gate_passes_on_permissive_verdict(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_BYPASS_CRITIC", raising=False)
+    assert ip._enforce_critic_gate(_Verdict("approve"), {}, "spec") is None
+    assert ip._enforce_critic_gate(_Verdict("advise"), {}, "spec") is None
+
+
+def test_enforce_critic_gate_rejects_on_non_permissive_verdict(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_BYPASS_CRITIC", raising=False)
+    out = ip._enforce_critic_gate(_Verdict("reject"), {}, "spec-1")
+    assert out is not None
+    assert out["status"] == "rejected_by_critic"
+    assert out["specialist_task_id"] == "spec-1"
+    assert out["patches_applied"] == []
+    assert "reject" in out["reason"]
+
+
+def test_enforce_critic_gate_rejects_when_no_verdict_on_record(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_BYPASS_CRITIC", raising=False)
+    out = ip._enforce_critic_gate(_Verdict(""), {}, "spec-2")
+    assert out is not None
+    assert out["status"] == "rejected_by_critic"
+    assert "no Critic verdict on record" in out["reason"]
+
+
+def test_enforce_critic_gate_ignores_inband_bypass_and_warns(monkeypatch, caplog):
+    monkeypatch.delenv("HYPERLOOM_BYPASS_CRITIC", raising=False)
+    # In-band bypass_critic must NOT self-approve; a non-permissive verdict still rejects.
+    with caplog.at_level("WARNING"):
+        out = ip._enforce_critic_gate(_Verdict("reject"), {"bypass_critic": True}, "spec-3")
+    assert out is not None
+    assert out["status"] == "rejected_by_critic"
+    assert any("in-band bypass_critic ignored" in r.message for r in caplog.records)
+
+
+def test_enforce_critic_gate_handles_state_without_verdict_method(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_BYPASS_CRITIC", raising=False)
+
+    class _NoMethod:
+        pass
+
+    # AttributeError on get_specialist_patch_verdict is treated as "no verdict".
+    out = ip._enforce_critic_gate(_NoMethod(), {}, "spec-4")
+    assert out is not None
+    assert out["status"] == "rejected_by_critic"
