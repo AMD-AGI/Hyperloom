@@ -123,6 +123,8 @@ class EnablementStackAction:
         server_args: Extra server args routed to ``EXTRA_{FW}_ARGS``.
         envs: Extra benchmark envs to merge.
         attempt_venv_root: Attempt venv root; filled by the executor stage.
+        pr_number: Merged PR number for a ``pr_backport`` localization (M2).
+        localized_paths: Repo-relative paths for a ``vendor_files`` localization (M2).
     """
 
     kind: str
@@ -140,6 +142,8 @@ class EnablementStackAction:
     server_args: str = ""
     envs: Mapping[str, str] = field(default_factory=dict)
     attempt_venv_root: str = ""
+    pr_number: int = 0
+    localized_paths: tuple[str, ...] = ()
 
     def to_state(self) -> dict[str, Any]:
         """Serialize to a plain dict for task params / shared state."""
@@ -159,6 +163,8 @@ class EnablementStackAction:
             "server_args": self.server_args,
             "envs": dict(self.envs),
             "attempt_venv_root": self.attempt_venv_root,
+            "pr_number": self.pr_number,
+            "localized_paths": list(self.localized_paths),
         }
 
     @classmethod
@@ -175,6 +181,10 @@ class EnablementStackAction:
         method = str(d.get("acquisition_method") or "none")
         if method not in _ACQUISITION_METHODS:
             method = "none"
+        try:
+            pr_number = int(d.get("pr_number") or 0)
+        except (TypeError, ValueError):
+            pr_number = 0
         return cls(
             kind=str(d.get("kind") or "runtime_candidate"),
             framework=str(d.get("framework") or "").strip().lower(),
@@ -191,6 +201,8 @@ class EnablementStackAction:
             server_args=str(d.get("server_args") or ""),
             envs=envs,
             attempt_venv_root=str(d.get("attempt_venv_root") or ""),
+            pr_number=pr_number,
+            localized_paths=_tuple("localized_paths"),
         )
 
 
