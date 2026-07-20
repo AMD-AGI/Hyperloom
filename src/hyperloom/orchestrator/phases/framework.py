@@ -46,6 +46,24 @@ _ENABLEMENT_WATCHDOG_GRACE_TICKS: int = 20
 _ENABLEMENT_WATCHDOG_HARD_TICKS: int = 60
 
 
+def _derive_gpu_arch(gpu_type: str) -> str:
+    """Map a gpu_type label to an explicit GFX arch (never silent fallback, L6)."""
+    _MAP = {
+        "mi355x": "gfx950",
+        "mi300x": "gfx942",
+        "mi308x": "gfx942",
+        "mi300": "gfx942",
+        "mi250x": "gfx90a",
+        "mi250": "gfx90a",
+        "mi210": "gfx90a",
+    }
+    gt = (gpu_type or "").strip().lower()
+    for key, arch in _MAP.items():
+        if key in gt:
+            return arch
+    return ""
+
+
 def _maybe_build_runtime_candidate(
     capability_gap: Any,
     *,
@@ -1228,6 +1246,23 @@ class FrameworkPhase(PhaseHandler):
             params_out["runtime_candidate"] = kept_action
         if localization_candidate is not None:
             params_out["localization_candidate"] = localization_candidate
+        # Rung 5: inject the last targeted-build failure into the mandate (D5 §9).
+        last_build_failure = getattr(state, "enablement_last_build_failure", None) or {}
+        if isinstance(last_build_failure, dict) and last_build_failure:
+            fc = str(last_build_failure.get("failure_class") or "")
+            fs = str(last_build_failure.get("failure_summary") or "")
+            if fc or fs:
+                build_note = (
+                    f"PREVIOUS TARGETED-BUILD ATTEMPT: failure_class={fc!r}"
+                    + (f"; {fs}" if fs else "")
+                    + "\nIf the build ran out of time (failure_class='timeout' or "
+                    "'preflight_budget'), request more build_budget_sec or a smaller "
+                    "component scope.  For compile/symbol defects, choose a different "
+                    "ref or narrow the build target."
+                )
+                notes = build_note + "\n\n" + notes
+                params_out["notes"] = notes
+            params_out["enablement_last_build_failure"] = dict(last_build_failure)
         return params_out
 
     def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
@@ -1522,6 +1557,13 @@ class FrameworkPhase(PhaseHandler):
             # A non-blank UNKNOWN log is recorded for human review, once per log.
             await self._maybe_record_enablement_human_review(launch_log)
             return ""
+        # Rung 5: auto-escalate to a targeted build when the residual gap is a
+        # compiled miss.  The enqueue is a no-op when a build is already queued or
+        # running (idempotent by novelty key).
+        try:
+            await self._maybe_escalate_to_targeted_build(launch_log, attempt=attempt)
+        except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
+            log.debug("enablement: targeted-build escalation raised", exc_info=True)
         from ..actions.executors._multi_node_env import is_multi_node
 
         if is_multi_node():
@@ -4008,6 +4050,170 @@ class FrameworkPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — defensive
             log.exception("FRAMEWORK pump (%s) failed", caller)
 
+    async def _maybe_escalate_to_targeted_build(
+        self,
+        launch_log: str,
+        *,
+        attempt: int = 0,
+    ) -> None:
+        """Enqueue a targeted build row when the residual gap is a compiled miss (Rung 5).
+
+        No-op when a build is already queued or running (idempotent by novelty
+        key), when the env var ``HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD=1``
+        is set, on multi-node, or when the gap is not a compiled miss.
+        """
+        import os as _os
+
+        if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+            return
+        try:
+            from ..actions.executors._multi_node_env import is_multi_node
+
+            if is_multi_node():
+                return
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            from hyperloom.agents.framework.enablement import (
+                classify_failure,
+                is_targeted_build_candidate,
+            )
+            from ..framework.build_actions import TargetedBuildAction
+
+            signature = classify_failure(launch_log)
+            if not is_targeted_build_candidate(signature, launch_log):
+                return
+
+            state = self.shared_state
+            framework = (getattr(state, "framework", "") or "").strip().lower()
+            gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
+
+            # Derive novelty fields from the current failure + session context.
+            # Ref and repo_url come from the existing Rung-3/4 stack action when
+            # present, otherwise defaults (framework agent will self-select via
+            # WebSearch discovery in its mandate).
+            existing_stack = getattr(state, "enablement_kept_stack_action", None) or {}
+            repo_url = str(existing_stack.get("repo_url") or "").strip()
+            ref = str(existing_stack.get("ref") or "").strip()
+
+            action = TargetedBuildAction(
+                gap_id=f"gap.enablement.{signature.kind}",
+                framework=framework or "vllm",
+                component="aiter",
+                capability=str(signature.offending_symbol or signature.kind or ""),
+                reason=f"Rung-5 auto-escalation from {signature.kind}",
+                repo_url=repo_url,
+                ref=ref,
+                gpu_arch=_derive_gpu_arch(gpu_type),
+                build_budget_sec=0,
+            )
+            task_id = await self.enqueue_targeted_build(action)
+            if task_id:
+                log.info(
+                    "ENABLEMENT: enqueued targeted_build for compiled gap "
+                    "kind=%s gpu_arch=%s task=%s",
+                    signature.kind,
+                    action.gpu_arch,
+                    task_id,
+                )
+        except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
+            log.debug("enablement: targeted-build escalation failed", exc_info=True)
+
+    async def _maybe_route_build_outcomes(self) -> None:
+        """Route terminal targeted_build rows to _maybe_rearm_enablement (D6).
+
+        Called every tick from _pump_enablement_safely.  Reads succeeded/failed
+        rows, synthesises the rearm res dict (status='kept'/'reverted'/'advanced'),
+        and delegates to the existing stall-gate machinery.
+
+        D6 novelty: a 'timeout' or 'preflight_budget' failure_class maps to
+        'advanced' (novel attempt, time vs defect distinction — keep going); all
+        real defects map to 'reverted' (advance stall streak).
+        """
+        try:
+            from ..state.task_registry import TERMINAL_STATES
+
+            all_tasks = []
+            for st in ("succeeded", "failed"):
+                all_tasks.extend(
+                    t for t in await self.tasks.by_state(st) if t.kind == "targeted_build"
+                )
+            if not all_tasks:
+                return
+            # Pick the most recent terminal row (by updated_at).
+            task = sorted(all_tasks, key=lambda t: str(getattr(t, "updated_at", "") or ""))[-1]
+            task_id = str(getattr(task, "task_id", "") or "")
+            # Skip rows already accounted for (tracked by enablement_build_manifest).
+            state = self.shared_state
+            manifest = list(getattr(state, "enablement_build_manifest", None) or [])
+            seen_ids = {str(m.get("task_id") or "") for m in manifest if isinstance(m, dict)}
+            if task_id in seen_ids:
+                return
+            # Mark as seen immediately so we don't process the same row twice.
+            manifest.append({"task_id": task_id, "routed": True})
+            state.enablement_build_manifest = manifest
+
+            result_runtime: dict = {}
+            fc = ""
+            fs = ""
+            if task.state == "succeeded":
+                # Load the BuildResult from result.json for the rich runtime.
+                attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
+                if attempt_root:
+                    from ..framework.targeted_build import _load_result_json
+
+                    br = _load_result_json(attempt_root)
+                    if br is not None and br.ok:
+                        result_runtime = br.runtime.to_state()
+
+                res = {
+                    "enablement": True,
+                    "status": "kept",
+                    "enablement_active_runtime": result_runtime,
+                }
+                log.info("ENABLEMENT: targeted_build KEPT task=%s", task_id)
+                self._maybe_rearm_enablement(res)
+                return
+
+            # failed row — read failure_class from history or last_build_failure
+            history = getattr(task, "history", None) or []
+            if isinstance(history, (list, tuple)) and history:
+                last_ev = history[-1]
+                if isinstance(last_ev, dict):
+                    fc = str(last_ev.get("evidence", {}).get("failure_class") or "")
+
+            lbf = getattr(state, "enablement_last_build_failure", None) or {}
+            if not fc and isinstance(lbf, dict):
+                fc = str(lbf.get("failure_class") or "")
+                fs = str(lbf.get("failure_summary") or "")
+
+            # D6: time-based failures are novel; defects advance the stall streak.
+            time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
+            if fc in time_classes:
+                status = "advanced"
+                new_log = str(getattr(state, "enablement_launch_log", "") or "")
+                res = {
+                    "enablement": True,
+                    "status": "advanced",
+                    "advanced": True,
+                    "patches_applied": [],
+                    "enablement_launch_log": new_log,
+                }
+            else:
+                res = {
+                    "enablement": True,
+                    "status": "reverted",
+                }
+            log.info(
+                "ENABLEMENT: targeted_build %s task=%s failure_class=%r",
+                res["status"],
+                task_id,
+                fc,
+            )
+            self._maybe_rearm_enablement(res)
+        except Exception:  # noqa: BLE001 — never wedge the tick
+            log.debug("enablement: route_build_outcomes failed", exc_info=True)
+
     async def _pump_enablement_safely(self, *, caller: str) -> None:
         """Phase-independent enablement pump — runs every tick.
 
@@ -4029,6 +4235,10 @@ class FrameworkPhase(PhaseHandler):
         Args:
             caller: Label identifying the caller ("tick" / "run"), for logs.
         """
+        try:
+            await self._maybe_route_build_outcomes()
+        except Exception:  # noqa: BLE001 — never wedge the tick
+            log.exception("ENABLEMENT route_build_outcomes (%s) failed", caller)
         try:
             await self._maybe_enqueue_enablement_specialist()
         except Exception:  # noqa: BLE001 — never wedge the tick
