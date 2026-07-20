@@ -1155,6 +1155,12 @@ class IntegratePatchExecutor:
         specialist_workspace: Path = ctx._ip_specialist_workspace  # type: ignore[attr-defined]
         done_payload: dict[str, Any] = ctx._ip_done_payload  # type: ignore[attr-defined]
 
+        # Rung 3 (M1): provision an attempt-scoped runtime AFTER the Critic gate
+        # (in _stage_resolve) and BEFORE any patch apply / setup replay (§10.2).
+        provision_early = await self._stage_provision_attempt_runtime(ctx, params, specialist_task_id)
+        if provision_early is not None:
+            return provision_early
+
         apply_result = await self._stage_apply(ctx, params, extra, specialist_task_id, shared_state, done_payload)
         if apply_result is not None:
             return apply_result
@@ -1290,6 +1296,123 @@ class IntegratePatchExecutor:
         ctx._ip_specialist_workspace = specialist_workspace  # type: ignore[attr-defined]
         ctx._ip_done_payload = done_payload  # type: ignore[attr-defined]
         return None
+
+    async def _stage_provision_attempt_runtime(
+        self,
+        ctx: Any,
+        params: dict[str, Any],
+        specialist_task_id: str,
+    ) -> dict[str, Any] | None:
+        """Provision the attempt-scoped runtime from ``params['runtime_candidate']``.
+
+        Rung 3 (M1). No-op when no candidate is present or in multi-node mode.
+        Runs a disk preflight, delegates provision+probe to the framework
+        adapter, and on success stores the resolved runtime on
+        ``ctx._ip_provision_result`` / ``ctx._ip_stack_action`` for the gate to
+        activate via the YAML-layer ``runtime_override``. Returns an early-exit
+        ``reverted`` dict on any provision failure (no patch side effects yet),
+        or ``None`` to continue.
+        """
+        ctx._ip_provision_result = None  # type: ignore[attr-defined]
+        ctx._ip_stack_action = None  # type: ignore[attr-defined]
+        raw = params.get("runtime_candidate")
+        if not isinstance(raw, dict) or not raw:
+            return None
+
+        from ._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            log.info("integrate_patch: skipping runtime provision in multi-node mode")
+            return None
+
+        from ...framework.adapters import get_adapter
+        from ...framework.stack_actions import EnablementStackAction
+
+        action = EnablementStackAction.from_state(raw)
+        attempt_dir = (
+            self.session_dir / "enablement" / "stacks" / (action.framework or "unknown") / (specialist_task_id or "attempt")
+        )
+
+        from hyperloom.agents.framework.isolation import DiskPreflightError, disk_preflight
+
+        try:
+            disk_preflight(attempt_dir.parent, n_candidates=1)
+        except DiskPreflightError as exc:
+            return {
+                "status": "reverted",
+                "error_class": "disk_preflight_failed",
+                "error": str(exc),
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "config_changes_applied": {},
+                "enablement": True,
+                "reason": f"attempt-runtime provision aborted: {exc}",
+            }
+        except Exception as exc:  # noqa: BLE001 — preflight is best-effort advisory
+            log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
+
+        adapter = get_adapter(action.framework)
+        try:
+            result = adapter.provision(action, attempt_dir)
+            if result.ok and not adapter.probe(result, action):
+                from ...framework.stack_actions import ProvisionResult as _PR
+
+                result = _PR(ok=False, log_path=result.log_path, error="adapter probe failed after provision")
+        except Exception as exc:  # noqa: BLE001 — provision failure is a clean revert, not a crash
+            log.exception("integrate_patch: attempt-runtime provision raised")
+            self._gc_attempt_dir(attempt_dir)
+            return {
+                "status": "reverted",
+                "error_class": "provision_exception",
+                "error": repr(exc),
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "config_changes_applied": {},
+                "enablement": True,
+                "reason": f"attempt-runtime provision raised: {exc!r}",
+            }
+
+        if not result.ok:
+            self._gc_attempt_dir(attempt_dir)
+            return {
+                "status": "reverted",
+                "error_class": "provision_failed",
+                "error": result.error,
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "config_changes_applied": {},
+                "enablement": True,
+                "reason": f"attempt-runtime provision failed: {result.error}",
+                "provision_result": result.to_state(),
+            }
+
+        # Record the attempt venv root on the action so KEEP can persist it and
+        # resume/GC can find it.
+        action = EnablementStackAction.from_state(
+            {**action.to_state(), "attempt_venv_root": result.runtime.venv_root}
+        )
+        ctx._ip_provision_result = result  # type: ignore[attr-defined]
+        ctx._ip_stack_action = action  # type: ignore[attr-defined]
+        ctx._ip_attempt_venv_root = result.runtime.venv_root  # type: ignore[attr-defined]
+        log.info(
+            "integrate_patch: attempt runtime provisioned for %s (venv=%s, versions=%s)",
+            action.framework,
+            result.runtime.venv_root,
+            result.installed_versions,
+        )
+        return None
+
+    @staticmethod
+    def _gc_attempt_dir(attempt_dir: Path) -> None:
+        """Remove a half/failed attempt-runtime dir (best-effort)."""
+        try:
+            if attempt_dir.exists():
+                shutil.rmtree(attempt_dir, ignore_errors=True)
+        except Exception:  # noqa: BLE001 — GC is best-effort
+            log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
     async def _stage_apply(
         self,
@@ -1453,6 +1576,8 @@ class IntegratePatchExecutor:
                     "config_changes": dict(config_changes),
                     "framework_source_root": str(framework_root or ""),
                     "workspace": str(output_root),
+                    # Rung 3: attempt venv root for crash-resume GC (§10.3).
+                    "attempt_venv_root": str(getattr(ctx, "_ip_attempt_venv_root", "") or ""),
                     "ts": _now_iso(),
                 }
                 shared_state.save(self.session_dir)
@@ -1611,6 +1736,13 @@ class IntegratePatchExecutor:
         Runs _bench_patch, applies the appropriate gate, and returns the
         final integration result. Never returns None.
         """
+        # Rung 3: activate the provisioned attempt runtime by threading its
+        # YAML-layer override into params so both bench wirings pick it up.
+        provision_result = getattr(ctx, "_ip_provision_result", None)
+        if provision_result is not None and getattr(provision_result, "ok", False):
+            params = dict(params)
+            params["runtime_override"] = provision_result.runtime.to_runtime_override()
+
         try:
             bench_result, gate_evidence = await self._bench_patch(
                 params=params,
@@ -1674,6 +1806,7 @@ class IntegratePatchExecutor:
                 setup_result=setup_result,
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
+                ctx=ctx,
             )
 
         return await self._gate_perf(
@@ -1711,6 +1844,7 @@ class IntegratePatchExecutor:
         setup_result: dict[str, Any],
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
+        ctx: Any = None,
     ) -> dict[str, Any]:
         """Enablement gate: runnability + minimal-correctness.
 
@@ -1718,8 +1852,23 @@ class IntegratePatchExecutor:
           accuracy > floor      -> correctness_ok=True  (KEEP, verified)
           accuracy <= floor/NaN -> correctness_ok=False (REVERT, garbage)
           accuracy is None      -> correctness_ok=None  (KEEP but provisional)
+
+        On KEEP, when a Rung 3 attempt runtime was provisioned, the stack action
+        is recorded in the result (``enablement_kept_stack_action``) so it
+        survives rearm (§8.5). On REVERT / non-KEEP, the attempt runtime dir is
+        GC'd (§8.6).
         """
         import math as _math
+
+        stack_action = getattr(ctx, "_ip_stack_action", None) if ctx is not None else None
+        provision_result = getattr(ctx, "_ip_provision_result", None) if ctx is not None else None
+
+        def _gc_on_revert() -> None:
+            """GC the attempt runtime dir on a non-KEEP enablement outcome."""
+            root = str(getattr(ctx, "_ip_attempt_venv_root", "") or "") if ctx is not None else ""
+            if root:
+                # venv_root is ``<attempt_dir>/venv``; GC the whole attempt dir.
+                self._gc_attempt_dir(Path(root).parent)
 
         from hyperloom.agents.framework.enablement import (
             FailureSignature,
@@ -1800,6 +1949,7 @@ class IntegratePatchExecutor:
                 )
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
+            _gc_on_revert()
             await self._maybe_write_framework_kb_record(
                 done_payload=done_payload,
                 outcome="reverted_smoke_fail",
@@ -1837,28 +1987,30 @@ class IntegratePatchExecutor:
             tps_delta_pct=0.0,
             extra=extra,
         )
-        return _with_stash_restore(
-            framework_root,
-            stash_state,
-            stash_note,
-            {
-                "status": "kept",
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [str(p) for p in applied],
-                "patches_reverted": [],
-                "artifacts_applied": applied_artifacts,
-                "config_changes_applied": config_changes_applied,
-                "output_throughput": new_tput,
-                "enablement": True,
-                "runnable": True,
-                "correctness_verified": correctness_ok is True,
-                "provisional": provisional,
-                "reason": reason,
-                "setup_commands_applied": list(setup_result.get("applied") or []),
-                "bench_result": bench_result,
-                "workspace": str(output_root),
-            },
-        )
+        kept_result: dict[str, Any] = {
+            "status": "kept",
+            "specialist_task_id": specialist_task_id,
+            "patches_applied": [str(p) for p in applied],
+            "patches_reverted": [],
+            "artifacts_applied": applied_artifacts,
+            "config_changes_applied": config_changes_applied,
+            "output_throughput": new_tput,
+            "enablement": True,
+            "runnable": True,
+            "correctness_verified": correctness_ok is True,
+            "provisional": provisional,
+            "reason": reason,
+            "setup_commands_applied": list(setup_result.get("applied") or []),
+            "bench_result": bench_result,
+            "workspace": str(output_root),
+        }
+        # Rung 3: record the KEEP'd attempt runtime so it survives rearm (§8.5)
+        # and every later bench in this session re-activates it (§10.4).
+        if stack_action is not None and provision_result is not None and getattr(provision_result, "ok", False):
+            kept_result["enablement_kept_stack_action"] = stack_action.to_state()
+            kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
+            kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
+        return _with_stash_restore(framework_root, stash_state, stash_note, kept_result)
 
     async def _gate_perf(
         self,
