@@ -344,6 +344,10 @@ class DispatcherCollaborator:
             if task.task_id in exclude_ids:
                 # Already dispatched in a prior pass of this pump.
                 continue
+            if task.kind == "targeted_build":
+                # Off-loop builds run in their own process group and are pumped/
+                # reaped by BuildLifecycleCollaborator; never drain them here.
+                continue
             lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
                 # SQLite lane gate. Under single-node Ray execution (§12 T7,
