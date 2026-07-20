@@ -70,11 +70,10 @@ def _section_mission() -> list[str]:
         '   which next action gives the highest expected_gain / cost_minutes?"',
         "",
         'An optimization is only "real" once it has been validated as part of the',
-        "full optimization_stack. v0.8 M3 inlines that validation into every",
-        "``explore`` KEEP (per-KEEP stack rebench), so the validated cumulative",
-        "gain advances automatically — sums of per-round gains still do NOT",
-        "compose linearly, so drive the loop until ``explore`` has produced",
-        "at least one KEEP that survived the stack rebench.",
+        "full optimization_stack. ``explore`` inlines a per-KEEP stack rebench, so",
+        "the validated cumulative gain advances automatically — sums of per-round",
+        "gains still do NOT compose linearly, so drive the loop until ``explore``",
+        "has produced at least one KEEP that survived the stack rebench.",
     ]
 
 
@@ -122,25 +121,12 @@ def _section_session_context(
         f"- max_minutes      : {max_minutes}",
         f"- framework_source_roots: {roots_line}",
         "",
-        "Per-tick dynamic context (Mission progress, Time budget, Shared",
-        "session state, Coordinator checklist, KB hints, inbox tail) is",
-        "appended below the system prompt every tick by the Coordinator.",
-        "The Time-budget block carries `remaining=X.Xmin`. The Coordinator",
-        "always auto-flushes a deterministic `report` at the wall-clock",
-        "deadline — that is the artefact-contract invariant. As an",
-        "advisory hint, when `remaining` falls under roughly",
-        "`report.typical_runtime_min * 3` you may consider proposing",
-        "`report` earlier to capture any LLM narrative you want",
-        "surfaced; the deadline auto-flush still runs either way.",
-        "",
-        "**Phase awareness (v0.8 §3.2 / §3.3)**: every tick also brings a",
-        "`=== Phase ===` block carrying the current phase, elapsed seconds",
-        "in that phase, and budget cap. The `=== Phase-allowed actions ===`",
-        "block lists the exact set of actions you may propose this tick;",
-        "anything outside that set returns `policy_denied` with rule",
-        "`phase_incompatible`. The 6-phase chain is:",
-        "  PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE",
-        "Disabled phases (see PHASE CONTRACT below) are skipped but keep their place in the chain. Transitions are Coordinator-owned (you cannot write phase).",
+        "Per-tick dynamic context (Phase, Mission progress, Time budget,",
+        "Shared session state, KB hints, inbox tail) is appended below the",
+        "system prompt every tick by the Coordinator.",
+        "The Time-budget block carries `remaining=X.Xmin`.",
+        "See PHASE CONTRACT below for the 6-phase chain, per-phase allowed",
+        "actions, and phase-transition rules.",
     ]
 
 
@@ -166,10 +152,7 @@ def _section_phase_semantics(
     Returns:
         Markdown lines for the phase-contract section.
     """
-    from ..phases.machine_state import (
-        is_phase_interleave_enabled,
-        render_phase_proposable_bullets,
-    )
+    from ..phases.machine_state import render_phase_proposable_bullets
 
     # phase name -> the flag that disabled it (None => always enabled).
     disabled_suffix: dict[str, str] = {}
@@ -180,9 +163,8 @@ def _section_phase_semantics(
     if not kernel_enabled:
         disabled_suffix["KERNEL_AGENT"] = "--no-kernel"
 
-    interleave = is_phase_interleave_enabled()
     lines: list[str] = [
-        "## 3a. PHASE CONTRACT (v0.8 §3.2 / §3.3)",
+        "## 3a. PHASE CONTRACT",
         "",
         "The Coordinator runs the optimization in a 6-phase linear pipeline.",
         "Each tick it injects a `=== Phase ===` block with the current",
@@ -195,7 +177,7 @@ def _section_phase_semantics(
         lines.append("")
     lines.extend(
         render_phase_proposable_bullets(
-            interleave=interleave,
+            interleave=False,
             explore_enabled=explore_enabled,
             disabled_suffix=disabled_suffix,
         )
@@ -205,7 +187,8 @@ def _section_phase_semantics(
             "",
             "roofline, profile, replay_warm_recipe and framework are never",
             "in the sets above: the Coordinator auto-manages them and PolicyGate",
-            "denies any attempt to propose them.",
+            "denies any attempt to propose them. Denial of any action lands in",
+            "your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
             "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
@@ -225,28 +208,6 @@ def _section_phase_semantics(
             "so emitting it on a normal finish mislabels the run.",
         ]
     )
-    if interleave:
-        lines.extend(
-            [
-                "",
-                "**Phase interleave mode is ON**:",
-                "- EXPLORE may also REQUEST kernel_agent-owned kinds "
-                + "(kernel_opt / integrate / deep_kernel_analysis / "
-                + "operator_tuning / vendor_kernel_config / gemm_tuning) when "
-                + "a probe of the kernel surface is needed mid-EXPLORE.",
-                "- KERNEL_AGENT may also propose / delegate explore / specialist /",
-                "  integrate_patch when a config / patch refinement is needed",
-                "  mid-KERNEL_AGENT.",
-                "- The phase chain stays monotonic within a macro-cycle (SWEEP",
-                "  reloops to EXPLORE / FRAMEWORK_AGENT across cycles) for",
-                "  resume / audit / the CLOSE sequencer, which read the",
-                "  cycle-stamped ordered history; only the per-phase action",
-                "  contract is",
-                "  widened. Data-dependency (trace_analyze→run_optimization),",
-                "  the integrate_patch Critic gate, and sweep singletons are",
-                "  unchanged.",
-            ]
-        )
     return lines
 
 
@@ -384,14 +345,6 @@ def _section_pipeline_and_budget(
             "If sum >> budget, prefer high-gain/low-cost actions and skip optional",
             "phases (analysis / support). If sum << budget, do an extra explore round",
             "before report.",
-            "",
-            "``explore`` runs its per-KEEP stack rebench inline — there is no",
-            "standalone validation step. Route every grid attempt through",
-            "``delegate{action_name='explore', params={grid: ...}}``.",
-            "",
-            "At the wall-clock deadline the Coordinator auto-enqueues a deterministic",
-            "`report` (no LLM) during closing phase — do not waste ticks re-proposing",
-            "it unless you want an earlier narrative version before time runs out.",
         ]
     )
     return lines
@@ -474,33 +427,20 @@ def _format_grid_injection_hint(name: str) -> str | None:
     """
     if name == "explore":
         return (
-            "GRID INPUT (v0.8 M3, REQUIRED): emit "
+            "GRID INPUT (REQUIRED): emit "
             "`delegate{action_name='explore', params={grid: [{name, "
             "extra_args, extra_envs, remove_args?, unset_envs?, "
             "args_mode?: 'append'|'replace', provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
             "keep_threshold_pct?: 1.0, stack_stable_threshold_pct?: 0.5}}`. "
-            "Variants run serially; each KEEP triggers an inlined "
-            "stack rebench. "
-            "**Provenance is audit/advisory, not a hard gate:** "
-            "accepted values include provenance='llm_direct' "
-            "(Orchestration-authored), provenance='default_grid', and "
-            "provenance='specialist:<domain-or-tag>'. A specialist variant "
-            "MAY also carry its scope (domain/domains/freeform) as an "
-            "additive analytics tag. Prefer specialist / research-hint "
-            "variants when they exist, but use llm_direct for uncovered "
-            "gaps or cold-start hypotheses. **Breadth is bounded by "
-            "resources, not a grid cap:** specialist variants "
-            "fan out up to the research_lane / GPU pool leases (the "
-            "research_lane scales with the 2 x visible GPU ceiling). The "
-            "executor dedups against SharedState.explore_search by "
-            "canonical_fingerprint, so a rename of an already-tested "
-            "(args, envs, remove_args, unset_envs, args_mode) collapses "
-            "to the same row. Use remove_args / unset_envs to test whether "
-            "operator-pinned base flags or envs are harmful; use "
-            "args_mode='replace' only when the variant is intended to run "
-            "without inherited server args."
+            "Variants run serially; each KEEP triggers an inlined stack "
+            "rebench. Variant identity is content-based (args+envs+"
+            "remove_args+unset_envs+args_mode) — rename alone does NOT "
+            "bypass dedup. Use remove_args/unset_envs to ablate harmful "
+            "base flags; args_mode='replace' to drop inherited server args. "
+            "provenance values: 'llm_direct', 'default_grid', "
+            "'specialist:<domain-or-tag>' (audit/advisory, not a gate)."
         )
     if name == "sweep":
         return (
@@ -581,26 +521,21 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
         "   propose `report` once (if not already done) then heartbeat 'goal-reached'.",
         "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
         "   delegated_result; do NOT re-baseline on a positive result with warnings.",
-        "3. **Inlined stack-rebench**: the ``explore`` action runs its own",
-        "   per-KEEP stack rebench, so there is no standalone validation step",
-        "   to schedule. Route every grid attempt through",
-        "   ``delegate{action_name='explore', params={grid: [...] }}``.",
+        "3. **Inlined stack-rebench**: route every grid attempt through",
+        "   ``delegate{action_name='explore', params={grid: [...] }}``;",
+        "   there is no standalone validation step (see Hard rules).",
     ]
     lines.append(
-        "4. **Analysis is auto-managed**. Roofline (or profile under "
-        "``--no-enable-roofline``) is enqueued by the Coordinator at "
-        "PRELUDE and at every +10% validated-gain watermark crossing. "
-        "Do not propose ``profile`` or ``roofline`` — they are "
-        "Coordinator-managed and never in the per-phase proposable set, "
-        "so PolicyGate denies both with ``rule='phase_incompatible'``. "
-        "While the analysis task is in flight, ``specialist`` / "
-        "``explore`` / kernel_agent-owned dispatches are deferred until "
+        "4. **Analysis is auto-managed**. Roofline/profile is enqueued by "
+        "the Coordinator at PRELUDE and at every +10% validated-gain "
+        "watermark crossing. Never propose ``profile`` or ``roofline`` "
+        "(see Hard rules). While a refresh is in flight, specialist / "
+        "explore / kernel_agent-owned dispatches are deferred until "
         "``analysis.md`` / ``last_profile_trace`` refreshes.",
     )
     lines.extend(
         [
-            "5. **Phase-aware action selection**. v0.8",
-            "   retired the legacy ``Action scores`` block. There is no system-side",
+            "5. **Phase-aware action selection**. There is no system-side",
             "   priority list. Pick the next action by reading FACTS in this order:",
             "",
             "   a. **Phase + allowed actions** (the `=== Phase ===` /",
@@ -617,7 +552,7 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "      `last_action_failures` + `explore_search.winners_history`.",
             "   c. **KB sub-graphs + warm-start recipe** when present —",
             "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
-            "   d. **specialist proposal_set** (M5+) — when an explore round just",
+            "   d. **specialist proposal_set** — when an explore round just",
             "      finished, the proposal_set drives the next `explore` grid.",
             "   e. **Ordering facts**: baseline runs before anything else",
             "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
@@ -630,15 +565,8 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "   The Plateau advisory block is informational only; it does not",
             "   advance the phase. When you judge the current phase exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
-            "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (no",
-            "   longer robustness-only; see the `skip_to_close` exception in the",
-            "   PHASE CONTRACT). Otherwise the Coordinator advances only on IR-6",
-            "   force-exit, phase-budget exhaustion, or a terminal stop_reason.",
-            "7. **Sweep / report tail**: once EXPLORE / KERNEL_AGENT exit, the",
-            "   Coordinator routes the run to SWEEP (or directly to it under",
-            "   --no-kernel). When SWEEP completes, propose `report` for the",
-            "   LLM narrative (Coordinator also auto-enqueues one at the",
-            "   deadline).",
+            "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (see",
+            "   PHASE CONTRACT for the skip_to_close exception).",
             "",
             "If you cannot move forward, emit",
             "`send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
@@ -733,10 +661,8 @@ def _section_decision_framework(*, kernel_enabled: bool) -> list[str]:
             "   be slowing the workload, emit a variant with `remove_args` and/or",
             "   `unset_envs` instead of only adding more knobs.",
             "",
-            "Variant identity is content-based: the executor fingerprints",
-            "`(sorted extra_server_args, sorted extra_envs, remove_args,",
-            "unset_envs, args_mode)`, so renaming a tested variant does NOT",
-            "bypass dedup — change the actual args/envs/removals.",
+            "Variant identity is content-based (args+envs+remove_args+",
+            "unset_envs+args_mode) — rename alone does NOT bypass dedup.",
             "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
             "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
             "",
@@ -752,7 +678,7 @@ _KERNEL_OPT_PIPELINE_BODY: str = """\
 
 The four kernel_agent-owned actions are picked per the DECISION FRAMEWORK
 (phase allowed-set + gaps + KB priors); there is no system-side
-priority ranking (§3.9 Inv-9.1). Pick the next one by reading these facts in order:
+priority ranking. Pick the next one by reading these facts in order:
 a `state.gaps[]` `layer='kernel_agent'` gap with attempts left →
 `last_kernel_opt` (KEEP→integrate next; PARTIAL→retry at most
 `_DEFAULT_KERNEL_OPT_MAX_PARTIAL` then rejected; REVERT→rejected) →
