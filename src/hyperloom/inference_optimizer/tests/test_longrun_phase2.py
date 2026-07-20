@@ -50,7 +50,7 @@ def _plateaued_explore_state(
 
 
 # plateau → actionable
-def test_explore_plateau_is_actionable_in_cyclic():
+def test_explore_plateau_is_actionable():
     st = _plateaued_explore_state()
     out = ps.exit_normal_explore(st)
     assert out is not None

@@ -370,16 +370,11 @@ class ProposalsCollaborator:
     def _decaying_keep_threshold_pct(self) -> float | None:
         """Per-cycle KEEP threshold to inject, or ``None`` to keep executor defaults.
 
-        Only active in cyclic mode: the bar shrinks along the shared decaying
-        curve as macro-cycles accrue. Returns ``None`` off cyclic mode so
-        non-cyclic runs fall back to the executor's fixed default.
+        The bar shrinks along the shared decaying curve as macro-cycles accrue.
 
         Returns:
-            The decayed per-cycle KEEP threshold percentage, or ``None`` off
-            cyclic mode (keep executor defaults).
+            The decayed per-cycle KEEP threshold percentage.
         """
-        if not _phase_state.is_cyclic_phases_enabled():
-            return None
         from ..actions.executors._multi_node_env import is_multi_node
 
         cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)

@@ -636,10 +636,9 @@ class ConversationCollaborator:
         """Render the plateau-judgment advisory block (EXPLORE/KERNEL/FRAMEWORK). Returns "" when no plateau signal is active.
 
         KERNEL / FRAMEWORK plateaus are advisory only (never auto-exit the
-        phase). An EXPLORE plateau is advisory in non-cyclic mode, but in cyclic
-        mode (default) it deterministically advances EXPLORE → KERNEL_AGENT via
-        ``explore_no_more_leverage`` (a non-terminal lever switch); the rendered
-        footer states which regime is active.
+        phase). An EXPLORE plateau deterministically advances
+        EXPLORE → KERNEL_AGENT via ``explore_no_more_leverage`` (a non-terminal
+        lever switch).
 
         Returns:
             The rendered plateau advisory text, or ``""`` when no plateau
@@ -739,7 +738,7 @@ class ConversationCollaborator:
                 )
         if not lines:
             return ""
-        if phase == _phase_state.PHASE_EXPLORE and _phase_state.is_cyclic_phases_enabled():
+        if phase == _phase_state.PHASE_EXPLORE:
             lines.append(
                 "Note: in cyclic mode a detected EXPLORE plateau "
                 "deterministically advances EXPLORE → KERNEL_AGENT (non-terminal "
@@ -774,7 +773,7 @@ class ConversationCollaborator:
     def _bottleneck_redirect_advisory_block(self) -> str:
         """Render the R3 cyclic bottleneck-redirect advisory (EXPLORE only).
 
-        Active only in cyclic mode when a prior cycle's plateau flagged
+        Applies when a prior cycle's plateau flagged
         ``pending_bottleneck_switch``. Names the bottleneck we plateaued on, the
         current dominant roofline direction, and a suggested specialist domain so
         Orchestration redirects the new cycle's dispatch. Advisory, never gates.
@@ -784,8 +783,6 @@ class ConversationCollaborator:
             applicable.
         """
         state = self.shared_state
-        if not _phase_state.is_cyclic_phases_enabled():
-            return ""
         if (getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_EXPLORE:
             return ""
         sat = getattr(state, "saturated_directions", {}) or {}
@@ -861,7 +858,7 @@ class ConversationCollaborator:
 
         Returns:
             The rendered acceptance-threshold advisory text, or ``""`` when not
-            applicable (non-cyclic mode or first cycle).
+            applicable (first cycle, before any threshold decay).
         """
         state = self.shared_state
         keep = self._decaying_keep_threshold_pct()
