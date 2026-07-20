@@ -208,7 +208,9 @@ def poll_build(
 
     Non-blocking: on deadline it sends SIGTERM and records ``sigterm_at``, then
     on a later poll past the grace window escalates to SIGKILL, so the reaper
-    never sleeps inside a tick.
+    never sleeps inside a tick.  When the process exits, attempts to load a
+    rich ``result.json`` written by the driver; falls back to the exit-code
+    classification when the file is absent.
 
     Args:
         handle: The in-flight build handle.
@@ -226,6 +228,10 @@ def poll_build(
                 failure_class="timeout",
                 summary=f"build exceeded wall-clock budget and was terminated (rc={rc})",
             )
+        # Try to load a rich result written by the driver subprocess.
+        rich = _load_result_json(handle.attempt_root)
+        if rich is not None:
+            return rich
         if int(rc) == 0:
             return _finalize(handle, ok=True, failure_class="ok", summary="")
         return _finalize(
@@ -248,10 +254,381 @@ def poll_build(
     return None
 
 
+def _load_result_json(attempt_root: str) -> BuildResult | None:
+    """Try to load a ``result.json`` written by the driver; return None on miss."""
+    import json
+
+    result_path = Path(attempt_root) / "result.json"
+    try:
+        data = json.loads(result_path.read_text(encoding="utf-8"))
+        return BuildResult.from_state(data)
+    except Exception:  # noqa: BLE001 — missing/corrupt result falls back
+        return None
+
+
+# ---------------------------------------------------------------------------
+# AITER real-build recipe (S4)
+# ---------------------------------------------------------------------------
+
+# Default AITER upstream; overridable via TargetedBuildAction.repo_url.
+_AITER_DEFAULT_REPO = "https://github.com/ROCm/aiter"
+# Headroom for a full AITER compile + build cache (GB).
+_AITER_DISK_PER_CANDIDATE_GB = 6.0
+# Default max parallel compile jobs; can be overridden by action.max_jobs.
+_AITER_DEFAULT_MAX_JOBS = 8
+
+
+def run_aiter_build(
+    action: TargetedBuildAction,
+    attempt_root: str,
+    *,
+    run: Callable[..., Any] = subprocess.run,
+    git: Callable[..., Any] | None = None,
+    disk_preflight_fn: Callable[..., Any] | None = None,
+) -> BuildResult:
+    """Run a full isolated AITER targeted build (§7.1).
+
+    Executes entirely in-process (call it from the detached driver subprocess
+    so the coordinator tick loop is never blocked).  All subprocess calls go
+    through the injectable ``run`` shim for testability.
+
+    Stages:
+      1. disk + toolchain/ABI preflight
+      2. repo mirror-clone (isolation.prepare_repo_cache)
+      3. per-attempt venv (isolation.prepare_candidate_workspace)
+      4. ROCm torch constraint file
+      5. pip install -e (pinned ref or tag-desc autoselect)
+      6. artifact freshness + symbol verify
+      7. Return BuildResult with FrameworkRuntime + installed_versions
+
+    Args:
+        action: The build action describing the component, ref, gpu_arch, etc.
+        attempt_root: Attempt directory (writable; logs and artifacts land here).
+        run: Injectable subprocess callable (defaults to subprocess.Popen for
+            real subprocess; tests supply a mock).
+        git: Injectable git runner (None → subprocess.run). Used for tag listing.
+        disk_preflight_fn: Injectable disk preflight callable (None → real).
+
+    Returns:
+        BuildResult: Either ok with runtime, or failed with failure_class.
+    """
+    import json
+    import shutil
+    import subprocess as _subprocess
+    import time as _time
+
+    from .build_utils import (
+        AbiMismatchError,
+        check_rocm_toolchain_alignment,
+        hash_artifacts,
+        probe_torch_abi,
+        run_argv,
+        sort_tags_desc,
+        verify_fresh_artifacts,
+        verify_symbols,
+        write_rocm_torch_constraints,
+    )
+
+    root = Path(attempt_root)
+    root.mkdir(parents=True, exist_ok=True)
+    jit_dir = root / "aiter_jit"
+    jit_dir.mkdir(parents=True, exist_ok=True)
+    aiter_home = root / "home"
+    aiter_home.mkdir(parents=True, exist_ok=True)
+    build_log = root / "build.log"
+
+    def _run(argv, **kw):
+        """Route through injectable run shim; capture output for logs."""
+        kw.setdefault("capture_output", True)
+        kw.setdefault("text", True)
+        kw.setdefault("timeout", 3600)
+        return run(argv, **kw)
+
+    def _fail(failure_class: str, summary: str) -> BuildResult:
+        return BuildResult(
+            ok=False,
+            attempt_root=str(root),
+            build_log_path=str(build_log),
+            failure_class=failure_class,
+            failure_summary=summary,
+            error=summary,
+        )
+
+    # 1. Disk preflight -------------------------------------------------------
+    try:
+        if disk_preflight_fn is not None:
+            disk_preflight_fn(root, 1, per_candidate_gb=_AITER_DISK_PER_CANDIDATE_GB)
+        else:
+            from hyperloom.agents.framework.isolation import (
+                DiskPreflightError,
+                disk_preflight,
+            )
+            try:
+                disk_preflight(root, 1, per_candidate_gb=_AITER_DISK_PER_CANDIDATE_GB)
+            except DiskPreflightError as exc:
+                return _fail("preflight_disk", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("preflight_disk", f"disk preflight raised: {exc!r}")
+
+    # 2. Toolchain + ABI preflight --------------------------------------------
+    import os as _os
+
+    tc_ok, tc_msg = check_rocm_toolchain_alignment(env=dict(_os.environ), run=_run)
+    if not tc_ok:
+        return _fail("preflight_toolchain", tc_msg)
+
+    # Choose the Python interpreter in the attempt venv (created below).
+    # For preflight we use the host interpreter for the ABI probe.
+    import sys as _sys
+
+    host_py = _sys.executable
+    abi = probe_torch_abi(host_py, run=_run)
+    if not abi.get("is_rocm"):
+        return _fail(
+            "preflight_toolchain",
+            f"host torch is not a ROCm build (torch={abi.get('torch_version')})",
+        )
+
+    # 3. Isolation worktree + venv -------------------------------------------
+    repo_url = str(action.repo_url or _AITER_DEFAULT_REPO).strip() or _AITER_DEFAULT_REPO
+    ref = str(action.ref or "").strip()
+    worktree_dir: Path | None = None
+    venv_dir: Path | None = None
+    attempt_py = host_py  # overridden after venv creation
+
+    try:
+        from hyperloom.agents.framework.isolation import (
+            prepare_candidate_workspace,
+            prepare_repo_cache,
+        )
+        from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
+
+        req = ExploreRequest(
+            framework="aiter",
+            repo_url=repo_url,
+            work_dir=root,
+            baseline=Baseline(throughput=0.0),
+            prepare_candidate_env=True,
+        )
+        prepare_repo_cache(req)
+        candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
+        ws = prepare_candidate_workspace(req, candidate, index=0, execute=True)
+        worktree_dir = ws.worktree_dir
+        venv_dir = ws.venv_dir
+        attempt_py = str(venv_dir / "bin" / "python")
+    except Exception as exc:  # noqa: BLE001
+        return _fail("compile_error", f"workspace preparation failed: {exc!r}")
+
+    # 4. ROCm torch constraint file -------------------------------------------
+    constraint_path = root / "torch_constraints.txt"
+    try:
+        write_rocm_torch_constraints(attempt_py, str(constraint_path), run=_run)
+    except AbiMismatchError as exc:
+        return _fail("abi_mismatch", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("preflight_toolchain", f"torch constraint probe failed: {exc!r}")
+
+    # 5. pip install (pinned ref or tag-desc autoselect) ----------------------
+    gpu_arch = str(action.gpu_arch or "").strip()
+    max_jobs = int(action.max_jobs or _AITER_DEFAULT_MAX_JOBS)
+    install_env = {
+        **_os.environ,
+        "AITER_ROOT_DIR": str(aiter_home),
+        "HOME": str(aiter_home),
+        "INFERENCE_OPTIMIZER_AITER_JIT_DIR": str(jit_dir),
+        "AITER_REBUILD": "1",
+    }
+    if gpu_arch:
+        install_env["PYTORCH_ROCM_ARCH"] = gpu_arch
+        install_env["AITER_ROCM_ARCH"] = gpu_arch
+    if max_jobs:
+        install_env["MAX_JOBS"] = str(max_jobs)
+
+    git_run = git if git is not None else _run
+    since_unix = _time.time()
+    selected_ref = ref
+    installed_ok = False
+
+    pip_base = [
+        attempt_py, "-m", "pip", "install",
+        "--constraint", str(constraint_path),
+        "--config-settings", "editable_mode=compat",
+        "-e", str(worktree_dir),
+    ]
+
+    if ref:
+        res = run_argv(pip_base, cwd=str(worktree_dir), env=install_env, timeout_sec=3600, run=_run)
+        if res.returncode == 0:
+            installed_ok = True
+        else:
+            log_msg = res.stderr_tail or res.stdout_tail
+            build_log.write_text(log_msg, encoding="utf-8")
+            return _fail("compile_error", f"pip install failed for ref={ref!r}: rc={res.returncode}")
+    else:
+        # Tag-descending autoselect
+        tags_res = git_run(
+            ["git", "-C", str(worktree_dir), "tag", "-l", "v*"],
+            capture_output=True, text=True, timeout=60,
+        )
+        raw_tags = (getattr(tags_res, "stdout", "") or "").strip().splitlines()
+        tags = sort_tags_desc([t.strip() for t in raw_tags if t.strip()])
+        if not tags:
+            return _fail("compile_error", "no AITER version tags found in the cloned repo")
+
+        for tag in tags:
+            checkout_res = git_run(
+                ["git", "-C", str(worktree_dir), "checkout", tag],
+                capture_output=True, text=True, timeout=120,
+            )
+            if getattr(checkout_res, "returncode", 1) != 0:
+                continue
+            res = run_argv(pip_base, cwd=str(worktree_dir), env=install_env, timeout_sec=3600, run=_run)
+            if res.returncode == 0:
+                probe = run_argv(
+                    [attempt_py, "-c", "import aiter"],
+                    cwd=str(root), env=install_env, timeout_sec=60, run=_run,
+                )
+                if probe.returncode == 0:
+                    installed_ok = True
+                    selected_ref = tag
+                    break
+        if not installed_ok:
+            return _fail("compile_error", "no AITER tag installed and imported successfully")
+
+    # 6. Artifact freshness + symbol verify ------------------------------------
+    expected_artifacts = list(action.expected_artifacts) or ["**/*.so"]
+    freshness = verify_fresh_artifacts(str(worktree_dir), since_unix, expected_artifacts)
+    built_paths: tuple[str, ...] = tuple(freshness.get("fresh", []))
+
+    sym_result: dict[str, Any] = {"verified": True}
+    if action.expected_symbols:
+        sym_result = verify_symbols(attempt_py, list(action.expected_symbols), run=_run)
+        if not sym_result["verified"]:
+            return _fail(
+                "symbol_missing",
+                f"expected symbols not importable after build: {sym_result['missing']}",
+            )
+
+    # 7. Collect installed_versions + hashes, return BuildResult ---------------
+    sha_res = git_run(
+        ["git", "-C", str(worktree_dir), "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True, timeout=30,
+    )
+    commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
+
+    installed_versions: dict[str, str] = {
+        "torch": abi.get("torch_version", ""),
+        "aiter_ref": selected_ref,
+        "aiter_sha": commit_sha,
+        "arch": gpu_arch,
+        "hip_version": abi.get("hip_version", ""),
+    }
+
+    artifact_hashes = hash_artifacts(list(built_paths))
+
+    runtime = FrameworkRuntime(
+        pythonpath_prefixes=(str(worktree_dir),),
+        runtime_env={"INFERENCE_OPTIMIZER_AITER_JIT_DIR": str(jit_dir)},
+        source_root=str(worktree_dir),
+        attempt_root=str(root),
+    )
+
+    return BuildResult(
+        ok=True,
+        attempt_root=str(root),
+        runtime=runtime,
+        built_artifacts=built_paths,
+        installed_versions=installed_versions,
+        build_log_path=str(build_log),
+        failure_class="ok",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Off-loop driver entrypoint
+# ---------------------------------------------------------------------------
+
+def _driver_main(argv: list[str] | None = None) -> int:
+    """Driver subprocess entry: load plan.json, call run_aiter_build, write result.json."""
+    import argparse
+    import json
+    import sys as _sys
+
+    parser = argparse.ArgumentParser(description="Off-loop targeted-build driver")
+    parser.add_argument("--attempt-root", required=True, help="Attempt directory")
+    args = parser.parse_args(argv)
+
+    root = Path(args.attempt_root)
+    plan_path = root / "plan.json"
+    result_path = root / "result.json"
+
+    try:
+        action = TargetedBuildAction.from_state(
+            json.loads(plan_path.read_text(encoding="utf-8"))
+        )
+    except Exception as exc:  # noqa: BLE001
+        result_path.write_text(
+            json.dumps(
+                BuildResult(
+                    ok=False,
+                    attempt_root=str(root),
+                    failure_class="compile_error",
+                    failure_summary=f"failed to load plan.json: {exc!r}",
+                    error=repr(exc),
+                ).to_state()
+            ),
+            encoding="utf-8",
+        )
+        return 1
+
+    dispatcher = {
+        "aiter": run_aiter_build,
+        "framework_ext": run_aiter_build,
+    }
+    recipe = dispatcher.get(action.component)
+    if recipe is None:
+        result_path.write_text(
+            json.dumps(
+                BuildResult(
+                    ok=False,
+                    attempt_root=str(root),
+                    failure_class="compile_error",
+                    failure_summary=f"unknown component: {action.component!r}",
+                    error=f"no recipe for component {action.component!r}",
+                ).to_state()
+            ),
+            encoding="utf-8",
+        )
+        return 1
+
+    try:
+        result = recipe(action, str(root))
+    except Exception as exc:  # noqa: BLE001
+        result = BuildResult(
+            ok=False,
+            attempt_root=str(root),
+            failure_class="compile_error",
+            failure_summary=f"recipe raised: {exc!r}",
+            error=repr(exc),
+        )
+
+    result_path.write_text(json.dumps(result.to_state()), encoding="utf-8")
+    return 0 if result.ok else 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_driver_main())
+
+
 __all__ = [
     "BuildHandle",
+    "_driver_main",
+    "_load_result_json",
     "default_budget_sec",
     "kill_build_pgroup",
     "poll_build",
+    "run_aiter_build",
     "spawn_build",
 ]
