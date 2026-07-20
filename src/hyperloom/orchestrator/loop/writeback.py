@@ -3006,6 +3006,14 @@ class WritebackCollaborator:
         from ..actions.executors.integrate_patch import _git_apply_reverse
 
         summary: dict[str, Any] = {"reversed": [], "failed": []}
+        # Fourth decision axis (§10.3): discard a half-provisioned attempt venv
+        # so a crash mid-provision cannot leak a multi-GB dir. Independent of the
+        # patch rollback below.
+        attempt_venv_root = str(pending.get("attempt_venv_root") or "").strip()
+        if attempt_venv_root:
+            gc_root = str(Path(attempt_venv_root).parent)
+            if self._gc_attempt_runtime(gc_root):
+                summary["attempt_runtime_gc"] = gc_root
         root = str(pending.get("framework_source_root") or "").strip()
         patches = [str(p) for p in (pending.get("patches") or []) if str(p).strip()]
         if not root or not patches:
@@ -3022,6 +3030,27 @@ class WritebackCollaborator:
             else:
                 summary["failed"].append({"patch": patch, "error": err})
         return summary
+
+    @staticmethod
+    def _gc_attempt_runtime(attempt_dir: str) -> bool:
+        """Remove a Rung 3 attempt-runtime dir (best-effort).
+
+        Args:
+            attempt_dir: The attempt directory to remove (the venv's parent).
+
+        Returns:
+            bool: True when a directory was present and removal was attempted.
+        """
+        import shutil
+
+        path = Path(str(attempt_dir or "").strip())
+        if not attempt_dir or not path.exists():
+            return False
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+            return True
+        except Exception:  # noqa: BLE001 — GC is best-effort
+            return False
 
     async def _resume_recover_pending_integrate(self, report: dict[str, Any]) -> None:
         """Recover a crashed integrate_patch window from the sentinel (Gap C).
