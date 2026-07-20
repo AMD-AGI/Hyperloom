@@ -18,35 +18,45 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
+# Importable module entry for the ``fa`` CLI. Used as the final,
+# environment-independent fallback so discovery never dies on a lost $PATH.
+_FA_MODULE = "hyperloom.agents.framework.runtime.cli"
 
-def _resolve_fa_binary() -> str | None:
-    """Return the absolute path to the ``fa`` binary, or ``None``.
 
-    Resolution order: ``$FA_BIN``; ``shutil.which('fa')``;
-    ``$FRAMEWORK_AGENT_ROOT/scripts/fa``.
+def _resolve_fa_command() -> list[str]:
+    """Resolve the command prefix used to invoke the ``fa`` CLI.
+
+    Resolution order: ``$FA_BIN``; ``shutil.which('fa')``; the ``fa`` script
+    next to the current interpreter; ``$FRAMEWORK_AGENT_ROOT/scripts/fa``;
+    finally ``[sys.executable, '-m', <module>]``. The module fallback never
+    depends on $PATH, so a run whose shell lost the venv bin dir still works.
 
     Returns:
-        The absolute path to the ``fa`` binary, or ``None`` when it cannot be
-        located.
+        A non-empty argv prefix; the subcommand and IO flags are appended by
+        the caller.
     """
     explicit = (os.environ.get("FA_BIN") or "").strip()
     if explicit and Path(explicit).exists():
-        return explicit
+        return [explicit]
     via_path = shutil.which("fa")
     if via_path:
-        return via_path
+        return [via_path]
+    sibling = Path(sys.executable).with_name("fa")
+    if sibling.exists():
+        return [str(sibling)]
     fa_root = (os.environ.get("FRAMEWORK_AGENT_ROOT") or "").strip()
     if fa_root:
         candidate = Path(fa_root) / "scripts" / "fa"
         if candidate.exists():
-            return str(candidate)
-    return None
+            return [str(candidate)]
+    return [sys.executable, "-m", _FA_MODULE]
 
 
 DEFAULT_FA_PHASE_TIMEOUT_SEC: float = 180.0
@@ -55,15 +65,16 @@ DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 
 def _run_fa_subcommand_sync(
-    fa_bin: str,
+    cmd_prefix: list[str],
     subcommand: str,
     request_path: Path,
     timeout_sec: float,
 ) -> "tuple[int, str, str]":
-    """Sync helper: run ``fa <subcommand> --request <path> --out -``. Never raises.
+    """Sync helper: run ``<prefix> <subcommand> --request <path> --out -``. Never raises.
 
     Args:
-        fa_bin: Path to the ``fa`` binary.
+        cmd_prefix: The resolved ``fa`` command prefix (binary path or
+            ``[python, -m, module]``).
         subcommand: The ``fa`` subcommand to run.
         request_path: Path to the request JSON file.
         timeout_sec: Subprocess wall-clock timeout in seconds.
@@ -72,7 +83,7 @@ def _run_fa_subcommand_sync(
         A ``(returncode, stdout, stderr)`` tuple; failures map to ``127``
         (missing binary) or ``124`` (timeout).
     """
-    cmd = [fa_bin, subcommand, "--request", str(request_path), "--out", "-"]
+    cmd = [*cmd_prefix, subcommand, "--request", str(request_path), "--out", "-"]
     try:
         cp = subprocess.run(
             cmd,
@@ -111,14 +122,10 @@ async def _invoke_fa_phase(
         The parsed JSON payload returned by the subcommand.
 
     Raises:
-        RuntimeError: If the ``fa`` binary is missing, the subcommand exits
-            non-zero, or its output is not valid JSON.
+        RuntimeError: If the subcommand exits non-zero or its output is not
+            valid JSON.
     """
-    fa_bin = _resolve_fa_binary()
-    if not fa_bin:
-        raise RuntimeError(
-            f"fa binary not found (subcommand={subcommand!r}); checked $FA_BIN, $PATH, $FRAMEWORK_AGENT_ROOT/scripts/fa"
-        )
+    cmd_prefix = _resolve_fa_command()
     tmp_dir = session_dir / ".fa-tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     request_path = tmp_dir / f"phase-{subcommand}-{uuid.uuid4().hex[:12]}.json"
@@ -129,7 +136,7 @@ async def _invoke_fa_phase(
     try:
         rc, stdout, stderr = await asyncio.to_thread(
             _run_fa_subcommand_sync,
-            fa_bin,
+            cmd_prefix,
             subcommand,
             request_path,
             timeout_sec,
