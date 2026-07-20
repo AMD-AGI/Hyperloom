@@ -275,6 +275,7 @@ pythonpath = ["src", "."]
 markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
+    "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
 ]
 
 # Coverage configuration: limit coverage measurement to first-party
@@ -441,7 +442,7 @@ fail_under = 90
 # count (``-n``) are appended by the workflow from ``total_shards`` /
 # ``xdist_workers`` below, not pinned here (they vary with the matrix / runner).
 pytest_ci_args = [
-    "-m", "not critic_agent_e2e and not robustness_agent_e2e",
+    "-m", "not critic_agent_e2e and not robustness_agent_e2e and not targeted_build_e2e",
     "--cov=.", "--cov-report=term",
 ]
 # In-runner pytest-xdist workers per shard job. Pinned to an explicit count

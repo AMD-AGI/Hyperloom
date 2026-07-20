@@ -91,6 +91,7 @@ def spawn_build(
     action: TargetedBuildAction,
     *,
     attempt_root: str,
+    command: list[str] | None = None,
     run: Callable[..., Any] = subprocess.Popen,
     now: Callable[[], float] = time.monotonic,
 ) -> BuildHandle:
@@ -112,9 +113,9 @@ def spawn_build(
     Raises:
         ValueError: If ``build_command`` is empty.
     """
-    argv = list(action.build_command)
+    argv = command if command is not None else list(action.build_command)
     if not argv:
-        raise ValueError("targeted_build: build_command must be a non-empty argv")
+        raise ValueError("targeted_build: build_command must be a non-empty argv (or pass command=)")
 
     root = Path(attempt_root)
     root.mkdir(parents=True, exist_ok=True)

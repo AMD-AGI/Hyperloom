@@ -22,6 +22,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import json as _json
+import sys as _sys
+
 from ..bus.resource_lock import Lease
 from ..framework.build_actions import TargetedBuildAction, build_novelty_key
 from ..framework.targeted_build import BuildHandle, poll_build, spawn_build
@@ -104,7 +107,8 @@ class BuildLifecycleCollaborator:
             try:
                 action = TargetedBuildAction.from_state(task.params)
                 attempt_root = self._attempt_root(task.task_id)
-                handle = spawn_build(action, attempt_root=attempt_root)
+                command = _driver_command(action, attempt_root)
+                handle = spawn_build(action, attempt_root=attempt_root, command=command)
             except Exception as exc:  # noqa: BLE001 — spawn failure is a clean fail
                 await self.locks.release(lease)
                 log.exception("targeted_build: spawn failed for %s", task.task_id)
@@ -203,4 +207,30 @@ class BuildLifecycleCollaborator:
             log.debug("targeted_build: fail transition raced for %s", task_id, exc_info=True)
 
 
-__all__ = ["BuildLifecycleCollaborator"]
+def _driver_command(action: TargetedBuildAction, attempt_root: str) -> list[str]:
+    """Return the argv that runs the off-loop driver for a real component.
+
+    If the action carries an explicit ``build_command``, that argv is returned
+    unchanged (S2 fake-builder path).  Otherwise the driver entrypoint is used
+    so the full recipe runs in the detached subprocess.
+    """
+    if action.build_command:
+        return list(action.build_command)
+    _plan = str(attempt_root)
+    from pathlib import Path as _Path
+
+    root = _Path(_plan)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "plan.json").write_text(
+        _json.dumps(action.to_state()), encoding="utf-8"
+    )
+    return [
+        _sys.executable,
+        "-m",
+        "hyperloom.orchestrator.framework.targeted_build",
+        "--attempt-root",
+        str(root),
+    ]
+
+
+__all__ = ["BuildLifecycleCollaborator", "_driver_command"]
