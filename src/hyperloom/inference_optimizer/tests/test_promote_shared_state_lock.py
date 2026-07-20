@@ -18,6 +18,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import _AUDIT_ACTIONS
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task
@@ -455,3 +456,108 @@ async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, mon
     assert warm_calls[0]["result"]["output_throughput"] == 120.0
     # replay_warm_recipe is not audited by the unified tail.
     assert all(c["action"] != "replay_warm_recipe" for c in calls)
+
+
+# ---------------------------------------------------------------------------
+# GAP 8: roofline failure (status != succeeded/skipped) bumps the failure streak
+# and audits as discarded (roofline IS an audited action).
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_promote_roofline_failed_bumps_streak_and_audits_discarded(session_dir):
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.roofline_failure_streak = 2
+    s.auto_roofline_pending_task_id = "t1"
+
+    await coord._promote_to_shared_state(
+        "roofline",
+        {
+            "status": "failed",
+            "phase": "trace_analyze",
+            "error_class": "tracelens_error",
+            "error": "boom",
+        },
+        task=_task("roofline", task_id="t1"),
+    )
+
+    # Streak incremented; pending pointer cleared.
+    assert s.roofline_failure_streak == 3
+    assert s.auto_roofline_pending_task_id == ""
+    # Audit row: discarded, with the failure context in extras.
+    assert s.last_roofline["decision"] == "discarded"
+    assert s.last_roofline["status"] == "succeeded"  # record_action_attempt stamps the attempt status
+    assert s.last_roofline["extras"]["error_class"] == "tracelens_error"
+    assert s.last_roofline["extras"]["phase"] == "trace_analyze"
+
+
+# ---------------------------------------------------------------------------
+# GAP 9: explore resume_stack_revalidate (native, non-GEAK) with a valid tput
+# clears resume_pending_revalidation and does NOT promote a variant.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_promote_explore_resume_revalidate_clears_pending(session_dir):
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.current_best = {"action": "explore", "tput": 130.0}
+    s.resume_pending_revalidation = True
+
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "explore_search_update": {},
+            "winners": [],  # revalidation confirms the stack, never adds a variant
+            "round_id": "rv1",
+            "output_throughput": 128.0,
+        },
+        task=_task(
+            "explore",
+            task_id="t1",
+            params={"source": "resume_stack_revalidate"},
+        ),
+    )
+
+    # A valid rebench clears the pending flag; current_best is not re-promoted.
+    assert s.resume_pending_revalidation is False
+    assert s.current_best["action"] == "explore"
+    assert s.current_best["tput"] == 130.0
+
+
+@pytest.mark.asyncio
+async def test_promote_explore_resume_revalidate_keeps_pending_on_empty_rebench(session_dir):
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    s.resume_pending_revalidation = True
+
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "explore_search_update": {},
+            "winners": [],
+            "round_id": "rv2",
+            "output_throughput": None,  # failed/empty rebench
+        },
+        task=_task(
+            "explore",
+            task_id="t2",
+            params={"source": "resume_stack_revalidate"},
+        ),
+    )
+
+    # No valid measurement -> the flag stays set so reports keep warning.
+    assert s.resume_pending_revalidation is True
+
+
+# ---------------------------------------------------------------------------
+# GAP 10: every _PROMOTE_HANDLERS value resolves to a callable on the class,
+# so a typo or unregistered handler is caught at test time, not at runtime.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "task_kind,handler_name",
+    list(WritebackCollaborator._PROMOTE_HANDLERS.items()),
+)
+def test_promote_handlers_are_callable(task_kind, handler_name):
+    handler = getattr(WritebackCollaborator, handler_name, None)
+    assert callable(handler), f"{task_kind!r} -> {handler_name!r} is not a callable on WritebackCollaborator"
