@@ -46,6 +46,47 @@ _ENABLEMENT_WATCHDOG_GRACE_TICKS: int = 20
 _ENABLEMENT_WATCHDOG_HARD_TICKS: int = 60
 
 
+def _maybe_build_runtime_candidate(
+    capability_gap: Any,
+    *,
+    framework: str,
+    model: str,
+    gpu_type: str,
+) -> dict[str, Any] | None:
+    """Build a serialized runtime-candidate stack action, or None (Rung 3 / M1).
+
+    Returns None when the gap does not require code acquisition, the run is
+    multi-node (single-node-only guard), or the framework adapter cannot produce
+    an evidence-backed candidate. Fully exception-guarded.
+
+    Args:
+        capability_gap: The :class:`CapabilityGap` projection.
+        framework: Target framework name.
+        model: Model id/path being enabled.
+        gpu_type: Target GPU type.
+
+    Returns:
+        dict | None: ``EnablementStackAction.to_state()`` or ``None``.
+    """
+    if not getattr(capability_gap, "requires_code_acquisition", False):
+        return None
+    try:
+        from ..actions.executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return None
+        from ..framework.adapters import get_adapter
+
+        adapter = get_adapter(framework)
+        action = adapter.build_stack_action(capability_gap, framework=framework, model=model, gpu_type=gpu_type)
+        if action is None:
+            return None
+        return action.to_state()
+    except Exception:  # noqa: BLE001 — candidate construction is best-effort
+        log.debug("enablement: runtime-candidate construction failed", exc_info=True)
+        return None
+
+
 def _deterministic_enablement_setup_commands(signature: Any, launch_log: str) -> list[str]:
     """Seed concrete install commands for an ``missing_model_arch`` failure whose
     root cause is a too-old inference stack (Transformers / vLLM predating the
@@ -1082,7 +1123,16 @@ class FrameworkPhase(PhaseHandler):
         from hyperloom.agents.framework.enablement import CapabilityGap
 
         capability_gap = CapabilityGap.from_signature(signature)
-        return {
+
+        # Rung 3 (M1): when the gap requires code acquisition (not a resource
+        # constraint) and an adapter can build an evidence-backed candidate,
+        # attach a ``runtime_candidate`` so integrate_patch provisions an
+        # attempt-scoped runtime before booting. Skipped in multi-node mode.
+        runtime_candidate = _maybe_build_runtime_candidate(
+            capability_gap, framework=framework, model=model, gpu_type=req.gpu_type
+        )
+
+        params_out: dict[str, Any] = {
             "domain": "enablement_specialist",
             "gap_canonical_id": gap_cid,
             "gap_symptom": (f"{framework or '?'} cannot launch {model or 'the target model'}: {signature.kind}"),
@@ -1111,6 +1161,14 @@ class FrameworkPhase(PhaseHandler):
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
         }
+        if runtime_candidate is not None:
+            params_out["runtime_candidate"] = runtime_candidate
+        # Re-activate a prior KEEP'd attempt runtime so serial stacking runs on
+        # the same runtime the last round promoted (§8.5).
+        kept_action = getattr(state, "enablement_kept_stack_action", None)
+        if isinstance(kept_action, dict) and kept_action and "runtime_candidate" not in params_out:
+            params_out["runtime_candidate"] = kept_action
+        return params_out
 
     def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
         """Best-effort read a small source window near the offending site.
@@ -1628,11 +1686,25 @@ class FrameworkPhase(PhaseHandler):
             state.baseline_arg_error_streak = 0
             state.baseline_total_failures = 0
 
+        def _stack_kept_runtime() -> None:
+            """Persist the KEEP'd attempt runtime so it survives rearm (§8.5)."""
+            action = res.get("enablement_kept_stack_action")
+            if isinstance(action, dict) and action:
+                state.enablement_kept_stack_action = action
+            runtime = res.get("enablement_active_runtime")
+            if isinstance(runtime, dict) and runtime:
+                state.enablement_active_runtime = runtime
+                # Retain the attempt-runtime record (cap at 5 newest).
+                records = list(getattr(state, "enablement_attempt_runtimes", None) or [])
+                records.append(runtime)
+                state.enablement_attempt_runtimes = records[-5:]
+
         if status == "kept":
             state.enablement_succeeded = True
             state.enablement_stall_streak = 0
             _reset_baseline_failure_backstop()
             _stack_setup_commands()
+            _stack_kept_runtime()
         elif status == "advanced" or bool(res.get("advanced")):
             # Forward progress on a serial enablement: stack the progressing
             # patches + setup commands and pivot to the newly-revealed gap.
@@ -1643,6 +1715,7 @@ class FrameworkPhase(PhaseHandler):
                     kept.append(sp)
             state.enablement_kept_patches = kept
             _stack_setup_commands()
+            _stack_kept_runtime()
             new_log = str(res.get("enablement_launch_log") or "").strip()
             if new_log:
                 state.enablement_launch_log = new_log
