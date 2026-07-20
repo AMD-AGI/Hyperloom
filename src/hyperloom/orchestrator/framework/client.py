@@ -258,9 +258,9 @@ async def phase_audit(
     """FRAMEWORK-phase semantic-audit shim (``fa phase-audit``).
 
     Builds the request and runs the subcommand; returns the
-    ``semantic_audit`` verdict. The caller treats a missing binary / non-zero
-    exit / parse failure (raised as :class:`RuntimeError`) as ``unknown`` and
-    preserves legacy routing.
+    ``semantic_audit`` verdict. The caller treats a non-zero exit / parse
+    failure (raised as :class:`RuntimeError`) as ``unknown`` and preserves
+    legacy routing.
 
     Args:
         candidate: The discovered candidate row (carries repo / pr_number /
