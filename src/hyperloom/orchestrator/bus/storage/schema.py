@@ -33,6 +33,7 @@ DEFAULT_LANE_CAPACITIES: dict[str, int] = {
     "profile_lane": 1,
     "research_lane": 1,
     "gpu_research_lane": 1,
+    "build_lane": 1,
 }
 
 

@@ -56,6 +56,9 @@ KNOWN_LANES = (
     # the serving lanes and capacity-1 / strictly serial (one GPU specialist
     # holds the machine at a time; the GPU pool partitions cards within it).
     "gpu_research_lane",
+    # build_lane serializes off-loop compile tasks; capacity-1 with no
+    # serving-lane conflict (the compile step needs no GPU/server).
+    "build_lane",
 )
 
 # Lane → lanes that must *also* be free or co-acquired.
@@ -71,6 +74,8 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
     "research_lane": frozenset(),
     # gpu_research_lane ⊥ serving lanes; capacity-1 so GPU specialists serialize.
     "gpu_research_lane": frozenset({"benchmark_lane", "profile_lane", "server_lifecycle"}),
+    # build_lane is a serialization/observability primitive only; no conflicts.
+    "build_lane": frozenset(),
 }
 
 
