@@ -442,6 +442,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_stall_streak: int = 0
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     enablement_human_review_logged: list = field(default_factory=list)
+    # Rung 3 (M1) attempt-scoped runtime acquisition state. All optional; NOT in
+    # fact_layer_keys and do NOT bump schema_version (default via from_dict).
+    # ``enablement_stack_actions``: candidate EnablementStackAction dicts considered.
+    # ``enablement_active_runtime``: the currently-promoted attempt FrameworkRuntime dict.
+    # ``enablement_attempt_runtimes``: retained attempt-runtime records (capped).
+    # ``enablement_kept_stack_action``: the KEEP'd stack action; survives rearm (§8.5).
+    # ``enablement_localization_manifest``: Rung 4 (M2) localization records.
+    enablement_stack_actions: list = field(default_factory=list)
+    enablement_active_runtime: dict = field(default_factory=dict)
+    enablement_attempt_runtimes: list = field(default_factory=list)
+    enablement_kept_stack_action: dict = field(default_factory=dict)
+    enablement_localization_manifest: list = field(default_factory=list)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
