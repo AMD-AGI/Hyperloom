@@ -64,7 +64,12 @@ AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
 VLLM_VERSION="${VLLM_VERSION:-0.22.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm722}"
+_VLLM_ROCM_INDEX_WAS_SET="${VLLM_ROCM_INDEX+x}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
+# Default isolated venv path gets a -py<major><minor> suffix (resolved in main)
+# so venvs for different Python versions never collide; a user-provided value is
+# used verbatim.
+_VLLM_VENV_ROOT_WAS_SET="${VLLM_VENV_ROOT+x}"
 VLLM_VENV_ROOT="${VLLM_VENV_ROOT:-/opt/hyperloom/vllm-venv}"
 REQUIRE_FRAMEWORKS=0
 SKIP_BASE_CHECK=0
@@ -92,7 +97,12 @@ Options:
                          isolated. Default: shared. Use isolated for vLLM to
                          avoid replacing the shared ROCm torch stack.
   --vllm-venv-root PATH  Isolated vLLM venv path (default:
-                         /opt/hyperloom/vllm-venv).
+                         /opt/hyperloom/vllm-venv-py<major><minor>).
+  --sglang-ref REF       SGLang git tag for source install (default: v0.5.12)
+  --sglang-rocm-pypi-version VER  amd-sglang wheel index version (default: 7.2.0)
+  --aiter-ref REF        AITER git tag; when unset, auto-selects newest compatible
+  --vllm-version VER     vLLM version (default: 0.22.0)
+  --vllm-rocm-variant V  vLLM ROCm wheel variant (default: rocm722)
   --require-frameworks   Treat a missing requested framework as fatal
   --skip-base-check      Skip Phase 1 base preflight
   --check-only           Verify only; do not clone/install/mutate
@@ -139,7 +149,12 @@ while [ "$#" -gt 0 ]; do
         *) echo "[install-baremetal] ERROR: --framework-env must be one of: shared, isolated" >&2; exit 2 ;;
       esac
       ;;
-    --vllm-venv-root)   [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --vllm-venv-root requires a value" >&2; exit 2; }; shift; VLLM_VENV_ROOT="${1:-}" ;;
+    --vllm-venv-root)   [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --vllm-venv-root requires a value" >&2; exit 2; }; shift; VLLM_VENV_ROOT="${1:-}"; _VLLM_VENV_ROOT_WAS_SET="x" ;;
+    --sglang-ref)       [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --sglang-ref requires a value" >&2; exit 2; }; shift; SGLANG_REF="${1:-}" ;;
+    --sglang-rocm-pypi-version) [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --sglang-rocm-pypi-version requires a value" >&2; exit 2; }; shift; SGLANG_ROCM_PYPI_VERSION="${1:-}"; _SGLANG_ROCM_PYPI_VERSION_WAS_SET="x" ;;
+    --aiter-ref)        [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --aiter-ref requires a value" >&2; exit 2; }; shift; AITER_REF="${1:-}"; _AITER_REF_WAS_SET="x" ;;
+    --vllm-version)     [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --vllm-version requires a value" >&2; exit 2; }; shift; VLLM_VERSION="${1:-}" ;;
+    --vllm-rocm-variant) [ "$#" -ge 2 ] || { echo "[install-baremetal] ERROR: --vllm-rocm-variant requires a value" >&2; exit 2; }; shift; VLLM_ROCM_VARIANT="${1:-}" ;;
     --require-frameworks) REQUIRE_FRAMEWORKS=1 ;;
     --skip-base-check)  SKIP_BASE_CHECK=1 ;;
     --check-only)       CHECK_ONLY=1 ;;
@@ -150,6 +165,12 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+# Recompute the vLLM wheel index from version/variant unless the operator pinned
+# VLLM_ROCM_INDEX explicitly (flags may have changed version/variant post-init).
+if [ -z "$_VLLM_ROCM_INDEX_WAS_SET" ]; then
+  VLLM_ROCM_INDEX="https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}"
+fi
 
 log() { echo "[install-baremetal] $*"; }
 warn() { echo "[install-baremetal WARN] $*" >&2; }
@@ -395,6 +416,32 @@ except metadata.PackageNotFoundError:
 PY
 }
 
+# Normalize a version-ish token for loose comparison: drop a leading v/V and any
+# pre/post/dev/local suffix so git tags (v0.5.12) and pip versions (0.5.12.post1)
+# reduce to the same release core (0.5.12).
+normalize_version() {
+  printf '%s' "$1" | sed -E 's/^[vV]//; s/[-+].*$//; s/\.(post|dev|rc|a|b|c)[0-9]*$//I'
+}
+
+# Loose version match: equal after normalization, and both non-empty.
+version_matches() {
+  local a b
+  a="$(normalize_version "$1")"
+  b="$(normalize_version "$2")"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" = "$b" ]
+}
+
+# Target sglang version depends on install path: the AMD wheel path pins
+# SGLANG_ROCM_PYPI_VERSION, the source path pins SGLANG_REF (a git tag).
+sglang_target_version() {
+  local py_mm="$1"
+  if [ "$py_mm" = "3.10" ]; then
+    printf '%s' "$SGLANG_ROCM_PYPI_VERSION"
+  else
+    printf '%s' "$SGLANG_REF"
+  fi
+}
+
 torch_required_triton_version() {
   local py="$1"
   "$py" <<'PY'
@@ -454,6 +501,8 @@ install_sglang_from_source() {
   [ -n "$arch" ] || arch="gfx942"
 
   log "installing SGLang from source at ${sglang_root} (ref=${SGLANG_REF}, arch=${arch})"
+  # Remove any prior sglang so an upgrade cannot leave a stale wheel/source mix.
+  "$py" -m pip uninstall -y sglang-kernel sgl-kernel sglang amd-sglang || true
   if [ ! -d "${sglang_root}/.git" ]; then
     mkdir -p "$(dirname "$sglang_root")"
     git clone --recursive --branch "$SGLANG_REF" "$SGLANG_REPO" "$sglang_root"
@@ -578,7 +627,16 @@ PY
   fi
 
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    _py_has "$py" sglang && log "sglang import OK" || warn "sglang missing (check-only; would install amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}])"
+    local co_target co_current
+    co_target="$(sglang_target_version "$py_mm")"
+    co_current="$(installed_dist_version "$py" sglang 2>/dev/null || true)"
+    if ! _py_has "$py" sglang; then
+      warn "sglang missing (check-only; would install amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}])"
+    elif version_matches "$co_current" "$co_target"; then
+      log "sglang ${co_current} matches target ${co_target}"
+    else
+      warn "sglang ${co_current:-unknown} MISMATCH target ${co_target} (check-only; would reinstall)"
+    fi
     if _py_has "$py" aiter; then
       log "aiter import OK"
     elif [ -n "$AITER_REF" ]; then
@@ -605,21 +663,35 @@ PY
     return 0
   fi
 
-  if ! _py_has "$py" sglang || ! _py_has "$py" sgl_kernel; then
+  local sglang_target sglang_current
+  sglang_target="$(sglang_target_version "$py_mm")"
+  sglang_current="$(installed_dist_version "$py" sglang 2>/dev/null || true)"
+  if _py_has "$py" sglang && _py_has "$py" sgl_kernel \
+     && version_matches "$sglang_current" "$sglang_target"; then
+    log "sglang ${sglang_current} already matches target ${sglang_target}; skipping amd-sglang install"
+  else
+    if _py_has "$py" sglang && [ -n "$sglang_current" ]; then
+      log "sglang ${sglang_current} differs from target ${sglang_target}; reinstalling"
+    fi
     if [ "$py_mm" = "3.10" ]; then
       install_sglang_from_wheel "$py"
     else
       warn "amd-sglang ROCm 7.2 wheel currently pulls cp310 torch; Python ${py_mm} uses source install instead"
       install_sglang_from_source "$py" "$deps_root"
     fi
-  else
-    log "sglang + sgl_kernel already importable; skipping amd-sglang install"
   fi
 
+  # AITER skip is version-aware only when the operator pinned AITER_REF; with the
+  # default auto-select there is no explicit target to compare against.
+  local aiter_current
+  aiter_current="$(installed_dist_version "$py" aiter 2>/dev/null || true)"
   if ! _py_has "$py" aiter; then
     install_compatible_aiter "$py" "$aiter_root"
+  elif [ -n "$_AITER_REF_WAS_SET" ] && ! version_matches "$aiter_current" "$AITER_REF"; then
+    log "aiter ${aiter_current:-unknown} differs from target ${AITER_REF}; reinstalling"
+    install_compatible_aiter "$py" "$aiter_root"
   else
-    log "aiter already importable; skipping AITER source install"
+    log "aiter ${aiter_current:-present} already satisfies target; skipping AITER source install"
   fi
 
   "$py" -c "import sglang" >/dev/null || die "sglang not importable after install"
@@ -724,7 +796,13 @@ PY
     if [ "$FRAMEWORK_ENV" = "isolated" ] && [ ! -x "$py" ]; then
       warn "vllm isolated env missing (check-only; would create ${VLLM_VENV_ROOT} and install ${package_spec})"
     elif _py_has "$py" vllm; then
-      verify_vllm_rocm "$py" && log "vllm import OK (ROCm platform)"
+      local co_vllm_current
+      co_vllm_current="$(installed_dist_version "$py" vllm 2>/dev/null || true)"
+      if version_matches "$co_vllm_current" "$VLLM_VERSION" && verify_vllm_rocm "$py" >/dev/null 2>&1; then
+        log "vllm ${co_vllm_current} (ROCm) matches target ${VLLM_VERSION}"
+      else
+        warn "vllm ${co_vllm_current:-unknown} MISMATCH target ${VLLM_VERSION} or not a ROCm build (check-only; would reinstall)"
+      fi
     else
       warn "vllm missing (check-only; would install ${package_spec} from ${VLLM_ROCM_INDEX})"
     fi
@@ -748,10 +826,34 @@ PY
   fi
 
   [ "$py_mm" = "3.12" ] || die "vLLM ROCm wheels require Python 3.12; current Python is ${py_mm}"
+
+  # Skip only when an existing vLLM is a ROCm build and matches VLLM_VERSION;
+  # otherwise fall through and (re)install so version upgrades are not lost.
+  if [ -x "$py" ] && _py_has "$py" vllm; then
+    local vllm_current
+    vllm_current="$(installed_dist_version "$py" vllm 2>/dev/null || true)"
+    if version_matches "$vllm_current" "$VLLM_VERSION" && verify_vllm_rocm "$py" >/dev/null 2>&1; then
+      log "vllm ${vllm_current} (ROCm) already matches target ${VLLM_VERSION}; skipping install"
+      [ "$FRAMEWORK_ENV" = "isolated" ] && link_vllm_into_shared_bin "$base_py" "$py"
+      return 0
+    fi
+    [ -n "$vllm_current" ] && log "vllm ${vllm_current} differs from target ${VLLM_VERSION} or not a ROCm build; reinstalling"
+  fi
+
   if [ "$FRAMEWORK_ENV" = "isolated" ]; then
     mkdir -p "$(dirname "$VLLM_VENV_ROOT")"
     if [ ! -x "$py" ]; then
       "$base_py" -m venv "$VLLM_VENV_ROOT"
+    else
+      # Reuse guard: a pre-existing venv on a non-3.12 Python cannot host the
+      # ROCm vLLM wheel. Refuse rather than install into it; do not auto-delete.
+      local _venv_py_mm
+      _venv_py_mm="$("$py" - <<'PY' 2>/dev/null || true
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)"
+      [ "$_venv_py_mm" = "3.12" ] || die "existing vLLM venv at ${VLLM_VENV_ROOT} uses Python ${_venv_py_mm:-unknown}, but vLLM ROCm wheels require Python 3.12; remove it and re-run, or set --vllm-venv-root to a fresh path."
     fi
     "$py" -m pip install --upgrade pip wheel setuptools
     # Pin the ROCm torch first so the vLLM install below cannot fall back to a
@@ -1284,6 +1386,20 @@ main() {
   local py_for_env
   if py_for_env="$(resolve_python 2>/dev/null)"; then
     export_virtualenv_for_python "$py_for_env"
+  fi
+
+  # Suffix the default isolated venv path with the base Python version so venvs
+  # for different Python versions never collide. Only when the operator did not
+  # pin VLLM_VENV_ROOT and vLLM is the target framework.
+  if [ "$INSTALL_FRAMEWORK" = "vllm" ] && [ "$FRAMEWORK_ENV" = "isolated" ] \
+     && [ -z "$_VLLM_VENV_ROOT_WAS_SET" ] && [ -n "${py_for_env:-}" ]; then
+    local _base_py_mm
+    _base_py_mm="$("$py_for_env" - <<'PY' 2>/dev/null || true
+import sys
+print(f"py{sys.version_info.major}{sys.version_info.minor}")
+PY
+)"
+    [ -n "$_base_py_mm" ] && VLLM_VENV_ROOT="${VLLM_VENV_ROOT}-${_base_py_mm}"
   fi
 
   if [ "$SKIP_BASE_CHECK" -eq 1 ]; then
