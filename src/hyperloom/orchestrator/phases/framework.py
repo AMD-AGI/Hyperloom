@@ -4096,10 +4096,26 @@ class FrameworkPhase(PhaseHandler):
             repo_url = str(existing_stack.get("repo_url") or "").strip()
             ref = str(existing_stack.get("ref") or "").strip()
 
+            # Pick the component from the failure evidence:
+            # sgl_kernel when the offending symbol/log names sgl-kernel;
+            # vllm_source when vLLM's own C extension is implicated;
+            # aiter (default) for all other compiled-miss gaps.
+            sym_lower = (signature.offending_symbol or "").lower()
+            log_lower = launch_log.lower()
+            if "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
+                component = "sgl_kernel"
+            elif framework == "vllm" and (
+                "vllm/_c" in log_lower or "vllm.extension" in log_lower
+                or "_c.so" in log_lower or "vllm._c" in sym_lower
+            ):
+                component = "vllm_source"
+            else:
+                component = "aiter"
+
             action = TargetedBuildAction(
                 gap_id=f"gap.enablement.{signature.kind}",
                 framework=framework or "vllm",
-                component="aiter",
+                component=component,
                 capability=str(signature.offending_symbol or signature.kind or ""),
                 reason=f"Rung-5 auto-escalation from {signature.kind}",
                 repo_url=repo_url,

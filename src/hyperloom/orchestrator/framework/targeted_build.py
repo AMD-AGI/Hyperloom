@@ -546,6 +546,433 @@ def run_aiter_build(
 
 
 # ---------------------------------------------------------------------------
+# sgl-kernel recipe (S6, §7.2)
+# ---------------------------------------------------------------------------
+
+_SGLANG_DEFAULT_REPO = "https://github.com/sgl-project/sglang"
+_SGLANG_DISK_PER_CANDIDATE_GB = 8.0
+_SGLANG_DEFAULT_MAX_JOBS = 8
+
+
+def run_sgl_kernel_build(
+    action: TargetedBuildAction,
+    attempt_root: str,
+    *,
+    run: Callable[..., Any] = subprocess.run,
+    git: Callable[..., Any] | None = None,
+    disk_preflight_fn: Callable[..., Any] | None = None,
+) -> BuildResult:
+    """Run an isolated sgl-kernel targeted build (§7.2).
+
+    Clones SGLang into an isolated worktree/venv, builds the ROCm sgl-kernel
+    extension for the explicit gpu_arch (AMDGPU_TARGET), then installs the
+    Python package and verifies a fresh compiled artifact.
+    """
+    import os as _os
+    import sys as _sys
+    import time as _time
+
+    from .build_utils import (
+        AbiMismatchError,
+        check_rocm_toolchain_alignment,
+        hash_artifacts,
+        probe_torch_abi,
+        run_argv,
+        verify_fresh_artifacts,
+        verify_symbols,
+        write_rocm_torch_constraints,
+    )
+
+    root = Path(attempt_root)
+    root.mkdir(parents=True, exist_ok=True)
+    build_log = root / "build.log"
+
+    def _run(argv, **kw):
+        kw.setdefault("capture_output", True)
+        kw.setdefault("text", True)
+        kw.setdefault("timeout", 3600)
+        return run(argv, **kw)
+
+    def _fail(failure_class: str, summary: str) -> BuildResult:
+        return BuildResult(
+            ok=False,
+            attempt_root=str(root),
+            build_log_path=str(build_log),
+            failure_class=failure_class,
+            failure_summary=summary,
+            error=summary,
+        )
+
+    # Disk preflight
+    try:
+        if disk_preflight_fn is not None:
+            disk_preflight_fn(root, 1, per_candidate_gb=_SGLANG_DISK_PER_CANDIDATE_GB)
+        else:
+            from hyperloom.agents.framework.isolation import DiskPreflightError, disk_preflight
+
+            try:
+                disk_preflight(root, 1, per_candidate_gb=_SGLANG_DISK_PER_CANDIDATE_GB)
+            except DiskPreflightError as exc:
+                return _fail("preflight_disk", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("preflight_disk", f"disk preflight raised: {exc!r}")
+
+    tc_ok, tc_msg = check_rocm_toolchain_alignment(env=dict(_os.environ), run=_run)
+    if not tc_ok:
+        return _fail("preflight_toolchain", tc_msg)
+
+    host_py = _sys.executable
+    abi = probe_torch_abi(host_py, run=_run)
+    if not abi.get("is_rocm"):
+        return _fail("preflight_toolchain", f"host torch is not a ROCm build (torch={abi.get('torch_version')})")
+
+    gpu_arch = str(action.gpu_arch or "").strip()
+    if not gpu_arch:
+        return _fail("preflight_toolchain", "gpu_arch must be set explicitly for sgl-kernel (L6)")
+
+    repo_url = str(action.repo_url or _SGLANG_DEFAULT_REPO).strip() or _SGLANG_DEFAULT_REPO
+    ref = str(action.ref or "").strip()
+    max_jobs = int(action.max_jobs or _SGLANG_DEFAULT_MAX_JOBS)
+
+    # Isolation worktree + venv
+    worktree_dir: Path | None = None
+    venv_dir: Path | None = None
+    attempt_py = host_py
+
+    try:
+        from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
+        from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
+
+        req = ExploreRequest(
+            framework="sglang",
+            repo_url=repo_url,
+            work_dir=root,
+            baseline=Baseline(throughput=0.0),
+            prepare_candidate_env=True,
+        )
+        prepare_repo_cache(req)
+        candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
+        ws = prepare_candidate_workspace(req, candidate, index=0, execute=True)
+        worktree_dir = ws.worktree_dir
+        venv_dir = ws.venv_dir
+        attempt_py = str(venv_dir / "bin" / "python")
+    except Exception as exc:  # noqa: BLE001
+        return _fail("compile_error", f"workspace preparation failed: {exc!r}")
+
+    constraint_path = root / "torch_constraints.txt"
+    try:
+        write_rocm_torch_constraints(attempt_py, str(constraint_path), run=_run)
+    except AbiMismatchError as exc:
+        return _fail("abi_mismatch", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("preflight_toolchain", f"torch constraint probe failed: {exc!r}")
+
+    since_unix = _time.time()
+    sgl_kernel_dir = worktree_dir / "sgl-kernel"
+
+    # Build sgl-kernel with explicit AMDGPU_TARGET
+    install_env = {
+        **_os.environ,
+        "AMDGPU_TARGET": gpu_arch,
+        "MAX_JOBS": str(max_jobs),
+    }
+    kernel_build = run_argv(
+        [attempt_py, "setup_rocm.py", "install"],
+        cwd=str(sgl_kernel_dir),
+        env=install_env,
+        timeout_sec=3600,
+        run=_run,
+    )
+    if kernel_build.returncode != 0:
+        build_log.write_text(kernel_build.stderr_tail or kernel_build.stdout_tail, encoding="utf-8")
+        return _fail("compile_error", f"sgl-kernel compile failed (rc={kernel_build.returncode})")
+
+    # Copy pyproject_other.toml if present (mirrors installer :469-471)
+    py_other = worktree_dir / "python" / "pyproject_other.toml"
+    if py_other.is_file():
+        import shutil
+
+        shutil.copy2(str(py_other), str(worktree_dir / "python" / "pyproject.toml"))
+
+    # Install SGLang python package
+    pip_cmd = [
+        attempt_py, "-m", "pip", "install",
+        "--constraint", str(constraint_path),
+        "-e", str(worktree_dir / "python[srt_hip]"),
+    ]
+    pip_res = run_argv(pip_cmd, cwd=str(root), env=dict(_os.environ), timeout_sec=3600, run=_run)
+    if pip_res.returncode != 0:
+        build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
+        return _fail("compile_error", f"sgl-kernel pip install failed (rc={pip_res.returncode})")
+
+    # Verify
+    expected_artifacts = list(action.expected_artifacts) or ["**/*.so"]
+    freshness = verify_fresh_artifacts(str(sgl_kernel_dir), since_unix, expected_artifacts)
+    built_paths: tuple[str, ...] = tuple(freshness.get("fresh", []))
+
+    if action.expected_symbols:
+        sym_result = verify_symbols(attempt_py, list(action.expected_symbols), run=_run)
+        if not sym_result["verified"]:
+            return _fail("symbol_missing", f"symbols not importable: {sym_result['missing']}")
+
+    git_run = git if git is not None else _run
+    sha_res = git_run(["git", "-C", str(worktree_dir), "rev-parse", "--short", "HEAD"],
+                      capture_output=True, text=True, timeout=30)
+    commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
+
+    installed_versions = {
+        "torch": abi.get("torch_version", ""),
+        "sgl_kernel_ref": ref,
+        "sgl_kernel_sha": commit_sha,
+        "arch": gpu_arch,
+        "hip_version": abi.get("hip_version", ""),
+    }
+    artifact_hashes = hash_artifacts(list(built_paths))
+
+    runtime = FrameworkRuntime(
+        pythonpath_prefixes=(str(worktree_dir / "python"),),
+        runtime_env={"SGLANG_USE_AITER": "1"},
+        source_root=str(worktree_dir),
+        attempt_root=str(root),
+    )
+    return BuildResult(
+        ok=True,
+        attempt_root=str(root),
+        runtime=runtime,
+        built_artifacts=built_paths,
+        installed_versions=installed_versions,
+        build_log_path=str(build_log),
+        failure_class="ok",
+    )
+
+
+# ---------------------------------------------------------------------------
+# vLLM from source recipe (S6, §7.3)
+# ---------------------------------------------------------------------------
+
+_VLLM_DEFAULT_REPO = "https://github.com/ROCm/vllm"
+_VLLM_DISK_PER_CANDIDATE_GB = 20.0
+_VLLM_DEFAULT_MAX_JOBS = 8
+
+# Inline verify_vllm_rocm probe (ported from install_baremetal.sh :633-668).
+_VERIFY_VLLM_ROCM_SCRIPT = """\
+import sys, torch
+if not getattr(torch.version, "hip", None):
+    print("torch is not a ROCm build", file=sys.stderr); raise SystemExit(1)
+import vllm
+try:
+    from vllm.platforms import current_platform
+except Exception as exc:
+    print(f"cannot import vllm platform: {exc}", file=sys.stderr); raise SystemExit(1)
+is_rocm = False
+checker = getattr(current_platform, "is_rocm", None)
+if callable(checker):
+    try: is_rocm = bool(checker())
+    except Exception: pass
+if "rocm" in f"{current_platform!r} {current_platform.__class__.__name__}".lower():
+    is_rocm = True
+if not is_rocm:
+    print("vLLM did not report ROCm platform", file=sys.stderr); raise SystemExit(1)
+print("vllm_rocm_ok")
+"""
+
+
+def run_vllm_source_build(
+    action: TargetedBuildAction,
+    attempt_root: str,
+    *,
+    run: Callable[..., Any] = subprocess.run,
+    git: Callable[..., Any] | None = None,
+    disk_preflight_fn: Callable[..., Any] | None = None,
+) -> BuildResult:
+    """Run an isolated vLLM-from-source targeted build (§7.3, D1).
+
+    Clones ROCm/vllm into an isolated worktree, runs ``pip install -e``
+    which triggers the CMake ``build_ext`` pass, then verifies ROCm platform
+    and fresh compiled artefacts.  ABI-match guard refuses silently loading the
+    wrong interpreter (requires same Python major.minor as the Magpie launcher).
+    """
+    import os as _os
+    import sys as _sys
+    import time as _time
+
+    from .build_utils import (
+        AbiMismatchError,
+        check_rocm_toolchain_alignment,
+        hash_artifacts,
+        probe_torch_abi,
+        run_argv,
+        verify_fresh_artifacts,
+        verify_symbols,
+        write_rocm_torch_constraints,
+    )
+
+    root = Path(attempt_root)
+    root.mkdir(parents=True, exist_ok=True)
+    build_log = root / "build.log"
+
+    def _run(argv, **kw):
+        kw.setdefault("capture_output", True)
+        kw.setdefault("text", True)
+        kw.setdefault("timeout", 5400)
+        return run(argv, **kw)
+
+    def _fail(failure_class: str, summary: str) -> BuildResult:
+        return BuildResult(
+            ok=False,
+            attempt_root=str(root),
+            build_log_path=str(build_log),
+            failure_class=failure_class,
+            failure_summary=summary,
+            error=summary,
+        )
+
+    # Disk preflight (raised headroom: 20 GB for full vLLM build cache)
+    try:
+        if disk_preflight_fn is not None:
+            disk_preflight_fn(root, 1, per_candidate_gb=_VLLM_DISK_PER_CANDIDATE_GB)
+        else:
+            from hyperloom.agents.framework.isolation import DiskPreflightError, disk_preflight
+
+            try:
+                disk_preflight(root, 1, per_candidate_gb=_VLLM_DISK_PER_CANDIDATE_GB)
+            except DiskPreflightError as exc:
+                return _fail("preflight_disk", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("preflight_disk", f"disk preflight raised: {exc!r}")
+
+    tc_ok, tc_msg = check_rocm_toolchain_alignment(env=dict(_os.environ), run=_run)
+    if not tc_ok:
+        return _fail("preflight_toolchain", tc_msg)
+
+    host_py = _sys.executable
+    abi = probe_torch_abi(host_py, run=_run)
+    if not abi.get("is_rocm"):
+        return _fail("preflight_toolchain", f"host torch is not a ROCm build (torch={abi.get('torch_version')})")
+
+    gpu_arch = str(action.gpu_arch or "").strip()
+    if not gpu_arch:
+        return _fail("preflight_toolchain", "gpu_arch must be set explicitly for vLLM source (L6)")
+
+    # ABI-match guard: vLLM source compile must target the same Python major.minor
+    # as the calling interpreter; a mismatch means the built _C.so cannot be loaded
+    # by Magpie without a separate runtime_python_exe path (not yet supported).
+    host_pyver = f"{_sys.version_info.major}.{_sys.version_info.minor}"
+    abi_pyver = str(abi.get("python_version") or "").strip()
+    if abi_pyver and not abi_pyver.startswith(host_pyver):
+        return _fail(
+            "preflight_toolchain",
+            f"ABI mismatch: host interpreter is Python {host_pyver} but torch ABI probe "
+            f"reports {abi_pyver}; vLLM source must be built for the same Python version",
+        )
+
+    repo_url = str(action.repo_url or _VLLM_DEFAULT_REPO).strip() or _VLLM_DEFAULT_REPO
+    ref = str(action.ref or "").strip()
+    max_jobs = int(action.max_jobs or _VLLM_DEFAULT_MAX_JOBS)
+
+    # Isolation worktree + venv
+    worktree_dir: Path | None = None
+    venv_dir: Path | None = None
+    attempt_py = host_py
+
+    try:
+        from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
+        from hyperloom.agents.framework.models import Baseline, Candidate, ExploreRequest
+
+        req = ExploreRequest(
+            framework="vllm",
+            repo_url=repo_url,
+            work_dir=root,
+            baseline=Baseline(throughput=0.0),
+            prepare_candidate_env=True,
+        )
+        prepare_repo_cache(req)
+        candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
+        ws = prepare_candidate_workspace(req, candidate, index=0, execute=True)
+        worktree_dir = ws.worktree_dir
+        venv_dir = ws.venv_dir
+        attempt_py = str(venv_dir / "bin" / "python")
+    except Exception as exc:  # noqa: BLE001
+        return _fail("compile_error", f"workspace preparation failed: {exc!r}")
+
+    constraint_path = root / "torch_constraints.txt"
+    try:
+        write_rocm_torch_constraints(attempt_py, str(constraint_path), run=_run)
+    except AbiMismatchError as exc:
+        return _fail("abi_mismatch", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("preflight_toolchain", f"torch constraint probe failed: {exc!r}")
+
+    since_unix = _time.time()
+    install_env = {
+        **_os.environ,
+        "PYTORCH_ROCM_ARCH": gpu_arch,
+        "MAX_JOBS": str(max_jobs),
+    }
+
+    # pip install -e triggers CMake build_ext
+    pip_cmd = [
+        attempt_py, "-m", "pip", "install",
+        "--constraint", str(constraint_path),
+        "-e", str(worktree_dir),
+    ]
+    pip_res = run_argv(pip_cmd, cwd=str(worktree_dir), env=install_env, timeout_sec=5400, run=_run)
+    if pip_res.returncode != 0:
+        build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
+        return _fail("compile_error", f"vLLM source pip install failed (rc={pip_res.returncode})")
+
+    # ROCm platform verify (port of verify_vllm_rocm from installer)
+    vllm_verify = run_argv(
+        [attempt_py, "-c", _VERIFY_VLLM_ROCM_SCRIPT],
+        cwd=str(root), env=dict(_os.environ), timeout_sec=120, run=_run,
+    )
+    if vllm_verify.returncode != 0:
+        return _fail("boot_failed", f"vLLM ROCm platform check failed: {vllm_verify.stderr_tail[:500]}")
+
+    # Artifact freshness (fresh _C*.so means the extension was compiled)
+    expected_artifacts = list(action.expected_artifacts) or ["vllm/_C*.so", "**/_C*.so"]
+    freshness = verify_fresh_artifacts(str(worktree_dir), since_unix, expected_artifacts)
+    built_paths: tuple[str, ...] = tuple(freshness.get("fresh", []))
+
+    if action.expected_symbols:
+        sym_result = verify_symbols(attempt_py, list(action.expected_symbols), run=_run)
+        if not sym_result["verified"]:
+            return _fail("symbol_missing", f"symbols not importable: {sym_result['missing']}")
+
+    git_run = git if git is not None else _run
+    sha_res = git_run(["git", "-C", str(worktree_dir), "rev-parse", "--short", "HEAD"],
+                      capture_output=True, text=True, timeout=30)
+    commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
+
+    installed_versions = {
+        "torch": abi.get("torch_version", ""),
+        "vllm_ref": ref,
+        "vllm_sha": commit_sha,
+        "arch": gpu_arch,
+        "hip_version": abi.get("hip_version", ""),
+    }
+    artifact_hashes = hash_artifacts(list(built_paths))
+
+    # vLLM source overlay: prepend the worktree so the attempt venv's vllm wins.
+    runtime = FrameworkRuntime(
+        pythonpath_prefixes=(str(worktree_dir),),
+        entrypoint_bin_dir=str(venv_dir / "bin") if venv_dir else "",
+        runtime_env={"PYTORCH_ROCM_ARCH": gpu_arch},
+        source_root=str(worktree_dir),
+        attempt_root=str(root),
+    )
+    return BuildResult(
+        ok=True,
+        attempt_root=str(root),
+        runtime=runtime,
+        built_artifacts=built_paths,
+        installed_versions=installed_versions,
+        build_log_path=str(build_log),
+        failure_class="ok",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Off-loop driver entrypoint
 # ---------------------------------------------------------------------------
 
@@ -585,6 +1012,8 @@ def _driver_main(argv: list[str] | None = None) -> int:
     dispatcher = {
         "aiter": run_aiter_build,
         "framework_ext": run_aiter_build,
+        "sgl_kernel": run_sgl_kernel_build,
+        "vllm_source": run_vllm_source_build,
     }
     recipe = dispatcher.get(action.component)
     if recipe is None:
@@ -631,5 +1060,7 @@ __all__ = [
     "kill_build_pgroup",
     "poll_build",
     "run_aiter_build",
+    "run_sgl_kernel_build",
+    "run_vllm_source_build",
     "spawn_build",
 ]
