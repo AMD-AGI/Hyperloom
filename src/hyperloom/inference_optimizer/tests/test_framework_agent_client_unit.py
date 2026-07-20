@@ -7,6 +7,8 @@ error branches, and the ``phase_discover`` request shaping."""
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,8 +17,8 @@ import pytest
 
 from hyperloom.orchestrator.framework import client as fac
 
-# Module entry point used as the environment-independent fallback command.
-_FA_MODULE = "hyperloom.agents.framework.runtime.cli"
+# Reference the resolver's own constant so the two never drift apart.
+_FA_MODULE = fac._FA_MODULE
 
 
 # -- repo_url_for_framework -----------------------------------------------
@@ -118,6 +120,23 @@ def test_run_fa_subcommand_sync_timeout(monkeypatch) -> None:
     rc, _out, err = fac._run_fa_subcommand_sync(["fa"], "phase-discover", Path("/x"), 5.0)
     assert rc == 124
     assert "timed out" in err
+
+
+def test_module_fallback_entry_starts_in_real_subprocess() -> None:
+    """Smoke: the ``python -m <module>`` fallback must actually launch and emit
+    JSON, guarding the PATH-independent path (root-cause fix for #fa-not-found)."""
+    # Pass the parent env verbatim so the child inherits any PYTHONPATH the CI
+    # relies on (a PYTHONPATH=src runner would otherwise ModuleNotFoundError).
+    proc = subprocess.run(
+        [sys.executable, "-m", _FA_MODULE, "schema"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=os.environ.copy(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert "schema" in payload.get("subcommands_available", [])
 
 
 # -- _invoke_fa_phase ------------------------------------------------------

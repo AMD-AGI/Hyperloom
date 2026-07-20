@@ -81,7 +81,7 @@ def _run_fa_subcommand_sync(
 
     Returns:
         A ``(returncode, stdout, stderr)`` tuple; failures map to ``127``
-        (missing binary) or ``124`` (timeout).
+        (command not found) or ``124`` (timeout).
     """
     cmd = [*cmd_prefix, subcommand, "--request", str(request_path), "--out", "-"]
     try:
@@ -93,7 +93,7 @@ def _run_fa_subcommand_sync(
             check=False,
         )
     except FileNotFoundError as exc:
-        return 127, "", f"fa binary not found: {exc!r}"
+        return 127, "", f"fa command not found (prefix={cmd_prefix!r}): {exc!r}"
     except subprocess.TimeoutExpired as exc:
         return 124, "", f"fa {subcommand} timed out after {timeout_sec}s: {exc!r}"
     return cp.returncode, cp.stdout, cp.stderr
@@ -109,8 +109,7 @@ async def _invoke_fa_phase(
     """Generic async runner for ``fa phase-*`` subcommands.
 
     Writes ``request`` as temp JSON, runs the subcommand, returns parsed
-    JSON. Raises :class:`RuntimeError` on missing binary / non-zero exit /
-    parse failure.
+    JSON. Raises :class:`RuntimeError` on non-zero exit / parse failure.
 
     Args:
         subcommand: The ``fa phase-*`` subcommand to run.
