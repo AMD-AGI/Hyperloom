@@ -5,7 +5,6 @@
 
 import os
 import sys
-import shutil
 import re
 
 # -- Path setup --------------------------------------------------------------
