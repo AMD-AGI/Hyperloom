@@ -1913,7 +1913,9 @@ class PolicyGate:
                 rule="specialist_gpu_request_invalid",
             )
         ceiling = gpu_specialist_ceiling(self.shared_state)
-        if ceiling <= 0:
+        if ceiling <= 0 and not (
+            uses_whole_machine_gpu_lane(params) and _whole_machine_pool_size() > 0
+        ):
             raise PolicyDenied(
                 "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",
                 rule="specialist_gpu_pool_disabled",
