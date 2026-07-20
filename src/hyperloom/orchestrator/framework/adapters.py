@@ -236,6 +236,60 @@ class BaseAdapter:
         """
         return result.ok
 
+    def build_localization_action(
+        self,
+        gap: CapabilityGap,
+        *,
+        framework: str,
+        model: str,
+        candidate_ref: str,
+        repo_url: str,
+    ) -> EnablementStackAction | None:
+        """Build a Rung 4 (M2) code-localization action, or None (unsupported).
+
+        Args:
+            gap: The projected capability gap.
+            framework: Target framework name.
+            model: Model id/path being enabled.
+            candidate_ref: A discovered merged-PR ref (e.g. ``"PR:1234"`` or a
+                PR html_url).
+            repo_url: Origin-allowlisted repo URL to localize from.
+
+        Returns:
+            EnablementStackAction | None: A ``pr_backport`` action, or None when
+            the adapter cannot localize (base/null default).
+        """
+        return None
+
+    def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
+        """Return the argv that re-installs an editable checkout, or None.
+
+        Args:
+            venv_python: The attempt-venv interpreter.
+            checkout: Path to the editable source checkout.
+
+        Returns:
+            list[str] | None: A ``pip install -e`` argv, or None when the tree
+            is a plain (non-editable) install that needs no refresh.
+        """
+        return None
+
+
+def _pr_number_from_ref(candidate_ref: str) -> int:
+    """Parse a PR number from a ``"PR:1234"`` ref or a PR html_url; 0 if absent."""
+    ref = str(candidate_ref or "").strip()
+    if not ref:
+        return 0
+    if ref.upper().startswith("PR:"):
+        tail = ref.split(":", 1)[1].strip()
+        return int(tail) if tail.isdigit() else 0
+    # .../pull/1234 (optionally with a trailing segment).
+    parts = [p for p in ref.rstrip("/").split("/") if p]
+    for i, seg in enumerate(parts):
+        if seg == "pull" and i + 1 < len(parts) and parts[i + 1].isdigit():
+            return int(parts[i + 1])
+    return int(parts[-1]) if parts and parts[-1].isdigit() else 0
+
 
 class NullAdapter(BaseAdapter):
     """Adapter for unknown / unsupported frameworks: never supports, never raises."""
@@ -293,6 +347,42 @@ class _VenvProvisionMixin(BaseAdapter):
             argv += ["-e", editable]
         argv += list(specs)
         return self._run(argv, dict(os.environ), None)
+
+    def build_localization_action(
+        self,
+        gap: CapabilityGap,
+        *,
+        framework: str,
+        model: str,
+        candidate_ref: str,
+        repo_url: str,
+    ) -> EnablementStackAction | None:
+        """Build a pr_backport localization from a merged-PR ref (origin-allowlisted)."""
+        if not self.supports(gap):
+            return None
+        pr_number = _pr_number_from_ref(candidate_ref)
+        if not repo_url or pr_number <= 0:
+            return None
+        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
+        if origin_allow and not _is_allowlisted(repo_url, origin_allow):
+            log.warning("%s: repo_url %r not in origin allowlist", type(self).__name__, repo_url)
+            return None
+        return EnablementStackAction(
+            kind="pr_backport",
+            framework=self.framework,
+            gap_id=f"gap.enablement.{gap.kind}",
+            capability=gap.kind,
+            reason=f"{self.framework} PR backport #{pr_number} for {gap.kind}",
+            acquisition_method="none",
+            repo_url=repo_url,
+            pr_number=pr_number,
+        )
+
+    def editable_refresh_argv(self, venv_python: str, checkout: str) -> list[str] | None:
+        """Re-install the editable checkout so localized Python changes take effect."""
+        if not venv_python or not checkout:
+            return None
+        return [str(venv_python), "-m", "pip", "install", "-e", str(checkout), "--no-deps"]
 
 
 class VllmRocmAdapter(_VenvProvisionMixin):
@@ -510,13 +600,46 @@ class SglangAdapter(_VenvProvisionMixin):
 
 
 class AtomAdapter(BaseAdapter):
-    """Atom adapter: unsupported for runtime acquisition in this plan."""
+    """Atom adapter: no runtime acquisition (M1), but Python localization (M2).
+
+    Atom is a wheel-installed (non-git) tree; a Python-only PR backport localizes
+    via the executor's no-git apply. There is no editable refresh (importlib
+    picks up the file changes on the next boot).
+    """
 
     framework = "atom"
 
+    def build_localization_action(
+        self,
+        gap: CapabilityGap,
+        *,
+        framework: str,
+        model: str,
+        candidate_ref: str,
+        repo_url: str,
+    ) -> EnablementStackAction | None:
+        """Build a pr_backport localization (applied via no-git; no refresh)."""
+        if not gap.requires_code_acquisition or gap.kind == RESOURCE_CONSTRAINT:
+            return None
+        pr_number = _pr_number_from_ref(candidate_ref)
+        if not repo_url or pr_number <= 0:
+            return None
+        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
+        if origin_allow and not _is_allowlisted(repo_url, origin_allow):
+            return None
+        return EnablementStackAction(
+            kind="pr_backport",
+            framework="atom",
+            gap_id=f"gap.enablement.{gap.kind}",
+            capability=gap.kind,
+            reason=f"atom PR backport #{pr_number} for {gap.kind}",
+            repo_url=repo_url,
+            pr_number=pr_number,
+        )
+
 
 class XditAdapter(BaseAdapter):
-    """xDiT adapter: unsupported for runtime acquisition in this plan."""
+    """xDiT adapter: unsupported for runtime acquisition and localization here."""
 
     framework = "xdit"
 
