@@ -1,0 +1,205 @@
+# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Behavior-lock tests for ``materialize_config_with_envs``: golden snapshots of
+the real materialized YAML, plus RUN_EVAL warn-once and unset/extra_envs restore."""
+
+from __future__ import annotations
+
+import yaml
+
+from hyperloom.orchestrator.actions.executors import _workload_envs as we
+
+# Env names that leak process state into the materialized YAML. Cleared so the
+# golden snapshots stay deterministic regardless of the runner's environment.
+_LEAKY_ENV = (
+    "TP",
+    "EP",
+    "ISL",
+    "OSL",
+    "CONC",
+    "MAX_MODEL_LEN",
+    "PRECISION",
+    "RANDOM_RANGE_RATIO",
+    "ROCR_VISIBLE_DEVICES",
+    "RUN_EVAL",
+    "PROFILE",
+    "MODEL_PATH",
+    "INFERENCEX_PATH",
+    "PORT",
+    "PROFILE_OSL",
+    "HYPERLOOM_PROFILE_MAX_ITERS",
+    "HYPERLOOM_PROFILE_DELAY_ITERS",
+    "HYPERLOOM_PROFILE_MAX_STEPS_CAP",
+    "INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT",
+    "INFERENCE_OPTIMIZER_SERVER_ARGS",
+    "XDIT_QUALITY_REF",
+    "XDIT_QUALITY_REF_WRITE",
+)
+
+
+def _isolate(monkeypatch):
+    for k in _LEAKY_ENV:
+        monkeypatch.delenv(k, raising=False)
+    # Pin the two knobs that would otherwise depend on the host (GPU count and
+    # runtime patching), keeping the golden output byte-stable.
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+
+
+def _write(path, bench):
+    path.write_text(yaml.safe_dump({"benchmark": bench}), encoding="utf-8")
+    return path
+
+
+# ── golden YAML snapshots ───────────────────────────────────────────────────
+
+_GOLDEN_SGLANG_BASELINE = """\
+benchmark:
+  envs:
+    TP: 1
+    ROCR_VISIBLE_DEVICES: '0'
+    NUM_PROMPTS: 320
+    NUM_WARMUPS: 8
+    EXTRA_SGLANG_ARGS: --variant 4 --watchdog-timeout 1800
+    MAGPIE_TRUST_REMOTE_CODE: '1'
+    BENCH_TRUST_REMOTE_CODE: '1'
+    HF_HUB_TRUST_REMOTE_CODE: '1'
+    RUN_EVAL: 'true'
+  framework: sglang
+  model: /models/foo
+"""
+
+_GOLDEN_VLLM = """\
+benchmark:
+  envs:
+    TP: 1
+    ROCR_VISIBLE_DEVICES: '0'
+    NUM_PROMPTS: 320
+    NUM_WARMUPS: 8
+    EXTRA_VLLM_ARGS: --max-num-seqs 256
+    MAGPIE_TRUST_REMOTE_CODE: '1'
+    BENCH_TRUST_REMOTE_CODE: '1'
+    HF_HUB_TRUST_REMOTE_CODE: '1'
+    RUN_EVAL: 'true'
+  framework: vllm
+  model: /models/bar
+"""
+
+_GOLDEN_PROFILE = """\
+benchmark:
+  envs:
+    PROFILE: '1'
+    CONC: 64
+    ISL: 1024
+    OSL: 1024
+    TP: 1
+    ROCR_VISIBLE_DEVICES: '0'
+    PROFILE_EXTRA_BODY: '{"start_step": 6080, "num_steps": 128, "shape_discovery":
+      true, "roofline_annotations": true}'
+    NUM_PROMPTS: 776
+    NUM_WARMUPS: 8
+    EXTRA_SGLANG_ARGS: --watchdog-timeout 1800
+    MAGPIE_TRUST_REMOTE_CODE: '1'
+    BENCH_TRUST_REMOTE_CODE: '1'
+    HF_HUB_TRUST_REMOTE_CODE: '1'
+    RUN_EVAL: 'true'
+  framework: sglang
+  model: /models/foo
+"""
+
+
+def test_golden_sglang_baseline(monkeypatch, tmp_path):
+    _isolate(monkeypatch)
+    src = _write(tmp_path / "sglang.yaml", {"framework": "sglang", "model": "/models/foo", "envs": {}})
+    res = we.materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        extra_server_args="--variant 4",
+        args_mode="append",
+    )
+    assert res.read_text(encoding="utf-8") == _GOLDEN_SGLANG_BASELINE
+
+
+def test_golden_vllm(monkeypatch, tmp_path):
+    _isolate(monkeypatch)
+    src = _write(tmp_path / "vllm.yaml", {"framework": "vllm", "model": "/models/bar", "envs": {}})
+    res = we.materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        extra_server_args="--max-num-seqs 256",
+    )
+    assert res.read_text(encoding="utf-8") == _GOLDEN_VLLM
+
+
+def test_golden_profile_mode(monkeypatch, tmp_path):
+    _isolate(monkeypatch)
+    monkeypatch.setenv("ISL", "1024")
+    monkeypatch.setenv("OSL", "1024")
+    monkeypatch.setenv("CONC", "64")
+    # PROFILE is read from benchmark.envs (YAML), not the process env: the loop
+    # that copies process env into envs does not include PROFILE.
+    src = _write(tmp_path / "profile.yaml", {"framework": "sglang", "model": "/models/foo", "envs": {"PROFILE": "1"}})
+    res = we.materialize_config_with_envs(src, tmp_path / "out")
+    assert res.read_text(encoding="utf-8") == _GOLDEN_PROFILE
+
+
+# ── RUN_EVAL warn-once-per-process semantics ────────────────────────────────
+
+
+def test_run_eval_disabled_warns_only_once_per_process(monkeypatch, tmp_path, caplog):
+    _isolate(monkeypatch)
+    monkeypatch.setenv("RUN_EVAL", "false")
+    # Module-level global gates the warning; reset so this test owns the "once".
+    monkeypatch.setattr(we, "_RUN_EVAL_DISABLED_WARN_EMITTED", False)
+    src = _write(tmp_path / "cfg.yaml", {"framework": "sglang", "model": "/m", "envs": {}})
+    with caplog.at_level("WARNING", logger=we.log.name):
+        we.materialize_config_with_envs(src, tmp_path / "o1")
+        we.materialize_config_with_envs(src, tmp_path / "o2")
+    hits = [r for r in caplog.records if "RUN_EVAL is disabled" in r.message]
+    assert len(hits) == 1
+    assert we._RUN_EVAL_DISABLED_WARN_EMITTED is True
+
+
+def test_run_eval_disabled_no_warn_when_already_emitted(monkeypatch, tmp_path, caplog):
+    _isolate(monkeypatch)
+    monkeypatch.setenv("RUN_EVAL", "false")
+    # Simulate a process that already warned: the flag is set before the call.
+    monkeypatch.setattr(we, "_RUN_EVAL_DISABLED_WARN_EMITTED", True)
+    src = _write(tmp_path / "cfg.yaml", {"framework": "sglang", "model": "/m", "envs": {}})
+    with caplog.at_level("WARNING", logger=we.log.name):
+        we.materialize_config_with_envs(src, tmp_path / "o1")
+    hits = [r for r in caplog.records if "RUN_EVAL is disabled" in r.message]
+    assert hits == []
+
+
+# ── unset_envs then restore-from-extra_envs semantics ───────────────────────
+
+
+def test_unset_env_restored_from_extra_envs(monkeypatch, tmp_path):
+    _isolate(monkeypatch)
+    # KEEP exists in the YAML base, is overridden by extra_envs, then named in
+    # unset_envs. The final restore loop re-injects the extra_envs value.
+    src = _write(tmp_path / "cfg.yaml", {"framework": "sglang", "model": "/m", "envs": {"KEEP": "base"}})
+    res = we.materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        extra_envs={"KEEP": "from_extra"},
+        unset_envs="KEEP",
+    )
+    envs = yaml.safe_load(res.read_text())["benchmark"]["envs"]
+    assert envs["KEEP"] == "from_extra"
+
+
+def test_unset_env_dropped_when_not_in_extra_envs(monkeypatch, tmp_path):
+    _isolate(monkeypatch)
+    # KEEP is only in the YAML base and named in unset_envs with no extra_envs
+    # entry, so it is popped and never restored.
+    src = _write(tmp_path / "cfg.yaml", {"framework": "sglang", "model": "/m", "envs": {"KEEP": "base"}})
+    res = we.materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        unset_envs="KEEP",
+    )
+    envs = yaml.safe_load(res.read_text())["benchmark"]["envs"]
+    assert "KEEP" not in envs

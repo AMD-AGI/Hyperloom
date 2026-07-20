@@ -777,6 +777,140 @@ def _extract_patches_from_prs_tested(
         ctx["blocked_patches"] = blocked
 
 
+def _build_t0_trace_extras(
+    shared_state: Any,
+    *,
+    extra: "Mapping[str, Any]",
+    fp: "Mapping[str, Any]",
+    image_digest: str,
+    model_class: str,
+) -> dict[str, Any]:
+    """Assemble operator-traceability + workload-shape tags for the recipe extras (skip empty/zero)."""
+    _extras: dict[str, Any] = {}
+    if model_class:
+        _extras["model_class"] = model_class
+    _architectures = getattr(shared_state, "model_architectures", None) or []
+    if isinstance(_architectures, list):
+        _arch_list = [str(a).strip() for a in _architectures if str(a or "").strip()]
+        if _arch_list:
+            _extras["architectures"] = _arch_list
+    _model_type = str(getattr(shared_state, "model_type", "") or "").strip()
+    if _model_type:
+        _extras["model_type"] = _model_type
+    rocm_v = str(fp.get("rocm") or "").strip()
+    if rocm_v and rocm_v != "unknown":
+        _extras["rocm_version"] = rocm_v
+    aiter_v = str(fp.get("aiter") or "").strip()
+    if aiter_v and aiter_v != "unknown":
+        _extras["aiter_version"] = aiter_v
+    if image_digest and image_digest != "unknown":
+        _extras["image_digest"] = str(image_digest).strip()
+    for src_key in ("claw_session_id", "sandbox_user_id"):
+        v = str(extra.get(src_key) or "").strip()
+        if v:
+            _extras[src_key] = v
+    for src_attr, dst_key in (
+        ("tp", "tp"),
+        ("ep", "ep"),
+        ("conc", "conc"),
+        ("isl", "isl"),
+        ("osl", "osl"),
+        ("max_model_len", "max_model_len"),
+    ):
+        v = getattr(shared_state, src_attr, None)
+        if v not in (None, "", 0):
+            _extras[dst_key] = v
+    if "ep" not in _extras:
+        raw_ep = (os.environ.get("EP") or "").strip()
+        try:
+            n = int(raw_ep) if raw_ep else 0
+        except ValueError:
+            n = 0
+        if n > 0:
+            _extras["ep"] = n
+    raw_pp = (os.environ.get("PP") or "").strip()
+    try:
+        pp_n = int(raw_pp) if raw_pp else 0
+    except ValueError:
+        pp_n = 0
+    if pp_n > 0:
+        _extras["pp"] = pp_n
+    return _extras
+
+
+def _cascade_warm_start_search(
+    kb: "RecipeKB",
+    *,
+    cid: str,
+    hw: str,
+    framework: str,
+    model_type_val: str,
+    architectures_val: Any,
+    arch_slug: str,
+    fw_version: str,
+    precision: str,
+    warm_prefer: Any,
+) -> "tuple[dict[str, Any], str, float]":
+    """Resolve the warm-start recipe via the L1-L4 cascade (exact 1.0 / same-arch
+    0.95 / any-version 0.5 / relative 0.3); returns ``(warm_point, tier, conf)``."""
+    warm_point: dict[str, Any] = {}
+    warm_tier = "miss"
+    warm_conf = 0.0
+    # L1: full 7-tuple exact
+    try:
+        row = kb.get_recipe(canonical_id=cid, prefer=warm_prefer or None)
+    except Exception as exc:  # noqa: BLE001
+        log.info("warm-start L1 get_recipe non-fatal failure: %s", exc)
+        row = None
+    if isinstance(row, dict) and row and str(row.get("canonical_id") or "") == cid:
+        return row, "exact", 1.0
+    # L2: drop model — same (hw+fw+model_type+arch+fwv+prec)
+    if model_type_val or architectures_val:
+        l2_labels = {
+            "hardware": hw,
+            "framework": framework or "",
+            "model_type": model_type_val,
+            "architectures": arch_slug,
+            "framework_version": fw_version or "",
+            "precision": precision or "",
+        }
+        l2_labels = {k: v for k, v in l2_labels.items() if v and v not in ("unknown_model_type", "unknown_arch")}
+        try:
+            l2_rows = kb.search(label_match=l2_labels, limit=5)
+        except Exception:  # noqa: BLE001
+            l2_rows = []
+        for r in l2_rows or []:
+            if str(r.get("canonical_id") or "") == cid:
+                continue
+            if _recipe_is_actionable(r):
+                return r, "same_arch_class", 0.95
+
+    # L3: drop model + framework_version → (hw+fw+model_type+arch+prec)
+    if not warm_point and (model_type_val or architectures_val):
+        l3_labels = {
+            "hardware": hw,
+            "framework": framework or "",
+            "model_type": model_type_val,
+            "architectures": arch_slug,
+            "precision": precision or "",
+        }
+        l3_labels = {k: v for k, v in l3_labels.items() if v and v not in ("unknown_model_type", "unknown_arch")}
+        try:
+            l3_rows = kb.search(label_match=l3_labels, limit=5)
+        except Exception:  # noqa: BLE001
+            l3_rows = []
+        for r in l3_rows or []:
+            if str(r.get("canonical_id") or "") == cid:
+                continue
+            if _recipe_is_actionable(r):
+                return r, "same_arch_any_version", 0.5
+
+    # L4: if L1 returned a non-exact row (dispatcher relative match)
+    if not warm_point and isinstance(row, dict) and row:
+        return row, "relative", 0.3
+    return warm_point, warm_tier, warm_conf
+
+
 def run_t0_anchor(
     kb: RecipeKB,
     shared_state: Any,
@@ -873,56 +1007,13 @@ def run_t0_anchor(
     if not _fw_version and _framework:
         _fw_version = detect_framework_version(_framework)
 
-    # Operator-traceability + workload-shape tags into ``extras`` (skip empty/zero).
-    _extras: dict[str, Any] = {}
-    if _model_class:
-        _extras["model_class"] = _model_class
-    _architectures = getattr(shared_state, "model_architectures", None) or []
-    if isinstance(_architectures, list):
-        _arch_list = [str(a).strip() for a in _architectures if str(a or "").strip()]
-        if _arch_list:
-            _extras["architectures"] = _arch_list
-    _model_type = str(getattr(shared_state, "model_type", "") or "").strip()
-    if _model_type:
-        _extras["model_type"] = _model_type
-    rocm_v = str(fp.get("rocm") or "").strip()
-    if rocm_v and rocm_v != "unknown":
-        _extras["rocm_version"] = rocm_v
-    aiter_v = str(fp.get("aiter") or "").strip()
-    if aiter_v and aiter_v != "unknown":
-        _extras["aiter_version"] = aiter_v
-    if image_digest and image_digest != "unknown":
-        _extras["image_digest"] = str(image_digest).strip()
-    for src_key in ("claw_session_id", "sandbox_user_id"):
-        v = str(_extra.get(src_key) or "").strip()
-        if v:
-            _extras[src_key] = v
-    for src_attr, dst_key in (
-        ("tp", "tp"),
-        ("ep", "ep"),
-        ("conc", "conc"),
-        ("isl", "isl"),
-        ("osl", "osl"),
-        ("max_model_len", "max_model_len"),
-    ):
-        v = getattr(shared_state, src_attr, None)
-        if v not in (None, "", 0):
-            _extras[dst_key] = v
-    if "ep" not in _extras:
-        raw_ep = (os.environ.get("EP") or "").strip()
-        try:
-            n = int(raw_ep) if raw_ep else 0
-        except ValueError:
-            n = 0
-        if n > 0:
-            _extras["ep"] = n
-    raw_pp = (os.environ.get("PP") or "").strip()
-    try:
-        pp_n = int(raw_pp) if raw_pp else 0
-    except ValueError:
-        pp_n = 0
-    if pp_n > 0:
-        _extras["pp"] = pp_n
+    _extras = _build_t0_trace_extras(
+        shared_state,
+        extra=_extra,
+        fp=fp,
+        image_digest=image_digest,
+        model_class=_model_class,
+    )
 
     # Build canonical_id from the resolved 7-tuple.
     _model_type_val = str(getattr(shared_state, "model_type", "") or "").strip()
@@ -1043,69 +1134,18 @@ def run_t0_anchor(
 
     _arch_slug = _architectures_slug(_architectures_val)
 
-    # L1: full 7-tuple exact
-    try:
-        row = kb.get_recipe(canonical_id=cid, prefer=warm_prefer or None)
-    except Exception as exc:  # noqa: BLE001
-        log.info("warm-start L1 get_recipe non-fatal failure: %s", exc)
-        row = None
-    if isinstance(row, dict) and row and str(row.get("canonical_id") or "") == cid:
-        warm_point = row
-        warm_tier = "exact"
-        warm_conf = 1.0
-    else:
-        # L2: drop model — same (hw+fw+model_type+arch+fwv+prec)
-        if _model_type_val or _architectures_val:
-            l2_labels = {
-                "hardware": hw,
-                "framework": _framework or "",
-                "model_type": _model_type_val,
-                "architectures": _arch_slug,
-                "framework_version": _fw_version or "",
-                "precision": _precision or "",
-            }
-            l2_labels = {k: v for k, v in l2_labels.items() if v and v not in ("unknown_model_type", "unknown_arch")}
-            try:
-                l2_rows = kb.search(label_match=l2_labels, limit=5)
-            except Exception:  # noqa: BLE001
-                l2_rows = []
-            for r in l2_rows or []:
-                if str(r.get("canonical_id") or "") == cid:
-                    continue
-                if _recipe_is_actionable(r):
-                    warm_point = r
-                    warm_tier = "same_arch_class"
-                    warm_conf = 0.95
-                    break
-
-        # L3: drop model + framework_version → (hw+fw+model_type+arch+prec)
-        if not warm_point and (_model_type_val or _architectures_val):
-            l3_labels = {
-                "hardware": hw,
-                "framework": _framework or "",
-                "model_type": _model_type_val,
-                "architectures": _arch_slug,
-                "precision": _precision or "",
-            }
-            l3_labels = {k: v for k, v in l3_labels.items() if v and v not in ("unknown_model_type", "unknown_arch")}
-            try:
-                l3_rows = kb.search(label_match=l3_labels, limit=5)
-            except Exception:  # noqa: BLE001
-                l3_rows = []
-            for r in l3_rows or []:
-                if str(r.get("canonical_id") or "") == cid:
-                    continue
-                if _recipe_is_actionable(r):
-                    warm_point = r
-                    warm_tier = "same_arch_any_version"
-                    warm_conf = 0.5
-                    break
-
-        # L4: if L1 returned a non-exact row (dispatcher relative match)
-        if not warm_point and isinstance(row, dict) and row:
-            warm_point = row
-            warm_tier = "relative"
-            warm_conf = 0.3
+    warm_point, warm_tier, warm_conf = _cascade_warm_start_search(
+        kb,
+        cid=cid,
+        hw=hw,
+        framework=_framework,
+        model_type_val=_model_type_val,
+        architectures_val=_architectures_val,
+        arch_slug=_arch_slug,
+        fw_version=_fw_version,
+        precision=_precision,
+        warm_prefer=warm_prefer,
+    )
 
     # A bare T0 anchor (no best_config) demotes to seed_only.
     if warm_point and not _recipe_is_actionable(warm_point):
