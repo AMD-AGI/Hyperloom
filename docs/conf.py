@@ -92,3 +92,5 @@ extensions = [
 html_title = f"{project} {version_number} documentation"
 
 external_projects_current_project = "Hyperloom"
+
+exclude_patterns = ['.venv']
