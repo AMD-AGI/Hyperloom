@@ -226,6 +226,42 @@ def _extract_pr_number(text: str) -> str:
     return m.group(1) if m else ""
 
 
+def _norm_ref(r: str) -> str:
+    """Normalize a candidate ref to ``PR:<n>`` when it is a bare number or PR URL."""
+    r = str(r or "").strip()
+    if not r:
+        return ""
+    if r.startswith("PR:"):
+        return r
+    # tolerate a full PR URL or bare number
+    if r.isdigit():
+        return f"PR:{r}"
+    if "/pull/" in r:
+        tail = r.rstrip("/").rsplit("/pull/", 1)[-1].split("/")[0]
+        if tail.isdigit():
+            return f"PR:{tail}"
+    return r
+
+
+def _resolve_search_modes(request: dict[str, Any]) -> "tuple[list[str], dict[str, Any]]":
+    """Resolve discovery search modes + primus block from request / env
+    (gbrain_pr_kb prepended when configured, primus_cortex on URL, GitHub always)."""
+    primus_url = str(request.get("primus_cortex_url") or os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
+    if primus_url:
+        search_modes = ["primus_cortex", "github"]
+        primus_block: dict[str, Any] = {"primus_cortex": {"base_url": primus_url}}
+    else:
+        search_modes = ["github"]
+        primus_block = {}
+    pr_kb_enabled = (os.environ.get("PR_KB_ENABLE", "1") or "1").strip() != "0"
+    pr_kb_configured = bool(
+        (os.environ.get("GBRAIN_BASE_URL", "") or "").strip() and (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
+    )
+    if pr_kb_enabled and pr_kb_configured and "gbrain_pr_kb" not in search_modes:
+        search_modes = ["gbrain_pr_kb", *search_modes]
+    return search_modes, primus_block
+
+
 def _candidate_excluded_by_memory(
     *,
     pr_url: str,
@@ -272,11 +308,8 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
          "failed_candidate_context": [{"ref", "status", "gain_pct", "why"},
              ...] (optional; same-PR numbers are de-prioritised to a drop)}
 
-    Output shape:
-        {"batch_id": str, "framework": str, "excluded_count": int,
-         "candidates": [{"pr_url", "repo", "ref", "pr_number", "title",
-                          "summary", "score", "prior_score", "diff_url",
-                          "gap_canonical_id"}, ...]}
+    Writes a JSON batch (``batch_id`` + ``candidates`` + discovery metadata) to
+    ``args.out``; see ``emit_json`` below for the authoritative field set.
 
     Args:
         args (argparse.Namespace): Parsed CLI args with ``request`` and ``out``.
@@ -322,21 +355,6 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
         .lower()
     )
 
-    def _norm_ref(r: str) -> str:
-        r = str(r or "").strip()
-        if not r:
-            return ""
-        if r.startswith("PR:"):
-            return r
-        # tolerate a full PR URL or bare number
-        if r.isdigit():
-            return f"PR:{r}"
-        if "/pull/" in r:
-            tail = r.rstrip("/").rsplit("/pull/", 1)[-1].split("/")[0]
-            if tail.isdigit():
-                return f"PR:{tail}"
-        return r
-
     forced_refs: list[str] = []
     if forced_repo_scope and forced_repo_scope not in repo_url.strip().lower():
         # Queried repo out of scope for the forced refs; skip.
@@ -362,24 +380,7 @@ def _cmd_phase_discover(args: argparse.Namespace) -> None:
                     excluded_pr_numbers.add(n)
     excluded_count = 0
 
-    # Enable the primus_cortex mode only when a URL is available; GitHub
-    # (anonymous, best-effort) is always kept so discovery degrades gracefully.
-    primus_url = str(request.get("primus_cortex_url") or os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
-    if primus_url:
-        search_modes = ["primus_cortex", "github"]
-        primus_block: dict[str, Any] = {"primus_cortex": {"base_url": primus_url}}
-    else:
-        search_modes = ["github"]
-        primus_block = {}
-
-    # gbrain PR KB is the primary discovery backend when enabled + configured;
-    # prepend it so it ranks ahead of primus_cortex/github fallbacks.
-    pr_kb_enabled = (os.environ.get("PR_KB_ENABLE", "1") or "1").strip() != "0"
-    pr_kb_configured = bool(
-        (os.environ.get("GBRAIN_BASE_URL", "") or "").strip() and (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
-    )
-    if pr_kb_enabled and pr_kb_configured and "gbrain_pr_kb" not in search_modes:
-        search_modes = ["gbrain_pr_kb", *search_modes]
+    search_modes, primus_block = _resolve_search_modes(request)
 
     seen_refs: set[tuple[str, str]] = set()
     out_cands: list[dict[str, Any]] = []
