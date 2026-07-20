@@ -356,6 +356,42 @@ def _preflight_missing_targets(
     return records
 
 
+def _localization_paths_outside_allowlist(
+    touched_paths: list[str],
+    framework_root: Path | None,
+    allow_roots: list[str],
+) -> list[str]:
+    """Return the touched paths that resolve outside the allowed source roots.
+
+    A localization diff (M2) may only write under the source-file allowlist or
+    the attempt-local root. Paths are resolved against ``framework_root`` when
+    relative. Returns the offending paths (empty when all are in-bounds).
+
+    Args:
+        touched_paths: Repo-relative paths the localization diff touches.
+        framework_root: The tree the diff applies to (resolves relative paths).
+        allow_roots: The allowed root prefixes (allowlist + attempt-local root).
+
+    Returns:
+        list[str]: Paths that fall outside every allowed root.
+    """
+    roots = [Path(r).resolve() for r in allow_roots if str(r).strip()]
+    if framework_root is not None:
+        roots.append(Path(framework_root).resolve())
+    if not roots:
+        return []
+    outside: list[str] = []
+    for rel in touched_paths:
+        rel_s = str(rel or "").strip()
+        if not rel_s:
+            continue
+        base = framework_root if framework_root is not None else Path("/")
+        cand = (base / rel_s).resolve() if not Path(rel_s).is_absolute() else Path(rel_s).resolve()
+        if not any(_is_within(cand, root) for root in roots):
+            outside.append(rel_s)
+    return outside
+
+
 def _detect_p_level(
     framework_root: Path,
     patch_path: Path,
@@ -1161,6 +1197,13 @@ class IntegratePatchExecutor:
         if provision_early is not None:
             return provision_early
 
+        # Rung 4 (M2): localize a merged-PR / vendored closure into the source
+        # tree. Fetch happens post-Critic; a compiled/build closure defers to
+        # Rung 5 (clean revert). Localized patches are prepended in _stage_apply.
+        localize_early = await self._stage_localize_source(ctx, params, specialist_task_id)
+        if localize_early is not None:
+            return localize_early
+
         apply_result = await self._stage_apply(ctx, params, extra, specialist_task_id, shared_state, done_payload)
         if apply_result is not None:
             return apply_result
@@ -1414,6 +1457,107 @@ class IntegratePatchExecutor:
         except Exception:  # noqa: BLE001 — GC is best-effort
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
+    async def _stage_localize_source(
+        self,
+        ctx: Any,
+        params: dict[str, Any],
+        specialist_task_id: str,
+    ) -> dict[str, Any] | None:
+        """Fetch/synthesize a localization diff and stage it for _stage_apply.
+
+        Rung 4 (M2). No-op when no ``localization_candidate`` is present or in
+        multi-node mode. Fetches the merged-PR / vendored diff (post-Critic),
+        rejects a compiled / build-backend closure to Rung 5 (clean revert),
+        enforces the source-file allowlist (+ the attempt-local root only), and
+        writes the diff to a patch file recorded on ``ctx._ip_localization_patches``
+        which ``_stage_apply`` prepends to the patch set. Returns an early-exit
+        ``reverted`` dict on any gate/fetch failure (no tree mutation yet), or
+        ``None`` to continue.
+        """
+        ctx._ip_localization_patches = []  # type: ignore[attr-defined]
+        ctx._ip_localization_manifest = {}  # type: ignore[attr-defined]
+        raw = params.get("localization_candidate")
+        if not isinstance(raw, dict) or not raw:
+            return None
+
+        from ._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            log.info("integrate_patch: skipping localization in multi-node mode")
+            return None
+
+        from ...framework.localization import build_localization_diff
+        from ...framework.stack_actions import EnablementStackAction
+
+        action = EnablementStackAction.from_state(raw)
+
+        from hyperloom.agents.framework.sources import github as _gh
+
+        def _base_reverted(error_class: str, reason: str) -> dict[str, Any]:
+            return {
+                "status": "reverted",
+                "error_class": error_class,
+                "error": reason,
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "config_changes_applied": {},
+                "enablement": True,
+                "reason": reason,
+            }
+
+        try:
+            diff_text, touched_paths, verdict = build_localization_diff(
+                action,
+                fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
+                fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
+            )
+        except Exception as exc:  # noqa: BLE001 — fetch failure is a clean revert
+            log.exception("integrate_patch: localization fetch raised")
+            return _base_reverted("localization_fetch_failed", f"localization fetch raised: {exc!r}")
+
+        if not verdict.is_localizable:
+            error_class = (
+                "localization_rung5_deferred" if verdict.kind == "needs_rung5" else "localization_fetch_failed"
+            )
+            return _base_reverted(error_class, f"localization not applicable: {verdict.reason}")
+        if not diff_text.strip():
+            return _base_reverted("localization_fetch_failed", "localization produced an empty diff")
+
+        # Allowlist gate: touched paths must resolve under the source-file
+        # allowlist or the attempt-local root only (no global env mutation).
+        framework_root: Path | None = _resolve_framework_root(
+            params.get("framework_source_root") or None, patch_paths=[]
+        )
+        allow_roots = list(resolve_source_file_allowlist())
+        attempt_root = str(getattr(ctx, "_ip_attempt_venv_root", "") or "")
+        if attempt_root:
+            allow_roots.append(str(Path(attempt_root).parent))
+        outside = _localization_paths_outside_allowlist(touched_paths, framework_root, allow_roots)
+        if outside:
+            return _base_reverted(
+                "localization_outside_allowlist",
+                f"localization touches path(s) outside the allowlist: {outside[:8]}",
+            )
+
+        loc_dir = runs_dir(self.session_dir, "integrate_patch", str(getattr(ctx.task, "task_id", "") or "localize"))
+        loc_dir = loc_dir / "localization"
+        loc_dir.mkdir(parents=True, exist_ok=True)
+        gap_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", action.gap_id or "localization")
+        patch_path = loc_dir / f"{gap_slug}.patch"
+        patch_path.write_text(diff_text, encoding="utf-8")
+
+        ctx._ip_localization_patches = [patch_path]  # type: ignore[attr-defined]
+        ctx._ip_stack_action = action  # type: ignore[attr-defined]
+        ctx._ip_localization_touched = list(touched_paths)  # type: ignore[attr-defined]
+        log.info(
+            "integrate_patch: localization staged %s (%d file(s), kind=%s)",
+            patch_path,
+            len(touched_paths),
+            action.kind,
+        )
+        return None
+
     async def _stage_apply(
         self,
         ctx: Any,
@@ -1447,6 +1591,15 @@ class IntegratePatchExecutor:
             explicit_patches=(list(explicit_patches) if isinstance(explicit_patches, list) else None),
             done_payload=done_payload,
         )
+        # Rung 4 (M2): prepend localized closure patches (applied first, before
+        # this round's patch) so the enablement composes on top of the localization.
+        localization_patches = list(getattr(ctx, "_ip_localization_patches", None) or [])
+        if localization_patches:
+            seen_loc = {str(p) for p in patch_paths}
+            prefix_loc = [p for p in localization_patches if p.is_file() and str(p) not in seen_loc]
+            if prefix_loc:
+                log.info("integrate_patch: prepending %d localization patch(es)", len(prefix_loc))
+                patch_paths = prefix_loc + list(patch_paths)
         base_patches = params.get("enablement_base_patches")
         if bool(params.get("enablement")) and isinstance(base_patches, list) and base_patches:
             seen = {str(p) for p in patch_paths}
@@ -2010,7 +2163,78 @@ class IntegratePatchExecutor:
             kept_result["enablement_kept_stack_action"] = stack_action.to_state()
             kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
             kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
+        # Rung 4 (M2): editable-refresh the localized closure + snapshot a manifest
+        # that survives rearm so the closure is recorded and not re-fetched.
+        manifest = self._finalize_localization_keep(
+            ctx,
+            framework_root=framework_root,
+            specialist_task_id=specialist_task_id,
+            provision_result=provision_result,
+        )
+        if manifest:
+            kept_result["enablement_localization_manifest"] = manifest
         return _with_stash_restore(framework_root, stash_state, stash_note, kept_result)
+
+    def _finalize_localization_keep(
+        self,
+        ctx: Any,
+        *,
+        framework_root: Path | None,
+        specialist_task_id: str,
+        provision_result: Any,
+    ) -> dict[str, Any]:
+        """Editable-refresh a localized closure and snapshot its manifest (M2).
+
+        Runs the framework adapter's editable-refresh argv against the attempt
+        interpreter (best-effort; skipped when there is no attempt runtime or no
+        refresh argv), then records a localization manifest via
+        :func:`snapshot_source_layer`. Returns the manifest dict (empty when no
+        localization ran).
+        """
+        touched = list(getattr(ctx, "_ip_localization_touched", None) or [])
+        if not touched or framework_root is None:
+            return {}
+        action = getattr(ctx, "_ip_stack_action", None)
+        # Editable-refresh so localized Python changes take effect in the attempt
+        # runtime (no-op for plain wheel trees like atom).
+        try:
+            from ...framework.adapters import get_adapter
+
+            venv_py = ""
+            if provision_result is not None and getattr(provision_result, "ok", False):
+                venv_py = str(getattr(provision_result.runtime, "python_path", "") or "")
+            fw = str(getattr(action, "framework", "") or "")
+            argv = get_adapter(fw).editable_refresh_argv(venv_py, str(framework_root)) if venv_py else None
+            if argv:
+                subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)  # noqa: S603
+        except Exception:  # noqa: BLE001 — refresh is best-effort
+            log.debug("integrate_patch: localization editable-refresh failed", exc_info=True)
+        # Manifest via the existing snapshot mechanism.
+        try:
+            from ...source_snapshot import snapshot_source_layer
+
+            base_sha = ""
+            _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
+            if _cp is not None and getattr(_cp, "returncode", 1) == 0:
+                base_sha = (_cp.stdout or "").strip()
+            dest = self.session_dir / "optimization_stack" / "localization" / (specialist_task_id or "keep")
+            snap = snapshot_source_layer(
+                framework_root=framework_root,
+                base_sha=base_sha,
+                rel_paths=touched,
+                dest_dir=dest,
+                provenance="localization",
+                extra={
+                    "specialist_task_id": specialist_task_id,
+                    "kind": str(getattr(action, "kind", "") or ""),
+                    "repo_url": str(getattr(action, "repo_url", "") or ""),
+                    "pr_number": int(getattr(action, "pr_number", 0) or 0),
+                },
+            )
+            return dict(snap) if snap else {}
+        except Exception:  # noqa: BLE001 — manifest is best-effort durability
+            log.exception("integrate_patch: localization snapshot failed")
+            return {}
 
     async def _gate_perf(
         self,
