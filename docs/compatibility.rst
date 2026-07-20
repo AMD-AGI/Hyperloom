@@ -67,7 +67,7 @@ The following table lists the validated Hyperloom version and component combinat
 .. role:: version-start
 
 .. table::
-   :widths: 19 27 24 28 14 9 29
+   :widths: 19 27 20 28 14 15 5
    :align: left
    :class: compat-matrix format-big-table
 
