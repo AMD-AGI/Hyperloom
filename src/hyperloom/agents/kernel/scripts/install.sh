@@ -117,12 +117,27 @@ _compose_pythonpath() {
   done
   printf '%s' "$out"
 }
+# site-packages/dist-packages is already on the import path; keeping it off
+# PYTHONPATH avoids shadowing an isolated vLLM venv's torch (undefined symbol).
+_is_python_package_root() {
+  local p="${1%/}"
+  case "${p##*/}" in
+    site-packages | dist-packages) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# MAGPIE_PATH belongs on PYTHONPATH only for a source checkout, not a pip
+# install (site-packages, already importable).
+_magpie_pythonpath_arg() {
+  local p="${MAGPIE_PATH:-}"
+  { [ -n "$p" ] && ! _is_python_package_root "$p"; } && printf '%s' "$p"
+}
 # Keep REPO_ROOT on PYTHONPATH so subprocesses can ``import hyperloom`` under a
 # ``pip install --target $REPO_ROOT`` layout (the target dir is not on the
 # default sys.path). Put REPO_ROOT first, then MAGPIE_PATH, then any pre-existing
 # PYTHONPATH; write_env_file recomposes this the same way just before persisting
 # it, so a stale .env sourced later cannot drop REPO_ROOT.
-PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "${MAGPIE_PATH:-}" "${PYTHONPATH:-}")"
+PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "$(_magpie_pythonpath_arg)" "${PYTHONPATH:-}")"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
@@ -1020,7 +1035,7 @@ write_env_file() {
   # subprocesses would fail to ``import hyperloom`` on re-install. Rebuild here
   # (REPO_ROOT first, then MAGPIE_PATH, then any remaining entries) and drop
   # duplicates so repeated installs stay idempotent.
-  PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "${MAGPIE_PATH:-}" "${PYTHONPATH:-}")"
+  PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "$(_magpie_pythonpath_arg)" "${PYTHONPATH:-}")"
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
   {
