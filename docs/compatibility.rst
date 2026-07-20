@@ -50,7 +50,7 @@ The following table lists the minimum requirements for running Hyperloom.
 +---------------------+---------------------------------------+
 | Operating System    | Ubuntu 22.04, Ubuntu 24.04            |
 +---------------------+---------------------------------------+
-| ROCm Version        | 7.2.X                                 |
+| ROCm Version        | 7.2.x                                 |
 +---------------------+---------------------------------------+
 | Python              | >= 3.10                               |
 +---------------------+---------------------------------------+
@@ -64,19 +64,27 @@ Component support matrix
 
 The following table lists the validated Hyperloom version and component combinations.
 
+.. raw:: html
+
+   <div style="overflow-x: auto;">
+
 +-------------------+----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-| Hyperloom version | Component                  | GPU support            | ROCm version support         | OS support                 | Python  | GitHub                      |
+| Hyperloom version | Component                  | GPU                    | ROCm version support         | OS                         | Python  | GitHub                      |
 +===================+============================+========================+==============================+============================+=========+=============================+
 | 0.9.0             | `TraceLens 0.1.0`_         | N/A                    | N/A                          | N/A                        | >= 3.6  | |tracelens-github|          |
 +                   +----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-|                   | `GEAK 4.0`_                | MI300X, MI325X, MI355X | 6.4.X, 7.0.X, 7.1.X, 7.2.X   | Ubuntu 22.04, Ubuntu 24.04 | > 3.8   | |geak-github|               |
+|                   | `GEAK 4.0`_                | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x   | Ubuntu 22.04, Ubuntu 24.04 | > 3.8   | |geak-github|               |
 +                   +----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-|                   | `IntelliKit 0.1.0`_        | MI300X, MI325X, MI355X | 7.2.X                        | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |intellikit-github|         |
+|                   | `IntelliKit 0.1.0`_        | MI300X, MI325X, MI355X | 7.2.x                        | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |intellikit-github|         |
 +                   +----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-|                   | `AgentKernelArena 0.2.0`_  | MI300X, MI325X, MI355X | 7.2.X                        | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |agent-kernel-arena-github| |
+|                   | `AgentKernelArena 0.2.0`_  | MI300X, MI325X, MI355X | 7.2.x                        | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |agent-kernel-arena-github| |
 +                   +----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
-|                   | `Magpie 0.1.0`_            | MI300X, MI325X, MI355X | 7.0.X, 7.1.X, 7.2.X          | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |magpie-github|             |
+|                   | `Magpie 0.1.0`_            | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x          | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |magpie-github|             |
 +-------------------+----------------------------+------------------------+------------------------------+----------------------------+---------+-----------------------------+
+
+.. raw:: html
+
+   </div>
 
 .. _TraceLens 0.1.0: https://rocm.docs.amd.com/projects/tracelens/en/latest/
 .. _GEAK 4.0: https://rocm.docs.amd.com/projects/geak/en/latest/
