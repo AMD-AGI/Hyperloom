@@ -191,9 +191,66 @@ def rank_titles(
 # ---------------------------------------------------------------------------
 
 
-# Source-root families the authored patch may target.
+# Source-root families the authored patch may target (fallback when discovery fails).
 _FRAMEWORK_ROOT_HINT = "the serving-framework source tree (e.g. sglang / vllm / atom)"
 _ROCM_HIP_ROOT_HINT = "the ROCm / HIP / aiter source tree (/opt/rocm, aiter)"
+
+
+def _resolve_package_version(package: str) -> str:
+    """Return the installed version of *package*, or empty string on failure."""
+    try:
+        import importlib.metadata as _m
+
+        return _m.version(package)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _resolve_actual_root_hints(framework: str) -> list[str]:
+    """Return concrete source-root strings for the mandate.
+
+    Calls probe_framework_source_roots_for_env() and falls back to the generic
+    prose hints when discovery yields nothing.  Also appends version info for the
+    target framework package.
+
+    Args:
+        framework: Lower-cased framework name (e.g. ``"vllm"``).
+
+    Returns:
+        List of hint strings; never empty.
+    """
+    try:
+        from hyperloom.orchestrator.framework.paths import (
+            probe_framework_source_roots_for_env,
+            summarise_framework_root_discovery,
+        )
+
+        roots_str = probe_framework_source_roots_for_env()
+        if roots_str:
+            hints: list[str] = []
+            summary = summarise_framework_root_discovery(roots_str)
+            for root in roots_str.split(":"):
+                root = root.strip()
+                if root:
+                    hints.append(root)
+            hints.append(f"(discovery summary: {summary})")
+            pkg_map = {"sglang": "sglang", "vllm": "vllm", "xdit": "xfuser", "atom": "atom"}
+            pkg_name = pkg_map.get(framework, framework)
+            ver = _resolve_package_version(pkg_name)
+            if ver:
+                hints.append(f"({pkg_name} installed version: {ver})")
+            # Always include the ROCm/HIP root hint (authoring sub-agent always
+            # has /opt/rocm in scope for ROCm-side fixes, regardless of whether
+            # probe discovered it or not).
+            if not any(_ROCM_HIP_ROOT_HINT in h for h in hints):
+                hints.append(_ROCM_HIP_ROOT_HINT)
+            # Keep the generic framework hint as context even when real paths exist.
+            if not any(_FRAMEWORK_ROOT_HINT in h for h in hints):
+                hints.append(_FRAMEWORK_ROOT_HINT)
+            return hints
+    except Exception:  # noqa: BLE001 — discovery is best-effort
+        pass
+    return [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
 
 # Invariants every enablement patch must respect.
 ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
@@ -318,6 +375,7 @@ def build_mandate(
     signature: FailureSignature | None = None,
     candidate_refs: Sequence[str] = (),
     source_context: str = "",
+    root_hints: Sequence[str] | None = None,
 ) -> EnablementMandate:
     """Build an :class:`EnablementMandate` from a request + candidates.
 
@@ -327,13 +385,20 @@ def build_mandate(
         candidate_refs: Ranked bridging refs to suggest (best first).
         source_context: Optional source snippet near the offending site to
             ground the authoring sub-agent (best-effort; empty omits it).
+        root_hints: Explicit source-root hints; when ``None`` (default) they
+            are resolved via :func:`_resolve_actual_root_hints` (which calls
+            ``probe_framework_source_roots_for_env()`` and falls back to the
+            generic prose constants on failure).
 
     Returns:
         EnablementMandate: The authoring contract, ready to hand to the
         specialist runner.
     """
     sig = signature if signature is not None else req.signature
-    hints: list[str] = [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
+    if root_hints is not None:
+        hints: list[str] = list(root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
+    else:
+        hints = _resolve_actual_root_hints(req.framework)
     refs = tuple(r for r in candidate_refs if r)
     task = _render_task_description(req, sig, refs, hints, source_context)
     return EnablementMandate(
