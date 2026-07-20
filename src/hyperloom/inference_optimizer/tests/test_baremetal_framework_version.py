@@ -88,7 +88,10 @@ def test_version_matches_is_loose_and_rejects_empty(tmp_path: Path):
     assert out == ["v_vs_plain_MATCH", "suffix_MATCH", "diff_NO", "empty_NO"]
 
 
-def test_sglang_target_version_switches_on_python(tmp_path: Path):
+def test_sglang_target_version_empty_for_wheel_path(tmp_path: Path):
+    # The 3.10 wheel path has no comparable sglang release target (7.2.0 is the
+    # AMD ROCm PyPI index version, not the sglang package version), so it must
+    # return empty; the source path returns SGLANG_REF.
     runner = _write_runner(
         tmp_path,
         "target.sh",
@@ -96,12 +99,12 @@ def test_sglang_target_version_switches_on_python(tmp_path: Path):
             _version_helpers(),
             "SGLANG_ROCM_PYPI_VERSION=7.2.0",
             "SGLANG_REF=v0.5.12",
-            'echo "$(sglang_target_version 3.10)"',
-            'echo "$(sglang_target_version 3.12)"',
+            'echo "wheel=[$(sglang_target_version 3.10)]"',
+            'echo "source=[$(sglang_target_version 3.12)]"',
         ],
     )
     out = _run(runner).stdout.splitlines()
-    assert out == ["7.2.0", "v0.5.12"]
+    assert out == ["wheel=[]", "source=[v0.5.12]"]
 
 
 # --- sglang install decision (source path, python 3.12) ------------------------
@@ -163,6 +166,70 @@ def test_sglang_skips_when_installed_version_matches(tmp_path: Path):
     runner = _write_runner(tmp_path, "sglang-same.sh", body)
     out = _run(runner).stdout
     assert "MARKER_CONTENT:none" in out
+
+
+# --- sglang wheel path (python 3.10): import-only, no version reinstall --------
+
+
+def _sglang_wheel_runner_body(tmp_path: Path, sglang_importable: bool) -> list[str]:
+    # Stub interpreter: heredoc (`python - <<PY`) reports py_mm=3.10 to force the
+    # wheel path; any other invocation exits 0.
+    stub_py = tmp_path / "py-wheel-stub.sh"
+    stub_py.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "${1:-}" = "-" ]; then echo 3.10; exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub_py.chmod(0o755)
+    marker = tmp_path / "wheel-calls.txt"
+    # _py_has: sglang presence is parameterized; sgl_kernel/aiter present.
+    py_has = (
+        '_py_has() { case "$2" in sglang) return %d ;; *) return 0 ;; esac; }'
+        % (0 if sglang_importable else 1)
+    )
+    return [
+        _version_helpers(),
+        _sglang_framework_fn(),
+        "CHECK_ONLY=0",
+        "DRY_RUN=0",
+        "SGLANG_ROCM_EXTRA=rocm720",
+        "SGLANG_ROCM_PYPI_VERSION=7.2.0",
+        "SGLANG_REF=v0.5.12",
+        "AITER_REF=",
+        "_AITER_REF_WAS_SET=",
+        "AITER_REPO=https://example.invalid/aiter.git",
+        "SGLANG_REPO=https://example.invalid/sglang.git",
+        f"MARKER={marker}",
+        "log() { :; }",
+        "warn() { :; }",
+        'die() { echo "DIE:$*" >&2; exit 42; }',
+        f'resolve_python() {{ echo "{stub_py}"; }}',
+        f'framework_deps_root() {{ echo "{tmp_path}/deps"; }}',
+        py_has,
+        'installed_dist_version() { echo 0.5.12; }',
+        'install_sglang_from_wheel() { echo wheel >> "$MARKER"; }',
+        'install_sglang_from_source() { echo source >> "$MARKER"; }',
+        'install_compatible_aiter() { :; }',
+        "install_sglang_framework",
+        'echo "MARKER_CONTENT:$(cat "$MARKER" 2>/dev/null || echo none)"',
+    ]
+
+
+def test_sglang_wheel_path_skips_when_importable(tmp_path: Path):
+    # Regression: the 3.10 wheel path must NOT reinstall when sglang is already
+    # importable (previously it compared 0.5.12 vs 7.2.0 and reinstalled always).
+    body = _sglang_wheel_runner_body(tmp_path, sglang_importable=True)
+    runner = _write_runner(tmp_path, "wheel-import.sh", body)
+    out = _run(runner).stdout
+    assert "MARKER_CONTENT:none" in out
+
+
+def test_sglang_wheel_path_installs_when_missing(tmp_path: Path):
+    body = _sglang_wheel_runner_body(tmp_path, sglang_importable=False)
+    runner = _write_runner(tmp_path, "wheel-missing.sh", body)
+    out = _run(runner).stdout
+    assert "MARKER_CONTENT:wheel" in out
 
 
 # --- vllm install decision (shared env, python 3.12) ---------------------------

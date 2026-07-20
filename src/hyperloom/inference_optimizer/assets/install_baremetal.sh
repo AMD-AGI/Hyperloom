@@ -431,15 +431,14 @@ version_matches() {
   [ -n "$a" ] && [ -n "$b" ] && [ "$a" = "$b" ]
 }
 
-# Target sglang version depends on install path: the AMD wheel path pins
-# SGLANG_ROCM_PYPI_VERSION, the source path pins SGLANG_REF (a git tag).
+# Comparable sglang release target. Only the source path has one: SGLANG_REF is
+# the sglang release tag. The 3.10 wheel path pins an AMD ROCm PyPI index version
+# (e.g. 7.2.0), which is not the sglang package version, so it has no comparable
+# target and returns empty (callers then fall back to an import-only check).
 sglang_target_version() {
   local py_mm="$1"
-  if [ "$py_mm" = "3.10" ]; then
-    printf '%s' "$SGLANG_ROCM_PYPI_VERSION"
-  else
-    printf '%s' "$SGLANG_REF"
-  fi
+  [ "$py_mm" = "3.10" ] && return 0
+  printf '%s' "$SGLANG_REF"
 }
 
 torch_required_triton_version() {
@@ -632,6 +631,9 @@ PY
     co_current="$(installed_dist_version "$py" sglang 2>/dev/null || true)"
     if ! _py_has "$py" sglang; then
       warn "sglang missing (check-only; would install amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}])"
+    elif [ -z "$co_target" ]; then
+      # Wheel path (3.10): no comparable sglang release target to check against.
+      log "sglang ${co_current:-present} import OK"
     elif version_matches "$co_current" "$co_target"; then
       log "sglang ${co_current} matches target ${co_target}"
     else
@@ -663,14 +665,23 @@ PY
     return 0
   fi
 
-  local sglang_target sglang_current
+  local sglang_target sglang_current sglang_skip=0
   sglang_target="$(sglang_target_version "$py_mm")"
   sglang_current="$(installed_dist_version "$py" sglang 2>/dev/null || true)"
-  if _py_has "$py" sglang && _py_has "$py" sgl_kernel \
-     && version_matches "$sglang_current" "$sglang_target"; then
-    log "sglang ${sglang_current} already matches target ${sglang_target}; skipping amd-sglang install"
-  else
-    if _py_has "$py" sglang && [ -n "$sglang_current" ]; then
+  if _py_has "$py" sglang && _py_has "$py" sgl_kernel; then
+    if [ -z "$sglang_target" ]; then
+      # Wheel path (Python 3.10): no comparable sglang release target, so an
+      # importable install is treated as satisfied (avoids a forced reinstall
+      # that would first uninstall and could leave sglang broken on failure).
+      sglang_skip=1
+      log "sglang ${sglang_current:-present} + sgl_kernel importable; skipping amd-sglang install"
+    elif version_matches "$sglang_current" "$sglang_target"; then
+      sglang_skip=1
+      log "sglang ${sglang_current} already matches target ${sglang_target}; skipping install"
+    fi
+  fi
+  if [ "$sglang_skip" -eq 0 ]; then
+    if [ -n "$sglang_target" ] && _py_has "$py" sglang && [ -n "$sglang_current" ]; then
       log "sglang ${sglang_current} differs from target ${sglang_target}; reinstalling"
     fi
     if [ "$py_mm" = "3.10" ]; then
