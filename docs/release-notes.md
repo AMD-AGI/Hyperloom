@@ -1,13 +1,13 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 0.8.0, including the agentic optimization loop, multi-agent runtime, TraceLens integration, and session artifacts."
+    "description": "Hyperloom release notes: headline capabilities for version 0.9.0, including the agentic optimization loop, multi-agent runtime, TraceLens integration, and session artifacts."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is `0.8.0` (`pyproject.toml`). For the
+The current packaged version is `0.9.0` (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
