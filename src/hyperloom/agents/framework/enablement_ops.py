@@ -343,6 +343,89 @@ ENABLEMENT_BUILD_REQUEST_GUIDANCE: tuple[str, ...] = (
 )
 
 
+_LADDER_TWO_AXES: tuple[str, ...] = (
+    "DIAGNOSE ONCE, THEN CLIMB ONLY AS FAR AS NEEDED. Enablement has two axes:",
+    "  - Diagnosis: work out WHICH capability layer is missing. Read the failure "
+    "signature below, read the model's config.json architecture, check the "
+    "framework's supported-architecture registry and installed version, and check "
+    "upstream (WebSearch / mcp__pr_monitor__*) whether the capability already "
+    "exists and in which version/PR. This picks your ENTRY rung.",
+    "  - Climb: start at the LOWEST plausible rung and go up only when the current "
+    "rung cannot make it boot. A model whose architecture is already supported but "
+    "merely un-wired needs only the cheap top rungs (a flag / a small patch) — do "
+    "NOT pull code or compile for it. A genuinely-new architecture climbs higher.",
+    "After each cleared boot failure, RE-DIAGNOSE the new (deeper) failure and pick "
+    "a rung again — enablement is serial and progress is stacked.",
+)
+
+_LADDER_RUNGS: tuple[str, ...] = (
+    "Rung 0 - Diagnose / capability-gap localization (read-only): classify the "
+    "failure, read config.json, check the supported-arch registry + version, look "
+    "up upstream. Output: the missing layer and your chosen entry rung.",
+    "Rung 1 - Serve-flag / config wire-up: the architecture is supported and only a "
+    "serve flag / env / tokenizer-mode / trivial registration alias is missing. No "
+    "new code or dependencies.",
+    "Rung 2 - In-tree source patch: a unified diff against the INSTALLED source tree "
+    "— register the arch, a small forward/config/tokenizer bridge, or backport a "
+    "merged PR. Pure Python, no compile.",
+    "Rung 3 - Attempt-scoped runtime: the capability lives in a DIFFERENT version — "
+    "acquire a wheel / editable checkout / ref into an isolated per-attempt venv. No "
+    "compile, no shared-venv mutation (record it in setup_commands).",
+    "Rung 4 - Source localization: localize a merged-PR / vendored closure into the "
+    "source root; changes touching compiled or build-backend files defer to Rung 5.",
+    "Rung 5 - Off-loop compiled build: AITER / sgl-kernel / vLLM-from-source, built "
+    "in an isolated venv with pinned ROCm torch constraints on the off-loop build "
+    "lane. Request it via needs_targeted_build (see below); do not compile inline.",
+)
+
+_LADDER_KIND_TO_RUNG: tuple[str, ...] = (
+    "serve_flag / tokenizer_error -> Rung 1",
+    "missing_model_arch (pure registration) / capability_disabled -> Rung 2",
+    "missing_model_arch / missing_weight (absent here, present in another version) -> Rung 3",
+    "import_error / merged-PR closure -> Rung 4",
+    "hip_kernel_missing / native unsupported_dtype / missing compiled symbol -> Rung 5",
+    "resource_constraint (OOM / GPU count) -> NOT a code gap; cannot be patched",
+)
+
+
+def build_enablement_ladder_book(signature: FailureSignature | None = None) -> str:
+    """Render the advisory enablement methodology (the "ladder book").
+
+    Prose only: the two axes (diagnose once / climb as needed), the Rung 0-5
+    ladder, an advisory ``kind -> recommended entry rung`` table, and the folded
+    environment-setup / incremental-progress / targeted-build guidance. When a
+    ``signature`` is given, a one-line entry-rung hint is added; it never routes
+    deterministically.
+    """
+    lines: list[str] = ["ENABLEMENT METHODOLOGY (advisory — you decide how to apply it):", ""]
+    lines.extend(_LADDER_TWO_AXES)
+    lines.append("")
+    lines.append("THE LADDER (increasing complexity — enter at the lowest rung that fits):")
+    for rung in _LADDER_RUNGS:
+        lines.append(f"  - {rung}")
+    lines.append("")
+    lines.append("FAILURE-KIND -> RECOMMENDED ENTRY RUNG (advisory, not a hard mapping):")
+    for m in _LADDER_KIND_TO_RUNG:
+        lines.append(f"  - {m}")
+    kind = (getattr(signature, "kind", "") or "").strip() if signature is not None else ""
+    if kind:
+        lines.append("")
+        lines.append(f"This failure classified as `{kind}` — use the table above to pick your entry rung.")
+    lines.append("")
+    lines.append("ENVIRONMENT SETUP (installs are allowed AND must be recorded):")
+    for g in ENABLEMENT_SETUP_GUIDANCE:
+        lines.append(f"  - {g}")
+    lines.append("")
+    lines.append("PROGRESS DELIVERABLE (serial enablement — advancing the boot one step counts):")
+    for g in ENABLEMENT_PROGRESS_GUIDANCE:
+        lines.append(f"  - {g}")
+    lines.append("")
+    lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
+    for g in ENABLEMENT_BUILD_REQUEST_GUIDANCE:
+        lines.append(f"  - {g}")
+    return "\n".join(lines)
+
+
 @dataclass(frozen=True)
 class EnablementMandate:
     """A fully-specified authoring task for the enablement specialist.
@@ -417,17 +500,7 @@ def _render_task_description(
     for hint in allowed_root_hints:
         lines.append(f"  - {hint}")
     lines.append("")
-    lines.append("ENVIRONMENT SETUP (installs are allowed AND must be recorded):")
-    for g in ENABLEMENT_SETUP_GUIDANCE:
-        lines.append(f"  - {g}")
-    lines.append("")
-    lines.append("PROGRESS DELIVERABLE (serial enablement — advancing the boot one step counts):")
-    for g in ENABLEMENT_PROGRESS_GUIDANCE:
-        lines.append(f"  - {g}")
-    lines.append("")
-    lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
-    for g in ENABLEMENT_BUILD_REQUEST_GUIDANCE:
-        lines.append(f"  - {g}")
+    lines.append(build_enablement_ladder_book(sig))
     lines.append("")
     lines.append("INVARIANTS:")
     for inv in ENABLEMENT_PATCH_INVARIANTS:
@@ -485,6 +558,7 @@ __all__ = [
     "ENABLEMENT_SETUP_GUIDANCE",
     "EnablementMandate",
     "EnablementSearchPlan",
+    "build_enablement_ladder_book",
     "build_mandate",
     "build_search_plan",
     "rank_titles",

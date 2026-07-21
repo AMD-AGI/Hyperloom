@@ -15,6 +15,7 @@ from hyperloom.agents.framework.enablement import EnablementRequest, classify_fa
 from hyperloom.agents.framework.enablement_ops import (
     ENABLEMENT_PATCH_INVARIANTS,
     ENABLEMENT_SETUP_GUIDANCE,
+    build_enablement_ladder_book,
     build_mandate,
     build_search_plan,
     rank_titles,
@@ -106,6 +107,55 @@ def test_source_context_omitted_when_empty() -> None:
     """No SOURCE CONTEXT block is rendered when context is empty/blank."""
     mandate = build_mandate(_req(), source_context="   ")
     assert "SOURCE CONTEXT" not in mandate.task_description
+
+
+# --- authoring: ladder book ------------------------------------------------
+
+
+def test_ladder_book_renders_all_six_rungs() -> None:
+    """The book names every rung 0-5 of the escalation ladder."""
+    book = build_enablement_ladder_book()
+    for rung in ("Rung 0", "Rung 1", "Rung 2", "Rung 3", "Rung 4", "Rung 5"):
+        assert rung in book, f"missing {rung}"
+
+
+def test_ladder_book_states_two_axes() -> None:
+    """The book teaches the diagnose-once / climb-as-needed mental model."""
+    book = build_enablement_ladder_book()
+    assert "DIAGNOSE ONCE" in book
+    assert "climb" in book.lower()
+
+
+def test_ladder_book_carries_kind_to_rung_table() -> None:
+    """The advisory kind->rung entry table is present."""
+    book = build_enablement_ladder_book()
+    assert "RECOMMENDED ENTRY RUNG" in book
+    assert "serve_flag" in book
+    assert "hip_kernel_missing" in book
+    assert "resource_constraint" in book
+
+
+def test_ladder_book_folds_setup_progress_and_build_guidance() -> None:
+    """The three former guidance blocks are folded into the book."""
+    book = build_enablement_ladder_book()
+    assert "ENVIRONMENT SETUP" in book
+    assert "PROGRESS DELIVERABLE" in book
+    assert "TARGETED BUILD" in book
+    assert "needs_targeted_build" in book
+
+
+def test_ladder_book_personalizes_from_signature_kind() -> None:
+    """A signature adds an advisory entry-rung hint naming its kind."""
+    sig = classify_failure("ValueError: Model architecture 'Glm5ForCausalLM' is not supported")
+    book = build_enablement_ladder_book(sig)
+    assert "missing_model_arch" in book
+
+
+def test_mandate_embeds_ladder_book() -> None:
+    """The rendered mandate now carries the ladder methodology."""
+    td = build_mandate(_req()).task_description
+    assert "ENABLEMENT METHODOLOGY" in td
+    assert "Rung 5" in td
 
 
 # --- discovery: build_search_plan + ranking --------------------------------
