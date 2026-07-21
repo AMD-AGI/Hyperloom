@@ -50,6 +50,42 @@ def _write_pidfile(session_dir: Path, tag: str, pid: int) -> Path:
     return pidfile
 
 
+def _spawn_dead_leader_with_live_child(tmp_path: Path, marker: str) -> tuple[int, int]:
+    """Return ``(leader_pid, child_pid)`` where child remains in leader's pgid."""
+    info = tmp_path / "child.json"
+    leader_script = tmp_path / "leader.py"
+    leader_script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import subprocess",
+                "import sys",
+                f"p = subprocess.Popen([sys.executable, '-c', {('import time; _=' + repr(marker) + '; time.sleep(120)')!r}])",
+                f"open({str(info)!r}, 'w').write(json.dumps({{'child_pid': p.pid}}))",
+                "sys.exit(0)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    leader = subprocess.Popen(
+        [sys.executable, str(leader_script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    leader_pid = leader.pid
+    leader.wait(timeout=5)
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if info.exists():
+            import json
+
+            child_pid = int(json.loads(info.read_text(encoding="utf-8"))["child_pid"])
+            return leader_pid, child_pid
+        time.sleep(0.05)
+    raise AssertionError("leader did not write child pid")
+
+
 def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path):
     """A live server whose cmdline matches is reaped and its pidfile removed."""
     proc = _spawn_marker_process("sglang.launch_server")
@@ -111,3 +147,24 @@ def test_reap_dead_pid_clears_stale_pidfile(tmp_path):
 
     assert proc.pid not in reaped
     assert not pidfile.exists()
+
+
+def test_reap_kills_group_when_recorded_leader_exited_but_child_survives(tmp_path):
+    """The real leak shape: setsid leader exits, child remains in its pgid."""
+    leader_pid, child_pid = _spawn_dead_leader_with_live_child(tmp_path, "sglang.launch_server")
+    pidfile = _write_pidfile(tmp_path, "sglang_8888", leader_pid)
+    try:
+        reaped = reap_orphaned_servers(tmp_path)
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and _pid_alive(child_pid):
+            time.sleep(0.05)
+
+        assert leader_pid in reaped
+        assert not _pid_alive(child_pid)
+        assert not pidfile.exists()
+    finally:
+        try:
+            os.kill(child_pid, 9)
+        except OSError:
+            pass

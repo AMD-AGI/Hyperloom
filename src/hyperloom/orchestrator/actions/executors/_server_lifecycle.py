@@ -281,9 +281,10 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
     a recycled pid are both left untouched. Best-effort and never raises (safe
     to call unconditionally at boot); a no-op for a fresh session.
 
-    A pidfile pointing at a dead pid is removed. A pidfile pointing at a live
-    pid whose cmdline does NOT match is left in place so a later pass can
-    re-evaluate it.
+    A pidfile pointing at a dead pid is removed only after its process group is
+    also gone; if the leader exited but server children still occupy the group,
+    the group is reaped. A pidfile pointing at a live pid whose cmdline does NOT
+    match is left in place so a later pass can re-evaluate it.
 
     Args:
         session_dir: The current session directory whose ``runs/`` subtree is
@@ -309,16 +310,21 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
             continue
         try:
             server_pid = int(parts[0])
-            server_pgid = int(parts[1]) if len(parts) > 1 else server_pid
+            recorded_pgid = int(parts[1]) if len(parts) > 1 else server_pid
         except ValueError:
             _unlink_quietly(pid_file)
             continue
 
-        if not _pid_alive_simple(server_pid):
-            # Stale pidfile from a fully-exited server; just clean it up.
-            _unlink_quietly(pid_file)
-            continue
-        if not _looks_like_server_process(server_pid):
+        pid_alive = _pid_alive_simple(server_pid)
+        if pid_alive:
+            try:
+                server_pgid = os.getpgid(server_pid)
+            except OSError:
+                server_pgid = recorded_pgid
+        else:
+            server_pgid = recorded_pgid
+
+        if pid_alive and not _looks_like_server_process(server_pid):
             # Live pid but not one of our servers (pid reuse): do not touch the
             # process; leave the pidfile for a later re-evaluation.
             log.info(
@@ -327,6 +333,11 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
                 server_pid,
                 pid_file,
             )
+            continue
+        if not pid_alive and not _process_group_alive(server_pgid):
+            # Stale pidfile from a fully-exited server tree; just clean it up.
+            _unlink_quietly(pid_file)
+            _unlink_quietly(pid_file.with_suffix(".json"))
             continue
 
         _signal_group(server_pgid, signal.SIGTERM)
