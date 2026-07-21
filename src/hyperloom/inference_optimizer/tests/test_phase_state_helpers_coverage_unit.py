@@ -13,16 +13,7 @@ import pytest
 from hyperloom.orchestrator.phases import machine_state as ps
 
 
-def test_is_pause_specialist_hint() -> None:
-    prefix = ps.ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX
-    assert ps.is_pause_specialist_hint(prefix + "serving_specialist") is True
-    assert ps.is_pause_specialist_hint(prefix) is False  # no domain suffix
-    assert ps.is_pause_specialist_hint("something_else") is False
-
-
 def test_is_valid_escalate_hint() -> None:
-    prefix = ps.ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX
-    assert ps.is_valid_escalate_hint(prefix + "kernel_switch_specialist") is True
     assert ps.is_valid_escalate_hint("not-a-real-hint") is False
     # at least one vocab member should validate
     some_vocab = next(iter(ps.ESCALATE_HINT_VOCAB))

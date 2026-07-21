@@ -1524,17 +1524,6 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        try:
-            self.shared_state.bump_specialist_domain_empty_streak(
-                domain,
-                empty=is_empty,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "specialist bookkeeping: bump_specialist_domain_empty_streak failed for task=%s",
-                task.task_id,
-            )
-
         # Per-anchor coverage ledger: every specialist completion is
         # one "round" — tick all anchors, then zero the one that just ran so a
         # long-idle domain's counter climbs until the hard-trigger forces it.

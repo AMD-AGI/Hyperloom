@@ -371,15 +371,6 @@ async def test_escalate_extend_kernel_budget(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_escalate_pause_specialist(coord: Coordinator) -> None:
-    await coord._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate("pause_specialist_kernel"),
-    )
-    assert coord.shared_state.last_consumed_escalate_hint == "pause_specialist_kernel"
-
-
-@pytest.mark.asyncio
 async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
     await coord._handle_escalate_strategy_change(
         "orchestration",

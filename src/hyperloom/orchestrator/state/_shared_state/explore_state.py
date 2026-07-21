@@ -94,30 +94,6 @@ class _ExploreStateMixin:
         if len(self.specialist_rounds) > cap:
             self.specialist_rounds = self.specialist_rounds[-cap:]
 
-    def bump_specialist_domain_empty_streak(
-        self,
-        domain: str,
-        *,
-        empty: bool,
-    ) -> int:
-        """Increment/reset the per-domain empty-proposal streak; returns new value.
-
-        Args:
-            domain (str): The specialist domain; blank normalizes to
-                ``"unknown"``.
-            empty (bool): ``True`` to increment the streak, ``False`` to reset
-                it to zero.
-
-        Returns:
-            int: The post-update streak value for the domain.
-        """
-        d = str(domain or "").strip() or "unknown"
-        if empty:
-            self.specialist_domain_empty_streak[d] = int(self.specialist_domain_empty_streak.get(d, 0) or 0) + 1
-        else:
-            self.specialist_domain_empty_streak[d] = 0
-        return self.specialist_domain_empty_streak[d]
-
     def bump_domain_round_counters(self) -> None:
         """Increment both per-anchor round counters for every knowledge-domain
         anchor. Called once per EXPLORE round so a long-idle domain's counters

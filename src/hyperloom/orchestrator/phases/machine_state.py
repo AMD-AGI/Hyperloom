@@ -586,7 +586,6 @@ ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
-ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX: str = "pause_specialist_"
 
 # ``skip_to_sweep`` is the non-terminal "exhausted the current lever" signal:
 # from EXPLORE it advances to KERNEL, from KERNEL it winds down to SWEEP → CLOSE.
@@ -605,40 +604,16 @@ ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05  # +5 percentage points per hint
 ESCALATE_HINT_BUDGET_BUMP_CAP: float = 0.80  # absolute ceiling
 
 
-# True when a hint string is structurally a pause-specialist directive.
-def is_pause_specialist_hint(hint: str) -> bool:
-    """Return True when ``hint`` is a ``pause_specialist_<domain>`` directive.
-
-    Recognizes the structural shape only: the hint must start with
-    :data:`ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX` and carry a non-empty
-    suffix (the domain key). Whether that suffix is a valid domain is
-    validated by the Coordinator handler, not here, so this module stays
-    pure.
-
-    Args:
-        hint (str): Candidate escalate hint string; stripped before check.
-
-    Returns:
-        bool: True when the hint has the pause-specialist prefix plus a
-        non-empty domain suffix.
-    """
-    h = (hint or "").strip()
-    return h.startswith(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX) and len(h) > len(
-        ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
-    )
-
-
 def is_valid_escalate_hint(hint: str) -> bool:
-    """Return True for any hint Coordinator should act on (closed vocab + ``pause_specialist_<domain>``).
+    """Return True for any hint Coordinator should act on (closed vocab).
 
     Args:
         hint (str): Candidate escalate hint string; stripped before comparison.
 
     Returns:
-        bool: True when ``hint`` is in :data:`ESCALATE_HINT_VOCAB` or is a
-        structural ``pause_specialist_<domain>`` directive.
+        bool: True when ``hint`` is in :data:`ESCALATE_HINT_VOCAB`.
     """
-    return (hint or "").strip() in ESCALATE_HINT_VOCAB or is_pause_specialist_hint(hint)
+    return (hint or "").strip() in ESCALATE_HINT_VOCAB
 
 
 def apply_escalate_budget_bump(
@@ -2453,7 +2428,6 @@ __all__ = [
     "ESCALATE_HINT_BUDGET_BUMP_DELTA",
     "ESCALATE_HINT_EXTEND_EXPLORE_BUDGET",
     "ESCALATE_HINT_EXTEND_KERNEL_BUDGET",
-    "ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX",
     "ESCALATE_HINT_SKIP_TO_CLOSE",
     "ESCALATE_HINT_SKIP_TO_KERNEL",
     "ESCALATE_HINT_SKIP_TO_SWEEP",
@@ -2505,7 +2479,6 @@ __all__ = [
     "is_action_allowed_in_phase",
     "is_action_llm_proposable_in_phase",
     "llm_proposable_actions_for",
-    "is_pause_specialist_hint",
     "is_valid_escalate_hint",
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",

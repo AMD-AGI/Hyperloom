@@ -967,7 +967,6 @@ def test_build_empty_specialist_done_is_R3_valid():
 def test_shared_state_specialist_rounds_default_empty():
     s = SharedState()
     assert s.specialist_rounds == []
-    assert s.specialist_domain_empty_streak == {}
     assert s.last_specialist == {}
     assert s.research_lane_capacity == 1
     assert s.rounds_since_last_specialist == {}
@@ -1069,18 +1068,6 @@ def test_record_specialist_round_dedup_by_round_id():
     assert len(s.specialist_rounds) == 2
     by_round = {r["round_id"]: r for r in s.specialist_rounds}
     assert by_round["explore-001"]["proposals_total"] == 5
-
-
-def test_bump_specialist_domain_empty_streak():
-    s = SharedState()
-    assert s.bump_specialist_domain_empty_streak("serving_specialist", empty=True) == 1
-    assert s.bump_specialist_domain_empty_streak("serving_specialist", empty=True) == 2
-    # A non-empty proposal_set resets.
-    assert s.bump_specialist_domain_empty_streak("serving_specialist", empty=False) == 0
-    # Other domains don't share state.
-    assert s.bump_specialist_domain_empty_streak("kernel_switch_specialist", empty=True) == 1
-    assert s.specialist_domain_empty_streak["serving_specialist"] == 0
-    assert s.specialist_domain_empty_streak["kernel_switch_specialist"] == 1
 
 
 def test_update_last_specialist_snapshot():
