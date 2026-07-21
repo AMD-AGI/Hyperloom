@@ -1288,6 +1288,25 @@ async def run_grid(
             restart_server_for_round,
         )
 
+        # Preserve this variant's server rank logs on shared wekafs (under the
+        # variant slot) so a mid-benchmark server death survives the next
+        # round's restart, which otherwise overwrites the pod-local /tmp default
+        # before the crash site can be inspected. Opt out with
+        # HYPERLOOM_MN_PRESERVE_SERVER_LOGS=0.
+        _mn_server_log_dir: str | None = None
+        if os.environ.get("HYPERLOOM_MN_PRESERVE_SERVER_LOGS", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            try:
+                _sld = slot / "server_logs"
+                _sld.mkdir(parents=True, exist_ok=True)
+                _mn_server_log_dir = str(_sld)
+            except OSError as _sld_exc:  # noqa: BLE001 - best-effort diagnostics
+                log.warning("grid_runner: could not create per-variant server_logs dir: %r", _sld_exc)
+
         try:
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
@@ -1301,6 +1320,7 @@ async def run_grid(
                 unset_env=[str(k) for k in getattr(variant, "unset_envs", []) or [] if str(k).strip()],
                 model_path=model_path,
                 ep=int(os.environ.get("EP") or 0) or None,
+                server_log_dir=_mn_server_log_dir,
             )
         except ServerRestartFailed as exc:
             log.warning(
@@ -1767,6 +1787,63 @@ def _safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 
+# Known server-death signatures scanned in the preserved rank logs so a
+# failure snapshot flags the crash class at a glance.
+_SERVER_DEATH_MARKERS = (
+    "Memory access fault",
+    "scheduler died",
+    "Fatal Python error",
+    "Aborted",
+    "HIP error",
+    "CUDA error",
+    "out of memory",
+    "OutOfMemory",
+    "watchdog",
+    "Connection refused",
+)
+# Bounded per-rank-log tail so the snapshot never slurps a multi-GB log.
+_SERVER_LOG_TAIL_BYTES = 16_384
+
+
+def _snapshot_variant_server_logs(slot: Path) -> None:
+    """Fold preserved per-variant server rank-log tails into one snapshot file.
+
+    ``restart_server_for_round`` writes each round's ``rank_*.log`` under
+    ``slot/server_logs`` (shared wekafs), so a mid-benchmark server death
+    survives the next round's restart. This reads a bounded tail of each and
+    writes ``slot/server_death_snapshot.txt`` (prefixed with any matched
+    death markers) so a crash is visible without hunting pod-local ``/tmp``.
+    Best-effort; never raises.
+
+    Args:
+        slot (Path): Variant slot directory (contains ``server_logs``).
+    """
+    try:
+        src = slot / "server_logs"
+        logs = sorted(src.glob("rank_*.log")) if src.is_dir() else []
+        if not logs:
+            return
+        sections: list[str] = []
+        hits: set[str] = set()
+        for path in logs:
+            try:
+                with path.open("rb") as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - _SERVER_LOG_TAIL_BYTES))
+                    tail = f.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            hits.update(m for m in _SERVER_DEATH_MARKERS if m in tail)
+            sections.append(f"===== {path.name} (last {_SERVER_LOG_TAIL_BYTES}B) =====\n{tail}")
+        if not sections:
+            return
+        header = f"death_markers={sorted(hits)}\n\n" if hits else "death_markers=[] (no known crash signature)\n\n"
+        (slot / "server_death_snapshot.txt").write_text(header + "\n\n".join(sections), encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001 - snapshot is best-effort diagnostics
+        log.warning("_grid_runner: failed to write server_death_snapshot.txt at %s: %s", slot, exc)
+
+
 def _write_variant_abort_marker(
     slot: Path,
     *,
@@ -1809,6 +1886,9 @@ def _write_variant_abort_marker(
             slot,
             exc,
         )
+    # Fold the preserved per-variant server rank logs into a single failure
+    # snapshot so a mid-benchmark server death is captured alongside the reason.
+    _snapshot_variant_server_logs(slot)
 
 
 __all__ = [

@@ -406,6 +406,7 @@ async def restart_server_for_round(
     health_timeout_s: int = DEFAULT_HEALTH_TIMEOUT_S,
     poll_interval_s: int = 6,
     force_full_restart: bool = False,
+    server_log_dir: str | None = None,
 ) -> None:
     """Restart the multi-node inference server for the next Magpie round.
 
@@ -639,7 +640,11 @@ async def restart_server_for_round(
                 ep=ep_int,
                 extra_args=extra_server_args or "",
                 pid_file=None,
-                log_file=None,
+                # When set (per-variant grid path on shared wekafs), the launcher
+                # writes rank_*.log there so each variant's server logs survive
+                # the next round's restart (which otherwise overwrites the
+                # pod-local /tmp default) and are readable from the sandbox.
+                log_file=server_log_dir or None,
                 no_wait_health=False,
                 print_logs=False,
                 poll_interval=poll_interval_s,
