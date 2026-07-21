@@ -462,11 +462,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # ``enablement_build_manifest``: repo/ref/sha -> artifact -> hash records.
     # ``enablement_last_build_failure``: failure_class + failure_summary (framework channel §9).
     # ``enablement_build_novelty``: compact repeat-vs-novel ledger (D6).
+    # ``enablement_candidate_refs``: discovered candidate ref strings (ranked best-first).
     pending_targeted_build: dict = field(default_factory=dict)
     enablement_build_actions: list = field(default_factory=list)
     enablement_build_manifest: list = field(default_factory=list)
     enablement_last_build_failure: dict = field(default_factory=dict)
     enablement_build_novelty: list = field(default_factory=list)
+    enablement_candidate_refs: list = field(default_factory=list)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.

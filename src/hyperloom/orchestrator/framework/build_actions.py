@@ -71,6 +71,8 @@ class TargetedBuildAction:
         server_args: Extra server args routed to ``EXTRA_{FW}_ARGS``.
         envs: Extra structured build env.
         attempt_root: ``$SESSION_DIR/enablement/builds/<attempt_id>``.
+        source_pr_url: Source PR URL that drove the ref choice (provenance; does
+            not affect :func:`build_novelty_key`).
     """
 
     gap_id: str
@@ -91,6 +93,7 @@ class TargetedBuildAction:
     server_args: str = ""
     envs: Mapping[str, str] = field(default_factory=dict)
     attempt_root: str = ""
+    source_pr_url: str = ""
 
     def to_state(self) -> dict[str, Any]:
         """Serialize to a plain dict for task params / shared state."""
@@ -113,6 +116,7 @@ class TargetedBuildAction:
             "server_args": self.server_args,
             "envs": dict(self.envs),
             "attempt_root": self.attempt_root,
+            "source_pr_url": self.source_pr_url,
         }
 
     @classmethod
@@ -159,6 +163,7 @@ class TargetedBuildAction:
             server_args=str(d.get("server_args") or ""),
             envs=envs,
             attempt_root=str(d.get("attempt_root") or ""),
+            source_pr_url=str(d.get("source_pr_url") or ""),
         )
 
 
@@ -245,6 +250,48 @@ def build_novelty_key(action: TargetedBuildAction) -> tuple[str, str, str, tuple
     return (action.component, action.ref, action.gpu_arch, tuple(action.build_command))
 
 
+import re as _re
+
+_GITHUB_PR_RE = _re.compile(r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)", _re.IGNORECASE)
+_PR_REF_RE = _re.compile(r"^PR:(\d+)$")
+
+
+def resolve_build_ref(candidate: str, default_repo_url: str) -> tuple[str, str, str]:
+    """Resolve a discovered candidate string to ``(repo_url, ref, source_pr_url)``.
+
+    Handles the three forms discovery produces:
+    - ``https://github.com/{owner}/{repo}/pull/{n}`` → PR ref with full provenance.
+    - ``PR:{n}`` bare ref → PR ref against ``default_repo_url``.
+    - plain tag/branch/sha → verbatim ref against ``default_repo_url``.
+    - any other URL → ``("", "", "")`` (skip; cannot derive a checkoutable ref).
+
+    Args:
+        candidate: The candidate ref string from discovery.
+        default_repo_url: Repo URL to use when the candidate carries no origin.
+
+    Returns:
+        ``(repo_url, ref, source_pr_url)`` — all empty strings on skip.
+    """
+    s = candidate.strip()
+    if not s:
+        return ("", "", "")
+
+    m = _GITHUB_PR_RE.match(s)
+    if m:
+        slug, number = m.group(1), m.group(2)
+        repo_url = f"https://github.com/{slug}"
+        return (repo_url, f"PR:{number}", s)
+
+    if _PR_REF_RE.match(s):
+        number = s.split(":", 1)[1]
+        return (default_repo_url, f"PR:{number}", "")
+
+    if "://" in s or s.startswith("git@"):
+        return ("", "", "")
+
+    return (default_repo_url, s, "")
+
+
 __all__ = [
     "FAILURE_CLASSES",
     "BuildResult",
@@ -252,4 +299,5 @@ __all__ = [
     "TargetedBuildAction",
     "build_novelty_key",
     "normalize_failure_class",
+    "resolve_build_ref",
 ]

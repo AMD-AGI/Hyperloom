@@ -1144,6 +1144,8 @@ class FrameworkPhase(PhaseHandler):
             n = len(candidate_refs)
             k = attempt % n
             candidate_refs = candidate_refs[k:] + candidate_refs[:k]
+        # Persist so _maybe_escalate_to_targeted_build can pick the top candidate.
+        state.enablement_candidate_refs = list(candidate_refs)
         source_context = self._read_enablement_source_context(signature)
         # For a weight-init failure, fold the checkpoint's ground-truth per-layer
         # weight inventory into the mandate so the loop self-corrects each retry.
@@ -4090,8 +4092,8 @@ class FrameworkPhase(PhaseHandler):
 
             # Derive novelty fields from the current failure + session context.
             # Ref and repo_url come from the existing Rung-3/4 stack action when
-            # present, otherwise defaults (framework agent will self-select via
-            # WebSearch discovery in its mandate).
+            # present; otherwise the top discovery candidate for the component is
+            # used; empty ref falls back to tag-descending autoselect.
             existing_stack = getattr(state, "enablement_kept_stack_action", None) or {}
             repo_url = str(existing_stack.get("repo_url") or "").strip()
             ref = str(existing_stack.get("ref") or "").strip()
@@ -4112,6 +4114,32 @@ class FrameworkPhase(PhaseHandler):
             else:
                 component = "aiter"
 
+            source_pr_url = ""
+            # When no operator-pinned/kept ref, try the top discovery candidate.
+            if not ref:
+                from ..framework.build_actions import resolve_build_ref
+
+                _component_hints = {
+                    "aiter": ("aiter",),
+                    "sgl_kernel": ("sglang", "sgl-kernel", "sgl_kernel"),
+                    "vllm_source": ("vllm",),
+                    "framework_ext": (),
+                }
+                hints = _component_hints.get(component, ())
+                default_repo = repo_url or ""
+                for _cand in list(getattr(state, "enablement_candidate_refs", None) or []):
+                    _repo, _ref, _pr_url = resolve_build_ref(str(_cand), default_repo)
+                    if not _ref:
+                        continue
+                    if hints:
+                        _repo_lower = (_repo or _cand).lower()
+                        if not any(h in _repo_lower for h in hints):
+                            continue
+                    repo_url = _repo or repo_url
+                    ref = _ref
+                    source_pr_url = _pr_url
+                    break
+
             action = TargetedBuildAction(
                 gap_id=f"gap.enablement.{signature.kind}",
                 framework=framework or "vllm",
@@ -4122,6 +4150,7 @@ class FrameworkPhase(PhaseHandler):
                 ref=ref,
                 gpu_arch=_derive_gpu_arch(gpu_type),
                 build_budget_sec=0,
+                source_pr_url=source_pr_url,
             )
             task_id = await self.enqueue_targeted_build(action)
             if task_id:

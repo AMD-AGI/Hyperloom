@@ -402,3 +402,76 @@ def test_build_params_failure_class_distinguishes_timeout_vs_defect():
     assert "compile_error" in notes_defect
     # The timeout note steers toward more time/smaller scope
     assert "budget" in notes_timeout.lower() or "time" in notes_timeout.lower()
+
+
+# ---------------------------------------------------------------------------
+# _maybe_escalate_to_targeted_build: discovery-driven ref selection (Gap 7)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_escalate_uses_discovery_ref_when_no_kept_ref(coord, monkeypatch):
+    """When no kept/operator ref, top matching candidate from discovery is used."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "mi300x"
+    coord.shared_state.enablement_candidate_refs = [
+        "https://github.com/ROCm/aiter/pull/77",
+    ]
+
+    await Coordinator._maybe_escalate_to_targeted_build(coord, "hipErrorNoBinaryForGpu")
+
+    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
+    assert len(queued) == 1
+    action = TargetedBuildAction.from_state(queued[0].params)
+    assert action.ref == "PR:77"
+    assert "aiter" in action.repo_url.lower()
+    assert action.source_pr_url == "https://github.com/ROCm/aiter/pull/77"
+
+
+@pytest.mark.asyncio
+async def test_escalate_kept_ref_short_circuits_discovery(coord, monkeypatch):
+    """When a kept stack action has a ref, discovery candidates are ignored."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "mi300x"
+    coord.shared_state.enablement_kept_stack_action = {
+        "ref": "v0.99.0",
+        "repo_url": "https://github.com/ROCm/aiter",
+    }
+    coord.shared_state.enablement_candidate_refs = [
+        "https://github.com/ROCm/aiter/pull/77",
+    ]
+
+    await Coordinator._maybe_escalate_to_targeted_build(coord, "hipErrorNoBinaryForGpu")
+
+    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
+    assert len(queued) == 1
+    action = TargetedBuildAction.from_state(queued[0].params)
+    assert action.ref == "v0.99.0"
+    assert action.source_pr_url == ""
+
+
+@pytest.mark.asyncio
+async def test_escalate_skips_candidate_with_wrong_component_repo(coord, monkeypatch):
+    """aiter component only accepts candidates whose repo contains 'aiter'."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "mi300x"
+    coord.shared_state.enablement_candidate_refs = [
+        "https://github.com/sgl-project/sglang/pull/5",  # wrong repo for aiter
+    ]
+
+    await Coordinator._maybe_escalate_to_targeted_build(coord, "hipErrorNoBinaryForGpu")
+
+    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
+    assert len(queued) == 1
+    action = TargetedBuildAction.from_state(queued[0].params)
+    # Falls back to empty ref (tag autoselect) since no matching candidate
+    assert action.ref == ""
+    assert action.source_pr_url == ""

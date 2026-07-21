@@ -133,3 +133,67 @@ def test_novelty_key_novel_arch_and_command_differ():
     c = _action(ref="v1", gpu_arch="gfx942", build_command=("ninja",))
     assert build_novelty_key(a) != build_novelty_key(b)
     assert build_novelty_key(a) != build_novelty_key(c)
+
+
+# ---------------------------------------------------------------------------
+# resolve_build_ref
+# ---------------------------------------------------------------------------
+
+from hyperloom.orchestrator.framework.build_actions import resolve_build_ref
+
+
+def test_resolve_github_pr_url():
+    repo, ref, pr_url = resolve_build_ref(
+        "https://github.com/ROCm/aiter/pull/42",
+        "https://github.com/ROCm/aiter",
+    )
+    assert repo == "https://github.com/ROCm/aiter"
+    assert ref == "PR:42"
+    assert pr_url == "https://github.com/ROCm/aiter/pull/42"
+
+
+def test_resolve_github_pr_url_ignores_default_repo():
+    repo, ref, _ = resolve_build_ref(
+        "https://github.com/sgl-project/sglang/pull/7",
+        "https://github.com/ROCm/aiter",
+    )
+    assert repo == "https://github.com/sgl-project/sglang"
+    assert ref == "PR:7"
+
+
+def test_resolve_bare_pr_ref_uses_default_repo():
+    repo, ref, pr_url = resolve_build_ref("PR:123", "https://github.com/ROCm/aiter")
+    assert repo == "https://github.com/ROCm/aiter"
+    assert ref == "PR:123"
+    assert pr_url == ""
+
+
+def test_resolve_plain_tag():
+    repo, ref, pr_url = resolve_build_ref("v0.4.0", "https://github.com/ROCm/aiter")
+    assert repo == "https://github.com/ROCm/aiter"
+    assert ref == "v0.4.0"
+    assert pr_url == ""
+
+
+def test_resolve_non_pr_url_skipped():
+    repo, ref, pr_url = resolve_build_ref("https://example.com/foo", "https://github.com/ROCm/aiter")
+    assert repo == ""
+    assert ref == ""
+    assert pr_url == ""
+
+
+def test_resolve_empty_candidate_skipped():
+    assert resolve_build_ref("", "https://github.com/ROCm/aiter") == ("", "", "")
+
+
+def test_source_pr_url_round_trip():
+    a = _action(ref="PR:99", source_pr_url="https://github.com/ROCm/aiter/pull/99")
+    a2 = TargetedBuildAction.from_state(a.to_state())
+    assert a2.source_pr_url == "https://github.com/ROCm/aiter/pull/99"
+    assert a2 == a
+
+
+def test_source_pr_url_not_in_novelty_key():
+    a = _action(ref="v1", gpu_arch="gfx950", source_pr_url="https://github.com/x/y/pull/1")
+    b = _action(ref="v1", gpu_arch="gfx950", source_pr_url="")
+    assert build_novelty_key(a) == build_novelty_key(b)
