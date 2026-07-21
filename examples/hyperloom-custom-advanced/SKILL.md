@@ -1,6 +1,6 @@
 ---
 name: hyperloom-custom-advanced
-description: Run an advanced configurable Hyperloom optimization session with explicit model, framework, workload, objective, and phase toggles. Use when the user wants more control than the fixed 3h, 12h, or 24h demo presets.
+description: Run an advanced configurable Hyperloom optimization session with explicit model, framework, workload, objective, and phase toggles. Use when the user wants more control than the fixed 3h or 12h demo presets.
 ---
 
 # Hyperloom Custom Advanced Run

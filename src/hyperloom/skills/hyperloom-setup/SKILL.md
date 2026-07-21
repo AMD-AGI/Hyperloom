@@ -324,7 +324,6 @@ which option:
 
 - `3h` — short, no-kernel run. Best for a first end-to-end check.
 - `12h` — medium-length Qwen3-14B-FP8 run.
-- `24h` — long-horizon Qwen3-30B-A3B-Instruct-2507 run (long-run budget accounting: fixed per-cycle budget window).
 - `custom advanced` — user-selected model, framework, workload, budget, phase
   toggles, and advanced CLI flags.
 
@@ -349,7 +348,6 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 
 - `3h` → `hyperloom-qwen3-8b-3h`
 - `12h` → `hyperloom-qwen3-14b-fp8-12h`
-- `24h` → `hyperloom-qwen3-30b-a3b-instruct-2507-24h`
 - `custom advanced` → `hyperloom-custom-advanced`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,
