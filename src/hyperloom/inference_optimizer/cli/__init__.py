@@ -2086,6 +2086,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if not no_kernel:
         prompts["kernel_agent"] = args.kernel_prompt or _DEFAULT_KERNEL_PROMPT
     coordinator.system_prompt_overrides = prompts
+    # Cache a pure rebuild closure so the macro-cycle boundary can re-focus the
+    # orchestration prompt without reaching back into argparse. A user-supplied
+    # --orch-prompt is never clobbered.
+    import functools as _functools
+
+    coordinator._orch_prompt_is_user_supplied = bool(args.orch_prompt)
+    coordinator._rebuild_orch_prompt = _functools.partial(
+        _build_orchestration_prompt,
+        no_kernel=no_kernel,
+        no_explore=no_explore,
+        no_framework_agent=bool(getattr(args, "no_framework_agent", False)),
+        framework=framework_for_prompt,
+        objective=objective,
+        max_minutes=max_minutes_for_prompt,
+    )
     # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
     try:
         coordinator.framework_agent_discover_timeout_sec = float(

@@ -190,6 +190,68 @@ class ExplorePhase(PhaseHandler):
         lines.append("Advisory only: use this as a prior, not a dispatch gate.")
         return "\n".join(lines)
 
+    def _cycle_directive_fallback(self) -> str:
+        """Render a deterministic cycle focus from ``_plan_cycle_focus``.
+
+        Used when the LLM checkpoint produced no ``next_cycle_directive``; keeps
+        every cycle's CYCLE DIRECTIVE section grounded in real telemetry.
+        """
+        try:
+            planned = self._plan_cycle_focus()
+        except Exception:  # noqa: BLE001 — fallback must never raise
+            return ""
+        focus = str(planned.get("focus") or "").strip()
+        if not focus:
+            return ""
+        parts = [f"focus={focus}"]
+        rationale = str(planned.get("rationale") or "").strip()
+        if rationale:
+            parts.append(rationale)
+        bottleneck = str(planned.get("bottleneck_at_start") or "").strip()
+        if bottleneck:
+            parts.append(f"bottleneck={bottleneck}")
+        saturated = planned.get("saturated_at_start") or []
+        if saturated:
+            parts.append(f"deprioritize saturated={list(saturated)}")
+        return "; ".join(parts)
+
+    def _reseed_orch_prompt_for_cycle(self) -> bool:
+        """Rebuild the orchestration system prompt for the new macro-cycle.
+
+        Injects the freshly-captured ``next_cycle_directive`` (or a deterministic
+        fallback) into a rebuilt prompt, mutates ``system_prompt_overrides``, and
+        records the directive in the ``cycle_directive_history`` ring. Skips a
+        user-supplied ``--orch-prompt``. Best-effort; returns True when reseeded.
+        """
+        if getattr(self, "_orch_prompt_is_user_supplied", False):
+            return False
+        rebuild = getattr(self, "_rebuild_orch_prompt", None)
+        if rebuild is None:
+            return False
+        state = self.shared_state
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+        directive = str((dict(getattr(state, "orchestration_memory", {}) or {})).get("next_cycle_directive", "") or "")
+        source = "llm"
+        if not directive:
+            directive = self._cycle_directive_fallback()
+            source = "deterministic"
+        new_prompt = rebuild(macro_cycle=cycle, cycle_directive=directive)
+        overrides = getattr(self, "system_prompt_overrides", None)
+        if not isinstance(overrides, dict):
+            return False
+        overrides["orchestration"] = new_prompt
+        history = list(getattr(state, "cycle_directive_history", []) or [])
+        history.append(
+            {
+                "cycle": cycle,
+                "directive": directive,
+                "source": source,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        state.cycle_directive_history = history[-10:]
+        return True
+
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
         """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK or EXPLORE).
 
@@ -306,7 +368,8 @@ class ExplorePhase(PhaseHandler):
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # 1) Compact the cycle's conversation into durable memory and reset.
+        # 1) Compact the cycle's conversation into durable memory, re-focus the
+        # orchestration prompt for the new cycle, then reset.
         try:
             compacted = await self._maybe_checkpoint_orchestration(
                 tick=int(getattr(self.shared_state, "tick", 0) or 0),
@@ -314,6 +377,10 @@ class ExplorePhase(PhaseHandler):
                 force=True,
             )
             summary["memory_compacted"] = bool(compacted)
+            try:
+                summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
+            except Exception:  # noqa: BLE001 — reseed is best-effort
+                log.exception("cycle soft-restart: orchestration prompt reseed failed")
             # Reset unconditionally so a no-op checkpoint still reseeds next turn.
             self._reset_orchestration_conversation()
             summary["conversation_reset"] = True
