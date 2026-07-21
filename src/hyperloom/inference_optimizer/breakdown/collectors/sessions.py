@@ -1326,20 +1326,12 @@ def collect_enablement(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the enablement observability section (Rung 3 M1 + Rung 5).
+    """Collect the enablement observability section.
 
-    Reads ``enablement_*`` attempt-runtime state (Rung 3) and
-    ``enablement_build_manifest`` / ``enablement_last_build_failure`` (Rung 5).
+    Reads ``enablement_*`` attempt-runtime state and
+    ``enablement_build_manifest`` / ``enablement_last_build_failure``.
     Returns ``{}`` when nothing was ever attempted, so the dashboard hides the
     block.
-
-    Args:
-        session_dir (Path): Absolute session root (unused; signature parity).
-        state (dict[str, Any]): Parsed ``state.json`` (SharedState-shaped).
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        dict[str, Any]: The ``EnablementBreakdown`` section, or ``{}``.
     """
     stack_actions_raw = state.get("enablement_stack_actions")
     active_runtime_raw = state.get("enablement_active_runtime")
@@ -1387,7 +1379,7 @@ def collect_enablement(
         ]
     if failure_kind:
         out["failure_kind"] = failure_kind
-    # Rung 5: targeted-build attempt history
+    # targeted-build attempt history
     if have_build_manifest:
         build_attempts = [
             _build_attempt_summary(e)

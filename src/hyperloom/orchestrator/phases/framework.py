@@ -47,7 +47,7 @@ _ENABLEMENT_WATCHDOG_HARD_TICKS: int = 60
 
 
 def _derive_gpu_arch(gpu_type: str) -> str:
-    """Map a gpu_type label to an explicit GFX arch (never silent fallback, L6)."""
+    """Map a gpu_type label to an explicit GFX arch (never silent fallback)."""
     _MAP = {
         "mi355x": "gfx950",
         "mi300x": "gfx942",
@@ -71,20 +71,11 @@ def _maybe_build_runtime_candidate(
     model: str,
     gpu_type: str,
 ) -> dict[str, Any] | None:
-    """Build a serialized runtime-candidate stack action, or None (Rung 3 / M1).
+    """Build a serialized runtime-candidate stack action, or None.
 
     Returns None when the gap does not require code acquisition, the run is
     multi-node (single-node-only guard), or the framework adapter cannot produce
     an evidence-backed candidate. Fully exception-guarded.
-
-    Args:
-        capability_gap: The :class:`CapabilityGap` projection.
-        framework: Target framework name.
-        model: Model id/path being enabled.
-        gpu_type: Target GPU type.
-
-    Returns:
-        dict | None: ``EnablementStackAction.to_state()`` or ``None``.
     """
     if not getattr(capability_gap, "requires_code_acquisition", False):
         return None
@@ -113,21 +104,11 @@ def _maybe_build_localization_candidate(
     repo_url: str,
     candidate_refs: tuple[str, ...],
 ) -> dict[str, Any] | None:
-    """Build a serialized localization stack action, or None (Rung 4 / M2).
+    """Build a serialized localization stack action, or None.
 
     Returns None when the gap does not require code acquisition, the run is
     multi-node, there is no merged-PR candidate ref, or the framework adapter
-    cannot localize. The closure/Rung-5 gate runs later in the executor.
-
-    Args:
-        capability_gap: The :class:`CapabilityGap` projection.
-        framework: Target framework name.
-        model: Model id/path being enabled.
-        repo_url: Origin repo URL to localize from.
-        candidate_refs: Ranked discovered PR refs (best first).
-
-    Returns:
-        dict | None: ``EnablementStackAction.to_state()`` or ``None``.
+    cannot localize. The compiled-closure gate runs later in the executor.
     """
     if not getattr(capability_gap, "requires_code_acquisition", False):
         return None
@@ -1192,16 +1173,16 @@ class FrameworkPhase(PhaseHandler):
 
         capability_gap = CapabilityGap.from_signature(signature)
 
-        # Rung 3 (M1): when the gap requires code acquisition (not a resource
-        # constraint) and an adapter can build an evidence-backed candidate,
-        # attach a ``runtime_candidate`` so integrate_patch provisions an
-        # attempt-scoped runtime before booting. Skipped in multi-node mode.
+        # When the gap requires code acquisition (not a resource constraint) and
+        # an adapter can build an evidence-backed candidate, attach a
+        # ``runtime_candidate`` so integrate_patch provisions an attempt-scoped
+        # runtime before booting. Skipped in multi-node mode.
         runtime_candidate = _maybe_build_runtime_candidate(
             capability_gap, framework=framework, model=model, gpu_type=req.gpu_type
         )
-        # Rung 4 (M2): when a merged-PR candidate exists, attach a
-        # ``localization_candidate`` so integrate_patch localizes the closure
-        # into the source tree (compiled closures defer to Rung 5 at apply).
+        # When a merged-PR candidate exists, attach a ``localization_candidate``
+        # so integrate_patch localizes the closure into the source tree
+        # (compiled closures defer to the targeted build at apply).
         localization_candidate = _maybe_build_localization_candidate(
             capability_gap,
             framework=framework,
@@ -1242,13 +1223,13 @@ class FrameworkPhase(PhaseHandler):
         if runtime_candidate is not None:
             params_out["runtime_candidate"] = runtime_candidate
         # Re-activate a prior KEEP'd attempt runtime so serial stacking runs on
-        # the same runtime the last round promoted (§8.5).
+        # the same runtime the last round promoted.
         kept_action = getattr(state, "enablement_kept_stack_action", None)
         if isinstance(kept_action, dict) and kept_action and "runtime_candidate" not in params_out:
             params_out["runtime_candidate"] = kept_action
         if localization_candidate is not None:
             params_out["localization_candidate"] = localization_candidate
-        # Rung 5: inject the last targeted-build failure into the mandate (D5 §9).
+        # Inject the last targeted-build failure into the mandate.
         last_build_failure = getattr(state, "enablement_last_build_failure", None) or {}
         if isinstance(last_build_failure, dict) and last_build_failure:
             fc = str(last_build_failure.get("failure_class") or "")
@@ -1559,8 +1540,8 @@ class FrameworkPhase(PhaseHandler):
             # A non-blank UNKNOWN log is recorded for human review, once per log.
             await self._maybe_record_enablement_human_review(launch_log)
             return ""
-        # Rung 5: auto-escalate to a targeted build when the residual gap is a
-        # compiled miss.  The enqueue is a no-op when a build is already queued or
+        # Auto-escalate to a targeted build when the residual gap is a compiled
+        # miss.  The enqueue is a no-op when a build is already queued or
         # running (idempotent by novelty key).
         try:
             await self._maybe_escalate_to_targeted_build(launch_log, attempt=attempt)
@@ -1792,7 +1773,7 @@ class FrameworkPhase(PhaseHandler):
 
         def _stack_kept_runtime() -> None:
             """Persist the KEEP'd attempt runtime + localization manifest so they
-            survive rearm (§8.5)."""
+            survive rearm."""
             action = res.get("enablement_kept_stack_action")
             if isinstance(action, dict) and action:
                 state.enablement_kept_stack_action = action
@@ -1803,8 +1784,8 @@ class FrameworkPhase(PhaseHandler):
                 records = list(getattr(state, "enablement_attempt_runtimes", None) or [])
                 records.append(runtime)
                 state.enablement_attempt_runtimes = records[-5:]
-            # Rung 4 (M2): record the localized closure manifest so it is not
-            # re-fetched on the next round.
+            # Record the localized closure manifest so it is not re-fetched on
+            # the next round.
             manifest = res.get("enablement_localization_manifest")
             if isinstance(manifest, dict) and manifest:
                 existing = list(getattr(state, "enablement_localization_manifest", None) or [])
@@ -4058,7 +4039,7 @@ class FrameworkPhase(PhaseHandler):
         *,
         attempt: int = 0,
     ) -> None:
-        """Enqueue a targeted build row when the residual gap is a compiled miss (Rung 5).
+        """Enqueue a targeted build row when the residual gap is a compiled miss.
 
         No-op when a build is already queued or running (idempotent by novelty
         key), when the env var ``HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD=1``
@@ -4091,9 +4072,9 @@ class FrameworkPhase(PhaseHandler):
             gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
 
             # Derive novelty fields from the current failure + session context.
-            # Ref and repo_url come from the existing Rung-3/4 stack action when
-            # present; otherwise the top discovery candidate for the component is
-            # used; empty ref falls back to tag-descending autoselect.
+            # Ref and repo_url come from the existing stack action when present;
+            # otherwise the top discovery candidate for the component is used;
+            # empty ref falls back to tag-descending autoselect.
             existing_stack = getattr(state, "enablement_kept_stack_action", None) or {}
             repo_url = str(existing_stack.get("repo_url") or "").strip()
             ref = str(existing_stack.get("ref") or "").strip()
@@ -4165,19 +4146,19 @@ class FrameworkPhase(PhaseHandler):
             log.debug("enablement: targeted-build escalation failed", exc_info=True)
 
     async def _maybe_route_build_outcomes(self) -> None:
-        """Route terminal targeted_build rows to _maybe_rearm_enablement (D6).
+        """Route terminal targeted_build rows to _maybe_rearm_enablement.
 
         Called every tick from _pump_enablement_safely.  Reads succeeded/failed
         rows, synthesises the rearm res dict (status='kept'/'reverted'/'advanced'),
         and delegates to the existing stall-gate machinery.
 
-        D6 novelty: a 'timeout' or 'preflight_budget' failure_class maps to
+        Novelty: a 'timeout' or 'preflight_budget' failure_class maps to
         'advanced' (novel attempt, time vs defect distinction — keep going); all
         real defects map to 'reverted' (advance stall streak).
 
-        Gap 3/4/6: a succeeded build no longer synthesises status='kept' directly.
-        Instead it enqueues an integrate_patch launch probe so the runtime must
-        actually boot the model before KEEP is declared.
+        A succeeded build no longer synthesises status='kept' directly. Instead
+        it enqueues an integrate_patch launch probe so the runtime must actually
+        boot the model before KEEP is declared.
         """
         try:
             from ..state.task_registry import TERMINAL_STATES
@@ -4213,14 +4194,14 @@ class FrameworkPhase(PhaseHandler):
 
                     br = _load_result_json(attempt_root)
 
-                # Gap 6: if the runtime can't be read, it can't be launched → reverted.
+                # If the runtime can't be read, it can't be launched → reverted.
                 if br is None or not br.ok or not br.runtime.to_runtime_override():
                     res: dict = {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
                     log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
                     self._maybe_rearm_enablement(res)
                     return
 
-                # Gap 3/4: enqueue a launch probe; KEEP is declared by the probe result.
+                # Enqueue a launch probe; KEEP is declared by the probe result.
                 log.info("ENABLEMENT: targeted_build artifact-verified → enqueue launch probe task=%s", task_id)
                 await self._enqueue_build_launch_probe(task_id, br)
                 return
@@ -4237,8 +4218,8 @@ class FrameworkPhase(PhaseHandler):
                 fc = str(lbf.get("failure_class") or "")
                 fs = str(lbf.get("failure_summary") or "")
 
-            # D6 + Gap 1 (novelty ledger): time-based failures are always advanced;
-            # defect failures are advanced when the (component,ref,gpu_arch,cmd) tuple
+            # Novelty ledger: time-based failures are always advanced; defect
+            # failures are advanced when the (component,ref,gpu_arch,cmd) tuple
             # has not been seen before (novel), reverted when it is a repeat.
             time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
             if fc in time_classes:
@@ -4288,8 +4269,8 @@ class FrameworkPhase(PhaseHandler):
         applying any patch.  The probe completes as an ordinary integrate_patch
         task whose enablement:True result is routed by the dispatcher through
         _maybe_rearm_authored_lane → _maybe_rearm_enablement, producing a
-        genuine KEEP/advanced/reverted outcome (Gap 3).  The whole-machine GPU
-        pool is acquired via _framework_gpu_params (Gap 4).
+        genuine KEEP/advanced/reverted outcome.  The whole-machine GPU pool is
+        acquired via _framework_gpu_params.
         """
         from hyperloom.agents.framework.enablement import classify_failure
 

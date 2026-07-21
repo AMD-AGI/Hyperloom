@@ -26,12 +26,6 @@ def _auth_headers(accept: str) -> dict[str, str]:
 
     Stays anonymous (GitHub's 60 req/h IP limit) when neither ``GITHUB_TOKEN``
     nor ``GH_TOKEN`` is set.
-
-    Args:
-        accept: The ``Accept`` header value for this request.
-
-    Returns:
-        dict[str, str]: Request headers.
     """
     headers = {"Accept": accept, "User-Agent": "framework-agent/0.1"}
     token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()

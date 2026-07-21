@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Rung 4 (M2) code-localization logic: closure gate + diff synthesis.
+"""Code-localization logic: closure gate + diff synthesis.
 
 Given a localization stack action (PR backport or vendored files), this module
 decides whether the change is a Python-only dependency closure safe to localize
-here, or a compiled / build-backend change that must defer to Rung 5. Diff
-fetch/synthesis flows through injectable shims so the pure closure/synthesis
+here, or a compiled / build-backend change that must defer to a targeted build.
+Diff fetch/synthesis flows through injectable shims so the pure closure/synthesis
 logic is CI-testable without network.
 
 Pure-Python: no subprocess, no filesystem writes, no network here.
@@ -21,7 +21,7 @@ from typing import Callable
 
 
 # A closure that touches any of these is a compiled / build-backend change and
-# must defer to Rung 5 (targeted build), never localized+booted here.
+# must defer to a targeted build, never localized+booted here.
 _COMPILED_SUFFIXES: frozenset[str] = frozenset(
     {".cpp", ".cc", ".cxx", ".c", ".cu", ".cuh", ".hip", ".pyx", ".pxd", ".h", ".hpp"}
 )
@@ -70,7 +70,7 @@ def _is_compiled_or_build(path: str) -> bool:
 
 
 def classify_closure(paths: list[str]) -> ClosureVerdict:
-    """Classify a set of touched paths as localizable or Rung-5-deferred.
+    """Classify a set of touched paths as localizable or targeted-build-deferred.
 
     Args:
         paths: Repo-relative paths the closure touches.

@@ -3135,9 +3135,8 @@ class WritebackCollaborator:
         from ..actions.executors.integrate_patch import _git_apply_reverse
 
         summary: dict[str, Any] = {"reversed": [], "failed": []}
-        # Fourth decision axis (§10.3): discard a half-provisioned attempt venv
-        # so a crash mid-provision cannot leak a multi-GB dir. Independent of the
-        # patch rollback below.
+        # Discard a half-provisioned attempt venv so a crash mid-provision
+        # cannot leak a multi-GB dir. Independent of the patch rollback below.
         attempt_venv_root = str(pending.get("attempt_venv_root") or "").strip()
         if attempt_venv_root:
             gc_root = str(Path(attempt_venv_root).parent)
@@ -3162,13 +3161,9 @@ class WritebackCollaborator:
 
     @staticmethod
     def _gc_attempt_runtime(attempt_dir: str) -> bool:
-        """Remove a Rung 3 attempt-runtime dir (best-effort).
+        """Remove an attempt-runtime dir (best-effort).
 
-        Args:
-            attempt_dir: The attempt directory to remove (the venv's parent).
-
-        Returns:
-            bool: True when a directory was present and removal was attempted.
+        Returns True when a directory was present and removal was attempted.
         """
         import shutil
 
@@ -3238,12 +3233,9 @@ class WritebackCollaborator:
         A detached compile cannot be re-adopted across a restart: kill its
         recorded process group, rmtree the attempt dir, sweep its per-attempt
         aiter JIT locks (a killed compile leaves a pid-less lock that wedges
-        every later build of that module, L4), mark the row failed with a
-        ``timeout`` failure_class for the framework channel (§9), and clear the
+        every later build of that module), mark the row failed with a
+        ``timeout`` failure_class for the framework channel, and clear the
         sentinel. Best-effort throughout.
-
-        Args:
-            report: The resume report dict to append fixes to.
         """
         import shutil
         import signal

@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Typed data model for Rung 5 targeted (compiled-component) builds.
+"""Typed data model for targeted (compiled-component) builds.
 
 A :class:`TargetedBuildAction` describes the one missing *compiled* component
 the enablement loop must build (an AITER FP4 MoE / MLA / NSA op, sgl-kernel, or
 vLLM from source). A :class:`BuildResult` carries the outcome plus the resolved
 :class:`FrameworkRuntime` a KEEP promotes. :func:`build_novelty_key` gives the
-repeat-vs-novel identity the stall gate keys on (D6).
+repeat-vs-novel identity the stall gate keys on.
 
 Pure Python: no network, subprocess, or filesystem access. The compile itself
-lives in ``targeted_build.py`` (later step). :class:`FrameworkRuntime` is the
-shared runtime contract owned by :mod:`stack_actions`; it is re-exported here so
-build callers import one type.
+lives in ``targeted_build.py``. :class:`FrameworkRuntime` is the shared runtime
+contract owned by :mod:`stack_actions`; it is re-exported here so build callers
+import one type.
 """
 
 from __future__ import annotations
@@ -235,17 +235,11 @@ class BuildResult:
 
 
 def build_novelty_key(action: TargetedBuildAction) -> tuple[str, str, str, tuple[str, ...]]:
-    """Repeat-vs-novel identity for the stall gate (D6).
+    """Repeat-vs-novel identity for the stall gate.
 
     Two attempts with the same ``(component, ref, gpu_arch, build_command)``
     tuple are a *repeat* (advances the stall streak); any differing tuple is a
     *novel* attempt (does not stall).
-
-    Args:
-        action: The targeted-build action to key.
-
-    Returns:
-        tuple: ``(component, ref, gpu_arch, build_command)``.
     """
     return (action.component, action.ref, action.gpu_arch, tuple(action.build_command))
 

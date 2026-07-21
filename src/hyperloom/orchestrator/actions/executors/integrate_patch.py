@@ -91,12 +91,6 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
     Strips a leading ``sudo`` and any ``KEY=VALUE`` env-assignment prefixes, then
     requires the remainder to start with a known package/tool installer. Rejects
     anything with shell control operators that could chain an arbitrary payload.
-
-    Args:
-        cmd: The raw command string.
-
-    Returns:
-        bool: ``True`` when the command is a single allowlisted installer.
     """
     text = (cmd or "").strip()
     if not text:
@@ -106,14 +100,9 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
     if re.search(r"[`\n]|\$\(", text):
         return False
     # Guard against genuine shell chaining/redirection while allowing pip/pkg
-    # *version specifiers* that legitimately contain ``>``/``<`` (e.g.
-    # ``transformers>=4.58``, ``torch<2.11``). The previous guard rejected any
-    # ``>``/``<``/``|``/``&``, which false-positived on essentially every
-    # ``pip install 'pkg>=x.y'`` and silently skipped the enablement
-    # env-upgrade (the durable replay never ran, so the model was never
-    # actually enabled). We first neutralise the safe, non-shell uses, then
-    # reject on any leftover metacharacter. Because the replay runs under
-    # ``shell=True``, we must ensure no redirection/chaining survives.
+    # version specifiers that legitimately contain ``>``/``<`` (e.g.
+    # ``transformers>=4.58``). Neutralise the safe, non-shell uses first, then
+    # reject any leftover metacharacter (the replay runs under ``shell=True``).
     scrubbed = text
     # Drop quoted segments (their contents cannot act as shell operators).
     scrubbed = re.sub(r"'[^']*'", " ", scrubbed)
@@ -408,17 +397,9 @@ def _localization_paths_outside_allowlist(
 ) -> list[str]:
     """Return the touched paths that resolve outside the allowed source roots.
 
-    A localization diff (M2) may only write under the source-file allowlist or
-    the attempt-local root. Paths are resolved against ``framework_root`` when
+    A localization diff may only write under the source-file allowlist or the
+    attempt-local root. Paths are resolved against ``framework_root`` when
     relative. Returns the offending paths (empty when all are in-bounds).
-
-    Args:
-        touched_paths: Repo-relative paths the localization diff touches.
-        framework_root: The tree the diff applies to (resolves relative paths).
-        allow_roots: The allowed root prefixes (allowlist + attempt-local root).
-
-    Returns:
-        list[str]: Paths that fall outside every allowed root.
     """
     roots = [Path(r).resolve() for r in allow_roots if str(r).strip()]
     if framework_root is not None:
@@ -1279,15 +1260,15 @@ class IntegratePatchExecutor:
         specialist_workspace: Path = ctx._ip_specialist_workspace  # type: ignore[attr-defined]
         done_payload: dict[str, Any] = ctx._ip_done_payload  # type: ignore[attr-defined]
 
-        # Rung 3 (M1): provision an attempt-scoped runtime AFTER the Critic gate
-        # (in _stage_resolve) and BEFORE any patch apply / setup replay (§10.2).
+        # Provision an attempt-scoped runtime AFTER the Critic gate (in
+        # _stage_resolve) and BEFORE any patch apply / setup replay.
         provision_early = await self._stage_provision_attempt_runtime(ctx, params, specialist_task_id)
         if provision_early is not None:
             return provision_early
 
-        # Rung 4 (M2): localize a merged-PR / vendored closure into the source
-        # tree. Fetch happens post-Critic; a compiled/build closure defers to
-        # Rung 5 (clean revert). Localized patches are prepended in _stage_apply.
+        # Localize a merged-PR / vendored closure into the source tree. Fetch
+        # happens post-Critic; a compiled/build closure defers to a clean
+        # revert. Localized patches are prepended in _stage_apply.
         localize_early = await self._stage_localize_source(ctx, params, specialist_task_id)
         if localize_early is not None:
             return localize_early
@@ -1429,7 +1410,7 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any] | None:
         """Provision the attempt-scoped runtime from ``params['runtime_candidate']``.
 
-        Rung 3 (M1). No-op when no candidate is present or in multi-node mode.
+        No-op when no candidate is present or in multi-node mode.
         Runs a disk preflight, delegates provision+probe to the framework
         adapter, and on success stores the resolved runtime on
         ``ctx._ip_provision_result`` / ``ctx._ip_stack_action`` for the gate to
@@ -1546,10 +1527,10 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any] | None:
         """Fetch/synthesize a localization diff and stage it for _stage_apply.
 
-        Rung 4 (M2). No-op when no ``localization_candidate`` is present or in
-        multi-node mode. Fetches the merged-PR / vendored diff (post-Critic),
-        rejects a compiled / build-backend closure to Rung 5 (clean revert),
-        enforces the source-file allowlist (+ the attempt-local root only), and
+        No-op when no ``localization_candidate`` is present or in multi-node
+        mode. Fetches the merged-PR / vendored diff (post-Critic), rejects a
+        compiled / build-backend closure to a clean revert, enforces the
+        source-file allowlist (+ the attempt-local root only), and
         writes the diff to a patch file recorded on ``ctx._ip_localization_patches``
         which ``_stage_apply`` prepends to the patch set. Returns an early-exit
         ``reverted`` dict on any gate/fetch failure (no tree mutation yet), or
@@ -1672,8 +1653,8 @@ class IntegratePatchExecutor:
             explicit_patches=(list(explicit_patches) if isinstance(explicit_patches, list) else None),
             done_payload=done_payload,
         )
-        # Rung 4 (M2): prepend localized closure patches (applied first, before
-        # this round's patch) so the enablement composes on top of the localization.
+        # Prepend localized closure patches (applied first, before this round's
+        # patch) so the enablement composes on top of the localization.
         localization_patches = list(getattr(ctx, "_ip_localization_patches", None) or [])
         if localization_patches:
             seen_loc = {str(p) for p in patch_paths}
@@ -1833,7 +1814,7 @@ class IntegratePatchExecutor:
                     "config_changes": dict(config_changes),
                     "framework_source_root": str(framework_root or ""),
                     "workspace": str(output_root),
-                    # Rung 3: attempt venv root for crash-resume GC (§10.3).
+                    # Attempt venv root for crash-resume GC.
                     "attempt_venv_root": str(getattr(ctx, "_ip_attempt_venv_root", "") or ""),
                     "ts": _now_iso(),
                 }
@@ -1998,8 +1979,8 @@ class IntegratePatchExecutor:
         Runs _bench_patch, applies the appropriate gate, and returns the
         final integration result. Never returns None.
         """
-        # Rung 3: activate the provisioned attempt runtime by threading its
-        # YAML-layer override into params so both bench wirings pick it up.
+        # Activate the provisioned attempt runtime by threading its YAML-layer
+        # override into params so both bench wirings pick it up.
         provision_result = getattr(ctx, "_ip_provision_result", None)
         if provision_result is not None and getattr(provision_result, "ok", False):
             params = dict(params)
@@ -2115,10 +2096,9 @@ class IntegratePatchExecutor:
           accuracy <= floor/NaN -> correctness_ok=False (REVERT, garbage)
           accuracy is None      -> correctness_ok=None  (KEEP but provisional)
 
-        On KEEP, when a Rung 3 attempt runtime was provisioned, the stack action
-        is recorded in the result (``enablement_kept_stack_action``) so it
-        survives rearm (§8.5). On REVERT / non-KEEP, the attempt runtime dir is
-        GC'd (§8.6).
+        On KEEP, when an attempt runtime was provisioned, the stack action is
+        recorded in the result (``enablement_kept_stack_action``) so it survives
+        rearm. On REVERT / non-KEEP, the attempt runtime dir is GC'd.
         """
         import math as _math
 
@@ -2266,14 +2246,14 @@ class IntegratePatchExecutor:
             "bench_result": bench_result,
             "workspace": str(output_root),
         }
-        # Rung 3: record the KEEP'd attempt runtime so it survives rearm (§8.5)
-        # and every later bench in this session re-activates it (§10.4).
+        # Record the KEEP'd attempt runtime so it survives rearm and every later
+        # bench in this session re-activates it.
         if stack_action is not None and provision_result is not None and getattr(provision_result, "ok", False):
             kept_result["enablement_kept_stack_action"] = stack_action.to_state()
             kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
             kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
-        # Rung 4 (M2): editable-refresh the localized closure + snapshot a manifest
-        # that survives rearm so the closure is recorded and not re-fetched.
+        # Editable-refresh the localized closure + snapshot a manifest that
+        # survives rearm so the closure is recorded and not re-fetched.
         manifest = self._finalize_localization_keep(
             ctx,
             framework_root=framework_root,
@@ -2292,7 +2272,7 @@ class IntegratePatchExecutor:
         specialist_task_id: str,
         provision_result: Any,
     ) -> dict[str, Any]:
-        """Editable-refresh a localized closure and snapshot its manifest (M2).
+        """Editable-refresh a localized closure and snapshot its manifest.
 
         Runs the framework adapter's editable-refresh argv against the attempt
         interpreter (best-effort; skipped when there is no attempt runtime or no
@@ -2896,8 +2876,8 @@ class IntegratePatchExecutor:
         if isinstance(_rt, dict) and _rt:
             variant.runtime_override = {str(k): str(v) for k, v in _rt.items()}
 
-        # Ray-managed GPU execution (phase-3 §3.1 / invariant §6.2): hold a
-        # serving lease (num_gpus=TP + serving_slot) for the whole run_grid so
+        # Ray-managed GPU execution: hold a serving lease
+        # (num_gpus=TP + serving_slot) for the whole run_grid so
         # the patch benchmark serializes against other serving on the
         # whole-machine mutex instead of colliding with a concurrently-running
         # GPU specialist server on the same card (the observed

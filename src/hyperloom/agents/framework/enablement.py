@@ -125,12 +125,8 @@ class CapabilityGap:
     def from_signature(cls, sig: FailureSignature) -> "CapabilityGap":
         """Project a :class:`FailureSignature` onto a :class:`CapabilityGap`.
 
-        Args:
-            sig: The classified failure signature.
-
-        Returns:
-            CapabilityGap: Projection with ``requires_code_acquisition=False``
-            when ``sig.kind`` is :data:`RESOURCE_CONSTRAINT`.
+        ``requires_code_acquisition`` is False when ``sig.kind`` is
+        :data:`RESOURCE_CONSTRAINT`.
         """
         return cls(
             kind=sig.kind,
@@ -139,11 +135,7 @@ class CapabilityGap:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict.
-
-        Returns:
-            dict[str, Any]: A dataclass-derived dict of all fields.
-        """
+        """Serialize to a plain dict."""
         return {
             "kind": self.kind,
             "bridge_layer": self.bridge_layer,
@@ -657,7 +649,7 @@ def enablement_made_progress(
 # Evidence that a dtype/capability miss is backed by a *compiled* op rather
 # than pure-Python guard logic: a native symbol, an .so/kernel/op reference, or
 # a named compiled backend. Used only to promote UNSUPPORTED_DTYPE to a build
-# candidate (Rung 5); never fires for a plain Python NotImplementedError guard.
+# candidate; never fires for a plain Python NotImplementedError guard.
 _NATIVE_EVIDENCE_RE = re.compile(
     r"undefined symbol|\.so\b|_C\b|aiter|sgl[_-]?kernel|hip[a-z]*kernel|"
     r"\bkernel\b|custom[_ ]?op|torch\.ops|extension module|"
@@ -670,19 +662,12 @@ def is_targeted_build_candidate(
     signature: FailureSignature,
     launch_log: str = "",
 ) -> bool:
-    """Whether a residual gap is a *compiled* component miss (Rung 5).
+    """Whether a residual gap is a *compiled* component miss.
 
     Pure logic gate the escalation layer calls before enqueueing any build. A
-    pure-Python miss (Rung 4 territory) must never qualify here.
-
-    Args:
-        signature: The classified launch/import failure.
-        launch_log: Raw failure text; searched (with ``offending_symbol``) for
-            native-op evidence when the kind alone is ambiguous.
-
-    Returns:
-        bool: ``True`` for a build/native/HIP-kernel gap, or an
-        ``UNSUPPORTED_DTYPE`` gap whose evidence names a compiled symbol/op.
+    pure-Python miss must never qualify here. Returns ``True`` for a
+    build/native/HIP-kernel gap, or an ``UNSUPPORTED_DTYPE`` gap whose evidence
+    (``offending_symbol`` + ``launch_log``) names a compiled symbol/op.
     """
     if signature is None:
         return False

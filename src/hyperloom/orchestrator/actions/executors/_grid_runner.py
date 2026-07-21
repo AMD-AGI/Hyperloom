@@ -466,8 +466,8 @@ _RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIB
 def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> None:
     """Inject an attempt runtime override into the materialized YAML envs dict.
 
-    Writes the Rung-3 keys (path_prefix, pythonpath_prefix, framework_bin,
-    framework_python, framework_venv_root) and the Rung-5 compiled-artifact keys
+    Writes the base keys (path_prefix, pythonpath_prefix, framework_bin,
+    framework_python, framework_venv_root) and the compiled-artifact keys
     (pythonpath_prefixes, ld_library_path_prefix, runtime_env, entrypoint_bin_dir)
     into benchmark.envs so the Magpie subprocess re-exports them to the server it
     boots. All writes land in the YAML layer; os.environ is never mutated.
@@ -502,16 +502,16 @@ def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> No
             envs["PYTHONPATH"] = f"{pp_prefix}:{_cur_pp}" if _cur_pp else pp_prefix
         else:
             log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
-    # Multi-entry prefixes (Rung 5): prepend in order so the first entry wins,
-    # ahead of any single-dir pythonpath_prefix and the inherited value.
+    # Multi-entry prefixes: prepend in order so the first entry wins, ahead of
+    # any single-dir pythonpath_prefix and the inherited value.
     for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
         if _is_safe_path_entry(entry):
             _cur_pp = str(envs.get("PYTHONPATH", "") or "")
             envs["PYTHONPATH"] = f"{entry}:{_cur_pp}" if _cur_pp else entry
         else:
             log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
-    # Native loader path (Rung 5): prepend attempt entries while preserving any
-    # inherited entries (e.g. /opt/rocm/lib), which _prepend_path_entry never drops.
+    # Native loader path: prepend attempt entries while preserving any inherited
+    # entries (e.g. /opt/rocm/lib), which _prepend_path_entry never drops.
     for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
         if _is_safe_path_entry(entry):
             _prepend_path_entry(envs, "LD_LIBRARY_PATH", entry)

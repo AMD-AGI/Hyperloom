@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Off-loop targeted-build runner (Rung 5, S2).
+"""Off-loop targeted-build runner.
 
 Spawns a build command as a **detached** subprocess (its own process group) so a
 multi-hour compile never blocks the coordinator tick loop, then polls it across
@@ -9,11 +9,9 @@ ticks against a monotonic wall-clock deadline. On timeout it tears the whole
 process group down non-blocking (SIGTERM, then SIGKILL after a grace window so a
 poll never sleeps).
 
-S2 exercises this with a *fake* ``build_command`` argv; the isolation worktree,
-preflight, real recipes, and artifact/symbol verification are added in S3-S6.
 The build command is argv-only (never a shell string). Each build gets a
 per-attempt ``INFERENCE_OPTIMIZER_AITER_JIT_DIR`` so it never shares the
-node-global aiter JIT cache (L3).
+node-global aiter JIT cache.
 """
 
 from __future__ import annotations
@@ -34,7 +32,7 @@ log = logging.getLogger(__name__)
 # Seconds between SIGTERM and the escalation to SIGKILL on the process group.
 _KILL_GRACE_SEC = 5.0
 
-# Default per-component build budgets (upper bounds, §11 / D4), in seconds.
+# Default per-component build budgets (upper bounds), in seconds.
 _DEFAULT_BUDGET_SEC: dict[str, int] = {
     "aiter": 40 * 60,
     "sgl_kernel": 60 * 60,
@@ -44,7 +42,7 @@ _DEFAULT_BUDGET_SEC: dict[str, int] = {
 
 
 def default_budget_sec(component: str) -> int:
-    """Per-component wall-clock budget upper bound (§11)."""
+    """Per-component wall-clock budget upper bound."""
     return _DEFAULT_BUDGET_SEC.get(component, 40 * 60)
 
 
@@ -180,7 +178,7 @@ def kill_build_pgroup(pgid: int, *, sig: int = signal.SIGTERM) -> None:
 
 
 def _build_runtime(handle: BuildHandle) -> FrameworkRuntime:
-    """The runtime a KEEP would promote (S4-S6 enrich with real prefixes)."""
+    """The runtime a KEEP would promote."""
     return FrameworkRuntime(
         source_root=handle.attempt_root,
         attempt_root=handle.attempt_root,
@@ -268,7 +266,7 @@ def _load_result_json(attempt_root: str) -> BuildResult | None:
 
 
 # ---------------------------------------------------------------------------
-# AITER real-build recipe (S4)
+# AITER real-build recipe
 # ---------------------------------------------------------------------------
 
 # Default AITER upstream; overridable via TargetedBuildAction.repo_url.
@@ -287,31 +285,11 @@ def run_aiter_build(
     git: Callable[..., Any] | None = None,
     disk_preflight_fn: Callable[..., Any] | None = None,
 ) -> BuildResult:
-    """Run a full isolated AITER targeted build (§7.1).
+    """Run a full isolated AITER targeted build.
 
     Executes entirely in-process (call it from the detached driver subprocess
     so the coordinator tick loop is never blocked).  All subprocess calls go
     through the injectable ``run`` shim for testability.
-
-    Stages:
-      1. disk + toolchain/ABI preflight
-      2. repo mirror-clone (isolation.prepare_repo_cache)
-      3. per-attempt venv (isolation.prepare_candidate_workspace)
-      4. ROCm torch constraint file
-      5. pip install -e (pinned ref or tag-desc autoselect)
-      6. artifact freshness + symbol verify
-      7. Return BuildResult with FrameworkRuntime + installed_versions
-
-    Args:
-        action: The build action describing the component, ref, gpu_arch, etc.
-        attempt_root: Attempt directory (writable; logs and artifacts land here).
-        run: Injectable subprocess callable (defaults to subprocess.Popen for
-            real subprocess; tests supply a mock).
-        git: Injectable git runner (None → subprocess.run). Used for tag listing.
-        disk_preflight_fn: Injectable disk preflight callable (None → real).
-
-    Returns:
-        BuildResult: Either ok with runtime, or failed with failure_class.
     """
     import json
     import shutil
@@ -546,7 +524,7 @@ def run_aiter_build(
 
 
 # ---------------------------------------------------------------------------
-# sgl-kernel recipe (S6, §7.2)
+# sgl-kernel recipe
 # ---------------------------------------------------------------------------
 
 _SGLANG_DEFAULT_REPO = "https://github.com/sgl-project/sglang"
@@ -562,7 +540,7 @@ def run_sgl_kernel_build(
     git: Callable[..., Any] | None = None,
     disk_preflight_fn: Callable[..., Any] | None = None,
 ) -> BuildResult:
-    """Run an isolated sgl-kernel targeted build (§7.2).
+    """Run an isolated sgl-kernel targeted build.
 
     Clones SGLang into an isolated worktree/venv, builds the ROCm sgl-kernel
     extension for the explicit gpu_arch (AMDGPU_TARGET), then installs the
@@ -687,7 +665,7 @@ def run_sgl_kernel_build(
         build_log.write_text(kernel_build.stderr_tail or kernel_build.stdout_tail, encoding="utf-8")
         return _fail("compile_error", f"sgl-kernel compile failed (rc={kernel_build.returncode})")
 
-    # Copy pyproject_other.toml if present (mirrors installer :469-471)
+    # Copy pyproject_other.toml if present (mirrors the installer).
     py_other = worktree_dir / "python" / "pyproject_other.toml"
     if py_other.is_file():
         import shutil
@@ -751,14 +729,14 @@ def run_sgl_kernel_build(
 
 
 # ---------------------------------------------------------------------------
-# vLLM from source recipe (S6, §7.3)
+# vLLM from source recipe
 # ---------------------------------------------------------------------------
 
 _VLLM_DEFAULT_REPO = "https://github.com/ROCm/vllm"
 _VLLM_DISK_PER_CANDIDATE_GB = 20.0
 _VLLM_DEFAULT_MAX_JOBS = 8
 
-# Inline verify_vllm_rocm probe (ported from install_baremetal.sh :633-668).
+# Inline verify_vllm_rocm probe.
 _VERIFY_VLLM_ROCM_SCRIPT = """\
 import sys, torch
 if not getattr(torch.version, "hip", None):
@@ -789,12 +767,12 @@ def run_vllm_source_build(
     git: Callable[..., Any] | None = None,
     disk_preflight_fn: Callable[..., Any] | None = None,
 ) -> BuildResult:
-    """Run an isolated vLLM-from-source targeted build (§7.3, D1).
+    """Run an isolated vLLM-from-source targeted build.
 
     Clones ROCm/vllm into an isolated worktree, runs ``pip install -e``
     which triggers the CMake ``build_ext`` pass, then verifies ROCm platform
     and fresh compiled artefacts.  ABI-match guard refuses silently loading the
-    wrong interpreter (requires same Python major.minor as the Magpie launcher).
+    wrong interpreter (requires same Python major.minor as the launcher).
     """
     import os as _os
     import sys as _sys
@@ -859,11 +837,8 @@ def run_vllm_source_build(
         return _fail("preflight_toolchain", "gpu_arch must be set explicitly for vLLM source (L6)")
 
     # ABI-match guard: log an advisory when the torch ABI reports a different Python
-    # version; the build continues and runtime_python_exe will point to the attempt
-    # venv python so the server uses the correct interpreter (entrypoint_bin_dir +
-    # runtime_python_exe switch covers both Magpie and bypass).  The only residual
-    # risk is if the Magpie harness itself must import vllm._C.so, which requires
-    # the harness python to match — that is a Magpie-side concern outside this repo.
+    # version; the build continues and runtime_python_exe points to the attempt venv
+    # python so the server uses the correct interpreter.
     host_pyver = f"{_sys.version_info.major}.{_sys.version_info.minor}"
     abi_pyver = str(abi.get("python_version") or "").strip()
     if abi_pyver and not abi_pyver.startswith(host_pyver):

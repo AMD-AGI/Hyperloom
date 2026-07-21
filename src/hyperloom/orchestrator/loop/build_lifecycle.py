@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Off-loop targeted-build lifecycle (Rung 5, S2).
+"""Off-loop targeted-build lifecycle.
 
 Drives compiled-component builds as resume-safe task rows that run OFF the
 coordinator tick loop: one build at a time (``build_lane`` capacity 1), spawned
@@ -63,11 +63,7 @@ class BuildLifecycleCollaborator:
     async def enqueue_targeted_build(self, action: TargetedBuildAction) -> str:
         """Enqueue a resume-safe ``targeted_build`` row (idempotent by novelty).
 
-        Args:
-            action: The build to run.
-
-        Returns:
-            str: The task id (existing row's id on a repeat novelty tuple).
+        Returns the task id (an existing row's id on a repeat novelty tuple).
         """
         from ..framework.targeted_build import _resolve_budget_sec
 
@@ -161,7 +157,7 @@ class BuildLifecycleCollaborator:
             return None
 
     def _record_build_result(self, result: Any) -> None:
-        """Append the manifest entry and record the failure carrier (framework channel §9)."""
+        """Append the manifest entry and record the failure carrier."""
         state = self.shared_state
         manifest = list(getattr(state, "enablement_build_manifest", []) or [])
         manifest.append(result.to_state())
@@ -171,7 +167,7 @@ class BuildLifecycleCollaborator:
                 "failure_class": result.failure_class,
                 "failure_summary": result.failure_summary or result.error,
             }
-            # A killed build can wedge every later compile of a module (L4); the
+            # A killed build can wedge every later compile of a module; the
             # per-attempt jit dir is swept so a resumed/next attempt is clean.
             self._sweep_build_jit(result.attempt_root)
 
@@ -211,8 +207,8 @@ def _driver_command(action: TargetedBuildAction, attempt_root: str) -> list[str]
     """Return the argv that runs the off-loop driver for a real component.
 
     If the action carries an explicit ``build_command``, that argv is returned
-    unchanged (S2 fake-builder path).  Otherwise the driver entrypoint is used
-    so the full recipe runs in the detached subprocess.
+    unchanged.  Otherwise the driver entrypoint is used so the full recipe runs
+    in the detached subprocess.
     """
     if action.build_command:
         return list(action.build_command)

@@ -162,7 +162,7 @@ async def phase_discover(
         pr_states: Optional PR-state filter (all / open / merged / closed).
         excluded_candidate_ids: Candidate ids (pr_url / ref / ``PR:<n>``) the
             session has already discovered or reached a terminal verdict on;
-            fa hard-filters these out of the batch (Step B hard-dedup).
+            fa hard-filters these out of the batch.
         failed_candidate_context: Compact ``{ref, status, gain_pct, why}`` rows
             of candidates that already failed this session; fa uses them to
             de-prioritise same-PR / equivalent candidates. Truncated to the
@@ -251,8 +251,8 @@ async def phase_audit(
         target_framework_source_roots: explicit source roots for
             ``target_framework`` (the porting destination). Cross-framework
             audits prefer this over the ``framework_source_roots`` fallback so
-            ``metrics.roots_source=="explicit"`` and the R6 risk (source tree
-            mistaken for target tree) is never raised.
+            ``metrics.roots_source=="explicit"`` and the risk of the source tree
+            being mistaken for the target tree is never raised.
         use_llm: Opt-in single chat-completion refine (default off).
         model: Optional LLM model slug for the refine layer.
         timeout_sec: Subprocess wall-clock timeout in seconds.

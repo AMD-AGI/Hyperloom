@@ -323,9 +323,8 @@ class IntentRouter:
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the
             # executor, so the normal integrate-result rearm never fires. Without
             # this, enablement_dispatched stays stuck True and the run cannot
-            # advance the stall streak toward enablement_stalled — reproducing the
-            # 40h spin from a different path (e.g. an empty enablement deliverable
-            # the Critic rejects). Treat the rejection as a no-progress round.
+            # advance the stall streak toward enablement_stalled. Treat the
+            # rejection as a no-progress round.
             try:
                 self._coord._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}

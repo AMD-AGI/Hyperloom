@@ -207,17 +207,11 @@ def _resolve_package_version(package: str) -> str:
 
 
 def _resolve_actual_root_hints(framework: str) -> list[str]:
-    """Return concrete source-root strings for the mandate.
+    """Return concrete source-root strings for the mandate (never empty).
 
     Calls probe_framework_source_roots_for_env() and falls back to the generic
     prose hints when discovery yields nothing.  Also appends version info for the
     target framework package.
-
-    Args:
-        framework: Lower-cased framework name (e.g. ``"vllm"``).
-
-    Returns:
-        List of hint strings; never empty.
     """
     try:
         from hyperloom.orchestrator.framework.paths import (

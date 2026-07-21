@@ -2030,7 +2030,7 @@ class LangfusePush(TypedDict, total=False):
 
 
 class EnablementStackActionSummary(TypedDict, total=False):
-    """One Rung 3 (M1) attempt-runtime stack action considered/applied.
+    """One attempt-runtime stack action considered/applied.
 
     Attributes:
         kind: Stack-action kind (``runtime_candidate`` / ...).
@@ -2054,7 +2054,7 @@ class EnablementStackActionSummary(TypedDict, total=False):
 
 
 class EnablementAttemptRuntime(TypedDict, total=False):
-    """One provisioned Rung 3 attempt runtime (promoted or discarded).
+    """One provisioned attempt runtime (promoted or discarded).
 
     Attributes:
         venv_root: Attempt venv root (``$SESSION_DIR/enablement/stacks/...``).
@@ -2072,7 +2072,7 @@ class EnablementAttemptRuntime(TypedDict, total=False):
 
 
 class TargetedBuildAttemptSummary(TypedDict, total=False):
-    """One Rung 5 targeted-build attempt (AITER / sgl-kernel / vLLM-source).
+    """One targeted-build attempt (AITER / sgl-kernel / vLLM-source).
 
     Attributes:
         component: ``aiter`` / ``sgl_kernel`` / ``vllm_source`` / ``framework_ext``.
@@ -2102,17 +2102,17 @@ class TargetedBuildAttemptSummary(TypedDict, total=False):
 
 
 class EnablementBreakdown(TypedDict, total=False):
-    """Enablement attempt-runtime observability section (Rung 3 M1 + Rung 5).
+    """Enablement attempt-runtime observability section.
 
     Empty {} on sessions that never provisioned an attempt runtime, so the
     dashboard hides the block.
 
     Attributes:
-        stack_actions: Candidate Rung 3 stack actions considered this session.
+        stack_actions: Candidate stack actions considered this session.
         active_runtime: The currently-promoted attempt runtime, or {} when none.
-        attempt_runtimes: Retained Rung 3 attempt-runtime records (capped).
+        attempt_runtimes: Retained attempt-runtime records (capped).
         failure_kind: Last classified enablement failure kind.
-        build_attempts: Rung 5 targeted-build attempt history (newest last).
+        build_attempts: Targeted-build attempt history (newest last).
         last_build_failure: ``{failure_class, failure_summary}`` from the most
             recent failed build attempt (framework-channel decision input).
         build_attempt_count: Total number of targeted-build rows attempted.
@@ -2229,7 +2229,7 @@ class SessionBreakdown(TypedDict, total=False):
     kernel_journey: KernelJourney
     # Authoritative external-tool versions keyed by tool name; {} when absent.
     versions: dict[str, KernelToolMetadata]
-    # Rung 3 (M1) enablement attempt-runtime observability; {} → dashboard hides the block.
+    # Enablement attempt-runtime observability; {} → dashboard hides the block.
     enablement: EnablementBreakdown
 
     warnings: list[str]

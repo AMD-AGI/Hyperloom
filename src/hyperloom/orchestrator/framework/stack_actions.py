@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Typed data model for Rung 3 attempt-scoped runtime acquisition (M1).
+"""Typed data model for attempt-scoped runtime acquisition.
 
 An :class:`EnablementStackAction` describes an isolated runtime the enablement
 loop may acquire to provide a missing framework capability (a wheel, an editable
@@ -21,8 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
-# Acquisition methods the M1 adapters support. Compiled builds are Rung 5
-# (deferred): only wheel / editable-ref / local-tree / package-source here.
+# Acquisition methods the adapters support. Compiled builds are deferred to the
+# targeted-build path: only wheel / editable-ref / local-tree / package-source here.
 _ACQUISITION_METHODS: frozenset[str] = frozenset(
     {"wheel", "editable_ref", "local_tree", "package_source", "none"}
 )
@@ -33,9 +33,9 @@ _ACTION_KINDS: frozenset[str] = frozenset({"runtime_candidate", "pr_backport", "
 class FrameworkRuntime:
     """The explicit runtime the bench subprocess must resolve to.
 
-    Rung-3 (M1) fields describe an attempt venv; the Rung-5 additive fields
+    The base fields describe an attempt venv; the additive fields
     (``pythonpath_prefixes`` .. ``attempt_root``) describe a compiled-artifact
-    prefix. All new fields default to empty so a Rung-3 runtime is unchanged.
+    prefix. All additive fields default to empty so a venv-only runtime is unchanged.
 
     Attributes:
         bin_path: Attempt-local bin dir prepended to the YAML PATH (holds the
@@ -47,7 +47,7 @@ class FrameworkRuntime:
         server_args: Extra server args to route into ``EXTRA_{FW}_ARGS``.
         envs: Extra benchmark envs to merge (never mutates os.environ).
         pythonpath_prefixes: Multi-entry PYTHONPATH prefix for compiled
-            artifacts (Rung 5); prepended before inherited PYTHONPATH.
+            artifacts; prepended before inherited PYTHONPATH.
         ld_library_path_prefix: Native ``.so`` loader path prefix; prepended
             into LD_LIBRARY_PATH while preserving existing ROCm entries.
         runtime_env: Per-attempt env (e.g. ``INFERENCE_OPTIMIZER_AITER_JIT_DIR``,
@@ -80,7 +80,7 @@ class FrameworkRuntime:
 
         Maps this runtime onto the keys ``apply_runtime_override`` recognizes so
         the attempt runtime lands in the materialized YAML ``benchmark.envs``.
-        Rung-3 keys stay ``str``; the Rung-5 keys carry ``list``/``dict``.
+        The base keys stay ``str``; the additive keys carry ``list``/``dict``.
 
         Returns:
             dict[str, Any]: The runtime-override payload (empty values omitted).
@@ -177,8 +177,8 @@ class EnablementStackAction:
         server_args: Extra server args routed to ``EXTRA_{FW}_ARGS``.
         envs: Extra benchmark envs to merge.
         attempt_venv_root: Attempt venv root; filled by the executor stage.
-        pr_number: Merged PR number for a ``pr_backport`` localization (M2).
-        localized_paths: Repo-relative paths for a ``vendor_files`` localization (M2).
+        pr_number: Merged PR number for a ``pr_backport`` localization.
+        localized_paths: Repo-relative paths for a ``vendor_files`` localization.
     """
 
     kind: str

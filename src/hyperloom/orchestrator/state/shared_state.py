@@ -442,26 +442,26 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enablement_stall_streak: int = 0
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     enablement_human_review_logged: list = field(default_factory=list)
-    # Rung 3 (M1) attempt-scoped runtime acquisition state. All optional; NOT in
+    # Attempt-scoped runtime acquisition state. All optional; NOT in
     # fact_layer_keys and do NOT bump schema_version (default via from_dict).
     # ``enablement_stack_actions``: candidate EnablementStackAction dicts considered.
     # ``enablement_active_runtime``: the currently-promoted attempt FrameworkRuntime dict.
     # ``enablement_attempt_runtimes``: retained attempt-runtime records (capped).
-    # ``enablement_kept_stack_action``: the KEEP'd stack action; survives rearm (§8.5).
-    # ``enablement_localization_manifest``: Rung 4 (M2) localization records.
+    # ``enablement_kept_stack_action``: the KEEP'd stack action; survives rearm.
+    # ``enablement_localization_manifest``: localization records.
     enablement_stack_actions: list = field(default_factory=list)
     enablement_active_runtime: dict = field(default_factory=dict)
     enablement_attempt_runtimes: list = field(default_factory=list)
     enablement_kept_stack_action: dict = field(default_factory=dict)
     enablement_localization_manifest: list = field(default_factory=list)
-    # Rung 5 (S2) off-loop targeted-build state. All optional; NOT in
-    # fact_layer_keys and do NOT bump schema_version (default via from_dict).
+    # Off-loop targeted-build state. All optional; NOT in fact_layer_keys and
+    # do NOT bump schema_version (default via from_dict).
     # ``pending_targeted_build``: in-flight build sentinel (task_id/pid/pgid/
     #   attempt_root/aiter_jit_dir/deadline/action); own sentinel, resume-cleared.
     # ``enablement_build_actions``: TargetedBuildAction dicts considered.
     # ``enablement_build_manifest``: repo/ref/sha -> artifact -> hash records.
-    # ``enablement_last_build_failure``: failure_class + failure_summary (framework channel §9).
-    # ``enablement_build_novelty``: compact repeat-vs-novel ledger (D6).
+    # ``enablement_last_build_failure``: failure_class + failure_summary.
+    # ``enablement_build_novelty``: compact repeat-vs-novel ledger.
     # ``enablement_candidate_refs``: discovered candidate ref strings (ranked best-first).
     pending_targeted_build: dict = field(default_factory=dict)
     enablement_build_actions: list = field(default_factory=list)

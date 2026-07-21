@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reusable, injectable build utilities for off-loop targeted builds (S3).
+"""Reusable, injectable build utilities for off-loop targeted builds.
 
 All subprocess calls go through injectable ``run`` shims so every function can
 be tested without a GPU or compiler.  No PATH is hard-coded.
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 # ---------------------------------------------------------------------------
-# Argv safety (ported from apply_kernel_patch._coerce_rebuild_command)
+# Argv safety
 # ---------------------------------------------------------------------------
 
 _UNSAFE_TOKENS: frozenset[str] = frozenset({";", "&&", "||", "|", ">", ">>", "<", "<<", "`"})
@@ -87,18 +87,7 @@ def run_argv(
     timeout_sec: int = 1800,
     run: _RunCallable = subprocess.run,
 ) -> RunResult:
-    """Run *argv* in *cwd* and capture up to 4000 chars of each stream.
-
-    Args:
-        argv: The command argv (must be non-empty).
-        cwd: Working directory.
-        env: Environment mapping (``None`` inherits ``os.environ``).
-        timeout_sec: Subprocess hard timeout.
-        run: Injectable runner (defaults to ``subprocess.run``).
-
-    Returns:
-        RunResult: The outcome including return code and output tails.
-    """
+    """Run *argv* in *cwd* and capture up to 4000 chars of each stream."""
     try:
         completed = run(
             argv,
@@ -120,7 +109,7 @@ def run_argv(
 
 
 # ---------------------------------------------------------------------------
-# ROCm torch constraint file (ported from install_baremetal.sh :432-447)
+# ROCm torch constraint file
 # ---------------------------------------------------------------------------
 
 _TORCH_HIP_PROBE = (
@@ -150,14 +139,6 @@ def write_rocm_torch_constraints(
 
     Probes the interpreter for ``torch.version.hip``; raises
     :class:`AbiMismatchError` when torch is a CUDA / CPU build.
-
-    Args:
-        python_exe: Path to the Python interpreter to probe.
-        constraint_path: Where to write the constraint file.
-        run: Injectable runner.
-
-    Returns:
-        str: The path to the written constraint file.
 
     Raises:
         AbiMismatchError: If torch is not a ROCm build.
@@ -195,7 +176,7 @@ def write_rocm_torch_constraints(
 
 
 # ---------------------------------------------------------------------------
-# ROCm toolchain alignment check (ported from install_baremetal.sh :244-267)
+# ROCm toolchain alignment check
 # ---------------------------------------------------------------------------
 
 def check_rocm_toolchain_alignment(
@@ -295,7 +276,7 @@ def probe_torch_abi(
 
 
 # ---------------------------------------------------------------------------
-# Artifact freshness verify (ported from apply_kernel_patch.verify_cpp_itfs_rebuilt)
+# Artifact freshness verify
 # ---------------------------------------------------------------------------
 
 def verify_fresh_artifacts(

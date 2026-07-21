@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Registry-backed enablement adapters for Rung 3 runtime acquisition (M1).
+"""Registry-backed enablement adapters for runtime acquisition.
 
 One adapter per serving framework decides whether a :class:`CapabilityGap` is
 runtime-acquirable, builds the :class:`EnablementStackAction` that acquires it,
@@ -11,9 +11,9 @@ probes the result for the expected files/symbols.
 Isolation & safety:
 
 * vLLM ROCm provisioning pins ROCm torch from a host-allowlisted index and
-  refuses to fall back to a PyPI CUDA wheel (ported from
-  ``install_baremetal.sh`` ``write_rocm_torch_constraints`` / ``verify_vllm_rocm``).
-* Only wheel / editable-ref acquisition here; compiled builds are Rung 5.
+  refuses to fall back to a PyPI CUDA wheel.
+* Only wheel / editable-ref acquisition here; compiled builds are deferred to
+  the targeted-build path.
 * Every subprocess goes through an injectable ``run(argv, env, cwd)`` shim so the
   pure argv/env/version logic is CI-testable without ROCm / network.
 """
@@ -44,14 +44,14 @@ log = logging.getLogger(__name__)
 
 
 # Operator-configured allowlists (comma-separated). A candidate index / origin
-# must match one of these prefixes or provisioning is refused (supply-chain,
-# §10.5). The ROCm index also seeds the default vLLM adapter index.
+# must match one of these prefixes or provisioning is refused (supply-chain
+# safety). The ROCm index also seeds the default vLLM adapter index.
 _VLLM_ROCM_INDEX_ENV = "HYPERLOOM_VLLM_ROCM_INDEX_URL"
 _INDEX_ALLOWLIST_ENV = "HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST"
 _ORIGIN_ALLOWLIST_ENV = "HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST"
 
 # Per-provision hard timeout: wheel/editable install must fit inside the
-# integrate lane TTL (§8.6). Long compiles are Rung 5.
+# integrate lane TTL. Long compiles are deferred to the targeted-build path.
 _PROVISION_TIMEOUT_SEC = 1800
 
 # Gaps that a runtime candidate might repair. RESOURCE_CONSTRAINT is excluded
@@ -94,20 +94,12 @@ def _is_allowlisted(value: str, prefixes: tuple[str, ...]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Ported ROCm safety checks (install_baremetal.sh, as injectable Python)
+# ROCm safety checks (injectable Python)
 # ---------------------------------------------------------------------------
 def verify_torch_is_rocm(python_path: str, *, run: RunFn = _default_run) -> bool:
     """True when ``python_path``'s torch is a ROCm build (torch.version.hip set).
 
-    Ported from ``install_baremetal.sh:438-441``. A CUDA torch must never be
-    swapped into a ROCm attempt runtime.
-
-    Args:
-        python_path: Interpreter to probe.
-        run: Injectable subprocess shim.
-
-    Returns:
-        bool: True when torch imports and reports a ROCm/HIP build.
+    A CUDA torch must never be swapped into a ROCm attempt runtime.
     """
     argv = [python_path, "-c", "import torch,sys; sys.exit(0 if getattr(torch.version,'hip',None) else 1)"]
     try:
@@ -120,15 +112,7 @@ def verify_torch_is_rocm(python_path: str, *, run: RunFn = _default_run) -> bool
 def verify_vllm_rocm(python_path: str, *, run: RunFn = _default_run) -> bool:
     """True when vLLM imports AND reports a ROCm platform.
 
-    Ported from ``install_baremetal.sh:633-668`` (satisfies §6.4's
-    ``current_platform.is_rocm()`` check).
-
-    Args:
-        python_path: Interpreter to probe.
-        run: Injectable subprocess shim.
-
-    Returns:
-        bool: True when vLLM is importable and its platform is ROCm.
+    Confirms ``current_platform.is_rocm()``.
     """
     probe = (
         "import sys\n"
@@ -245,7 +229,7 @@ class BaseAdapter:
         candidate_ref: str,
         repo_url: str,
     ) -> EnablementStackAction | None:
-        """Build a Rung 4 (M2) code-localization action, or None (unsupported).
+        """Build a code-localization action, or None (unsupported).
 
         Args:
             gap: The projected capability gap.
@@ -600,7 +584,7 @@ class SglangAdapter(_VenvProvisionMixin):
 
 
 class AtomAdapter(BaseAdapter):
-    """Atom adapter: no runtime acquisition (M1), but Python localization (M2).
+    """Atom adapter: no runtime acquisition, but Python localization.
 
     Atom is a wheel-installed (non-git) tree; a Python-only PR backport localizes
     via the executor's no-git apply. There is no editable refresh (importlib
