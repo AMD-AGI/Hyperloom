@@ -102,6 +102,19 @@ A discovered candidate reference now drives the enablement targeted build
 - The source PR URL is recorded as build provenance and surfaces in the session
   breakdown's `build_attempts[].installed_versions` as `source_pr_url`.
 
+## Enablement ladder (methodology)
+
+When a candidate is for enablement (making a non-runnable `(model, backend)`
+combo boot at all, not perf), the repair follows a tiered ladder — diagnose the
+missing capability layer once, then climb only as far as needed: Rung 0
+diagnose, 1 serve-flag/config wire-up, 2 in-tree source patch, 3 attempt-scoped
+runtime, 4 source localization, 5 off-loop compiled build. A supported-but-un-wired
+model needs only the cheap top rungs; a genuinely-new architecture climbs higher.
+The canonical rendered text is `build_enablement_ladder_book` in
+`hyperloom.agents.framework.enablement_ops` (injected into the enablement
+authoring specialist's prompt); see also `docs/conceptual/optimization-loop.md`
+("Enablement escalation ladder").
+
 ## KB partition (`fa kb`)
 
 Read priors before generating a patch; write lessons only after a KEEP
