@@ -63,6 +63,7 @@ def build_server_command(
     extra_args: list[str],
     profile_dir: str | None,
     python_exe: str = "python3",
+    framework_python: str = "",
 ) -> list[str]:
     """Build the per-framework server launch argv.
 
@@ -79,7 +80,12 @@ def build_server_command(
             the interpreter running the bypass runner so the server loads the
             SAME venv (avoids a PATH ``python3`` that cannot import the
             framework). vllm uses its own ``vllm`` console script and ignores
-            this.
+            this unless ``framework_python`` is set.
+        framework_python: When non-empty, the explicit interpreter that built
+            the from-source vLLM/sglang.  For vLLM this switches from the
+            bare ``vllm serve`` console script to ``python -m
+            vllm.entrypoints.openai.api_server`` so the interpreter is
+            honored. For sglang/atom it replaces ``python_exe``.
 
     Returns:
         The server launch argv list.
@@ -88,9 +94,10 @@ def build_server_command(
         ValueError: When the framework has no known server launcher.
     """
     fw = framework.lower()
+    interp = framework_python or python_exe
     if fw == "sglang":
         cmd = [
-            python_exe,
+            interp,
             "-m",
             "sglang.launch_server",
             "--model-path",
@@ -105,16 +112,30 @@ def build_server_command(
         ]
         return cmd + list(extra_args)
     if fw == "vllm":
-        cmd = [
-            "vllm",
-            "serve",
-            model,
-            "--port",
-            str(port),
-            "--tensor-parallel-size",
-            str(tp),
-            "--trust-remote-code",
-        ]
+        if framework_python:
+            cmd = [
+                framework_python,
+                "-m",
+                "vllm.entrypoints.openai.api_server",
+                "--model",
+                model,
+                "--port",
+                str(port),
+                "--tensor-parallel-size",
+                str(tp),
+                "--trust-remote-code",
+            ]
+        else:
+            cmd = [
+                "vllm",
+                "serve",
+                model,
+                "--port",
+                str(port),
+                "--tensor-parallel-size",
+                str(tp),
+                "--trust-remote-code",
+            ]
         if max_model_len:
             cmd += ["--max-model-len", str(max_model_len)]
         if profile_dir:
@@ -130,7 +151,7 @@ def build_server_command(
         return cmd + list(extra_args)
     if fw == "atom":
         cmd = [
-            python_exe,
+            interp,
             "-m",
             "atom.entrypoints.openai_server",
             "--model",
