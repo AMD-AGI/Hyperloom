@@ -167,16 +167,58 @@ jobs:
           # shard's slice of the ``--splits`` partition (from PARGS).
           # ``--store-durations`` records THIS shard's per-test timings into a
           # shard-scoped file for the update-durations merge job.
+          # ``-rf`` prints a "short test summary info" block with one
+          # ``FAILED <nodeid> - <reason>`` line per failing test (stable pytest
+          # output contract, unaffected by ``-n``/xdist since the summary is
+          # rendered by the controller process after workers report back).
+          # Captured below (not just left in the raw log) so a shard's actual
+          # failures surface without opening the shard job's full log.
           export COVERAGE_FILE=".coverage.shard${SHARD}"
+          set +e
           pytest "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
             --store-durations --durations-path ".test_durations.shard${SHARD}" \
-            --cov-fail-under=0 "${EXTRA[@]}"
+            --cov-fail-under=0 -rf "${EXTRA[@]}" 2>&1 | tee pytest-output.log
+          PYTEST_RC="${PIPESTATUS[0]}"
+          set -e
+          exit "$PYTEST_RC"
 
       - name: Record shard outcome
         if: always()
         run: |
           mkdir -p shard-status
           echo "${{ steps.pytest.outcome }}" > "shard-status/py${{ matrix.python-version }}-shard${{ matrix.shard }}.outcome"
+
+      # Surface failures on the shard job itself, not just in the aggregate
+      # gate: extract the "FAILED <nodeid> - <reason>" lines, write them where
+      # this shard's failed count / list is picked up by the coverage job, and
+      # annotate the run so failures show up without opening this job's log.
+      - name: Report shard failures
+        if: always() && steps.pytest.outcome != 'success'
+        run: |
+          mkdir -p shard-status
+          FAILED_FILE="shard-status/py${{ matrix.python-version }}-shard${{ matrix.shard }}.failed"
+          # Section is bounded by pytest's own summary headers; grep the
+          # ``FAILED <nodeid> - ...`` lines pytest -rf prints between them.
+          grep -E '^FAILED ' pytest-output.log > "$FAILED_FILE" || true
+          TITLE="py${{ matrix.python-version }}-shard${{ matrix.shard }}-failed"
+          if [ -s "$FAILED_FILE" ]; then
+            COUNT=$(wc -l < "$FAILED_FILE")
+            echo "::error title=${TITLE}::${COUNT} test(s) failed in this shard"
+            {
+              echo "### Failed tests"
+              echo '```'
+              cat "$FAILED_FILE"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r line; do
+              echo "::error::${line}"
+            done < "$FAILED_FILE"
+          else
+            # pytest failed (non-zero exit) but no "FAILED " summary line was
+            # captured -- e.g. a collection error or worker crash. Say so
+            # explicitly instead of silently reporting nothing.
+            echo "::error title=${TITLE}::Shard failed but no per-test FAILED lines were found (collection error or crash); see this job's full log."
+          fi
 
       - name: Upload shard coverage data
         if: always()
@@ -186,6 +228,7 @@ jobs:
           path: |
             .coverage.shard${{ matrix.shard }}
             shard-status/*.outcome
+            shard-status/*.failed
           include-hidden-files: true
           retention-days: 1
           if-no-files-found: warn
@@ -238,6 +281,9 @@ jobs:
       - name: Download shard coverage data
         uses: actions/download-artifact@v8
         with:
+          # Same artifact family the ``test`` job uploads shard-status/*
+          # (outcome + failed-test-list) alongside; -status.outcome/-status.failed
+          # both land here.
           pattern: covdata-py${{ matrix.python-version }}-shard*
           merge-multiple: true
 
@@ -261,17 +307,59 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           failed=0
+          failed_shards=()
+          {
+            echo "### Shard results (Python ${{ matrix.python-version }})"
+            echo "| Shard | Result |"
+            echo "|-------|--------|"
+          } >> "$GITHUB_STEP_SUMMARY"
           for f in shard-status/*.outcome; do
             val="$(cat "$f")"
-            echo "$(basename "$f"): $val"
+            # filenames are "py<version>-shard<N>.outcome"
+            shard_label="$(basename "$f" .outcome)"
+            echo "$shard_label: $val"
+            icon="✅"
             if [ "$val" != "success" ]; then
               failed=1
+              failed_shards+=("$shard_label")
+              icon="❌"
             fi
+            echo "| $shard_label | $icon $val |" >> "$GITHUB_STEP_SUMMARY"
           done
           if [ "$failed" -eq 1 ]; then
             echo "tests_ok=false" >> "$GITHUB_OUTPUT"
+            # Comma-separated for a compact single-line ::error:: annotation;
+            # each shard's own failed-test list was already annotated by that
+            # shard job's "Report shard failures" step. Joined in a subshell
+            # so the IFS change doesn't leak into the rest of this step.
+            joined="$(IFS=,; echo "${failed_shards[*]}")"
+            echo "failed_shards=${joined}" >> "$GITHUB_OUTPUT"
           else
             echo "tests_ok=true" >> "$GITHUB_OUTPUT"
+            echo "failed_shards=" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Fold every shard's captured "FAILED <nodeid> - reason" lines (if
+          # any were uploaded) into this job's own Summary, so the full list of
+          # failing tests for this Python version is visible in ONE place
+          # without opening any shard job's log.
+          if compgen -G "shard-status/*.failed" > /dev/null; then
+            {
+              echo ""
+              echo "### Failed tests (Python ${{ matrix.python-version }})"
+            } >> "$GITHUB_STEP_SUMMARY"
+            for f in shard-status/*.failed; do
+              [ -s "$f" ] || continue
+              shard_label="$(basename "$f" .failed)"
+              {
+                echo "<details><summary>${shard_label}</summary>"
+                echo ""
+                echo '```'
+                cat "$f"
+                echo '```'
+                echo "</details>"
+              } >> "$GITHUB_STEP_SUMMARY"
+            done
           fi
 
       - name: Coverage summary
@@ -447,7 +535,7 @@ jobs:
       - name: Enforce test success
         if: always() && steps.outcomes.outputs.tests_ok != 'true'
         run: |
-          echo "::error::One or more test shards failed (see the shard jobs' \"Run tests with coverage\" logs)."
+          echo "::error title=test-shards-failed::Failed shard(s) for Python ${{ matrix.python-version }}: ${{ steps.outcomes.outputs.failed_shards }} -- see the 'Failed tests' section in this job's Summary, or the shard jobs' own 'Report shard failures' annotations."
           exit 1
 
   # ---------------------------------------------------------------------------
