@@ -436,9 +436,10 @@ def maybe_serving_lease(
     """Return a :class:`ServingLease` when single-node Ray execution is active.
 
     The single seam executors use to opt a benchmark unit onto Ray: it returns
-    a (not-yet-ensured) lease when the Ray backend should run this work and the
-    run is single-node, else ``None`` (multi-node, ``INFERENCE_OPTIMIZER_RAY_EXEC``
-    off, or the pytest default). Callers pass the result straight into
+    a (not-yet-ensured) lease only when the Ray backend is explicitly enabled
+    for a single-node run, else ``None`` (default local path, multi-node,
+    ``INFERENCE_OPTIMIZER_RAY_EXEC`` off, or the pytest default). Callers pass
+    the result straight into
     ``run_grid(..., serving_lease=lease)`` / ``run_session_kill`` — ``None``
     transparently keeps the existing local-subprocess path — and MUST
     :meth:`ServingLease.close` a non-``None`` lease (typically in a ``finally``)

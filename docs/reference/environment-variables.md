@@ -111,6 +111,14 @@ The following variables control the kernel optimization backend ladder.
 
 ---
 
+## Single-node Ray execution
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INFERENCE_OPTIMIZER_RAY_EXEC` | Unset (`off`) | Opt-in switch for routing single-node serving benchmarks and `needs_gpu` specialists through Ray actors. Set to `1` / `true` / `yes` / `on` to enable Ray-managed leases. Leave unset, or set `0` / `false` / `no` / `off`, to use the local subprocess path. Multi-node serving remains controlled by the multi-node backend. |
+
+---
+
 ## Codex (OpenAI) backend web search
 
 The following variables enable OpenAI's built-in server-side web search for the

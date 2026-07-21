@@ -43,15 +43,15 @@ def test_ray_exec_enabled_explicit_off(monkeypatch: pytest.MonkeyPatch, val: str
     assert rb.ray_exec_enabled() is False
 
 
-def test_ray_exec_forced_on_single_node_by_default(
+def test_ray_exec_off_by_default_on_single_node(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    """Decision 2+4: unset env -> ON for single-node."""
+    """Unset env -> local subprocess path; Ray is opt-in."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rb.ray_exec_enabled() is True
+    assert rb.ray_exec_enabled() is False
 
 
 def test_ray_exec_off_on_multi_node_by_default(
@@ -1259,13 +1259,13 @@ def test_gpu_specialist_lease_close_kills_live_actor(monkeypatch: pytest.MonkeyP
     assert lease._actor is None
 
 
-def test_should_use_ray_backend_unset_single_node_true(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Env unset + not-under-pytest + single-node -> True (production default)."""
+def test_should_use_ray_backend_unset_single_node_false(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Env unset + not-under-pytest + single-node -> False (Ray is opt-in)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)  # bypass the pytest gate
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rb._should_use_ray_backend() is True  # 80-82
+    assert rb._should_use_ray_backend() is False
 
 
 def test_strip_visible_devices_write_error_returns_src(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

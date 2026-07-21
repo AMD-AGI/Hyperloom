@@ -29,36 +29,30 @@ _RAY_OWNED_VISIBLE_DEVICE_VARS = (
 def ray_exec_enabled() -> bool:
     """Return whether GPU/serving work should run through the Ray backend.
 
-    When ``INFERENCE_OPTIMIZER_RAY_EXEC`` is unset: ON for single-node, OFF for
-    multi-node. The env var is an explicit override / emergency escape valve.
+    Ray execution is opt-in. Set ``INFERENCE_OPTIMIZER_RAY_EXEC=1`` to route
+    single-node GPU/serving work through Ray. When unset, the local subprocess
+    path is used.
     """
     val = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower()
     if val in {"1", "true", "yes", "on"}:
         return True
     if val in {"0", "false", "no", "off"}:
         return False
-    # Unset: single-node forced ON, multi-node OFF (decisions 2 + 4).
-    from ._multi_node_env import is_multi_node
-
-    return not is_multi_node()
+    return False
 
 
 def _should_use_ray_backend() -> bool:
-    """Like :func:`ray_exec_enabled` but stays OFF under pytest when unset.
+    """Return whether the Ray execution route is explicitly enabled.
 
-    Tests run the local subprocess path by default; ``INFERENCE_OPTIMIZER_RAY_EXEC=1``
-    still opts a specific test into the Ray path.
+    Tests and production both use the local subprocess path by default;
+    ``INFERENCE_OPTIMIZER_RAY_EXEC=1`` opts a run into the Ray path.
     """
     val = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower()
     if val in {"1", "true", "yes", "on"}:
         return True
     if val in {"0", "false", "no", "off"}:
         return False
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return False
-    from ._multi_node_env import is_multi_node
-
-    return not is_multi_node()
+    return False
 
 
 def ray_gpu_specialist_exec_enabled() -> bool:
