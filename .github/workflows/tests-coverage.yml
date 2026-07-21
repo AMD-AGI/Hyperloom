@@ -178,8 +178,17 @@ jobs:
           pytest "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
             --store-durations --durations-path ".test_durations.shard${SHARD}" \
             --cov-fail-under=0 -rf "${EXTRA[@]}" 2>&1 | tee pytest-output.log
+          # ${PIPESTATUS[@]} = (pytest_rc, tee_rc). The job's pass/fail is driven
+          # solely by pytest's rc (index 0). tee's rc (index 1) is only used to
+          # warn if the log write was truncated (e.g. disk full -- which this
+          # runner has actually hit), so a later partial FAILED extraction isn't
+          # mistaken for the full picture.
           PYTEST_RC="${PIPESTATUS[0]}"
+          TEE_RC="${PIPESTATUS[1]}"
           set -e
+          if [ "$TEE_RC" -ne 0 ]; then
+            echo "::warning::tee exited ${TEE_RC} writing pytest-output.log; the captured log (and any extracted FAILED list) may be truncated."
+          fi
           exit "$PYTEST_RC"
 
       - name: Record shard outcome
@@ -211,15 +220,31 @@ jobs:
           if [ -s "$FAILED_FILE" ]; then
             COUNT=$(wc -l < "$FAILED_FILE")
             echo "::error title=${TITLE}::${COUNT} test(s) failed in this shard"
+            # The full list always goes to the job Summary (and the uploaded
+            # .failed artifact). Per-test ::error:: annotations are capped: a
+            # mass failure (e.g. an import error failing hundreds of tests)
+            # would otherwise flood the run's annotation panel, which GitHub
+            # truncates anyway. Show the first ANNOTATION_CAP, then point at the
+            # Summary for the rest.
             {
               echo "### Failed tests"
               echo '```'
               cat "$FAILED_FILE"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            ANNOTATION_CAP=20
+            n=0
             while IFS= read -r line; do
-              echo "::error::${line}"
+              # ``: $(( ))`` (the leading ':' no-op) avoids the ``set -e`` pitfall
+              # where a bare ``n=$((n+1))`` would exit non-zero if the result were 0.
+              : $(( n += 1 ))
+              if [ "$n" -le "$ANNOTATION_CAP" ]; then
+                echo "::error::${line}"
+              fi
             done < "$FAILED_FILE"
+            if [ "$COUNT" -gt "$ANNOTATION_CAP" ]; then
+              echo "::error title=${TITLE}::Showing first ${ANNOTATION_CAP} of ${COUNT} failures as annotations; see the full list in this job's Summary or the .failed artifact."
+            fi
           else
             # pytest failed (non-zero exit) but no "FAILED " summary line was
             # captured -- e.g. a collection error or worker crash. Say so
