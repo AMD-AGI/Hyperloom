@@ -2371,12 +2371,6 @@ class BaselineExecutor:
             # still resolve from Magpie's benchmark reports.
             eval_search_root = result_dir
             eval_data = parse_eval_results(eval_search_root, framework=eval_framework)
-            if eval_data.get("accuracy") is None and eval_search_root != output_dir:
-                fallback_eval_data = parse_eval_results(output_dir, framework=eval_framework)
-                if fallback_eval_data.get("accuracy") is not None:
-                    eval_data = fallback_eval_data
-                    result.setdefault("nonfatal_warnings", [])
-                    result["nonfatal_warnings"].append("baseline_accuracy_parsed_from_output_dir_fallback")
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]
                 result["accuracy_task"] = eval_data.get("task", "gsm8k")

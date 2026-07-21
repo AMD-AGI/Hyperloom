@@ -352,54 +352,6 @@ def test_baseline_anchors_relative_result_dir_before_accuracy_parse(tmp_path):
     assert shared_state.stop_reason == ""
 
 
-def test_baseline_falls_back_to_output_dir_when_wrapper_ignores_result_dir(tmp_path):
-    """If a wrapper ignores RESULT_DIR, the deciding round's output_dir is still searched."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    output_dir = tmp_path / "ws"
-
-    def fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        workspace = _fake_workspace(slot)
-        _write_lm_eval_output(workspace)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    shared_state = _StopRecorder()
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-        shared_state=shared_state,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "baseline_double_run": False,
-            "framework": "vllm",
-            "result_dir": "runs/baseline/mp-backend",
-        }
-    )
-    ctx.task.kind = "baseline"
-    ctx.extra["shared_state"] = shared_state
-
-    with (
-        patch("hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", return_value=None),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-            side_effect=fake_run,
-        ),
-    ):
-        result = asyncio.run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert result.get("output_dir") == str(output_dir)
-    assert result.get("accuracy") == pytest.approx(0.83)
-    assert "baseline_accuracy_parsed_from_output_dir_fallback" in result.get("nonfatal_warnings", [])
-    assert shared_state.stop_reason == ""
-
-
 def test_baseline_parses_accuracy_after_eval_result_dir_cleanup(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base)
