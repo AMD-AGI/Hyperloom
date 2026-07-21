@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""S7 unit tests: targeted-build observability in session_breakdown.json."""
+"""Targeted-build observability in session_breakdown.json."""
 
 from __future__ import annotations
 
@@ -98,7 +98,7 @@ def test_collect_enablement_vllm_ref_surfaced():
 
 
 def test_collect_enablement_combined_rung3_and_rung5():
-    """Both Rung-3 (stack_actions) and Rung-5 (build_manifest) fields co-exist."""
+    """Both attempt-runtime (stack_actions) and build_manifest fields co-exist."""
     out = collect_enablement(
         Path("/tmp"),
         _state(

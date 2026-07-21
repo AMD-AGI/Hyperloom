@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""S5 unit tests: targeted-build <-> enablement integration.
+"""Targeted-build <-> enablement integration in the framework phase.
 
 Tests escalation, outcome routing, failure_class injection into the mandate,
 and the gpu_arch derivation helper.  No GPU, no network, no coordinator ticks.
@@ -10,69 +10,45 @@ and the gpu_arch derivation helper.  No GPU, no network, no coordinator ticks.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any
+import types as _types
 
 import pytest
 
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
-from hyperloom.orchestrator.bus.storage import SqliteConnection
-from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.framework import _derive_gpu_arch
-from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
 
 # ---------------------------------------------------------------------------
-# Helpers: minimal fake coordinator for framework-phase methods
+# Fixture: extend the shared build_coord with framework-phase routing methods
 # ---------------------------------------------------------------------------
-
-import types as _types
-
-class _FakeCoord:
-    def __init__(self, session_dir, db, state):
-        self.session_dir = session_dir
-        self.tasks = TaskRegistry(db)
-        self.locks = ResourceLockManager(SqliteLeaseBackend(db))
-        self.shared_state = state
-        self._rearm_calls: list[dict] = []
-        # Bind real Coordinator async methods that _maybe_route_build_outcomes delegates to.
-        self._enqueue_build_launch_probe = _types.MethodType(
-            Coordinator._enqueue_build_launch_probe, self
-        )
-
-    def _maybe_rearm_enablement(self, res):
-        self._rearm_calls.append(dict(res) if isinstance(res, dict) else {})
-
-    async def enqueue_targeted_build(self, action):
-        # Delegate to real BuildLifecycleCollaborator
-        return await self._bl.enqueue_targeted_build(action)
-
-    def _setup_bl(self):
-        self._bl = BuildLifecycleCollaborator(self)
-
-    def _framework_gpu_params(self) -> dict:
-        return {}
-
-    def _framework_authoring_lanes_ttl(self, params, *, base_ttl_sec: int) -> tuple:
-        return ["research_lane"], base_ttl_sec
-
-    def _coerce_needs_gpu(self, val) -> bool:
-        return bool(val)
-
 
 @pytest.fixture
-def coord(tmp_path):
-    db = SqliteConnection(tmp_path / "coordinator.db")
-    ensure_schema(db.raw)
-    state = SharedState()
-    fc = _FakeCoord(tmp_path, db, state)
-    fc._setup_bl()
-    yield fc
-    db.close()
+def coord(build_coord):
+    """``build_coord`` augmented with the routing-method surface the framework
+    phase delegates to (launch-probe enqueue, rearm capture, build lifecycle).
+    """
+    build_coord._rearm_calls = []
+    build_coord._enqueue_build_launch_probe = _types.MethodType(
+        Coordinator._enqueue_build_launch_probe, build_coord
+    )
+
+    def _maybe_rearm_enablement(res):
+        build_coord._rearm_calls.append(dict(res) if isinstance(res, dict) else {})
+
+    async def _enqueue_targeted_build(action):
+        return await build_coord._bl.enqueue_targeted_build(action)
+
+    build_coord._maybe_rearm_enablement = _maybe_rearm_enablement
+    build_coord.enqueue_targeted_build = _enqueue_targeted_build
+    build_coord._framework_gpu_params = lambda: {}
+    build_coord._framework_authoring_lanes_ttl = (
+        lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
+    )
+    build_coord._coerce_needs_gpu = lambda val: bool(val)
+    build_coord._bl = BuildLifecycleCollaborator(build_coord)
+    return build_coord
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +146,7 @@ async def test_escalate_disabled_by_env(coord, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # _maybe_escalate_to_targeted_build: vLLM arch/weight deep-failure -> vllm_source
-# (route_build Part B — source patches keep hitting the arch wall)
+# (source patches keep hitting the arch wall)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -209,8 +185,8 @@ async def test_arch_stall_not_escalated_on_non_vllm(coord, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _maybe_enqueue_specialist_requested_build (route_build Part A —
-# specialist asks for a compiled / from-source build in specialist_done)
+# _maybe_enqueue_specialist_requested_build
+# (specialist asks for a compiled / from-source build in specialist_done)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -367,7 +343,7 @@ async def test_route_succeeded_row_probe_carries_config_path(coord, tmp_path):
 
 @pytest.mark.asyncio
 async def test_route_succeeded_missing_result_json_calls_reverted(coord, tmp_path):
-    """Gap 6: a succeeded build whose result.json is absent routes reverted."""
+    """A succeeded build whose result.json is absent routes reverted."""
     root = tmp_path / "attempt_missing"
     root.mkdir(parents=True, exist_ok=True)
     # No result.json written.
@@ -386,7 +362,7 @@ async def test_route_succeeded_missing_result_json_calls_reverted(coord, tmp_pat
 
 @pytest.mark.asyncio
 async def test_route_succeeded_empty_runtime_override_calls_reverted(coord, tmp_path):
-    """Gap 6: a succeeded build with an empty runtime override routes reverted."""
+    """A succeeded build with an empty runtime override routes reverted."""
     root = tmp_path / "attempt_empty"
     root.mkdir(parents=True, exist_ok=True)
 
@@ -586,7 +562,7 @@ def test_build_params_failure_class_distinguishes_timeout_vs_defect():
 
 
 # ---------------------------------------------------------------------------
-# _maybe_escalate_to_targeted_build: discovery-driven ref selection (Gap 7)
+# _maybe_escalate_to_targeted_build: discovery-driven ref selection
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
