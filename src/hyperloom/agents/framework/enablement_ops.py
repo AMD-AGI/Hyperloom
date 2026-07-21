@@ -255,7 +255,10 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "setup via ENVIRONMENT SETUP below is separate and allowed.)",
     "Do NOT fabricate throughput/latency/accuracy numbers — the gate here is "
     "RUNNABILITY (does the server boot + pass a minimal inference), not perf.",
-    "Prefer the smallest bridging change that makes the combo run; do not refactor unrelated code.",
+    "Prefer the smallest bridging change that makes the combo run — or, when full "
+    "runnability is out of reach this round, the smallest change that ADVANCES the "
+    "boot past the current failure (see PROGRESS DELIVERABLE below); do not "
+    "refactor unrelated code.",
     "If a discovered PR already implements the fix, adapt/backport it rather than authoring from scratch.",
 )
 
@@ -276,6 +279,33 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
     "interactive (`-y` / `--yes`), and limited to package/tool installation — "
     "they are validated against an install-only allowlist on replay.",
     "If NO environment setup is needed (a pure source fix), leave `setup_commands` empty.",
+)
+
+# Serial-enablement progress contract. A brand-new architecture or a large
+# capability gap rarely becomes fully runnable inside a single budget window.
+# The integrate side already REWARDS partial progress: a patch that only
+# advances the boot to a *new, deeper* failure is KEPT and stacked as a base for
+# the next round (see ``enablement.enablement_made_progress`` and
+# ``integrate_patch`` ``status="advanced"``). Historically the specialist was
+# only told to make the combo *run*, so on a big gap it judged full runnability
+# infeasible and returned ``empty=true`` wholesale — starving that incremental
+# machinery of the very patches it stacks. This guidance closes that asymmetry:
+# advancing the boot ONE step is an explicit, valid deliverable.
+ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
+    "INCREMENTAL PROGRESS IS A FIRST-CLASS DELIVERABLE. Enablement gaps are "
+    "serial: clearing one boot failure usually reveals a deeper one. You do NOT "
+    "have to reach full end-to-end runnability in this one budget window.",
+    "If you cannot make the combo fully run, author the SMALLEST patch that "
+    "ADVANCES the boot PAST THE CURRENT failure — clear THIS error even if a "
+    "new, different failure then appears. A patch that changes the failure "
+    "signature is KEPT and stacked as a base; the next round resumes from the "
+    "deeper failure. One step forward is strictly better than returning nothing.",
+    "Record that patch in ``patches_written`` (and any installs in "
+    "``setup_commands``), set ``empty=false``, and in ``summary`` state which "
+    "failure you cleared and what the next (deeper) failure now is.",
+    "Return ``empty=true`` ONLY when you cannot advance past the CURRENT failure "
+    "by even one step — NOT merely because full runnability is out of reach this "
+    "round.",
 )
 
 
@@ -357,6 +387,10 @@ def _render_task_description(
     for g in ENABLEMENT_SETUP_GUIDANCE:
         lines.append(f"  - {g}")
     lines.append("")
+    lines.append("PROGRESS DELIVERABLE (serial enablement — advancing the boot one step counts):")
+    for g in ENABLEMENT_PROGRESS_GUIDANCE:
+        lines.append(f"  - {g}")
+    lines.append("")
     lines.append("INVARIANTS:")
     for inv in ENABLEMENT_PATCH_INVARIANTS:
         lines.append(f"  - {inv}")
@@ -408,6 +442,7 @@ def build_mandate(
 __all__ = [
     "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",
+    "ENABLEMENT_PROGRESS_GUIDANCE",
     "ENABLEMENT_SETUP_GUIDANCE",
     "EnablementMandate",
     "EnablementSearchPlan",
