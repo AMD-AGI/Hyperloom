@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for Rung 3 (M1) provision-stage wiring in integrate_patch (§10.2, §8.8).
+"""Tests for the attempt-runtime provision-stage wiring in integrate_patch.
 
 Exercises _stage_provision_attempt_runtime and the YAML-layer runtime activation
 in isolation, plus the KEEP/rearm stack-action survival and GC. All subprocess /
@@ -172,7 +172,7 @@ async def test_disk_preflight_failure_returns_reverted(_executor, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# §8.8 decision gate: runtime lands in materialized YAML, not os.environ
+# decision gate: runtime lands in materialized YAML, not os.environ
 # ---------------------------------------------------------------------------
 
 def test_provisioned_runtime_lands_in_yaml_not_process_env(tmp_path, monkeypatch):
@@ -195,7 +195,7 @@ def test_provisioned_runtime_lands_in_yaml_not_process_env(tmp_path, monkeypatch
 
     materialized = yaml.safe_load(out_yaml.read_text(encoding="utf-8"))
     envs = materialized["benchmark"]["envs"]
-    # §8.8: the server binary resolves the attempt runtime, proven via YAML.
+    # the server binary resolves the attempt runtime, proven via YAML.
     assert f"{venv}/bin" in envs["PATH"]
     assert envs["HYPERLOOM_FRAMEWORK_BIN"] == f"{venv}/bin"
     assert envs["HYPERLOOM_FRAMEWORK_VENV_ROOT"] == venv
@@ -212,7 +212,7 @@ def test_opt_venv_path_never_replaced(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# rearm: KEEP'd stack action survives one rearm cycle (§8.5)
+# rearm: KEEP'd stack action survives one rearm cycle
 # ---------------------------------------------------------------------------
 
 def test_kept_stack_action_survives_rearm(monkeypatch):

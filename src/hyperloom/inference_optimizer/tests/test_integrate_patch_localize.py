@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the M2 _stage_localize_source wiring in integrate_patch (§9.6)."""
+"""Tests for the _stage_localize_source wiring in integrate_patch."""
 
 from __future__ import annotations
 
 import types
-from pathlib import Path
 
 import pytest
 
@@ -90,7 +89,7 @@ async def test_python_only_writes_patch(_executor, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Rung 5 deferral: compiled closure -> reverted, no patch
+# compiled-closure deferral: reverted, no patch
 # ---------------------------------------------------------------------------
 
 async def test_compiled_closure_defers_rung5(_executor, monkeypatch):
