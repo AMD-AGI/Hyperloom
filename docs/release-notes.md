@@ -36,8 +36,8 @@ per-release versions:
   mirror; and session-breakdown attribution no longer fabricates credit from a
   seeded stack.
 
-- **Provider-direct LLM configuration**: Hyperloom runs against Anthropic +
-  DeepSeek directly (provider-only paths), with env-driven, consistent gateway
+- **Provider-direct LLM configuration**: Hyperloom runs against Anthropic
+  directly (provider-only paths), with env-driven, consistent gateway
   auth/endpoint resolution and case-insensitive Anthropic-endpoint handling;
   the Critic can run over the native provider endpoint.
 
