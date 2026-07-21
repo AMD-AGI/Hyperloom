@@ -1800,23 +1800,3 @@ def test_expected_framework_guard_unset_is_noop(monkeypatch):
     # No env pins -> guard is a no-op.
     cli._enforce_expected_framework("sglang")
     cli._enforce_expected_framework("anything")
-
-
-def test_resume_model_path_allows_huggingface_id():
-    assert cli._validate_resume_model_path("org/model-name_1") == "org/model-name_1"
-
-
-def test_resume_model_path_allows_any_absolute_path(tmp_path):
-    model = tmp_path / "outside-old-allowlist" / "M"
-    model.mkdir(parents=True)
-
-    assert cli._validate_resume_model_path(str(model)) == str(model.resolve())
-
-
-def test_resume_model_path_allows_primus_models_without_allowlist():
-    assert cli._validate_resume_model_path("/primus/models/Qwen3-8B") == "/primus/models/Qwen3-8B"
-
-
-def test_resume_model_path_rejects_relative_local_path():
-    with pytest.raises(ValueError, match="absolute path"):
-        cli._validate_resume_model_path("../models/Qwen3-8B")

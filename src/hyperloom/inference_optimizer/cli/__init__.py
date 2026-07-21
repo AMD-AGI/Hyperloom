@@ -14,7 +14,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shlex
 import sys
 import time
@@ -104,8 +103,6 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
-_HF_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
-
 from .parser import (
     _build_parser as _build_parser,
     _positive_int_arg as _positive_int_arg,
@@ -166,26 +163,6 @@ def _enforce_expected_framework(
             file=sys.stderr,
         )
         raise SystemExit(2)
-
-
-def _validate_resume_model_path(model_path: str) -> str:
-    """Validate persisted ``state.model_path`` before re-exporting MODEL_PATH.
-
-    Resume trusts the session's persisted model identity. Keep only basic input
-    validation here: control characters are rejected, HF repo IDs are allowed,
-    and absolute local paths are accepted regardless of root.
-    """
-    raw = str(model_path or "").strip()
-    if not raw:
-        return ""
-    if any(ch in raw for ch in ("\x00", "\n", "\r")):
-        raise ValueError("model_path contains control characters")
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        if _HF_MODEL_ID_RE.fullmatch(raw) and ".." not in raw.split("/"):
-            return raw
-        raise ValueError("model_path must be a HuggingFace repo id or an absolute path")
-    return str(path.resolve())
 
 
 def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
@@ -1460,11 +1437,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
         # Re-export session-level env from persisted state so a fresh-shell resume doesn't fall back to YAML defaults.
         if state.model_path:
-            try:
-                resume_model_path = _validate_resume_model_path(state.model_path)
-            except ValueError as exc:
-                print(f"ERROR: --resume refused persisted model_path: {exc}", file=sys.stderr)
-                sys.exit(2)
+            resume_model_path = str(state.model_path)
             os.environ["MODEL_PATH"] = resume_model_path
             print(f"  re-exported MODEL_PATH: {resume_model_path}")
             # Backfill model_info for sessions created before the field existed

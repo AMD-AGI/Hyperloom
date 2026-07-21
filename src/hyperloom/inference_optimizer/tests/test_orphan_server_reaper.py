@@ -168,3 +168,20 @@ def test_reap_kills_group_when_recorded_leader_exited_but_child_survives(tmp_pat
             os.kill(child_pid, 9)
         except OSError:
             pass
+
+
+def test_reap_spares_group_when_recorded_leader_exited_but_child_is_unrelated(tmp_path):
+    """A recycled pgid must not be killed unless a group member still looks like a server."""
+    leader_pid, child_pid = _spawn_dead_leader_with_live_child(tmp_path, "totally-unrelated-process")
+    pidfile = _write_pidfile(tmp_path, "sglang_8888", leader_pid)
+    try:
+        reaped = reap_orphaned_servers(tmp_path)
+
+        assert leader_pid not in reaped
+        assert _pid_alive(child_pid), "unrelated process group must not be killed"
+        assert pidfile.exists()
+    finally:
+        try:
+            os.kill(child_pid, 9)
+        except OSError:
+            pass

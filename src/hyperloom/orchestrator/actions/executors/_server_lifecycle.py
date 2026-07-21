@@ -268,6 +268,28 @@ def _looks_like_server_process(pid: int) -> bool:
     return any(marker in cmdline for marker in _SERVER_CMDLINE_MARKERS)
 
 
+def _process_group_looks_like_server(pgid: int) -> bool:
+    """Return whether any process in ``pgid`` still looks like a serving process."""
+    proc_root = Path("/proc")
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return False
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            pid = int(entry.name)
+            stat = (entry / "stat").read_text(encoding="utf-8")
+            after_comm = stat.rsplit(")", 1)[1].split()
+            entry_pgid = int(after_comm[2])
+        except (IndexError, OSError, ValueError):
+            continue
+        if entry_pgid == pgid and _looks_like_server_process(pid):
+            return True
+    return False
+
+
 def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
     """Reap serving processes orphaned by a prior monitor-process death.
 
@@ -338,6 +360,17 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
             # Stale pidfile from a fully-exited server tree; just clean it up.
             _unlink_quietly(pid_file)
             _unlink_quietly(pid_file.with_suffix(".json"))
+            continue
+        if not pid_alive and not _process_group_looks_like_server(server_pgid):
+            # The original leader is gone, and the remaining/reused pgid has no
+            # server-looking member; do not risk signalling an unrelated group.
+            log.info(
+                "orphan-reaper: pid=%d from %s is gone and pgid=%d has no "
+                "server-looking member; leaving it untouched",
+                server_pid,
+                pid_file,
+                server_pgid,
+            )
             continue
 
         _signal_group(server_pgid, signal.SIGTERM)
