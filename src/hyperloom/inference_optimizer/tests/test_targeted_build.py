@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the off-loop targeted-build runner (S2).
+"""Tests for the off-loop targeted-build runner.
 
 Uses real short-lived subprocesses (fake ``build_command`` argv) plus an
 injectable monotonic clock to exercise the two-phase timeout kill deterministically.
