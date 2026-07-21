@@ -91,6 +91,17 @@ fa phase-audit --request req.json --out -
 - **llm layer (opt-in, `use_llm=true`)**: single chat-completion refine; needs
   `SAFE_API_KEY` + `OPENAI_BASE_URL`; best-effort; never authors patches.
 
+## Candidate refs feed the targeted build
+
+A discovered candidate reference now drives the enablement targeted build
+(compiled-component acquisition), not just the git-apply/bench path:
+
+- A candidate is resolved to a checkoutable ref — a PR reference becomes that
+  PR's head ref — so support that only exists in an unreleased PR/branch is
+  reachable, not just released-tag autoselect.
+- The source PR URL is recorded as build provenance and surfaces in the session
+  breakdown's `build_attempts[].installed_versions` as `source_pr_url`.
+
 ## KB partition (`fa kb`)
 
 Read priors before generating a patch; write lessons only after a KEEP
