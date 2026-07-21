@@ -49,6 +49,91 @@ REUSE_PORT_DEFAULT = 8888
 # Override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
 SERVER_READY_TIMEOUT_SEC = 2700
 
+# Falsey values for the unique-port toggle.
+_UNIQUE_PORT_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def _pick_free_port() -> int:
+    """Return an OS-assigned free TCP port on the loopback interface.
+
+    Binds to port 0 (ephemeral) and reads back the kernel-chosen port. There
+    is a small TOCTOU window before the server actually binds, acceptable for
+    the high ephemeral range. Raises ``OSError`` if no port can be obtained.
+
+    Returns:
+        int: A currently-free TCP port.
+    """
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", 0))
+        return int(s.getsockname()[1])
+    finally:
+        s.close()
+
+
+def _resolve_reuse_port(config_port: int) -> int:
+    """Choose the persistent-server port for the reuse protocol.
+
+    The historical fixed default (``8888``) collides when a stale/leaked server
+    from a prior baseline attempt (double-run leaves ``cleanup=false`` round-1
+    servers running) or a co-tenant job still holds the port. Magpie then aborts
+    the fresh warmup with *"Reuse metadata mismatch ... server on PORT=8888 is
+    incompatible"* — every retry re-uses the same port and re-collides, so the
+    baseline never records an accuracy and the run stops with
+    ``baseline_accuracy_failed`` even though the model serves correctly.
+
+    Resolution order:
+      1. ``INFERENCE_OPTIMIZER_BASELINE_REUSE_PORT`` — an explicit operator pin.
+      2. A per-session free ephemeral port (default), so each baseline gets a
+         clean port and never collides with a leaked/co-tenant server. Disable
+         with ``INFERENCE_OPTIMIZER_BASELINE_UNIQUE_PORT=0``.
+      3. Only the shared default (``REUSE_PORT_DEFAULT``) is overridden; a
+         deliberately non-default ``PORT`` from the config is respected.
+
+    Both double-run rounds share the returned port (resolved once per attempt),
+    and it is pinned into ``envs.PORT`` so the server bind, Magpie reuse keying,
+    the lm-eval ``base_url`` and our teardown all agree.
+
+    Args:
+        config_port: The port read from the materialized benchmark config.
+
+    Returns:
+        int: The port to pin for this baseline's persistent server.
+    """
+    pin = os.environ.get("INFERENCE_OPTIMIZER_BASELINE_REUSE_PORT", "").strip()
+    if pin:
+        try:
+            return int(pin)
+        except ValueError:
+            log.warning(
+                "server_lifecycle: invalid INFERENCE_OPTIMIZER_BASELINE_REUSE_PORT=%r; ignoring",
+                pin,
+            )
+    unique = os.environ.get("INFERENCE_OPTIMIZER_BASELINE_UNIQUE_PORT", "1").strip().lower()
+    if unique in _UNIQUE_PORT_FALSE:
+        return config_port
+    # Respect a deliberately non-default port; only replace the shared default.
+    if config_port != REUSE_PORT_DEFAULT:
+        return config_port
+    try:
+        free = _pick_free_port()
+    except OSError as exc:
+        log.warning(
+            "server_lifecycle: free-port pick failed (%s); keeping fixed port %d",
+            exc,
+            config_port,
+        )
+        return config_port
+    log.info(
+        "server_lifecycle: assigned per-session free port %d (avoids fixed-port %d reuse collisions)",
+        free,
+        config_port,
+    )
+    return free
+
 
 def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     """Inspect the materialized YAML for server_lifecycle eligibility.
@@ -121,6 +206,12 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     if profiler_on:
         info["reason"] = "torch_profiler enabled (incompatible with reuse)"
         return info
+
+    # Assign a per-session port (default: free ephemeral) so a leaked/co-tenant
+    # server on the fixed default port cannot trigger Magpie's "Reuse metadata
+    # mismatch" abort on every retry. Resolved once here; both double-run rounds
+    # share it via inject_lifecycle -> envs.PORT.
+    info["port"] = _resolve_reuse_port(int(info["port"]))
 
     info["eligible"] = True
     return info
