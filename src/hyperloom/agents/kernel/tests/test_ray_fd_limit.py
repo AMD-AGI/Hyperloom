@@ -258,6 +258,41 @@ def test_force_restart_local_cluster_runs_fd_preflight_before_ray_start(monkeypa
     assert kinds.index("setrlimit") < kinds.index("ray_start")
 
 
+def test_ray_status_timeout_is_treated_as_down(monkeypatch):
+    """A stale ``ray_current_cluster`` can make ``ray status`` hang on dead GCS.
+
+    Treat timeout as "no usable cluster" so startup can rebuild a local head
+    instead of carrying a stale GCS address into a long optimizer session.
+    """
+    monkeypatch.delenv("HYPERLOOM_RAY_STATUS_TIMEOUT_SEC", raising=False)
+    calls: list = []
+
+    def _timeout_run(cmd, **kwargs):
+        calls.append((tuple(cmd), kwargs))
+        raise subprocess.TimeoutExpired(cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(ray_runtime.subprocess, "run", _timeout_run)
+
+    assert ray_runtime.ray_status_ok() is False
+    assert calls
+    assert calls[0][1].get("timeout") == ray_runtime.DEFAULT_RAY_STATUS_TIMEOUT_SEC
+
+
+def test_ensure_ray_cluster_clears_stale_ray_before_start(monkeypatch):
+    """When discovery is down, clear stale Ray state before starting a fresh head."""
+    events: list = []
+    fake = _FakeResource(soft=1048576, hard=1048576, events=events)
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    _install_fake_ray_start(monkeypatch, events)
+
+    ray_runtime.ensure_ray_cluster(num_gpus=1)
+
+    kinds = [kind for kind, _ in events]
+    assert "ray_stop" in kinds
+    assert "ray_start" in kinds
+    assert kinds.index("ray_stop") < kinds.index("ray_start")
+
+
 def test_ensure_ray_cluster_binds_dashboard_to_loopback(monkeypatch):
     """The local head must bind the dashboard/jobs API to loopback, not 0.0.0.0,
     so the unauthenticated Ray Jobs endpoint is not exposed on the pod network."""

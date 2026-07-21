@@ -380,6 +380,12 @@ class ServingLease:
             # self-heal rather than cascade to every remaining variant.
             log.warning("ServingLease.run_session_kill: ray actor died: %r", exc)
             self._actor = None
+            try:
+                from ._ray_backend import mark_ray_backend_unhealthy  # noqa: PLC0415
+
+                mark_ray_backend_unhealthy()
+            except Exception:  # noqa: BLE001 - failure recovery must not raise
+                pass
             return 1, "", f"ray_actor_error: {exc}"[:2000]
         except _task_err as exc:  # type: ignore[misc]
             # Worker crash / unexpected error: surface as a benchmark failure so

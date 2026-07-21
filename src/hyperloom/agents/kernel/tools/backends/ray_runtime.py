@@ -23,6 +23,8 @@ from typing import Optional, Tuple
 # Minimum soft RLIMIT_NOFILE the Ray raylet needs to stay up. Override via
 # RAY_MIN_NOFILE.
 DEFAULT_MIN_NOFILE = 65536
+DEFAULT_RAY_STATUS_TIMEOUT_SEC = 5.0
+DEFAULT_RAY_STOP_TIMEOUT_SEC = 30.0
 
 # Custom Ray resource declared on the single-node head so serving-family work
 # (serving / benchmark / profile / gpu_research) can hold a whole-machine
@@ -120,6 +122,28 @@ def _min_nofile_target() -> int:
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
     return DEFAULT_MIN_NOFILE
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    """Return a positive float env override, else ``default``."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _ray_status_timeout_sec() -> float:
+    """Return the ``ray status`` probe timeout in seconds."""
+    return _positive_float_env("HYPERLOOM_RAY_STATUS_TIMEOUT_SEC", DEFAULT_RAY_STATUS_TIMEOUT_SEC)
+
+
+def _ray_stop_timeout_sec() -> float:
+    """Return the ``ray stop --force`` timeout in seconds."""
+    return _positive_float_env("HYPERLOOM_RAY_STOP_TIMEOUT_SEC", DEFAULT_RAY_STOP_TIMEOUT_SEC)
 
 
 def ensure_fd_limit(
@@ -233,13 +257,46 @@ def ray_status_ok() -> bool:
         bool: True if ``ray status`` exits 0 (a cluster is reachable),
             False otherwise.
     """
-    proc = subprocess.run(
-        ["ray", "status"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["ray", "status"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=_ray_status_timeout_sec(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     return proc.returncode == 0
+
+
+def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> None:
+    """Best-effort ``ray stop --force`` with a bounded timeout.
+
+    Used before starting a fresh local head when auto-discovery points at a
+    stale or unreachable GCS. Never raises.
+    """
+    cmd = ["ray", "stop", "--force"]
+    timeout = _ray_stop_timeout_sec()
+    try:
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as log:
+                if reason:
+                    log.write(f"{reason}\n")
+                log.write(f"$ {' '.join(cmd)}\n")
+                subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        else:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if log_path is not None:
+            try:
+                with log_path.open("a", encoding="utf-8") as log:
+                    log.write(f"[ray_stop_timeout] exceeded {timeout}s\n")
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> bool:
@@ -260,6 +317,10 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     # is reused regardless of which free port it bound.
     if ray_status_ok():
         return False
+    _stop_ray_force(
+        log_path=log_path,
+        reason="Clearing stale Ray discovery state before starting a local head",
+    )
     # Raise the open-files limit before the raylet starts.
     ensure_fd_limit(log_path=log_path)
     # Bind the dashboard/jobs API to loopback (avoids exposing the

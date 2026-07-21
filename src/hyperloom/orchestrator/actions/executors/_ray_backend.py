@@ -447,11 +447,31 @@ def get_ray_backend() -> RayExecutionBackend:
     return _BACKEND
 
 
+def mark_ray_backend_unhealthy() -> None:
+    """Disconnect the current Ray driver and force the next use to re-ensure.
+
+    Ray's native GCS client can terminate the process if a driver remains
+    attached to a dead GCS. Actor-death paths call this after surfacing the
+    current benchmark as a failure so the next Ray use reconnects to a fresh
+    cluster instead of carrying a stale driver.
+    """
+    try:
+        import ray  # noqa: PLC0415
+
+        ray.shutdown()
+    except Exception:  # noqa: BLE001 - recovery must never raise
+        pass
+    if _BACKEND is not None:
+        _BACKEND._ensured = False
+        _BACKEND._started = False
+
+
 __all__ = [
     "RayExecutionBackend",
     "SubprocessResult",
     "_should_use_ray_backend",
     "get_ray_backend",
+    "mark_ray_backend_unhealthy",
     "ray_exec_enabled",
     "resolve_shared_artifact_root",
     "strip_visible_devices_from_config",
