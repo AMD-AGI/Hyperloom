@@ -376,6 +376,31 @@ def test_run_aiter_build_reproducible_versions(monkeypatch, tmp_path):
     assert v["arch"] == "gfx950"
 
 
+def test_run_aiter_build_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
+    _patch_isolation(monkeypatch, tmp_path, make_so=True)
+    result = run_aiter_build(
+        _action(ref="v0.1.0", gpu_arch="gfx950",
+                source_pr_url="https://github.com/ROCm/aiter/pull/77"),
+        str(tmp_path / "attempt"),
+        run=_make_run(), git=_make_git(),
+        disk_preflight_fn=_noop_disk_preflight,
+    )
+    assert result.ok
+    assert result.installed_versions.get("source_pr_url") == "https://github.com/ROCm/aiter/pull/77"
+
+
+def test_run_aiter_build_no_source_pr_url_when_empty(monkeypatch, tmp_path):
+    _patch_isolation(monkeypatch, tmp_path, make_so=True)
+    result = run_aiter_build(
+        _action(ref="v0.1.0", gpu_arch="gfx950"),
+        str(tmp_path / "attempt"),
+        run=_make_run(), git=_make_git(),
+        disk_preflight_fn=_noop_disk_preflight,
+    )
+    assert result.ok
+    assert "source_pr_url" not in result.installed_versions
+
+
 # ---------------------------------------------------------------------------
 # Test: result.json round-trip through poll_build
 # ---------------------------------------------------------------------------

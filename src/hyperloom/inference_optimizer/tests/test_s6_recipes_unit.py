@@ -433,7 +433,55 @@ def test_sgl_kernel_runtime_python_exe_set(monkeypatch, tmp_path):
     assert result.runtime.runtime_python_exe
     assert result.runtime.entrypoint_bin_dir
 
-def test_driver_main_routes_sgl_kernel(monkeypatch, tmp_path):
+
+def test_sgl_kernel_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"
+    (wt / "sgl-kernel").mkdir(parents=True)
+    (wt / "python").mkdir()
+    (wt / "sgl-kernel" / "sgl_ext.so").write_bytes(b"\x7fELF")
+    venv = tmp_path / "venv"; (venv / "bin").mkdir(parents=True)
+    _patch_isolation(monkeypatch, wt, venv)
+
+    result = run_sgl_kernel_build(
+        _sgl_action(source_pr_url="https://github.com/sgl-project/sglang/pull/5"),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(), git=_make_git(),
+        disk_preflight_fn=_noop_disk,
+    )
+    assert result.ok is True
+    assert result.installed_versions.get("source_pr_url") == "https://github.com/sgl-project/sglang/pull/5"
+
+
+def test_vllm_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / "vllm").mkdir()
+    (wt / "vllm" / "_C.so").write_bytes(b"ELF")
+    venv = tmp_path / "venv"; (venv / "bin").mkdir(parents=True)
+    _patch_isolation(monkeypatch, wt, venv)
+
+    result = run_vllm_source_build(
+        _vllm_action(source_pr_url="https://github.com/ROCm/vllm/pull/42"),
+        str(tmp_path / "attempt"),
+        run=_make_rocm_run(), disk_preflight_fn=_noop_disk,
+    )
+    assert result.ok is True
+    assert result.installed_versions.get("source_pr_url") == "https://github.com/ROCm/vllm/pull/42"
+
+
+def test_recipe_no_source_pr_url_when_empty(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / "vllm").mkdir()
+    (wt / "vllm" / "_C.so").write_bytes(b"ELF")
+    venv = tmp_path / "venv"; (venv / "bin").mkdir(parents=True)
+    _patch_isolation(monkeypatch, wt, venv)
+
+    result = run_vllm_source_build(
+        _vllm_action(),  # source_pr_url=""
+        str(tmp_path / "attempt2"),
+        run=_make_rocm_run(), disk_preflight_fn=_noop_disk,
+    )
+    assert result.ok is True
+    assert "source_pr_url" not in result.installed_versions
     root = tmp_path / "attempt"; root.mkdir()
     action = _sgl_action()
     (root / "plan.json").write_text(json.dumps(action.to_state()), encoding="utf-8")

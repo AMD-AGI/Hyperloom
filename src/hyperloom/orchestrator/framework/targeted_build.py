@@ -524,8 +524,8 @@ def run_aiter_build(
         "arch": gpu_arch,
         "hip_version": abi.get("hip_version", ""),
     }
-
-    artifact_hashes = hash_artifacts(list(built_paths))
+    if action.source_pr_url:
+        installed_versions["source_pr_url"] = action.source_pr_url
 
     runtime = FrameworkRuntime(
         pythonpath_prefixes=(str(worktree_dir),),
@@ -727,6 +727,8 @@ def run_sgl_kernel_build(
         "arch": gpu_arch,
         "hip_version": abi.get("hip_version", ""),
     }
+    if action.source_pr_url:
+        installed_versions["source_pr_url"] = action.source_pr_url
     artifact_hashes = hash_artifacts(list(built_paths))
 
     runtime = FrameworkRuntime(
@@ -974,6 +976,8 @@ def run_vllm_source_build(
         "arch": gpu_arch,
         "hip_version": abi.get("hip_version", ""),
     }
+    if action.source_pr_url:
+        installed_versions["source_pr_url"] = action.source_pr_url
     artifact_hashes = hash_artifacts(list(built_paths))
 
     # vLLM source overlay: prepend the worktree so the attempt venv's vllm wins.
