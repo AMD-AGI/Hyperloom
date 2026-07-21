@@ -118,8 +118,10 @@ ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dash
 ray status
 ```
 
-> **Note**: `inference_optimizer.cli` does *not* auto-start Ray.
-> Always start it before launching `python -m hyperloom.inference_optimizer.cli optimize`.
+> **Note**: current Hyperloom startup paths can auto-start or reuse a local Ray
+> head. If `ray_current_cluster` points at a stale or incompatible cluster, stop
+> Ray first so Hyperloom can create a fresh head with the required GPU and
+> custom-resource configuration.
 
 ---
 

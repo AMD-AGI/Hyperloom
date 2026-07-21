@@ -26,7 +26,8 @@ per-release versions:
   now runs on a Ray-managed GPU lease, with Ray owning GPU queueing, device
   isolation, and a whole-machine serving mutex. The path fails fast on an
   infeasible cluster, times out stuck specialist scheduling, detects dead
-  actors, and keeps the raylet stable across per-round server reboots.
+  actors, and adds safeguards around Ray actor failure and server lifecycle
+  cleanup.
   Multi-node is unchanged (gated off).
 
 - **Accuracy-gate & eval-result integrity**: lm-eval output is wired to a
