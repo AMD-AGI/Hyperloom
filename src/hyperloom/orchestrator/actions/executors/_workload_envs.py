@@ -778,6 +778,12 @@ def materialize_config_with_envs(
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     framework_env = server_args_env_name(bench.get("framework"))
+    # Final dedup after reference/server_args merges: collapse repeated
+    # vLLM/atom single-value flags to last-wins so recipe/variant values
+    # override earlier ones (no-op for sglang).
+    _final_args = str(envs.get(framework_env, "")).strip()
+    if _final_args:
+        envs[framework_env] = dedup_vllm_server_args(_final_args, bench.get("framework"))
     # ── Quality-reference wiring (scriptable / server-less workloads) ──────
     # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
     # re-inject the image-quality reference here (the single scriptable choke
