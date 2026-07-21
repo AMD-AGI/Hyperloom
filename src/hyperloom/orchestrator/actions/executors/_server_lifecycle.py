@@ -70,6 +70,30 @@ def _pick_free_port() -> int:
         s.close()
 
 
+def _assign_free_port(current_port: int) -> int:
+    """Return a per-session free ephemeral port for the persistent server.
+
+    Falls back to ``current_port`` if no free port can be bound. Used on the
+    common resolution path so every backend (Magpie and bypass) gets the same
+    stale/co-tenant port-collision protection.
+
+    Args:
+        current_port: Port to keep if free-port allocation fails.
+
+    Returns:
+        int: A free port, or ``current_port`` on ``OSError``.
+    """
+    try:
+        return _pick_free_port()
+    except OSError as exc:
+        log.warning(
+            "server_lifecycle: free-port pick failed (%s); keeping port %d",
+            exc,
+            current_port,
+        )
+        return current_port
+
+
 def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     """Inspect the materialized YAML for server_lifecycle eligibility.
 
@@ -113,6 +137,13 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
 
     backend_verdict = resolve_backend().lifecycle_eligibility(bench)
     if backend_verdict is not None:
+        # Free-port assignment lives on this common path so a non-Magpie backend
+        # (e.g. bypass) gets the same stale/co-tenant collision protection
+        # instead of falling back to the fixed default port.
+        if backend_verdict.get("eligible"):
+            backend_verdict["port"] = _assign_free_port(
+                int(backend_verdict.get("port", REUSE_PORT_DEFAULT))
+            )
         return backend_verdict
 
     # Server-less (scriptable) frameworks — e.g. xDiT diffusion — never boot a
@@ -151,14 +182,7 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     # baseline_accuracy_failed. Resolved once here; both double-run rounds share
     # it via inject_lifecycle -> envs.PORT (server bind, Magpie reuse keying,
     # lm-eval base_url and teardown all agree).
-    try:
-        info["port"] = _pick_free_port()
-    except OSError as exc:
-        log.warning(
-            "server_lifecycle: free-port pick failed (%s); keeping port %d",
-            exc,
-            info["port"],
-        )
+    info["port"] = _assign_free_port(info["port"])
 
     info["eligible"] = True
     return info
