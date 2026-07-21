@@ -513,7 +513,7 @@ install_aiter_ref_with_constraints() {
   esac
   AITER_USE_SYSTEM_TRITON="$aiter_use_system_triton" "$py" -m pip install --constraint "$constraint_file" \
     --config-settings editable_mode=compat -e "$aiter_root" || return 1
-  "$py" -c "import aiter" >/dev/null
+  "$py" -c "import aiter" >/dev/null || return 1
   check_torch_triton_alignment "$py" || return 1
 }
 
@@ -629,7 +629,7 @@ PY
     log "sglang + sgl_kernel already importable; skipping amd-sglang install"
   fi
 
-  if ! _py_has "$py" aiter; then
+  if ! "$py" -c "import aiter" >/dev/null 2>&1; then
     install_compatible_aiter "$py" "$aiter_root"
   else
     log "aiter already importable; skipping AITER source install"
