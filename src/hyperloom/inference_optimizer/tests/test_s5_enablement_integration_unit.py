@@ -30,6 +30,8 @@ from hyperloom.orchestrator.state.task_registry import TaskRegistry
 # Helpers: minimal fake coordinator for framework-phase methods
 # ---------------------------------------------------------------------------
 
+import types as _types
+
 class _FakeCoord:
     def __init__(self, session_dir, db, state):
         self.session_dir = session_dir
@@ -37,6 +39,10 @@ class _FakeCoord:
         self.locks = ResourceLockManager(SqliteLeaseBackend(db))
         self.shared_state = state
         self._rearm_calls: list[dict] = []
+        # Bind real Coordinator async methods that _maybe_route_build_outcomes delegates to.
+        self._enqueue_build_launch_probe = _types.MethodType(
+            Coordinator._enqueue_build_launch_probe, self
+        )
 
     def _maybe_rearm_enablement(self, res):
         self._rearm_calls.append(dict(res) if isinstance(res, dict) else {})
@@ -47,6 +53,15 @@ class _FakeCoord:
 
     def _setup_bl(self):
         self._bl = BuildLifecycleCollaborator(self)
+
+    def _framework_gpu_params(self) -> dict:
+        return {}
+
+    def _framework_authoring_lanes_ttl(self, params, *, base_ttl_sec: int) -> tuple:
+        return ["research_lane"], base_ttl_sec
+
+    def _coerce_needs_gpu(self, val) -> bool:
+        return bool(val)
 
 
 @pytest.fixture
@@ -165,22 +180,115 @@ async def _enqueue_and_transition(coord, action, state):
 
 
 @pytest.mark.asyncio
-async def test_route_succeeded_row_calls_kept(coord, tmp_path):
+async def test_route_succeeded_row_enqueues_launch_probe(coord, tmp_path):
+    """A succeeded build must enqueue an integrate_patch launch probe, not call rearm directly."""
     root = tmp_path / "attempt_s"
     root.mkdir(parents=True, exist_ok=True)
 
-    # Write a result.json for the rich runtime
     rt = FrameworkRuntime(pythonpath_prefixes=(str(root),), runtime_env={"X": "1"})
     br = BuildResult(ok=True, attempt_root=str(root), runtime=rt)
     (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
 
     action = TargetedBuildAction(gap_id="g2", framework="vllm", component="aiter",
                                  capability="fp4_moe", ref="v1", attempt_root=str(root))
-    task_id = await _enqueue_and_transition(coord, action, "succeeded")
+    await _enqueue_and_transition(coord, action, "succeeded")
 
     await Coordinator._maybe_route_build_outcomes(coord)
 
-    assert any(r.get("status") == "kept" for r in coord._rearm_calls)
+    # Must NOT directly rearm with "kept" — KEEP comes from the probe.
+    assert not any(r.get("status") == "kept" for r in coord._rearm_calls)
+    # Must have queued a launch-probe task.
+    probes = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+    assert len(probes) == 1
+    probe_params = probes[0].params
+    assert probe_params.get("enablement_launch_only") is True
+    assert probe_params.get("enablement") is True
+    assert isinstance(probe_params.get("runtime_override"), dict)
+    assert probe_params["runtime_override"]  # non-empty
+
+
+@pytest.mark.asyncio
+async def test_route_succeeded_row_probe_carries_config_path(coord, tmp_path):
+    """Launch probe inherits baseline_config_path from shared state."""
+    root = tmp_path / "attempt_cfg"
+    root.mkdir(parents=True, exist_ok=True)
+
+    rt = FrameworkRuntime(pythonpath_prefixes=(str(root),))
+    br = BuildResult(ok=True, attempt_root=str(root), runtime=rt)
+    (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
+
+    coord.shared_state.baseline_config_path = "/cfg/bench.yaml"
+    action = TargetedBuildAction(gap_id="g3", framework="sglang", component="aiter",
+                                 capability="fp4_moe", ref="v2", attempt_root=str(root))
+    await _enqueue_and_transition(coord, action, "succeeded")
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    probes = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+    assert len(probes) == 1
+    assert probes[0].params.get("config_path") == "/cfg/bench.yaml"
+
+
+@pytest.mark.asyncio
+async def test_route_succeeded_missing_result_json_calls_reverted(coord, tmp_path):
+    """Gap 6: a succeeded build whose result.json is absent routes reverted."""
+    root = tmp_path / "attempt_missing"
+    root.mkdir(parents=True, exist_ok=True)
+    # No result.json written.
+
+    action = TargetedBuildAction(gap_id="g4", framework="vllm", component="aiter",
+                                 capability="fp4_moe", ref="v1", attempt_root=str(root))
+    await _enqueue_and_transition(coord, action, "succeeded")
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    assert any(r.get("status") == "reverted" for r in coord._rearm_calls)
+    # No probe should be queued.
+    probes = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+    assert len(probes) == 0
+
+
+@pytest.mark.asyncio
+async def test_route_succeeded_empty_runtime_override_calls_reverted(coord, tmp_path):
+    """Gap 6: a succeeded build with an empty runtime override routes reverted."""
+    root = tmp_path / "attempt_empty"
+    root.mkdir(parents=True, exist_ok=True)
+
+    # FrameworkRuntime with all-default (empty) fields → to_runtime_override() == {}
+    rt = FrameworkRuntime()
+    br = BuildResult(ok=True, attempt_root=str(root), runtime=rt)
+    (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
+
+    action = TargetedBuildAction(gap_id="g5", framework="vllm", component="aiter",
+                                 capability="fp4_moe", ref="v1", attempt_root=str(root))
+    await _enqueue_and_transition(coord, action, "succeeded")
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    assert any(r.get("status") == "reverted" for r in coord._rearm_calls)
+    probes = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+    assert len(probes) == 0
+
+
+@pytest.mark.asyncio
+async def test_route_succeeded_probe_idempotent(coord, tmp_path):
+    """Calling _maybe_route_build_outcomes twice for the same row only enqueues one probe."""
+    root = tmp_path / "attempt_idem"
+    root.mkdir(parents=True, exist_ok=True)
+
+    rt = FrameworkRuntime(pythonpath_prefixes=(str(root),))
+    br = BuildResult(ok=True, attempt_root=str(root), runtime=rt)
+    (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
+
+    action = TargetedBuildAction(gap_id="g6", framework="vllm", component="aiter",
+                                 capability="fp4_moe", ref="v1", attempt_root=str(root))
+    await _enqueue_and_transition(coord, action, "succeeded")
+
+    await Coordinator._maybe_route_build_outcomes(coord)
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    probes = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+    assert len(probes) == 1  # idempotent
 
 
 @pytest.mark.asyncio

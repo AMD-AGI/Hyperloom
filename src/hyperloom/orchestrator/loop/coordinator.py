@@ -1022,6 +1022,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_rearm_enablement": "phase_framework",
         "_maybe_escalate_to_targeted_build": "phase_framework",
         "_maybe_route_build_outcomes": "phase_framework",
+        "_enqueue_build_launch_probe": "phase_framework",
         "_maybe_rearm_authored_lane": "phase_framework",
         "_enqueue_author_specialist": "phase_framework",
         "_drain_apply_fail_retry_pending": "phase_framework",

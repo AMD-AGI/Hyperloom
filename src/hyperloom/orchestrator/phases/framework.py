@@ -4145,6 +4145,10 @@ class FrameworkPhase(PhaseHandler):
         D6 novelty: a 'timeout' or 'preflight_budget' failure_class maps to
         'advanced' (novel attempt, time vs defect distinction — keep going); all
         real defects map to 'reverted' (advance stall streak).
+
+        Gap 3/4/6: a succeeded build no longer synthesises status='kept' directly.
+        Instead it enqueues an integrate_patch launch probe so the runtime must
+        actually boot the model before KEEP is declared.
         """
         try:
             from ..state.task_registry import TERMINAL_STATES
@@ -4169,26 +4173,27 @@ class FrameworkPhase(PhaseHandler):
             manifest.append({"task_id": task_id, "routed": True})
             state.enablement_build_manifest = manifest
 
-            result_runtime: dict = {}
             fc = ""
             fs = ""
             if task.state == "succeeded":
                 # Load the BuildResult from result.json for the rich runtime.
                 attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
+                br = None
                 if attempt_root:
                     from ..framework.targeted_build import _load_result_json
 
                     br = _load_result_json(attempt_root)
-                    if br is not None and br.ok:
-                        result_runtime = br.runtime.to_state()
 
-                res = {
-                    "enablement": True,
-                    "status": "kept",
-                    "enablement_active_runtime": result_runtime,
-                }
-                log.info("ENABLEMENT: targeted_build KEPT task=%s", task_id)
-                self._maybe_rearm_enablement(res)
+                # Gap 6: if the runtime can't be read, it can't be launched → reverted.
+                if br is None or not br.ok or not br.runtime.to_runtime_override():
+                    res: dict = {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
+                    log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
+                    self._maybe_rearm_enablement(res)
+                    return
+
+                # Gap 3/4: enqueue a launch probe; KEEP is declared by the probe result.
+                log.info("ENABLEMENT: targeted_build artifact-verified → enqueue launch probe task=%s", task_id)
+                await self._enqueue_build_launch_probe(task_id, br)
                 return
 
             # failed row — read failure_class from history or last_build_failure
@@ -4229,6 +4234,51 @@ class FrameworkPhase(PhaseHandler):
             self._maybe_rearm_enablement(res)
         except Exception:  # noqa: BLE001 — never wedge the tick
             log.debug("enablement: route_build_outcomes failed", exc_info=True)
+
+    async def _enqueue_build_launch_probe(self, build_task_id: str, br: Any) -> None:
+        """Enqueue an integrate_patch launch probe for a verified build.
+
+        Runs the built runtime through the enablement runnable gate without
+        applying any patch.  The probe completes as an ordinary integrate_patch
+        task whose enablement:True result is routed by the dispatcher through
+        _maybe_rearm_authored_lane → _maybe_rearm_enablement, producing a
+        genuine KEEP/advanced/reverted outcome (Gap 3).  The whole-machine GPU
+        pool is acquired via _framework_gpu_params (Gap 4).
+        """
+        from hyperloom.agents.framework.enablement import classify_failure
+
+        state = self.shared_state
+        runtime_override = br.runtime.to_runtime_override()
+        launch_log = str(getattr(state, "enablement_launch_log", "") or "")
+        before_sig = classify_failure(launch_log).to_dict()
+        params: dict[str, Any] = {
+            "enablement": True,
+            "enablement_launch_only": True,
+            "runtime_override": runtime_override,
+            "framework": str(getattr(state, "framework", "") or ""),
+            "enablement_before_signature": before_sig,
+            "source": "coordinator_internal",
+            **self._framework_gpu_params(),
+        }
+        cfg = str(getattr(state, "baseline_config_path", "") or "")
+        if cfg:
+            params["config_path"] = cfg
+        idem = f"build_launch_probe:{build_task_id}"
+        lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
+        probe_task, existing = await self.tasks.create_or_return_existing(
+            kind="integrate_patch",
+            params=params,
+            idempotency_key=idem,
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+        )
+        probe_tid = str(getattr(probe_task, "task_id", "") or "")
+        log.info(
+            "ENABLEMENT: build launch probe %s task=%s (existing=%s)",
+            "re-used" if existing else "enqueued",
+            probe_tid,
+            existing,
+        )
 
     async def _pump_enablement_safely(self, *, caller: str) -> None:
         """Phase-independent enablement pump — runs every tick.
