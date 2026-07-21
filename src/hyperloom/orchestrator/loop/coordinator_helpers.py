@@ -554,19 +554,26 @@ def _geak_revalidation_decision(
     got_hash: str,
     expected_hash: str,
     min_engaged_gain_pct: float,
+    current_best: Any = None,
 ) -> str:
     """Decide a geak same-harness (2b) rebench outcome.
 
-    Returns ``"validated"`` only when BOTH hold:
+    Returns ``"validated"`` only when ALL hold:
       * config identity — the ran variant's fingerprint matches the expected
         (skipped when no expected hash was pinned); catches an executor-side
         drop/alter of the optimized config; and
       * engagement — the measured throughput cleared baseline by at least
         ``min_engaged_gain_pct`` (i.e. the optimization actually took effect and
-        did not collapse back to an un-optimized relaunch).
+        did not collapse back to an un-optimized relaunch); and
+      * improvement — the measured throughput beats the current best (aligns the
+        GEAK KEEP gate with forge / integrate_patch, which promote only above
+        current_best).
+    Returns ``"no_promote"`` when the run is well-measured and engaged over
+    baseline but does not beat ``current_best`` — a real measurement, not an
+    inconclusive one, so the caller must NOT replay via the GEAK harness (2a).
     Otherwise returns ``"fallback"`` so the caller replays via the GEAK harness
-    (2a). General: the engagement floor only detects a baseline collapse, it is
-    not tied to any specific optimization's expected magnitude.
+    (2a) for a genuinely inconclusive rebench (bad measurement / config drift /
+    baseline collapse).
 
     Args:
         measured: Rebench output throughput (tok/s).
@@ -574,9 +581,11 @@ def _geak_revalidation_decision(
         got_hash: Fingerprint of the variant that actually ran.
         expected_hash: Pinned expected fingerprint ("" => identity check skipped).
         min_engaged_gain_pct: Minimum over-baseline gain to count as engaged.
+        current_best: Current best throughput (tok/s); ``None``/<=0 disables the
+            improvement gate.
 
     Returns:
-        ``"validated"`` or ``"fallback"``.
+        ``"validated"``, ``"no_promote"``, or ``"fallback"``.
     """
     measured_ok = isinstance(measured, (int, float)) and measured > 0
     baseline_ok = isinstance(baseline, (int, float)) and baseline > 0
@@ -584,7 +593,32 @@ def _geak_revalidation_decision(
         return "fallback"
     cfg_ok = (not expected_hash) or (str(got_hash or "") == str(expected_hash))
     engaged = float(measured) >= float(baseline) * (1.0 + float(min_engaged_gain_pct) / 100.0)
-    return "validated" if (cfg_ok and engaged) else "fallback"
+    if not (cfg_ok and engaged):
+        return "fallback"
+    if isinstance(current_best, (int, float)) and current_best > 0 and float(measured) <= float(current_best):
+        return "no_promote"
+    return "validated"
+
+
+def _normalize_geak_overlay_dir(overlay: str) -> str:
+    """Normalize a GEAK ``final_overlay`` path to the loadable overlay dir.
+
+    GEAK sometimes hands back the parent ``.../final`` while the importable
+    authored-kernel root is ``.../final/overlay``. When the given path is a
+    directory containing an ``overlay`` subdirectory, return that subdirectory so
+    ``run_grid`` prepends the real overlay onto PYTHONPATH; otherwise return the
+    input unchanged (``run_grid`` still applies its own safety checks).
+    """
+    if not overlay:
+        return overlay
+    try:
+        p = Path(overlay)
+        child = p / "overlay"
+        if p.is_dir() and child.is_dir():
+            return str(child)
+    except (OSError, ValueError):
+        return overlay
+    return overlay
 
 
 def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:

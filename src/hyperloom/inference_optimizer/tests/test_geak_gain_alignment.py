@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import r
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     _geak_revalidation_decision,
+    _normalize_geak_overlay_dir,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
@@ -103,6 +104,52 @@ def test_revalidation_fallback_on_bad_measurement(measured, baseline) -> None:
     )
 
 
+def test_normalize_geak_overlay_dir_picks_overlay_subdir(tmp_path: Path) -> None:
+    final = tmp_path / "final"
+    (final / "overlay").mkdir(parents=True)
+    assert _normalize_geak_overlay_dir(str(final)) == str(final / "overlay")
+
+
+def test_normalize_geak_overlay_dir_keeps_real_overlay(tmp_path: Path) -> None:
+    overlay = tmp_path / "final" / "overlay"
+    overlay.mkdir(parents=True)
+    assert _normalize_geak_overlay_dir(str(overlay)) == str(overlay)
+
+
+def test_normalize_geak_overlay_dir_empty_passthrough() -> None:
+    assert _normalize_geak_overlay_dir("") == ""
+
+
+def test_revalidation_no_promote_when_not_beating_current_best() -> None:
+    # Engaged over baseline + identity matches, but does not beat current_best.
+    assert (
+        _geak_revalidation_decision(
+            measured=9623.0,
+            baseline=7380.7,
+            got_hash="abc",
+            expected_hash="abc",
+            min_engaged_gain_pct=2.0,
+            current_best=10067.9,
+        )
+        == "no_promote"
+    )
+
+
+def test_revalidation_validated_when_beating_current_best() -> None:
+    # Beats current_best (and baseline + identity) -> a real KEEP.
+    assert (
+        _geak_revalidation_decision(
+            measured=10500.0,
+            baseline=7380.7,
+            got_hash="abc",
+            expected_hash="abc",
+            min_engaged_gain_pct=2.0,
+            current_best=10067.9,
+        )
+        == "validated"
+    )
+
+
 # ── Shared Coordinator fixture ───────────────────────────────────────────────
 
 
@@ -170,6 +217,45 @@ async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, mo
     assert ss.current_best["tput"] == pytest.approx(measured)
     assert any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert not ss.geak_pending  # candidate cleared on promote
+
+
+@pytest.mark.asyncio
+async def test_geak_harness_fallback_no_promote_below_current_best(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2a: a GEAK-harness replay measured below current_best must NOT overwrite it."""
+    base = 7380.7
+    current_best = 10067.9
+    measured = 9623.0  # beats baseline but loses to current_best
+    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
+    coord.shared_state.optimization_stack = [
+        {"action": "explore", "variant_name": "kv-cache-fp8", "tput": current_best}
+    ]
+    coord.shared_state.geak_result = {
+        "status": "ok",
+        "throughput_speedup": 1.088,
+        "final_throughput_basis": "cold",
+        "accepted_config": {"flags": "--kv-cache-dtype fp8", "env": "TP=1"},
+        "final_overlay": "",
+        "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
+        "alignment_metrics": {"cold_geak_speedup": 1.088, "final_basis": "cold"},
+    }
+
+    async def _fake_sweep(**_kwargs):
+        return {"status": "succeeded", "best_for_each_conc": {"64": {"output_throughput": measured}}}
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak",
+        _fake_sweep,
+    )
+
+    await coord._validate_geak_via_geak_harness(reason="unit")
+
+    ss = coord.shared_state
+    assert ss.current_best["tput"] == pytest.approx(current_best)
+    assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
+    assert ss.cumulative_gain_validated == pytest.approx(0.0)
+    assert not ss.geak_pending
 
 
 # ── Fix B: report renders a PROVISIONAL gain honestly (not "+0.00% validated") ─
@@ -300,6 +386,36 @@ async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> No
     assert called["n"] == 1
     assert ss.cumulative_gain_validated == pytest.approx(0.0)
     assert ss.cumulative_gain_provenance != "geak_orch_harness_validated"
+
+
+@pytest.mark.asyncio
+async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) -> None:
+    """A GEAK rebench that beats baseline but loses to current_best is measured, not a KEEP."""
+    base, current_best, measured = 7380.7, 10067.9, 9623.0
+    coord = _coord(tmp_path, baseline=base, best_tput=current_best)
+    coord.shared_state.optimization_stack = [{"action": "explore", "variant_name": "kv-cache-fp8", "tput": current_best}]
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.geak_pending = {"status": "awaiting_rebench"}
+
+    async def _must_not_fallback(**_kwargs):
+        raise AssertionError("2a fallback must not run for a measured no-promote")
+
+    coord._validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
+
+    result = {
+        "output_throughput": measured,
+        "best_variant": {"fingerprint": "abc"},
+        "winners": [],
+    }
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
+
+    ss = coord.shared_state
+    assert ss.current_best["tput"] == pytest.approx(current_best)
+    assert ss.cumulative_gain_validated == pytest.approx(0.0)
+    assert ss.cumulative_gain_provenance != "geak_orch_harness_validated"
+    assert not any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
+    assert ss.resume_pending_revalidation is False
+    assert not ss.geak_pending
 
 
 # ── Rebench-first: candidate recorded, headline deferred to measured rebench ──

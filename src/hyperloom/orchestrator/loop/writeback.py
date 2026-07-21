@@ -33,6 +33,7 @@ from .coordinator_helpers import (
     _parse_baseline_workload_extra,
     _geak_revalidation_decision,
     _geak_sweep_measured_tput,
+    _normalize_geak_overlay_dir,
     _scrape_resolved_launch_flags,
     _split_env_and_flags,
 )
@@ -2379,10 +2380,11 @@ class WritebackCollaborator:
         # ``resume_pending_revalidation`` flag from the measured tput — but
         # ONLY when the rebench actually produced a valid measurement, so a
         # failed/empty rebench leaves the flag set and reports keep warning.
-        if task is not None and str((task.params or {}).get("source") or "") in {
+        is_revalidation_task = task is not None and str((task.params or {}).get("source") or "") in {
             "resume_stack_revalidate",
             "resume_reverify_best",
-        }:
+        }
+        if is_revalidation_task:
             measured = result.get("output_throughput")
             measured_ok = isinstance(measured, (int, float)) and measured > 0
             # A GEAK revalidation (2b) must assert config identity + that the
@@ -2395,12 +2397,17 @@ class WritebackCollaborator:
                     got_hash = str(best_winner.get("fingerprint") or "")
                 if not got_hash and isinstance(winners, list) and winners and isinstance(winners[0], dict):
                     got_hash = str(winners[0].get("fingerprint") or "")
+                cb_now = (
+                    self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                )
+                cb_tput = cb_now.get("tput")
                 decision = _geak_revalidation_decision(
                     measured=measured,
                     baseline=self.shared_state.baseline_tput,
                     got_hash=got_hash,
                     expected_hash=str((task.params or {}).get("expected_cfg_hash") or ""),
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
+                    current_best=cb_tput,
                 )
                 if decision == "validated":
                     # Write the headline from the measured orchestrator-harness
@@ -2416,6 +2423,34 @@ class WritebackCollaborator:
                         measured_tput=float(measured),
                         provenance="geak_orch_harness_validated",
                     )
+                elif decision == "no_promote":
+                    # Well-measured + engaged over baseline, but does not beat
+                    # current_best. This is a real result, NOT inconclusive, so
+                    # do not replay via the GEAK harness (2a); clear the pending
+                    # candidate without touching the headline / stack / gain.
+                    log.info(
+                        "geak 2b rebench did not beat current_best "
+                        "(measured=%r current_best=%r) -> no_promote",
+                        measured,
+                        cb_tput,
+                    )
+                    try:
+                        await self._record_observation(
+                            "coordinator",
+                            "observation",
+                            {
+                                "kind": "geak_no_promote",
+                                "measured_tput": float(measured),
+                                "current_best_tput": (
+                                    float(cb_tput) if isinstance(cb_tput, (int, float)) else None
+                                ),
+                                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+                            },
+                        )
+                    except Exception:  # noqa: BLE001 - observation is best-effort
+                        log.exception("geak no_promote: observation emit failed")
+                    self.shared_state.geak_pending = {}
+                    self.shared_state.resume_pending_revalidation = False
                 else:
                     # 2b inconclusive -> GEAK harness replay (2a), which
                     # clears the pending flag on success. Best-effort.
@@ -2461,7 +2496,11 @@ class WritebackCollaborator:
                 if measured_ok:
                     self.shared_state.resume_pending_revalidation = False
                 changed = True
-        if isinstance(winners, list) and winners:
+        # A revalidation task only CONFIRMS the existing stack/current_best; its
+        # winner is not a new discovery. Skip the accept/lift path so a rebench
+        # (e.g. geak_revalidate) never appends a duplicate optimization_stack
+        # entry or re-lifts current_best.
+        if isinstance(winners, list) and winners and not is_revalidation_task:
             for winner in winners:
                 if not isinstance(winner, dict):
                     continue
@@ -3328,7 +3367,7 @@ class WritebackCollaborator:
         # before stamping validated, and falls back to 2a (GEAK harness) on miss.
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
-        ps_overlay = str(ps.get("final_overlay") or "").strip()
+        ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         if str(ps.get("status") or "") == "ok" and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
             from ..actions.executors._canonical_fingerprint import canonical_fingerprint
 
