@@ -137,15 +137,15 @@ async def test_high_agent_stall_emits_alert_only():
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
 
 
-async def test_repeated_failure_emits_alert_only():
-    """prune_branch suggestion lives in the alert detail; auto-emit dropped."""
+async def test_repeated_failure_high_emits_alert_plus_prune_branch():
+    """Sustained repeated_failure (HIGH) prunes the offending family."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [
             _sym(
                 "repeated_failure",
                 SymptomSeverity.HIGH,
-                evidence={"family": "kernel_opt", "count": 3},
+                evidence={"family": "kernel_opt", "count": 4},
                 subject={"family": "kernel_opt"},
             )
         ],
@@ -154,7 +154,9 @@ async def test_repeated_failure_emits_alert_only():
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
-    assert IntentType.PRUNE_BRANCH not in types
+    assert IntentType.PRUNE_BRANCH in types
+    prune = next(i for i in out.intents if i.type is IntentType.PRUNE_BRANCH)
+    assert prune.payload["family"] == "kernel_opt"
 
 
 # Wind-down path: recover_unsuccessful / deadline_imminent -> delegate(report)
@@ -439,7 +441,7 @@ async def test_ray_pending_starvation_alert_only():
     assert IntentType.PRUNE_BRANCH not in types
 
 
-async def test_geak_budget_starvation_alert_only():
+async def test_geak_budget_starvation_emits_alert_plus_prune_kernel_opt():
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -456,11 +458,12 @@ async def test_geak_budget_starvation_alert_only():
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
-    assert IntentType.PRUNE_BRANCH not in types
+    prune = next(i for i in out.intents if i.type is IntentType.PRUNE_BRANCH)
+    assert prune.payload["family"] == "kernel_opt"
 
 
-async def test_kernel_opt_no_progress_alert_only():
-    """F5: pipeline structurally cannot optimise — alert only; Orchestration may emit prune_branch/escalate itself."""
+async def test_kernel_opt_no_progress_emits_alert_plus_prune_kernel_opt():
+    """F5: pipeline structurally cannot optimise — prune kernel_opt toward params/sweep."""
     ladder = ActionLadder()
     out = await ladder.decide(
         [_sym("kernel_opt_no_progress", SymptomSeverity.HIGH, evidence={"kernel_count": 3}, subject={})],
@@ -469,8 +472,9 @@ async def test_kernel_opt_no_progress_alert_only():
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
-    assert IntentType.PRUNE_BRANCH not in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
+    prune = next(i for i in out.intents if i.type is IntentType.PRUNE_BRANCH)
+    assert prune.payload["family"] == "kernel_opt"
 
 
 async def test_critic_prune_stuck_falls_to_medium_alert():
@@ -516,7 +520,7 @@ async def test_model_gpu_infeasible_alert_only():
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
 
 
-async def test_amdahl_kernel_ceiling_alert_only():
+async def test_amdahl_kernel_ceiling_emits_alert_plus_prune_kernel_opt():
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -535,7 +539,8 @@ async def test_amdahl_kernel_ceiling_alert_only():
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
-    assert IntentType.PRUNE_BRANCH not in types
+    prune = next(i for i in out.intents if i.type is IntentType.PRUNE_BRANCH)
+    assert prune.payload["family"] == "kernel_opt"
 
 
 async def test_cold_start_budget_exhausted_alert_only():
@@ -812,7 +817,7 @@ async def test_deadline_imminent_emits_alert_plus_delegate_report():
     assert delegate.payload["idempotency_key"] == ("report-deadline-imminent-tick-12")
 
 
-async def test_same_payload_loop_alert_only():
+async def test_same_payload_loop_emits_alert_plus_prune_branch():
     ladder = ActionLadder()
     out = await ladder.decide(
         [
@@ -834,8 +839,9 @@ async def test_same_payload_loop_alert_only():
     )
     types = [i.type for i in out.intents]
     assert IntentType.ALERT in types
-    assert IntentType.PRUNE_BRANCH not in types
     assert IntentType.ESCALATE_STRATEGY_CHANGE not in types
+    prune = next(i for i in out.intents if i.type is IntentType.PRUNE_BRANCH)
+    assert prune.payload["family"] == "validate_stack"
 
 
 async def test_ray_head_dead_alert_only():

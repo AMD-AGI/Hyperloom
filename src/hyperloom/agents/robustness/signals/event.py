@@ -27,6 +27,9 @@ class EventConfig:
 
     policy_denied_threshold: int = 3
     delegated_failure_threshold: int = 2
+    # Sustained-failure count at/above which repeated_failure escalates to HIGH
+    # so the action ladder emits prune_branch (first hits stay advisory MEDIUM).
+    delegated_failure_prune_threshold: int = 4
     # Lookback over inbox + coordinator_events for the most recent recover result.
     recover_lookback_events: int = 50
     # B4 ``idempotency_replay``: fire when >= threshold distinct idempotency_keys
@@ -163,10 +166,13 @@ def _delegated_failure_symptoms(
     for family, count in family_counts.items():
         if count < cfg.delegated_failure_threshold:
             continue
+        severity = (
+            SymptomSeverity.HIGH if count >= cfg.delegated_failure_prune_threshold else SymptomSeverity.MEDIUM
+        )
         out.append(
             Symptom(
                 name="repeated_failure",
-                severity=SymptomSeverity.MEDIUM,
+                severity=severity,
                 summary=(f"action family {family!r} failed {count} times (>= {cfg.delegated_failure_threshold})"),
                 evidence={
                     "family": family,

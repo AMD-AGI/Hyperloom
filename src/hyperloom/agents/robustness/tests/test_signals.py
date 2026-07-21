@@ -180,6 +180,28 @@ def test_repeated_failure_groups_by_family():
     sym = next(s for s in out if s.name == "repeated_failure")
     assert sym.evidence["family"] == "kernel_opt"
     assert sym.evidence["count"] == 2
+    # Two failures is above the alert threshold but below the prune threshold.
+    assert sym.severity is SymptomSeverity.MEDIUM
+
+
+def test_repeated_failure_escalates_to_high_at_prune_threshold():
+    coord_events = [
+        {
+            "topic": "delegated_result",
+            "agent": "coordinator",
+            "payload": {"state": "failed", "kind": "kernel_opt", "task_id": f"t{i}"},
+        }
+        for i in range(4)
+    ]
+    data = SourceData(coordinator_events=coord_events)
+    out = evaluate_event_signals(
+        _ctx(),
+        data,
+        config=EventConfig(delegated_failure_threshold=2, delegated_failure_prune_threshold=4),
+    )
+    sym = next(s for s in out if s.name == "repeated_failure")
+    assert sym.evidence["count"] == 4
+    assert sym.severity is SymptomSeverity.HIGH
 
 
 def test_recover_unsuccessful_fires_on_needs_review_with_gpu_unhealthy_error():
