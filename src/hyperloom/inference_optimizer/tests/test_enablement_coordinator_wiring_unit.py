@@ -104,18 +104,25 @@ _TRANSFORMERS_UNRECOGNIZED_LOG = (
 )
 
 
-def test_build_params_seeds_deterministic_setup_commands_for_stack_arch_miss(monkeypatch):
-    """A 'Transformers does not recognize' arch miss seeds concrete upgrade
-    install commands into enablement_setup_commands, so the enablement round has
-    a real action to execute (which integrate_patch then replays before boot)."""
+def test_build_params_seeds_no_deterministic_shared_venv_mutation(monkeypatch):
+    """An arch-miss round must NOT auto-seed ANY shared-venv mutation.
+
+    Both ``pip install -U vllm`` and ``pip install -U transformers`` were removed
+    from the deterministic seed: an unpinned upgrade of the shared serving venv
+    bypasses the LLM/Critic/ROCm guard and can brick serving (CUDA-wheel clobber
+    of the ROCm vLLM/torch; transformers-major skew breaking vLLM's pin + the
+    compiled tokenizers/hf-hub/numpy ABI). Environment/build acquisition is owned
+    by the isolated, ROCm-safe targeted-build path and the specialist's own
+    recorded setup_commands — never a blind Coordinator seed."""
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self(model_name="deepseek-ai/DeepSeek-V4-Flash")
     params = Coordinator._build_enablement_specialist_params(fake, _TRANSFORMERS_UNRECOGNIZED_LOG)
     assert params is not None
     assert params["enablement_failure_kind"] == "missing_model_arch"
     setup = params.get("enablement_setup_commands") or []
-    assert "pip install -U transformers" in setup
-    assert "pip install -U vllm" in setup
+    # Regression guard: no unpinned serving-framework / transformers upgrade seeded.
+    assert not any("vllm" in c for c in setup)
+    assert not any("transformers" in c for c in setup)
 
 
 def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch):

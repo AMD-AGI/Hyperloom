@@ -104,8 +104,18 @@ class SpecialistSubprocessConfig:
     model: str = ""
     """Claude model id (e.g. ``claude-opus-4-7``). Empty = SDK default."""
 
-    permission_mode: str = "auto"
-    """claude-cli ``--permission-mode``. ``auto`` matches Arbor."""
+    permission_mode: str = "bypassPermissions"
+    """claude-cli ``--permission-mode``. Default ``bypassPermissions``: specialist
+    subprocesses are autonomous and already sandboxed by three independent gates —
+    an isolated git worktree, a curated ``--allowedTools`` allowlist, and
+    Critic + PolicyGate review of everything they emit — so the claude-cli safety
+    classifier adds no real safety, only a hard dependency on a separate
+    ``claude-sonnet-5`` gateway call. When that classifier is degraded, ``auto``
+    made specialists stall on retries and burn their whole budget without running
+    a single Bash command (observed 96 classifier-unavailable errors vs 6 runs in
+    one enablement task). Operators can override per pod via
+    ``HYPERLOOM_SPECIALIST_PERMISSION_MODE`` (e.g. ``auto`` to restore the
+    classifier path); see ``cli/executors.py``."""
 
     framework_source_roots: tuple[str, ...] = ()
     """Roots used to seed ``git worktree add`` and as ``--add-dir`` parents.

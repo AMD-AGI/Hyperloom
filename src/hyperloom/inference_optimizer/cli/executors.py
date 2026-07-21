@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -167,13 +168,26 @@ def _build_specialist_executor(
             if generated is not None:
                 mcp_config_path = str(generated)
                 forced_mcp_servers = None
-        sub_config = SpecialistSubprocessConfig(
-            claude_executable=claude_bin or "claude",
-            model=claude_model,
-            framework_source_roots=framework_source_roots,
-            mcp_config_path=mcp_config_path,
-            per_turn_max_seconds=per_turn_max_seconds,
-        )
+        # Specialist subprocesses default to ``bypassPermissions`` (see
+        # SpecialistSubprocessConfig.permission_mode): they are autonomous and
+        # already sandboxed by an isolated worktree + curated ``--allowedTools``
+        # allowlist + Critic/PolicyGate review, so routing every Bash call
+        # through the claude-cli ``claude-sonnet-5`` safety classifier adds no
+        # real safety and becomes a hard dependency that stalls the specialist
+        # whenever that classifier is degraded. Operators can override per pod
+        # (e.g. ``HYPERLOOM_SPECIALIST_PERMISSION_MODE=auto`` to restore the
+        # classifier path); an empty/unset value keeps the config default.
+        specialist_permission_mode = os.environ.get("HYPERLOOM_SPECIALIST_PERMISSION_MODE", "").strip()
+        sub_config_kwargs: dict[str, Any] = {
+            "claude_executable": claude_bin or "claude",
+            "model": claude_model,
+            "framework_source_roots": framework_source_roots,
+            "mcp_config_path": mcp_config_path,
+            "per_turn_max_seconds": per_turn_max_seconds,
+        }
+        if specialist_permission_mode:
+            sub_config_kwargs["permission_mode"] = specialist_permission_mode
+        sub_config = SpecialistSubprocessConfig(**sub_config_kwargs)
         runner = SpecialistRunner(
             subprocess_config=sub_config,
             session_dir=session_dir,

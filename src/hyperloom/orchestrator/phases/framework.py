@@ -134,41 +134,6 @@ def _maybe_build_localization_candidate(
         return None
 
 
-def _deterministic_enablement_setup_commands(signature: Any, launch_log: str) -> list[str]:
-    """Seed concrete install commands for an ``missing_model_arch`` failure whose
-    root cause is a too-old inference stack (Transformers / vLLM predating the
-    checkpoint's ``model_type``).
-
-    This is a deterministic best-effort bridge so an enablement round always has
-    a real action to execute even when the LLM specialist is offline/uncertain:
-    a brand-new architecture on an outdated stack is most often fixed by
-    upgrading Transformers (which ships the modeling code) and, where possible,
-    the serving framework. The commands are install-only (subject to
-    integrate_patch's allowlist + boot re-probe as the source of truth), so a
-    wrong guess costs one bounded install + boot, never correctness.
-
-    Returns an empty list for any other failure kind, so non-arch gaps keep the
-    LLM-authored bridging path unchanged.
-    """
-    from hyperloom.agents.framework.enablement import MISSING_MODEL_ARCH
-
-    kind = getattr(signature, "kind", "") or ""
-    if kind != MISSING_MODEL_ARCH:
-        return []
-    text = (launch_log or "").lower()
-    cmds: list[str] = []
-    # Transformers-side "does not recognize this architecture" -> the modeling
-    # code lives in a newer transformers release; upgrade it first.
-    if "transformers" in text or "does not recognize" in text or "model type" in text:
-        cmds.append("pip install -U transformers")
-    # vLLM registry miss (arch absent from model_executor/models/registry) is
-    # usually fixed by a newer vLLM; best-effort upgrade (will no-op / fail
-    # cleanly on a stack that has no compatible wheel, feeding the stall gate).
-    if "vllm" in text or "modelconfig" in text or "validationerror" in text:
-        cmds.append("pip install -U vllm")
-    return cmds
-
-
 class FrameworkPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -1142,13 +1107,13 @@ class FrameworkPhase(PhaseHandler):
         # Progressing patches from prior rounds, re-applied as a base before this
         # round's patch (serial-gap stacking); author a fix composing on top.
         base_patches = [str(p) for p in (getattr(state, "enablement_kept_patches", None) or [])]
+        # Only prior rounds' *actually-applied* setup commands (recorded by the
+        # specialist and replayed by integrate_patch) stack as a base. No install
+        # command is ever auto-seeded here: an unpinned upgrade of the shared
+        # serving venv is unsafe (CUDA-wheel clobber of ROCm vLLM/torch,
+        # transformers-major skew) and environment/build acquisition is owned by
+        # the isolated targeted-build path + the specialist's own setup_commands.
         base_setup = [str(c) for c in (getattr(state, "enablement_setup_commands", None) or [])]
-        # Seed deterministic install commands for a too-old-stack arch miss so the
-        # enablement round has a concrete action even without LLM authoring; the
-        # boot re-probe remains the source of truth for runnability.
-        for _c in _deterministic_enablement_setup_commands(signature, text):
-            if _c and _c not in base_setup:
-                base_setup.append(_c)
         notes = mandate.task_description
         if base_patches or base_setup:
             progress_bits = []
@@ -1540,9 +1505,16 @@ class FrameworkPhase(PhaseHandler):
             # A non-blank UNKNOWN log is recorded for human review, once per log.
             await self._maybe_record_enablement_human_review(launch_log)
             return ""
-        # Auto-escalate to a targeted build when the residual gap is a compiled
-        # miss.  The enqueue is a no-op when a build is already queued or
-        # running (idempotent by novelty key).
+        # Enqueue any build the *previous* round's specialist explicitly requested
+        # (``needs_targeted_build`` in its specialist_done), then auto-escalate to
+        # a targeted build when the residual gap is a compiled miss or a vLLM
+        # arch/weight deep-failure that source patches keep hitting. Both enqueues
+        # are no-ops when a matching build is already queued/running (idempotent by
+        # novelty key).
+        try:
+            await self._maybe_enqueue_specialist_requested_build()
+        except Exception:  # noqa: BLE001 — best-effort; never wedge dispatch
+            log.debug("enablement: specialist-requested build raised", exc_info=True)
         try:
             await self._maybe_escalate_to_targeted_build(launch_log, attempt=attempt)
         except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
@@ -1748,6 +1720,13 @@ class FrameworkPhase(PhaseHandler):
         state = self.shared_state
         status = str(res.get("status") or "")
         stop_set = ""
+        # Capture the finished round's specialist task id so the async dispatch
+        # chokepoint can read its specialist_done.json for a needs_targeted_build
+        # request (a build enqueue needs await; rearm is sync). Only overwrite on
+        # a real specialist round (targeted_build rearm rows carry no such id).
+        _spec_tid = str(res.get("specialist_task_id") or "").strip()
+        if _spec_tid:
+            state.enablement_last_specialist_task_id = _spec_tid
 
         def _stack_setup_commands() -> None:
             """Append this round's applied setup commands to the durable stack."""
@@ -4058,18 +4037,40 @@ class FrameworkPhase(PhaseHandler):
             return
         try:
             from hyperloom.agents.framework.enablement import (
+                MISSING_MODEL_ARCH,
+                MISSING_WEIGHT,
+                NOT_IMPLEMENTED,
                 classify_failure,
                 is_targeted_build_candidate,
             )
             from ..framework.build_actions import TargetedBuildAction
 
             signature = classify_failure(launch_log)
-            if not is_targeted_build_candidate(signature, launch_log):
-                return
 
             state = self.shared_state
             framework = (getattr(state, "framework", "") or "").strip().lower()
             gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
+
+            # Two escalation triggers:
+            #  1. An inherently *compiled* gap (build / rocm_hip / native-dtype /
+            #     hip-kernel) — the original Rung-5 path.
+            #  2. A vLLM **arch/weight deep-failure that source patches keep
+            #     hitting**: the enablement specialist authored ≥1 source patch
+            #     (attempt >= 1) yet the boot still stops at an arch/weight/
+            #     not-implemented wall. For a genuinely new architecture, aliasing
+            #     to an existing model class in the *installed* vLLM cannot model
+            #     the new op set; the correct acquisition is a from-source vLLM
+            #     build of a version that natively implements the arch. Only fires
+            #     on vLLM (the from-source recipe target) and never on the first
+            #     attempt (give the cheap source-patch path a chance first).
+            is_compiled_gap = is_targeted_build_candidate(signature, launch_log)
+            arch_stall = (
+                signature.kind in (MISSING_MODEL_ARCH, MISSING_WEIGHT, NOT_IMPLEMENTED)
+                and framework == "vllm"
+                and int(attempt or 0) >= 1
+            )
+            if not is_compiled_gap and not arch_stall:
+                return
 
             # Derive novelty fields from the current failure + session context.
             # Ref and repo_url come from the existing stack action when present;
@@ -4085,7 +4086,12 @@ class FrameworkPhase(PhaseHandler):
             # aiter (default) for all other compiled-miss gaps.
             sym_lower = (signature.offending_symbol or "").lower()
             log_lower = launch_log.lower()
-            if "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
+            if arch_stall and not is_compiled_gap:
+                # Arch/weight deep-failure on vLLM after source patches: the fix
+                # is a from-source vLLM build that natively implements the arch,
+                # not an aiter/sgl-kernel op build.
+                component = "vllm_source"
+            elif "sgl_kernel" in sym_lower or "sgl-kernel" in sym_lower or "sgl_kernel" in log_lower:
                 component = "sgl_kernel"
             elif framework == "vllm" and (
                 "vllm/_c" in log_lower or "vllm.extension" in log_lower
@@ -4121,12 +4127,18 @@ class FrameworkPhase(PhaseHandler):
                     source_pr_url = _pr_url
                     break
 
+            reason = (
+                f"Rung-5 arch-stall auto-escalation: {signature.kind} persists on vLLM "
+                f"after {int(attempt or 0)} source-patch attempt(s) — build vLLM from source"
+                if (arch_stall and not is_compiled_gap)
+                else f"Rung-5 auto-escalation from {signature.kind}"
+            )
             action = TargetedBuildAction(
                 gap_id=f"gap.enablement.{signature.kind}",
                 framework=framework or "vllm",
                 component=component,
                 capability=str(signature.offending_symbol or signature.kind or ""),
-                reason=f"Rung-5 auto-escalation from {signature.kind}",
+                reason=reason,
                 repo_url=repo_url,
                 ref=ref,
                 gpu_arch=_derive_gpu_arch(gpu_type),
@@ -4136,14 +4148,107 @@ class FrameworkPhase(PhaseHandler):
             task_id = await self.enqueue_targeted_build(action)
             if task_id:
                 log.info(
-                    "ENABLEMENT: enqueued targeted_build for compiled gap "
-                    "kind=%s gpu_arch=%s task=%s",
+                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s "
+                    "arch_stall=%s gpu_arch=%s task=%s",
                     signature.kind,
+                    component,
+                    bool(arch_stall and not is_compiled_gap),
                     action.gpu_arch,
                     task_id,
                 )
         except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
             log.debug("enablement: targeted-build escalation failed", exc_info=True)
+
+    async def _maybe_enqueue_specialist_requested_build(self) -> None:
+        """Enqueue a targeted build the enablement specialist explicitly requested.
+
+        The enablement specialist may emit a ``needs_targeted_build`` object in its
+        ``specialist_done.json`` (see ``ENABLEMENT_BUILD_REQUEST_GUIDANCE``) when a
+        compiled component / from-source framework build is required that a source
+        patch against the installed tree cannot deliver. This reads that request
+        from the just-finished round's workdir (task id captured at rearm into
+        ``enablement_last_specialist_task_id``) and enqueues it on the isolated,
+        ROCm-safe build lane. The field is cleared once read so the request is
+        consumed at most once; ``enqueue_targeted_build`` is additionally
+        idempotent by build-novelty key. Best-effort — never wedges dispatch.
+        """
+        import os as _os
+
+        state = self.shared_state
+        task_id = str(getattr(state, "enablement_last_specialist_task_id", "") or "").strip()
+        if not task_id:
+            return
+        # Consume-once: clear the marker regardless of outcome below.
+        state.enablement_last_specialist_task_id = ""
+        try:
+            if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+                return
+            from ..actions.executors._multi_node_env import is_multi_node
+
+            if is_multi_node():
+                return
+            done_path = self.session_dir / "runs" / "specialist" / task_id / "specialist_done.json"
+            if not done_path.is_file():
+                return
+            import json as _json
+
+            try:
+                payload = _json.loads(done_path.read_text())
+            except Exception:  # noqa: BLE001 — malformed/partial done is non-fatal
+                return
+            req = payload.get("needs_targeted_build") if isinstance(payload, dict) else None
+            if not isinstance(req, dict) or not req:
+                return
+
+            from ..framework.build_actions import (
+                _COMPONENTS,
+                TargetedBuildAction,
+                resolve_build_ref,
+            )
+
+            component = str(req.get("component") or "").strip().lower()
+            if component not in _COMPONENTS:
+                # A from-source framework build is the safest default for an
+                # arch/model request that named no valid compiled component.
+                component = "vllm_source"
+            framework = (getattr(state, "framework", "") or "").strip().lower() or "vllm"
+            gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
+            repo_url = str(req.get("repo_url") or "").strip()
+            ref = str(req.get("ref") or "").strip()
+            source_pr_url = ""
+            # A PR-like ``ref``/``repo_url`` carries its own repo + provenance.
+            candidate = ref or repo_url
+            if candidate:
+                _repo, _ref, _pr = resolve_build_ref(candidate, repo_url)
+                repo_url = _repo or repo_url
+                ref = _ref or ref
+                source_pr_url = _pr
+            capability = str(req.get("capability") or "").strip()
+            reason = str(req.get("reason") or "").strip() or "specialist-requested targeted build"
+            action = TargetedBuildAction(
+                gap_id=f"gap.enablement.{capability or component}",
+                framework=framework,
+                component=component,
+                capability=capability or component,
+                reason=f"specialist request: {reason}",
+                repo_url=repo_url,
+                ref=ref,
+                gpu_arch=_derive_gpu_arch(gpu_type),
+                build_budget_sec=0,
+                source_pr_url=source_pr_url,
+            )
+            build_task_id = await self.enqueue_targeted_build(action)
+            if build_task_id:
+                log.info(
+                    "ENABLEMENT: enqueued specialist-requested targeted_build "
+                    "component=%s capability=%s ref=%s task=%s",
+                    component,
+                    capability or "(none)",
+                    ref or "(autoselect)",
+                    build_task_id,
+                )
+        except Exception:  # noqa: BLE001 — best-effort; never wedge dispatch
+            log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
 
     async def _maybe_route_build_outcomes(self) -> None:
         """Route terminal targeted_build rows to _maybe_rearm_enablement.

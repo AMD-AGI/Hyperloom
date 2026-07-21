@@ -428,6 +428,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     #   uses these to detect a silently-finished round and count it as a stall.
     enablement_inflight_task_id: str = ""
     enablement_dispatch_tick: int = -1
+    # Task id of the most recently completed enablement specialist round. Captured
+    #   at rearm so the async dispatch chokepoint can read that round's
+    #   ``specialist_done.json`` for a ``needs_targeted_build`` request and enqueue
+    #   an off-loop build (see ``_maybe_enqueue_specialist_requested_build``).
+    #   Cleared once consumed. Optional; defaults via from_dict, no schema bump.
+    enablement_last_specialist_task_id: str = ""
     # Ordered, deduped patch paths from prior enablement rounds that made forward
     #   progress; re-applied as a base before the next round's patch so serial
     #   gaps stack. See ``_maybe_rearm_enablement``.

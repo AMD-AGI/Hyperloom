@@ -309,6 +309,40 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
 )
 
 
+# Targeted-build request contract. A pure source patch (a unified diff against
+# the installed tree) cannot deliver a *compiled* component (a new AITER
+# FP4/MLA/NSA op, sgl-kernel) or a from-source framework build (a newer vLLM
+# that natively implements a brand-new architecture). Historically the
+# specialist had no way to ask for one — it could only author a patch or return
+# empty — so genuinely-new architectures dead-ended at the arch-registry alias.
+# This contract lets the specialist REQUEST an off-loop targeted build; the
+# Coordinator enqueues it on the isolated, ROCm-safe build lane (isolated venv +
+# pinned ROCm torch constraints), gated by the runnable-decision probe.
+ENABLEMENT_BUILD_REQUEST_GUIDANCE: tuple[str, ...] = (
+    "REQUESTING A COMPILED / FROM-SOURCE BUILD. If clearing this gap needs a "
+    "*compiled* component (a new AITER FP4/MLA/NSA op, sgl-kernel) or a "
+    "from-source framework build (e.g. a newer vLLM that NATIVELY implements "
+    "this architecture, which a source patch against the INSTALLED tree cannot "
+    "provide), do NOT fake it with an install command or a stub patch. Emit a "
+    "``needs_targeted_build`` object in your final ``specialist_done`` and the "
+    "Coordinator runs it off-loop on an isolated, ROCm-safe build lane.",
+    "``needs_targeted_build`` schema: ``{component, capability, repo_url, ref, "
+    "reason}``. ``component`` is one of ``aiter`` / ``sgl_kernel`` / "
+    "``vllm_source`` / ``framework_ext``. ``capability`` names the missing op / "
+    "arch (e.g. ``deepseek_v4_nsa`` / ``fp4_moe``). ``repo_url`` + ``ref`` are "
+    "OPTIONAL but HIGH-VALUE: if you found (via WebSearch / mcp__pr_monitor__*) "
+    "a specific upstream PR / tag / commit that implements the fix, name it "
+    "(a GitHub PR URL, ``PR:1234``, a tag, or a sha) so the build checks out "
+    "exactly that; leave them empty for tag-descending autoselect. ``reason`` "
+    "is a one-line evidence summary.",
+    "A build request is COMPLEMENTARY to a source patch, not a replacement: you "
+    "MAY both author the smallest patch that advances the boot one step AND "
+    "request a build for the compiled/from-source piece the patch cannot cover. "
+    "Setting ``needs_targeted_build`` counts as a real deliverable — do NOT set "
+    "``empty=true`` when you emit one.",
+)
+
+
 @dataclass(frozen=True)
 class EnablementMandate:
     """A fully-specified authoring task for the enablement specialist.
@@ -391,6 +425,10 @@ def _render_task_description(
     for g in ENABLEMENT_PROGRESS_GUIDANCE:
         lines.append(f"  - {g}")
     lines.append("")
+    lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
+    for g in ENABLEMENT_BUILD_REQUEST_GUIDANCE:
+        lines.append(f"  - {g}")
+    lines.append("")
     lines.append("INVARIANTS:")
     for inv in ENABLEMENT_PATCH_INVARIANTS:
         lines.append(f"  - {inv}")
@@ -440,6 +478,7 @@ def build_mandate(
 
 
 __all__ = [
+    "ENABLEMENT_BUILD_REQUEST_GUIDANCE",
     "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",
     "ENABLEMENT_PROGRESS_GUIDANCE",

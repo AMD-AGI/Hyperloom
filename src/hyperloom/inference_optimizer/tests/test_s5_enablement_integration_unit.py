@@ -169,6 +169,142 @@ async def test_escalate_disabled_by_env(coord, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _maybe_escalate_to_targeted_build: vLLM arch/weight deep-failure -> vllm_source
+# (route_build Part B — source patches keep hitting the arch wall)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_arch_stall_escalates_to_vllm_source_after_attempts(coord, monkeypatch):
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "mi355x"
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    log = "Model architecture 'DeepseekV4ForCausalLM' is not supported"
+    # attempt 0: give the cheap source-patch path first crack -> no build yet.
+    await Coordinator._maybe_escalate_to_targeted_build(coord, log, attempt=0)
+    assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
+
+    # attempt 1: source patches still hit the arch wall -> from-source vLLM build.
+    await Coordinator._maybe_escalate_to_targeted_build(coord, log, attempt=1)
+    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
+    assert len(queued) == 1
+    action = TargetedBuildAction.from_state(queued[0].params)
+    assert action.component == "vllm_source"
+    assert action.gpu_arch == "gfx950"
+
+
+@pytest.mark.asyncio
+async def test_arch_stall_not_escalated_on_non_vllm(coord, monkeypatch):
+    coord.shared_state.framework = "sglang"
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    log = "Model architecture 'FooForCausalLM' is not supported"
+    # Even at a high attempt count, the from-source vLLM recipe is vLLM-only.
+    await Coordinator._maybe_escalate_to_targeted_build(coord, log, attempt=5)
+    assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# _maybe_enqueue_specialist_requested_build (route_build Part A —
+# specialist asks for a compiled / from-source build in specialist_done)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_specialist_requested_build_enqueued(coord, monkeypatch):
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "mi355x"
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    tid = "spec-abc123"
+    wd = coord.session_dir / "runs" / "specialist" / tid
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "specialist_done.json").write_text(
+        json.dumps(
+            {
+                "needs_targeted_build": {
+                    "component": "aiter",
+                    "capability": "deepseek_v4_nsa",
+                    "repo_url": "https://github.com/ROCm/aiter",
+                    "ref": "PR:1234",
+                    "reason": "NSA index op missing on ROCm",
+                }
+            }
+        )
+    )
+    coord.shared_state.enablement_last_specialist_task_id = tid
+
+    await Coordinator._maybe_enqueue_specialist_requested_build(coord)
+
+    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
+    assert len(queued) == 1
+    action = TargetedBuildAction.from_state(queued[0].params)
+    assert action.component == "aiter"
+    assert action.capability == "deepseek_v4_nsa"
+    assert action.ref == "PR:1234"
+    assert action.gpu_arch == "gfx950"
+    # Consume-once: the marker is cleared so the next tick does not re-enqueue.
+    assert coord.shared_state.enablement_last_specialist_task_id == ""
+
+
+@pytest.mark.asyncio
+async def test_specialist_requested_build_defaults_component_to_vllm_source(coord, monkeypatch):
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "mi300x"
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    tid = "spec-nocomp"
+    wd = coord.session_dir / "runs" / "specialist" / tid
+    wd.mkdir(parents=True, exist_ok=True)
+    # A request with no (or invalid) component defaults to a from-source vLLM build.
+    (wd / "specialist_done.json").write_text(
+        json.dumps({"needs_targeted_build": {"capability": "deepseek_v4", "reason": "new arch"}})
+    )
+    coord.shared_state.enablement_last_specialist_task_id = tid
+
+    await Coordinator._maybe_enqueue_specialist_requested_build(coord)
+
+    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
+    assert len(queued) == 1
+    assert TargetedBuildAction.from_state(queued[0].params).component == "vllm_source"
+
+
+@pytest.mark.asyncio
+async def test_specialist_requested_build_noop_without_request(coord, monkeypatch):
+    coord.shared_state.framework = "vllm"
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    tid = "spec-plain"
+    wd = coord.session_dir / "runs" / "specialist" / tid
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "specialist_done.json").write_text(json.dumps({"empty": False, "patches_written": ["p.patch"]}))
+    coord.shared_state.enablement_last_specialist_task_id = tid
+
+    await Coordinator._maybe_enqueue_specialist_requested_build(coord)
+
+    assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
+    # Marker is still consumed (cleared) even when there is no request.
+    assert coord.shared_state.enablement_last_specialist_task_id == ""
+
+
+@pytest.mark.asyncio
+async def test_specialist_requested_build_noop_when_no_task_id(coord, monkeypatch):
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.enablement_last_specialist_task_id = ""
+    await Coordinator._maybe_enqueue_specialist_requested_build(coord)
+    assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
+
+
+# ---------------------------------------------------------------------------
 # _maybe_route_build_outcomes -> _maybe_rearm_enablement routing
 # ---------------------------------------------------------------------------
 
