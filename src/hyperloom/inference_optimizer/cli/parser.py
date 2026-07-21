@@ -1426,7 +1426,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.15.",
+        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.20.",
     )
     opt.add_argument(
         "--max-minutes-explore-pct",
@@ -1434,7 +1434,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_explore_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.375.",
+        help="Wall-clock budget cap for EXPLORE. Default: 0.35.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1442,7 +1442,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.305.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.28.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",

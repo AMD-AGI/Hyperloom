@@ -101,6 +101,8 @@ Collect these required values:
 - Workload: `TP`, `EP`, `CONC`, `ISL`, `OSL`, `PRECISION`, and optional
   `MAX_MODEL_LEN` / `PROFILE_OSL`.
 - Objective and budget: `MAX_HOURS` plus `TARGET_GAIN`.
+- Optional phase budget percentages for `PRELUDE`, `FRAMEWORK_AGENT`,
+  `EXPLORE`, `KERNEL_AGENT`, `SWEEP`, and `CLOSE`.
 
 ## Default Values
 
@@ -133,6 +135,19 @@ resolved values in the launch plan before starting the optimizer.
   timeout.
 - `CONC_SWEEP_TOTAL_BUDGET_SEC`: unset, so Hyperloom uses its default total
   sweep budget.
+- Phase budget percentages default to:
+  - `PHASE_BUDGET_PRELUDE_PCT=0.03`: startup, preflight, baseline setup, and
+    initial orchestration.
+  - `PHASE_BUDGET_FRAMEWORK_PCT=0.20`: framework-agent work, including source
+    patching or framework-side exploration.
+  - `PHASE_BUDGET_EXPLORE_PCT=0.35`: serving-parameter exploration and
+    benchmark validation.
+  - `PHASE_BUDGET_KERNEL_PCT=0.28`: kernel-agent TraceLens/GEAK/native-kernel
+    optimization work.
+  - `PHASE_BUDGET_SWEEP_PCT=0.12`: concurrency sweep and final throughput
+    validation around the best candidate.
+  - `PHASE_BUDGET_CLOSE_PCT=0.02`: final report, state closeout, and summary
+    generation.
 - Phase toggles default to enabled: kernel enabled, explore enabled, framework
   agent enabled, roofline enabled, and concurrency sweep enabled.
 
@@ -140,6 +155,12 @@ Collect these optional advanced values:
 
 - Phase toggles: `--no-kernel`, `--no-explore`, `--no-framework-agent`,
   `--no-enable-conc-sweep`, `--no-enable-roofline`.
+- Phase budget percentages:
+  `PHASE_BUDGET_PRELUDE_PCT`, `PHASE_BUDGET_FRAMEWORK_PCT`,
+  `PHASE_BUDGET_EXPLORE_PCT`, `PHASE_BUDGET_KERNEL_PCT`,
+  `PHASE_BUDGET_SWEEP_PCT`, and `PHASE_BUDGET_CLOSE_PCT`.
+  Explain what each phase does before asking. Accept only values where
+  `0 < pct <= 1`; leave a value unset to use the optimizer default.
 - Routing and baseline options: `--skip-variants`, `--server-args`,
   `--reference-script`, `--model-class`, `--gpu-type`, `--framework-version`,
   `--target-summary`, `--compare-against-gpu`.
@@ -154,6 +175,9 @@ Guardrails:
   Hyperloom auto-detect from ROCm/system info.
 - Warn the user when both `--no-explore` and `--no-kernel` are selected; that
   collapses the run mostly to baseline and sweep validation.
+- Phase budget percentages are caps, not guaranteed time usage. A phase may end
+  earlier, and disabled work phases have their share redistributed by the
+  optimizer.
 - There is no generic `--skip-stage` flag and no `--no-sweep` flag. Compose
   phase behavior from the explicit flags above.
 
@@ -251,6 +275,12 @@ export OSL="${OSL:-1024}"
 export PRECISION="${PRECISION:-bf16}"
 export MAX_HOURS="${MAX_HOURS:-8}"
 export TARGET_GAIN="${TARGET_GAIN:-30}"
+export PHASE_BUDGET_PRELUDE_PCT="${PHASE_BUDGET_PRELUDE_PCT:-}"
+export PHASE_BUDGET_FRAMEWORK_PCT="${PHASE_BUDGET_FRAMEWORK_PCT:-}"
+export PHASE_BUDGET_EXPLORE_PCT="${PHASE_BUDGET_EXPLORE_PCT:-}"
+export PHASE_BUDGET_KERNEL_PCT="${PHASE_BUDGET_KERNEL_PCT:-}"
+export PHASE_BUDGET_SWEEP_PCT="${PHASE_BUDGET_SWEEP_PCT:-}"
+export PHASE_BUDGET_CLOSE_PCT="${PHASE_BUDGET_CLOSE_PCT:-}"
 
 OPT_FLAGS=(
   --model "$MODEL_PATH"
@@ -280,6 +310,12 @@ OPT_FLAGS=(
 [ -n "${CONC_SWEEP_CONCS:-}" ] && OPT_FLAGS+=(--conc-sweep-concs "$CONC_SWEEP_CONCS")
 [ -n "${CONC_SWEEP_TIMEOUT_SEC:-}" ] && OPT_FLAGS+=(--conc-sweep-timeout-sec "$CONC_SWEEP_TIMEOUT_SEC")
 [ -n "${CONC_SWEEP_TOTAL_BUDGET_SEC:-}" ] && OPT_FLAGS+=(--conc-sweep-total-budget-sec "$CONC_SWEEP_TOTAL_BUDGET_SEC")
+[ -n "${PHASE_BUDGET_PRELUDE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-prelude-pct "$PHASE_BUDGET_PRELUDE_PCT")
+[ -n "${PHASE_BUDGET_FRAMEWORK_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-framework-pct "$PHASE_BUDGET_FRAMEWORK_PCT")
+[ -n "${PHASE_BUDGET_EXPLORE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-explore-pct "$PHASE_BUDGET_EXPLORE_PCT")
+[ -n "${PHASE_BUDGET_KERNEL_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-kernel-pct "$PHASE_BUDGET_KERNEL_PCT")
+[ -n "${PHASE_BUDGET_SWEEP_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-sweep-pct "$PHASE_BUDGET_SWEEP_PCT")
+[ -n "${PHASE_BUDGET_CLOSE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-close-pct "$PHASE_BUDGET_CLOSE_PCT")
 [ "${NO_KERNEL:-0}" = "1" ] && OPT_FLAGS+=(--no-kernel)
 [ "${NO_EXPLORE:-0}" = "1" ] && OPT_FLAGS+=(--no-explore)
 [ "${NO_FRAMEWORK_AGENT:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)
@@ -324,6 +360,8 @@ Before launch, report the launch plan:
 - model path and whether it is an existing local model or a downloaded repo;
 - run mode (`baremetal` or `docker`) and target host/container when applicable;
 - framework, TP, EP, concurrency, ISL, OSL, precision, max hours, and objective;
+- phase budget percentages, showing defaults for unset values and user-selected
+  overrides for set values;
 - selected phase toggles and advanced flags;
 - `USER_DATA_PATH` and where runtime artifacts will be written.
 
