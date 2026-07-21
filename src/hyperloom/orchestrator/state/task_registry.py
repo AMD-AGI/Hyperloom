@@ -536,6 +536,38 @@ class TaskRegistry:
                 cancelled.append(task_id)
         return cancelled
 
+    async def cancel_queued_not_allowed(
+        self,
+        *,
+        allowed_kinds: set[str] | frozenset[str],
+        reason: str,
+    ) -> list[str]:
+        """Bulk-cancel queued tasks whose kind is not allowed at a phase boundary."""
+        allowed = {str(kind or "").strip() for kind in allowed_kinds if str(kind or "").strip()}
+        cancelled: list[str] = []
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT task_id, kind, history FROM tasks WHERE state='queued'")
+            rows = [(r["task_id"], r["kind"], r["history"]) for r in cur.fetchall()]
+            now = _now_iso()
+            for task_id, kind, history_json in rows:
+                if str(kind or "").strip() in allowed:
+                    continue
+                history = json.loads(history_json)
+                history.append(
+                    {
+                        "from": "queued",
+                        "to": "cancelled",
+                        "ts": now,
+                        "evidence": {"reason": reason},
+                    }
+                )
+                cur.execute(
+                    "UPDATE tasks SET state='cancelled', history=?, updated_at=? WHERE task_id=?",
+                    (json.dumps(history), now, task_id),
+                )
+                cancelled.append(task_id)
+        return cancelled
+
 
 __all__ = [
     "IllegalTransition",

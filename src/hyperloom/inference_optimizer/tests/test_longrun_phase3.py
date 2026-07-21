@@ -245,6 +245,102 @@ async def test_soft_restart_skips_server_clean_when_disabled(cyclic_coordinator)
     assert "servers_restarted" not in summary
 
 
+async def _noop_phase_side_effects(c):
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    c.phase_internal._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
+    c.phase_explore._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    c.phase_internal._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
+
+
+def _arm_explore_to_sweep(st):
+    now = datetime.now(timezone.utc)
+    st.phase = ps.PHASE_EXPLORE
+    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
+    st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
+    st.start_ts = (now - timedelta(minutes=10)).isoformat()
+    st.max_minutes = 96 * 60
+    st.kernel_enabled = False
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+
+
+@pytest.mark.asyncio
+async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
+    c = cyclic_coordinator
+    await _noop_phase_side_effects(c)
+    _arm_explore_to_sweep(c.shared_state)
+
+    queued = await c.tasks.create(
+        kind="specialist",
+        params={"needs_gpu": True},
+        idempotency_key="queued-specialist",
+    )
+
+    await c._advance_phase_if_needed()
+
+    updated = await c.tasks.get(queued.task_id)
+    assert c.shared_state.phase == ps.PHASE_SWEEP
+    assert updated.state == "cancelled"
+    assert updated.history[-1]["evidence"]["reason"] == "phase_transition:EXPLORE->SWEEP"
+
+
+@pytest.mark.asyncio
+async def test_phase_transition_does_not_cancel_running_specialist(cyclic_coordinator):
+    c = cyclic_coordinator
+    await _noop_phase_side_effects(c)
+    _arm_explore_to_sweep(c.shared_state)
+
+    running = await c.tasks.create(
+        kind="specialist",
+        params={"needs_gpu": True},
+        idempotency_key="running-specialist",
+    )
+    await c.tasks.transition(running.task_id, "running")
+
+    await c._advance_phase_if_needed()
+
+    assert c.shared_state.phase == ps.PHASE_SWEEP
+    assert (await c.tasks.get(running.task_id)).state == "running"
+
+
+@pytest.mark.asyncio
+async def test_phase_transition_preserves_target_phase_queued_task(cyclic_coordinator):
+    c = cyclic_coordinator
+    await _noop_phase_side_effects(c)
+    _arm_explore_to_sweep(c.shared_state)
+
+    queued = await c.tasks.create(
+        kind="conc_sweep",
+        params={},
+        idempotency_key="queued-conc-sweep",
+    )
+
+    await c._advance_phase_if_needed()
+
+    assert c.shared_state.phase == ps.PHASE_SWEEP
+    assert (await c.tasks.get(queued.task_id)).state == "queued"
+
+
+@pytest.mark.asyncio
+async def test_phase_transition_preserves_close_report_task(cyclic_coordinator):
+    c = cyclic_coordinator
+    await _noop_phase_side_effects(c)
+    c.shared_state.phase = ps.PHASE_EXPLORE
+    c.shared_state.set_stop_reason("target_reached")
+
+    queued = await c.tasks.create(
+        kind="report",
+        params={},
+        idempotency_key="queued-report",
+    )
+
+    await c._advance_phase_if_needed()
+
+    assert c.shared_state.phase == ps.PHASE_CLOSE
+    assert (await c.tasks.get(queued.task_id)).state == "queued"
+
+
 # Dispatcher pump: every-tick expired-running reclaim (pump_watchdog path)
 
 
