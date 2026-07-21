@@ -27,7 +27,7 @@ from .parser import (
     DEFAULT_EP,
     DEFAULT_PRECISION,
 )
-from ..session.paths import _SESSION_SKELETON, workspace_root as _workspace_root_resolve
+from ..session.paths import _SESSION_SKELETON
 from ..session.session_paths import agent_prompt_snapshot
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
@@ -238,7 +238,7 @@ def _seed_shared_state(
         model_class=args.model_class or "",
         # Advisory architecture profile; fresh-launch only. Soft-degrade to {}.
         model_arch=_load_model_arch(
-            _workspace_root_resolve(),
+            session_dir,
             _model_identity,
             str(args.model),
         ),

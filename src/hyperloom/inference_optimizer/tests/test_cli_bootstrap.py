@@ -83,7 +83,6 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
         },
     )
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {"layers": 61})
-    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
@@ -133,6 +132,42 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
 
+def test_seed_shared_state_loads_model_arch_from_session_dir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """model_arch.json is per-session, not shared across USER_DATA_PATH."""
+    workspace_root = tmp_path / "workspace"
+    session_dir = workspace_root / "Model-A" / "20260721T031500Z"
+    session_dir.mkdir(parents=True)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+
+    def _load_arch(root: Path, model_name: str, launched_model: str = "") -> dict:
+        captured["root"] = root
+        captured["model_name"] = model_name
+        captured["launched_model"] = launched_model
+        return {"source": "session-local"}
+
+    monkeypatch.setattr(cb, "_load_model_arch", _load_arch)
+    monkeypatch.setattr(
+        cb,
+        "_resolve_reference_recipe",
+        lambda _args: ("", {}, "", ""),
+    )
+
+    from hyperloom.orchestrator.policy import gate as policy
+
+    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
+
+    state = cb._seed_shared_state(session_dir, _args(model="/models/Model-A"), session_id="session-arch")
+
+    assert captured["root"] == session_dir
+    assert state.model_arch == {"source": "session-local"}
+
+
 def test_seed_shared_state_preserves_quantized_model_identity(
     tmp_path: Path,
     monkeypatch,
@@ -142,7 +177,6 @@ def test_seed_shared_state_preserves_quantized_model_identity(
     ``<...>/quantized`` path basename."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
@@ -174,7 +208,6 @@ def test_seed_shared_state_falls_back_to_path_basename(
     name is still the plain model-path basename."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",

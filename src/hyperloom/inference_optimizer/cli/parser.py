@@ -570,7 +570,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "model-path family keywords, replacing the deleted ``classify`` "
             "action's lightweight state-write role. For richer *advisory* "
             "model context (attention variant, KV/token, experts, MTP, ...) "
-            "the SKILL launcher writes $USER_DATA_PATH/model_arch.json, which "
+            "the SKILL launcher writes <session_dir>/model_arch.json, which "
             "is injected into prompts but drives no gating."
         ),
     )
