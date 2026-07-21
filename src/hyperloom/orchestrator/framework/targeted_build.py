@@ -731,6 +731,8 @@ def run_sgl_kernel_build(
 
     runtime = FrameworkRuntime(
         pythonpath_prefixes=(str(worktree_dir / "python"),),
+        entrypoint_bin_dir=str(venv_dir / "bin") if venv_dir else "",
+        runtime_python_exe=attempt_py,
         runtime_env={"SGLANG_USE_AITER": "1"},
         source_root=str(worktree_dir),
         attempt_root=str(root),
@@ -854,16 +856,21 @@ def run_vllm_source_build(
     if not gpu_arch:
         return _fail("preflight_toolchain", "gpu_arch must be set explicitly for vLLM source (L6)")
 
-    # ABI-match guard: vLLM source compile must target the same Python major.minor
-    # as the calling interpreter; a mismatch means the built _C.so cannot be loaded
-    # by Magpie without a separate runtime_python_exe path (not yet supported).
+    # ABI-match guard: log an advisory when the torch ABI reports a different Python
+    # version; the build continues and runtime_python_exe will point to the attempt
+    # venv python so the server uses the correct interpreter (entrypoint_bin_dir +
+    # runtime_python_exe switch covers both Magpie and bypass).  The only residual
+    # risk is if the Magpie harness itself must import vllm._C.so, which requires
+    # the harness python to match — that is a Magpie-side concern outside this repo.
     host_pyver = f"{_sys.version_info.major}.{_sys.version_info.minor}"
     abi_pyver = str(abi.get("python_version") or "").strip()
     if abi_pyver and not abi_pyver.startswith(host_pyver):
-        return _fail(
-            "preflight_toolchain",
-            f"ABI mismatch: host interpreter is Python {host_pyver} but torch ABI probe "
-            f"reports {abi_pyver}; vLLM source must be built for the same Python version",
+        import logging as _log
+        _log.getLogger(__name__).info(
+            "vLLM source build: torch ABI python %s != host %s; "
+            "runtime_python_exe will be set to the attempt venv interpreter",
+            abi_pyver,
+            host_pyver,
         )
 
     repo_url = str(action.repo_url or _VLLM_DEFAULT_REPO).strip() or _VLLM_DEFAULT_REPO
@@ -929,6 +936,22 @@ def run_vllm_source_build(
     if vllm_verify.returncode != 0:
         return _fail("boot_failed", f"vLLM ROCm platform check failed: {vllm_verify.stderr_tail[:500]}")
 
+    # Load probe: confirm the attempt venv loads vllm from the worktree.
+    load_probe_script = (
+        f"import vllm, inspect, sys; f = inspect.getfile(vllm); print(f); "
+        f"sys.exit(0 if f.startswith({str(worktree_dir)!r}) else 3)"
+    )
+    load_probe = run_argv(
+        [attempt_py, "-c", load_probe_script],
+        cwd=str(root), env=dict(_os.environ), timeout_sec=60, run=_run,
+    )
+    if load_probe.returncode != 0:
+        return _fail(
+            "boot_failed",
+            f"vLLM load probe failed: attempt venv does not load vllm from worktree "
+            f"(rc={load_probe.returncode}; out={load_probe.stdout_tail[:200]})",
+        )
+
     # Artifact freshness (fresh _C*.so means the extension was compiled)
     expected_artifacts = list(action.expected_artifacts) or ["vllm/_C*.so", "**/_C*.so"]
     freshness = verify_fresh_artifacts(str(worktree_dir), since_unix, expected_artifacts)
@@ -957,6 +980,7 @@ def run_vllm_source_build(
     runtime = FrameworkRuntime(
         pythonpath_prefixes=(str(worktree_dir),),
         entrypoint_bin_dir=str(venv_dir / "bin") if venv_dir else "",
+        runtime_python_exe=attempt_py,
         runtime_env={"PYTORCH_ROCM_ARCH": gpu_arch},
         source_root=str(worktree_dir),
         attempt_root=str(root),

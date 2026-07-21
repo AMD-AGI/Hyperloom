@@ -290,9 +290,11 @@ def test_vllm_source_build_abi_mismatch_refuses_silently(monkeypatch, tmp_path):
 
 
 def test_vllm_source_python_version_abi_guard(monkeypatch, tmp_path):
-    """ABI mismatch on wrong Python version -> preflight_toolchain."""
+    """ABI mismatch on wrong Python version is now advisory — build succeeds with runtime_python_exe set."""
     import json as _j
     wt = tmp_path / "wt"; wt.mkdir()
+    (wt / "vllm").mkdir()
+    (wt / "vllm" / "_C.so").write_bytes(b"\x7fELF")
     venv = tmp_path / "venv"; (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
 
@@ -307,7 +309,6 @@ def test_vllm_source_python_version_abi_guard(monkeypatch, tmp_path):
             }) + "\n")
         return _make_rocm_run()(argv, **kw)
 
-    # Only relevant when sys.version_info != 3.8
     if sys.version_info[:2] == (3, 8):
         pytest.skip("host is 3.8, no mismatch to detect")
 
@@ -315,9 +316,9 @@ def test_vllm_source_python_version_abi_guard(monkeypatch, tmp_path):
         _vllm_action(), str(tmp_path / "attempt"),
         run=_run_wrong_py, disk_preflight_fn=_noop_disk,
     )
-    assert result.ok is False
-    assert result.failure_class == "preflight_toolchain"
-    assert "ABI" in result.failure_summary
+    # ABI guard is now advisory: build must succeed and runtime_python_exe must be set.
+    assert result.ok is True
+    assert result.runtime.runtime_python_exe
 
 
 def test_vllm_source_compile_error(monkeypatch, tmp_path):
@@ -372,7 +373,7 @@ def test_vllm_source_symbol_missing(monkeypatch, tmp_path):
 
 
 def test_vllm_source_runtime_fields(monkeypatch, tmp_path):
-    """KEEP'd runtime must have pythonpath_prefixes, entrypoint_bin_dir, PYTORCH_ROCM_ARCH."""
+    """KEEP'd runtime must have pythonpath_prefixes, entrypoint_bin_dir, runtime_python_exe, PYTORCH_ROCM_ARCH."""
     wt = tmp_path / "wt"; wt.mkdir()
     (wt / "vllm").mkdir()
     (wt / "vllm" / "_C.so").write_bytes(b"ELF")
@@ -387,12 +388,50 @@ def test_vllm_source_runtime_fields(monkeypatch, tmp_path):
     rt = result.runtime
     assert rt.pythonpath_prefixes
     assert rt.entrypoint_bin_dir
+    assert rt.runtime_python_exe
     assert rt.runtime_env.get("PYTORCH_ROCM_ARCH") == "gfx950"
 
 
-# ---------------------------------------------------------------------------
-# Driver dispatcher wires sgl_kernel and vllm_source
-# ---------------------------------------------------------------------------
+def test_vllm_source_load_probe_failure_returns_boot_failed(monkeypatch, tmp_path):
+    """Load probe rc!=0 must return boot_failed."""
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / "vllm").mkdir()
+    (wt / "vllm" / "_C.so").write_bytes(b"ELF")
+    venv = tmp_path / "venv"; (venv / "bin").mkdir(parents=True)
+    _patch_isolation(monkeypatch, wt, venv)
+
+    def _run_probe_fail(argv, **kw):
+        cmd = " ".join(str(a) for a in argv)
+        if "inspect" in cmd and "startswith" in cmd:
+            return _completed(returncode=3, stdout="", stderr="wrong path\n")
+        return _make_rocm_run()(argv, **kw)
+
+    result = run_vllm_source_build(
+        _vllm_action(), str(tmp_path / "attempt"),
+        run=_run_probe_fail, disk_preflight_fn=_noop_disk,
+    )
+    assert result.ok is False
+    assert result.failure_class == "boot_failed"
+    assert "load probe" in result.failure_summary
+
+
+def test_sgl_kernel_runtime_python_exe_set(monkeypatch, tmp_path):
+    """sgl-kernel build must set runtime_python_exe and entrypoint_bin_dir."""
+    wt = tmp_path / "worktree"
+    (wt / "sgl-kernel").mkdir(parents=True)
+    (wt / "python").mkdir()
+    (wt / "sgl-kernel" / "sgl_kernel_ext.so").write_bytes(b"\x7fELF")
+    venv = tmp_path / "venv"; (venv / "bin").mkdir(parents=True)
+    _patch_isolation(monkeypatch, wt, venv)
+
+    result = run_sgl_kernel_build(
+        _sgl_action(), str(tmp_path / "attempt"),
+        run=_make_rocm_run(), git=_make_git(),
+        disk_preflight_fn=_noop_disk,
+    )
+    assert result.ok is True
+    assert result.runtime.runtime_python_exe
+    assert result.runtime.entrypoint_bin_dir
 
 def test_driver_main_routes_sgl_kernel(monkeypatch, tmp_path):
     root = tmp_path / "attempt"; root.mkdir()
