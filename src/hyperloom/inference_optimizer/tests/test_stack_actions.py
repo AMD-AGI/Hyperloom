@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the Rung 3 (M1) stack-action data model (§8.2)."""
+"""Tests for the enablement stack-action data model."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def test_runtime_round_trip():
 
 
 # ---------------------------------------------------------------------------
-# FrameworkRuntime — Rung 5 additive fields
+# FrameworkRuntime — additive build fields
 # ---------------------------------------------------------------------------
 
 def test_runtime_extended_round_trip():
@@ -133,7 +133,7 @@ def test_runtime_extended_override_keys():
 
 
 def test_runtime_extended_override_omitted_when_empty():
-    """A Rung-3 runtime produces the exact same override as before (back-compat)."""
+    """An attempt-runtime produces the exact same override as before (back-compat)."""
     rt = FrameworkRuntime(bin_path="/s/venv/bin", python_path="/s/venv/bin/python", venv_root="/s/venv")
     ov = rt.to_runtime_override()
     for key in ("pythonpath_prefixes", "ld_library_path_prefix", "runtime_env", "entrypoint_bin_dir",

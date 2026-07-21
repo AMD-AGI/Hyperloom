@@ -1,15 +1,14 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the M2 localization module + adapter localization hooks (§9.6)."""
+"""Tests for the localization module + adapter localization hooks."""
 
 from __future__ import annotations
 
-import os
 
 import pytest
 
-from .conftest import git_commit_all, init_git_repo
+from .conftest import init_git_repo
 
 from hyperloom.agents.framework.enablement import (
     MISSING_MODEL_ARCH,
@@ -28,7 +27,7 @@ def _gap(kind: str = MISSING_MODEL_ARCH) -> CapabilityGap:
 
 
 # ---------------------------------------------------------------------------
-# classify_closure — Rung 5 gate
+# classify_closure — compiled-closure gate
 # ---------------------------------------------------------------------------
 
 def test_closure_empty():

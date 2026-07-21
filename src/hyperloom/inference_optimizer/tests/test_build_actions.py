@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the Rung 5 targeted-build data model (§6)."""
+"""Tests for the targeted-build data model."""
 
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def test_build_result_from_state_normalizes_bad_failure_class():
 
 
 # ---------------------------------------------------------------------------
-# build_novelty_key — repeat vs novel (D6)
+# build_novelty_key — repeat vs novel
 # ---------------------------------------------------------------------------
 
 def _action(**kw):

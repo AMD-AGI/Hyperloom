@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for Rung 3 (M1) enablement adapters (§8.4).
+"""Tests for the enablement runtime adapters.
 
 All subprocess calls go through an injected fake ``run`` shim so no ROCm /
 network / real venv is required.
@@ -10,9 +10,7 @@ network / real venv is required.
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
-import pytest
 
 from hyperloom.agents.framework.enablement import (
     MISSING_MODEL_ARCH,

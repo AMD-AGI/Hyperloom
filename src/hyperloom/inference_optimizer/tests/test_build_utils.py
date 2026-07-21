@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for build_utils (S3) — all subprocess-free via mocked runners."""
+"""Unit tests for build_utils — all subprocess-free via mocked runners."""
 
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,7 +13,6 @@ import pytest
 
 from hyperloom.orchestrator.framework.build_utils import (
     AbiMismatchError,
-    RunResult,
     check_rocm_toolchain_alignment,
     coerce_build_argv,
     hash_artifacts,
