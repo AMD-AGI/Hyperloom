@@ -438,6 +438,54 @@ def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path
     ]
 
 
+def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("install_aiter_ref_with_constraints() {")
+    end = script_text.index("\n}\n\ninstall_compatible_aiter() {", start) + 3
+    install_aiter = script_text[start:end]
+
+    fake_py = tmp_path / "python"
+    calls_file = tmp_path / "calls.txt"
+    fake_py.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                'printf "env=%s args=%s\\n" "${AITER_USE_SYSTEM_TRITON-__unset__}" "$*" >> "$CALLS_FILE"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_py.chmod(0o755)
+
+    runner = tmp_path / "aiter-install.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"export CALLS_FILE={calls_file}",
+                "checkout_aiter_ref() { printf 'checkout %s %s\\n' \"$1\" \"$2\" >> \"$CALLS_FILE\"; }",
+                "check_torch_triton_alignment() { printf 'align %s\\n' \"$1\" >> \"$CALLS_FILE\"; }",
+                install_aiter,
+                f"install_aiter_ref_with_constraints {fake_py} {tmp_path / 'aiter'} v0.1.18 {tmp_path / 'constraints.txt'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["bash", str(runner)], check=True)
+
+    assert calls_file.read_text(encoding="utf-8").splitlines() == [
+        f"checkout {tmp_path / 'aiter'} v0.1.18",
+        f"env=1 args=-m pip install --constraint {tmp_path / 'constraints.txt'} --config-settings editable_mode=compat -e {tmp_path / 'aiter'}",
+        "env=__unset__ args=-c import aiter",
+        f"align {fake_py}",
+    ]
+
+
 def test_kernel_install_no_longer_exports_openai_safe_credentials():
     install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")

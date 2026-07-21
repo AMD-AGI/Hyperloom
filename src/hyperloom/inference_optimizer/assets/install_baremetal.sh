@@ -504,11 +504,17 @@ list_aiter_tags_newest_first() {
 }
 
 install_aiter_ref_with_constraints() {
-  local py="$1" aiter_root="$2" ref="$3" constraint_file="$4"
+  local py="$1" aiter_root="$2" ref="$3" constraint_file="$4" aiter_use_system_triton
   checkout_aiter_ref "$aiter_root" "$ref"
-  "$py" -m pip install --constraint "$constraint_file" \
+  aiter_use_system_triton="${AITER_USE_SYSTEM_TRITON:-1}"
+  case "$aiter_use_system_triton" in
+    0|1) ;;
+    *) warn "AITER_USE_SYSTEM_TRITON must be 0 or 1"; return 1 ;;
+  esac
+  AITER_USE_SYSTEM_TRITON="$aiter_use_system_triton" "$py" -m pip install --constraint "$constraint_file" \
     --config-settings editable_mode=compat -e "$aiter_root" || return 1
   "$py" -c "import aiter" >/dev/null
+  check_torch_triton_alignment "$py" || return 1
 }
 
 install_compatible_aiter() {
