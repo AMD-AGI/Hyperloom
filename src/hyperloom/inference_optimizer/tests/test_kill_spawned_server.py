@@ -367,6 +367,38 @@ def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
     assert "Engine core initialization failed" in excerpt
 
 
+def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path):
+    """A config-validation-stage failure (brand-new checkpoint ``model_type``
+    unknown to the installed transformers/vLLM) dies BEFORE the engine starts and
+    must still be surfaced as a fatal excerpt. Without this the enablement failure
+    classifier only sees Magpie's ``subprocess_nonzero`` stdout tail, classifies
+    ``unknown``, and never seeds the ``pip install -U transformers`` bridge —
+    starving every enablement round of the real root cause (DeepSeek-V4 repro)."""
+    from hyperloom.agents.framework.enablement import classify_failure
+
+    log_path = tmp_path / "server.log"
+    # A healthy INFO banner naming architectures must NOT trip the markers.
+    log_path.write_text("INFO [registry] Model architectures ['Qwen3ForCausalLM'] loaded\n")
+    assert server_log_death_excerpt(str(log_path)) is None
+    # The real DeepSeek-V4 config-validation failure.
+    log_path.write_text(
+        "(APIServer pid=1046234) Traceback (most recent call last):\n"
+        "(APIServer pid=1046234) pydantic_core._pydantic_core.ValidationError: "
+        "1 validation error for ModelConfig\n"
+        "(APIServer pid=1046234)   Value error, The checkpoint you are trying to "
+        "load has model type `deepseek_v4` but Transformers does not recognize "
+        "this architecture.\n"
+    )
+    excerpt = server_log_death_excerpt(str(log_path))
+    assert excerpt is not None
+    assert "does not recognize this architecture" in excerpt
+    # The extracted excerpt must classify as missing_model_arch (not unknown),
+    # which is what seeds the deterministic pip-install enablement bridge.
+    sig = classify_failure(excerpt)
+    assert sig.kind == "missing_model_arch"
+    assert sig.offending_symbol == "deepseek_v4"
+
+
 def test_run_with_session_kill_watchdog_reaps_hung_server(tmp_path):
     """A child that writes a fatal server marker then hangs is reaped via the
     watchdog with ``SERVER_DEAD_RETURNCODE`` — well before the hard timeout."""
