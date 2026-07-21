@@ -11,7 +11,7 @@ Fields::
     model_class         str   — categorical key supplied via --model-class
     model_arch          dict  — advisory architecture profile (hybrid
                                 structured + free-text notes) loaded from
-                                the launcher's ``$USER_DATA_PATH/model_arch.json``;
+                                the launcher's ``<session_dir>/model_arch.json``;
                                 prompt-context only, no deterministic gating
     model_architectures list  — config.json ``architectures``; stamped into
                                 the recipe-snapshot ``extras`` as a KB tag
