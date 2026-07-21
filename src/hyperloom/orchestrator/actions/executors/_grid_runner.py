@@ -1390,6 +1390,36 @@ async def run_grid(
                     exc,
                 )
 
+        # B-class guard: after a restart the MN server can transiently refuse
+        # connections even though it is otherwise healthy (e.g. /health flips
+        # 200 but the frontend is briefly unavailable during cuda-graph
+        # capture), which invalidates an otherwise-good variant with a spurious
+        # ConnectionRefused. Re-confirm the benchmark target is reachable right
+        # before the measured pass so the load only starts once the server is
+        # actually accepting requests. Best-effort + gated
+        # (HYPERLOOM_MN_PREBENCH_HEALTH_REGATE=0 disables); a genuinely dead
+        # server (A-class) just times out fast here and the benchmark then
+        # surfaces the real death via the per-variant snapshot.
+        from ._multi_node_env import is_multi_node as _mn_is_mn
+        if _mn_is_mn() and os.environ.get("HYPERLOOM_MN_PREBENCH_HEALTH_REGATE", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            try:
+                from ._multi_node_server_lifecycle import _wait_for_server_health_async as _mn_health_wait
+
+                await _mn_health_wait(
+                    timeout_s=int(os.environ.get("HYPERLOOM_MN_PREBENCH_HEALTH_S", "300") or 300),
+                )
+            except Exception as _regate_exc:  # noqa: BLE001 - best-effort readiness re-gate
+                log.warning(
+                    "grid_runner: pre-benchmark health re-gate did not confirm readiness "
+                    "(proceeding; benchmark will surface any real death): %r",
+                    _regate_exc,
+                )
+
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
         # leak destinations per-variant.
         variant_started_unix = time.time()
