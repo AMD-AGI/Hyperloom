@@ -4289,7 +4289,6 @@ class FrameworkPhase(PhaseHandler):
             state.enablement_build_manifest = manifest
 
             fc = ""
-            fs = ""
             if task.state == "succeeded":
                 # Load the BuildResult from result.json for the rich runtime.
                 attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
@@ -4321,7 +4320,6 @@ class FrameworkPhase(PhaseHandler):
             lbf = getattr(state, "enablement_last_build_failure", None) or {}
             if not fc and isinstance(lbf, dict):
                 fc = str(lbf.get("failure_class") or "")
-                fs = str(lbf.get("failure_summary") or "")
 
             # Novelty ledger: time-based failures are always advanced; defect
             # failures are advanced when the (component,ref,gpu_arch,cmd) tuple

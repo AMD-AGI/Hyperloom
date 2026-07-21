@@ -382,6 +382,7 @@ def hash_artifacts(paths: list[str] | tuple[str, ...]) -> dict[str, str]:
             data = Path(p).read_bytes()
             out[str(p)] = hashlib.sha256(data).hexdigest()
         except OSError:
+            # Missing/unreadable artifact paths are skipped.
             pass
     return out
 

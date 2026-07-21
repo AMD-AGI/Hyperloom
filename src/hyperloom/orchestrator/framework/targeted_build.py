@@ -21,7 +21,7 @@ import os
 import signal
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -174,6 +174,7 @@ def kill_build_pgroup(pgid: int, *, sig: int = signal.SIGTERM) -> None:
     try:
         os.killpg(pgid, sig)
     except (ProcessLookupError, PermissionError, OSError, OverflowError, ValueError):
+        # Best-effort: the group may already be gone or unsignalable.
         pass
 
 
@@ -299,7 +300,6 @@ def run_aiter_build(
     from .build_utils import (
         AbiMismatchError,
         check_rocm_toolchain_alignment,
-        hash_artifacts,
         probe_torch_abi,
         run_argv,
         sort_tags_desc,
@@ -373,7 +373,6 @@ def run_aiter_build(
     ref = str(action.ref or "").strip()
     worktree_dir: Path | None = None
     venv_dir: Path | None = None
-    attempt_py = host_py  # overridden after venv creation
 
     try:
         from hyperloom.agents.framework.isolation import (
@@ -437,9 +436,7 @@ def run_aiter_build(
 
     if ref:
         res = run_argv(pip_base, cwd=str(worktree_dir), env=install_env, timeout_sec=3600, run=_run)
-        if res.returncode == 0:
-            installed_ok = True
-        else:
+        if res.returncode != 0:
             log_msg = res.stderr_tail or res.stdout_tail
             build_log.write_text(log_msg, encoding="utf-8")
             return _fail("compile_error", f"pip install failed for ref={ref!r}: rc={res.returncode}")
@@ -553,7 +550,6 @@ def run_sgl_kernel_build(
     from .build_utils import (
         AbiMismatchError,
         check_rocm_toolchain_alignment,
-        hash_artifacts,
         probe_torch_abi,
         run_argv,
         verify_fresh_artifacts,
@@ -615,7 +611,6 @@ def run_sgl_kernel_build(
     # Isolation worktree + venv
     worktree_dir: Path | None = None
     venv_dir: Path | None = None
-    attempt_py = host_py
 
     try:
         from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
@@ -707,7 +702,6 @@ def run_sgl_kernel_build(
     }
     if action.source_pr_url:
         installed_versions["source_pr_url"] = action.source_pr_url
-    artifact_hashes = hash_artifacts(list(built_paths))
 
     runtime = FrameworkRuntime(
         pythonpath_prefixes=(str(worktree_dir / "python"),),
@@ -781,7 +775,6 @@ def run_vllm_source_build(
     from .build_utils import (
         AbiMismatchError,
         check_rocm_toolchain_alignment,
-        hash_artifacts,
         probe_torch_abi,
         run_argv,
         verify_fresh_artifacts,
@@ -857,7 +850,6 @@ def run_vllm_source_build(
     # Isolation worktree + venv
     worktree_dir: Path | None = None
     venv_dir: Path | None = None
-    attempt_py = host_py
 
     try:
         from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
@@ -953,7 +945,6 @@ def run_vllm_source_build(
     }
     if action.source_pr_url:
         installed_versions["source_pr_url"] = action.source_pr_url
-    artifact_hashes = hash_artifacts(list(built_paths))
 
     # vLLM source overlay: prepend the worktree so the attempt venv's vllm wins.
     runtime = FrameworkRuntime(

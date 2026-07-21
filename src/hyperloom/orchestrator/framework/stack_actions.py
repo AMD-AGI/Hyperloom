@@ -26,7 +26,6 @@ from typing import Any, Mapping
 _ACQUISITION_METHODS: frozenset[str] = frozenset(
     {"wheel", "editable_ref", "local_tree", "package_source", "none"}
 )
-_ACTION_KINDS: frozenset[str] = frozenset({"runtime_candidate", "pr_backport", "vendor_files"})
 
 
 @dataclass(frozen=True)
