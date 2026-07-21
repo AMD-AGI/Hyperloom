@@ -117,12 +117,13 @@ value.
 
    Present exactly these two option labels in this order:
 
-   1. `docker`
+   1. `docker (Recommended)`
    2. `baremetal`
 
-   - `docker`: record docker as the run mode; the example (workload) skill will
-     generate a ROCm container later. Choose this when the host does not have the
-     framework installed but Docker with GPU access is available.
+   - `docker (Recommended)`: record `docker` as the run mode; the example
+     (workload) skill will generate a ROCm container later. Choose this when
+     the host does not have the framework installed but Docker with GPU access
+     is available.
    - `baremetal`: run the setup backend directly on this host. Choose this when
      the host provides ROCm, or when Hyperloom is already installed inside a
      Docker container and setup should run directly in that current container
@@ -162,10 +163,10 @@ value.
 7. Only when the user chose `baremetal`, ask whether to install a serving
    framework (used as the `--install-framework` value in Step 4):
    - `none`: use an already-installed vLLM/SGLang framework stack on the host.
+   - `sglang`: install SGLang ROCm framework components (shared with the host torch).
    - `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
      pins its own torch, so it runs in an isolated env and never touches the
      host torch/SGLang stack.
-   - `sglang`: install SGLang ROCm framework components (shared with the host torch).
    - If the user is unsure, recommend `none` when a framework is already present;
      otherwise recommend `vllm (isolated)`.
 
