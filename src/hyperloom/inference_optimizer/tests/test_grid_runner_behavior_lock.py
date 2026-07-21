@@ -388,9 +388,12 @@ class TestAutoWarmupTeardown:
 
     def test_warmup_success_measured_success_tears_down_once(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
-        # Pin the reuse port so the teardown-port assertion is deterministic
-        # (baseline now defaults to a per-session free port).
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_REUSE_PORT", "8888")
+        # Pin the free-port picker so the teardown-port assertion is
+        # deterministic (baseline uses a per-session free port).
+        monkeypatch.setattr(
+            "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
+            lambda: 8888,
+        )
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
         state = {"n": 0}

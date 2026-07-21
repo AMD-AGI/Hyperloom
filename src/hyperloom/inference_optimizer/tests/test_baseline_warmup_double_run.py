@@ -900,7 +900,10 @@ def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
     output_dir = tmp_path / "ws"
     output_dir.mkdir(parents=True)
     (output_dir / "vllm_8888.pid").write_text("2147483646")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_REUSE_PORT", "8888")
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
+        lambda: 8888,
+    )
 
     kill_calls = {"n": 0}
 
@@ -955,7 +958,10 @@ def test_pre_start_cleanup_no_kill_when_port_free(tmp_path, monkeypatch):
     output_dir = tmp_path / "ws"
     output_dir.mkdir(parents=True)
     (output_dir / "vllm_8888.pid").write_text("2147483646")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_REUSE_PORT", "8888")
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
+        lambda: 8888,
+    )
 
     kill_calls = {"n": 0}
 
@@ -1008,7 +1014,10 @@ def test_pre_start_cleanup_no_kill_when_metadata_existed(tmp_path, monkeypatch):
     output_dir = tmp_path / "ws"
     output_dir.mkdir(parents=True)
     (output_dir / "vllm_8888.pid").write_text("2147483646")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BASELINE_REUSE_PORT", "8888")
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
+        lambda: 8888,
+    )
     (output_dir / "vllm_8888.json").write_text("{}")
 
     kill_calls = {"n": 0}
