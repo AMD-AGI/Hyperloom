@@ -193,12 +193,13 @@ async def test_pump_real_component_writes_plan_json(build_coord, build_lifecycle
         assert json.loads(plan.read_text())["component"] == "aiter"
         raise RuntimeError("captured")
 
-    import hyperloom.orchestrator.loop.build_lifecycle as blc_mod
+    from hyperloom.orchestrator.loop import build_lifecycle as blc_mod
     original = blc_mod.spawn_build
     blc_mod.spawn_build = _capture_spawn
     try:
         await build_lifecycle._maybe_pump_targeted_build(tick=0)
     except RuntimeError:
+        # _capture_spawn raises after recording the command to stop the pump.
         pass
     finally:
         blc_mod.spawn_build = original
@@ -222,12 +223,13 @@ async def test_pump_fake_component_runs_literal_command(build_coord, build_lifec
         spawned_commands.append(list(command) if command else [])
         raise RuntimeError("captured")
 
-    import hyperloom.orchestrator.loop.build_lifecycle as blc_mod
+    from hyperloom.orchestrator.loop import build_lifecycle as blc_mod
     original = blc_mod.spawn_build
     blc_mod.spawn_build = _capture_spawn
     try:
         await build_lifecycle._maybe_pump_targeted_build(tick=0)
     except RuntimeError:
+        # _capture_spawn raises after recording the command to stop the pump.
         pass
     finally:
         blc_mod.spawn_build = original

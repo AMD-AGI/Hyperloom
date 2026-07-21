@@ -887,7 +887,7 @@ def test_driver_main_routes_sgl_kernel(monkeypatch, tmp_path):
     action = _sgl_action()
     (root / "plan.json").write_text(json.dumps(action.to_state()), encoding="utf-8")
 
-    import hyperloom.orchestrator.framework.targeted_build as tb
+    from hyperloom.orchestrator.framework import targeted_build as tb
 
     def _fake_sgl(action, attempt_root, **kw):
         from hyperloom.orchestrator.framework.build_actions import BuildResult
@@ -907,7 +907,7 @@ def test_driver_main_routes_vllm_source(monkeypatch, tmp_path):
     action = _vllm_action()
     (root / "plan.json").write_text(json.dumps(action.to_state()), encoding="utf-8")
 
-    import hyperloom.orchestrator.framework.targeted_build as tb
+    from hyperloom.orchestrator.framework import targeted_build as tb
 
     def _fake_vllm(action, attempt_root, **kw):
         from hyperloom.orchestrator.framework.build_actions import BuildResult
@@ -926,7 +926,7 @@ def test_driver_main_unknown_component_returns_failure(monkeypatch, tmp_path):
     action = _vllm_action()
     (root / "plan.json").write_text(json.dumps(action.to_state()), encoding="utf-8")
 
-    import hyperloom.orchestrator.framework.targeted_build as tb
+    from hyperloom.orchestrator.framework import targeted_build as tb
 
     def _patched_driver(argv=None):
         import argparse

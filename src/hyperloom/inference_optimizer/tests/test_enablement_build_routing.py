@@ -46,7 +46,7 @@ def coord(build_coord):
     build_coord._framework_authoring_lanes_ttl = (
         lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
     )
-    build_coord._coerce_needs_gpu = lambda val: bool(val)
+    build_coord._coerce_needs_gpu = bool
     build_coord._bl = BuildLifecycleCollaborator(build_coord)
     return build_coord
 
@@ -407,7 +407,7 @@ async def test_route_succeeded_probe_idempotent(coord, tmp_path):
 async def test_route_failed_timeout_calls_advanced(coord):
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
                                  capability="fp4_moe", ref="v1")
-    task_id = await _enqueue_and_transition(coord, action, "failed")
+    await _enqueue_and_transition(coord, action, "failed")
     # Simulate failure recorded by lifecycle
     coord.shared_state.enablement_last_build_failure = {
         "failure_class": "timeout",
