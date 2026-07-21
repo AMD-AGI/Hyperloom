@@ -200,7 +200,7 @@ custom run:
 
 - [`3h`](../../examples/hyperloom-qwen3-8b-3h/SKILL.md): Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
-- [`8h`](../../examples/hyperloom-qwen3-14b-fp8-8h/SKILL.md): Qwen3-14B-FP8, medium-length FP8 run.
+- [`12h`](../../examples/hyperloom-qwen3-14b-fp8-12h/SKILL.md): Qwen3-14B-FP8, medium-length FP8 run.
 - [`24h`](../../examples/hyperloom-qwen3-30b-a3b-instruct-2507-24h/SKILL.md):
   Qwen3-30B-A3B-Instruct-2507, long-horizon run (long-run budget accounting:
   fixed per-cycle budget window).

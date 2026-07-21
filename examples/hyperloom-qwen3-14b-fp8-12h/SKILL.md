@@ -1,11 +1,11 @@
 ---
-name: hyperloom-qwen3-14b-fp8-8h
-description: Run an 8-hour Hyperloom Qwen3-14B-FP8 optimization session. Use when the user wants a medium-length Hyperloom demo on the local AMD ROCm environment.
+name: hyperloom-qwen3-14b-fp8-12h
+description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session. Use when the user wants a medium-length Hyperloom demo on the local AMD ROCm environment.
 ---
 
-# Hyperloom Qwen3-14B-FP8 8h Run
+# Hyperloom Qwen3-14B-FP8 12h Run
 
-Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for an 8-hour Qwen3-14B-FP8 demo.
+Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a 12-hour Qwen3-14B-FP8 demo.
 
 ## Run Mode
 
@@ -75,7 +75,7 @@ Required optimize CLI flags:
 - `--osl 1024`
 - `--precision bf16`
 - `--target-gain 30`
-- `--max-hours 8`
+- `--max-hours 12`
 - `--max-minutes-kernel-pct 0.5`
 - `--max-minutes-explore-pct 0.13`
 
