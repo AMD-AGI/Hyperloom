@@ -949,3 +949,35 @@ def test_driver_main_unknown_component_returns_failure(monkeypatch, tmp_path):
     assert rc == 1
     data = json.loads((root / "result.json").read_text())
     assert data["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# Opt-in real ROCm compile (excluded from CI via -m 'not targeted_build_e2e')
+# ---------------------------------------------------------------------------
+
+@pytest.mark.targeted_build_e2e
+def test_aiter_build_e2e_real_rocm(tmp_path):
+    """Real AITER compile; skipped unless a ROCm host is present."""
+    try:
+        import torch
+
+        if not getattr(torch.version, "hip", None):
+            pytest.skip("not a ROCm torch — skipping real AITER compile")
+    except ImportError:
+        pytest.skip("torch not importable — skipping real AITER compile")
+
+    from hyperloom.orchestrator.framework.targeted_build import run_aiter_build
+
+    action = TargetedBuildAction(
+        gap_id="e2e",
+        framework="vllm",
+        component="aiter",
+        capability="fp4_moe",
+        ref="",
+        repo_url="https://github.com/ROCm/aiter",
+        gpu_arch="gfx950",
+        max_jobs=8,
+    )
+    result = run_aiter_build(action, str(tmp_path / "e2e_attempt"))
+    assert result.ok, f"e2e AITER build failed: {result.failure_class} - {result.failure_summary}"
+    assert result.installed_versions.get("aiter_ref")
