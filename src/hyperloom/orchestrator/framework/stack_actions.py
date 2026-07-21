@@ -53,6 +53,10 @@ class FrameworkRuntime:
         runtime_env: Per-attempt env (e.g. ``INFERENCE_OPTIMIZER_AITER_JIT_DIR``,
             ``AITER_REBUILD``); merged into benchmark envs.
         entrypoint_bin_dir: Optional PATH prefix for a built console script.
+        runtime_python_exe: Explicit interpreter that must launch the server
+            (e.g. the venv python a from-source build compiled against).
+            Emitted as ``HYPERLOOM_FRAMEWORK_PYTHON`` with priority over
+            ``python_path``; honored by bypass via ``python -m`` launch.
         source_root: Isolated worktree / installed source root (provenance).
         attempt_root: Attempt directory anchoring the build (provenance).
     """
@@ -67,6 +71,7 @@ class FrameworkRuntime:
     ld_library_path_prefix: tuple[str, ...] = ()
     runtime_env: Mapping[str, str] = field(default_factory=dict)
     entrypoint_bin_dir: str = ""
+    runtime_python_exe: str = ""
     source_root: str = ""
     attempt_root: str = ""
 
@@ -99,6 +104,8 @@ class FrameworkRuntime:
             out["runtime_env"] = dict(self.runtime_env)
         if self.entrypoint_bin_dir:
             out["entrypoint_bin_dir"] = self.entrypoint_bin_dir
+        if self.runtime_python_exe:
+            out["runtime_python_exe"] = self.runtime_python_exe
         return out
 
     def to_state(self) -> dict[str, Any]:
@@ -114,6 +121,7 @@ class FrameworkRuntime:
             "ld_library_path_prefix": list(self.ld_library_path_prefix),
             "runtime_env": dict(self.runtime_env),
             "entrypoint_bin_dir": self.entrypoint_bin_dir,
+            "runtime_python_exe": self.runtime_python_exe,
             "source_root": self.source_root,
             "attempt_root": self.attempt_root,
         }
@@ -142,6 +150,7 @@ class FrameworkRuntime:
             ld_library_path_prefix=_str_tuple("ld_library_path_prefix"),
             runtime_env=_str_map("runtime_env"),
             entrypoint_bin_dir=str(d.get("entrypoint_bin_dir") or ""),
+            runtime_python_exe=str(d.get("runtime_python_exe") or ""),
             source_root=str(d.get("source_root") or ""),
             attempt_root=str(d.get("attempt_root") or ""),
         )

@@ -136,8 +136,38 @@ def test_runtime_extended_override_omitted_when_empty():
     """A Rung-3 runtime produces the exact same override as before (back-compat)."""
     rt = FrameworkRuntime(bin_path="/s/venv/bin", python_path="/s/venv/bin/python", venv_root="/s/venv")
     ov = rt.to_runtime_override()
-    for key in ("pythonpath_prefixes", "ld_library_path_prefix", "runtime_env", "entrypoint_bin_dir"):
+    for key in ("pythonpath_prefixes", "ld_library_path_prefix", "runtime_env", "entrypoint_bin_dir",
+                "runtime_python_exe"):
         assert key not in ov
+
+
+def test_runtime_python_exe_emitted_in_override():
+    rt = FrameworkRuntime(runtime_python_exe="/venv/bin/python3.11")
+    ov = rt.to_runtime_override()
+    assert ov["runtime_python_exe"] == "/venv/bin/python3.11"
+
+
+def test_runtime_python_exe_round_trip():
+    rt = FrameworkRuntime(
+        entrypoint_bin_dir="/venv/bin",
+        runtime_python_exe="/venv/bin/python3.11",
+        source_root="/src",
+        attempt_root="/attempt",
+    )
+    assert FrameworkRuntime.from_state(rt.to_state()) == rt
+
+
+def test_runtime_python_exe_overrides_framework_python_in_envs():
+    """runtime_python_exe must win over framework_python for HYPERLOOM_FRAMEWORK_PYTHON."""
+    from hyperloom.orchestrator.actions.executors._grid_runner import apply_runtime_override
+
+    rt = FrameworkRuntime(
+        python_path="/old/bin/python",
+        runtime_python_exe="/venv/bin/python3.11",
+    )
+    envs: dict[str, str] = {}
+    apply_runtime_override(envs, rt.to_runtime_override())
+    assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == "/venv/bin/python3.11"
 
 
 # ---------------------------------------------------------------------------

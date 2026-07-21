@@ -180,6 +180,22 @@ def test_entrypoint_bin_dir_unsafe_dropped():
     assert envs["PATH"] == "/usr/bin"
 
 
+def test_runtime_python_exe_writes_hyperloom_framework_python():
+    envs: dict[str, str] = {}
+    apply_runtime_override(envs, {"runtime_python_exe": "/venv/bin/python3.11"})
+    assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == "/venv/bin/python3.11"
+
+
+def test_runtime_python_exe_overrides_framework_python():
+    """runtime_python_exe must win when both keys are present."""
+    envs: dict[str, str] = {}
+    apply_runtime_override(envs, {
+        "framework_python": "/old/bin/python",
+        "runtime_python_exe": "/venv/bin/python3.11",
+    })
+    assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == "/venv/bin/python3.11"
+
+
 def test_extended_framework_runtime_lands_in_yaml(tmp_path):
     """An extended FrameworkRuntime.to_runtime_override lands end-to-end in YAML."""
     from hyperloom.orchestrator.framework.stack_actions import FrameworkRuntime

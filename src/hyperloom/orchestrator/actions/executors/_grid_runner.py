@@ -529,6 +529,10 @@ def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> No
         val = str(override.get(key) or "").strip()
         if val:
             envs[f"HYPERLOOM_{key.upper()}"] = val
+    # runtime_python_exe takes priority over framework_python as the launch interpreter.
+    rpe = str(override.get("runtime_python_exe") or "").strip()
+    if rpe:
+        envs["HYPERLOOM_FRAMEWORK_PYTHON"] = rpe
 
 
 def _coerce_prefix_list(value: Any) -> list[str]:
