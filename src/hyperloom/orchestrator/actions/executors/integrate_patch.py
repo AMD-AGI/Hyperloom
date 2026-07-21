@@ -101,8 +101,32 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
     text = (cmd or "").strip()
     if not text:
         return False
-    # Reject shell metacharacters that could chain/redirect a non-allowlisted command.
-    if re.search(r"[;&|`<>\n]|\$\(", text):
+    # Reject command substitution / backticks / newlines outright — these can
+    # smuggle an arbitrary payload regardless of tokenization.
+    if re.search(r"[`\n]|\$\(", text):
+        return False
+    # Guard against genuine shell chaining/redirection while allowing pip/pkg
+    # *version specifiers* that legitimately contain ``>``/``<`` (e.g.
+    # ``transformers>=4.58``, ``torch<2.11``). The previous guard rejected any
+    # ``>``/``<``/``|``/``&``, which false-positived on essentially every
+    # ``pip install 'pkg>=x.y'`` and silently skipped the enablement
+    # env-upgrade (the durable replay never ran, so the model was never
+    # actually enabled). We first neutralise the safe, non-shell uses, then
+    # reject on any leftover metacharacter. Because the replay runs under
+    # ``shell=True``, we must ensure no redirection/chaining survives.
+    scrubbed = text
+    # Drop quoted segments (their contents cannot act as shell operators).
+    scrubbed = re.sub(r"'[^']*'", " ", scrubbed)
+    scrubbed = re.sub(r'"[^"]*"', " ", scrubbed)
+    # Drop version-specifier / comparison operators used by pip & friends:
+    #   ``>=`` ``<=`` ``==`` ``!=`` ``~=`` and a bare ``>``/``<`` that is
+    #   immediately followed by a version-like token (digit or letter), which
+    #   is a requirement spec, never a redirection (redirection needs a path
+    #   target, typically separated by whitespace).
+    scrubbed = re.sub(r"(>=|<=|==|!=|~=)", " ", scrubbed)
+    scrubbed = re.sub(r"[<>](?=[0-9A-Za-z])", " ", scrubbed)
+    # Any remaining shell chaining/redirection metacharacter => unsafe.
+    if re.search(r"[;&|<>]", scrubbed):
         return False
     # Strip a leading sudo and leading KEY=VALUE env assignments.
     text = re.sub(r"^\s*sudo\s+", "", text)
@@ -1291,6 +1315,23 @@ class IntegratePatchExecutor:
                 ),
             }
 
+        shared_state = extra.get("shared_state") or extra.get("state")
+        if shared_state is not None and not params.get("accuracy_baseline"):
+            _base_acc = getattr(shared_state, "baseline_accuracy", 0.0)
+            if isinstance(_base_acc, (int, float)) and _base_acc > 0:
+                params["accuracy_baseline"] = float(_base_acc)
+
+        # Launch-only mode: pure bench of a pre-built runtime (no specialist, no Critic).
+        if params.get("enablement_launch_only"):
+            task_id = str(getattr(ctx.task, "task_id", "") or "build_launch_probe")
+            scratch = runs_dir(self.session_dir, "integrate_patch", task_id)
+            scratch.mkdir(parents=True, exist_ok=True)
+            ctx._ip_specialist_task_id = task_id  # type: ignore[attr-defined]
+            ctx._ip_shared_state = shared_state  # type: ignore[attr-defined]
+            ctx._ip_specialist_workspace = scratch  # type: ignore[attr-defined]
+            ctx._ip_done_payload = {}  # type: ignore[attr-defined]
+            return None
+
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
             return {
@@ -1302,12 +1343,6 @@ class IntegratePatchExecutor:
                     "the patches to integrate)"
                 ),
             }
-
-        shared_state = extra.get("shared_state") or extra.get("state")
-        if shared_state is not None and not params.get("accuracy_baseline"):
-            _base_acc = getattr(shared_state, "baseline_accuracy", 0.0)
-            if isinstance(_base_acc, (int, float)) and _base_acc > 0:
-                params["accuracy_baseline"] = float(_base_acc)
 
         specialist_workspace = runs_dir(self.session_dir, "specialist", specialist_task_id)
         if not specialist_workspace.is_dir():
@@ -1652,6 +1687,19 @@ class IntegratePatchExecutor:
 
         _setup_ran = bool(setup_result.get("applied"))
         if not patch_paths and not config_changes and not artifact_specs and not _setup_ran:
+            # Launch-only mode: skip the no-patches early-return and fall through to bench.
+            if params.get("enablement_launch_only"):
+                output_root = runs_dir(self.session_dir, "integrate_patch", specialist_task_id)
+                output_root.mkdir(parents=True, exist_ok=True)
+                ctx._ip_output_root = output_root  # type: ignore[attr-defined]
+                ctx._ip_framework_root = None  # type: ignore[attr-defined]
+                ctx._ip_stash_state = "clean"  # type: ignore[attr-defined]
+                ctx._ip_stash_note = ""  # type: ignore[attr-defined]
+                ctx._ip_applied = []  # type: ignore[attr-defined]
+                ctx._ip_applied_artifacts = []  # type: ignore[attr-defined]
+                ctx._ip_config_changes_applied = {}  # type: ignore[attr-defined]
+                ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
+                return None
             _no_patches: dict[str, Any] = {
                 "status": "no_patches",
                 "specialist_task_id": specialist_task_id,
