@@ -792,6 +792,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # records; recovers a later degenerate compaction from a prior snapshot.
     orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
 
+    # Bounded ring (cap 10) of per-macro-cycle directives injected into the
+    # orchestration system prompt; entries: {cycle, directive, source, ts}.
+    cycle_directive_history: list[dict[str, Any]] = field(default_factory=list)
+
     # Non-field instance attr (set in load_or_init / save): session dir for
     # breakdown instrumentation. Plain class attr => not serialized.
     _session_dir = None
