@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for split_config_changes: server-flag vs env routing (§6.1)."""
+"""Tests for split_config_changes: server-flag vs env routing."""
 
 from __future__ import annotations
 
 import yaml
-import pytest
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors._grid_server_args import split_config_changes

@@ -1,7 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for bypass_engine.build_server_command framework_python switch (Gap 5)."""
+"""Unit tests for bypass_engine.build_server_command framework_python switch."""
 
 from __future__ import annotations
 

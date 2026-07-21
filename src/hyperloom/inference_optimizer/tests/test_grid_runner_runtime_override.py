@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the YAML-layer runtime override (§6.3).
+"""Tests for the YAML-layer runtime override.
 
 Verifies that runtime_override lands in materialized YAML benchmark.envs
 and that os.environ is never mutated.
@@ -13,7 +13,6 @@ import os
 import yaml
 from pathlib import Path
 
-import pytest
 
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
@@ -128,7 +127,7 @@ def test_no_runtime_override_field_is_noop(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Rung 5: compiled-artifact runtime prefixes
+# compiled-artifact runtime prefixes
 # ---------------------------------------------------------------------------
 
 def test_pythonpath_prefixes_multi_entry_ordered_prepended():
