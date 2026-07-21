@@ -899,3 +899,45 @@ async def test_bench_patch_config_not_found(tmp_path):
             config_changes_applied={},
             specialist_task_id="abc",
         )
+
+
+@pytest.mark.asyncio
+async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch):
+    # An artifact-install failure with a dirty tree must restore the auto-stash;
+    # otherwise the untracked user file stays trapped in the git stash.
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    # Dirty the tree with an untracked file so integrate_patch auto-stashes (-u).
+    scratch = repo / "user_scratch.txt"
+    scratch.write_text("user work in progress\n", encoding="utf-8")
+
+    # Force a non-empty artifact set and a failing install so the code hits the
+    # artifact_install_failed return branch.
+    def _fake_resolve(*args, **kwargs):
+        return [object()], []
+
+    def _fake_apply(self, specs, *, backup_root):
+        return [], [{"artifact": "tuned.json", "error": "disk full"}]
+
+    monkeypatch.setattr(ip, "_resolve_artifact_specs", _fake_resolve)
+    monkeypatch.setattr(IntegratePatchExecutor, "_apply_artifacts", _fake_apply)
+    monkeypatch.setattr(IntegratePatchExecutor, "_revert_artifacts", lambda self, applied: None)
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    res = await ex(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo)},
+        )
+    )
+
+    assert res["status"] == "apply_failed"
+    assert res["error_class"] == "artifact_install_failed"
+    # The user's untracked file must be back in the working tree, not stranded
+    # in the stash. This is the regression the fix guards against.
+    assert scratch.exists(), "user auto-stash was not restored after artifact_install_failed"
+    assert scratch.read_text(encoding="utf-8") == "user work in progress\n"

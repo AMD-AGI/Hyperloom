@@ -2126,3 +2126,128 @@ class TestKernelOptArtifactBundleRecording:
         assert resolved["patch_path"] == "/tmp/queued.patch"
         assert resolved["kernel_repo"] == "/repo2"
         assert resolved["source_file"] == "/repo2/aiter/ops/queued.py"
+
+
+class TestBuildTraceAnalyzeCmd:
+    """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable)
+    and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
+
+    def _common(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", raising=False)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path("/tools") / name)
+        state = SharedState()
+        return state, tmp_path / "sess"
+
+    def test_tracelens_splitter_cmd(self, monkeypatch, tmp_path):
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        cmd, steady = krh._build_trace_analyze_cmd(
+            {"session_id": "sid", "trace_input": "/t/trace", "split_conc": "64", "split_osl": "1024"},
+            session_dir=session_dir,
+            state=state,
+            workspace_path="/ws",
+            trace_input="/t/trace",
+            tracelens_root=Path("/tl"),
+            is_bypass=False,
+            scriptable=False,
+            workload={"conc": 8, "osl": 256, "random_range_ratio": "0.5"},
+            model_name="Qwen",
+            framework="sglang",
+            target_platform="MI300X",
+            analysis_mode="deterministic",
+            analysis_route="deterministic",
+        )
+        assert cmd == [
+            "python3",
+            "/tools/tracelens_analysis.py",
+            "--trace-input",
+            "/t/trace",
+            "--session-id",
+            "sid",
+            "--workspace-path",
+            "/ws",
+            "--tracelens-root",
+            "/tl",
+            "--model-name",
+            "Qwen",
+            "--framework",
+            "sglang",
+            "--target-platform",
+            "MI300X",
+            "--analysis-mode",
+            "deterministic",
+            # splitter hints: payload override wins over workload metadata.
+            "--split-conc",
+            "64",
+            "--split-osl",
+            "1024",
+            "--split-r",
+            "0.5",
+            "--analysis-route",
+            "deterministic",
+        ]
+        assert steady == ""
+
+    def test_bypass_scriptable_cmd(self, monkeypatch, tmp_path):
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        state.model_path = "/models/flux"
+        cmd, steady = krh._build_trace_analyze_cmd(
+            {
+                "session_id": "sid",
+                "trace_input": "/t/trace",
+                "num_denoise_steps": 30,
+                "precision": "bf16",
+                "steady_state_mode": "auto",
+                "dry_run": True,
+            },
+            session_dir=session_dir,
+            state=state,
+            workspace_path="/ws",
+            trace_input="/t/trace",
+            tracelens_root=None,
+            is_bypass=True,
+            scriptable=True,
+            workload={},
+            model_name="",
+            framework="",
+            target_platform="",
+            analysis_mode="",
+            analysis_route="bypass",
+        )
+        # bypass tool name; no --tracelens-root and no --skip-split.
+        assert cmd[1] == "/tools/bypass_trace_analysis.py"
+        assert "--tracelens-root" not in cmd
+        assert "--skip-split" not in cmd
+        # scriptable forwards denoise/model/precision; not the splitter hints.
+        assert "--num-denoise-steps" in cmd and cmd[cmd.index("--num-denoise-steps") + 1] == "30"
+        assert "--model-path" in cmd and cmd[cmd.index("--model-path") + 1] == "/models/flux"
+        assert "--precision" in cmd and cmd[cmd.index("--precision") + 1] == "bf16"
+        assert "--split-conc" not in cmd
+        # bypass takes no analysis-route flag.
+        assert "--analysis-route" not in cmd
+        assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "auto"
+        assert cmd[-1] == "--dry-run"
+        assert steady == "auto"
+
+    def test_steady_state_mode_from_env(self, monkeypatch, tmp_path):
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "median")
+        cmd, steady = krh._build_trace_analyze_cmd(
+            {"trace_input": "/t/trace"},
+            session_dir=session_dir,
+            state=state,
+            workspace_path="/ws",
+            trace_input="/t/trace",
+            tracelens_root=Path("/tl"),
+            is_bypass=False,
+            scriptable=False,
+            workload={},
+            model_name="",
+            framework="",
+            target_platform="",
+            analysis_mode="",
+            analysis_route="agent",
+        )
+        assert steady == "median"
+        assert cmd[cmd.index("--steady-state-mode") + 1] == "median"
+        # session-id falls back to the session dir name when payload omits it.
+        assert cmd[cmd.index("--session-id") + 1] == session_dir.name

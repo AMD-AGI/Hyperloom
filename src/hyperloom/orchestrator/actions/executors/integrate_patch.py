@@ -1132,6 +1132,41 @@ def _stamp_framework_kb_provenance(
     target.setdefault("framework", framework)
 
 
+def _enforce_critic_gate(
+    shared_state: Any,
+    specialist_task_id: str,
+) -> "dict[str, Any] | None":
+    """Enforce a permissive Critic verdict before any side effect; returns a
+    ``rejected_by_critic`` dict on failure, else ``None`` when no SharedState
+    is available or the verdict is permissive."""
+    if shared_state is None:
+        return None
+    try:
+        from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS as _PERMISSIVE
+    except Exception:  # noqa: BLE001 - avoid a hard import-cycle dependency
+        _PERMISSIVE = frozenset({"approve", "advise"})
+    try:
+        recorded = shared_state.get_specialist_patch_verdict(specialist_task_id)
+    except AttributeError:
+        recorded = ""
+    if (recorded or "").lower() not in _PERMISSIVE:
+        _detail = f"verdict {recorded!r}" if recorded else "no Critic verdict on record"
+        # No side effect has occurred yet; reject cleanly (nothing to revert).
+        return {
+            "status": "rejected_by_critic",
+            "specialist_task_id": specialist_task_id,
+            "patches_applied": [],
+            "patches_reverted": [],
+            "config_changes_applied": {},
+            "reason": (
+                f"integrate_patch requires a permissive Critic verdict "
+                f"(approve/advise) for specialist task "
+                f"{specialist_task_id!r}; {_detail}. Refusing to run."
+            ),
+        }
+    return None
+
+
 class IntegratePatchExecutor:
     """ActionRunner for the ``integrate_patch`` action (PR-A4)."""
 
@@ -1241,30 +1276,9 @@ class IntegratePatchExecutor:
         # integrate_patch always has its verdict persisted before the queued task
         # is created (see intent_router._handle_single_verdict), so a genuine
         # task is unaffected. No-op when SharedState is absent.
-        if shared_state is not None:
-            try:
-                from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS as _PERMISSIVE
-            except Exception:  # noqa: BLE001 - avoid a hard import-cycle dependency
-                _PERMISSIVE = frozenset({"approve", "advise"})
-            try:
-                recorded = shared_state.get_specialist_patch_verdict(specialist_task_id)
-            except AttributeError:
-                recorded = ""
-            if (recorded or "").lower() not in _PERMISSIVE:
-                _detail = f"verdict {recorded!r}" if recorded else "no Critic verdict on record"
-                # No side effect has occurred yet; reject cleanly (nothing to revert).
-                return {
-                    "status": "rejected_by_critic",
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "config_changes_applied": {},
-                    "reason": (
-                        f"integrate_patch requires a permissive Critic verdict "
-                        f"(approve/advise) for specialist task "
-                        f"{specialist_task_id!r}; {_detail}. Refusing to run."
-                    ),
-                }
+        critic_reject = _enforce_critic_gate(shared_state, specialist_task_id)
+        if critic_reject is not None:
+            return critic_reject
 
         # Read done payload for patches_written + config_changes_default.
         done_payload = _read_done_payload(specialist_workspace)
@@ -1537,17 +1551,22 @@ class IntegratePatchExecutor:
                     tps_delta_pct=0.0,
                     extra=extra,
                 )
-                return {
-                    "status": "apply_failed",
-                    "error_class": "artifact_install_failed",
-                    "error": artifact_resolve_errors + artifact_apply_errors,
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [str(p) for p in reverted],
-                    "artifacts_applied": [],
-                    "config_changes_applied": {},
-                    "workspace": str(output_root),
-                }
+                return _with_stash_restore(
+                    framework_root,
+                    stash_state,
+                    stash_note,
+                    {
+                        "status": "apply_failed",
+                        "error_class": "artifact_install_failed",
+                        "error": artifact_resolve_errors + artifact_apply_errors,
+                        "specialist_task_id": specialist_task_id,
+                        "patches_applied": [],
+                        "patches_reverted": [str(p) for p in reverted],
+                        "artifacts_applied": [],
+                        "config_changes_applied": {},
+                        "workspace": str(output_root),
+                    },
+                )
 
         # Layer config_changes onto the launch env (via ``extra_envs``).
         config_changes_applied = dict(config_changes)
