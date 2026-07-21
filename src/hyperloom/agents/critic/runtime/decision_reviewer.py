@@ -107,11 +107,21 @@ def _proposal_levers(
     return params, envs, args
 
 
-# Review-constraints taxonomy: proposals split into three classes and the
+# Review-constraints taxonomy: proposals split into four classes and the
 # bundle-level ``approve_requires`` collapses a batch to its strictest class.
 ACTION_CLASS_PATCH_LANDING = "patch_landing"
 ACTION_CLASS_EVIDENCE_PRODUCER = "evidence_producer"
 ACTION_CLASS_FRAMEWORK_OP = "framework_op"
+# Pre-boot enablement patches (framework-agent authoring / enablement=True):
+# a patch-landing action whose sole purpose is *runnability* (make the model
+# boot at all), not throughput. It is dispatched before any usable baseline
+# exists, so the production ``patch_landing`` evidence — a comparable
+# before/after benchmark and an accuracy gate — is impossible by construction.
+# Rollback is provided structurally by the enablement integrate executor
+# (``git apply`` + REVERT via ``git reset --hard`` + artifact backup) and by
+# the downstream runnable-decision gate (boot-probe -> REVERT on failure), so
+# it must not be judged under the full production bar.
+ACTION_CLASS_ENABLEMENT_LANDING = "enablement_landing"
 
 _PATCH_LANDING_ACTIONS: frozenset[str] = frozenset(
     {
@@ -162,11 +172,24 @@ _APPROVE_REQUIRES_EVIDENCE_PRODUCER: tuple[str, ...] = (
     "no_contradicting_kb_prior",
 )
 
+# Pre-boot enablement patch: keep only the review-time-checkable safety checks.
+# The production evidence (comparable_before_after_benchmark / accuracy_gate)
+# cannot exist before the model boots, and rollback is guaranteed by the
+# enablement integrate executor + runnable-decision gate, so both are dropped.
+_APPROVE_REQUIRES_ENABLEMENT_LANDING: tuple[str, ...] = (
+    "specialist_or_default_grid_provenance",
+    "in_phase_allowed_action",
+    "no_contradicting_kb_prior",
+)
+
 _APPROVE_REQUIRES_FRAMEWORK_OP: tuple[str, ...] = ()
 
-# Class precedence for collapsing a batch — strictest class wins.
+# Class precedence for collapsing a batch — strictest class wins. Enablement
+# landing sits below production patch-landing (a real promotion in the same
+# batch still forces the strict bar) but above framework ops.
 _CLASS_RANK: dict[str, int] = {
     ACTION_CLASS_FRAMEWORK_OP: 0,
+    ACTION_CLASS_ENABLEMENT_LANDING: 1,
     ACTION_CLASS_EVIDENCE_PRODUCER: 1,
     ACTION_CLASS_PATCH_LANDING: 2,
 }
@@ -174,18 +197,45 @@ _CLASS_RANK: dict[str, int] = {
 _APPROVE_REQUIRES_BY_CLASS: dict[str, tuple[str, ...]] = {
     ACTION_CLASS_PATCH_LANDING: _APPROVE_REQUIRES_PATCH_LANDING,
     ACTION_CLASS_EVIDENCE_PRODUCER: _APPROVE_REQUIRES_EVIDENCE_PRODUCER,
+    ACTION_CLASS_ENABLEMENT_LANDING: _APPROVE_REQUIRES_ENABLEMENT_LANDING,
     ACTION_CLASS_FRAMEWORK_OP: _APPROVE_REQUIRES_FRAMEWORK_OP,
 }
 
 
-def classify_proposal_action(action_name: str | None) -> str:
-    """Map an action name to its review class.
+def _is_enablement_patch(payload: dict[str, Any] | None) -> bool:
+    """Whether a patch-landing proposal is a pre-boot enablement patch.
+
+    Enablement patches are tagged by the framework-agent authoring path via
+    ``payload.params.enablement`` / ``payload.params.framework_agent_authoring``
+    (see ``orchestrator.phases.framework``). Their purpose is runnability, not
+    throughput, so they are reviewed under the lighter ``enablement_landing``
+    bar instead of the production ``patch_landing`` bar.
+
+    Args:
+        payload: The raw proposal payload, if any.
+
+    Returns:
+        ``True`` when the payload carries an enablement authoring marker.
+    """
+    if not isinstance(payload, dict):
+        return False
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return False
+    return bool(params.get("enablement")) or bool(params.get("framework_agent_authoring"))
+
+
+def classify_proposal_action(action_name: str | None, payload: dict[str, Any] | None = None) -> str:
+    """Map an action name (and optional payload) to its review class.
 
     Unknown or missing actions fall back to the evidence-producer class,
-    which is the cold-start-safe default.
+    which is the cold-start-safe default. A patch-landing action carrying an
+    enablement marker in ``payload`` is routed to the lighter
+    ``enablement_landing`` class (see :func:`_is_enablement_patch`).
 
     Args:
         action_name: The proposed action's name, if any.
+        payload: The proposal payload, used to detect enablement patches.
 
     Returns:
         The review class constant for the action.
@@ -196,6 +246,8 @@ def classify_proposal_action(action_name: str | None) -> str:
     if not name:
         return ACTION_CLASS_EVIDENCE_PRODUCER
     if name in _PATCH_LANDING_ACTIONS:
+        if _is_enablement_patch(payload):
+            return ACTION_CLASS_ENABLEMENT_LANDING
         return ACTION_CLASS_PATCH_LANDING
     if name in _FRAMEWORK_OP_ACTIONS:
         return ACTION_CLASS_FRAMEWORK_OP
@@ -975,7 +1027,7 @@ class DecisionReviewer:
         max_rank = -1
         max_class = ACTION_CLASS_EVIDENCE_PRODUCER
         for p in proposals:
-            cls = classify_proposal_action(p.action_name)
+            cls = classify_proposal_action(p.action_name, p.payload)
             per_proposal[p.msg_id] = cls
             rank = _CLASS_RANK[cls]
             if rank > max_rank:
