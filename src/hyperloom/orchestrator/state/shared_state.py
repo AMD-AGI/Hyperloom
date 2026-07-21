@@ -458,13 +458,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # do NOT bump schema_version (default via from_dict).
     # ``pending_targeted_build``: in-flight build sentinel (task_id/pid/pgid/
     #   attempt_root/aiter_jit_dir/deadline/action); own sentinel, resume-cleared.
-    # ``enablement_build_actions``: TargetedBuildAction dicts considered.
     # ``enablement_build_manifest``: repo/ref/sha -> artifact -> hash records.
     # ``enablement_last_build_failure``: failure_class + failure_summary.
     # ``enablement_build_novelty``: compact repeat-vs-novel ledger.
     # ``enablement_candidate_refs``: discovered candidate ref strings (ranked best-first).
     pending_targeted_build: dict = field(default_factory=dict)
-    enablement_build_actions: list = field(default_factory=list)
     enablement_build_manifest: list = field(default_factory=list)
     enablement_last_build_failure: dict = field(default_factory=dict)
     enablement_build_novelty: list = field(default_factory=list)
