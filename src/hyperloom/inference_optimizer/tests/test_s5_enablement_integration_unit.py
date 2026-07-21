@@ -307,7 +307,8 @@ async def test_route_failed_timeout_calls_advanced(coord):
 
 
 @pytest.mark.asyncio
-async def test_route_failed_compile_error_calls_reverted(coord):
+async def test_route_failed_compile_error_novel_calls_advanced(coord):
+    """A compile_error not yet in the novelty ledger → advanced (novel attempt)."""
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
                                  capability="fp4_moe", ref="v1")
     await _enqueue_and_transition(coord, action, "failed")
@@ -317,7 +318,51 @@ async def test_route_failed_compile_error_calls_reverted(coord):
     }
     await Coordinator._maybe_route_build_outcomes(coord)
 
+    assert any(r.get("status") == "advanced" for r in coord._rearm_calls)
+
+
+@pytest.mark.asyncio
+async def test_route_failed_compile_error_repeat_calls_reverted(coord, tmp_path):
+    """A compile_error whose key is already in the novelty ledger → reverted."""
+    from hyperloom.orchestrator.framework.build_actions import build_novelty_key
+
+    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
+                                 capability="fp4_moe", ref="v1")
+    # Pre-seed the ledger with this exact novelty key.
+    key = list(build_novelty_key(action))
+    coord.shared_state.enablement_build_novelty = [key]
+
+    await _enqueue_and_transition(coord, action, "failed")
+    coord.shared_state.enablement_last_build_failure = {
+        "failure_class": "compile_error",
+        "failure_summary": "hipcc failed again",
+    }
+    await Coordinator._maybe_route_build_outcomes(coord)
+
     assert any(r.get("status") == "reverted" for r in coord._rearm_calls)
+
+
+@pytest.mark.asyncio
+async def test_novelty_ledger_is_appended_and_bounded(coord, tmp_path):
+    """Ledger grows on each novel failure and is capped at 20 entries."""
+    from hyperloom.orchestrator.framework.build_actions import build_novelty_key
+
+    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter",
+                                 capability="fp4_moe", ref="v1")
+    # Seed ledger with 20 different entries so the cap truncates old ones.
+    coord.shared_state.enablement_build_novelty = [
+        ["aiter", f"v{i}", "gfx950", []] for i in range(20)
+    ]
+    await _enqueue_and_transition(coord, action, "failed")
+    coord.shared_state.enablement_last_build_failure = {
+        "failure_class": "compile_error",
+        "failure_summary": "overflow",
+    }
+    await Coordinator._maybe_route_build_outcomes(coord)
+
+    ledger = coord.shared_state.enablement_build_novelty
+    assert len(ledger) == 20  # bounded
+    assert list(build_novelty_key(action)) in ledger  # new entry present
 
 
 @pytest.mark.asyncio

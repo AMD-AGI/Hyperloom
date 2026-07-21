@@ -4237,10 +4237,11 @@ class FrameworkPhase(PhaseHandler):
                 fc = str(lbf.get("failure_class") or "")
                 fs = str(lbf.get("failure_summary") or "")
 
-            # D6: time-based failures are novel; defects advance the stall streak.
+            # D6 + Gap 1 (novelty ledger): time-based failures are always advanced;
+            # defect failures are advanced when the (component,ref,gpu_arch,cmd) tuple
+            # has not been seen before (novel), reverted when it is a repeat.
             time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
             if fc in time_classes:
-                status = "advanced"
                 new_log = str(getattr(state, "enablement_launch_log", "") or "")
                 res = {
                     "enablement": True,
@@ -4250,10 +4251,26 @@ class FrameworkPhase(PhaseHandler):
                     "enablement_launch_log": new_log,
                 }
             else:
-                res = {
-                    "enablement": True,
-                    "status": "reverted",
-                }
+                from ..framework.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
+
+                task_params = getattr(task, "params", None) or {}
+                _action = _TBA.from_state(task_params)
+                _key = list(_bnk(_action))
+                ledger = list(getattr(state, "enablement_build_novelty", None) or [])
+                is_repeat = any(entry == _key for entry in ledger if isinstance(entry, list))
+                ledger.append(_key)
+                state.enablement_build_novelty = ledger[-20:]
+                if is_repeat:
+                    res = {"enablement": True, "status": "reverted"}
+                else:
+                    new_log = str(getattr(state, "enablement_launch_log", "") or "")
+                    res = {
+                        "enablement": True,
+                        "status": "advanced",
+                        "advanced": True,
+                        "patches_applied": [],
+                        "enablement_launch_log": new_log,
+                    }
             log.info(
                 "ENABLEMENT: targeted_build %s task=%s failure_class=%r",
                 res["status"],
