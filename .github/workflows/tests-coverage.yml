@@ -178,22 +178,11 @@ jobs:
           pytest "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
             --store-durations --durations-path ".test_durations.shard${SHARD}" \
             --cov-fail-under=0 -rf "${EXTRA[@]}" 2>&1 | tee pytest-output.log
-          # Snapshot the whole PIPESTATUS array in ONE statement, immediately
-          # after the pipeline: it is reset by the next command, so reading
-          # ``${PIPESTATUS[1]}`` on a separate line (after assigning [0]) would
-          # get an empty value. rc = (pytest_rc, tee_rc). The job's pass/fail is
-          # driven solely by pytest's rc (index 0); tee's rc (index 1) is only
-          # used to warn if the log write was truncated (e.g. disk full -- which
-          # this runner has actually hit), so a later partial FAILED extraction
-          # isn't mistaken for the full picture. ``:-0`` guards against a short
-          # array so ``set -e`` + ``[ ... -ne 0 ]`` never sees an empty operand.
-          rc=("${PIPESTATUS[@]}")
-          PYTEST_RC="${rc[0]:-0}"
-          TEE_RC="${rc[1]:-0}"
+          # ``${PIPESTATUS[0]}`` is pytest's own exit code (not tee's); read it
+          # immediately after the pipeline. The shard's pass/fail is driven
+          # solely by this.
+          PYTEST_RC="${PIPESTATUS[0]}"
           set -e
-          if [ "$TEE_RC" -ne 0 ]; then
-            echo "::warning::tee exited ${TEE_RC} writing pytest-output.log; the captured log (and any extracted FAILED list) may be truncated."
-          fi
           exit "$PYTEST_RC"
 
       - name: Record shard outcome
