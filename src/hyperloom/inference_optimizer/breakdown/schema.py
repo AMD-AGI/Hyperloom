@@ -2082,7 +2082,8 @@ class TargetedBuildAttemptSummary(TypedDict, total=False):
         ok: Whether the build + verify passed.
         failure_class: One of the ``FAILURE_CLASSES`` values, or ``"ok"``.
         failure_summary: Human-readable reason (agent decision input).
-        installed_versions: torch/ref/sha/arch recorded after a successful build.
+        installed_versions: torch/ref/sha/arch recorded after a successful build;
+            includes ``source_pr_url`` when a discovered PR ref drove the build.
         built_artifacts: Verified artifact paths (up to 8).
         build_log_path: Path to the compile log inside the attempt dir.
         attempt_root: Attempt directory anchoring the build.
