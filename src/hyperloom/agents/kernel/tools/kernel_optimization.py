@@ -477,8 +477,9 @@ def parse_backends(backends: str) -> list[str]:
 def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
     """Select the backend ladder for a kernel-opt run.
 
-    forge is the sole per-kernel backend; only ``[]`` returns for vendor
-    binaries (nothing rewritable upstream).
+    Per-kernel Forge is opt-in only. The default KERNEL_AGENT path is the
+    coordinator-owned GEAK phase delegate, so the CLI returns ``[]`` unless
+    ``--backends forge`` or ``KERNEL_OPT_BACKEND_ORDER=forge`` is explicit.
 
     Args:
         args (argparse.Namespace): Parsed CLI args carrying ``backends`` and
@@ -509,11 +510,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
     if user_backends:
         return user_backends, notes
 
-    if source_type == "vendor_binary":
-        return [], notes
-
-    selected = ["forge"]
-    return selected, notes
+    return [], notes
 
 
 _GEAK_KERNEL_TYPE = {
