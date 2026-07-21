@@ -1563,6 +1563,55 @@ def _forge_gemm_tune_available() -> bool:
         return False
 
 
+def _ensure_forge_gemm_tune_on_path() -> None:
+    """Multi-node runtime fallback: make forge_gemm_tune importable without a pip install.
+
+    install.sh only pip-installs forge-gemm-tune when a ``FORGE_PATH``-style env
+    is set BEFORE it runs; that ordering is fragile (the env often lands in the
+    optimize process but not the earlier install shell). The node count is only
+    authoritative in-process at optimize time (``is_multi_node()`` — set from the
+    ``--nodes`` flag / state, not available to install.sh), so gate this here.
+
+    For multi-node runs, resolve the KernelForge ``src`` dir (``FORGE_PATH`` /
+    ``KERNEL_FORGE_*`` aliases, else the sibling of the Magpie / InferenceX tool
+    checkouts) and prepend it to ``sys.path`` + ``$PYTHONPATH`` so both this
+    process and the ``forge_gemm_tune.cli`` subprocess can import it. No-op on
+    single-node or when already importable.
+    """
+    try:
+        if importlib.util.find_spec("forge_gemm_tune") is not None:
+            return
+    except (ModuleNotFoundError, ValueError):
+        pass
+    from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
+
+    if not is_multi_node():
+        return
+    # Candidate dirs that should contain the ``forge_gemm_tune`` package.
+    cands: list[str] = []
+    root = os.environ.get("FORGE_GEMM_TUNE_ROOT", "").strip().rstrip("/")
+    if root:
+        cands.append(os.path.dirname(root))  # ROOT points at the package dir
+    for env_key in ("FORGE_PATH", "KERNEL_FORGE_ROOT", "KERNEL_FORGE_PATH"):
+        v = os.environ.get(env_key, "").strip().rstrip("/")
+        if v:
+            cands.append(v + "/src")
+    for env_key in ("MAGPIE_PATH", "INFERENCEX_PATH"):
+        v = os.environ.get(env_key, "").strip().rstrip("/")
+        if v:
+            cands.append(os.path.dirname(v) + "/KernelForge/src")
+    for src in cands:
+        if src and os.path.isfile(os.path.join(src, "forge_gemm_tune", "cli.py")):
+            if src not in sys.path:
+                sys.path.insert(0, src)
+            pp = os.environ.get("PYTHONPATH", "")
+            if src not in pp.split(os.pathsep):
+                os.environ["PYTHONPATH"] = src + (os.pathsep + pp if pp else "")
+            importlib.invalidate_caches()
+            log.info("forge_gemm_tune: multi-node fallback exposed src on path: %s", src)
+            return
+
+
 def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     """Resolve the actual runtime precision and quant_type for forge tuning.
 
@@ -2029,6 +2078,11 @@ async def _run_forge_gemm_tuning(
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
+
+    # Multi-node runtime fallback: expose the KernelForge checkout on the path
+    # when forge-gemm-tune was not pip-installed at install time (FORGE_PATH
+    # ordering trap). Gated on is_multi_node() inside; no-op otherwise.
+    _ensure_forge_gemm_tune_on_path()
 
     if not _forge_gemm_tune_available():
         forge_path = os.environ.get("FORGE_GEMM_TUNE_PATH", "")

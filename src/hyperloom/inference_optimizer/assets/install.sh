@@ -660,17 +660,6 @@ _forge_gemm_tune_candidates() {
   [ -n "${FORGE_PATH:-}" ] && printf '%s\n' "${FORGE_PATH%/}/src/forge_gemm_tune" "${FORGE_PATH%/}/forge_gemm_tune"
   [ -n "${KERNEL_FORGE_ROOT:-}" ] && printf '%s\n' "${KERNEL_FORGE_ROOT%/}/src/forge_gemm_tune" "${KERNEL_FORGE_ROOT%/}/forge_gemm_tune"
   [ -n "${KERNEL_FORGE_PATH:-}" ] && printf '%s\n' "${KERNEL_FORGE_PATH%/}/src/forge_gemm_tune" "${KERNEL_FORGE_PATH%/}/forge_gemm_tune"
-  # Multi-node fallback (INFERENCE_OPTIMIZER_NODES>=2 only): KernelForge sits
-  # beside the Magpie / InferenceX tool checkouts (…/{Magpie,InferenceX,
-  # KernelForge}), so derive a default forge_gemm_tune root from their parent.
-  # Lets multi-node runs get forge GEMM tuning without an explicit FORGE_PATH
-  # (avoids the ordering trap where FORGE_PATH is exported after install.sh).
-  # Single-node keeps the opt-in behavior (no default emitted). Non-existent
-  # derived paths are harmless — _resolve_forge_gemm_tune_root skips them.
-  if printf '%s' "${INFERENCE_OPTIMIZER_NODES:-1}" | grep -qE '^[0-9]+$' && [ "${INFERENCE_OPTIMIZER_NODES:-1}" -ge 2 ]; then
-    [ -n "${MAGPIE_PATH:-}" ] && printf '%s\n' "$(dirname "${MAGPIE_PATH%/}")/KernelForge/src/forge_gemm_tune"
-    [ -n "${INFERENCEX_PATH:-}" ] && printf '%s\n' "$(dirname "${INFERENCEX_PATH%/}")/KernelForge/src/forge_gemm_tune"
-  fi
 }
 
 _resolve_forge_gemm_tune_root() {
