@@ -385,6 +385,59 @@ def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
     assert "dv_openai" not in credential_text
 
 
+def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path):
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    loop_start = script_text.index("  local m", script_text.index('  if [ "$any_fw" -eq 0 ]; then'))
+    loop_end = script_text.index('\n\n  [ "$rc" -ne 0 ]', loop_start)
+    runtime_dep_loop = script_text[loop_start:loop_end]
+
+    host_py = tmp_path / "host-python"
+    vllm_root = tmp_path / "vllm-venv"
+    vllm_py = vllm_root / "bin" / "python"
+    host_py.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    vllm_py.parent.mkdir(parents=True)
+    vllm_py.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    host_py.chmod(0o755)
+    vllm_py.chmod(0o755)
+
+    runner = tmp_path / "runtime-deps.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"py={host_py}",
+                f"VLLM_VENV_ROOT={vllm_root}",
+                "FRAMEWORK_ENV=isolated",
+                "FRAMEWORKS=sglang,vllm",
+                'log() { :; }',
+                'warn() { :; }',
+                '_py_has() { printf "probe %s %s\\n" "$1" "$2"; return 0; }',
+                "run_probe() {",
+                runtime_dep_loop,
+                "}",
+                "run_probe",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = subprocess.run(
+        ["bash", str(runner)],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.splitlines()
+
+    assert out == [
+        f"probe {vllm_py} triton",
+        f"probe {vllm_py} aiter",
+        f"probe {host_py} sgl_kernel",
+    ]
+
+
 def test_kernel_install_no_longer_exports_openai_safe_credentials():
     install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")

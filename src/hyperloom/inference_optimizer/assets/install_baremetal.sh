@@ -363,9 +363,16 @@ PY
     fi
   fi
 
-  local m
+  # vLLM's ROCm stack owns triton/aiter in isolated mode; SGLang owns sgl_kernel.
+  local m dep_py
   for m in triton aiter sgl_kernel; do
-    _py_has "$py" "$m" && log "runtime dep ${m}: OK" || warn "runtime dep ${m}: missing (some phases may degrade)"
+    dep_py="$py"
+    if [ "$m" != "sgl_kernel" ] && [ "$FRAMEWORK_ENV" = "isolated" ] \
+       && [ -x "${VLLM_VENV_ROOT}/bin/python" ] \
+       && printf '%s' ",${FRAMEWORKS}," | grep -q ",vllm,"; then
+      dep_py="${VLLM_VENV_ROOT}/bin/python"
+    fi
+    _py_has "$dep_py" "$m" && log "runtime dep ${m}: OK" || warn "runtime dep ${m}: missing (some phases may degrade)"
   done
 
   [ "$rc" -ne 0 ] && die "base preflight failed. Fix the items above, or pass --skip-base-check to override."
