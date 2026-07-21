@@ -52,6 +52,7 @@ Hyperloom combines:
 
 | Topic | Link |
 |-------|------|
+| ROCm Docs | [Hyperloom](https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html) |
 | Authentication and credentials | [Authentication & credentials](docs/reference/authentication.md) |
 | Environment variables | [Environment variables](docs/reference/environment-variables.md) |
 | Components | [Components](docs/components/index.md) |
