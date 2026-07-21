@@ -264,6 +264,7 @@ def _build_orchestration_prompt(
     no_explore: bool = False,
     no_framework_agent: bool = False,
     macro_cycle: int = 0,
+    cycle_directive: str = "",
     action_registry: ActionRegistry | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
@@ -275,8 +276,8 @@ def _build_orchestration_prompt(
         max_minutes (int): The wall-clock budget in minutes.
         no_explore (bool): When ``True`` the EXPLORE phase is disabled.
         no_framework_agent (bool): When ``True`` the FRAMEWORK_AGENT phase is disabled.
-        macro_cycle (int): Current macro-cycle number; seeds the CYCLE DIRECTIVE
-            section so Orchestration plans with the live cycle context.
+        macro_cycle (int): Current macro-cycle counter; shown in the CYCLE DIRECTIVE section.
+        cycle_directive (str): LLM-authored focus text for this cycle; empty renders the default arc.
         action_registry (ActionRegistry | None): The action registry to use;
             a fresh loaded registry is built when ``None``.
 
@@ -297,6 +298,7 @@ def _build_orchestration_prompt(
         objective_value=value,
         max_minutes=int(max_minutes),
         macro_cycle=int(macro_cycle),
+        cycle_directive=cycle_directive,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_source_file_allowlist(),
     )
@@ -2061,6 +2063,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))
     _initial_macro_cycle = int(getattr(coordinator.shared_state, "macro_cycle", 0) or 0)
+    _initial_directive = str(
+        (dict(getattr(coordinator.shared_state, "orchestration_memory", {}) or {})).get(
+            "next_cycle_directive", ""
+        )
+        or ""
+    )
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt
         or _build_orchestration_prompt(
@@ -2071,6 +2079,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             objective=objective,
             max_minutes=max_minutes_for_prompt,
             macro_cycle=_initial_macro_cycle,
+            cycle_directive=_initial_directive,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }

@@ -778,40 +778,42 @@ def _section_rules(rules_md: str) -> list[str]:
     return ["## 7. RULES & OUTPUT PROTOCOL", "", body]
 
 
-def _section_macro_posture(macro_cycle: int = 0) -> list[str]:
-    """Build the advisory long-run MACRO POSTURE section.
+def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "") -> list[str]:
+    """Build the CYCLE DIRECTIVE section.
 
-    Informs Orchestration of the breadth→depth arc that the run's machinery
-    already drives (per-cycle KEEP-threshold decay + specialist wall-budget
-    amplification), so it can plan for it. Purely advisory — it forbids
-    nothing. The LIVE cycle number is carried every tick in the ``cycle`` line
-    of the ``=== Phase ===`` block; this section explains how to use it.
+    When ``cycle_directive`` is non-empty it carries an LLM-authored focus
+    mandate for this macro-cycle (see ``orchestration_memory.next_cycle_directive``).
+    Otherwise the standing breadth→depth arc is used as the default.
 
     Args:
-        macro_cycle: The macro-cycle the prompt was assembled at (starting
-            posture hint; the live value is in the per-tick phase block).
+        macro_cycle: Current macro-cycle counter; shown verbatim.
+        cycle_directive: Optional LLM-authored focus text for this cycle.
 
     Returns:
-        list[str]: Markdown lines for the macro-posture section.
+        list[str]: Markdown lines for the section.
     """
-    return [
-        "## MACRO POSTURE (advisory — breadth→depth across the long run)",
+    lines = [
+        "## CYCLE DIRECTIVE (advisory — this macro-cycle's focus)",
         "",
-        f"This run was assembled at macro_cycle={int(macro_cycle)}. The live",
-        "cycle number is in the ``cycle`` line of the per-tick ``=== Phase ===``",
-        "block. As the cycle grows, the machinery already (a) decays the KEEP",
-        "acceptance threshold so late cycles can still capture small wins, and",
-        "(b) amplifies each specialist's wall budget so deeper / longer-running",
-        "tasks become affordable.",
+        f"macro_cycle={int(macro_cycle)}. Live cycle number is in the"
+        " ``cycle`` line of the per-tick ``=== Phase ===`` block.",
+        "The machinery already (a) decays the KEEP threshold each cycle and"
+        " (b) amplifies specialist wall budgets — plan with that arc.",
         "",
-        "Plan with that arc (this is guidance, not a constraint):",
-        "- Early cycles (≈0-2): cast WIDE. Prefer many cheap config/env levers",
-        "  and several specialists in parallel to map the space fast.",
-        "- Later cycles: commit to FEWER, DEEPER, longer-running specialist",
-        "  tasks — short-horizon wins are largely exhausted, so spend the",
-        "  amplified budget on autotune / kernel / profiling-driven work that",
-        "  needs a long measure→edit→measure loop.",
     ]
+    if cycle_directive and cycle_directive.strip():
+        lines.append("Focus for this cycle (LLM-authored at prior cycle boundary):")
+        lines.append(cycle_directive.strip())
+    else:
+        lines.extend([
+            "Default arc (no per-cycle directive yet):",
+            "- Early cycles (≈0-2): cast WIDE — many cheap config/env levers and"
+            "  several specialists in parallel to map the space fast.",
+            "- Later cycles: FEWER, DEEPER, longer-running specialist tasks —"
+            "  spend the amplified budget on autotune / kernel / profiling-driven"
+            "  work that needs a long measure→edit→measure loop.",
+        ])
+    return lines
 
 
 def build_orchestration_prompt(
@@ -826,6 +828,7 @@ def build_orchestration_prompt(
     objective_value: float | str | None = None,
     max_minutes: int = 0,
     macro_cycle: int = 0,
+    cycle_directive: str = "",
     rules_fragment_path: Path | None = None,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> str:
@@ -847,9 +850,11 @@ def build_orchestration_prompt(
         objective_kind: :mod:`objective` kind string, printed verbatim.
         objective_value: :mod:`objective` target value, printed verbatim.
         max_minutes: wall-clock budget for the run.
-        macro_cycle: macro-cycle the prompt is assembled at; seeds the advisory
-            MACRO POSTURE section (the live value rides the per-tick phase
-            block).
+        macro_cycle: current macro-cycle counter; shown in the CYCLE DIRECTIVE
+            section.
+        cycle_directive: optional LLM-authored focus text for this cycle
+            (from ``orchestration_memory.next_cycle_directive``); empty string
+            renders the standing breadth→depth default.
         rules_fragment_path: path to ``orchestration.md``; placeholder if
             unreadable.
         framework_source_roots: optional framework source roots passed through
@@ -886,7 +891,7 @@ def build_orchestration_prompt(
         ),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled),
-        _section_macro_posture(macro_cycle),
+        _section_cycle_directive(macro_cycle=macro_cycle, cycle_directive=cycle_directive),
     ]
     if kernel_enabled and any(a.name == "kernel_opt" for a in actions):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
