@@ -197,10 +197,17 @@ jobs:
         run: |
           mkdir -p shard-status
           FAILED_FILE="shard-status/py${{ matrix.python-version }}-shard${{ matrix.shard }}.failed"
+          TITLE="py${{ matrix.python-version }}-shard${{ matrix.shard }}-failed"
+          if [ ! -f pytest-output.log ]; then
+            # The previous step's pipeline was killed (OOM/cancellation) before
+            # tee could write anything. Say so explicitly rather than silently
+            # falling into the "no FAILED lines" branch below with no reason.
+            echo "::error title=${TITLE}::Shard failed and pytest-output.log is missing (pipeline likely killed before tee wrote it); see this job's raw Actions log."
+            exit 0
+          fi
           # Section is bounded by pytest's own summary headers; grep the
           # ``FAILED <nodeid> - ...`` lines pytest -rf prints between them.
           grep -E '^FAILED ' pytest-output.log > "$FAILED_FILE" || true
-          TITLE="py${{ matrix.python-version }}-shard${{ matrix.shard }}-failed"
           if [ -s "$FAILED_FILE" ]; then
             COUNT=$(wc -l < "$FAILED_FILE")
             echo "::error title=${TITLE}::${COUNT} test(s) failed in this shard"
@@ -216,8 +223,10 @@ jobs:
           else
             # pytest failed (non-zero exit) but no "FAILED " summary line was
             # captured -- e.g. a collection error or worker crash. Say so
-            # explicitly instead of silently reporting nothing.
-            echo "::error title=${TITLE}::Shard failed but no per-test FAILED lines were found (collection error or crash); see this job's full log."
+            # explicitly, and keep pytest-output.log as an artifact (below) so
+            # "this job's full log" in the message below is actually
+            # retrievable after the run's own log retention expires.
+            echo "::error title=${TITLE}::Shard failed but no per-test FAILED lines were found (collection error or crash); see the uploaded pytest-output.log artifact or this job's full log."
           fi
 
       - name: Upload shard coverage data
@@ -232,6 +241,19 @@ jobs:
           include-hidden-files: true
           retention-days: 1
           if-no-files-found: warn
+
+      # Keep the raw pytest log retrievable past the run's own log retention,
+      # so the "Report shard failures" fallback message (collection
+      # error/crash, no per-test FAILED lines) points somewhere real. Only
+      # uploaded on failure to avoid an artifact per green shard.
+      - name: Upload pytest output log
+        if: always() && steps.pytest.outcome != 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pytest-log-py${{ matrix.python-version }}-shard${{ matrix.shard }}
+          path: pytest-output.log
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Upload this shard's timing slice so update-durations (push-to-main only)
       # can merge a full fresh .test_durations. Only the 3.10 leg is uploaded to
@@ -301,6 +323,12 @@ jobs:
           coverage combine "${files[@]}"
           test -f .coverage || { echo "::error::coverage combine produced no .coverage"; exit 1; }
 
+      # NOTE on $GITHUB_STEP_SUMMARY ordering: this step's "Shard results" /
+      # "Failed tests" sections are appended before the "Coverage summary"
+      # step's "## Coverage (UT)" section runs (steps execute in file order,
+      # and both use ``>>``), so failures show up above the coverage table in
+      # the rendered Summary. Keep that relative order if adding more steps
+      # that also write to $GITHUB_STEP_SUMMARY between here and there.
       - name: Aggregate shard test outcomes
         id: outcomes
         run: |
@@ -331,7 +359,10 @@ jobs:
             # Comma-separated for a compact single-line ::error:: annotation;
             # each shard's own failed-test list was already annotated by that
             # shard job's "Report shard failures" step. Joined in a subshell
-            # so the IFS change doesn't leak into the rest of this step.
+            # so the IFS change doesn't leak into the rest of this step. Safe
+            # to join on ',': shard_label is always "py<version>-shard<N>"
+            # (derived from the matrix, not from free-form input), so it can
+            # never itself contain a comma.
             joined="$(IFS=,; echo "${failed_shards[*]}")"
             echo "failed_shards=${joined}" >> "$GITHUB_OUTPUT"
           else
