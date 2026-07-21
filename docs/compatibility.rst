@@ -175,13 +175,14 @@ Hyperloom does not install ROCm or torch itself.
      - v0.5.12
      - Installed in ``shared`` mode (reuses the host torch).
    * - vLLM
-     - isolated venv
-     - vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
+     - v0.21.0 (rocm722), isolated venv
+     - Installs ``vllm==0.21.0+rocm722`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
 
-For a fully validated, pre-aligned vLLM stack, prefer ``docker`` mode with
-``primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix`` — the bare-metal vLLM
-wheel index only publishes rolling versions, so exact ``v0.21.0`` parity is
-available through the container image, not pip.
+The bare-metal vLLM version matches the ``v0.21.0`` Docker image, but the pip
+index only publishes the ``rocm722`` variant (ROCm 7.2.2), so the bare-metal
+ROCm layer is 7.2.2 rather than the image's rocm720. For a fully validated,
+pre-aligned vLLM stack with rocm720, prefer ``docker`` mode with
+``primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix``.
 
 Framework versions are overridable via env (``SGLANG_REF``, ``VLLM_VERSION``,
 ``VLLM_ROCM_VARIANT``) for hosts that need a different pinned stack.
