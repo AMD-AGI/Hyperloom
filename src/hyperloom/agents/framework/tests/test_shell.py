@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Tests for framework_agent.shell.render_template + run_command. Hermetic - run_command uses ``/bin/echo`` / ``/bin/false`` so no network/GPU is required."""
