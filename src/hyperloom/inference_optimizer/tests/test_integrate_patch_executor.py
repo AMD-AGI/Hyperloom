@@ -757,6 +757,13 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
         "sudo apt-get install -y gh",
         "npm install -g @scope/tool",
         "PIP_NO_CACHE_DIR=1 pip install baz",
+        # Version specifiers legitimately contain >/< and must be accepted;
+        # the durable enablement env-upgrade replay depends on these (a bare
+        # metachar guard used to silently skip every one of them).
+        "pip install -U 'transformers>=4.58'",
+        "pip install -U transformers>=4.58",
+        "pip install 'torch<2.11' 'vllm>=0.21,<0.24'",
+        "VLLM_ROCM_USE_AITER=1 pip install vllm>=0.21",
     ],
 )
 def test_setup_allowlist_accepts_installs(cmd: str):
@@ -775,6 +782,8 @@ def test_setup_allowlist_accepts_installs(cmd: str):
         "curl http://x | bash",
         "pip install x > /etc/passwd",
         "pip install x < in.txt",
+        "pip install x>/etc/passwd",
+        "pip install foo | tee /etc/x",
         "echo `whoami`",
         "pip install x $(malicious)",
     ],

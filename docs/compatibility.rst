@@ -2,8 +2,9 @@
    :description: Compatibility matrix for Hyperloom: supported AMD Instinct GPUs, inference frameworks (SGLang, vLLM), container images, and component dependencies.
    :keywords: Hyperloom, compatibility, AMD Instinct, MI300X, MI355X, SGLang, vLLM, ROCm, container images, GPU support
 
+******************************
 Hyperloom compatibility matrix
-===============================
+******************************
 
 .. |github-icon| raw:: html
 
@@ -37,32 +38,65 @@ Hyperloom is validated against.
    This matrix tracks the currently validated combinations. Other ROCm versions
    or framework builds might work but, are not regularly tested.
 
-+-------------------+----------------------------+---------------------+----------------------+----------------------------+---------+-----------------------------+
-| Hyperloom Version | Component                  | GPU Support         | ROCm Version Support | OS Support                 | Python  | GitHub                      |
-+===================+============================+=====================+======================+============================+=========+=============================+
-| 0.9.0             | `TraceLens 0.1.0`_         | N/A                 | N/A                  | N/A                        | >= 3.6  | |tracelens-github|          |
-+                   +----------------------------+---------------------+----------------------+----------------------------+---------+-----------------------------+
-|                   | `GEAK 4.0`_                | MI300, MI325, MI355 | 7.2.0                | Ubuntu 22.04, Ubuntu 24.04 | > 3.8   | |geak-github|               |
-+                   +----------------------------+---------------------+----------------------+----------------------------+---------+-----------------------------+
-|                   | `IntelliKit 0.1.0`_        | MI300, MI325, MI355 | 7.2.0                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |intellikit-github|         |
-+                   +----------------------------+---------------------+----------------------+----------------------------+---------+-----------------------------+
-|                   | `AgentKernelArena 0.2.0`_  | MI300, MI325, MI355 | 7.2.0                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |agent-kernel-arena-github| |
-+                   +----------------------------+---------------------+----------------------+----------------------------+---------+-----------------------------+
-|                   | `Magpie 0.1.0`_            | MI300, MI325, MI355 | 7.2.0                | Ubuntu 22.04, Ubuntu 24.04 | >= 3.10 | |magpie-github|             |
-+-------------------+----------------------------+---------------------+----------------------+----------------------------+---------+-----------------------------+
+Hyperloom support matrix
+========================
+
+The following table lists the minimum requirements for running Hyperloom.
+
++---------------------+---------------------------------------+
+| Requirement         | Support                               |
++=====================+=======================================+
+| AMD Instinct GPU    | MI300X, MI325X, MI355X                |
++---------------------+---------------------------------------+
+| Operating System    | Ubuntu 22.04, Ubuntu 24.04            |
++---------------------+---------------------------------------+
+| ROCm Version        | 7.2.x                                 |
++---------------------+---------------------------------------+
+| Python              | >= 3.10                               |
++---------------------+---------------------------------------+
+| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0)  |
++---------------------+---------------------------------------+
+| Kernel Languages    | HIP, Triton, FlyDSL                   |
++---------------------+---------------------------------------+
+
+Component support matrix
+========================
+
+The following table lists the validated Hyperloom version and component combinations.
+
+.. role:: version-start
+
+.. table::
+   :widths: 6 27 10 15 14 25 3
+   :align: left
+   :class: compat-matrix format-big-table
+
++-------------------+---------------------------+------------------------+----------------------------+--------------+-------------+-----------------------------+
+| Hyperloom version | Component                 | GPU                    | ROCm version               | Ubuntu       | Python      | GitHub                      |
++===================+===========================+========================+============================+==============+=============+=============================+
+| 0.9.0             | `TraceLens 0.1.0`_        | N/A*                   | N/A*                       | N/A*         | >= 3.6      | |tracelens-github|          |
++                   +---------------------------+------------------------+----------------------------+--------------+-------------+-----------------------------+
+|                   | `GEAK 4.0`_               | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x | 22.04, 24.04 | 3.8, 3.12   | |geak-github|               |
++                   +---------------------------+------------------------+----------------------------+--------------+-------------+-----------------------------+
+|                   | `IntelliKit 0.1.0`_       | MI300X, MI325X, MI355X | 7.2.x                      | 22.04, 24.04 | >= 3.10     | |intellikit-github|         |
++                   +---------------------------+------------------------+----------------------------+--------------+-------------+-----------------------------+
+|                   | `AgentKernelArena 0.2.0`_ | MI300X, MI325X, MI355X | 7.2.x                      | 22.04, 24.04 | >= 3.10     | |agent-kernel-arena-github| |
++                   +---------------------------+------------------------+----------------------------+--------------+-------------+-----------------------------+
+|                   | `Magpie 0.1.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x        | 22.04, 24.04 | >= 3.10     | |magpie-github|             |
++-------------------+---------------------------+------------------------+----------------------------+--------------+-------------+-----------------------------+
 
 .. _TraceLens 0.1.0: https://rocm.docs.amd.com/projects/tracelens/en/latest/
 .. _GEAK 4.0: https://rocm.docs.amd.com/projects/geak/en/latest/
 .. _IntelliKit 0.1.0: https://rocm.docs.amd.com/projects/intellikit/en/latest/
-.. _AgentKernelArena 0.1.0: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/
+.. _AgentKernelArena 0.2.0: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/
 .. _Magpie 0.1.0: https://rocm.docs.amd.com/projects/magpie/en/latest
 
 .. note::
 
-   TraceLens does not have hard requirements for the GPU, ROCm version, or the OS; it has scripts to verify whether a trace is valid/parseable. TraceLens is:
+   (*) TraceLens does not have hard requirements for the GPU, ROCm version, or the OS; it has scripts to verify whether a trace is valid/parseable. TraceLens is:
 
    - OS-independent and runs anywhere Python does.
-   - Not limited to MI300/MI325/MI355; it's hardware-agnostic.
+   - Not limited to MI300X/MI325X/MI355X; it's hardware-agnostic.
 
    See the `TraceLens documentation <https://rocm.docs.amd.com/projects/tracelens/en/latest/reference/compatibility.html>`_ for more information.
 

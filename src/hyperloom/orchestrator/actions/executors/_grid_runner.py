@@ -969,6 +969,49 @@ def _num_gpus_for_config(config_path: Path) -> float:
         return 1.0
 
 
+def _resolve_mn_effective_server_args(
+    cfg_path: Path,
+    base_yaml_path: Path,
+    variant: Any,
+    *,
+    base_extra_args: str,
+    base_args_mode: str,
+) -> str:
+    """Resolve the multi-node server args for a variant restart; prefer the
+    materialized variant YAML, falling back to a recompose from the base YAML."""
+    try:
+        with cfg_path.open(encoding="utf-8") as _f:
+            _variant_cfg = yaml.safe_load(_f) or {}
+        _variant_bench = _variant_cfg.get("benchmark") or {}
+        _variant_envs = _variant_bench.get("envs") or {}
+        _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
+        return str(_variant_envs.get(_variant_framework_env) or "")
+    except Exception:  # noqa: BLE001 - restart path still reports validation errors
+        log.debug(
+            "grid_runner: failed to read materialized variant args from %s",
+            cfg_path,
+            exc_info=True,
+        )
+        try:
+            with base_yaml_path.open(encoding="utf-8") as _f:
+                _base_cfg = yaml.safe_load(_f) or {}
+            _base_bench = _base_cfg.get("benchmark") or {}
+            _base_envs = _base_bench.get("envs") or {}
+            _base_framework_env = server_args_env_name(_base_bench.get("framework"))
+            _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
+        except Exception:  # noqa: BLE001 - best-effort parity fallback
+            _fallback_inherited_args = ""
+        return _shell_safe_dedupe(
+            compose_server_args(
+                inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
+                base_extra_args=base_extra_args,
+                variant_extra_args=variant.extra_server_args,
+                remove_args=getattr(variant, "remove_args", []),
+                args_mode=getattr(variant, "args_mode", "append"),
+            )
+        )
+
+
 async def run_grid(
     *,
     base_yaml_path: Path,
@@ -1134,37 +1177,13 @@ async def run_grid(
                 break
             continue
 
-        try:
-            with cfg_path.open(encoding="utf-8") as _f:
-                _variant_cfg = yaml.safe_load(_f) or {}
-            _variant_bench = _variant_cfg.get("benchmark") or {}
-            _variant_envs = _variant_bench.get("envs") or {}
-            _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
-            _mn_effective_args = str(_variant_envs.get(_variant_framework_env) or "")
-        except Exception:  # noqa: BLE001 - restart path still reports validation errors
-            log.debug(
-                "grid_runner: failed to read materialized variant args from %s",
-                cfg_path,
-                exc_info=True,
-            )
-            try:
-                with base_yaml_path.open(encoding="utf-8") as _f:
-                    _base_cfg = yaml.safe_load(_f) or {}
-                _base_bench = _base_cfg.get("benchmark") or {}
-                _base_envs = _base_bench.get("envs") or {}
-                _base_framework_env = server_args_env_name(_base_bench.get("framework"))
-                _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
-            except Exception:  # noqa: BLE001 - best-effort parity fallback
-                _fallback_inherited_args = ""
-            _mn_effective_args = _shell_safe_dedupe(
-                compose_server_args(
-                    inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
-                    base_extra_args=base_extra_args,
-                    variant_extra_args=variant.extra_server_args,
-                    remove_args=getattr(variant, "remove_args", []),
-                    args_mode=getattr(variant, "args_mode", "append"),
-                )
-            )
+        _mn_effective_args = _resolve_mn_effective_server_args(
+            cfg_path,
+            base_yaml_path,
+            variant,
+            base_extra_args=base_extra_args,
+            base_args_mode=base_args_mode,
+        )
 
         if auto_warmup_requested:
             try:

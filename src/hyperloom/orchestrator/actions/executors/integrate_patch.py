@@ -1193,6 +1193,49 @@ def _stamp_framework_kb_provenance(
     target.setdefault("framework", framework)
 
 
+def _enforce_critic_gate(
+    shared_state: Any,
+    params: dict[str, Any],
+    specialist_task_id: str,
+) -> "dict[str, Any] | None":
+    """Enforce a permissive Critic verdict before any side effect; returns a
+    ``rejected_by_critic`` dict on failure, else ``None`` (no-op if bypassed)."""
+    if shared_state is None or os.environ.get("HYPERLOOM_BYPASS_CRITIC") == "1":
+        return None
+    if params.get("bypass_critic"):
+        log.warning(
+            "integrate_patch executor: in-band bypass_critic ignored; "
+            "enforcing Critic verdict for specialist_task_id=%r (operator "
+            "override is HYPERLOOM_BYPASS_CRITIC=1, out-of-band only).",
+            specialist_task_id,
+        )
+    try:
+        from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS as _PERMISSIVE
+    except Exception:  # noqa: BLE001 - avoid a hard import-cycle dependency
+        _PERMISSIVE = frozenset({"approve", "advise"})
+    try:
+        recorded = shared_state.get_specialist_patch_verdict(specialist_task_id)
+    except AttributeError:
+        recorded = ""
+    if (recorded or "").lower() not in _PERMISSIVE:
+        _detail = f"verdict {recorded!r}" if recorded else "no Critic verdict on record"
+        # No side effect has occurred yet; reject cleanly (nothing to revert).
+        return {
+            "status": "rejected_by_critic",
+            "specialist_task_id": specialist_task_id,
+            "patches_applied": [],
+            "patches_reverted": [],
+            "config_changes_applied": {},
+            "reason": (
+                f"integrate_patch requires a permissive Critic verdict "
+                f"(approve/advise) for specialist task "
+                f"{specialist_task_id!r}; {_detail}. Refusing to run. "
+                f"Set HYPERLOOM_BYPASS_CRITIC=1 out-of-band to force."
+            ),
+        }
+    return None
+
+
 class IntegratePatchExecutor:
     """ActionRunner for the ``integrate_patch`` action (PR-A4)."""
 
@@ -1353,39 +1396,21 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
             }
 
-        # Critic-verdict gate — enforced BEFORE any side effect. No-op when
-        # SharedState is absent. Override is out-of-band only (HYPERLOOM_BYPASS_CRITIC=1).
-        if shared_state is not None and os.environ.get("HYPERLOOM_BYPASS_CRITIC") != "1":
-            if params.get("bypass_critic"):
-                log.warning(
-                    "integrate_patch executor: in-band bypass_critic ignored; "
-                    "enforcing Critic verdict for specialist_task_id=%r (operator "
-                    "override is HYPERLOOM_BYPASS_CRITIC=1, out-of-band only).",
-                    specialist_task_id,
-                )
-            try:
-                from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS as _PERMISSIVE
-            except Exception:  # noqa: BLE001
-                _PERMISSIVE = frozenset({"approve", "advise"})
-            try:
-                recorded = shared_state.get_specialist_patch_verdict(specialist_task_id)
-            except AttributeError:
-                recorded = ""
-            if (recorded or "").lower() not in _PERMISSIVE:
-                _detail = f"verdict {recorded!r}" if recorded else "no Critic verdict on record"
-                return {
-                    "status": "rejected_by_critic",
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "config_changes_applied": {},
-                    "reason": (
-                        f"integrate_patch requires a permissive Critic verdict "
-                        f"(approve/advise) for specialist task "
-                        f"{specialist_task_id!r}; {_detail}. Refusing to run. "
-                        f"Set HYPERLOOM_BYPASS_CRITIC=1 out-of-band to force."
-                    ),
-                }
+        # Critic-verdict gate — enforced BEFORE any side effect (setup replay,
+        # stash, patch/artifact apply, pod fan-out). Paths that bypass PolicyGate
+        # (notably a queued/resume-dispatched task) are not re-validated there, so
+        # a forged coordinator.db row with no genuine Critic verdict must be
+        # rejected here, all-or-nothing, before it can install packages or mutate
+        # the live framework tree. specialist_patch_verdicts is a Coordinator-only
+        # CORE_STATE_FIELD an LLM/forged row cannot write, and a legitimate
+        # integrate_patch always has its verdict persisted before the queued task
+        # is created (see intent_router._handle_single_verdict), so a genuine
+        # task is unaffected. No-op when SharedState is absent. Override is
+        # out-of-band only (HYPERLOOM_BYPASS_CRITIC=1); an in-band
+        # params.bypass_critic is ignored so an LLM cannot self-approve.
+        critic_reject = _enforce_critic_gate(shared_state, params, specialist_task_id)
+        if critic_reject is not None:
+            return critic_reject
 
         done_payload = _read_done_payload(specialist_workspace)
         _stamp_framework_kb_provenance(done_payload, params=params, shared_state=shared_state)
@@ -1904,17 +1929,22 @@ class IntegratePatchExecutor:
                     tps_delta_pct=0.0,
                     extra=extra,
                 )
-                return {
-                    "status": "apply_failed",
-                    "error_class": "artifact_install_failed",
-                    "error": artifact_resolve_errors + artifact_apply_errors,
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [str(p) for p in reverted],
-                    "artifacts_applied": [],
-                    "config_changes_applied": {},
-                    "workspace": str(output_root),
-                }
+                return _with_stash_restore(
+                    framework_root,
+                    stash_state,
+                    stash_note,
+                    {
+                        "status": "apply_failed",
+                        "error_class": "artifact_install_failed",
+                        "error": artifact_resolve_errors + artifact_apply_errors,
+                        "specialist_task_id": specialist_task_id,
+                        "patches_applied": [],
+                        "patches_reverted": [str(p) for p in reverted],
+                        "artifacts_applied": [],
+                        "config_changes_applied": {},
+                        "workspace": str(output_root),
+                    },
+                )
 
         config_changes_applied = dict(config_changes)
 

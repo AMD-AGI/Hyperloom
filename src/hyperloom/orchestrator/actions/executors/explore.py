@@ -21,17 +21,8 @@ Follows the "one change at a time" rule (single-tenant serving GPU).
 ``provenance`` passes through to the ledger unchanged so the specialist
 path can fill ``'specialist:<domain>'``.
 
-Result schema (returned to the bus):
-
-    status:                   "succeeded" | "failed"
-    output_throughput:        float | None  (best variant or last stack rebench)
-    best_variant:             dict | None
-    winners:                  list[dict]   (KEEP'd in this batch, post-rebench)
-    losers:                   list[dict]   (REVERT'd)
-    keep_unstable_in_stack:   list[dict]   (KEEP'd then evicted by stack rebench)
-    explore_search_update:    dict         (ledger increment)
-    discovered_flags_update:  dict | None  (specialist-emitted; M5)
-    workspace:                str          (output root)
+The result payload is consumed by writeback's ``explore`` promote branch; see
+the ``return`` at the end of ``__call__`` for the authoritative field set.
 """
 
 from __future__ import annotations

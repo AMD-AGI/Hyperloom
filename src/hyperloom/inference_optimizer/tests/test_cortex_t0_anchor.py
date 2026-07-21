@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.knowledge.cortex_t0 import (
+    _cascade_warm_start_search,
     _warm_recipe_source,
     run_t0_anchor,
 )
@@ -391,3 +392,124 @@ def test_t0_anchor_requires_explicit_session_dir(
     state = _FakeSharedState()
     with pytest.raises(ValueError):
         run_t0_anchor(kb, state, workload="m", hw="mi300x")
+
+
+# ---------------------------------------------------------------------------
+# _cascade_warm_start_search: the L1-L4 warm-start tier resolution.
+# ---------------------------------------------------------------------------
+_ACTIONABLE = {"best_throughput": 100.0}
+
+
+class _FakeKB:
+    """Minimal KB double exposing only get_recipe + search."""
+
+    def __init__(self, *, get_result=None, search_by_labels=None, get_raises=False):
+        self._get_result = get_result
+        self._search = search_by_labels or []
+        self._get_raises = get_raises
+        self.search_calls: list[dict] = []
+
+    def get_recipe(self, *, canonical_id, prefer=None):
+        if self._get_raises:
+            raise RuntimeError("boom")
+        return self._get_result
+
+    def search(self, *, label_match, limit=5):
+        self.search_calls.append(dict(label_match))
+        # Pop the next queued result list per search invocation.
+        if self._search:
+            return self._search.pop(0)
+        return []
+
+
+def _cascade(kb, cid="CID:target"):
+    return _cascade_warm_start_search(
+        kb,
+        cid=cid,
+        hw="mi300x",
+        framework="sglang",
+        model_type_val="qwen",
+        architectures_val=["Qwen3ForCausalLM"],
+        arch_slug="qwen3forcausallm",
+        fw_version="0.4.5",
+        precision="fp8",
+        warm_prefer=None,
+    )
+
+
+def test_cascade_l1_exact():
+    kb = _FakeKB(get_result={"canonical_id": "CID:target", **_ACTIONABLE})
+    point, tier, conf = _cascade(kb)
+    assert tier == "exact"
+    assert conf == 1.0
+    assert point["canonical_id"] == "CID:target"
+
+
+def test_cascade_l2_same_arch_class():
+    # L1 misses (different cid); L2 search yields an actionable same-arch row.
+    kb = _FakeKB(
+        get_result={"canonical_id": "CID:other"},
+        search_by_labels=[[{"canonical_id": "CID:l2", **_ACTIONABLE}]],
+    )
+    point, tier, conf = _cascade(kb)
+    assert tier == "same_arch_class"
+    assert conf == 0.95
+    assert point["canonical_id"] == "CID:l2"
+
+
+def test_cascade_l3_same_arch_any_version():
+    # L1 miss (non-dict), L2 empty, L3 yields an actionable row.
+    kb = _FakeKB(
+        get_result=None,
+        search_by_labels=[[], [{"canonical_id": "CID:l3", **_ACTIONABLE}]],
+    )
+    point, tier, conf = _cascade(kb)
+    assert tier == "same_arch_any_version"
+    assert conf == 0.5
+    assert point["canonical_id"] == "CID:l3"
+
+
+def test_cascade_l4_relative_when_l1_returns_nonexact():
+    # L1 returns a non-exact dict row; L2/L3 empty -> relative fallback.
+    kb = _FakeKB(
+        get_result={"canonical_id": "CID:other", **_ACTIONABLE},
+        search_by_labels=[[], []],
+    )
+    point, tier, conf = _cascade(kb)
+    assert tier == "relative"
+    assert conf == 0.3
+    assert point["canonical_id"] == "CID:other"
+
+
+def test_cascade_miss_when_nothing_matches():
+    kb = _FakeKB(get_result=None, search_by_labels=[[], []])
+    point, tier, conf = _cascade(kb)
+    assert tier == "miss"
+    assert conf == 0.0
+    assert point == {}
+
+
+def test_cascade_l1_get_recipe_exception_is_swallowed():
+    # A raising get_recipe degrades to search-based tiers, not a crash.
+    kb = _FakeKB(get_raises=True, search_by_labels=[[{"canonical_id": "CID:l2", **_ACTIONABLE}]])
+    point, tier, conf = _cascade(kb)
+    assert tier == "same_arch_class"
+    assert conf == 0.95
+
+
+def test_cascade_l2_skips_same_cid_and_nonactionable():
+    # A row with the target cid is skipped; a bare non-actionable row is skipped;
+    # only the actionable distinct-cid row is accepted.
+    kb = _FakeKB(
+        get_result={"canonical_id": "CID:other"},
+        search_by_labels=[
+            [
+                {"canonical_id": "CID:target", **_ACTIONABLE},  # same cid: skip
+                {"canonical_id": "CID:bare"},  # not actionable: skip
+                {"canonical_id": "CID:l2", **_ACTIONABLE},  # accept
+            ]
+        ],
+    )
+    point, tier, conf = _cascade(kb)
+    assert tier == "same_arch_class"
+    assert point["canonical_id"] == "CID:l2"
