@@ -754,6 +754,20 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
 _AITER_CSRC_MARKER = "/aiter/csrc/"
 
 
+def _isolated_aiter_pkg_root() -> Path | None:
+    """Locate aiter inside the isolated vLLM venv when it is not importable here."""
+    vllm_venv = os.environ.get("VLLM_VENV_ROOT", "").strip()
+    if not vllm_venv:
+        return None
+    lib = Path(vllm_venv) / "lib"
+    if not lib.is_dir():
+        return None
+    for match in sorted(lib.glob("python*/site-packages/aiter")):
+        if match.is_dir():
+            return match
+    return None
+
+
 def _target_is_in_aiter_csrc(target_file: Path) -> bool:
     """Report whether a file resides under an ``aiter/csrc/`` tree.
 
@@ -776,9 +790,11 @@ def _aiter_jit_build_dir() -> Path | None:
     try:
         spec = importlib.util.find_spec("aiter")
     except (ImportError, ValueError):
-        return None
+        isolated = _isolated_aiter_pkg_root()
+        return isolated / "jit" / "build" if isolated is not None else None
     if spec is None or not spec.submodule_search_locations:
-        return None
+        isolated = _isolated_aiter_pkg_root()
+        return isolated / "jit" / "build" if isolated is not None else None
     aiter_pkg = Path(list(spec.submodule_search_locations)[0])
     return aiter_pkg / "jit" / "build"
 
@@ -1243,6 +1259,10 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         root = Path("/sgl-workspace/vllm")
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
+    elif isolated_aiter_root := _isolated_aiter_pkg_root():
+        if _within_root(target_file, isolated_aiter_root):
+            root = isolated_aiter_root
+            artifact_roots = [root]
     elif allow_unknown_target:
         root = target_file.parent
 
