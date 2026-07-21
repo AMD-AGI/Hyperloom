@@ -297,6 +297,22 @@ def _materialized_run_eval_disabled(config_path: Path) -> bool:
     return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
 
 
+def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Path:
+    """Resolve the benchmark ``$RESULT_DIR`` exactly as the subprocess sees it.
+
+    Magpie is launched with ``cwd=output_dir``. If orchestration supplies a
+    relative ``result_dir``, both the subprocess and Hyperloom's accuracy parser
+    must interpret it relative to that same directory, not relative to the
+    coordinator's process cwd.
+    """
+    if not override_result_dir:
+        return output_dir
+    result_dir = Path(override_result_dir)
+    if result_dir.is_absolute():
+        return result_dir
+    return (output_dir / result_dir).resolve()
+
+
 def _should_establish_quality_ref(task_kind: str | None) -> bool:
     """Only a genuine ``baseline`` task may establish/overwrite the quality reference.
 
@@ -1924,11 +1940,12 @@ class BaselineExecutor:
             env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts
         # that ignore it are caught by the salvage pass.
-        env["RESULT_DIR"] = override_result_dir or str(output_dir)
+        result_dir = _resolve_result_dir(output_dir, override_result_dir)
+        env["RESULT_DIR"] = str(result_dir)
         # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing
         # lm-eval output. Keep it under the task workspace but separate from
         # Magpie's ``benchmark_*`` traces in ``$RESULT_DIR``.
-        env["EVAL_RESULT_DIR"] = str(Path(env["RESULT_DIR"]) / "eval_output")
+        env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
         # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the
         # task workspace; ``harvest_leaked_artifacts`` is the defense-in-depth net.
         env["SERVER_LOG"] = str(output_dir / "server.log")
@@ -2303,6 +2320,8 @@ class BaselineExecutor:
             **measurement,
             "nonfatal_warnings": warnings,
             "returncode": proc_returncode,
+            "output_dir": str(output_dir),
+            "result_dir": str(result_dir),
             "report_path": str(report_path) if report_path.exists() else None,
             "workspace": str(workspace),
             # Materialized YAML for THIS baseline. Coordinator promotes it into
@@ -2350,8 +2369,14 @@ class BaselineExecutor:
             # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh
             # moving/cleaning ``$EVAL_RESULT_DIR`` and scriptable quality gates
             # still resolve from Magpie's benchmark reports.
-            eval_search_root = Path(env["RESULT_DIR"])
+            eval_search_root = result_dir
             eval_data = parse_eval_results(eval_search_root, framework=eval_framework)
+            if eval_data.get("accuracy") is None and eval_search_root != output_dir:
+                fallback_eval_data = parse_eval_results(output_dir, framework=eval_framework)
+                if fallback_eval_data.get("accuracy") is not None:
+                    eval_data = fallback_eval_data
+                    result.setdefault("nonfatal_warnings", [])
+                    result["nonfatal_warnings"].append("baseline_accuracy_parsed_from_output_dir_fallback")
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]
                 result["accuracy_task"] = eval_data.get("task", "gsm8k")
