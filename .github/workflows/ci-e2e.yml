@@ -58,6 +58,10 @@ jobs:
           MAX_HOURS: ${{ vars.CI_E2E_MAX_HOURS }}
           # Slurm account identity spur dispatches under (must be an amd-hyperloom member).
           CI_E2E_USER_NAME: ${{ vars.CI_E2E_USER_NAME }}
+          # The robust-spur ingress uses an internal CA. Skip TLS verify unless a CA
+          # bundle is provided via CI_E2E_CACERT. Override with vars.CI_E2E_INSECURE=0
+          # once the runner trusts the internal CA.
+          CI_E2E_INSECURE: ${{ vars.CI_E2E_INSECURE || '1' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.event.pull_request.head.ref || inputs.head_ref || github.ref_name }}
           # Tokenized clone URLs so the compute node can clone this (private) PR branch.
