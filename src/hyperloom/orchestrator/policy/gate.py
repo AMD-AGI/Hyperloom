@@ -146,10 +146,9 @@ INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 # Merged explore action.
 EXPLORE_ACTION_NAME: str = "explore"
 
-# Sweep actions; named constants so the ``*_phase_singleton`` rules have a
-# single source of truth.
+# Full workload sweep action; named constant so the
+# ``sweep_phase_singleton`` rule has a single source of truth.
 SWEEP_ACTION_NAME: str = "sweep"
-CONC_SWEEP_ACTION_NAME: str = "conc_sweep"
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
@@ -923,9 +922,6 @@ class PolicyGate:
         # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # conc_sweep_phase_singleton: block duplicate conc_sweep proposals.
-        if action_name == CONC_SWEEP_ACTION_NAME:
-            self._validate_conc_sweep_singleton(payload, intent_kind="delegate")
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
