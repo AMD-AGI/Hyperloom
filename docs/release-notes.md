@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 0.9.0, including the agentic optimization loop, multi-agent runtime, TraceLens integration, and session artifacts."
+    "description": "Hyperloom release notes: headline capabilities for version 1.0.0a1, including the agentic optimization loop, multi-agent runtime, TraceLens integration, and session artifacts."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
 ---
 
