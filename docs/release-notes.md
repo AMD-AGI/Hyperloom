@@ -14,10 +14,9 @@ or view a detailed breakdown of all previous Hyperloom pre-release versions unde
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
 
-## Hyperloom public snapshot
+## Hyperloom public release
 
-The first public snapshot of Hyperloom combines features from the following
-per-release versions:
+The first public release of Hyperloom combines features from the following versions:
 
 ### 0.9.0 highlights
 
@@ -31,7 +30,7 @@ per-release versions:
   cleanup. When unset, single-node serving uses the local subprocess path.
   Multi-node is unchanged (gated off).
 
-- **Accuracy-gate & eval-result integrity**: lm-eval output is wired to a
+- **Accuracy-gate and eval-result integrity**: lm-eval output is wired to a
   session-scoped `EVAL_RESULT_DIR`; a baseline that produces no accuracy
   verdict now hard-stops instead of optimizing an unvalidated baseline; leaked
   eval results are salvaged back from the InferenceX checkout / local-disk
@@ -43,7 +42,7 @@ per-release versions:
   auth/endpoint resolution and case-insensitive Anthropic-endpoint handling;
   the Critic can run over the native provider endpoint.
 
-- **Model-path & workload-default consistency**: A single `--model` value (local
+- **Model-path and workload-default consistency**: A single `--model` value (local
   path or HF repo id) resolves identically across baseline, roofline, and the
   kernel agent; prompt-stated ISL/OSL/CONC/TP are honored as flags instead of
   silently defaulting; and the `model_arch` freshness guard is org-aware across
@@ -60,7 +59,7 @@ per-release versions:
 
 ### 0.8.0 highlights
 
-- **Kernel-optimization integrity & GEAK faithfulness**: Patch-only kernel
+- **Kernel-optimization integrity and GEAK faithfulness**: Patch-only kernel
   wins are no longer discarded by the FULL_BENCHMARK verifier (full source is
   reconstructed from the patch); multi-file (L3) kernel optimizations are
   preserved end-to-end via recorded kernel-artifact bundles; GEAK always runs
@@ -71,12 +70,12 @@ per-release versions:
   profiler traces (torch-trace `"kernel"` category), and a stale TRACELENS_ROOT
   inherited from the kernel-agent env file no longer breaks TraceLens discovery.
 
-- **Orchestrator reliability & long-run durability**: `reports/final.json` is
+- **Orchestrator reliability and long-run durability**: `reports/final.json` is
   now written crash-safe even on non-graceful/`time_exhausted` exits, and
   orchestrator LLM calls survive slow heavy-reasoning models (e.g. Kimi-K2.6)
   via idle-timeout + amplified retry.
 
-- **Server config & Local-Mode portability**: sglang `--context-length` is
+- **Server config and Local-Mode portability**: sglang `--context-length` is
   clamped to the run's `--max-model-len` (no more contradictory server config),
   and Local Mode portability groundwork removes Core42 / WekaFS hard-coding (docs).
 
@@ -120,13 +119,13 @@ per-release versions:
   serialization-safe capture cap, expert-parallel flag handling for MoE roofline,
   and eager-boot fallback for the SGLang profile-cuda-graph path.
 
-- **Reliability: sandbox-hang elimination & real-cluster hardening**: LLM streaming
+- **Reliability: sandbox-hang elimination and real-cluster hardening**: LLM streaming
   reads are now bounded client-side and timed-out subprocess trees are reaped by
   process group, eliminating the "pod Running but idle" sandbox hang. Plus setup_env
   race / USER_DATA_PATH corruption fixes, user-uncommitted-change protection before
   destructive reverts, and invalid / premature zero-gain rejection.
 
-- **CI: structural model pre-filter & throughput**: A shared model-compatibility
+- **CI: structural model pre-filter and throughput**: A shared model-compatibility
   pre-flight (multimodal / Gemma2 / Phi3-longrope / dual-chunk / ModelOpt-FP8 /
   FlashInfer / gated / missing-tokenizer) skips doomed models before a session is
   created, alongside HF-token rotation with 429 backoff, larger daily pools, and 48h
@@ -161,20 +160,20 @@ per-release versions:
   open-source MAF backfill (GPU microbenchmark), a TraceLens CLI, WebUI standalone / comparative
   analysis, and roofline that is time-boxed against the total budget.
 
-- **Multi-node & scale**: Multi-node Optimus support comes online and the Arbor
+- **Multi-node and scale**: Multi-node Optimus support comes online and the Arbor
   mechanism migration is completed.
 
 - **Observability overhaul**: Live Langfuse tracing, full-trace token and conversation
   logging, phase / step-level observability, a per-session token-consumption breakdown,
   and an author-time session-breakdown recorder make long runs inspectable in real time.
 
-- **Reliability & real-cluster hardening**: A broad sweep driven by large-scale
+- **Reliability and real-cluster hardening**: A broad sweep driven by large-scale
   cluster-run analysis: fast-fail for immediate arg / config errors, log line-buffering
   so healthy runs no longer look frozen, pod-local dependency roots decoupled from WekaFS,
   Ray raylet fd-limits, MI308X detection, attention-backend argument hygiene, GEAK container
   network path to the LLM gateway, and clearer setup / baseline failure classes.
 
-- **Docs, licensing & coverage**: Repo-wide Google-style docstrings with a published Sphinx
+- **Docs, licensing and coverage**: Repo-wide Google-style docstrings with a published Sphinx
   documentation site, the license relicensed **Apache → MIT**, requesting-access / SSO docs, and
   Python test coverage raised to ~91.5%.
 
@@ -187,7 +186,7 @@ per-release versions:
   ([#336](https://github.com/AMD-AGI/Hyperloom/issues/336)) and a soft **Dynamic Action** cross-domain
   deep-dive ([#335](https://github.com/AMD-AGI/Hyperloom/issues/335)) widen the search surface.
 
-- **GEAK & kernel optimization, deeper**: **GEAK GEMM tuning**
+- **GEAK and kernel optimization, deeper**: **GEAK GEMM tuning**
   ([#331 ](https://github.com/AMD-AGI/Hyperloom/issues/331)) and **FlyDSL kernel-optimization
   integration** ([#211](https://github.com/AMD-AGI/Hyperloom/issues/211)) land, and **kernel-level
   roofline support + quality fixes** ([#330](https://github.com/AMD-AGI/Hyperloom/issues/330))
@@ -199,10 +198,10 @@ per-release versions:
   batch parallelism adapts to smaller pods ( [#338](https://github.com/AMD-AGI/Hyperloom/issues/338) ).
 
 - **Knowledge Base productization**: The 0.4 Knowledge Base Service moves toward operations with **KB
-  Productization & Data Maintenance** ([#333](https://github.com/AMD-AGI/Hyperloom/issues/333)) and **KB Recipe
+  Productization and Data Maintenance** ([#333](https://github.com/AMD-AGI/Hyperloom/issues/333)) and **KB Recipe
   Ingestion** ([#332](https://github.com/AMD-AGI/Hyperloom/issues/332)).
 
-- **Profiling, TraceLens & Dashboard**: **TraceLens 0.5** ([#358](https://github.com/AMD-AGI/Hyperloom/issues/358));
+- **Profiling, TraceLens, and Dashboard**: **TraceLens 0.5** ([#358](https://github.com/AMD-AGI/Hyperloom/issues/358));
   a patched profiler docker image that captures HipGraphLaunch kernels so optimization-loop traces are
   complete ([#352](https://github.com/AMD-AGI/Hyperloom/issues/352)); **profiling information for all Hyperloom
   models** ([#346](https://github.com/AMD-AGI/Hyperloom/issues/346)); **kernel roofline on the dashboard**
@@ -210,7 +209,7 @@ per-release versions:
   auto-collection, alerting, TraceLens/GEAK detail capture, and kernel roofline
   ([#334](https://github.com/AMD-AGI/Hyperloom/issues/334)).
 
-- **Stability & bug fixes**: 0.5 closes a batch of orchestration / runtime defects surfaced by 0.4 runs:
+- **Stability and bug fixes**: 0.5 closes a batch of orchestration / runtime defects surfaced by 0.4 runs:
   local-mode KERNEL phase failing to dispatch GEAK plus TP variants leaking past visible-device scope
   ([#341](https://github.com/AMD-AGI/Hyperloom/issues/341)); integrate_handler early-out on a missing
   base_tput that was already in SharedState ([#319](https://github.com/AMD-AGI/Hyperloom/issues/319));
@@ -223,7 +222,7 @@ per-release versions:
 ### 0.4.0 highlights
 
 - **Hyperloom v2 architecture lands**: 0.4 is a substantial v2 leap: end-to-end Model Auto-Optimize,
-  Framework Agent integration, Agent Kernel Arena, the Self-Evolving Skills & Memory layer ramping past
+  Framework Agent integration, Agent Kernel Arena, the Self-Evolving Skills and Memory layer ramping past
   the 0.3 proposal-only stage, and the first-iteration Hyperloom Knowledge Base Service. Multi-Node
   CI/CD comes online as a first-class capability.
 
@@ -323,7 +322,7 @@ per-release versions:
   Python harness, provides independent context windows per agent (surviving 24h runs), and supports auto-restart
   through the CLI `--continue` loop.
 
-- **White-box visibility: Root Cause & Pending Cause Agents**: Two new supervisory agents make Hyperloom white-box
+- **White-box visibility: Root Cause and Pending Cause Agents**: Two new supervisory agents make Hyperloom white-box
   at both ends of the user experience. The **Root Cause Agent** watches the Marathon optimization loop for failures,
   diagnoses the cause, and writes actionable guidance back into the next retry prompt — failures stop being binary
   pass-or-discard and become constrained retries. The **Pending Cause Agent** does the analogous thing on the queue
