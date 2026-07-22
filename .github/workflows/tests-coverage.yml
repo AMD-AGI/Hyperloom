@@ -167,22 +167,27 @@ jobs:
           # shard's slice of the ``--splits`` partition (from PARGS).
           # ``--store-durations`` records THIS shard's per-test timings into a
           # shard-scoped file for the update-durations merge job.
-          # ``--junitxml`` writes a machine-readable result file that the
-          # "Report shard failures" step parses to extract this shard's real
-          # failures. JUnit XML is the authoritative source (not a text grep):
-          # it separates test ``<failure>`` (assertion) from ``<error>``
-          # (collection / fixture setup+teardown) at the ``<testcase>`` nodeid
-          # level, and is unaffected by ``-n``/xdist (the controller merges all
-          # workers into one document). ``-rf`` is kept only so the raw log
-          # remains human-readable; failure EXTRACTION no longer greps the log
-          # (that mis-fired on test stdout beginning with "FAILED" and missed
-          # fixture/collection ERRORs).
+          # ``-rfE`` prints pytest's own "short test summary info" block with one
+          # ``FAILED <nodeid> - <reason>`` / ``ERROR <nodeid> - <reason>`` line
+          # per failing/erroring test. Those lines carry the AUTHORITATIVE
+          # pytest nodeid ("path/to/test_x.py::TestA::test_y"), so the report
+          # step extracts them verbatim from the summary section rather than
+          # reconstructing a nodeid from JUnit's lossy dotted classname (which
+          # dropped the ".py" and "/" separators). ``E`` adds ERRORs (fixture
+          # setup/teardown, collection) that plain ``-rf`` omits. Extraction is
+          # strictly bounded to the summary section (see the report step), so
+          # test stdout that happens to start with "FAILED" is never mistaken
+          # for a result line. The summary is rendered by the xdist controller
+          # after workers report back, so it is complete under ``-n``.
+          # ``--junitxml`` is still written and uploaded on failure as a
+          # machine-readable debugging artifact (its <error> body carries the
+          # full collection-error traceback that the one-line summary elides).
           export COVERAGE_FILE=".coverage.shard${SHARD}"
           set +e
           pytest "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
             --store-durations --durations-path ".test_durations.shard${SHARD}" \
             --junitxml="pytest-junit.shard${SHARD}.xml" \
-            --cov-fail-under=0 -rf "${EXTRA[@]}" 2>&1 | tee pytest-output.log
+            --cov-fail-under=0 -rfE "${EXTRA[@]}" 2>&1 | tee pytest-output.log
           # ``${PIPESTATUS[0]}`` is pytest's own exit code (not tee's); read it
           # immediately after the pipeline. The shard's pass/fail is driven
           # solely by this.
@@ -197,14 +202,19 @@ jobs:
           echo "${{ steps.pytest.outcome }}" > "shard-status/py${{ matrix.python-version }}-shard${{ matrix.shard }}.outcome"
 
       # Surface failures on the shard job itself, not just in the aggregate
-      # gate: parse this shard's JUnit XML for the real failing/erroring test
-      # nodeids, write them where the coverage job picks up this shard's failed
-      # list, and annotate the run so failures show up without opening the log.
-      # JUnit XML (not a log grep) is authoritative: it distinguishes test
-      # <failure> (assertion) from <error> (collection / fixture setup+teardown)
-      # by nodeid, so fixture/collection ERRORs -- which ``-rf`` never lists --
-      # are captured, and test stdout that happens to start with "FAILED" can no
-      # longer be mis-reported.
+      # gate: extract this shard's failing/erroring tests and write them where
+      # the coverage job picks up this shard's failed list, plus annotate the
+      # run so failures show without opening the log. Extraction reads pytest's
+      # own "short test summary info" section (from ``-rfE``): those
+      # ``FAILED <nodeid> - <reason>`` / ``ERROR <nodeid> - <reason>`` lines
+      # carry the AUTHORITATIVE pytest nodeid ("path/to/test_x.py::Cls::test"),
+      # unlike JUnit's lossy dotted classname. Parsing is bounded strictly to
+      # that section (between pytest's "== short test summary info ==" header
+      # and the next "===="/"____" banner), so arbitrary test stdout that begins
+      # with "FAILED"/"ERROR" outside the section is never mistaken for a
+      # result. ``ERROR`` lines cover fixture setup/teardown + collection
+      # errors that plain ``-rf`` omits (their full traceback lives in the
+      # uploaded JUnit XML for deeper debugging).
       - name: Report shard failures
         if: always() && steps.pytest.outcome != 'success'
         env:
@@ -215,14 +225,14 @@ jobs:
           python3 <<'PY'
           import os
           import pathlib
+          import re
           import sys
-          import xml.etree.ElementTree as ET
 
           pyver = os.environ["PYVER"]
           shard = os.environ["SHARD"]
           title = f"py{pyver}-shard{shard}-failed"
           failed_file = pathlib.Path(f"shard-status/py{pyver}-shard{shard}.failed")
-          xml_path = pathlib.Path(f"pytest-junit.shard{shard}.xml")
+          log_path = pathlib.Path("pytest-output.log")
           summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
           ANNOTATION_CAP = 20
 
@@ -231,63 +241,63 @@ jobs:
                   with open(summary_path, "a", encoding="utf-8") as fh:
                       fh.write(text + "\n")
 
-          if not xml_path.exists():
-              # The pytest pipeline was killed (OOM/cancellation) before the
-              # JUnit XML was written. Say so explicitly rather than silently
-              # reporting "no failures".
+          if not log_path.exists():
+              # The pipeline was killed (OOM/cancellation) before tee wrote the
+              # log. Say so explicitly rather than silently reporting "no
+              # failures".
               print(
-                  f"::error title={title}::Shard failed and {xml_path} is missing "
-                  "(pipeline likely killed before pytest wrote it); see the uploaded "
-                  "pytest-output.log artifact or this job's raw Actions log."
+                  f"::error title={title}::Shard failed and pytest-output.log is missing "
+                  "(pipeline likely killed before tee wrote it); see the uploaded "
+                  "pytest-output.log / JUnit XML artifact or this job's raw Actions log."
               )
               sys.exit(0)
 
-          try:
-              root = ET.parse(xml_path).getroot()
-          except ET.ParseError as exc:
-              print(
-                  f"::error title={title}::Shard failed and {xml_path} is unparseable "
-                  f"({exc}); see the uploaded pytest-output.log artifact or this job's log."
-              )
-              sys.exit(0)
+          raw = log_path.read_text(encoding="utf-8", errors="replace")
+          # Strip ANSI color codes and normalize CRs so the anchored matching
+          # below is robust to pytest's colored TTY-ish output under xdist.
+          text = re.sub(r"\x1b\[[0-9;]*m", "", raw).replace("\r", "\n")
+          lines = text.splitlines()
 
-          # Collect one entry per failing/erroring testcase. ``<failure>`` =
-          # assertion failure (pytest FAILED); ``<error>`` = collection or
-          # fixture setup/teardown error (pytest ERROR, which -rf omits).
+          # Locate pytest's "short test summary info" section. Its header line
+          # embeds the TITLE inside '=' padding (``== short test summary info ==``),
+          # so the header itself contains letters -- do NOT require it to be an
+          # all-'=' banner (that was a bug: the section was never entered). We
+          # match the header by its title text alone. The section then runs
+          # until the NEXT pure banner line -- a run of '='/'_' padding with no
+          # title, e.g. the trailing ``==== N failed in ... ====`` totals line or
+          # a ``____ test ____`` separator -- or EOF. ``is_banner`` is used ONLY
+          # for that end-of-section test (pure padding, no embedded title).
+          def is_banner(s: str) -> bool:
+              t = s.strip()
+              return len(t) >= 6 and (set(t) <= set("= ") or set(t) <= set("_ "))
+
+          start = None
+          for i, s in enumerate(lines):
+              if "short test summary info" in s:
+                  start = i + 1
+                  break
+
           entries: list[str] = []
-          for tc in root.iter("testcase"):
-              kind = None
-              msg = ""
-              child = tc.find("failure")
-              if child is not None:
-                  kind = "FAILED"
-              else:
-                  child = tc.find("error")
-                  if child is not None:
-                      kind = "ERROR"
-              if kind is None:
-                  continue
-              msg = (child.get("message") or "").strip().splitlines()
-              msg = msg[0] if msg else ""
-              classname = tc.get("classname") or ""
-              name = tc.get("name") or ""
-              # Reconstruct a pytest-style nodeid: classname is the dotted path
-              # (module[.Class]); render module path with "/" and "::" separators
-              # where possible, else fall back to the raw classname.
-              nodeid = f"{classname}::{name}" if classname else name
-              line = f"{kind} {nodeid}"
-              if msg:
-                  line += f" - {msg}"
-              entries.append(line)
+          if start is not None:
+              for s in lines[start:]:
+                  if is_banner(s):
+                      break
+                  # Only pytest result lines. ``-rfE`` prints FAILED and ERROR;
+                  # anchored at line start so test output can't sneak in (and we
+                  # already bounded to the summary section above).
+                  m = re.match(r"^(FAILED|ERROR)\s+\S", s)
+                  if m:
+                      entries.append(s.rstrip())
 
           if not entries:
-              # pytest exited non-zero but the XML held no failure/error cases
-              # (e.g. an internal crash, or a worker died without recording a
-              # case). Say so explicitly and point at the retained log.
+              # pytest exited non-zero but no FAILED/ERROR summary lines were
+              # found -- e.g. an internal crash, a worker died, or the section
+              # was never printed. Say so explicitly and point at the artifacts.
               print(
-                  f"::error title={title}::Shard failed but no per-test FAILED/ERROR "
-                  "cases were found in the JUnit XML (internal crash or worker death); "
-                  "see the uploaded pytest-output.log artifact or this job's full log."
+                  f"::error title={title}::Shard failed but no FAILED/ERROR lines were "
+                  "found in pytest's summary section (internal crash, worker death, or "
+                  "no summary printed); see the uploaded pytest-output.log / JUnit XML "
+                  "artifact or this job's full log."
               )
               sys.exit(0)
 
@@ -535,17 +545,21 @@ jobs:
           PY
 
       - name: Combine shard coverage
-        # Only combine a COMPLETE, all-passing set: computing coverage on a
-        # partial/failed suite would produce a misleading total (and could let
-        # it pass fail_under). The dedicated gate below turns the job red.
-        if: steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
+        # Combine as long as the suite is COMPLETE (every shard reported its
+        # data), even if some tests FAILED. A failed assertion does not make the
+        # coverage data partial -- all shards still measured their slice -- so we
+        # still want the combined number rendered (the summary flags it as
+        # possibly-misleading, and fail_under below is NOT enforced on a failed
+        # run). Only genuine INCOMPLETENESS (a missing shard) skips combine,
+        # since combining a partial set would under-count. The "Enforce shard
+        # results" gate still reds the job for the failed/incomplete case.
+        if: steps.outcomes.outputs.complete == 'true'
         run: |
           set -euo pipefail
           shopt -s nullglob
           files=(.coverage.shard*)
-          # Defensive floor: the aggregate step above already gates on complete
-          # && tests_ok, but keep a zero-files guard so ``coverage combine``
-          # never runs against an empty set even if this step is reached.
+          # Defensive floor: the aggregate step gates on complete==true, but keep
+          # a zero-files guard so ``coverage combine`` never runs on an empty set.
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::No shard coverage data files downloaded."
             exit 1
