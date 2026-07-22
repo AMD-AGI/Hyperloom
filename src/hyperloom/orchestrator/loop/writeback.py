@@ -421,6 +421,25 @@ class WritebackCollaborator:
         if task.kind == "conc_sweep" and not result_payload.get("status"):
             result_payload["status"] = "failed"
         any_changed = False
+        params = task.params or {}
+        if task.kind == "explore" and bool(params.get("geak_fallback")):
+            pending = getattr(self.shared_state, "geak_pending", None) or {}
+            pending_task_id = str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
+            if not pending_task_id or pending_task_id == task.task_id:
+                geak_result = (
+                    dict(self.shared_state.geak_result)
+                    if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+                    else {}
+                )
+                geak_result["revalidation_status"] = "failed"
+                geak_result["revalidation_error_class"] = str(result_payload.get("error_class") or "")
+                geak_result["revalidation_error"] = str(
+                    result_payload.get("error") or result_payload.get("reason") or ""
+                )[:500]
+                self.shared_state.geak_result = geak_result
+                self.shared_state.geak_pending = {}
+                self.shared_state.resume_pending_revalidation = False
+                any_changed = True
         # Per-action audit (failed attempt) for the in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
             audit_extras: dict[str, Any] = {}
@@ -3407,7 +3426,12 @@ class WritebackCollaborator:
                     params=params_ps,
                     idempotency_key="geak-revalidate",
                 )
-                return {"task_id": task.task_id, "existing": bool(existing), "mode": "geak_2b"}
+                return {
+                    "task_id": task.task_id,
+                    "task_state": task.state,
+                    "existing": bool(existing),
+                    "mode": "geak_2b",
+                }
 
         rebuilt = self._materialize_stack_config_for_resume()
         args = str(rebuilt.get("extra_server_args") or "").strip()
