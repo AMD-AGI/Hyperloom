@@ -19,6 +19,55 @@ summarizes the headline capabilities.
 The first public snapshot of Hyperloom combines features from the following
 per-release versions:
 
+### 1.0.0a1
+
+- **Unified macro-cycle orchestration and budget accounting**: Short and long
+  sessions now share the same cyclic optimization model. Phase budgets use
+  consistent charge-back accounting, short runs stop dispatching after their
+  phase budget is exhausted, and new macro-cycles only start when at least
+  three hours remain. This removes legacy cyclic-mode branches and makes phase
+  progression more predictable across bounded and long-horizon runs.
+
+- **Opt-in Ray serving and GPU execution**: The opt-in Ray path now places all
+  serving and GPU-specialist operations under the whole-machine `serving_slot`
+  mutex, including framework-agent benchmarks, `integrate_patch`, and concurrency
+  sweeps. GPU specialists can queue without blocking the Coordinator, serving
+  receives scheduling priority, and stale AITER JIT locks are cleaned before
+  server launch. Local subprocess execution remains the default; multi-node
+  behavior is unchanged.
+
+- **vLLM and serving-environment reliability**: Hyperloom now isolates co-located
+  Ray heads, uses per-session free ports for persistent serving processes, and
+  reaps orphaned vLLM/SGLang process groups safely. Package-root `MAGPIE_PATH`
+  entries are kept out of `PYTHONPATH`, preventing main-environment Torch packages
+  from shadowing isolated vLLM environments. TraceLens patching and dependency
+  discovery also support isolated vLLM/AITER installations more reliably.
+
+- **GEAK-first kernel optimization**: GEAK is now the default owner of the complete
+  KERNEL phase. Forge remains an explicit opt-in and runs only when
+  `KERNEL_OPT_BACKEND_ORDER=forge` is set. GEAK candidates remain provisional until
+  Hyperloom revalidates them with its benchmark harness; successful revalidation can
+  now complete before SWEEP begins, while failed or inconclusive validation exits
+  cleanly without blocking the session.
+
+- **Baseline, evaluation, and reporting integrity**: Relative evaluation-result paths
+  are resolved against the benchmark output directory, preventing false baseline-accuracy
+  failures. Persistent servers use unique ports across retries, framework-phase gains
+  are attributed correctly in session breakdowns, and concurrency-sweep internal tasks
+  are no longer rejected by their own singleton policy.
+
+- **Security and policy hardening**: Multi-node restart arguments are validated and
+  shell-quoted before execution. Explicit framework source roots must remain inside the
+  configured allowlist, and queued tasks are revalidated by PolicyGate before dispatch
+  to prevent forged task rows from bypassing normal authorization and Critic gates.
+
+- **CI and release engineering**: Every PR targeting `main` now runs a single-GPU
+  Qwen3 smoke test on the dedicated Hyperloom E2E runner. The sharded Python 3.10/3.11 test
+  suite has stronger failure visibility and completeness checks. Release version reporting
+  now comes from installed package metadata, keeping
+  `hyperloom.inference_optimizer.__version__`, wheel metadata, and the release version
+  aligned.
+
 ### 0.9.0 highlights
 
 - **Opt-in Ray-managed single-node execution**: When
