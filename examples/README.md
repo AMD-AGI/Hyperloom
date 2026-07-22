@@ -327,12 +327,13 @@ export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
+  --entrypoint tail \
   --device /dev/kfd \
   --device /dev/dri \
   --group-add video \
   -v "$REPO_ROOT:$REPO_ROOT" \
   "$HYPERLOOM_IMAGE" \
-  tail -f /dev/null
+  -f /dev/null
 ```
 
 Then run all Hyperloom commands inside that container with
