@@ -14,9 +14,9 @@ or view a detailed breakdown of all previous Hyperloom pre-release versions unde
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
 
-## Hyperloom public release
+## Hyperloom 1.0.0a1 public release
 
-The first public release of Hyperloom combines features from the following versions:
+The first public release of Hyperloom (`1.0.0a1`) combines features from the following versions:
 
 ### 0.9.0 highlights
 
