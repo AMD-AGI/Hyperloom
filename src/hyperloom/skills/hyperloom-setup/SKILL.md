@@ -161,14 +161,16 @@ value.
      start or restart any Slurm job from setup.
 
 7. Only when the user chose `baremetal`, ask whether to install a serving
-   framework (used as the `--install-framework` value in Step 4):
-   - `none`: use an already-installed vLLM/SGLang framework stack on the host.
-   - `sglang`: install SGLang ROCm framework components (shared with the host torch).
-   - `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
-     pins its own torch, so it runs in an isolated env and never touches the
-     host torch/SGLang stack.
-   - If the user is unsure, recommend `none` when a framework is already present;
-     otherwise recommend `vllm (isolated)`.
+   framework (used as the `--install-framework` value in Step 4). Present exactly
+   these three option labels in this order and do not reorder them by
+   recommendation:
+   1. `none`: use an already-installed vLLM/SGLang framework stack on the host.
+   2. `sglang`: install SGLang ROCm framework components (shared with the host torch).
+   3. `vllm (isolated)`: install vLLM into a dedicated venv. vLLM's ROCm wheel
+      pins its own torch, so it runs in an isolated env and never touches the
+      host torch/SGLang stack.
+   - Do not mark any option as recommended. Present the three options in the exact
+     order above without a default selection.
 
 ## Step 3: Write `.env`
 
