@@ -1250,6 +1250,24 @@ class IntegratePatchExecutor:
             }
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or extra.get("state")
+        # Rebind execution-time base from live current_best so a task queued
+        # before an Explore KEEP always measures against the real stack top.
+        if shared_state is not None:
+            cb = getattr(shared_state, "current_best", None)
+            if isinstance(cb, dict):
+                cb_tput = cb.get("tput")
+                if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+                    params["base_tput"] = float(cb_tput)
+                cb_args = str(cb.get("extra_server_args") or "").strip()
+                if cb_args:
+                    params["base_extra_args"] = cb_args
+                cb_envs = {str(k): str(v) for k, v in (cb.get("extra_envs") or {}).items()}
+                if cb_envs:
+                    params["base_extra_envs"] = cb_envs
+                for _ctrl in ("remove_args", "unset_envs", "args_mode"):
+                    cb_ctrl = cb.get(_ctrl)
+                    if cb_ctrl and not params.get(f"base_{_ctrl}"):
+                        params[f"base_{_ctrl}"] = cb_ctrl
         # Thread the run's baseline accuracy into the accuracy gate when the
         # dispatching path did not carry one. Only fills a missing / zero value.
         if shared_state is not None and not params.get("accuracy_baseline"):
@@ -2331,10 +2349,13 @@ class IntegratePatchExecutor:
         )
 
         # Single-variant grid with config_changes_applied as extra_envs.
+        _base_envs = dict(params.get("base_extra_envs") or {})
+        _variant_envs = dict(_base_envs)
+        _variant_envs.update(config_changes_applied)
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}",
             extra_server_args=str(params.get("base_extra_args") or "").strip(),
-            extra_envs=dict(config_changes_applied),
+            extra_envs=_variant_envs,
             remove_args=to_str_list(params.get("base_remove_args")),
             unset_envs=to_str_list(params.get("base_unset_envs")),
             args_mode=str(params.get("base_args_mode") or "append"),
@@ -2524,7 +2545,7 @@ class IntegratePatchExecutor:
         variant = GridVariant(
             name=f"integrate-patch-rebench-{specialist_task_id[:8]}",
             extra_server_args=base_extra_args,
-            extra_envs=dict(config_changes_applied),
+            extra_envs={**dict(params.get("base_extra_envs") or {}), **dict(config_changes_applied)},
             remove_args=to_str_list(params.get("base_remove_args")),
             unset_envs=to_str_list(params.get("base_unset_envs")),
             args_mode=str(params.get("base_args_mode") or "append"),
