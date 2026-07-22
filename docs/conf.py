@@ -24,22 +24,16 @@ version_number = "1.0.0a1"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {
-    "flavor": "generic",
-    "header_title": f"Hyperloom {version_number}",
-    "header_link": False,
-    "version_list_link": False,
-    "nav_secondary_items": {
-        "GitHub": "https://github.com/AMD-AGI/Hyperloom",
-        "Community": False,
-        "Blogs": "https://rocm.blogs.amd.com/",
-        "ROCm Developer Hub": "https://www.amd.com/en/developer/resources/rocm-hub.html",
-        "Instinct™ Docs": "https://instinct.docs.amd.com/",
-        "Infinity Hub": "https://www.amd.com/en/developer/resources/infinity-hub.html",
-        "Support": "https://github.com/AMD-AGI/Hyperloom/issues/new/choose",
-    },
+    "flavor": "rocm",
     "link_main_doc": False,
+    "repository_url": "https://github.com/AMD-AGI/Hyperloom",
+    "use_repository_button": True,
+    "use_issues_button": True,
+    # "secondary_sidebar_items": {
+        # "training/Primus**": ["framework-version-toc2"],
+        # "**": ["framework-version-toc2"],
+    # },
 }
-
 
 # Article info display
 setting_all_article_info = True
