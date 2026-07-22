@@ -1697,6 +1697,7 @@ def _run_loop_via_cli(
     gpu_target: str,
     fellow: str,
     program_md_file: str,
+    invocation_spec_file: str,
     experiments_dir: Path,
     forge_log: Path,
     timeout_s: int,
@@ -1762,6 +1763,8 @@ def _run_loop_via_cli(
     ]
     if program_md_file and Path(program_md_file).exists():
         cmd += ["--program-md-file", str(program_md_file)]
+    if invocation_spec_file and Path(invocation_spec_file).is_file():
+        cmd += ["--invocation-spec-file", str(Path(invocation_spec_file).resolve())]
 
     loop_exc = None
     out = ""
@@ -1879,6 +1882,7 @@ def submit(
     timeout_s: int = 1800,
     prefer_ray: bool = True,
     kernel_repo: str = "",
+    invocation_spec_file: str = "",
 ) -> dict:
     """Run Forge's autonomous loop on one kernel; emit Hyperloom-contract artifacts.
 
@@ -2101,6 +2105,7 @@ def submit(
             gpu_target=gpu_target,
             fellow=fellow,
             program_md_file=str(prompt_file),
+            invocation_spec_file=invocation_spec_file,
             experiments_dir=experiments_dir,
             forge_log=forge_log,
             timeout_s=timeout_s,

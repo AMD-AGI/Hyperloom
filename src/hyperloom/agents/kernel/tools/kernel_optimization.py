@@ -31,6 +31,11 @@ from _io_utils import (  # noqa: E402
     source_text_looks_complete,
     utc_now,
 )
+from _invocation_spec import (  # noqa: E402
+    build_invocation_spec,
+    invocation_spec_filename,
+    write_invocation_spec,
+)
 from _paths import workspace_root  # noqa: E402
 
 sys.path.pop(0)
@@ -2084,6 +2089,24 @@ def invoke_backend(
             # emits optimized_versions/ + optimization_report.md.
             forge = _import_backend("forge_submit")
             out_dir = _forge_output_dir(args.session_id, prompt_file)
+            invocation_spec_path = out_dir / invocation_spec_filename(candidate)
+            try:
+                invocation_spec = build_invocation_spec(
+                    candidate,
+                    source_file=source_file,
+                    test_command=common_test_command,
+                )
+                write_invocation_spec(invocation_spec_path, invocation_spec)
+                if log_path is not None:
+                    append_log(log_path, f"[invocation_spec] wrote {invocation_spec_path}")
+            except Exception as exc:
+                # Evidence extraction must not block an otherwise runnable Forge
+                # attempt while the spec is not yet a required CLI input.
+                if log_path is not None:
+                    append_log(
+                        log_path,
+                        f"[invocation_spec] failed: {type(exc).__name__}: {exc}",
+                    )
             result = forge.submit(
                 source_file=source_file,
                 prompt_file=prompt_file,
@@ -2095,8 +2118,15 @@ def invoke_backend(
                 timeout_s=timeout_s,
                 prefer_ray=prefer_ray,
                 kernel_repo=kernel_repo,
+                invocation_spec_file=(
+                    str(invocation_spec_path)
+                    if invocation_spec_path.is_file()
+                    else ""
+                ),
             )
             result["output_dir"] = str(out_dir)
+            if invocation_spec_path.is_file():
+                result["invocation_spec_path"] = str(invocation_spec_path)
             if common_test_command:
                 result["test_command"] = common_test_command
             return result
@@ -2195,6 +2225,13 @@ def run_attempt(
         out_dir = result.get("output_dir") if isinstance(result, dict) else ""
         if out_dir:
             backend_paths["output_dir"] = out_dir
+            invocation_spec_path = (
+                result.get("invocation_spec_path") or ""
+                if isinstance(result, dict)
+                else ""
+            )
+            if invocation_spec_path:
+                backend_paths["invocation_spec"] = str(invocation_spec_path)
             cli_workspace = (result.get("cli_workspace") or "") if isinstance(result, dict) else ""
             session_id_oob = (result.get("session_id") or "") if isinstance(result, dict) else ""
             cli_log = ""
