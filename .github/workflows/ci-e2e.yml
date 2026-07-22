@@ -1,0 +1,78 @@
+name: CI E2E (single-GPU smoke run)
+
+# Every PR dispatches ONE single-GPU Qwen3-0.6B inference-optimizer run built from
+# the PR's branch on the spur cluster. The job is green if the run reaches Succeeded,
+# red on Failed/timeout. Opt OUT by adding the `skip-e2e-test` label to the PR.
+# Runs on a self-hosted runner that can reach the robust-spur ingress.
+
+on:
+  pull_request:
+    # opened/synchronize/reopened = run on create + new commits + reopen.
+    # labeled/unlabeled = re-evaluate when `skip-e2e-test` is added/removed.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      head_ref:
+        description: "Hyperloom branch to run (defaults to the caller ref)"
+        required: false
+
+# A newer commit on the same PR cancels the in-flight run (the script's TERM
+# trap deletes the spur workload so no GPU is leaked).
+concurrency:
+  group: ci-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# The workflow token writes the live commit status and the sticky PR report comment.
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: write
+
+jobs:
+  e2e:
+    # Runs for every PR by default; opt out with the `skip-e2e-test` label.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !contains(github.event.pull_request.labels.*.name, 'skip-e2e-test')
+    # Self-hosted runner registered with the label `Hyperloom-e2e-ci`
+    # (config.sh --labels Hyperloom-e2e-ci). Must reach github.com + the spur ingress.
+    runs-on: Hyperloom-e2e-ci
+    # Covers a full MAX_HOURS run (currently up to 3h) + setup/baseline overhead.
+    timeout-minutes: 240
+    steps:
+      - name: Checkout (workflow scripts only)
+        uses: actions/checkout@v4
+
+      - name: Ensure jq
+        run: command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
+
+      - name: Dispatch + monitor single-GPU smoke run
+        id: run
+        env:
+          SAFE_AK: ${{ secrets.ROBUST_SPUR_SAFE_AK }}
+          ROBUST_BASE: ${{ vars.ROBUST_SPUR_BASE }}
+          MODEL: ${{ vars.CI_E2E_MODEL }}
+          MODEL_CLASS: ${{ vars.CI_E2E_MODEL_CLASS }}
+          GPUS: ${{ vars.CI_E2E_GPUS }}
+          TP: ${{ vars.CI_E2E_TP }}
+          MAX_HOURS: ${{ vars.CI_E2E_MAX_HOURS }}
+          # Slurm account identity spur dispatches under (must be an amd-hyperloom member).
+          CI_E2E_USER_NAME: ${{ vars.CI_E2E_USER_NAME }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || inputs.head_ref || github.ref_name }}
+          # Tokenized clone URLs so the compute node can clone this (private) PR branch.
+          # github.token is ephemeral (expires with the run) and can read same-repo PRs.
+          HEAD_REPO_URL: ${{ github.event.pull_request.head.repo.full_name && format('https://x-access-token:{0}@github.com/{1}.git', github.token, github.event.pull_request.head.repo.full_name) || '' }}
+          BASE_REPO_URL: ${{ format('https://x-access-token:{0}@github.com/{1}.git', github.token, github.repository) }}
+          # Live commit status on the PR, refreshed every STATUS_INTERVAL_S.
+          GH_STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_STATUS_REPO: ${{ github.repository }}
+          GH_STATUS_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS_INTERVAL_S: "300"
+          # Poll long enough to cover a 3h MAX_HOURS run: 220 * 60s ≈ 3h40m.
+          POLL_INTERVAL_S: "60"
+          POLL_MAX: "220"
+        run: |
+          chmod +x .github/scripts/ci-e2e-dispatch.sh
+          .github/scripts/ci-e2e-dispatch.sh
