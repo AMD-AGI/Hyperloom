@@ -782,6 +782,14 @@ class PolicyGate:
         if role is None:
             raise PolicyDenied("unknown agent 'orchestration'", rule="role")
         self._validate_payload_paths(role, IntentType.DELEGATE, payload)
+        # Coordinator-managed internal actions (roofline / profile /
+        # replay_warm_recipe / framework_agent / conc_sweep) are dispatched by
+        # the Coordinator itself, never LLM-delegated, so they receive path
+        # checks only. In particular the SWEEP-entry auto-enqueued conc_sweep
+        # must NOT be re-validated against the delegate-body sweep-family
+        # singleton guard here — that guard keys on auto_conc_sweep_task_id,
+        # which is the auto-enqueued task's own id, so it would deny the sole
+        # conc_sweep against itself and surface as a spurious conc_sweep_failed.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
         self._validate_delegate_body(role, payload, check_phase=False)
@@ -1286,11 +1294,12 @@ class PolicyGate:
                 f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
                 rule="phase_incompatible",
                 hint=(
-                    "roofline / profile / replay_warm_recipe / framework "
-                    "are driven by the Coordinator (PRELUDE bootstrap, +10% "
-                    "watermark refresh, warm-recipe replay, FRAMEWORK "
-                    "pump) and never appear in any phase's LLM-proposable "
-                    "set. Propose ``specialist`` or ``explore`` instead."
+                    "roofline / profile / replay_warm_recipe / framework / "
+                    "conc_sweep are driven by the Coordinator (PRELUDE "
+                    "bootstrap, +10% watermark refresh, warm-recipe replay, "
+                    "FRAMEWORK pump, SWEEP-entry CONC ladder) and never appear "
+                    "in any phase's LLM-proposable set. Propose ``specialist`` "
+                    "or ``explore`` instead (or ``sweep`` for a full workload grid)."
                 ),
             )
         state = self.shared_state

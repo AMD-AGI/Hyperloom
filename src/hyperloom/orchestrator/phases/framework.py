@@ -2072,12 +2072,49 @@ class FrameworkPhase(PhaseHandler):
             "gap_canonical_id": "local_explore",
         }
 
+    def _local_explore_plateaued(self) -> bool:
+        """True when the local-exploration arm has plateaued (no recent KEEP).
+
+        The arm otherwise re-dispatches unconditionally on every
+        discovery-exhaustion tick, so in an environment where discovery always
+        fails and every authored deliverable is empty (e.g. no outbound network
+        for ``fa phase-discover`` / WebSearch) the phase would never exit until
+        the max-hours budget backstop — starving EXPLORE / KERNEL / SWEEP. This
+        realizes the documented "exits via plateau" contract: once the tail run
+        of consecutive no-KEEP ``local_explore`` progress rows reaches
+        ``DISCOVER_FAILURE_RETRY_LIMIT``, stop dispatching so the caller falls
+        through to the discover-exhaustion exit and the phase advances.
+
+        Returns:
+            ``True`` when the trailing consecutive-no-KEEP local_explore streak
+            has reached the retry limit; else ``False``.
+        """
+        from ..framework import client as _fa_client
+
+        progress = getattr(self.shared_state, "framework_agent_phase_progress", None) or []
+        streak = 0
+        for p in reversed(progress):
+            if not isinstance(p, dict):
+                continue
+            cand_id = str(p.get("candidate_id") or "")
+            if not cand_id.startswith("local_explore:"):
+                # A non-local_explore terminal row breaks the streak; a KEEP
+                # anywhere in the tail resets the plateau below.
+                break
+            if str(p.get("status") or "") == "kept":
+                streak = 0
+                break
+            streak += 1
+        return streak >= int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT)
+
     async def _maybe_dispatch_local_explore(self, *, reason: str) -> bool:
         """Dispatch a local-exploration specialist when the arm is enabled.
 
         Used as the discovery-exhaustion fallback: rather than marking the phase
         done, author a patch from the live source. No-op (returns ``False``)
-        when the arm is disabled so callers fall back to the historical exit.
+        when the arm is disabled OR has plateaued (see
+        :meth:`_local_explore_plateaued`) so callers fall back to the historical
+        discover-exhaustion exit and the phase advances.
 
         Args:
             reason: Short provenance tag recorded on the dispatch log line.
@@ -2086,6 +2123,15 @@ class FrameworkPhase(PhaseHandler):
             ``True`` when a specialist was dispatched, else ``False``.
         """
         if not self._framework_local_explore_arm_enabled():
+            return False
+        if self._local_explore_plateaued():
+            from ..framework import client as _fa_client
+
+            log.info(
+                "FRAMEWORK: local-exploration arm plateaued (>= %d consecutive no-KEEP) "
+                "— not re-dispatching; falling through to discover-exhaustion exit",
+                int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
+            )
             return False
         pseudo = self._make_local_explore_pseudo_candidate()
         if pseudo is None:
