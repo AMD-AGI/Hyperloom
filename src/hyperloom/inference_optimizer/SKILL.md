@@ -864,18 +864,23 @@ For **multi-node / communication-bound** runs (a single exposed
 collective such as an `ncclDevKernel`/RCCL all-reduce dominates GPU time
 while compute is a small slice), compute/cache knobs above cannot move
 the run — the bottleneck is a cross-rank wait, usually EP/TP load
-imbalance. The `comm_specialist` owns this direction; useful candidate
-families it may surface: hide the collective
-(`--enable-two-batch-overlap`, `--enable-overlap-schedule`,
-`SGLANG_OPT_USE_MULTI_STREAM_OVERLAP`); shrink / rebalance it
-(`--enable-dp-attention`, `--ep-size` / `--moe-dense-tp-size`
-re-partition, quantized quick-reduce `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION`
-/ aiter quick-reduce INT8/FP8); and collective-library env sweeps
+imbalance. The `comm_specialist` owns this direction. Candidate
+*mechanisms* (not a fixed flag list): hide the collective (micro-batch /
+dual-batch overlap, overlap scheduler, multi-stream overlap); shrink /
+rebalance it (DP / sequence-parallel attention, EP / MoE-TP re-partition,
+quantized quick-reduce); and collective-library env sweeps
 (`NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS`, `NCCL_PROTO`,
-`RCCL_MSCCL_ENABLE`). Aggressive overlap flags can crash during CUDA-graph
-capture on MI325X + ROCm — a crash means step down the specialist's
-degradation ladder (drop quick-reduce, keep TBO; then overlap-schedule;
-then dp-attention; then env-only sweeps), not abandon the direction.
+`RCCL_MSCCL_ENABLE` — these env vars are version-stable). **Do not
+hard-code framework server-flag names**: they drift across framework
+versions (renamed, default-on, or companion-required), so the specialist
+must source the exact flag from the running build's `--help` /
+`discovered_flags` and confirm it is accepted before proposing — an
+unknown flag wastes a full cluster restart on an `unrecognized arguments`
+abort. Aggressive overlap / quantized-collective mechanisms can also crash
+during graph capture on some stacks — a runtime crash means step down the
+specialist's degradation ladder (not abandon the direction), whereas an
+`unrecognized arguments` abort means the flag is not in this build (drop it
+permanently and pick another mechanism).
 
 ### Per-Run Asset Override (advanced)
 
