@@ -118,13 +118,13 @@ The following inference frameworks are supported:
    * - Framework
      - ROCm version
      - Notes
-   * - SGLang (ROCm)
+   * - SGLang
      - 7.2.0
      - Default framework
-   * - vLLM (ROCm)
+   * - vLLM
      - 7.2.0
      - Do not mix frameworks within one session
-   * - Atom (ROCm)
+   * - Atom
      - 7.2.0
      - Single-node only (multi-node rejected by the IR-8 guard)
    * - xDiT (diffusion)
@@ -169,7 +169,7 @@ Hyperloom does not install ROCm or torch itself.
      - Recommended
      - Notes
    * - ROCm
-     - 7.2.0
+     - 7.2.2
      - Matches the validated framework stacks above.
    * - Python
      - 3.12
