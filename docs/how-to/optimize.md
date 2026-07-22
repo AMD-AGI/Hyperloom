@@ -6,10 +6,7 @@ myst:
 ---
 # Run a Hyperloom optimization
 
-This topic assumes you have already completed installation. If you haven't:
-
-- **Quickstart**: see [Quickstart](../../examples/README.md),
-  then return here to launch your first run.
+This topic assumes you have already completed installation. If you haven't see [Quickstart](../install/install.md), then return here to launch your first run.
 
 ## Launch from Cursor
 
