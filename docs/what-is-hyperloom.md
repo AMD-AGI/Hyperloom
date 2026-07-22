@@ -33,7 +33,7 @@ The following diagram describes how Hyperloom processes a workload from submissi
 
 Hyperloom combines:
 
-- Trace analysis, identifying bottleneck kernels and bridge planning through
+- Trace analysis, identifying kernel bottlenecks and bridge planning through
   [TraceLens](https://github.com/AMD-AGI/TraceLens) Agent (backend support
    from [Magpie](https://github.com/AMD-AGI/Magpie) and
    [Intellikit](https://github.com/AMDResearch/intellikit))

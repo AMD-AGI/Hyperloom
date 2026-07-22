@@ -35,8 +35,7 @@ Hyperloom is validated against.
 
 .. note::
 
-   This matrix tracks the currently validated combinations. Other ROCm versions
-   or framework builds might work but, are not regularly tested.
+  ROCm versions or framework builds not listed in this matrix might work, but are not regularly tested.
 
 Hyperloom support matrix
 ========================
