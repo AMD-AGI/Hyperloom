@@ -169,7 +169,7 @@ def test_validate_dispatched_task_unit_integrate_patch_gate(tmp_path):
             "integrate_patch",
             {"specialist_task_id": "x", "framework_source_root": "/root"},
         )
-    assert exc.value.rule == "source_file_not_allowlisted"
+    assert exc.value.rule == "source_file_outside_trusted_scope"
 
 
 def test_validate_dispatched_task_accepts_integrate_patch_with_verdict(tmp_path, monkeypatch):
