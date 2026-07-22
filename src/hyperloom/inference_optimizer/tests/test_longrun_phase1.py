@@ -113,7 +113,7 @@ def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
 
 
 def test_short_bounded_run_closes_when_insufficient_remaining():
-    # 12h bounded run with ~10min left: still below the 30min reloop floor.
+    # 12h bounded run with ~10min left: below the 3h reloop floor.
     st = _sweep_state(max_minutes=12 * 60, started_hours_ago=12 - 10 / 60.0)
     reloop, ev = ps.should_reloop_to_explore(st)
     assert reloop is False
@@ -124,6 +124,25 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
     assert reason == "sweep_done"
     assert "loopback" not in evidence
     assert evidence["reloop_blocked"] == "insufficient_remaining"
+
+
+def test_reloop_requires_at_least_three_hours_remaining():
+    st = _sweep_state(max_minutes=12 * 60, started_hours_ago=0.0)
+    start_unix = datetime.fromisoformat(st.start_ts).timestamp()
+
+    reloop, ev = ps.should_reloop_to_explore(
+        st,
+        now_unix=start_unix + 9 * 3600,
+    )
+    assert reloop is True
+    assert ev["reloop"] is True
+
+    reloop, ev = ps.should_reloop_to_explore(
+        st,
+        now_unix=start_unix + 9 * 3600 + 1,
+    )
+    assert reloop is False
+    assert ev["reloop_blocked"] == "insufficient_remaining"
 
 
 def test_exactly_24h_is_long_run():

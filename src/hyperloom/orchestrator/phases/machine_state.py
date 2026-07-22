@@ -524,7 +524,7 @@ DEFAULT_MAX_MACRO_CYCLES: int = 1000
 # Minimum session wall-clock (seconds) that must remain to justify opening a new
 # macro-cycle; below this we wind down to CLOSE instead of starting a cycle we
 # cannot meaningfully use.
-DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = 1800.0  # 30 min
+DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = 10800.0  # 3 h
 
 # R7 global convergence: number of consecutive no-gain macro-cycles after which
 # the run is considered converged (stop looping → CLOSE).
