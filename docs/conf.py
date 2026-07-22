@@ -4,7 +4,11 @@
 # Configuration file for the Sphinx documentation builder.
 
 import os
+import re
+import shutil
 import sys
+from pathlib import Path
+from subprocess import run
 
 # -- Path setup --------------------------------------------------------------
 # Add repo root and ``src`` for autodoc.
@@ -46,6 +50,26 @@ suppress_warnings = [
     "etoc.toctree",
 ]
 
+# Register Sphinx extensions and static assets
+sys.path.append(str(DOCS_DIR / "extension"))
+extensions = [
+    "rocm_docs",
+    "rocm_docs_custom.selector",
+    "rocm_docs_custom.matrix",
+    "rocm_docs_custom.icon",
+    "rocm_docs_custom.csv_list_to_table",
+    "rocm_docs_custom.remote_content",
+    "rocm_docs_custom.remote_yaml",
+    "rocm_docs_custom.version_ref",
+    "rocm_docs_custom.merge_components",
+    "sphinxcontrib.datatemplates",
+    "sphinx_substitution_extensions",
+    # "sphinx_reredirects",
+    # "sphinx_sitemap",
+]
+templates_path = ["extension/rocm_docs_custom/selector/templates"]
+
+external_projects_current_project = "rocm"
 html_theme = "rocm_docs_theme"
 html_theme_options = {
     "flavor": "rocm",
