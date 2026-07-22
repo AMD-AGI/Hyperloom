@@ -192,12 +192,20 @@ trap 'echo "[ci-e2e] cancelled; deleting workload $UID_"; post_status "error" "c
 
 # ---- poll -----------------------------------------------------------------
 i=0
+prev_phase=""
 while [ "$i" -lt "$POLL_MAX" ]; do
   i=$((i + 1))
   detail="$(curl -sS "${tls[@]}" "$API/$UID_" "${auth[@]}" || true)"
   phase="$(printf '%s' "$detail" | jq -r '.orchestration.phase // "Unknown"' 2>/dev/null || echo Unknown)"
-  spur="$(printf '%s' "$detail" | jq -r '.dispatches[0].platform_ref // "-"' 2>/dev/null || echo -)"
-  echo "[ci-e2e] poll $i/$POLL_MAX phase=$phase spur_job=$spur uid=$UID_"
+  spur="$(printf '%s' "$detail" | jq -r '.dispatches[-1].platform_ref // "-"' 2>/dev/null || echo -)"
+  node="$(printf '%s' "$detail" | jq -r '.dispatches[-1].nodes // "-"' 2>/dev/null || echo -)"
+  echo "[ci-e2e] poll $i/$POLL_MAX phase=$phase node=$node spur_job=$spur uid=$UID_"
+  # Announce phase transitions (from the orchestration conditions ledger).
+  if [ "$phase" != "$prev_phase" ]; then
+    cond="$(printf '%s' "$detail" | jq -r '.orchestration.conditions[-1] | "\(.time) \(.phase): \(.message)"' 2>/dev/null || echo "")"
+    echo "[ci-e2e]   >> phase ${prev_phase:-<start>} -> ${phase}${cond:+   ($cond)}"
+    prev_phase="$phase"
+  fi
   case "$phase" in
     Succeeded)
       summary "✅ **PASS** — run completed. claw_session_id=\`$UID_\` spur_job=\`$spur\`"
@@ -206,7 +214,7 @@ while [ "$i" -lt "$POLL_MAX" ]; do
       exit 0 ;;
     Failed)
       err="$(printf '%s' "$detail" | jq -r '.orchestration.last_error // (.orchestration.conditions[-1].message) // "unknown"' 2>/dev/null)"
-      summary "❌ **FAIL** — claw_session_id=\`$UID_\` spur_job=\`$spur\`"
+      summary "❌ **FAIL** — claw_session_id=\`$UID_\` spur_job=\`$spur\` node=\`$node\`"
       summary "reason: $err"
       post_status "failure" "FAIL — ${err}; uid=${UID_}; spur_job=${spur}"
       report_upsert "❌ Failed"
