@@ -20,7 +20,6 @@ upstream SKILL file for the component you're touching:
 **Symptom**: A tool exits with one of:
 
 * `HTTP 401 Unauthorized`
-* `Primus.00009 token not present`
 * `Claude SDK exit code 1`
 * `OpenAI SDK: AuthenticationError`
 

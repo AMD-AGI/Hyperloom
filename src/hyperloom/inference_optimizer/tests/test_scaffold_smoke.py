@@ -21,8 +21,15 @@ from hyperloom.orchestrator.bus.storage import (
 )
 
 
-def test_package_version_is_v06():
-    assert hyperloom.inference_optimizer.__version__ == "0.6.0"
+def test_package_version_matches_metadata():
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as pkg_version
+
+    try:
+        expected = pkg_version("hyperloom-inference_optimizer")
+    except PackageNotFoundError:
+        expected = "0.0.0.dev0"
+    assert hyperloom.inference_optimizer.__version__ == expected
 
 
 def test_make_session_dir_creates_all_subdirs(tmp_path, monkeypatch):
