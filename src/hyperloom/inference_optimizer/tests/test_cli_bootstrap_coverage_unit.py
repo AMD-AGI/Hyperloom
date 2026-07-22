@@ -578,3 +578,75 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
         lambda *_a, **_k: ("fuzzy.sh", "fuzzy"),
     )
     assert cb._resolve_reference_recipe(_args(reference_script="empty.sh")) == ("", {}, "", "")
+
+
+# ---------------------------------------------------------------------------
+# _detect_checkpoint_precision tests
+# ---------------------------------------------------------------------------
+
+
+def test_detect_checkpoint_precision_bf16_from_torch_dtype(tmp_path):
+    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+
+    (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
+    assert _detect_checkpoint_precision(str(tmp_path)) == "bf16"
+
+
+def test_detect_checkpoint_precision_fp8_from_quant_method(tmp_path):
+    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+
+    (tmp_path / "config.json").write_text(
+        '{"quantization_config": {"quant_method": "fp8"}}', encoding="utf-8"
+    )
+    assert _detect_checkpoint_precision(str(tmp_path)) == "fp8"
+
+
+def test_detect_checkpoint_precision_fallback_on_missing():
+    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+
+    assert _detect_checkpoint_precision("/nonexistent/model/path") == ""
+    assert _detect_checkpoint_precision(None) == ""
+
+
+def test_detect_checkpoint_precision_float8_e4m3fn(tmp_path):
+    from hyperloom.inference_optimizer.cli import _detect_checkpoint_precision
+
+    (tmp_path / "config.json").write_text('{"torch_dtype": "float8_e4m3fn"}', encoding="utf-8")
+    assert _detect_checkpoint_precision(str(tmp_path)) == "fp8"
+
+
+def test_resolve_workload_knobs_precision_auto_detected(tmp_path):
+    import argparse
+
+    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+
+    (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
+    args = argparse.Namespace(precision=None, model=str(tmp_path), tp=None, ep=None, conc=None)
+    _resolve_workload_knobs(args)
+    assert args.precision == "bf16"
+
+
+def test_resolve_workload_knobs_explicit_precision_kept_with_warning(tmp_path, capsys):
+    import argparse
+
+    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+
+    (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
+    args = argparse.Namespace(precision="fp8", model=str(tmp_path), tp=None, ep=None, conc=None)
+    _resolve_workload_knobs(args)
+    assert args.precision == "fp8"
+    captured = capsys.readouterr()
+    assert "WARN" in captured.err and "bf16" in captured.err
+
+
+def test_resolve_workload_knobs_resume_precision_wins(tmp_path):
+    import argparse
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.cli import _resolve_workload_knobs
+
+    (tmp_path / "config.json").write_text('{"torch_dtype": "bfloat16"}', encoding="utf-8")
+    args = argparse.Namespace(precision=None, model=str(tmp_path), tp=None, ep=None, conc=None)
+    state = SimpleNamespace(precision="fp8", tp=2, ep=1, conc=64)
+    _resolve_workload_knobs(args, state)
+    assert args.precision == "fp8"

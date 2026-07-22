@@ -1200,6 +1200,38 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     return phase_budget_pct
 
 
+def _detect_checkpoint_precision(model_path: str | None) -> str:
+    """Detect weight precision from model config.json; returns '' on failure."""
+    if not model_path:
+        return ""
+    try:
+        from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+
+        summary = summarize_model_config(str(model_path))
+    except Exception:  # noqa: BLE001
+        return ""
+    quant = (summary.get("quantization") or "").strip().lower()
+    if quant:
+        if quant.startswith("fp8"):
+            return "fp8"
+        if quant in ("fp4", "mxfp4", "nvfp4"):
+            return "fp4"
+        if quant in ("int8", "w8a8_int8"):
+            return "int8"
+        if quant in ("int4", "awq", "gptq"):
+            return "int4"
+        return quant
+    dtype = (summary.get("torch_dtype") or "").strip().lower()
+    _DTYPE_MAP = {
+        "bfloat16": "bf16",
+        "float16": "fp16",
+        "float32": "fp32",
+        "float8_e4m3fn": "fp8",
+        "float8_e5m2": "fp8",
+    }
+    return _DTYPE_MAP.get(dtype, dtype) if dtype else ""
+
+
 def _resolve_workload_knobs(
     args: argparse.Namespace,
     state: Any | None = None,
@@ -1233,7 +1265,19 @@ def _resolve_workload_knobs(
     precision = getattr(args, "precision", None)
     if not precision:
         persisted = (getattr(state, "precision", "") or "").strip() if state is not None else ""
-        precision = persisted or DEFAULT_PRECISION
+        if persisted:
+            precision = persisted
+        else:
+            detected = _detect_checkpoint_precision(getattr(args, "model", None))
+            precision = detected or DEFAULT_PRECISION
+    else:
+        detected = _detect_checkpoint_precision(getattr(args, "model", None))
+        if detected and detected != precision:
+            print(
+                f"WARN: --precision={precision!r} but checkpoint dtype is {detected!r}; "
+                "using --precision flag as specified.",
+                file=sys.stderr,
+            )
     args.precision = precision
 
 
