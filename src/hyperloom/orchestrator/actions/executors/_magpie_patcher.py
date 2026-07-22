@@ -111,6 +111,30 @@ _REMOTE_DIRECT_PATCHED_BLOCK = (
     "    fi\n"
 )
 
+# Local-server SGLang client path (``BENCHMARK_BASE_URL`` unset — e.g. the
+# baseline ``server_lifecycle`` reuse path) calls InferenceX
+# ``run_benchmark_serving`` directly. Unlike the remote-direct path above this
+# branch had NO trust gate, so custom-code tokenizers (Kimi-K2.7-Code, Qwen,
+# ...) failed the client-side tokenizer load even though
+# ``MAGPIE_TRUST_REMOTE_CODE=1`` was exported. Inject the same gate here so both
+# client paths honour the trust env.
+_LOCAL_TRUST_SENTINEL = "HYPERLOOM_LOCAL_TRUST"
+_LOCAL_DIRECT_LEGACY_BLOCK = (
+    "  else\n"
+    "    run_benchmark_serving \\\n"
+    '        --model "$MODEL" \\\n'
+)
+_LOCAL_DIRECT_PATCHED_BLOCK = (
+    "  else\n"
+    "    LOCAL_TRUST_ARGS=()  # HYPERLOOM_LOCAL_TRUST\n"
+    '    if [[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" || "${BENCH_TRUST_REMOTE_CODE:-0}" == "1" ]]; then\n'
+    "      LOCAL_TRUST_ARGS+=(--trust-remote-code)\n"
+    "    fi\n"
+    "    run_benchmark_serving \\\n"
+    '        "${LOCAL_TRUST_ARGS[@]}" \\\n'
+    '        --model "$MODEL" \\\n'
+)
+
 # Strip the redundant, fatal ``--concurrent-requests <CONC>`` flag from Magpie's
 # generic benchmark scripts: InferenceX's ``run_lm_eval`` rejects it as an
 # unknown flag, aborting the whole script; concurrency still flows via the
@@ -685,9 +709,10 @@ def _apply_patch_atomic_reason(src: Path) -> str:
 def _is_remote_trust_patched(src: Path) -> bool:
     """Return whether SGLang compatibility sentinels are already present.
 
-    Checks BOTH ``MAGPIE_TRUST_REMOTE_CODE`` (remote trust) and
+    Checks ``MAGPIE_TRUST_REMOTE_CODE`` (remote-direct trust),
+    ``HYPERLOOM_LOCAL_TRUST`` (local-server trust) and
     ``HYPERLOOM_EVAL_CONCURRENCY_FIX`` (eval concurrency) so a pre-existing
-    remote-trust patch does not short-circuit the eval-concurrency fix.
+    partial patch does not short-circuit the remaining fixes.
 
     Args:
         src: The ``sglang_mi300x.sh`` file to inspect.
@@ -696,19 +721,20 @@ def _is_remote_trust_patched(src: Path) -> bool:
         True iff both compatibility sentinels are present, False on a miss or
         read error.
     """
-    return file_contains_sentinel(src, _REMOTE_TRUST_SENTINEL, log, "_magpie_patcher") and file_contains_sentinel(
-        src,
-        _EVAL_CONC_SENTINEL,
-        log,
-        "_magpie_patcher",
+    return (
+        file_contains_sentinel(src, _REMOTE_TRUST_SENTINEL, log, "_magpie_patcher")
+        and file_contains_sentinel(src, _LOCAL_TRUST_SENTINEL, log, "_magpie_patcher")
+        and file_contains_sentinel(src, _EVAL_CONC_SENTINEL, log, "_magpie_patcher")
     )
 
 
 def _apply_remote_trust_patch_atomic(src: Path) -> bool:
     """Patch ``sglang_mi300x.sh`` for Hyperloom compatibility.
 
-    Applies two independent compatibility fixes:
-    - remote client trust gating via ``MAGPIE_TRUST_REMOTE_CODE``
+    Applies three independent compatibility fixes:
+    - remote-direct client trust gating via ``MAGPIE_TRUST_REMOTE_CODE``
+    - local-server client trust gating (the ``run_benchmark_serving`` else
+      branch used by the baseline ``server_lifecycle`` reuse path)
     - eval concurrency wiring via ``EVAL_CONCURRENT_REQUESTS`` env (no
       unsupported ``--concurrent-requests`` arg)
 
@@ -739,6 +765,21 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
         patched = patched.replace(
             _REMOTE_DIRECT_LEGACY_BLOCK,
             _REMOTE_DIRECT_PATCHED_BLOCK,
+            1,
+        )
+
+    if _LOCAL_TRUST_SENTINEL not in patched:
+        if _LOCAL_DIRECT_LEGACY_BLOCK not in patched:
+            log.warning(
+                "_magpie_patcher: local benchmark direct-call block not found in "
+                "%s; Magpie custom-tokenizer local-client trust patch could not "
+                "be applied (baseline server_lifecycle reuse path)",
+                src,
+            )
+            return False
+        patched = patched.replace(
+            _LOCAL_DIRECT_LEGACY_BLOCK,
+            _LOCAL_DIRECT_PATCHED_BLOCK,
             1,
         )
 

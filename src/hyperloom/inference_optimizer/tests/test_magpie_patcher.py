@@ -135,7 +135,9 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
     SERVER_MONITOR_ARGS=()
     magpie_run_benchmark_serving_remote_direct || exit $?
   else
-    run_benchmark_serving --model "$MODEL" || exit $?
+    run_benchmark_serving \
+        --model "$MODEL" \
+        --port "$PORT" || exit $?
   fi
 fi
 if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
@@ -249,6 +251,10 @@ def test_sglang_remote_client_trust_patch_is_env_gated(fake_magpie: Path):
     assert '[[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]' in text
     assert "magpie_run_benchmark_serving_remote_direct trust" in text
     assert "magpie_run_benchmark_serving_remote_direct || exit $?" in text
+    # Local-server (else / run_benchmark_serving) path is gated too.
+    assert "HYPERLOOM_LOCAL_TRUST" in text
+    assert '"${LOCAL_TRUST_ARGS[@]}"' in text
+    assert 'BENCH_TRUST_REMOTE_CODE:-0' in text
     assert "HYPERLOOM_EVAL_CONCURRENCY_FIX" in text
     assert "EVAL_CONCURRENT_REQUESTS" in text
     assert "--concurrent-requests" not in text

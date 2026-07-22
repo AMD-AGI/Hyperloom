@@ -26,6 +26,10 @@ _SGLANG_LEGACY = (
     "#!/bin/bash\n"
     "    SERVER_MONITOR_ARGS=()\n"
     "    magpie_run_benchmark_serving_remote_direct || exit $?\n"
+    "  else\n"
+    "    run_benchmark_serving \\\n"
+    '        --model "$MODEL" \\\n'
+    '        --port "$PORT" || exit $?\n'
     '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n'
 )
 
@@ -199,6 +203,13 @@ def test_is_remote_trust_patched(tmp_path):
         "MAGPIE_TRUST_REMOTE_CODE here\nHYPERLOOM_EVAL_CONCURRENCY_FIX\n",
         encoding="utf-8",
     )
+    # Local-server trust sentinel still missing -> not fully patched.
+    assert mp._is_remote_trust_patched(f) is False
+    f.write_text(
+        "MAGPIE_TRUST_REMOTE_CODE here\nHYPERLOOM_LOCAL_TRUST\n"
+        "HYPERLOOM_EVAL_CONCURRENCY_FIX\n",
+        encoding="utf-8",
+    )
     assert mp._is_remote_trust_patched(f) is True
     assert mp._is_remote_trust_patched(tmp_path / "missing") is False
 
@@ -206,7 +217,8 @@ def test_is_remote_trust_patched(tmp_path):
 def test_apply_remote_trust_already(tmp_path):
     f = tmp_path / "s.sh"
     f.write_text(
-        "MAGPIE_TRUST_REMOTE_CODE\nHYPERLOOM_EVAL_CONCURRENCY_FIX\n",
+        "MAGPIE_TRUST_REMOTE_CODE\nHYPERLOOM_LOCAL_TRUST\n"
+        "HYPERLOOM_EVAL_CONCURRENCY_FIX\n",
         encoding="utf-8",
     )
     assert mp._apply_remote_trust_patch_atomic(f) is True
@@ -218,11 +230,29 @@ def test_apply_remote_trust_legacy_missing(tmp_path):
     assert mp._apply_remote_trust_patch_atomic(f) is False
 
 
+def test_apply_remote_trust_local_block_missing(tmp_path):
+    # Remote-direct block present but the local-server run_benchmark_serving
+    # else branch is absent -> patch must fail loudly (no silent gap).
+    f = tmp_path / "s.sh"
+    f.write_text(
+        "#!/bin/bash\n"
+        "    SERVER_MONITOR_ARGS=()\n"
+        "    magpie_run_benchmark_serving_remote_direct || exit $?\n"
+        '        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?\n',
+        encoding="utf-8",
+    )
+    assert mp._apply_remote_trust_patch_atomic(f) is False
+
+
 def test_apply_remote_trust_applied(tmp_path):
     f = tmp_path / "s.sh"
     f.write_text(_SGLANG_LEGACY, encoding="utf-8")
     assert mp._apply_remote_trust_patch_atomic(f) is True
-    assert "MAGPIE_TRUST_REMOTE_CODE" in f.read_text(encoding="utf-8")
+    patched = f.read_text(encoding="utf-8")
+    assert "MAGPIE_TRUST_REMOTE_CODE" in patched
+    # Local-server (else / run_benchmark_serving) branch also gained the gate.
+    assert "HYPERLOOM_LOCAL_TRUST" in patched
+    assert '"${LOCAL_TRUST_ARGS[@]}"' in patched
 
 
 def test_apply_remote_trust_read_error(tmp_path):
