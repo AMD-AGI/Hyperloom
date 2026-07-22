@@ -146,10 +146,10 @@ INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 # Merged explore action.
 EXPLORE_ACTION_NAME: str = "explore"
 
-# Full workload sweep action; named constant so the ``sweep_phase_singleton``
-# rule has a single source of truth. (``conc_sweep`` is a Coordinator-internal
-# action gated via COORDINATOR_INTERNAL_ACTIONS, not a singleton rule here.)
+# Sweep actions; named constants so the ``*_phase_singleton`` rules have a
+# single source of truth.
 SWEEP_ACTION_NAME: str = "sweep"
+CONC_SWEEP_ACTION_NAME: str = "conc_sweep"
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
