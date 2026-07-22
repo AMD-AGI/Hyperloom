@@ -1563,6 +1563,23 @@ def _forge_gemm_tune_available() -> bool:
         return False
 
 
+def _resolve_aiter_root_for_forge() -> str:
+    """Resolve AITER's source root, including split ``aiter_meta`` wheels."""
+    explicit = os.environ.get("AITER_ROOT_DIR", "").strip()
+    if explicit:
+        return explicit
+    try:
+        spec = importlib.util.find_spec("aiter_meta")
+    except (ModuleNotFoundError, ValueError):
+        spec = None
+    locations = getattr(spec, "submodule_search_locations", None) or []
+    for location in locations:
+        root = Path(location)
+        if (root / "csrc").is_dir():
+            return str(root)
+    return ""
+
+
 def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     """Resolve the actual runtime precision and quant_type for forge tuning.
 
@@ -1579,6 +1596,9 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if payload.get("precision"):
         precision = _normalize_precision(payload["precision"])
         quant_type = str(payload.get("quant_type") or "auto").strip()
+        if precision == "fp8" and quant_type.lower() == "auto":
+            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+            quant_type = _resolve_fp8_quant_type(model_path)
         return precision, quant_type
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
@@ -1616,6 +1636,9 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if not precision:
         precision = "bf16"
     quant_type = str(payload.get("quant_type") or "auto").strip()
+    if precision == "fp8" and quant_type.lower() == "auto":
+        model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+        quant_type = _resolve_fp8_quant_type(model_path)
     return precision, quant_type
 
 
@@ -2016,6 +2039,123 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
         return ""
 
 
+_VLLM_BLOCK_FP8_TRACE_OPS = (
+    "w8a8_triton_block_scaled_mm",
+    "rocm_aiter_gemm_a8w8_blockscale",
+    "rocm_aiter_triton_gemm_a8w8_blockscale",
+)
+
+
+def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
+    """Return whether vLLM runs the block-scaled FP8 linear kernel path."""
+    return precision == "fp8" and quant_type.strip().lower() in {
+        "blockscale",
+        "block_scale",
+        "a8w8_blockscale",
+        "fp8_blockscale",
+    }
+
+
+def _forge_framework_for_vllm(
+    *,
+    framework: str,
+    precision: str,
+    quant_type: str,
+    tunableop_input: str,
+) -> str:
+    """Route block-FP8 vLLM to Forge's AITER dense tuner family."""
+    if framework == "vllm" and not tunableop_input and _is_vllm_block_fp8(precision, quant_type):
+        return "vllm-aiter"
+    return framework
+
+
+def _vllm_block_fp8_profile_capture_required(
+    *,
+    framework: str,
+    precision: str,
+    quant_type: str,
+    shapes_json: str,
+    tunableop_input: str,
+    dry_run: bool,
+) -> bool:
+    """Return whether block-FP8 needs a profiled runtime-shape capture pass."""
+    if (
+        framework != "vllm"
+        or not _is_vllm_block_fp8(precision, quant_type)
+        or dry_run
+        or shapes_json
+        or tunableop_input
+        or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
+    ):
+        return False
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    return not is_multi_node()
+
+
+def _trace_event_block_fp8_shape(event: Any) -> tuple[int, int, int] | None:
+    """Extract one (M, N, K) tuple from a profiled block-FP8 linear event."""
+    if not isinstance(event, dict):
+        return None
+    name = str(event.get("name") or "").lower()
+    if not any(marker in name for marker in _VLLM_BLOCK_FP8_TRACE_OPS):
+        return None
+    args = event.get("args")
+    if not isinstance(args, dict):
+        return None
+    dims = args.get("Input Dims") or args.get("Input dims") or args.get("input_shapes")
+    if not isinstance(dims, list) or len(dims) < 2:
+        return None
+    a_dims, b_dims = dims[0], dims[1]
+    if not isinstance(a_dims, list) or not isinstance(b_dims, list) or len(a_dims) < 2 or len(b_dims) < 2:
+        return None
+    try:
+        m = int(a_dims[-2])
+        k = int(a_dims[-1])
+        if int(b_dims[-1]) == k:
+            n = int(b_dims[-2])
+        elif int(b_dims[-2]) == k:
+            n = int(b_dims[-1])
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return (m, n, k) if min(m, n, k) > 0 else None
+
+
+def _extract_vllm_block_fp8_profile_shapes(capture_dir: Path) -> tuple[str, int]:
+    """Convert Kineto block-FP8 events into Forge's structured shapes JSON."""
+    import gzip
+
+    shapes: set[tuple[int, int, int]] = set()
+    trace_paths = sorted(capture_dir.rglob("*.json")) + sorted(capture_dir.rglob("*.json.gz"))
+    for path in trace_paths:
+        try:
+            if path.name.endswith(".gz"):
+                with gzip.open(path, "rt", encoding="utf-8", errors="replace") as stream:
+                    data = json.load(stream)
+            else:
+                data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            continue
+        events = data.get("traceEvents") if isinstance(data, dict) else None
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            shape = _trace_event_block_fp8_shape(event)
+            if shape is not None:
+                shapes.add(shape)
+    if not shapes:
+        return "", 0
+    out = capture_dir / "forge_shapes.json"
+    payload = [{"M": m, "N": n, "K": k} for m, n, k in sorted(shapes)]
+    try:
+        out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        return "", 0
+    return str(out), len(payload)
+
+
 def _vllm_dense_shape_capture_required(
     *,
     framework: str,
@@ -2129,7 +2269,7 @@ async def _capture_vllm_tunableop_shapes(
     payload: dict,
     workspace: Path,
 ) -> HandlerResult:
-    """Record real vLLM GEMMs with PyTorch TunableOp using the baseline workload."""
+    """Record real vLLM GEMMs using TunableOp or a block-FP8 profiler trace."""
     from ..actions.executors.baseline import BaselineExecutor
     from ..loop.sub_agent_runner import RunnerContext
     from ..state.task_registry import Task
@@ -2138,6 +2278,7 @@ async def _capture_vllm_tunableop_shapes(
     capture_dir.mkdir(parents=True, exist_ok=True)
     untuned_base = capture_dir / "tunableop_untuned.csv"
     results_base = capture_dir / "tunableop_results.csv"
+    profile_mode = payload.get("_shape_capture_mode") == "block_fp8_profile"
 
     config_path = str(payload.get("config_path") or getattr(state, "baseline_config_path", "") or "").strip()
     if not config_path or not Path(config_path).is_file():
@@ -2149,6 +2290,31 @@ async def _capture_vllm_tunableop_shapes(
             "error": "vLLM TunableOp shape capture requires an existing baseline_config_path",
             "shape_capture_workspace": str(capture_dir),
         }
+
+    if profile_mode:
+        try:
+            import yaml
+
+            capture_config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+            benchmark_config = capture_config.setdefault("benchmark", {})
+            profiler_config = benchmark_config.setdefault("profiler", {})
+            torch_profiler_config = profiler_config.setdefault("torch_profiler", {})
+            torch_profiler_config["enabled"] = True
+            profile_config_path = capture_dir / "block_fp8_profile_config.yaml"
+            profile_config_path.write_text(
+                yaml.safe_dump(capture_config, sort_keys=False),
+                encoding="utf-8",
+            )
+            config_path = str(profile_config_path)
+        except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+            return {
+                "status": "failed",
+                "decision": "REVERT",
+                "requires_e2e_validation": False,
+                "error_class": "shape_capture_failed",
+                "error": f"vLLM block-FP8 profile config failed: {exc}",
+                "shape_capture_workspace": str(capture_dir),
+            }
 
     current_best = getattr(state, "current_best", None)
     current_best = current_best if isinstance(current_best, dict) else {}
@@ -2184,6 +2350,13 @@ async def _capture_vllm_tunableop_shapes(
             "PYTORCH_TUNABLEOP_FILENAME": str(results_base),
         }
     )
+    if profile_mode:
+        capture_envs.update(
+            {
+                "VLLM_ROCM_USE_AITER": "1",
+                "VLLM_ROCM_USE_AITER_LINEAR": "1",
+            }
+        )
     for env_name, state_name in (
         ("TP", "tp"),
         ("CONC", "conc"),
@@ -2219,6 +2392,13 @@ async def _capture_vllm_tunableop_shapes(
         if "extra_server_args" in payload
         else str(current_best.get("extra_server_args") or "")
     )
+    if profile_mode:
+        if "profiler-config.delay_iterations" not in extra_server_args:
+            extra_server_args = f"{extra_server_args} --profiler-config.delay_iterations 0".strip()
+        if "torch_profiler_record_shapes" not in extra_server_args:
+            extra_server_args = (
+                f"{extra_server_args} --profiler-config.torch_profiler_record_shapes True"
+            ).strip()
     inherited_unset = payload.get("unset_envs", current_best.get("unset_envs")) or []
     if isinstance(inherited_unset, str):
         capture_unset_envs = [inherited_unset]
@@ -2291,6 +2471,29 @@ async def _capture_vllm_tunableop_shapes(
 
     if not isinstance(benchmark_result, dict):
         benchmark_result = {}
+    if profile_mode:
+        shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(capture_dir)
+        if benchmark_result.get("status") == "succeeded" and shape_count > 0:
+            return {
+                "status": "ok",
+                "shapes_json": shapes_json,
+                "shape_capture_workspace": str(capture_dir),
+                "shape_count": shape_count,
+                "capture_mode": "block_fp8_profile",
+            }
+        benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
+        detail = f": {benchmark_error}" if benchmark_error else ""
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": f"vLLM block-FP8 profile capture produced no structured GEMM shapes{detail}",
+            "shape_capture_workspace": str(capture_dir),
+            "shape_count": shape_count,
+            "capture_mode": "block_fp8_profile",
+        }
+
     row_count = _merge_tunableop_untuned_files(untuned_base)
     if benchmark_result.get("status") != "succeeded" or row_count == 0:
         try:
@@ -2385,18 +2588,36 @@ async def _run_forge_gemm_tuning(
         untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type, model_path)
 
     tunableop_input = str(payload.get("tunableop_input") or "").strip()
+    forge_framework = _forge_framework_for_vllm(
+        framework=framework,
+        precision=precision,
+        quant_type=quant_type,
+        tunableop_input=tunableop_input,
+    )
     shape_capture: HandlerResult | None = None
-    if _vllm_dense_shape_capture_required(
+    block_fp8_profile_capture = _vllm_block_fp8_profile_capture_required(
+        framework=framework,
+        precision=precision,
+        quant_type=quant_type,
+        shapes_json=shapes_json,
+        tunableop_input=tunableop_input,
+        dry_run=bool(payload.get("dry_run")),
+    )
+    tunableop_capture = _vllm_dense_shape_capture_required(
         framework=framework,
         model_path=model_path,
         shapes_json=shapes_json,
         tunableop_input=tunableop_input,
         dry_run=bool(payload.get("dry_run")),
-    ):
+    ) and not block_fp8_profile_capture
+    if block_fp8_profile_capture or tunableop_capture:
+        capture_payload = dict(payload)
+        if block_fp8_profile_capture:
+            capture_payload["_shape_capture_mode"] = "block_fp8_profile"
         shape_capture = await _capture_vllm_tunableop_shapes(
             state=state,
             session_dir=session_dir,
-            payload=payload,
+            payload=capture_payload,
             workspace=workspace,
         )
         if shape_capture.get("status") != "ok":
@@ -2408,12 +2629,19 @@ async def _run_forge_gemm_tuning(
             shape_capture.setdefault("model_path", model_path)
             return shape_capture
         tunableop_input = str(shape_capture.get("tunableop_input") or "").strip()
+        captured_shapes = str(shape_capture.get("shapes_json") or "").strip()
+        if captured_shapes:
+            shapes_json = captured_shapes
+            # Forge dense tuners prefer untuned_csv over shapes_json. A fresh
+            # profile capture is workload-matched and must supersede any stale
+            # specialist CSV resolved before the capture pass.
+            untuned_csv = ""
 
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     input_payload = {
         "model_path": model_path,
-        "framework": framework,
+        "framework": forge_framework,
         "precision": precision,
         "quant_type": quant_type,
         "gpu_type": gpu_type,
@@ -2442,6 +2670,9 @@ async def _run_forge_gemm_tuning(
         "--input-json",
         str(input_json),
     ]
+    aiter_root = _resolve_aiter_root_for_forge()
+    if aiter_root:
+        cmd = ["env", f"AITER_ROOT_DIR={aiter_root}", *cmd]
 
     try:
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout)
@@ -2463,6 +2694,7 @@ async def _run_forge_gemm_tuning(
     result.setdefault("workspace", str(workspace))
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
+    result.setdefault("tuning_framework", forge_framework)
     result.setdefault("model_path", model_path)
     if shape_capture is not None:
         result.setdefault(
@@ -2471,7 +2703,9 @@ async def _run_forge_gemm_tuning(
                 "status": "ok",
                 "workspace": shape_capture.get("shape_capture_workspace"),
                 "tunableop_input": tunableop_input,
+                "shapes_json": shapes_json,
                 "shape_count": shape_capture.get("shape_count"),
+                "capture_mode": shape_capture.get("capture_mode", "tunableop"),
             },
         )
 
