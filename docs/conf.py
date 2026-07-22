@@ -22,19 +22,6 @@ flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-develope
 # Keep in sync with pyproject.toml [project].version.
 version_number = "1.0.0a1"
 
-html_theme = "rocm_docs_theme"
-html_theme_options = {
-    "flavor": "rocm",
-    "link_main_doc": False,
-    "repository_url": "https://github.com/AMD-AGI/Hyperloom",
-    "use_repository_button": True,
-    "use_issues_button": True,
-    # "secondary_sidebar_items": {
-        # "training/Primus**": ["framework-version-toc2"],
-        # "**": ["framework-version-toc2"],
-    # },
-}
-
 # Article info display
 setting_all_article_info = True
 all_article_info_os = ["linux"]
@@ -58,6 +45,19 @@ suppress_warnings = [
     # Autosummary API pages contain toctrees that external-toc warns about.
     "etoc.toctree",
 ]
+
+html_theme = "rocm_docs_theme"
+html_theme_options = {
+    "flavor": "rocm",
+    "link_main_doc": False,
+    "repository_url": "https://github.com/AMD-AGI/Hyperloom",
+    "use_repository_button": True,
+    "use_issues_button": True,
+    # "secondary_sidebar_items": {
+        # "training/Primus**": ["framework-version-toc2"],
+        # "**": ["framework-version-toc2"],
+    # },
+}
 
 """
 Doxygen Settings
