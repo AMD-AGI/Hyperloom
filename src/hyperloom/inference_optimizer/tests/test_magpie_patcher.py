@@ -143,6 +143,26 @@ if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
 fi
 """
 
+_UPSTREAM_SGLANG_MI355X_SH = """\
+#!/usr/bin/env bash
+SERVER_MONITOR_ARGS=()
+if [[ -n "${SERVER_PID:-}" ]]; then
+  SERVER_MONITOR_ARGS+=(--server-pid "$SERVER_PID")
+fi
+if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
+  if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+    SERVER_MONITOR_ARGS=()
+    magpie_run_benchmark_serving_remote_direct || exit $?
+  else
+    run_benchmark_serving \\
+        --model "$MODEL" \\
+        --result-filename "$RESULT_FILENAME" \\
+        "${SERVER_MONITOR_ARGS[@]}" \\
+        --result-dir ${RESULT_DIR:-/workspace/} || exit $?
+  fi
+fi
+"""
+
 
 # Layout drift: unrecognisable prepare body + atomic ops only in an unrelated
 # method; region scoping must keep this out of "already atomic".
@@ -188,10 +208,15 @@ def _write_magpie_tree(root: Path, benchmarker_src: str) -> Path:
     return bench_py
 
 
-def _write_sglang_script(root: Path, src: str = _UPSTREAM_SGLANG_MI300X_SH) -> Path:
+def _write_sglang_script(
+    root: Path,
+    src: str = _UPSTREAM_SGLANG_MI300X_SH,
+    *,
+    name: str = "sglang_mi300x.sh",
+) -> Path:
     script_dir = root / "Magpie" / "scripts" / "benchmark"
     script_dir.mkdir(parents=True, exist_ok=True)
-    script = script_dir / "sglang_mi300x.sh"
+    script = script_dir / name
     script.write_text(src, encoding="utf-8")
     script.chmod(0o755)
     return script
@@ -252,6 +277,26 @@ def test_sglang_remote_client_trust_patch_is_env_gated(fake_magpie: Path):
     assert "HYPERLOOM_EVAL_CONCURRENCY_FIX" in text
     assert "EVAL_CONCURRENT_REQUESTS" in text
     assert "--concurrent-requests" not in text
+
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    assert script.read_text(encoding="utf-8") == text
+
+
+def test_sglang_mi355x_local_and_remote_client_trust_is_env_gated(fake_magpie: Path):
+    script = _write_sglang_script(
+        fake_magpie,
+        _UPSTREAM_SGLANG_MI355X_SH,
+        name="sglang_mi355x.sh",
+    )
+
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    text = script.read_text(encoding="utf-8")
+
+    assert '[[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]' in text
+    assert "magpie_run_benchmark_serving_remote_direct trust" in text
+    assert "HYPERLOOM_SGLANG_LOCAL_TRUST" in text
+    assert "CLIENT_TRUST_ARGS+=(--trust-remote-code)" in text
+    assert '"${CLIENT_TRUST_ARGS[@]}"' in text
 
     assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
     assert script.read_text(encoding="utf-8") == text
