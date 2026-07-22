@@ -4292,6 +4292,13 @@ class FrameworkPhase(PhaseHandler):
             if task.state == "succeeded":
                 # Load the BuildResult from result.json for the rich runtime.
                 attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
+                # The build's attempt_root is resolved at pump time and is NOT
+                # written back into the task params (they keep the enqueue-time
+                # default ""). Fall back to the deterministic build path keyed by
+                # task_id so a *successful* build is not wrongly rejected as
+                # ``artifact_unreadable`` (mirrors BuildLifecycle._attempt_root).
+                if not attempt_root and task_id:
+                    attempt_root = str(self.session_dir / "enablement" / "builds" / task_id)
                 br = None
                 if attempt_root:
                     from ..framework.targeted_build import _load_result_json

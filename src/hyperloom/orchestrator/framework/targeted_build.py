@@ -266,6 +266,38 @@ def _load_result_json(attempt_root: str) -> BuildResult | None:
         return None
 
 
+def _read_build_system_requires(worktree_dir: Any) -> list[str]:
+    """Return a checkout's PEP 518 ``[build-system].requires`` for pre-install.
+
+    Used before a ``--no-build-isolation`` editable install so the attempt venv
+    carries the backend deps (setuptools-scm / setuptools-rust / packaging /
+    cmake / ninja / wheel / jinja2 / ...) the checkout pins. Any ``torch``
+    requirement is dropped so the venv's ROCm torch is never clobbered by an
+    upstream CUDA torch pin. Missing / unparseable pyproject → empty list
+    (caller degrades to the plain editable install).
+    """
+    try:
+        import tomllib  # py3.11+
+    except Exception:  # noqa: BLE001
+        return []
+    pyproject = Path(worktree_dir) / "pyproject.toml"
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — no/invalid pyproject → skip pre-install
+        return []
+    reqs = (data.get("build-system") or {}).get("requires") or []
+    out: list[str] = []
+    for r in reqs:
+        if not isinstance(r, str):
+            continue
+        # Drop torch pins — the ROCm torch already in the venv must win.
+        name = r.strip().lower()
+        if name.startswith("torch") and not name.startswith("torchvision") and not name.startswith("torchaudio"):
+            continue
+        out.append(r.strip())
+    return out
+
+
 # ---------------------------------------------------------------------------
 # AITER real-build recipe
 # ---------------------------------------------------------------------------
@@ -880,15 +912,51 @@ def run_vllm_source_build(
         return _fail("preflight_toolchain", f"torch constraint probe failed: {exc!r}")
 
     since_unix = _time.time()
+    # vLLM's ROCm setup.py asserts ``CUDA_HOME is not set`` and reuses it as the
+    # toolchain root even on ROCm. The pip build-env overlay does not inherit an
+    # unset CUDA_HOME/ROCM_HOME, so derive the ROCm root and export it explicitly.
+    _rocm_root = (
+        _os.environ.get("ROCM_HOME")
+        or _os.environ.get("CUDA_HOME")
+        or _os.environ.get("ROCM_PATH")
+        or _os.environ.get("HIP_PATH")
+        or "/opt/rocm"
+    ).strip() or "/opt/rocm"
     install_env = {
         **_os.environ,
         "PYTORCH_ROCM_ARCH": gpu_arch,
         "MAX_JOBS": str(max_jobs),
+        "CUDA_HOME": _rocm_root,
+        "ROCM_HOME": _rocm_root,
+        "ROCM_PATH": _rocm_root,
+        "HIP_HOME": _rocm_root,
     }
 
-    # pip install -e triggers CMake build_ext
+    # ``--no-build-isolation`` (below) means pip will NOT install the checkout's
+    # [build-system].requires — they must already be in the attempt venv. Pre-
+    # install them (minus any ``torch`` pin, which would clobber the ROCm torch
+    # the venv was built against). Without this, a checkout that pins e.g.
+    # setuptools-scm / setuptools-rust / a different torch fails PEP517 metadata
+    # prep with the cryptic ``OSError ... output.json: No such file or directory``.
+    try:
+        build_requires = _read_build_system_requires(worktree_dir)
+        if build_requires:
+            run_argv(
+                [attempt_py, "-m", "pip", "install", *build_requires],
+                cwd=str(worktree_dir), env=install_env, timeout_sec=1800, run=_run,
+            )
+    except Exception:  # noqa: BLE001 — best-effort; the editable install still runs
+        import logging as _logmod
+        _logmod.getLogger(__name__).debug(
+            "vLLM source build: build-requires pre-install skipped", exc_info=True
+        )
+
+    # pip install -e triggers CMake build_ext. ``--no-build-isolation`` keeps the
+    # build in the attempt venv (which has the pinned ROCm torch + numpy) so
+    # setup.py sees torch/numpy and the exported CUDA_HOME/ROCM_HOME.
     pip_cmd = [
         attempt_py, "-m", "pip", "install",
+        "--no-build-isolation",
         "--constraint", str(constraint_path),
         "-e", str(worktree_dir),
     ]

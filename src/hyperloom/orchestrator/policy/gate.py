@@ -1648,6 +1648,15 @@ class PolicyGate:
                 rule="integrate_patch_requires_critic_verdict",
                 hint=("pass params={specialist_task_id: <id>, ...}; see actions/integrate_patch.md"),
             )
+        # Enablement build launch probe: an ``enablement_launch_only`` integrate
+        # runs the (already artifact-verified) built runtime through the runnable
+        # gate WITHOUT applying any patch. There is no specialist patch to
+        # attribute and nothing for the Critic to review, so the
+        # specialist_task_id + verdict requirement does not apply. Without this
+        # exemption the probe is denied ("specialist_task_id is required") and
+        # cancelled, so a successful from-source build never reaches KEEP.
+        if params.get("enablement_launch_only"):
+            return
         sid = str(params.get("specialist_task_id") or "").strip()
         if not sid:
             raise PolicyDenied(
