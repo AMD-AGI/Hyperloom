@@ -1,9 +1,9 @@
 name: CI E2E (single-GPU smoke run)
 
-# Every PR targeting `main` dispatches ONE single-GPU Qwen3-0.6B inference-optimizer
-# run built from the PR's branch on the spur cluster. Green if the run reaches
-# Succeeded, red on Failed/timeout. Opt OUT by adding the `skip-e2e-test` label.
-# Runs on a self-hosted runner that can reach the robust-spur ingress.
+# Every PR targeting `main` dispatches ONE single-GPU inference-optimizer run built
+# from the PR's branch, monitors it, and reports green (Succeeded) / red (Failed or
+# timeout). Opt OUT by adding the `skip-e2e-test` label. Runs on a self-hosted runner
+# that can reach the run API.
 
 on:
   pull_request:
@@ -14,11 +14,11 @@ on:
   workflow_dispatch:
     inputs:
       head_ref:
-        description: "Hyperloom branch to run (defaults to the caller ref)"
+        description: "Branch to run (defaults to the caller ref)"
         required: false
 
-# A newer commit on the same PR cancels the in-flight run (the script's TERM
-# trap deletes the spur workload so no GPU is leaked).
+# A newer commit on the same PR cancels the in-flight run; the cleanup step below
+# cancels the workload so no GPU is leaked.
 concurrency:
   group: ci-e2e-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -36,9 +36,9 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       !contains(github.event.pull_request.labels.*.name, 'skip-e2e-test')
     # Self-hosted runner registered with the label `Hyperloom-e2e-ci`
-    # (config.sh --labels Hyperloom-e2e-ci). Must reach github.com + the spur ingress.
+    # (config.sh --labels Hyperloom-e2e-ci). Must reach github.com + the run API.
     runs-on: Hyperloom-e2e-ci
-    # Covers a full MAX_HOURS run (currently up to 3h) + setup/baseline overhead.
+    # Covers a full MAX_HOURS run + setup/baseline overhead.
     timeout-minutes: 240
     steps:
       - name: Checkout (workflow scripts only)
@@ -50,23 +50,26 @@ jobs:
       - name: Dispatch + monitor single-GPU smoke run
         id: run
         env:
-          SAFE_AK: ${{ secrets.ROBUST_SPUR_SAFE_AK }}
-          ROBUST_BASE: ${{ vars.ROBUST_SPUR_BASE }}
-          MODEL: ${{ vars.CI_E2E_MODEL }}
-          MODEL_CLASS: ${{ vars.CI_E2E_MODEL_CLASS }}
-          GPUS: ${{ vars.CI_E2E_GPUS }}
-          TP: ${{ vars.CI_E2E_TP }}
-          MAX_HOURS: ${{ vars.CI_E2E_MAX_HOURS }}
-          # Slurm account identity spur dispatches under (must be an amd-hyperloom member).
-          CI_E2E_USER_NAME: ${{ vars.CI_E2E_USER_NAME }}
-          # The robust-spur ingress uses an internal CA. Skip TLS verify unless a CA
-          # bundle is provided via CI_E2E_CACERT. Override with vars.CI_E2E_INSECURE=0
-          # once the runner trusts the internal CA.
-          CI_E2E_INSECURE: ${{ vars.CI_E2E_INSECURE || '1' }}
+          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
+          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
+          E2E_INFRA_TYPE: ${{ secrets.CI_E2E_INFRA_TYPE }}
+          MODEL: ${{ secrets.CI_E2E_MODEL }}
+          MODEL_CLASS: ${{ secrets.CI_E2E_MODEL_CLASS }}
+          MODEL_BASE: ${{ secrets.CI_E2E_MODEL_BASE }}
+          GPUS: ${{ secrets.CI_E2E_GPUS }}
+          TP: ${{ secrets.CI_E2E_TP }}
+          MAX_HOURS: ${{ secrets.CI_E2E_MAX_HOURS }}
+          # Account identity the run dispatches under.
+          CI_E2E_USER_NAME: ${{ secrets.CI_E2E_USER_NAME }}
+          # Per-PR checkout base dir.
+          CI_E2E_PR_CHECK_BASE: ${{ secrets.CI_E2E_PR_CHECK_BASE }}
+          # The API endpoint may use a private CA; skip TLS verify unless a CA bundle is
+          # provided. Set the CI_E2E_INSECURE secret to 0 once the runner trusts the CA.
+          CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '1' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.event.pull_request.head.ref || inputs.head_ref || github.ref_name }}
-          # Tokenized clone URLs so the compute node can clone this (private) PR branch.
-          # github.token is ephemeral (expires with the run) and can read same-repo PRs.
+          # Tokenized clone URLs so the run can clone this PR branch. github.token is
+          # ephemeral (expires with the run) and can read same-repo PRs.
           HEAD_REPO_URL: ${{ github.event.pull_request.head.repo.full_name && format('https://x-access-token:{0}@github.com/{1}.git', github.token, github.event.pull_request.head.repo.full_name) || '' }}
           BASE_REPO_URL: ${{ format('https://x-access-token:{0}@github.com/{1}.git', github.token, github.repository) }}
           # Live commit status on the PR, refreshed every STATUS_INTERVAL_S.
@@ -75,7 +78,7 @@ jobs:
           GH_STATUS_SHA: ${{ github.event.pull_request.head.sha }}
           GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           STATUS_INTERVAL_S: "300"
-          # Poll long enough to cover a 3h MAX_HOURS run: 220 * 60s ≈ 3h40m.
+          # Poll long enough to cover the run budget.
           POLL_INTERVAL_S: "60"
           POLL_MAX: "220"
         run: |
@@ -83,18 +86,18 @@ jobs:
           .github/scripts/ci-e2e-dispatch.sh
 
       # If the job is cancelled (manual stop, or a newer commit via concurrency
-      # cancel-in-progress), GitHub still runs this step — DELETE the spur workload
-      # so the GPU run doesn't leak. Reliable even when the main step is hard-killed.
-      - name: Cancel spur workload on job cancel
+      # cancel-in-progress), GitHub still runs this step — cancel the workload so the
+      # GPU run doesn't leak. Reliable even when the main step is hard-killed.
+      - name: Cancel workload on job cancel
         if: cancelled()
         env:
-          SAFE_AK: ${{ secrets.ROBUST_SPUR_SAFE_AK }}
-          ROBUST_BASE: ${{ vars.ROBUST_SPUR_BASE }}
+          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
+          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
         run: |
-          uid="$(cat "${RUNNER_TEMP}/claw_uid" 2>/dev/null || true)"
-          if [ -z "$uid" ]; then echo "no claw uid recorded; nothing to cancel"; exit 0; fi
-          base="${ROBUST_BASE:-https://crusoe.primus-safe.amd.com/robust-spur-api}"
-          echo "cancelling spur workload $uid"
+          uid="$(cat "${RUNNER_TEMP}/e2e_session_uid" 2>/dev/null || true)"
+          if [ -z "$uid" ]; then echo "no session uid recorded; nothing to cancel"; exit 0; fi
+          if [ -z "${E2E_API_BASE:-}" ]; then echo "no API base; cannot cancel"; exit 0; fi
+          echo "cancelling workload $uid"
           curl -sS -k -o /dev/null -w 'DELETE HTTP=%{http_code}\n' \
-            -X DELETE -H "Authorization: Bearer ${SAFE_AK}" \
-            "${base%/}/api/v1/orchestration/workloads/${uid}"
+            -X DELETE -H "Authorization: Bearer ${E2E_API_KEY}" \
+            "${E2E_API_BASE%/}/api/v1/orchestration/workloads/${uid}"
