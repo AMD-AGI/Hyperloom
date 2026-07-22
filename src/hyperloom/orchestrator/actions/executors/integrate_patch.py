@@ -240,15 +240,15 @@ def _resolve_framework_root(
 ) -> Path | None:
     """Pick the framework source root for patches.
 
-    Precedence: explicit param (must lie under
-    :func:`resolve_source_file_allowlist`) → first allowlist root whose tree
+    Precedence: explicit param (must lie under a trusted installed source
+    scope) → first source root whose tree
     actually contains the patch targets (target-aware: a ``vllm/...`` patch must
     apply under the vllm root, not the first allowlist entry which is ``aiter``)
     → first existing git root → first existing dir. None when nothing resolves.
 
     Args:
         explicit: Explicit framework-root override, or ``None`` to use the
-            allowlist. Overrides outside the allowlist are rejected.
+        source scope. Overrides outside the trusted scope are rejected.
         patch_paths: Patch target paths used to pick the allowlist root whose
             tree actually contains them.
 
@@ -278,7 +278,7 @@ def _resolve_framework_root(
             if _is_within(p, root):
                 return p
         log.warning(
-            "integrate_patch: framework_source_root override %r rejected (not under allowlist)",
+            "integrate_patch: framework_source_root override %r rejected (outside trusted source scope)",
             explicit,
         )
         return None
@@ -1381,7 +1381,7 @@ class IntegratePatchExecutor:
                 _error_class = "framework_source_root_rejected"
                 _error = (
                     f"framework_source_root {explicit_framework_root!r} is not "
-                    "under the configured source allowlist"
+                    "under the configured trusted source scope"
                 )
             else:
                 _error_class = "no_framework_agent_root"

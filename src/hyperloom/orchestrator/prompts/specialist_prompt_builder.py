@@ -1640,7 +1640,7 @@ def _section_pr_feed(inp: SpecialistPromptInputs) -> list[str]:
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 7 (local source navigation hint) of the prompt.
 
-    Lists the read-only framework source roots and per-domain focus
+    Lists the installed source roots and per-domain focus
     directories, or a ``(none)`` placeholder when neither is supplied.
 
     Args:
@@ -1654,7 +1654,7 @@ def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(_NONE_PLACEHOLDER)
         return rows
     if inp.framework_source_roots:
-        rows.append("Framework source roots (read-only):")
+        rows.append("Installed source roots (read-only):")
         for p in inp.framework_source_roots:
             rows.append(f"- {p}")
     if inp.source_hint_directories:

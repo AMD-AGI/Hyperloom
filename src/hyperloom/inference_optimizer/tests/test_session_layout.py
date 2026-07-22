@@ -20,6 +20,7 @@ from hyperloom.inference_optimizer.session.manifest import (
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.policy import gate as policy_gate
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
@@ -535,7 +536,7 @@ def test_policy_path_outside_session_dir_denied(tmp_path):
     assert exc.value.rule == "path_outside_session_dir"
 
 
-def test_policy_source_file_allowlist_passes(tmp_path):
+def test_policy_source_file_trusted_scope_passes(tmp_path):
     gate = _gate(tmp_path)
     intent = Intent(
         type=IntentType.RESPONSE,
@@ -552,7 +553,25 @@ def test_policy_source_file_allowlist_passes(tmp_path):
     gate.validate_intent("kernel_agent", intent)
 
 
-def test_policy_source_file_outside_allowlist_denied(tmp_path):
+def test_policy_source_file_any_installed_package_passes(tmp_path, monkeypatch):
+    packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    source = packages / "unrelated_package" / "native" / "kernel.cu"
+    source.parent.mkdir(parents=True)
+    source.write_text("// source")
+    monkeypatch.setattr(policy_gate, "resolve_source_file_allowlist", lambda: (f"{packages}/",))
+    gate = _gate(tmp_path)
+    intent = Intent(
+        type=IntentType.RESPONSE,
+        payload={
+            "in_reply_to": "m-1",
+            "kind": "trace_analyze_done",
+            "result": {"hot_kernels": [{"kernel_id": "k1", "source_file": str(source)}]},
+        },
+    )
+    gate.validate_intent("kernel_agent", intent)
+
+
+def test_policy_source_file_outside_trusted_scope_denied(tmp_path):
     gate = _gate(tmp_path)
     intent = Intent(
         type=IntentType.RESPONSE,
@@ -568,11 +587,11 @@ def test_policy_source_file_outside_allowlist_denied(tmp_path):
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("kernel_agent", intent)
-    assert exc.value.rule == "source_file_not_allowlisted"
+    assert exc.value.rule == "source_file_outside_trusted_scope"
 
 
-def test_policy_framework_source_root_outside_allowlist_denied(tmp_path):
-    # A framework_source_root override escaping the source allowlist must be
+def test_policy_framework_source_root_outside_trusted_scope_denied(tmp_path):
+    # A framework_source_root override escaping trusted source scopes must be
     # rejected under strict_paths.
     gate = _gate(tmp_path)
     intent = Intent(
@@ -588,7 +607,7 @@ def test_policy_framework_source_root_outside_allowlist_denied(tmp_path):
     )
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "source_file_not_allowlisted"
+    assert exc.value.rule == "source_file_outside_trusted_scope"
 
 
 def test_policy_strict_off_skips_path_check(tmp_path):

@@ -479,10 +479,8 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# `source_file` may match :func:`resolve_source_file_allowlist` (framework trees
-# outside session_dir, resolved at check time). `framework_source_root` is the
-# optional git-apply root override; gating it here blocks an LLM-authored override
-# escaping to an arbitrary dir under strict_paths.
+# `source_file` and `framework_source_root` may point at trusted installed source
+# scopes outside the session directory. Real-path containment prevents escapes.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
 
 
@@ -2276,15 +2274,14 @@ class PolicyGate:
         return v == sd or v.is_relative_to(sd)
 
     def _path_in_source_allowlist(self, value: str) -> bool:
-        """Return whether a path falls under a framework source allowlist.
+        """Return whether a path falls under a trusted installed source scope.
 
         Args:
             value (str): the path string to test.
 
         Returns:
-            bool: True when ``value`` resolves to or under any root returned by
-                :func:`resolve_source_file_allowlist` (the aiter / sglang /
-                vllm source trees); False otherwise.
+            bool: True when ``value`` resolves to or under a configured editable
+            source root, active site/dist-packages root, or ROCm source root.
         """
         return any(_resolved_within(value, p) for p in resolve_source_file_allowlist())
 
@@ -2355,11 +2352,14 @@ class PolicyGate:
                     return
                 raise PolicyDenied(
                     f"role={role.name!r} {intent_type.value} payload field "
-                    f"{key!r}={node!r} is not under session_dir or any of "
+                    f"{key!r}={node!r} is not under session_dir or a trusted "
+                    f"installed source scope from "
                     f"{list(resolve_source_file_allowlist())!r}",
-                    rule="source_file_not_allowlisted",
+                    rule="source_file_outside_trusted_scope",
                     hint=(
-                        "kernel-opt may only target framework source trees under aiter/sglang/vllm; reject the request"
+                        "source_file and framework_source_root must resolve under "
+                        "an active site/dist-packages, configured framework root, "
+                        "or session directory"
                     ),
                 )
             if key not in PATH_LIKE_FIELDS:
