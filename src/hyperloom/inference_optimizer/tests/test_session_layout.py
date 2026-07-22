@@ -51,7 +51,7 @@ def test_session_dir_user_data_path_overrides_default(tmp_path, monkeypatch):
 def test_make_session_dir_creates_full_skeleton(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
-    # No model_name -> flat layout, session_dir == workspace_root.
+    # No model_name -> session_dir == workspace_root.
     assert sd == tmp_path
     for sub in paths._SESSION_SKELETON:
         assert (sd / sub).is_dir(), f"missing per-session skeleton subdir: {sub}"
@@ -109,14 +109,6 @@ def test_make_session_dir_accepts_path_object(tmp_path, monkeypatch):
         model_name=Path("/path/models/DeepSeek-R1-0528"),
     )
     assert sd.parent.name == "DeepSeek-R1-0528"
-
-
-def test_make_session_dir_flat_layout_via_env(tmp_path, monkeypatch):
-    """Env override forces legacy flat layout even when model_name is set."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    monkeypatch.setenv(paths.ENV_SESSION_LAYOUT, "flat")
-    sd = paths.make_session_dir(model_name="DeepSeek-R1-0528")
-    assert sd == tmp_path
 
 
 def test_make_session_dir_overwrites_stale_pin(tmp_path, monkeypatch):

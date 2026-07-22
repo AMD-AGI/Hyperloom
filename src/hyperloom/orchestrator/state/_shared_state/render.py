@@ -186,7 +186,7 @@ class _RenderMixin:
             DEFAULT_EXPLORE_FORCE_EXIT_HOURS_REMAINING,
             PHASE_EXPLORE,
             _phase_budget_total_seconds,
-            llm_proposable_actions_for_with_interleave,
+            llm_proposable_actions_for,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
             phase_elapsed_seconds,
@@ -209,14 +209,7 @@ class _RenderMixin:
             budget_line = (
                 f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} remaining_sec={int(remaining)}"
             )
-        proposable = tuple(
-            sorted(
-                llm_proposable_actions_for_with_interleave(
-                    phase,
-                    explore_enabled=bool(getattr(self, "explore_enabled", True)),
-                )
-            )
-        )
+        proposable = llm_proposable_actions_for(phase)
         allowed_line = f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
         lines = [
             f"phase     : {phase}",

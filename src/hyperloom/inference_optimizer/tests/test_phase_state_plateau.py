@@ -28,7 +28,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     compute_plateau_kernel,
     exit_normal_explore,
     exit_normal_kernel,
-    is_pause_specialist_hint,
     is_valid_escalate_hint,
     is_valid_stop_reason,
     kernel_work_pending,
@@ -48,20 +47,10 @@ def test_escalate_hint_vocab_closed():
     )
 
 
-def test_is_valid_escalate_hint_accepts_vocab_and_pause_specialist():
+def test_is_valid_escalate_hint_accepts_vocab():
     assert is_valid_escalate_hint("skip_to_kernel")
-    assert is_valid_escalate_hint("pause_specialist_serving_specialist")
-    assert is_valid_escalate_hint("pause_specialist_anything")
     assert not is_valid_escalate_hint("garbage")
     assert not is_valid_escalate_hint("")
-    # The bare prefix is invalid — must have a suffix.
-    assert not is_valid_escalate_hint("pause_specialist_")
-
-
-def test_is_pause_specialist_hint_requires_suffix():
-    assert is_pause_specialist_hint("pause_specialist_x")
-    assert not is_pause_specialist_hint("pause_specialist_")
-    assert not is_pause_specialist_hint("skip_to_kernel")
 
 
 def test_plateau_explore_empty_state_returns_false():

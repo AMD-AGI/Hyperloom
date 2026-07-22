@@ -282,7 +282,8 @@ async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
 async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
     from hyperloom.agents.robustness.config import Config
 
-    # Inject a fake coordinator.db with state=failed twice on the same family.
+    # Inject a fake coordinator.db with enough same-family failures to cross
+    # the prune threshold (repeated_failure escalates to HIGH -> prune_branch).
     import json
     import sqlite3
 
@@ -294,7 +295,7 @@ async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
         "CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, msg_id TEXT,"
         " from_agent TEXT, to_agent TEXT, topic TEXT, payload TEXT, ts TEXT)"
     )
-    for tid in ("t1", "t2"):
+    for tid in ("t1", "t2", "t3", "t4"):
         conn.execute(
             "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?, ?, ?, ?, ?, ?)",
             (
@@ -327,6 +328,7 @@ async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
     try:
         types_emitted = {i.type.value for i in intents}
         assert "alert" in types_emitted
+        assert "prune_branch" in types_emitted
         gate = _gate()
         for intent in intents:
             gate.validate_intent("robustness", _to_upstream(intent))

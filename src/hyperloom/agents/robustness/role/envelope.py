@@ -148,7 +148,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "lifecycle",
         # specialist sub-agent ledger.
         "specialist_rounds",
-        "specialist_domain_empty_streak",
         # per-kb_anchor coverage counters.
         "rounds_since_last_specialist",
         "rounds_since_last_keep",

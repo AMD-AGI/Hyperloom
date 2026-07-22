@@ -177,8 +177,6 @@ def _section_phase_semantics(
         lines.append("")
     lines.extend(
         render_phase_proposable_bullets(
-            interleave=False,
-            explore_enabled=explore_enabled,
             disabled_suffix=disabled_suffix,
         )
     )

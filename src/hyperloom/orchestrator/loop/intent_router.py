@@ -866,12 +866,10 @@ class IntentRouter:
         from ..phases.machine_state import (
             ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
-            ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX,
             ESCALATE_HINT_SKIP_TO_CLOSE,
             PHASE_EXPLORE,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
-            is_pause_specialist_hint,
             is_valid_escalate_hint,
         )
 
@@ -914,17 +912,6 @@ class IntentRouter:
             self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
                 self.shared_state.phase_budget_pct,
                 phase=PHASE_KERNEL_AGENT,
-            )
-            self.shared_state.last_consumed_escalate_hint = hint
-            self.shared_state.last_consumed_escalate_hint_ts = now_ts
-            self.shared_state.save(self.session_dir)
-            return
-        # pause_specialist_<domain>: bump the per-domain empty-streak.
-        if is_pause_specialist_hint(hint):
-            domain = hint[len(ESCALATE_HINT_PAUSE_SPECIALIST_PREFIX) :]
-            self.shared_state.bump_specialist_domain_empty_streak(
-                domain,
-                empty=True,
             )
             self.shared_state.last_consumed_escalate_hint = hint
             self.shared_state.last_consumed_escalate_hint_ts = now_ts
