@@ -263,13 +263,18 @@ jobs:
           # so the header itself contains letters -- do NOT require it to be an
           # all-'=' banner (that was a bug: the section was never entered). We
           # match the header by its title text alone. The section then runs
-          # until the NEXT pure banner line -- a run of '='/'_' padding with no
-          # title, e.g. the trailing ``==== N failed in ... ====`` totals line or
-          # a ``____ test ____`` separator -- or EOF. ``is_banner`` is used ONLY
-          # for that end-of-section test (pure padding, no embedded title).
+          # until the NEXT pytest banner line -- or EOF. A pytest banner is a
+          # rule of '=' or '_' padding, EITHER pure (``==========``) OR wrapping
+          # a title (``==== 1 failed, 2 error in 3.2s ====`` / ``___ test ___``).
+          # The trailing totals line is the title-wrapped form, so matching only
+          # pure padding (the earlier bug) let the loop run to EOF and risked
+          # collecting a stray FAILED/ERROR line emitted by a plugin AFTER the
+          # summary. The regex below matches both banner forms: a run of >=3
+          # padding chars at the START (title-wrapped), or an all-padding line.
+          _BANNER_RE = re.compile(r"^(={3,}|_{3,})(\s|$)|^[=_ ]{6,}$")
+
           def is_banner(s: str) -> bool:
-              t = s.strip()
-              return len(t) >= 6 and (set(t) <= set("= ") or set(t) <= set("_ "))
+              return bool(_BANNER_RE.match(s.strip()))
 
           start = None
           for i, s in enumerate(lines):
