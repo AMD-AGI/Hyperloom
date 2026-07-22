@@ -206,6 +206,9 @@ if [ -z "$UID_" ]; then
 fi
 summary "**claw_session_id (workload uid):** \`$UID_\`"
 echo "claw_session_id=$UID_" >> "${GITHUB_OUTPUT:-/dev/null}"
+# Persist the uid so a workflow `if: cancelled()` step can DELETE the workload even
+# if this process is hard-killed on cancel (the trap below is best-effort only).
+echo "$UID_" > "${CLAW_UID_FILE:-${RUNNER_TEMP:-/tmp}/claw_uid}" 2>/dev/null || true
 
 # Seed the live commit status (no-op unless GH_STATUS_* are set).
 post_status "pending" "submitted; uid=${UID_}; model=${MODEL} ref=${HEAD_REF}"

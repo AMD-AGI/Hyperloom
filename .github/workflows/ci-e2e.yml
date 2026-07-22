@@ -80,3 +80,20 @@ jobs:
         run: |
           chmod +x .github/scripts/ci-e2e-dispatch.sh
           .github/scripts/ci-e2e-dispatch.sh
+
+      # If the job is cancelled (manual stop, or a newer commit via concurrency
+      # cancel-in-progress), GitHub still runs this step — DELETE the spur workload
+      # so the GPU run doesn't leak. Reliable even when the main step is hard-killed.
+      - name: Cancel spur workload on job cancel
+        if: cancelled()
+        env:
+          SAFE_AK: ${{ secrets.ROBUST_SPUR_SAFE_AK }}
+          ROBUST_BASE: ${{ vars.ROBUST_SPUR_BASE }}
+        run: |
+          uid="$(cat "${RUNNER_TEMP}/claw_uid" 2>/dev/null || true)"
+          if [ -z "$uid" ]; then echo "no claw uid recorded; nothing to cancel"; exit 0; fi
+          base="${ROBUST_BASE:-https://crusoe.primus-safe.amd.com/robust-spur-api}"
+          echo "cancelling spur workload $uid"
+          curl -sS -k -o /dev/null -w 'DELETE HTTP=%{http_code}\n' \
+            -X DELETE -H "Authorization: Bearer ${SAFE_AK}" \
+            "${base%/}/api/v1/orchestration/workloads/${uid}"
