@@ -630,6 +630,7 @@ class FrameworkPhase(PhaseHandler):
                     applicability=str((audit or {}).get("applicability") or "").strip(),
                     provenance="phase_audit",
                     changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
+                    session_dir=self.session_dir,
                 )
             except Exception:  # noqa: BLE001 — KB writeback is best-effort
                 log.debug("FRAMEWORK: audit-skip KB writeback failed", exc_info=True)

@@ -49,6 +49,17 @@ SectionShape = Literal["item", "singleton"]
 # Producer-written sections and their fragment shape. Payloads match the
 # corresponding ``schema.py`` TypedDict so assembly is structure-preserving.
 SECTION_SHAPES: dict[str, SectionShape] = {
+    # Session Breakdown v4 canonical author-time streams. These names are
+    # intentionally separate from the legacy v2/v3 sections so the live v4
+    # builder can consume a closed set of SDK-authored facts.
+    "run_snapshot": "singleton",
+    "phase_transitions": "item",
+    "subjects": "item",
+    "operations": "item",
+    "measurements": "item",
+    "adoptions": "item",
+    "artifacts": "item",
+    "trace_events": "item",
     "session": "singleton",
     "workload": "singleton",
     "baseline": "singleton",
@@ -115,6 +126,18 @@ def section_shape(section: str) -> SectionShape | None:
 
 
 _SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
+_ENTITY_ID_FIELDS = (
+    "attempt_id",
+    "substep_id",
+    "gate_id",
+    "decision_id",
+    "relation_id",
+    "measurement_id",
+    "artifact_id",
+    "adoption_id",
+    "subject_id",
+    "operation_id",
+)
 
 
 def _slug(value: str) -> str:
@@ -128,6 +151,55 @@ def _slug(value: str) -> str:
     """
     s = _SANITIZE.sub("-", str(value or "").strip())
     return s.strip("-.") or "unknown"
+
+
+def _merge_mappings(
+    current: Mapping[str, Any],
+    update: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recursively merge a partial entity update into its current payload."""
+    merged = dict(current)
+    for key, value in update.items():
+        previous = merged.get(key)
+        if isinstance(previous, Mapping) and isinstance(value, Mapping):
+            merged[key] = _merge_mappings(previous, value)
+        elif isinstance(previous, list) and isinstance(value, list):
+            merged[key] = _merge_lists(previous, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_lists(current: list[Any], update: list[Any]) -> list[Any]:
+    """Merge stable nested entities while retaining unrelated list entries."""
+    merged = list(current)
+    indexes: dict[tuple[str, str], int] = {}
+    for index, value in enumerate(merged):
+        if not isinstance(value, Mapping):
+            continue
+        identity = next(
+            ((field, str(value[field])) for field in _ENTITY_ID_FIELDS if value.get(field)),
+            None,
+        )
+        if identity:
+            indexes[identity] = index
+    for value in update:
+        identity = (
+            next(
+                ((field, str(value[field])) for field in _ENTITY_ID_FIELDS if value.get(field)),
+                None,
+            )
+            if isinstance(value, Mapping)
+            else None
+        )
+        index = indexes.get(identity) if identity else None
+        if index is not None and isinstance(merged[index], Mapping):
+            merged[index] = _merge_mappings(merged[index], value)
+        elif value not in merged:
+            merged.append(dict(value) if isinstance(value, Mapping) else value)
+            if identity:
+                indexes[identity] = len(merged) - 1
+    return merged
 
 
 class Recorder:
@@ -145,7 +217,7 @@ class Recorder:
         self._dir = Path(parts_dir)
         self._producer = _slug(producer)
         self._seq = 0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     @property
     def producer(self) -> str:
@@ -194,6 +266,28 @@ class Recorder:
         filename = f"{_slug(section)}__{self._producer}.json"
         return self._write(section, "singleton", payload, filename=filename)
 
+    def record_upsert_singleton(
+        self,
+        section: str,
+        payload: Mapping[str, Any],
+    ) -> Path:
+        """Merge and atomically rewrite this producer's singleton fragment."""
+        self._check_shape(section, "singleton")
+        filename = f"{_slug(section)}__{self._producer}.json"
+        target = self._dir / filename
+        with self._lock:
+            try:
+                current = json.loads(target.read_text(encoding="utf-8"))
+                current_payload = current.get("payload") if isinstance(current, dict) else None
+                merged = (
+                    _merge_mappings(current_payload, payload)
+                    if isinstance(current_payload, Mapping)
+                    else dict(payload)
+                )
+            except (OSError, ValueError, TypeError):
+                merged = dict(payload)
+            return self._write(section, "singleton", merged, filename=filename)
+
     def record_item(
         self,
         section: str,
@@ -224,6 +318,37 @@ class Recorder:
             seq = self._next_seq()
             filename = f"{_slug(section)}__{self._producer}__{os.getpid()}-{seq:06d}.json"
         return self._write(section, "item", payload, filename=filename)
+
+    def record_upsert_item(
+        self,
+        section: str,
+        payload: Mapping[str, Any],
+        *,
+        key: str,
+    ) -> Path:
+        """Merge and atomically rewrite one stable item fragment.
+
+        This is the write-side primitive used by v4 entity helpers. Repeated
+        updates from the same producer preserve fields omitted by later partial
+        updates while retaining one stable fragment file.
+        """
+        self._check_shape(section, "item")
+        if not key:
+            raise ValueError("upsert key must be non-empty")
+        filename = f"{_slug(section)}__{self._producer}__{_slug(key)}.json"
+        target = self._dir / filename
+        merged: dict[str, Any] = {}
+        with self._lock:
+            try:
+                current = json.loads(target.read_text(encoding="utf-8"))
+                current_payload = current.get("payload") if isinstance(current, dict) else None
+                if isinstance(current_payload, Mapping):
+                    merged = _merge_mappings(current_payload, payload)
+                else:
+                    merged = dict(payload)
+            except (OSError, ValueError, TypeError):
+                merged = dict(payload)
+            return self._write(section, "item", merged, filename=filename)
 
     @staticmethod
     def _check_shape(section: str, kind: str) -> None:

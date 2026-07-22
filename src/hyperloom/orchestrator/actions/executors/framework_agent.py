@@ -1046,6 +1046,7 @@ class FrameworkAgentExecutor:
                 applicability=str(candidate.get("applicability") or "").strip(),
                 provenance="framework_agent",
                 changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
+                session_dir=self.session_dir,
             )
             log.info(
                 "framework: wrote KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",

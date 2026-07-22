@@ -2162,6 +2162,7 @@ class IntegratePatchExecutor:
                 )
                 .strip()
                 .lower(),
+                session_dir=self.session_dir,
             )
             log.info(
                 "integrate_patch: wrote framework KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",

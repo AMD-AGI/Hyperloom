@@ -23,6 +23,38 @@ from typing import Any
 from hyperloom.common.jsonio import read_json
 
 _UNREADABLE = object()
+V4_STREAMS: tuple[str, ...] = (
+    "run_snapshot",
+    "phase_transitions",
+    "subjects",
+    "operations",
+    "measurements",
+    "adoptions",
+    "artifacts",
+    "trace_events",
+    "versions",
+)
+_V4_ENTITY_IDS: dict[str, tuple[str, ...]] = {
+    "phase_transitions": ("transition_id", "event_id"),
+    "subjects": ("subject_id",),
+    "operations": ("operation_id",),
+    "measurements": ("measurement_id",),
+    "adoptions": ("adoption_id",),
+    "artifacts": ("artifact_id",),
+    "trace_events": ("trace_event_id", "event_id", "span_id"),
+}
+_NESTED_ENTITY_IDS: tuple[str, ...] = (
+    "attempt_id",
+    "substep_id",
+    "gate_id",
+    "decision_id",
+    "relation_id",
+    "measurement_id",
+    "artifact_id",
+    "adoption_id",
+    "subject_id",
+    "operation_id",
+)
 
 
 def parts_dir(session_dir: Path | str) -> Path:
@@ -121,15 +153,229 @@ def assemble_parts(
 
     out: dict[str, Any] = {}
     for section, recs in items.items():
-        recs.sort(key=lambda r: (int(r.get("seq") or 0), str(r.get("ts") or "")))
-        out[section] = [r.get("payload") for r in recs]
+        if section in _V4_ENTITY_IDS:
+            recs.sort(key=_v4_record_sort_key)
+            out[section] = _merge_v4_entities(
+                [r.get("payload") for r in recs],
+                id_fields=_V4_ENTITY_IDS[section],
+            )
+        else:
+            recs.sort(key=lambda r: (int(r.get("seq") or 0), str(r.get("ts") or "")))
+            out[section] = [r.get("payload") for r in recs]
     for section, rec in singletons.items():
         out[section] = rec.get("payload")
 
+    _normalize_kernel_route_operations(out)
     _compose_critic_robustness(out)
     _compose_kernel_journey(out)
     _compose_versions(out)
     return out
+
+
+def _normalize_kernel_route_operations(out: dict[str, Any]) -> None:
+    """Normalize active Kernel routes from canonical operation fragments only."""
+    operations = out.get("operations")
+    if not isinstance(operations, list):
+        return
+    selections = [
+        operation
+        for operation in operations
+        if isinstance(operation, dict)
+        and operation.get("kind") == "strategy_selection"
+        and operation.get("strategy_group") == "kernel_optimizer"
+        and str(operation.get("status") or "").lower()
+        not in {"revoked", "reverted", "superseded", "skipped"}
+    ]
+    selections_by_cycle: dict[str, list[dict[str, Any]]] = {}
+    for selection in selections:
+        macro_cycle = selection.get("macro_cycle")
+        if macro_cycle is None:
+            continue
+        selections_by_cycle.setdefault(str(macro_cycle), []).append(selection)
+
+    for cycle_selections in selections_by_cycle.values():
+        selection_ids = {
+            str(selection.get("operation_id") or "")
+            for selection in cycle_selections
+            if selection.get("operation_id")
+        }
+        if len(selection_ids) != 1:
+            continue
+        selection = cycle_selections[-1]
+        selection_id = next(iter(selection_ids))
+        selected_strategy = str(
+            (selection.get("outputs") or {}).get("selected_strategy") or ""
+        )
+        cycle_routes = [
+            operation
+            for operation in operations
+            if isinstance(operation, dict)
+            and operation.get("kind") == "kernel_optimizer_run"
+            and str(operation.get("parent_operation_id") or "") == selection_id
+        ]
+        selected_routes = [
+            route
+            for route in cycle_routes
+            if str(route.get("strategy") or "") == selected_strategy
+            and str(route.get("status") or "").lower()
+            not in {"revoked", "reverted", "skipped"}
+        ]
+        active_route = selected_routes[-1] if selected_routes else None
+        active_route_id = (
+            str(active_route.get("operation_id") or "")
+            if isinstance(active_route, dict)
+            else ""
+        )
+        for route in cycle_routes:
+            competition = dict(
+                ((route.get("extensions") or {}).get("route_competition") or {})
+            )
+            if route is active_route:
+                competition.update(
+                    {
+                        "active": True,
+                        "selected": True,
+                        "normalized_from_operations": True,
+                    }
+                )
+            elif (
+                str(route.get("strategy") or "") != selected_strategy
+                or active_route is not None
+            ):
+                previous_status = str(route.get("status") or "")
+                route["status"] = "superseded"
+                competition.update(
+                    {
+                        "active": False,
+                        "selected": False,
+                        "historical_executed": True,
+                        "historical_status": previous_status,
+                        "superseded_by": active_route_id or None,
+                        "normalized_from_operations": True,
+                    }
+                )
+            else:
+                competition.update(
+                    {
+                        "active": False,
+                        "selected": True,
+                        "normalized_from_operations": True,
+                    }
+                )
+            extensions = dict(route.get("extensions") or {})
+            extensions["route_competition"] = competition
+            route["extensions"] = extensions
+
+
+def assemble_v4_parts(
+    session_dir: Path | str,
+    *,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    """Assemble the closed v4 streams and merge authored tool versions.
+
+    The dedicated ``versions`` stream is merged into
+    ``run_snapshot.versions``. Values authored directly in the run snapshot
+    take precedence over the dedicated stream on matching tool keys.
+    """
+    assembled = assemble_parts(session_dir, warnings=warnings)
+    closed = {name: assembled[name] for name in V4_STREAMS if name in assembled}
+    stream_versions = closed.get("versions")
+    if isinstance(stream_versions, dict) and stream_versions:
+        snapshot = dict(closed.get("run_snapshot") or {})
+        snapshot_versions = (
+            dict(snapshot.get("versions") or {})
+            if isinstance(snapshot.get("versions"), dict)
+            else {}
+        )
+        snapshot["versions"] = {**stream_versions, **snapshot_versions}
+        closed["run_snapshot"] = snapshot
+    return closed
+
+
+def _v4_record_sort_key(record: dict[str, Any]) -> tuple[str, int, str]:
+    """Order v4 updates by recorder time, then producer-local sequence."""
+    return (
+        str(record.get("ts") or ""),
+        int(record.get("seq") or 0),
+        str(record.get("producer") or ""),
+    )
+
+
+def _entity_id(value: Any, id_fields: tuple[str, ...]) -> str:
+    """Return the first stable id present in an entity mapping."""
+    if not isinstance(value, dict):
+        return ""
+    return next((str(value.get(name) or "") for name in id_fields if value.get(name)), "")
+
+
+def _merge_v4_entities(
+    payloads: list[Any],
+    *,
+    id_fields: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Merge time-ordered partial entity updates by stable id."""
+    merged: list[dict[str, Any]] = []
+    index_by_id: dict[str, int] = {}
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        stable_id = _entity_id(payload, id_fields)
+        if not stable_id:
+            merged.append(dict(payload))
+            continue
+        index = index_by_id.get(stable_id)
+        if index is None:
+            index_by_id[stable_id] = len(merged)
+            merged.append(dict(payload))
+        else:
+            merged[index] = _deep_merge(merged[index], payload)
+    return merged
+
+
+def _deep_merge(current: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+    """Merge partial entity state while preserving nested keyed histories."""
+    merged = dict(current)
+    for key, value in update.items():
+        previous = merged.get(key)
+        if isinstance(previous, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(previous, value)
+        elif isinstance(previous, list) and isinstance(value, list):
+            merged[key] = _merge_lists(previous, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_lists(current: list[Any], update: list[Any]) -> list[Any]:
+    """Merge list entries with stable nested ids and append other new values."""
+    merged = list(current)
+    indexes: dict[tuple[str, str], int] = {}
+    for index, value in enumerate(merged):
+        if not isinstance(value, dict):
+            continue
+        for field in _NESTED_ENTITY_IDS:
+            if value.get(field):
+                indexes[(field, str(value[field]))] = index
+                break
+    for value in update:
+        if not isinstance(value, dict):
+            if value not in merged:
+                merged.append(value)
+            continue
+        identity = next(
+            ((field, str(value[field])) for field in _NESTED_ENTITY_IDS if value.get(field)),
+            None,
+        )
+        index = indexes.get(identity) if identity else None
+        if index is None:
+            if value not in merged:
+                merged.append(dict(value))
+                if identity:
+                    indexes[identity] = len(merged) - 1
+        else:
+            merged[index] = _deep_merge(merged[index], value)
+    return merged
 
 
 def _compose_versions(out: dict[str, Any]) -> None:
@@ -312,7 +558,19 @@ def _kernel_outcome(
     """
     if e2e:
         decision = str(e2e.get("decision") or "").upper()
-        if e2e.get("integrated") or decision in ("KEEP", "ADOPTED"):
+        validation_tier = str(
+            e2e.get("final_validation_tier")
+            or e2e.get("validation_tier")
+            or ""
+        ).strip().lower()
+        final_validated = e2e.get("validated") is True or validation_tier in {
+            "final",
+            "final_validation",
+            "orchestrator_final",
+            "same_harness_final",
+            "integrate_e2e",
+        }
+        if final_validated and (e2e.get("integrated") or decision in ("KEEP", "ADOPTED")):
             return "adopted"
         if decision in ("REVERT", "REJECTED"):
             return "reverted"
@@ -345,4 +603,10 @@ def _kb_writes_summary(critic_iters: list[Any]) -> dict[str, Any]:
     return {"total": total, "by_verdict": by_verdict}
 
 
-__all__ = ["assemble_parts", "has_parts", "parts_dir"]
+__all__ = [
+    "V4_STREAMS",
+    "assemble_parts",
+    "assemble_v4_parts",
+    "has_parts",
+    "parts_dir",
+]
