@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Tests for framework_agent.kb and the `fa kb <op>` CLI surface. Hermetic - redirects KB_ROOT via FRAMEWORK_AGENT_KB_DIR."""

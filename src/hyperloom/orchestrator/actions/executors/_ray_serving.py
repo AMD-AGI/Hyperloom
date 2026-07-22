@@ -380,6 +380,12 @@ class ServingLease:
             # self-heal rather than cascade to every remaining variant.
             log.warning("ServingLease.run_session_kill: ray actor died: %r", exc)
             self._actor = None
+            try:
+                from ._ray_backend import mark_ray_backend_unhealthy  # noqa: PLC0415
+
+                mark_ray_backend_unhealthy()
+            except Exception:  # noqa: BLE001 - failure recovery must not raise
+                pass
             return 1, "", f"ray_actor_error: {exc}"[:2000]
         except _task_err as exc:  # type: ignore[misc]
             # Worker crash / unexpected error: surface as a benchmark failure so
@@ -430,9 +436,10 @@ def maybe_serving_lease(
     """Return a :class:`ServingLease` when single-node Ray execution is active.
 
     The single seam executors use to opt a benchmark unit onto Ray: it returns
-    a (not-yet-ensured) lease when the Ray backend should run this work and the
-    run is single-node, else ``None`` (multi-node, ``INFERENCE_OPTIMIZER_RAY_EXEC``
-    off, or the pytest default). Callers pass the result straight into
+    a (not-yet-ensured) lease only when the Ray backend is explicitly enabled
+    for a single-node run, else ``None`` (default local path, multi-node,
+    ``INFERENCE_OPTIMIZER_RAY_EXEC`` off, or the pytest default). Callers pass
+    the result straight into
     ``run_grid(..., serving_lease=lease)`` / ``run_session_kill`` — ``None``
     transparently keeps the existing local-subprocess path — and MUST
     :meth:`ServingLease.close` a non-``None`` lease (typically in a ``finally``)

@@ -1,11 +1,11 @@
 ---
-name: hyperloom-qwen3-14b-fp8-8h
-description: Run an 8-hour Hyperloom Qwen3-14B-FP8 optimization session. Use when the user wants a medium-length Hyperloom demo on the local AMD ROCm environment.
+name: hyperloom-qwen3-14b-fp8-12h
+description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session. Use when the user wants a medium-length Hyperloom demo on the local AMD ROCm environment.
 ---
 
-# Hyperloom Qwen3-14B-FP8 8h Run
+# Hyperloom Qwen3-14B-FP8 12h Run
 
-Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for an 8-hour Qwen3-14B-FP8 demo.
+Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a 12-hour Qwen3-14B-FP8 demo.
 
 ## Run Mode
 
@@ -39,12 +39,13 @@ export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
+  --entrypoint tail \
   --device /dev/kfd \
   --device /dev/dri \
   --group-add video \
   -v "$REPO_ROOT:$REPO_ROOT" \
   "$HYPERLOOM_IMAGE" \
-  tail -f /dev/null
+  -f /dev/null
 ```
 
 Mount the Hyperloom workspace at the same absolute path (`-v "$REPO_ROOT:$REPO_ROOT"`) so paths in `.env`, logs, and session artifacts stay valid. If `USER_DATA_PATH` or a pre-downloaded model directory is outside the workspace, add matching `-v host_path:host_path` mounts before starting the container.
@@ -75,9 +76,10 @@ Required optimize CLI flags:
 - `--osl 1024`
 - `--precision bf16`
 - `--target-gain 30`
-- `--max-hours 8`
-- `--max-minutes-kernel-pct 0.5`
-- `--max-minutes-explore-pct 0.13`
+- `--max-hours 12`
+- `--max-minutes-framework-pct 0.01`
+- `--max-minutes-explore-pct 0.42`
+- `--max-minutes-kernel-pct 0.42`
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 

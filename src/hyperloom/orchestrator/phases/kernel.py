@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """KERNEL_AGENT phase handler: bf16-dense-GEMM fallback, GEAK e2e run,
@@ -863,6 +863,21 @@ class KernelPhase(PhaseHandler):
         except (TypeError, ValueError):
             return
         if measured <= 0:
+            return
+        # KEEP guard (aligns GEAK with forge / integrate_patch): a measured
+        # rebench that does not beat the current best must NOT overwrite the
+        # headline / stack / gain. Backstops every promote entry point (2a, 2b,
+        # crash-recovery) so a low-but-valid measurement can never lower best.
+        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        cb_tput = cb_now.get("tput")
+        if isinstance(cb_tput, (int, float)) and cb_tput > 0 and measured <= float(cb_tput):
+            log.info(
+                "geak promote skipped: measured %.3f did not beat current_best %.3f",
+                measured,
+                float(cb_tput),
+            )
+            self.shared_state.geak_pending = {}
+            self.shared_state.resume_pending_revalidation = False
             return
         accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
 
