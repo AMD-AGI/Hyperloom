@@ -75,15 +75,6 @@ html_context = {}
 if os.environ.get("READTHEDOCS", "") == "True":
     html_context["READTHEDOCS"] = True
 
-# For substitutions in MyST Markdown and rST files.
-# Usage:
-#   ```md              | ```rst
-#   {{ ROCM_VERSION }} | |ROCM_VERSION|
-#   ```                | ```
-myst_substitutions = {"ROCM_VERSION": ROCM_VERSION}
-rst_prolog = "\n".join(
-    f".. |{key}| replace:: {val}" for key, val in myst_substitutions.items()
-)
 
 numfig = False
 
