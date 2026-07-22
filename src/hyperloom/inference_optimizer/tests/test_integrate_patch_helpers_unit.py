@@ -47,6 +47,14 @@ def test_resolve_framework_root_explicit_nested_under_allowlist(tmp_path, monkey
     assert ip._resolve_framework_root(str(nested)) == nested
 
 
+def test_resolve_framework_root_accepts_non_git_installed_package(tmp_path, monkeypatch):
+    packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    package = packages / "unrelated_package"
+    package.mkdir(parents=True)
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(packages)])
+    assert ip._resolve_framework_root(str(package)) == package
+
+
 def test_resolve_framework_root_slash_override_rejected(tmp_path, monkeypatch):
     """An explicit ``/`` override must never be returned as the framework root."""
     fw = tmp_path / "fw"
