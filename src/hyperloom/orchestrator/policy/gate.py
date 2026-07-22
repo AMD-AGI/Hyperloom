@@ -10,7 +10,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from ..framework.paths import resolve_source_file_allowlist
 from ..bus.gpu_pool import (
@@ -146,9 +146,10 @@ INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 # Merged explore action.
 EXPLORE_ACTION_NAME: str = "explore"
 
-# Sweep actions; named constants so the ``*_phase_singleton`` rules have a single source of truth.
+# Full workload sweep action; named constant so the ``sweep_phase_singleton``
+# rule has a single source of truth. (``conc_sweep`` is a Coordinator-internal
+# action gated via COORDINATOR_INTERNAL_ACTIONS, not a singleton rule here.)
 SWEEP_ACTION_NAME: str = "sweep"
-CONC_SWEEP_ACTION_NAME: str = "conc_sweep"
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
@@ -923,11 +924,11 @@ class PolicyGate:
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
             self._validate_integrate_patch_critic_gate(payload)
         # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed.
+        # conc_sweep has no equivalent guard here: it is a Coordinator-internal
+        # action (never LLM-delegated), so _validate_phase_action rejects any LLM
+        # conc_sweep as Coordinator-managed (phase_incompatible) below.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        # conc_sweep_phase_singleton: block duplicate conc_sweep proposals.
-        if action_name == CONC_SWEEP_ACTION_NAME:
-            self._validate_conc_sweep_singleton(payload, intent_kind="delegate")
         self._validate_fp8_only_action(action_name, intent_kind="delegate")
         # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
@@ -1021,14 +1022,10 @@ class PolicyGate:
                 rule="unknown_action",
             )
         # sweep_phase_singleton (defense in depth on the propose_action channel).
+        # conc_sweep is Coordinator-internal (never LLM-proposed); _validate_phase_action
+        # below rejects any LLM conc_sweep as Coordinator-managed (phase_incompatible).
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(
-                payload,
-                intent_kind="propose_action",
-            )
-        # conc_sweep_phase_singleton on propose_action.
-        if action_name == CONC_SWEEP_ACTION_NAME:
-            self._validate_conc_sweep_singleton(
                 payload,
                 intent_kind="propose_action",
             )
@@ -1504,11 +1501,18 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Deny agent workload sweeps once SWEEP auto-dispatched conc_sweep.
+        """Deny an LLM workload ``sweep`` once SWEEP auto-dispatched ``conc_sweep``.
 
-        The automatic phase path now runs ``conc_sweep`` directly, so a later
-        LLM-proposed full ``sweep`` would only burn extra GPU time. Escape:
+        The automatic phase path runs the Coordinator-internal ``conc_sweep``
+        directly on SWEEP entry (recorded as ``auto_conc_sweep_task_id`` in the
+        latest ``phase_history`` evidence), so a later LLM-proposed full
+        ``sweep`` would only burn extra GPU time. Escape:
         ``params.bypass_sweep_singleton=True``.
+
+        ``conc_sweep`` itself has no singleton guard — it is a
+        Coordinator-internal action (see ``COORDINATOR_INTERNAL_ACTIONS``) that
+        is never LLM-proposed, so an LLM ``conc_sweep`` is rejected earlier by
+        ``_validate_phase_action`` as Coordinator-managed.
 
         Args:
             payload (dict[str, Any]): the intent payload;
@@ -1521,99 +1525,8 @@ class PolicyGate:
             PolicyDenied: when the SWEEP phase already carries an auto-enqueued
                 conc_sweep task and no bypass flag is set.
         """
-        self._validate_sweep_family_singleton(
-            payload,
-            bypass_key="bypass_sweep_singleton",
-            evidence_key="auto_conc_sweep_task_id",
-            rule="sweep_phase_singleton",
-            message_fn=lambda auto_id: (
-                f"sweep: SWEEP phase already has an auto-enqueued conc_sweep "
-                f"task (auto_conc_sweep_task_id={auto_id!r}); full workload "
-                f"sweep is no longer part of the automatic closeout path."
-            ),
-            hint=(
-                "The Coordinator's SWEEP-entry hook already dispatches "
-                "conc_sweep directly; no full workload sweep proposal is "
-                "needed. Wait for SWEEP→CLOSE. "
-                "If you genuinely need a second grid for debug, "
-                f"set params.bypass_sweep_singleton=True on the "
-                f"{intent_kind} payload (the override is recorded "
-                f"on the audit trail)."
-            ),
-        )
-
-    # ``conc_sweep_phase_singleton``
-    def _validate_conc_sweep_singleton(
-        self,
-        payload: dict[str, Any],
-        *,
-        intent_kind: str,
-    ) -> None:
-        """Enforce one conc_sweep per SWEEP phase; re-proposals burn GPU for no new data. Escape: ``params.bypass_conc_sweep_singleton=True``.
-
-        Args:
-            payload (dict[str, Any]): the intent payload;
-                ``params.bypass_conc_sweep_singleton`` opts out of the singleton
-                guard.
-            intent_kind (str): the channel the action arrived on, used in the
-                error hint.
-
-        Raises:
-            PolicyDenied: when the SWEEP phase already carries an auto-enqueued
-                conc_sweep task and no bypass flag is set.
-        """
-        self._validate_sweep_family_singleton(
-            payload,
-            bypass_key="bypass_conc_sweep_singleton",
-            evidence_key="auto_conc_sweep_task_id",
-            rule="conc_sweep_phase_singleton",
-            message_fn=lambda auto_id: (
-                f"conc_sweep: SWEEP phase already has an auto-enqueued "
-                f"conc_sweep task (auto_conc_sweep_task_id={auto_id!r}); "
-                f"duplicate runs reproduce the same baseline + current_best "
-                f"comparison and add no new data while burning 30-150 min "
-                f"of GPU time."
-            ),
-            hint=(
-                "Coordinator's SWEEP-entry hook already dispatched "
-                "conc_sweep — wait for SWEEP→CLOSE. If you need a "
-                "second run for debug, set "
-                f"params.bypass_conc_sweep_singleton=True on the "
-                f"{intent_kind} payload (recorded on the audit trail)."
-            ),
-        )
-
-    def _validate_sweep_family_singleton(
-        self,
-        payload: dict[str, Any],
-        *,
-        bypass_key: str,
-        evidence_key: str,
-        rule: str,
-        message_fn: Callable[[str], str],
-        hint: str,
-    ) -> None:
-        """Shared SWEEP-phase singleton guard for the sweep / conc_sweep family.
-
-        Walks the latest ``phase_history`` entry and denies when the SWEEP phase
-        already carries an auto-enqueued task under *evidence_key* (unless the
-        per-family *bypass_key* is set on ``params``).
-
-        Args:
-            payload: The intent payload (``params.<bypass_key>`` opts out).
-            bypass_key: ``params`` flag that bypasses this guard.
-            evidence_key: ``phase_history[-1].evidence`` key holding the
-                auto-enqueued task id.
-            rule: PolicyDenied rule id raised on conflict.
-            message_fn: Builds the deny message from the resolved auto-task id.
-            hint: PolicyDenied remediation hint.
-
-        Raises:
-            PolicyDenied: when the SWEEP phase already carries the auto-enqueued
-                task and no bypass flag is set.
-        """
         params = payload.get("params") or {}
-        if isinstance(params, dict) and params.get(bypass_key):
+        if isinstance(params, dict) and params.get("bypass_sweep_singleton"):
             return
         ss = getattr(self, "shared_state", None)
         if ss is None:
@@ -1629,10 +1542,26 @@ class PolicyGate:
         evidence = latest.get("evidence")
         if not isinstance(evidence, dict):
             return
-        auto_id = str(evidence.get(evidence_key) or "").strip()
+        auto_id = str(evidence.get("auto_conc_sweep_task_id") or "").strip()
         if not auto_id:
             return
-        raise PolicyDenied(message_fn(auto_id), rule=rule, hint=hint)
+        raise PolicyDenied(
+            (
+                f"sweep: SWEEP phase already has an auto-enqueued conc_sweep "
+                f"task (auto_conc_sweep_task_id={auto_id!r}); full workload "
+                f"sweep is no longer part of the automatic closeout path."
+            ),
+            rule="sweep_phase_singleton",
+            hint=(
+                "The Coordinator's SWEEP-entry hook already dispatches "
+                "conc_sweep directly; no full workload sweep proposal is "
+                "needed. Wait for SWEEP→CLOSE. "
+                "If you genuinely need a second grid for debug, "
+                f"set params.bypass_sweep_singleton=True on the "
+                f"{intent_kind} payload (the override is recorded "
+                f"on the audit trail)."
+            ),
+        )
 
     def _validate_integrate_patch_critic_gate(
         self,

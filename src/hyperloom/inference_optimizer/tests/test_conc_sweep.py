@@ -1122,54 +1122,13 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
     assert coord.shared_state.save.call_count >= 2
 
 
-def test_conc_sweep_phase_singleton_denies_after_auto_enqueue():
-    """``conc_sweep_phase_singleton`` denies LLM conc_sweep proposals after auto-enqueue."""
-    from hyperloom.orchestrator.policy.gate import PolicyGate, PolicyDenied
-
-    class _State:
-        phase = "SWEEP"
-        phase_history = [
-            {
-                "to_phase": "SWEEP",
-                "evidence": {"auto_conc_sweep_task_id": "cs-abc-123"},
-            }
-        ]
-
-    gate = PolicyGate.__new__(PolicyGate)
-    gate.shared_state = _State()
-
-    with pytest.raises(PolicyDenied) as exc_info:
-        gate._validate_conc_sweep_singleton(
-            {"params": {}},
-            intent_kind="propose_action",
-        )
-    assert exc_info.value.rule == "conc_sweep_phase_singleton"
-    assert "auto_conc_sweep_task_id" in str(exc_info.value)
-
-    # Operator bypass works.
-    gate._validate_conc_sweep_singleton(
-        {"params": {"bypass_conc_sweep_singleton": True}},
-        intent_kind="propose_action",
-    )
-
-    # No evidence stamp -> rule is inert.
-    _State.phase_history = [{"to_phase": "SWEEP", "evidence": {}}]
-    gate._validate_conc_sweep_singleton(
-        {"params": {}},
-        intent_kind="propose_action",
-    )
-
-    # Outside SWEEP -> rule is inert.
-    _State.phase_history = [
-        {
-            "to_phase": "EXPLORE",
-            "evidence": {"auto_conc_sweep_task_id": "cs-x"},
-        }
-    ]
-    gate._validate_conc_sweep_singleton(
-        {"params": {}},
-        intent_kind="propose_action",
-    )
+# NOTE: the former ``test_conc_sweep_phase_singleton_denies_after_auto_enqueue``
+# was retired together with PolicyGate._validate_conc_sweep_singleton. conc_sweep
+# is now a Coordinator-internal action (COORDINATOR_INTERNAL_ACTIONS), so an LLM
+# conc_sweep proposal is rejected as Coordinator-managed (phase_incompatible),
+# not via a per-action singleton rule. That behaviour is covered by
+# test_sweep_phase_auto.py::test_validate_intent_denies_llm_conc_sweep_propose_as_coordinator_managed
+# and ::test_conc_sweep_is_coordinator_internal_action.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
