@@ -36,6 +36,7 @@ KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
 # Coordinator-managed actions that agents should not directly propose.
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
     {
+        "conc_sweep",
         "roofline",
         "profile",
         "replay_warm_recipe",

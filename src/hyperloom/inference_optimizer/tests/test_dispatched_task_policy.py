@@ -137,6 +137,36 @@ async def test_dispatched_internal_roofline_passes_delegate_gates(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_dispatched_internal_conc_sweep_passes_auto_enqueue_singleton(tmp_path, monkeypatch):
+    """Auto-enqueued conc_sweep must not re-run LLM singleton validation at dispatch."""
+    sub = _runner_with_policy(tmp_path, monkeypatch)
+    state = sub.shared_state
+    assert isinstance(state, SharedState)
+    state.phase = "SWEEP"
+    state.phase_history = [
+        {
+            "to_phase": "SWEEP",
+            "evidence": {"auto_conc_sweep_task_id": "internal-conc_sweep-phase_entry"},
+        }
+    ]
+    executed = {"ran": False}
+
+    async def _stub(_ctx) -> dict:
+        executed["ran"] = True
+        return {"status": "ok"}
+
+    sub.register_executor("conc_sweep", _stub)
+    task = await sub.tasks.create(
+        kind="conc_sweep",
+        params={"reason": "phase_entry"},
+        idempotency_key="internal-conc-sweep",
+    )
+    res = await sub.run_task(task)
+    assert res.state == "succeeded"
+    assert executed["ran"] is True
+
+
+@pytest.mark.asyncio
 async def test_dispatched_recover_rejected_for_orchestration_source(tmp_path, monkeypatch):
     """Robustness-only delegates cannot be forged as orchestration queued tasks."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
