@@ -42,7 +42,7 @@ jobs:
     timeout-minutes: 240
     steps:
       - name: Checkout (workflow scripts only)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Ensure jq
         run: command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
