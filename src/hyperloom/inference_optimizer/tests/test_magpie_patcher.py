@@ -302,6 +302,28 @@ def test_sglang_mi355x_local_and_remote_client_trust_is_env_gated(fake_magpie: P
     assert script.read_text(encoding="utf-8") == text
 
 
+def test_sglang_mi300x_local_client_trust_is_env_gated(fake_magpie: Path):
+    # Regression: the client-trust patch must also reach the local-server path
+    # of sglang_mi300x.sh (previously only mi355x got the local splice). Use the
+    # realistic client shape (with a local-server path) for the mi300x script.
+    script = _write_sglang_script(
+        fake_magpie,
+        _UPSTREAM_SGLANG_MI355X_SH,
+        name="sglang_mi300x.sh",
+    )
+
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    text = script.read_text(encoding="utf-8")
+
+    assert "magpie_run_benchmark_serving_remote_direct trust" in text
+    assert "HYPERLOOM_SGLANG_LOCAL_TRUST" in text
+    assert "CLIENT_TRUST_ARGS+=(--trust-remote-code)" in text
+    assert '"${CLIENT_TRUST_ARGS[@]}"' in text
+
+    assert ensure_magpie_atomic_scripts_patch(fake_magpie) is True
+    assert script.read_text(encoding="utf-8") == text
+
+
 def test_remote_trust_drift_is_reported_separately(
     tmp_path: Path,
     caplog,

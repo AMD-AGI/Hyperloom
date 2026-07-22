@@ -111,12 +111,18 @@ _REMOTE_DIRECT_PATCHED_BLOCK = (
     "    fi\n"
 )
 
-# Magpie's SGLang MI355X local-client path calls ``run_benchmark_serving``
-# directly. Unlike the vLLM MI355X script, it does not pass
-# ``--trust-remote-code``, so custom tokenizer models (for example Kimi) fail
-# before issuing a request. Build an optional argv array from the same env gate
-# used by the remote-direct path, then splice it into the local client command.
+# Magpie's SGLang local-client path (``BENCHMARK_BASE_URL`` unset — e.g. the
+# baseline ``server_lifecycle`` reuse path) calls ``run_benchmark_serving``
+# directly. Unlike the vLLM scripts it does not pass ``--trust-remote-code``, so
+# custom tokenizer models (for example Kimi) fail before issuing a request.
+# Build an optional argv array from the same env gate used by the remote-direct
+# path, then splice it into the local client command. Both the ``sglang_mi300x``
+# and ``sglang_mi355x`` scripts share these byte-identical client blocks.
 _LOCAL_TRUST_SENTINEL = "HYPERLOOM_SGLANG_LOCAL_TRUST"
+# Marks that a script actually has a local-server client path to patch. When
+# absent (reduced test layouts / scripts without the local branch) the local
+# trust splice is skipped rather than treated as drift.
+_LOCAL_PATH_MARKER = "--result-dir ${RESULT_DIR"
 _LOCAL_TRUST_ARGS_LEGACY_BLOCK = 'SERVER_MONITOR_ARGS=()\nif [[ -n "${SERVER_PID:-}" ]]; then\n'
 _LOCAL_TRUST_ARGS_PATCHED_BLOCK = (
     "SERVER_MONITOR_ARGS=()\n"
@@ -826,21 +832,46 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
     return True
 
 
-def _is_mi355x_client_trust_patched(src: Path) -> bool:
-    """Return whether both MI355X SGLang client paths carry trust gating."""
+def _is_sglang_client_trust_patched(src: Path) -> bool:
+    """Return whether an SGLang script's client paths already carry trust gating.
+
+    Covers both the remote-direct path and, when the script has a local-server
+    client path (:data:`_LOCAL_PATH_MARKER`), the local splice. Scripts without
+    a local path are considered patched once the remote-direct gate is present.
+
+    Args:
+        src: The ``sglang_mi300x.sh`` / ``sglang_mi355x.sh`` file to inspect.
+
+    Returns:
+        True iff the applicable client trust patches are already present, False
+        on a miss or read error.
+    """
     try:
         text = src.read_text(encoding="utf-8")
     except OSError:
         return False
-    return (
-        _LOCAL_TRUST_SENTINEL in text
-        and "magpie_run_benchmark_serving_remote_direct trust" in text
-        and '"${CLIENT_TRUST_ARGS[@]}"' in text
-    )
+    remote_ok = "magpie_run_benchmark_serving_remote_direct trust" in text
+    local_ok = _LOCAL_TRUST_SENTINEL in text or _LOCAL_PATH_MARKER not in text
+    return remote_ok and local_ok
 
 
-def _apply_mi355x_client_trust_patch_atomic(src: Path) -> bool:
-    """Patch SGLang MI355X remote and local benchmark clients for custom code."""
+def _apply_sglang_client_trust_patch_atomic(src: Path) -> bool:
+    """Patch an SGLang script's remote and local benchmark clients for custom code.
+
+    Applies to both ``sglang_mi300x.sh`` and ``sglang_mi355x.sh`` — their client
+    blocks are byte-identical. The remote-direct gate is required (a missing
+    block signals layout drift). The local splice is applied only when the
+    script actually has a local-server client path (:data:`_LOCAL_PATH_MARKER`),
+    and a drifted local block there is reported as a failure.
+
+    Args:
+        src: The SGLang benchmark script to patch in place.
+
+    Returns:
+        True when the applicable trust patches are present after the call
+        (already patched or freshly written), False when a required legacy block
+        is missing / drifted or any IO step fails.
+    """
     try:
         original = src.read_text(encoding="utf-8")
     except OSError as e:
@@ -851,7 +882,7 @@ def _apply_mi355x_client_trust_patch_atomic(src: Path) -> bool:
     if "magpie_run_benchmark_serving_remote_direct trust" not in patched:
         if _REMOTE_DIRECT_LEGACY_BLOCK not in patched:
             log.warning(
-                "_magpie_patcher: MI355X remote benchmark direct-call block "
+                "_magpie_patcher: remote benchmark direct-call block "
                 "not found in %s; custom-tokenizer trust patch could not be applied",
                 src,
             )
@@ -862,10 +893,10 @@ def _apply_mi355x_client_trust_patch_atomic(src: Path) -> bool:
             1,
         )
 
-    if _LOCAL_TRUST_SENTINEL not in patched:
+    if _LOCAL_TRUST_SENTINEL not in patched and _LOCAL_PATH_MARKER in patched:
         if _LOCAL_TRUST_ARGS_LEGACY_BLOCK not in patched or _LOCAL_CLIENT_LEGACY_BLOCK not in patched:
             log.warning(
-                "_magpie_patcher: MI355X local benchmark client block not found "
+                "_magpie_patcher: local benchmark client block not found "
                 "in %s; custom-tokenizer trust patch could not be applied",
                 src,
             )
@@ -887,13 +918,13 @@ def _apply_mi355x_client_trust_patch_atomic(src: Path) -> bool:
     if not atomic_write_text(
         src,
         patched,
-        tmp_prefix=".sglang_mi355x.sh.hyperloom_",
+        tmp_prefix=f".{src.name}.hyperloom_",
         log_prefix="_magpie_patcher",
     ):
         return False
 
     log.info(
-        "_magpie_patcher: applied SGLang MI355X client trust patches to %s",
+        "_magpie_patcher: applied SGLang client trust patches to %s",
         src,
     )
     return True
@@ -991,16 +1022,22 @@ def magpie_scripts_patch_status(
         atomic_ok = atomic_reason not in _ATOMIC_REASONS_GENUINE_FAILURE
         sglang_mi300x_script = _resolve_sglang_mi300x_script_path(magpie_dir)
         sglang_mi355x_script = _resolve_sglang_mi355x_script_path(magpie_dir)
+        sglang_scripts = [s for s in (sglang_mi300x_script, sglang_mi355x_script) if s is not None]
         trust_results: list[bool] = []
+        # MI300X additionally carries the eval-concurrency inline rewrite; keep
+        # that patcher so the script's existing behaviour is unchanged.
         if sglang_mi300x_script is not None:
             trust_results.append(
                 _is_remote_trust_patched(sglang_mi300x_script)
                 or _apply_remote_trust_patch_atomic(sglang_mi300x_script)
             )
-        if sglang_mi355x_script is not None:
+        # Both MI300X and MI355X get the full remote + local client trust patch;
+        # the client blocks are byte-identical across the two scripts, so one
+        # patcher covers each remote-direct and local-server client path.
+        for script in sglang_scripts:
             trust_results.append(
-                _is_mi355x_client_trust_patched(sglang_mi355x_script)
-                or _apply_mi355x_client_trust_patch_atomic(sglang_mi355x_script)
+                _is_sglang_client_trust_patched(script)
+                or _apply_sglang_client_trust_patch_atomic(script)
             )
         if not trust_results:
             log.info(
