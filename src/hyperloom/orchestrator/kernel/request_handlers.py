@@ -2016,6 +2016,307 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
         return ""
 
 
+def _vllm_dense_shape_capture_required(
+    *,
+    framework: str,
+    model_path: str,
+    shapes_json: str,
+    tunableop_input: str,
+    dry_run: bool,
+) -> bool:
+    """Return whether Forge needs an automatic TunableOp recording pass."""
+    if (
+        framework != "vllm"
+        or dry_run
+        or shapes_json
+        or tunableop_input
+        or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
+    ):
+        return False
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    if is_multi_node():
+        return False
+
+    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+
+    summary = summarize_model_config(model_path)
+    if not summary or bool(summary.get("is_moe")):
+        return False
+    try:
+        hidden_size = int(summary.get("hidden_size") or 0)
+        intermediate_size = int(summary.get("intermediate_size") or 0)
+    except (TypeError, ValueError):
+        return False
+    return hidden_size > 0 and intermediate_size > 0
+
+
+def _pick_shape_capture_port() -> int:
+    """Pick a free local port distinct from the production serving port."""
+    import socket
+
+    for _ in range(5):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        if port != 8888:
+            return port
+    return 18888
+
+
+def _resolve_shape_capture_port(value: Any) -> int:
+    """Resolve an isolated capture port and reject the production port."""
+    if value in (None, ""):
+        return _pick_shape_capture_port()
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid shape_capture_port: {value!r}") from exc
+    if port <= 0 or port > 65535 or port == 8888:
+        raise ValueError(f"shape_capture_port must be 1..65535 and not 8888: {port}")
+    return port
+
+
+def _is_tunableop_untuned_row(line: str) -> bool:
+    """Recognize a native PyTorch TunableOp offline-input row."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or stripped.startswith("Validator"):
+        return False
+    fields = [field.strip() for field in stripped.split(",")]
+    if len(fields) < 2 or "TunableOp" not in fields[0] or not fields[1]:
+        return False
+    dimensions = [int(value) for value in re.findall(r"\d+", fields[1])]
+    return sum(value > 0 for value in dimensions) >= 3
+
+
+def _merge_tunableop_untuned_files(base_path: Path) -> int:
+    """Merge per-device TunableOp recordings into one deterministic input."""
+    rows: list[str] = []
+    seen: set[str] = set()
+    pattern = f"{base_path.stem}*{base_path.suffix}"
+    for path in sorted(base_path.parent.glob(pattern)):
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            row = line.strip()
+            if _is_tunableop_untuned_row(row) and row not in seen:
+                seen.add(row)
+                rows.append(row)
+    if not rows:
+        return 0
+
+    tmp_path = base_path.with_suffix(f"{base_path.suffix}.tmp")
+    try:
+        tmp_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        os.replace(tmp_path, base_path)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return 0
+    return len(rows)
+
+
+async def _capture_vllm_tunableop_shapes(
+    *,
+    state: Any,
+    session_dir: Path,
+    payload: dict,
+    workspace: Path,
+) -> HandlerResult:
+    """Record real vLLM GEMMs with PyTorch TunableOp using the baseline workload."""
+    from ..actions.executors.baseline import BaselineExecutor
+    from ..loop.sub_agent_runner import RunnerContext
+    from ..state.task_registry import Task
+
+    capture_dir = workspace / "shape_capture" / f"attempt-{time.time_ns()}"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    untuned_base = capture_dir / "tunableop_untuned.csv"
+    results_base = capture_dir / "tunableop_results.csv"
+
+    config_path = str(payload.get("config_path") or getattr(state, "baseline_config_path", "") or "").strip()
+    if not config_path or not Path(config_path).is_file():
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": "vLLM TunableOp shape capture requires an existing baseline_config_path",
+            "shape_capture_workspace": str(capture_dir),
+        }
+
+    current_best = getattr(state, "current_best", None)
+    current_best = current_best if isinstance(current_best, dict) else {}
+    inherited_envs = dict(current_best.get("extra_envs") or {})
+    inherited_envs.update(dict(payload.get("extra_envs") or {}))
+    capture_envs = {
+        str(key): str(value)
+        for key, value in inherited_envs.items()
+        if not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
+    }
+    try:
+        capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": str(exc),
+            "shape_capture_workspace": str(capture_dir),
+        }
+    capture_envs.update(
+        {
+            "PORT": str(capture_port),
+            "RUN_EVAL": "false",
+            "HL_TUNABLEOP_MODE": "",
+            "HL_TUNABLEOP_FILE": "",
+            "HL_TUNABLEOP_VERBOSE": "",
+            "PYTORCH_TUNABLEOP_ENABLED": "1",
+            "PYTORCH_TUNABLEOP_TUNING": "0",
+            "PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1",
+            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME": str(untuned_base),
+            "PYTORCH_TUNABLEOP_FILENAME": str(results_base),
+        }
+    )
+    for env_name, state_name in (
+        ("TP", "tp"),
+        ("CONC", "conc"),
+        ("ISL", "isl"),
+        ("OSL", "osl"),
+        ("MAX_MODEL_LEN", "max_model_len"),
+    ):
+        value = payload.get(state_name)
+        if value in (None, ""):
+            value = capture_envs.get(env_name)
+        if value in (None, ""):
+            value = getattr(state, state_name, 0)
+        try:
+            resolved = int(value or 0)
+        except (TypeError, ValueError):
+            resolved = 0
+        if resolved > 0:
+            capture_envs[env_name] = str(resolved)
+
+    try:
+        timeout_sec = int(
+            payload.get("shape_capture_timeout_sec")
+            or os.environ.get("HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC")
+            or 1800
+        )
+    except (TypeError, ValueError):
+        timeout_sec = 1800
+    timeout_sec = max(60, timeout_sec)
+
+    task_id = f"{str(payload.get('task_id') or workspace.name)}-shape-capture"
+    extra_server_args = (
+        str(payload.get("extra_server_args") or "")
+        if "extra_server_args" in payload
+        else str(current_best.get("extra_server_args") or "")
+    )
+    inherited_unset = payload.get("unset_envs", current_best.get("unset_envs")) or []
+    if isinstance(inherited_unset, str):
+        capture_unset_envs = [inherited_unset]
+    else:
+        capture_unset_envs = [str(key) for key in inherited_unset]
+    capture_unset_envs.extend(
+        [
+            "HL_TUNABLEOP_MODE",
+            "HL_TUNABLEOP_FILE",
+            "HL_TUNABLEOP_VERBOSE",
+            "PYTORCH_TUNABLEOP_ENABLED",
+            "PYTORCH_TUNABLEOP_TUNING",
+            "PYTORCH_TUNABLEOP_RECORD_UNTUNED",
+            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME",
+            "PYTORCH_TUNABLEOP_FILENAME",
+        ]
+    )
+    inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
+    if isinstance(inherited_remove, str):
+        capture_remove_args = [inherited_remove]
+    else:
+        capture_remove_args = [str(arg) for arg in inherited_remove]
+    capture_remove_args.append("--port")
+    task = Task(
+        task_id=task_id,
+        kind="gemm_shape_capture",
+        state="running",
+        params={
+            "config_path": config_path,
+            "output_dir": str(capture_dir),
+            "timeout_sec": timeout_sec,
+            "framework": "vllm",
+            "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
+            "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
+            "extra_server_args": extra_server_args,
+            "extra_envs": capture_envs,
+            "remove_args": capture_remove_args,
+            "unset_envs": capture_unset_envs,
+            "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+            "disable_run_eval": True,
+            "baseline_double_run": False,
+        },
+        idempotency_key=f"{task_id}-run",
+    )
+    ctx = RunnerContext(task=task, lease=None)
+    import copy
+
+    capture_state = copy.copy(state)
+    capture_state.baseline_eager_fallback = False
+    ctx.extra = {
+        "shared_state": capture_state,
+        "session_dir": session_dir,
+        "workspace": capture_dir,
+    }
+
+    try:
+        benchmark_result = await BaselineExecutor(
+            session_dir=session_dir,
+            shared_state=capture_state,
+        )(ctx)
+    except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": f"vLLM TunableOp shape capture raised {exc!r}",
+            "shape_capture_workspace": str(capture_dir),
+        }
+
+    if not isinstance(benchmark_result, dict):
+        benchmark_result = {}
+    row_count = _merge_tunableop_untuned_files(untuned_base)
+    if benchmark_result.get("status") != "succeeded" or row_count == 0:
+        try:
+            untuned_base.unlink(missing_ok=True)
+        except OSError:
+            pass
+        benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
+        detail = f": {benchmark_error}" if benchmark_error else ""
+        return {
+            "status": "failed",
+            "decision": "REVERT",
+            "requires_e2e_validation": False,
+            "error_class": "shape_capture_failed",
+            "error": f"vLLM TunableOp shape capture produced no complete workload recording{detail}",
+            "shape_capture_workspace": str(capture_dir),
+            "shape_count": row_count,
+        }
+
+    return {
+        "status": "ok",
+        "tunableop_input": str(untuned_base),
+        "shape_capture_workspace": str(capture_dir),
+        "shape_count": row_count,
+    }
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -2083,6 +2384,31 @@ async def _run_forge_gemm_tuning(
     if not untuned_csv and not shapes_json:
         untuned_csv = _resolve_forge_untuned_csv(session_dir, precision, quant_type, model_path)
 
+    tunableop_input = str(payload.get("tunableop_input") or "").strip()
+    shape_capture: HandlerResult | None = None
+    if _vllm_dense_shape_capture_required(
+        framework=framework,
+        model_path=model_path,
+        shapes_json=shapes_json,
+        tunableop_input=tunableop_input,
+        dry_run=bool(payload.get("dry_run")),
+    ):
+        shape_capture = await _capture_vllm_tunableop_shapes(
+            state=state,
+            session_dir=session_dir,
+            payload=payload,
+            workspace=workspace,
+        )
+        if shape_capture.get("status") != "ok":
+            shape_capture.setdefault("backend", "forge")
+            shape_capture.setdefault("engine", "forge")
+            shape_capture.setdefault("workspace", str(workspace))
+            shape_capture.setdefault("precision", precision)
+            shape_capture.setdefault("framework", framework)
+            shape_capture.setdefault("model_path", model_path)
+            return shape_capture
+        tunableop_input = str(shape_capture.get("tunableop_input") or "").strip()
+
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     input_payload = {
@@ -2102,7 +2428,7 @@ async def _run_forge_gemm_tuning(
         "tokens": tokens,
         "untuned_csv": untuned_csv,
         "shapes_json": shapes_json,
-        "tunableop_input": str(payload.get("tunableop_input") or ""),
+        "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
         "tuner": str(payload.get("tuner") or ""),
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
@@ -2138,6 +2464,16 @@ async def _run_forge_gemm_tuning(
     result.setdefault("precision", precision)
     result.setdefault("framework", framework)
     result.setdefault("model_path", model_path)
+    if shape_capture is not None:
+        result.setdefault(
+            "shape_capture",
+            {
+                "status": "ok",
+                "workspace": shape_capture.get("shape_capture_workspace"),
+                "tunableop_input": tunableop_input,
+                "shape_count": shape_capture.get("shape_count"),
+            },
+        )
 
     # Surface why forge skipped: merge per-tuner skip reasons from the on-disk
     # result.json and derive a top-level skip_reason.

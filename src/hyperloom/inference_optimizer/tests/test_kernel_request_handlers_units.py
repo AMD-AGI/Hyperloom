@@ -1061,6 +1061,342 @@ class TestReusableSourceRootsAtom:
 
 
 class TestRunGemmTuningHandler:
+    def test_vllm_shape_capture_merges_per_device_native_rows(self, tmp_path, monkeypatch):
+        from hyperloom.orchestrator.actions.executors import baseline as baseline_module
+
+        baseline_config = tmp_path / "baseline.yaml"
+        baseline_config.write_text("benchmark:\n  framework: vllm\n")
+        state = SharedState(
+            framework="vllm",
+            model_path="/models/qwen",
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=512,
+            max_model_len=4096,
+            baseline_config_path=str(baseline_config),
+            baseline_eager_fallback=True,
+            current_best={
+                "extra_server_args": "--enforce-eager --port 8888",
+                "extra_envs": {
+                    "CONC": "128",
+                    "KEEP_ME": "1",
+                    "PYTORCH_TUNABLEOP_TUNING": "1",
+                    "HL_TUNABLEOP_MODE": "candidate",
+                },
+            },
+        )
+        captured: dict = {}
+
+        class FakeBaselineExecutor:
+            def __init__(self, **kwargs):
+                captured["init"] = kwargs
+
+            async def __call__(self, ctx):
+                captured["task"] = ctx.task
+                envs = ctx.task.params["extra_envs"]
+                base = Path(envs["PYTORCH_TUNABLEOP_UNTUNED_FILENAME"])
+                base.with_name(f"{base.stem}0{base.suffix}").write_text(
+                    "GemmTunableOp_BFloat16_NT,nt_5120_4149_17408_ld_5120_17408_5120\n"
+                    "not-a-native-row\n"
+                )
+                base.with_name(f"{base.stem}1{base.suffix}").write_text(
+                    "GemmTunableOp_BFloat16_NT,nt_5120_4149_17408_ld_5120_17408_5120\n"
+                    "GemmTunableOp_BFloat16_NN,nn_17408_1083_5120_ld_17408_5120_17408\n"
+                    "ScaledGemmTunableOp_Float8_e4m3fnuz_NN,"
+                    "nn_5120_4149_17408_ld_5120_17408_5120_rw_0_bias_None,"
+                    "BLAS_PARAMS,algo_1\n"
+                )
+                return {"status": "succeeded"}
+
+        monkeypatch.setattr(baseline_module, "BaselineExecutor", FakeBaselineExecutor)
+        monkeypatch.setattr(krh, "_pick_shape_capture_port", lambda: 19001)
+
+        result = asyncio.run(
+            krh._capture_vllm_tunableop_shapes(
+                state=state,
+                session_dir=tmp_path,
+                payload={"task_id": "capture", "tp": 2},
+                workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
+            )
+        )
+
+        assert result["status"] == "ok"
+        assert result["shape_count"] == 3
+        merged = Path(result["tunableop_input"])
+        assert len(merged.read_text().splitlines()) == 3
+        task = captured["task"]
+        assert task.kind == "gemm_shape_capture"
+        assert task.params["baseline_double_run"] is False
+        assert task.params["disable_run_eval"] is True
+        assert task.params["extra_server_args"] == "--enforce-eager --port 8888"
+        assert "--port" in task.params["remove_args"]
+        assert task.params["extra_envs"]["KEEP_ME"] == "1"
+        assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_ENABLED"] == "1"
+        assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_TUNING"] == "0"
+        assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_RECORD_UNTUNED"] == "1"
+        assert task.params["extra_envs"]["HL_TUNABLEOP_MODE"] == ""
+        assert task.params["extra_envs"]["PORT"] == "19001"
+        assert task.params["extra_envs"]["TP"] == "2"
+        assert task.params["extra_envs"]["CONC"] == "128"
+        assert task.params["extra_envs"]["ISL"] == "1024"
+        assert task.params["extra_envs"]["OSL"] == "512"
+        assert task.params["extra_envs"]["MAX_MODEL_LEN"] == "4096"
+        assert "HL_TUNABLEOP_MODE" in task.params["unset_envs"]
+        assert captured["init"]["shared_state"] is not state
+        assert captured["init"]["shared_state"].baseline_eager_fallback is False
+        assert state.baseline_eager_fallback is True
+
+    @pytest.mark.parametrize("port", [0, -1, 8888, 65536, "bad"])
+    def test_shape_capture_rejects_unsafe_explicit_port(self, port):
+        with pytest.raises(ValueError):
+            krh._resolve_shape_capture_port(port)
+
+    def test_vllm_shape_capture_empty_output_is_explicit_failure(self, tmp_path, monkeypatch):
+        from hyperloom.orchestrator.actions.executors import baseline as baseline_module
+
+        baseline_config = tmp_path / "baseline.yaml"
+        baseline_config.write_text("benchmark:\n  framework: vllm\n")
+        state = SharedState(
+            framework="vllm",
+            model_path="/models/qwen",
+            baseline_config_path=str(baseline_config),
+        )
+
+        class FakeBaselineExecutor:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __call__(self, ctx):
+                return {"status": "succeeded"}
+
+        monkeypatch.setattr(baseline_module, "BaselineExecutor", FakeBaselineExecutor)
+
+        result = asyncio.run(
+            krh._capture_vllm_tunableop_shapes(
+                state=state,
+                session_dir=tmp_path,
+                payload={"task_id": "capture"},
+                workspace=tmp_path / "runs" / "gemm_tuning" / "capture",
+            )
+        )
+
+        assert result["status"] == "failed"
+        assert result["error_class"] == "shape_capture_failed"
+        assert result["shape_count"] == 0
+
+    @pytest.mark.parametrize(
+        ("framework", "shapes_json", "tunableop_input", "dry_run"),
+        [
+            ("sglang", "", "", False),
+            ("vllm", "present", "", False),
+            ("vllm", "", "/tmp/tunableop.csv", False),
+            ("vllm", "", "", True),
+        ],
+    )
+    def test_vllm_shape_capture_does_not_change_existing_input_paths(
+        self,
+        tmp_path,
+        framework,
+        shapes_json,
+        tunableop_input,
+        dry_run,
+    ):
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps({"hidden_size": 5120, "intermediate_size": 17408})
+        )
+        if shapes_json:
+            path = tmp_path / "shapes.json"
+            path.write_text(json.dumps([{"M": 1, "N": 2, "K": 3}]))
+            shapes_json = str(path)
+
+        assert (
+            krh._vllm_dense_shape_capture_required(
+                framework=framework,
+                model_path=str(model),
+                shapes_json=shapes_json,
+                tunableop_input=tunableop_input,
+                dry_run=dry_run,
+            )
+            is False
+        )
+
+    def test_multi_node_vllm_preserves_existing_no_capture_behavior(self, tmp_path, monkeypatch):
+        from hyperloom.orchestrator.actions.executors import _multi_node_env
+
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps({"hidden_size": 5120, "intermediate_size": 17408})
+        )
+        monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
+
+        assert (
+            krh._vllm_dense_shape_capture_required(
+                framework="vllm",
+                model_path=str(model),
+                shapes_json="",
+                tunableop_input="",
+                dry_run=False,
+            )
+            is False
+        )
+
+    def test_vllm_moe_does_not_trigger_dense_shape_capture(self, tmp_path):
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps(
+                {
+                    "hidden_size": 5120,
+                    "intermediate_size": 17408,
+                    "num_experts": 128,
+                }
+            )
+        )
+
+        assert (
+            krh._vllm_dense_shape_capture_required(
+                framework="vllm",
+                model_path=str(model),
+                shapes_json="",
+                tunableop_input="",
+                dry_run=False,
+            )
+            is False
+        )
+
+    def test_explicit_tunableop_input_bypasses_vllm_shape_capture(self, tmp_path, monkeypatch):
+        root = tmp_path / "kernel-agent"
+        tool = root / "tools" / "forge_gemm_tuning.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("# placeholder\n")
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps({"hidden_size": 5120, "intermediate_size": 17408})
+        )
+        explicit_input = tmp_path / "operator-provided.csv"
+        explicit_input.write_text("GemmTunableOp_BFloat16_NN,nn_5120_64_5120_ld_5120_5120_5120\n")
+        SharedState(
+            precision="fp8",
+            framework="vllm",
+            model_path=str(model),
+            gpu_type="mi300x",
+        ).save(tmp_path)
+        captured_input: dict = {}
+
+        async def fail_capture(**kwargs):
+            raise AssertionError("explicit tunableop_input must bypass automatic capture")
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            input_path = Path(cmd[cmd.index("--input-json") + 1])
+            captured_input.update(json.loads(input_path.read_text()))
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps({"status": "ok", "micro_decision": "no_improvement"})
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_capture_vllm_tunableop_shapes", fail_capture)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(
+            krh.run_gemm_tuning_handler(
+                {
+                    "task_id": "explicit",
+                    "tunableop_input": str(explicit_input),
+                },
+                session_dir=tmp_path,
+            )
+        )
+
+        assert captured_input["tunableop_input"] == str(explicit_input)
+        assert result["status"] == "ok"
+
+    def test_vllm_dense_without_shapes_captures_tunableop_input(self, tmp_path, monkeypatch):
+        root = tmp_path / "kernel-agent"
+        tool = root / "tools" / "forge_gemm_tuning.py"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("# placeholder\n")
+        monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(root))
+        monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(
+            json.dumps(
+                {
+                    "architectures": ["Qwen3ForCausalLM"],
+                    "hidden_size": 5120,
+                    "intermediate_size": 17408,
+                }
+            )
+        )
+        SharedState(
+            precision="fp8",
+            framework="vllm",
+            model_path=str(model),
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+        ).save(tmp_path)
+
+        capture_calls: list[dict] = []
+        captured_input: dict = {}
+
+        async def fake_capture(*, state, session_dir, payload, workspace):
+            capture_calls.append(
+                {
+                    "state": state,
+                    "session_dir": session_dir,
+                    "payload": payload,
+                    "workspace": workspace,
+                }
+            )
+            path = tmp_path / "tunableop_untuned.csv"
+            path.write_text("GemmTunableOp_BFloat16_NT,nt_5120_4149_17408_ld_5120_17408_5120\n")
+            return {"status": "ok", "tunableop_input": str(path)}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int):
+            input_path = Path(cmd[cmd.index("--input-json") + 1])
+            captured_input.update(json.loads(input_path.read_text()))
+            return (
+                0,
+                "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+                + json.dumps(
+                    {
+                        "status": "ok",
+                        "micro_decision": "no_improvement",
+                        "recommended_env": {},
+                        "tuners_run": [{"tuner_name": "vllm_dense_tunableop"}],
+                    }
+                )
+                + "\nFORGE_GEMM_TUNE_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_capture_vllm_tunableop_shapes", fake_capture, raising=False)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        result = asyncio.run(krh.run_gemm_tuning_handler({"task_id": "capture"}, session_dir=tmp_path))
+
+        assert len(capture_calls) == 1
+        assert captured_input["tunableop_input"] == str(tmp_path / "tunableop_untuned.csv")
+        assert result["status"] == "ok"
+
     def test_skips_non_fp8_without_kernel_agent_root(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
         state = SharedState(precision="bf16", framework="sglang")
