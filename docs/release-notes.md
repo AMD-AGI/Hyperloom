@@ -7,7 +7,7 @@ myst:
 
 # Hyperloom release notes
 
-The current packaged version is `0.9.0` (`pyproject.toml`). For the
+The current packaged version is `1.0.0a1` (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
