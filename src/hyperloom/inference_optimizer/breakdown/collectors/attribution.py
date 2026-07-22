@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Deterministic collectors for ``session_breakdown.json``.
@@ -63,7 +63,10 @@ _ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
     (lambda s: s.split(":", 1)[0] == "replay_warm_recipe", "replay_warm_recipe"),
     # FRAMEWORK: own headline row so per-source totals reconcile against
     # validated_total_pct (else these KEEPs fell into ``other`` and vanished).
-    (lambda s: s == "framework", "framework"),
+    # Framework-PR integration is emitted as ``integrate_patch`` (distinct from
+    # the legacy kernel ``integrate`` above), so credit it to ``framework``
+    # rather than letting it fall through to ``other``/``unattributed``.
+    (lambda s: s == "framework" or s.startswith("integrate_patch"), "framework"),
     # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
     (lambda s: s == "gemm_tuning", "gemm_tuning"),
@@ -389,6 +392,12 @@ def _collect_phase_breakdown(
         except (TypeError, ValueError):
             ts_f = 0.0
         phase = _phase_for(ts_f).lower()
+        # ``phase_history`` records the phase as ``FRAMEWORK_AGENT`` but the
+        # attribution bucket is named ``framework``; normalize so framework-phase
+        # KEEPs land in the framework bucket instead of missing the bucket key and
+        # falling through to the action-family fallback (and then ``unattributed``).
+        if phase == "framework_agent":
+            phase = "framework"
         action = str(e.get("action") or "").lower()
         fam = _action_family(action)
         # gemm_tuning runs inside KERNEL but is bucketed separately.

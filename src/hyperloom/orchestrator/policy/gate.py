@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """PolicyGate — single chokepoint: every parsed Intent passes through ``validate_intent`` before side-effects."""
@@ -858,7 +858,7 @@ class PolicyGate:
         analysis/internal-only gate, the kernel_agent-owned-action guard, and
         the per-action specialised paths (``specialist`` / ``dynamic_action``
         / ``integrate_patch`` / ``explore`` / ``sweep``). It then applies
-        the FP8-only, gain-driven and explore-minimum kernel_opt gates, the
+        the GEMM-tuning ownership, gain-driven and explore-minimum kernel_opt gates, the
         ActionRegistry unknown-action lookup, per-action source and
         required-payload guards, the phase-compatibility check, and the
         external-tool collision guards (R4 / R5).
@@ -921,12 +921,12 @@ class PolicyGate:
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
             self._validate_integrate_patch_critic_gate(payload)
         # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed.
-        # conc_sweep has no equivalent guard here: it is a Coordinator-internal
-        # action (never LLM-delegated), so _validate_phase_action rejects any LLM
-        # conc_sweep as Coordinator-managed (phase_incompatible) below.
         if action_name == SWEEP_ACTION_NAME:
             self._validate_sweep_singleton(payload, intent_kind="delegate")
-        self._validate_fp8_only_action(action_name, intent_kind="delegate")
+        # conc_sweep_phase_singleton: block duplicate conc_sweep proposals.
+        if action_name == CONC_SWEEP_ACTION_NAME:
+            self._validate_conc_sweep_singleton(payload, intent_kind="delegate")
+        self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         # Refuse delegate for unknown action names when an ActionRegistry is wired (no registry → fall through).
         if self.action_registry is not None and self.action_registry.get(action_name) is None:
             raise PolicyDenied(
@@ -982,7 +982,7 @@ class PolicyGate:
         ActionRegistry lookup here is soft — unknown names are only
         rejected when a registry is wired and the action is neither
         registered nor kernel_agent-owned. Mirrors the delegate channel's
-        explore-grid, sweep-singleton, FP8-only, gain-driven /
+        explore-grid, sweep-singleton, GEMM-tuning ownership, gain-driven /
         explore-minimum kernel_opt, phase, and external-tool collision
         gates so an LLM cannot sidestep them by proposing instead of
         delegating.
@@ -1038,7 +1038,7 @@ class PolicyGate:
                     "escalate via its action-ladder instead"
                 ),
             )
-        self._validate_fp8_only_action(action_name, intent_kind="propose_action")
+        self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")
         # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
         # R4 / R5 — defense in depth on propose_action.
@@ -1114,7 +1114,7 @@ class PolicyGate:
         :data:`REQUEST_ROUTING`), that ``target_agent`` is in the role's
         allowed-target set, and that ``kind`` is present. For
         orchestration→kernel requests the ``kind`` is treated as the action
-        name, so the internal-only, phase, FP8-only and external-tool
+        name, so the internal-only, phase, GEMM-tuning ownership and external-tool
         collision guards are applied to it as defense in depth.
 
         Args:
@@ -1155,7 +1155,7 @@ class PolicyGate:
             target == "kernel_agent" and gated_kind in KERNEL_AGENT_OWNED_ACTIONS
         ) or gated_kind in COORDINATOR_INTERNAL_ACTIONS:
             self._validate_phase_action(role, gated_kind, intent_kind="request")
-        self._validate_fp8_only_action(kind, intent_kind="request")
+        self._validate_gemm_tuning_action(kind, intent_kind="request")
         # R4 / R5 — a REQUEST.kind cannot smuggle a KB write / external tool either.
         self._validate_no_kb_write_collision(kind, intent_kind="request")
         self._validate_tool_whitelist_collision(
@@ -1356,18 +1356,19 @@ class PolicyGate:
             hint=hint,
         )
 
-    # FP8-only actions
-    def _validate_fp8_only_action(
+    # GEMM tuning ownership
+    def _validate_gemm_tuning_action(
         self,
         action_name: str,
         *,
         intent_kind: str,
     ) -> None:
-        """Reject GEMM tuning for non-FP8 sessions when using GEAK backend.
+        """Do not pre-filter GEMM tuning applicability in Hyperloom.
 
-        When GEMM_TUNING_BACKEND=forge (or KERNEL_OPT_BACKEND_ORDER starts
-        with forge), the FP8 gate is lifted since forge-gemm-tune supports
-        bf16/fp4/vLLM natively and handles eligibility internally.
+        Current GEAK owns its optimization loop and decides internally whether
+        GEMM tuning applies to the workload.  Hyperloom keeps this hook as a
+        named policy boundary but deliberately does not reject by precision,
+        framework, or GEMM type.
 
         Args:
             action_name (str): the action name being checked.
@@ -1375,32 +1376,9 @@ class PolicyGate:
                 error hint.
 
         Raises:
-            PolicyDenied: when a GEAK-only GEMM tuning action is requested but
-                the session precision is not ``fp8``.
+            PolicyDenied: This hook does not currently raise.
         """
-        if not action_name or action_name not in _GEMM_TUNING_ACTIONS:
-            return
-        # Dynamically check if forge backend lifts the FP8 gate.
-        from ..kernel.request_handlers import _resolve_gemm_tuning_backend
-
-        if _resolve_gemm_tuning_backend({}) == "forge":
-            return  # forge handles eligibility internally; no FP8 gate.
-        state = self.shared_state
-        if state is None:
-            return
-        precision = str(getattr(state, "precision", "") or "").strip().lower()
-        if precision == "fp8":
-            return
-        raise PolicyDenied(
-            f"action {action_name!r} is FP8-only but session precision={precision or '(unset)'!r}",
-            rule="fp8_only_action",
-            hint=(
-                f"intent_kind={intent_kind!r}: GEAK GEMM tuning only applies "
-                "to FP8 block-scale workloads. Set PRECISION=fp8 / "
-                "--precision fp8, or use GEMM_TUNING_BACKEND=forge for "
-                "broader precision support."
-            ),
-        )
+        return
 
     # R4 — kb_write_unauthorized
     def _validate_no_kb_write_collision(

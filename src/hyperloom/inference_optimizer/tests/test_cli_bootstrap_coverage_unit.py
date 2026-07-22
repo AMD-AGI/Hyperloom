@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 """Focused coverage for CLI bootstrap helpers."""
 
@@ -82,7 +82,6 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
         },
     )
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {"layers": 61})
-    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
@@ -132,11 +131,24 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
 
+def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+
+    state = cb._seed_shared_state(tmp_path, _args(), session_id="session-forge")
+
+    assert state.kernel_optimizer == "native"
+
+
 def _stub_seed_deps(monkeypatch, tmp_path):
     """Common monkeypatches so ``_seed_shared_state`` runs without real I/O."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
@@ -215,7 +227,6 @@ def test_seed_shared_state_preserves_quantized_model_identity(
     ``<...>/quantized`` path basename."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
@@ -247,7 +258,6 @@ def test_seed_shared_state_falls_back_to_path_basename(
     name is still the plain model-path basename."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
@@ -282,7 +292,6 @@ def test_seed_passes_raw_model_path_to_model_arch_guard(
 
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", _spy)
-    monkeypatch.setattr(cb, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",

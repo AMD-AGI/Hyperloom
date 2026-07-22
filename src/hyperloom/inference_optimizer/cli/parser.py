@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """CLI argument parser — ``_build_parser`` and its purely-computational helpers."""
@@ -570,7 +570,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "model-path family keywords, replacing the deleted ``classify`` "
             "action's lightweight state-write role. For richer *advisory* "
             "model context (attention variant, KV/token, experts, MTP, ...) "
-            "the SKILL launcher writes $USER_DATA_PATH/model_arch.json, which "
+            "the SKILL launcher writes <session_dir>/model_arch.json, which "
             "is injected into prompts but drives no gating."
         ),
     )
@@ -1406,7 +1406,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.15.",
+        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.20.",
     )
     opt.add_argument(
         "--max-minutes-explore-pct",
@@ -1414,7 +1414,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_explore_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.375.",
+        help="Wall-clock budget cap for EXPLORE. Default: 0.35.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1422,7 +1422,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.305.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.28.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """CLI ``_preflight`` cluster — auto-install/env-hygiene checks run before ``optimize`` starts."""
@@ -828,7 +828,7 @@ def _print_cortex_kb_queue_status() -> None:
 
 
 _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
-_INFERENCEX_REF_DEFAULT = "2035a2117ad22403376359be0064dfa2c078c59b"
+_INFERENCEX_REF_DEFAULT = "a4bb43afa7fd74c1356583ed29e51421be010f0f"
 
 
 def _inferencex_checkout_ok(path: Path | str) -> bool:

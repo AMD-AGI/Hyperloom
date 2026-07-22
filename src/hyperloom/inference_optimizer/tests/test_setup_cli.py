@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -383,6 +383,227 @@ def test_baremetal_install_no_longer_accepts_openai_safe_credential_flags():
     assert "openai_url" not in credential_text
     assert "dv_safe" not in credential_text
     assert "dv_openai" not in credential_text
+
+
+def test_baremetal_runtime_deps_probe_vllm_venv_for_isolated_vllm(tmp_path: Path):
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    loop_start = script_text.index("  local m", script_text.index('  if [ "$any_fw" -eq 0 ]; then'))
+    loop_end = script_text.index('\n\n  [ "$rc" -ne 0 ]', loop_start)
+    runtime_dep_loop = script_text[loop_start:loop_end]
+
+    host_py = tmp_path / "host-python"
+    vllm_root = tmp_path / "vllm-venv"
+    vllm_py = vllm_root / "bin" / "python"
+    host_py.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    vllm_py.parent.mkdir(parents=True)
+    vllm_py.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    host_py.chmod(0o755)
+    vllm_py.chmod(0o755)
+
+    runner = tmp_path / "runtime-deps.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"py={host_py}",
+                f"VLLM_VENV_ROOT={vllm_root}",
+                "FRAMEWORK_ENV=isolated",
+                "FRAMEWORKS=sglang,vllm",
+                'log() { :; }',
+                'warn() { :; }',
+                '_py_has() { printf "probe %s %s\\n" "$1" "$2"; return 0; }',
+                "run_probe() {",
+                runtime_dep_loop,
+                "}",
+                "run_probe",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = subprocess.run(
+        ["bash", str(runner)],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.splitlines()
+
+    assert out == [
+        f"probe {vllm_py} triton",
+        f"probe {vllm_py} aiter",
+        f"probe {host_py} sgl_kernel",
+    ]
+
+
+def test_baremetal_aiter_install_preserves_system_triton_and_rechecks_alignment(tmp_path: Path):
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("install_aiter_ref_with_constraints() {")
+    end = script_text.index("\n}\n\ninstall_compatible_aiter() {", start) + 3
+    install_aiter = script_text[start:end]
+
+    fake_py = tmp_path / "python"
+    calls_file = tmp_path / "calls.txt"
+    fake_py.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                'printf "env=%s args=%s\\n" "${AITER_USE_SYSTEM_TRITON-__unset__}" "$*" >> "$CALLS_FILE"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_py.chmod(0o755)
+
+    runner = tmp_path / "aiter-install.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"export CALLS_FILE={calls_file}",
+                "checkout_aiter_ref() { printf 'checkout %s %s\\n' \"$1\" \"$2\" >> \"$CALLS_FILE\"; }",
+                "check_torch_triton_alignment() { printf 'align %s\\n' \"$1\" >> \"$CALLS_FILE\"; }",
+                install_aiter,
+                f"install_aiter_ref_with_constraints {fake_py} {tmp_path / 'aiter'} v0.1.18 {tmp_path / 'constraints.txt'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["bash", str(runner)], check=True)
+
+    assert calls_file.read_text(encoding="utf-8").splitlines() == [
+        f"checkout {tmp_path / 'aiter'} v0.1.18",
+        f"env=1 args=-m pip install --constraint {tmp_path / 'constraints.txt'} --config-settings editable_mode=compat -e {tmp_path / 'aiter'}",
+        "env=__unset__ args=-c import aiter",
+        f"align {fake_py}",
+    ]
+
+
+def test_baremetal_aiter_install_fails_when_import_fails(tmp_path: Path):
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("install_aiter_ref_with_constraints() {")
+    end = script_text.index("\n}\n\ninstall_compatible_aiter() {", start) + 3
+    install_aiter = script_text[start:end]
+
+    fake_py = tmp_path / "python"
+    calls_file = tmp_path / "calls.txt"
+    fake_py.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                'printf "args=%s\\n" "$*" >> "$CALLS_FILE"',
+                '[ "$*" = "-c import aiter" ] && exit 42',
+                "exit 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_py.chmod(0o755)
+
+    runner = tmp_path / "aiter-import-fail.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"export CALLS_FILE={calls_file}",
+                "checkout_aiter_ref() { printf 'checkout %s %s\\n' \"$1\" \"$2\" >> \"$CALLS_FILE\"; }",
+                "check_torch_triton_alignment() { printf 'align %s\\n' \"$1\" >> \"$CALLS_FILE\"; return 0; }",
+                install_aiter,
+                f"if install_aiter_ref_with_constraints {fake_py} {tmp_path / 'aiter'} v0.1.18 {tmp_path / 'constraints.txt'}; then",
+                "  echo RESULT=success",
+                "else",
+                "  echo RESULT=failure",
+                "fi",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = subprocess.run(["bash", str(runner)], check=True, text=True, stdout=subprocess.PIPE).stdout
+
+    assert "RESULT=failure" in out
+    assert calls_file.read_text(encoding="utf-8").splitlines() == [
+        f"checkout {tmp_path / 'aiter'} v0.1.18",
+        f"args=-m pip install --constraint {tmp_path / 'constraints.txt'} --config-settings editable_mode=compat -e {tmp_path / 'aiter'}",
+        "args=-c import aiter",
+    ]
+
+
+def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fails(tmp_path: Path):
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    start = script_text.index("install_sglang_framework() {")
+    end = script_text.index("\n}\n\n# Verify that the installed vLLM package resolves", start) + 3
+    install_sglang_framework = script_text[start:end]
+
+    fake_py = tmp_path / "python"
+    calls_file = tmp_path / "calls.txt"
+    import_flag = tmp_path / "aiter-ok"
+    fake_py.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                'printf "py args=%s\\n" "$*" >> "$CALLS_FILE"',
+                'if [ "$*" = "-c import aiter" ]; then',
+                f"  [ -f {import_flag} ] && exit 0 || exit 42",
+                "fi",
+                'if [ "$*" = "-c import sglang" ] || [ "$*" = "-c import sgl_kernel" ]; then exit 0; fi',
+                "if [ \"$1\" = \"-\" ]; then echo 3.12; exit 0; fi",
+                "exit 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_py.chmod(0o755)
+
+    runner = tmp_path / "sglang-aiter-reinstall.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"export CALLS_FILE={calls_file}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "AITER_REF=",
+                "SGLANG_ROCM_EXTRA=rocm720",
+                "SGLANG_ROCM_PYPI_VERSION=7.2.0",
+                "SGLANG_REPO=https://example.invalid/sglang.git",
+                "SGLANG_REF=main",
+                "AITER_REPO=https://example.invalid/aiter.git",
+                f"AITER_ROOT={tmp_path / 'aiter'}",
+                f"resolve_python() {{ printf '%s\\n' {fake_py}; }}",
+                f"framework_deps_root() {{ printf '%s\\n' {tmp_path}; }}",
+                "log() { :; }",
+                "warn() { :; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "_py_has() { [ \"$2\" = aiter ] && return 0; return 0; }",
+                "install_sglang_from_wheel() { :; }",
+                "install_sglang_from_source() { :; }",
+                f"install_compatible_aiter() {{ printf 'install_compatible_aiter %s %s\\n' \"$1\" \"$2\" >> \"$CALLS_FILE\"; touch {import_flag}; }}",
+                install_sglang_framework,
+                "install_sglang_framework",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["bash", str(runner)], check=True)
+
+    assert f"install_compatible_aiter {fake_py} {tmp_path / 'aiter'}" in calls_file.read_text(encoding="utf-8")
 
 
 def test_kernel_install_no_longer_exports_openai_safe_credentials():

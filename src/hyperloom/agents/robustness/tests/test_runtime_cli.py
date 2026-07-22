@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Tests for the subprocess transport CLI: the in-process ``_run_tick`` helper and the real ``python -m robustness_agent.runtime.cli tick`` invocation. Pins the request.json/emit.json contract the Coordinator host-side wrapper depends on."""

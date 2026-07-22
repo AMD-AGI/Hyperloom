@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Phase state-machine handler: initialisation, exit-condition scan/transition,
@@ -189,6 +189,17 @@ class MachinePhase(PhaseHandler):
             and "no_gain_cycle_streak_effective" in evidence
         ):
             state.no_gain_cycle_streak = int(evidence.get("no_gain_cycle_streak_effective", 0) or 0)
+        allowed_kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset())
+        cancelled = await self.tasks.cancel_queued_not_allowed(
+            allowed_kinds=allowed_kinds,
+            reason=f"phase_transition:{str(prior or '').strip().upper()}->{target}",
+        )
+        if cancelled:
+            log.info(
+                "Coordinator.phase: cancelled %d queued task(s) incompatible with %s",
+                len(cancelled),
+                target,
+            )
         state.record_phase_transition(
             to_phase=target,
             reason=reason,

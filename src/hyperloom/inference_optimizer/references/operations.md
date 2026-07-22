@@ -21,8 +21,9 @@ bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"
 paths by hand. Do not manually repair `$USER_DATA_PATH/runtime/` or
 `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/`.
 
-Optionally write `$USER_DATA_PATH/model_arch.json` if the architecture is known.
-It is advisory only; skip rather than guessing.
+Optionally write `<session_dir>/model_arch.json` if the architecture is known.
+It is advisory only; skip rather than guessing. Do not write the file at the
+`$USER_DATA_PATH` workspace root because concurrent sessions share that path.
 
 ## Launch Flags
 

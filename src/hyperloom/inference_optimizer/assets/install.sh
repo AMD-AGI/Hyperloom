@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 # Inference Optimizer installer.
@@ -222,7 +222,7 @@ INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX
 # Pin InferenceX to a current default-branch HEAD *commit SHA* so the
 # per-install clone is reproducible (same rationale as MAGPIE_REF). Operators
 # can re-pin with INFERENCEX_REF=<tag|branch|sha>.
-INFERENCEX_REF="${INFERENCEX_REF:-2035a2117ad22403376359be0064dfa2c078c59b}"
+INFERENCEX_REF="${INFERENCEX_REF:-a4bb43afa7fd74c1356583ed29e51421be010f0f}"
 _INFERENCEX_SHA="$(_resolve_ref_sha "$INFERENCEX_REPO" "$INFERENCEX_REF")"
 INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX@${_INFERENCEX_SHA}}"
 

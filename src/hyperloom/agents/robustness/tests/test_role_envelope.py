@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Unit tests for :mod:`robustness_agent.role.envelope`: builder round-trips, defensive ValueError on bad args, and static-table invariants matching upstream PolicyGate."""
