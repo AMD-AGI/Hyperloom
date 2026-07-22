@@ -1457,7 +1457,9 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
         reason = await c.run(max_ticks=5)
         assert reason == "target_reached"
         assert c.shared_state.stop_reason == "target_reached"
-        assert c.shared_state.crash_count == 1
+        # Two advance_phase calls per run (pre-reactor hint consume + main) each
+        # record a coordinator exception when the tick body raises.
+        assert c.shared_state.crash_count == 2
         assert c.shared_state.last_tick_exception["stage"] == "advance_phase"
         assert c.shared_state.last_tick_exception["type"] == "RuntimeError"
         persisted = SharedState.load_or_init(session_dir)

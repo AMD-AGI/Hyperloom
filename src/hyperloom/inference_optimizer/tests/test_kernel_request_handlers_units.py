@@ -1064,6 +1064,7 @@ class TestReusableSourceRootsAtom:
 class TestRunGemmTuningHandler:
     def test_handler_passes_non_fp8_geak_to_next_hyperloom_prereq(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
         state = SharedState(precision="bf16", framework="sglang")
         state.save(tmp_path)
 
