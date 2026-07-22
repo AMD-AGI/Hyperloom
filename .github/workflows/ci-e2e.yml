@@ -1,0 +1,103 @@
+name: CI E2E (single-GPU smoke run)
+
+# Every PR targeting `main` dispatches ONE single-GPU inference-optimizer run built
+# from the PR's branch, monitors it, and reports green (Succeeded) / red (Failed or
+# timeout). Opt OUT by adding the `skip-e2e-test` label. Runs on a self-hosted runner
+# that can reach the run API.
+
+on:
+  pull_request:
+    branches: [main]          # only PRs whose BASE branch is main
+    # opened/synchronize/reopened = run on create + new commits + reopen.
+    # labeled/unlabeled = re-evaluate when `skip-e2e-test` is added/removed.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      head_ref:
+        description: "Branch to run (defaults to the caller ref)"
+        required: false
+
+# A newer commit on the same PR cancels the in-flight run; the cleanup step below
+# cancels the workload so no GPU is leaked.
+concurrency:
+  group: ci-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# The workflow token writes the live commit status and the sticky PR report comment.
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: write
+
+jobs:
+  e2e:
+    # Runs for every PR by default; opt out with the `skip-e2e-test` label.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !contains(github.event.pull_request.labels.*.name, 'skip-e2e-test')
+    # Self-hosted runner registered with the label `Hyperloom-e2e-ci`
+    # (config.sh --labels Hyperloom-e2e-ci). Must reach github.com + the run API.
+    runs-on: Hyperloom-e2e-ci
+    # Covers a full MAX_HOURS run + setup/baseline overhead.
+    timeout-minutes: 240
+    steps:
+      - name: Checkout (workflow scripts only)
+        uses: actions/checkout@v4
+
+      - name: Ensure jq
+        run: command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
+
+      - name: Dispatch + monitor single-GPU smoke run
+        id: run
+        env:
+          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
+          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
+          E2E_INFRA_TYPE: ${{ secrets.CI_E2E_INFRA_TYPE }}
+          MODEL: ${{ secrets.CI_E2E_MODEL }}
+          MODEL_CLASS: ${{ secrets.CI_E2E_MODEL_CLASS }}
+          MODEL_BASE: ${{ secrets.CI_E2E_MODEL_BASE }}
+          GPUS: ${{ secrets.CI_E2E_GPUS }}
+          TP: ${{ secrets.CI_E2E_TP }}
+          MAX_HOURS: ${{ secrets.CI_E2E_MAX_HOURS }}
+          # Account identity the run dispatches under.
+          CI_E2E_USER_NAME: ${{ secrets.CI_E2E_USER_NAME }}
+          # Per-PR checkout base dir.
+          CI_E2E_PR_CHECK_BASE: ${{ secrets.CI_E2E_PR_CHECK_BASE }}
+          # The API endpoint may use a private CA; skip TLS verify unless a CA bundle is
+          # provided. Set the CI_E2E_INSECURE secret to 0 once the runner trusts the CA.
+          CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '1' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || inputs.head_ref || github.ref_name }}
+          # Tokenized clone URLs so the run can clone this PR branch. github.token is
+          # ephemeral (expires with the run) and can read same-repo PRs.
+          HEAD_REPO_URL: ${{ github.event.pull_request.head.repo.full_name && format('https://x-access-token:{0}@github.com/{1}.git', github.token, github.event.pull_request.head.repo.full_name) || '' }}
+          BASE_REPO_URL: ${{ format('https://x-access-token:{0}@github.com/{1}.git', github.token, github.repository) }}
+          # Live commit status on the PR, refreshed every STATUS_INTERVAL_S.
+          GH_STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_STATUS_REPO: ${{ github.repository }}
+          GH_STATUS_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS_INTERVAL_S: "300"
+          # Poll long enough to cover the run budget.
+          POLL_INTERVAL_S: "60"
+          POLL_MAX: "220"
+        run: |
+          chmod +x .github/scripts/ci-e2e-dispatch.sh
+          .github/scripts/ci-e2e-dispatch.sh
+
+      # If the job is cancelled (manual stop, or a newer commit via concurrency
+      # cancel-in-progress), GitHub still runs this step — cancel the workload so the
+      # GPU run doesn't leak. Reliable even when the main step is hard-killed.
+      - name: Cancel workload on job cancel
+        if: cancelled()
+        env:
+          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
+          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
+        run: |
+          uid="$(cat "${RUNNER_TEMP}/e2e_session_uid" 2>/dev/null || true)"
+          if [ -z "$uid" ]; then echo "no session uid recorded; nothing to cancel"; exit 0; fi
+          if [ -z "${E2E_API_BASE:-}" ]; then echo "no API base; cannot cancel"; exit 0; fi
+          echo "cancelling workload $uid"
+          curl -sS -k -o /dev/null -w 'DELETE HTTP=%{http_code}\n' \
+            -X DELETE -H "Authorization: Bearer ${E2E_API_KEY}" \
+            "${E2E_API_BASE%/}/api/v1/orchestration/workloads/${uid}"
