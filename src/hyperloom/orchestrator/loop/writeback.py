@@ -1734,7 +1734,7 @@ class WritebackCollaborator:
             )
 
     def _harvest_research_scout(self, done_payload: dict[str, Any]) -> None:
-        """Persist scout output (hints, gap seeds, dedup); all steps fail-soft.
+        """Persist top-level scout output and re-seed Orchestration.
 
         The scout is a text-hints-only collector. Any ``competitor_target``
         numbers it emits are intentionally ignored here: measured competitor
@@ -1742,15 +1742,13 @@ class WritebackCollaborator:
         LLM-written numbers must never be persisted as a consumable target.
 
         Args:
-            done_payload: The completed research-scout task payload; its
-                ``research`` block carries hints and PR ids.
+            done_payload: The completed research-scout task payload.
         """
         from ..knowledge import research_hints as _research_hints
 
-        block = done_payload.get("research")
-        if not isinstance(block, dict):
-            block = {}
-        hints = block.get("hints") or []
+        hints = done_payload.get("new_findings") or []
+        if not isinstance(hints, list):
+            hints = []
         try:
             added, dropped = _research_hints.append_hints(
                 self.session_dir,
@@ -1766,10 +1764,18 @@ class WritebackCollaborator:
             added = 0
         # Share inspected PR ids with the FRAMEWORK dedup set.
         pr_ids: list[Any] = []
-        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
-            vals = block.get(key)
-            if isinstance(vals, list):
-                pr_ids.extend(vals)
+        for hint in hints:
+            if isinstance(hint, dict) and hint.get("source"):
+                pr_ids.append(hint["source"])
+        proposals = done_payload.get("proposal_set") or []
+        if isinstance(proposals, list):
+            for proposal in proposals:
+                if not isinstance(proposal, dict):
+                    continue
+                for key in ("pr_evidence", "source_evidence"):
+                    refs = proposal.get(key)
+                    if isinstance(refs, list):
+                        pr_ids.extend(refs)
         try:
             self.shared_state.register_seen_pr_ids(pr_ids)
         except Exception:  # noqa: BLE001 — defensive
@@ -1779,6 +1785,7 @@ class WritebackCollaborator:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: gap seeding failed")
+        self._coord._reset_orchestration_conversation()
         log.info(
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
             added,

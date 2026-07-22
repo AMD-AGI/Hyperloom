@@ -5,6 +5,7 @@
 tracking, and autosubmit of specialist patches / framework configs."""
 
 from __future__ import annotations
+from hashlib import sha1
 import logging as _logging
 import os
 import time
@@ -567,12 +568,14 @@ class ExplorePhase(PhaseHandler):
         from ..knowledge import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
-        for idx, hint in enumerate(hints):
+        for hint in hints:
             what = str(hint.get("what") or "").strip()
-            if not what:
+            source = str(hint.get("source") or "").strip()
+            if not what or not source:
                 continue
             tags = hint.get("domain_tags") or []
-            cid = f"gap.research_hint.{idx}"
+            key = f"{what.lower()}::{source.lower()}"
+            cid = f"gap.research_hint.{sha1(key.encode()).hexdigest()[:16]}"
             try:
                 self.shared_state.upsert_gap(
                     {

@@ -1007,9 +1007,7 @@ async def test_compose_prompt_orchestration_all_advisory_blocks(
     monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", lambda: "GAP-BLOCK")
     monkeypatch.setattr(coord.conversation, "_priors_match_advisory_block", lambda: "PRIORS-BLOCK")
     monkeypatch.setattr(coord.conversation, "_plateau_advisory_block", lambda: "PLATEAU-BLOCK")
-    from hyperloom.orchestrator.knowledge import research_hints as rh
-
-    monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-BLOCK")
+    monkeypatch.setattr(coord.conversation, "_research_scout_seed_block", lambda: "HINTS-BLOCK")
 
     out = await coord._compose_prompt("orchestration")
     for token in (
@@ -1024,6 +1022,57 @@ async def test_compose_prompt_orchestration_all_advisory_blocks(
         "PLATEAU-BLOCK",
     ):
         assert token in out
+
+
+def test_research_scout_seed_block_keeps_all_rounds(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.knowledge import research_hints
+
+    research_hints.append_hints(
+        coord.session_dir,
+        [
+            {"what": "hint one", "source": "https://example.test/one"},
+            {"what": "hint two", "source": "https://example.test/two"},
+        ],
+    )
+    coord.shared_state.specialist_rounds = [
+        {
+            "domain": "research_scout_specialist",
+            "proposal_set": [
+                {
+                    "name": "first",
+                    "extra_envs": {"FIRST": "1"},
+                    "source_evidence": ["https://example.test/one"],
+                }
+            ],
+            "residual_questions": ["question one"],
+        },
+        {
+            "domain": "research_scout_specialist",
+            "proposal_set": [
+                {
+                    "name": "second",
+                    "extra_args": "--second",
+                    "source_evidence": ["https://example.test/two"],
+                }
+            ],
+            "residual_questions": ["question two"],
+        },
+        {
+            "domain": "serving_specialist",
+            "proposal_set": [{"name": "ignore-me"}],
+            "residual_questions": ["ignore me"],
+        },
+    ]
+
+    block = coord.conversation._research_scout_seed_block()
+
+    assert "hint one" in block
+    assert "hint two" in block
+    assert '"name": "first"' in block
+    assert '"name": "second"' in block
+    assert "question one" in block
+    assert "question two" in block
+    assert "ignore-me" not in block
 
 
 @pytest.mark.asyncio
@@ -1044,9 +1093,7 @@ async def test_compose_prompt_orchestration_advisory_blocks_raise(
     monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", _boom)
     monkeypatch.setattr(coord.conversation, "_priors_match_advisory_block", _boom)
     monkeypatch.setattr(coord.conversation, "_plateau_advisory_block", _boom)
-    from hyperloom.orchestrator.knowledge import research_hints as rh
-
-    monkeypatch.setattr(rh, "summarise_for_prompt", _boom)
+    monkeypatch.setattr(coord.conversation, "_research_scout_seed_block", _boom)
 
     # Every advisory failure is swallowed; the prompt still renders.
     out = await coord._compose_prompt("orchestration")

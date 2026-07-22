@@ -281,15 +281,31 @@ def test_priors_match_advisory_block_no_variants(coord: Coordinator) -> None:
 
 # -- _harvest_research_scout -----------------------------------------------
 def test_harvest_research_scout_empty_and_populated(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.knowledge import research_hints
+
     coord._harvest_research_scout({})
+    coord._orchestration_seeded = True
     coord._harvest_research_scout(
         {
-            "research": {
-                "hints": {"what_to_try": ["aiter"]},
-                "gaps": [],
-            }
+            "new_findings": [
+                {
+                    "what": "enable aiter",
+                    "source": "https://example.test/aiter",
+                    "domain_tags": ["serving"],
+                }
+            ],
+            "proposal_set": [
+                {
+                    "name": "aiter",
+                    "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+                    "source_evidence": ["https://example.test/aiter"],
+                }
+            ],
         }
     )
+    assert research_hints.load_hints(coord.session_dir)[0]["what"] == "enable aiter"
+    assert "https://example.test/aiter" in coord.shared_state.research_scout_seen_pr_ids
+    assert coord._orchestration_seeded is False
 
 
 def test_harvest_research_scout_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
@@ -306,16 +322,14 @@ def test_harvest_research_scout_does_not_persist_llm_competitor_target(coord: Co
 
     coord._harvest_research_scout(
         {
-            "research": {
-                "hints": [{"what": "try mtp", "source": "https://pr/1"}],
-                "competitor_target": {
-                    "gpu": "b200",
-                    "model": "m",
-                    "per_conc": [
-                        {"conc": 64, "tput_per_gpu": 999999.0, "source": "some blog"},
-                    ],
-                },
-            }
+            "new_findings": [{"what": "try mtp", "source": "https://pr/1"}],
+            "competitor_target": {
+                "gpu": "b200",
+                "model": "m",
+                "per_conc": [
+                    {"conc": 64, "tput_per_gpu": 999999.0, "source": "some blog"},
+                ],
+            },
         }
     )
 
