@@ -636,10 +636,16 @@ class ClaudeBackend:
                 if isinstance(msg_usage, dict) and msg_usage:
                     last_usage = dict(msg_usage)
         except Exception as exc:
-            # SDK may raise "error result: success" on max-turns exit; keep any
-            # intents already collected.
+            # The SDK raises on a terminal ResultMessage with is_error=True. Two
+            # such subtypes are NON-fatal turn boundaries, not real failures, and
+            # any intents/text already streamed must be kept:
+            #   * "error result: success"                    (older max-turns-on-success)
+            #   * "Reached maximum number of turns (N)"       (newer CLI: hitting the
+            #     per-call max_turns cap mid-agentic-loop — expected when a caller
+            #     runs a bounded step; the collected partial turn is still usable)
             err_str = str(exc)
-            if "error result: success" in err_str:
+            _non_fatal = "error result: success" in err_str or "maximum number of turns" in err_str
+            if _non_fatal:
                 if intents:
                     log.warning(
                         "claude SDK raised '%s' but %d intents already collected; returning partial results",
