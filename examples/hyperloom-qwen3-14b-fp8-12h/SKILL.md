@@ -76,8 +76,9 @@ Required optimize CLI flags:
 - `--precision bf16`
 - `--target-gain 30`
 - `--max-hours 12`
-- `--max-minutes-kernel-pct 0.5`
-- `--max-minutes-explore-pct 0.13`
+- `--max-minutes-framework-pct 0.01`
+- `--max-minutes-explore-pct 0.42`
+- `--max-minutes-kernel-pct 0.42`
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.
 
