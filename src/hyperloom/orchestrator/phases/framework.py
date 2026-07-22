@@ -3100,6 +3100,7 @@ class FrameworkPhase(PhaseHandler):
         batch_entry = {
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
             "candidate_count": len(norm),
             "candidates": norm,
             "max_gain_pct_observed_in_batch": 0.0,
@@ -3469,6 +3470,7 @@ class FrameworkPhase(PhaseHandler):
             "gain_pct": (float(gain_pct) if isinstance(gain_pct, (int, float)) else 0.0),
             "provenance": str(provenance or ""),
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(state, "macro_cycle", 0) or 0),
         }
         # Merge caller-supplied extras (e.g. ``error`` / ``review_submissions``)
         # onto the row too, without clobbering the canonical fields above, so
@@ -3807,6 +3809,7 @@ class FrameworkPhase(PhaseHandler):
             "kept": status == "kept",
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         }
         if not isinstance(self.shared_state.framework_agent_phase_progress, list):
             self.shared_state.framework_agent_phase_progress = []
@@ -3954,6 +3957,7 @@ class FrameworkPhase(PhaseHandler):
             "gain_pct": 0.0,
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         }
         self.shared_state.framework_agent_phase_progress.append(progress_entry)
         try:

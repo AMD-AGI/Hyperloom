@@ -2626,6 +2626,7 @@ class WritebackCollaborator:
             "kept": kept_flag,
             "batch_id": batch_id,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         }
         if not isinstance(self.shared_state.framework_agent_phase_progress, list):
             self.shared_state.framework_agent_phase_progress = []

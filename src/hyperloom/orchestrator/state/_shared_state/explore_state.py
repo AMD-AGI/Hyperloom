@@ -63,19 +63,21 @@ class _ExploreStateMixin:
         """
         if not isinstance(entry, dict) or not entry:
             return
+        entry = dict(entry)
+        entry.setdefault("cycle", int(getattr(self, "macro_cycle", 0) or 0))
         round_id = str(entry.get("round_id") or "").strip()
         if not round_id:
-            self.specialist_rounds.append(dict(entry))
+            self.specialist_rounds.append(entry)
         else:
             existing = self.specialist_rounds
             matched = False
             for i, prev in enumerate(existing):
                 if isinstance(prev, dict) and str(prev.get("round_id") or "") == round_id:
-                    existing[i] = dict(entry)
+                    existing[i] = entry
                     matched = True
                     break
             if not matched:
-                existing.append(dict(entry))
+                existing.append(entry)
         self._trim_specialist_rounds()
         # Author-time breakdown capture: one specialist_runs item per round.
         try:
@@ -450,6 +452,22 @@ class _ExploreStateMixin:
         """Reset the explore plateau proxy counter."""
         self.params_no_promote_streak = 0
 
+    def reset_per_cycle_plateau_state(self) -> None:
+        """Reset transient plateau and dispatch state for a macro-cycle."""
+        self.params_no_promote_streak = 0
+        self.explore_specialist_dispatched_count = 0
+        self.framework_agent_phase_done = False
+        self.framework_agent_discover_failures = 0
+        self.framework_agent_empty_discoveries = 0
+        self.framework_config_lane_state = ""
+        self.framework_config_lane_round = 0
+        self.framework_config_pending_grid = []
+        self.specialist_domain_empty_streak = {}
+        self.rounds_since_last_specialist = {}
+        self.rounds_since_last_keep = {}
+        self.last_sweep = {}
+        self.last_conc_sweep = {}
+
     def note_explore_outcome(self, *, promoted: bool) -> None:
         """Update the plateau proxy after one explore task (KEEP resets, no-promote increments).
 
@@ -546,9 +564,29 @@ class _ExploreStateMixin:
         merged["last_round"] = dict(update.get("last_round") or {})
         # Append-only history fields — merge instead of overwrite.
         wh = list(prior.get("winners_history") or [])
+        known = {
+            (
+                str(row.get("round_id") or ""),
+                str(row.get("fingerprint") or row.get("variant_name") or ""),
+                str(row.get("ts") or ""),
+            )
+            for row in wh
+            if isinstance(row, dict)
+        }
         for entry in update.get("winners_history") or []:
-            if isinstance(entry, dict):
-                wh.append(dict(entry))
+            if not isinstance(entry, dict):
+                continue
+            row = dict(entry)
+            key = (
+                str(row.get("round_id") or ""),
+                str(row.get("fingerprint") or row.get("variant_name") or ""),
+                str(row.get("ts") or ""),
+            )
+            if key in known:
+                continue
+            row.setdefault("cycle", cur_cycle)
+            known.add(key)
+            wh.append(row)
         merged["winners_history"] = wh[-ss._WINNERS_HISTORY_CAP :]
         sa: set[tuple[str, ...]] = set()
         for src in (prior.get("synergy_attempted"), update.get("synergy_attempted")):

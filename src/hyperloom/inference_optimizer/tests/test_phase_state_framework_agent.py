@@ -195,6 +195,27 @@ def test_compute_plateau_framework_agent_returns_signal():
     assert ev["lookback"] == 3
 
 
+def test_framework_batch_plateau_ignores_prior_macro_cycle():
+    batches = [
+        {
+            "batch_id": f"b{i}",
+            "cycle": 0,
+            "max_gain_pct_observed_in_batch": 0.0,
+            "candidates": [{"id": f"c{i}"}],
+        }
+        for i in range(3)
+    ]
+    progress = [
+        {"batch_id": f"b{i}", "candidate_id": f"c{i}", "status": "reverted", "cycle": 0}
+        for i in range(3)
+    ]
+    state = _State(framework_agent_batches=batches, framework_agent_phase_progress=progress)
+    state.macro_cycle = 1
+    triggered, evidence = phase_state.compute_plateau_framework_agent(state)
+    assert triggered is False
+    assert evidence["batch_max_gains"] == []
+
+
 def test_exit_normal_framework_agent_force_exit_evidence_carries_pending_count():
     """Regression: force-exit evidence surfaces ``pending_candidate_count``."""
     batches = [

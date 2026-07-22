@@ -160,6 +160,7 @@ class TestProbeFrameworkSourceRootsForEnv:
             ),
         )
         monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
+        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ())
         # Isolate from the always-on enablement ROCm/HIP root (may exist on disk).
         monkeypatch.setattr(fp, "_ROCM_HIP_SOURCE_ROOTS", ())
         result = fp.probe_framework_source_roots_for_env()
@@ -208,6 +209,7 @@ class TestProbeFrameworkSourceRootsForEnv:
             (f"{shared}/",),
         )
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: shared)
+        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: ())
         monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
         monkeypatch.setattr(fp, "_ROCM_HIP_SOURCE_ROOTS", ())
         result = fp.probe_framework_source_roots_for_env()

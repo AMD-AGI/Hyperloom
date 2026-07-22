@@ -285,20 +285,11 @@ class ExplorePhase(PhaseHandler):
             state.gain_at_cycle_start = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
         except (TypeError, ValueError):
             state.gain_at_cycle_start = 0.0
-        # Reset per-cycle counters (fresh plateau/dispatch budget for the cycle).
+        # Reset per-cycle counters.
         try:
-            state.reset_specialist_dispatched()
-            state.reset_explore_plateau_proxy()
+            state.reset_per_cycle_plateau_state()
         except Exception:  # noqa: BLE001 — resets are best-effort
             log.exception("Coordinator: per-cycle reset failed on reloop")
-        # Re-open FRAMEWORK for the new cycle; preserved batches/progress rows
-        # keep already-tested PRs skipped.
-        state.framework_agent_phase_done = False
-        state.framework_agent_discover_failures = 0
-        # Reset the config-exploration guard so each macro-cycle re-runs the lane.
-        state.framework_config_lane_state = ""
-        state.framework_config_lane_round = 0
-        state.framework_config_pending_grid = []
         # Mark a macro-cycle boundary in the preserved progress ledger so the
         # consecutive-no-keep plateau gate ignores the prior cycle's trailing
         # no-KEEP streak.
@@ -324,10 +315,6 @@ class ExplorePhase(PhaseHandler):
                 )
         except Exception:  # noqa: BLE001 — plateau-reset marker is best-effort
             log.exception("Coordinator: framework_agent cycle_boundary marker append failed")
-        # Clear the per-cycle SWEEP completion markers so the next cycle's SWEEP
-        # runs a fresh sweep instead of exiting on a stale status.
-        state.last_sweep = {}
-        state.last_conc_sweep = {}
         try:
             self._record_cycle_strategy_for_current_cycle()
         except Exception:  # noqa: BLE001 — focus is advisory only

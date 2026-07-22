@@ -1274,6 +1274,33 @@ def should_force_exit_explore(
 
 
 # plateau pure functions
+def _current_macro_cycle(state: Any) -> int:
+    """Return the current macro-cycle index."""
+    try:
+        return int(getattr(state, "macro_cycle", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _row_cycle(row: dict[str, Any]) -> int:
+    """Return a row cycle, treating legacy unstamped rows as cycle zero."""
+    try:
+        return int(row.get("cycle", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rows_for_current_cycle(rows: Any, state: Any) -> list[dict[str, Any]]:
+    """Filter durable ledger rows to the current macro-cycle."""
+    if not isinstance(rows, list):
+        return []
+    dict_rows = [row for row in rows if isinstance(row, dict)]
+    if not any("cycle" in row for row in dict_rows):
+        return dict_rows
+    cycle = _current_macro_cycle(state)
+    return [row for row in dict_rows if _row_cycle(row) == cycle]
+
+
 def compute_plateau_explore(
     state: Any,
     *,
@@ -1308,9 +1335,7 @@ def compute_plateau_explore(
     explore_search = getattr(state, "explore_search", None) or {}
     if not isinstance(explore_search, dict):
         explore_search = {}
-    winners_history = explore_search.get("winners_history") or []
-    if not isinstance(winners_history, list):
-        winners_history = []
+    winners_history = _rows_for_current_cycle(explore_search.get("winners_history") or [], state)
     recent_winners = list(winners_history[-lookback:])
     recent_keep_gain = 0.0
     for w in recent_winners:
@@ -1322,9 +1347,7 @@ def compute_plateau_explore(
         except (TypeError, ValueError):
             continue
 
-    specialist_rounds = getattr(state, "specialist_rounds", None) or []
-    if not isinstance(specialist_rounds, list):
-        specialist_rounds = []
+    specialist_rounds = _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state)
 
     def _round_is_empty(row: Any) -> bool:
         """Return True when a specialist-round summary produced no work.
@@ -1413,12 +1436,20 @@ def compute_plateau_kernel(
 
     # Flatten the integrate attempt log into a time-ordered list, take the
     # last ``lookback`` rows.
+    has_cycle = any(
+        isinstance(attempt, dict) and "cycle" in attempt
+        for entry in integ_attempts.values()
+        if isinstance(entry, dict)
+        for attempt in (entry.get("attempts") or [])
+    )
     flat: list[tuple[str, str, float]] = []  # (decision, ts, gain_pct)
     for ent in integ_attempts.values():
         if not isinstance(ent, dict):
             continue
         for a in ent.get("attempts") or []:
             if not isinstance(a, dict):
+                continue
+            if has_cycle and _row_cycle(a) != _current_macro_cycle(state):
                 continue
             decision = str(a.get("decision") or "").upper().strip()
             if not decision:
@@ -1895,7 +1926,7 @@ def compute_plateau_framework_agent(
         tuple[bool, dict[str, Any]]: ``(triggered, evidence)`` — whether the
         plateau fired, and the supporting evidence map.
     """
-    batches = getattr(state, "framework_agent_batches", None) or []
+    batches = _rows_for_current_cycle(getattr(state, "framework_agent_batches", None) or [], state)
     lookback_int = int(lookback or 0)
     base_evidence = {
         "lookback": lookback_int,
@@ -1904,7 +1935,7 @@ def compute_plateau_framework_agent(
     }
     if not isinstance(batches, list) or lookback_int <= 0 or len(batches) < lookback_int:
         return False, base_evidence
-    progress = getattr(state, "framework_agent_phase_progress", None) or []
+    progress = _rows_for_current_cycle(getattr(state, "framework_agent_phase_progress", None) or [], state)
     progress_by_batch: dict[str, int] = {}
     for row in progress:
         if isinstance(row, dict):

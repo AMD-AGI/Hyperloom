@@ -245,6 +245,7 @@ def record_kernel_integrate_result(
         "workspace": result.get("workspace"),
         "report_path": result.get("report_path"),
         "ts": _now_iso(),
+        "cycle": int(getattr(state, "macro_cycle", 0) or 0),
     }
     attempts.append(attempt)
     best_gain = max(

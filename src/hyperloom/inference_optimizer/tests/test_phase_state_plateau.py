@@ -125,6 +125,20 @@ def test_plateau_explore_short_empty_streak_blocks_trigger():
     assert ev["empty_streak"] == 0
 
 
+def test_plateau_explore_ignores_prior_macro_cycle_rows():
+    state = SimpleNamespace(
+        macro_cycle=1,
+        explore_search={"winners_history": [{"gain_pct": 0.0, "cycle": 0}]},
+        specialist_rounds=[
+            {"proposals_total": 0, "proposals_kept": 0, "cycle": 0}
+            for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
+        ],
+    )
+    triggered, ev = compute_plateau_explore(state)
+    assert triggered is False
+    assert ev["empty_streak"] == 0
+
+
 def test_plateau_explore_supports_threshold_overrides():
     state = SimpleNamespace(
         explore_search={"winners_history": [{"gain_pct": 1.5}]},
@@ -186,6 +200,24 @@ def test_plateau_kernel_low_gain_triggers():
     assert ev["recent_keep_gain_pct"] == 0.1
 
 
+def test_plateau_kernel_ignores_prior_macro_cycle_attempts():
+    state = SimpleNamespace(
+        macro_cycle=1,
+        kernel_integrate_attempts={
+            "k1": {
+                "attempts": [
+                    {"decision": "REVERT", "ts": "2026-05-19T18:00:00", "cycle": 0},
+                    {"decision": "REVERT", "ts": "2026-05-19T18:01:00", "cycle": 0},
+                    {"decision": "REVERT", "ts": "2026-05-19T18:02:00", "cycle": 0},
+                ]
+            }
+        },
+    )
+    triggered, ev = compute_plateau_kernel(state)
+    assert triggered is False
+    assert ev["reason"] == "no_kernel_attempts_yet"
+
+
 def test_plateau_kernel_high_gain_blocks_revert_streak():
     """When the REVERT streak is below threshold and gain is large, plateau doesn't fire."""
     state = SimpleNamespace(
@@ -233,6 +265,37 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
     triggered, ev = compute_plateau_kernel(state)
     assert triggered is False
     assert ev.get("reason") == "no_kernel_attempts_yet"
+
+
+def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
+    state = SharedState(session_id="t")
+    state.params_no_promote_streak = 4
+    state.explore_specialist_dispatched_count = 3
+    state.framework_agent_phase_done = True
+    state.framework_agent_discover_failures = 2
+    state.framework_agent_empty_discoveries = 2
+    state.specialist_domain_empty_streak = {"serving_specialist": 3}
+    state.rounds_since_last_specialist = {"serving_specialist": 4}
+    state.rounds_since_last_keep = {"serving_specialist": 5}
+    state.last_sweep = {"status": "succeeded"}
+    state.last_conc_sweep = {"status": "succeeded"}
+    state.explore_search = {"tested": {"stable": {"cycle": 0}}}
+    state.kernel_integrate_attempts = {"stable": {"attempts": [{"cycle": 0}]}}
+
+    state.reset_per_cycle_plateau_state()
+
+    assert state.params_no_promote_streak == 0
+    assert state.explore_specialist_dispatched_count == 0
+    assert state.framework_agent_phase_done is False
+    assert state.framework_agent_discover_failures == 0
+    assert state.framework_agent_empty_discoveries == 0
+    assert state.specialist_domain_empty_streak == {}
+    assert state.rounds_since_last_specialist == {}
+    assert state.rounds_since_last_keep == {}
+    assert state.last_sweep == {}
+    assert state.last_conc_sweep == {}
+    assert state.explore_search["tested"]["stable"]["cycle"] == 0
+    assert state.kernel_integrate_attempts["stable"]["attempts"][0]["cycle"] == 0
 
 
 def test_exit_normal_explore_exits_on_plateau():
