@@ -12,9 +12,26 @@ and old DFS demo mechanics; the live action catalog, phase allowlist,
 PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
-```{image} ../images/Hyperloom_optimization_loop.png
-:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
-:target: ../images/Hyperloom_optimization_loop.png
+```{raw} html
+<style>
+  .hl-lightbox-thumb { cursor: zoom-in; max-width: 100%; display: block; }
+  dialog.hl-lightbox {
+    max-width: 90vw; max-height: 90vh; padding: 0; border: none;
+    background: transparent; overflow: visible;
+  }
+  dialog.hl-lightbox::backdrop { background: rgba(0,0,0,0.75); }
+  dialog.hl-lightbox img { max-width: 90vw; max-height: 90vh; display: block; cursor: zoom-out; }
+</style>
+<figure>
+  <img class="hl-lightbox-thumb"
+       src="../_images/Hyperloom_optimization_loop.png"
+       alt="Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state."
+       onclick="document.getElementById('hl-dialog-loop').showModal()" />
+</figure>
+<dialog id="hl-dialog-loop" class="hl-lightbox" onclick="this.close()">
+  <img src="../_images/Hyperloom_optimization_loop.png"
+       alt="Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state." />
+</dialog>
 ```
 
 ## Runtime contract
