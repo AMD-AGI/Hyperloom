@@ -251,6 +251,31 @@ def test_exit_normal_framework_agent_no_plateau_below_threshold():
     assert phase_state.exit_normal_framework_agent(state) is None
 
 
+def test_local_explore_author_empty_uses_official_plateau_threshold():
+    n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    progress = [
+        {"candidate_id": f"local_explore:{i}", "status": "author_empty", "kept": False}
+        for i in range(n - 1)
+    ]
+    assert phase_state.exit_normal_framework_agent(_State(framework_agent_phase_progress=progress)) is None
+    progress.append({"candidate_id": f"local_explore:{n - 1}", "status": "author_empty", "kept": False})
+    out = phase_state.exit_normal_framework_agent(_State(framework_agent_phase_progress=progress))
+    assert out is not None
+    assert out[0] == "framework_agent_plateau"
+    assert out[1]["consecutive_no_keep"] == n
+
+
+def test_cycle_boundary_resets_local_explore_plateau_streak():
+    n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    progress = [
+        {"candidate_id": f"local_explore:{i}", "status": "author_empty", "kept": False}
+        for i in range(n)
+    ]
+    progress.append({"candidate_id": "", "status": "cycle_boundary", "kept": False})
+    progress.append({"candidate_id": "local_explore:new", "status": "author_empty", "kept": False})
+    assert phase_state.exit_normal_framework_agent(_State(framework_agent_phase_progress=progress)) is None
+
+
 def test_exit_normal_framework_agent_keep_resets_no_keep_streak():
     """A KEEP breaks the streak; only reverts after it count."""
     progress = [

@@ -239,7 +239,7 @@ def test_maybe_dispatch_local_explore_enabled_creates_specialist(tmp_path: Path)
     assert params["domain"] == "serving_specialist"
     # No upstream PR lead: the mandate is authored from live source.
     assert "LOCAL-EXPLORATION" in params["notes"]
-    assert "aiter" in params["notes"]
+    assert "installed package source" in params["notes"]
     # WebSearch/WebFetch available so the specialist can compare upstream latest.
     assert "WebSearch" in created["allowed_tools"]
     assert "WebFetch" in created["allowed_tools"]
