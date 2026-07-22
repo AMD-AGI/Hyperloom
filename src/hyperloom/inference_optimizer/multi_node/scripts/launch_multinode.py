@@ -658,7 +658,7 @@ def _unsupported_extra_arg_flags(framework: str, extra_args: list[str]) -> list[
         extra_args: Tokenized extra server args (e.g. ``["--flag", "val"]``).
 
     Returns:
-        list[str]: Flag tokens not present in the build's help text, or ``[]``.
+        list[str]: Flag tokens not registered on the build's parser, or ``[]``.
     """
     flags = [t for t in extra_args if t.startswith("--")]
     if not flags:
@@ -667,12 +667,18 @@ def _unsupported_extra_arg_flags(framework: str, extra_args: list[str]) -> list[
         if framework == "sglang":
             from sglang.launch_server import parser as _sgl_parser
 
-            help_text = _sgl_parser.format_help()
+            # Exact option-string set from the actual parser. Matching flag
+            # tokens by argparse registration (not a help-text substring) avoids
+            # false negatives where a short flag like ``--tp`` is a substring of
+            # an unrelated option (``--tp-size``) and slips through the preflight.
+            known = set(getattr(_sgl_parser, "_option_string_actions", {}).keys())
         else:
             return []
     except Exception:  # noqa: BLE001 - preflight must never block on its own failure
         return []
-    return [f for f in flags if f.split("=", 1)[0] not in help_text]
+    if not known:
+        return []
+    return [f for f in flags if f.split("=", 1)[0] not in known]
 
 
 def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:

@@ -1461,6 +1461,16 @@ async def run_grid(
                     len(grid),
                     variant.name,
                 )
+                # Clear the first (conn-refused) pass's partial benchmark_*
+                # outputs so the retry produces the sole result in this slot and
+                # the downstream sorted(slot.glob("benchmark_*")) selection cannot
+                # mix the two passes. Best-effort; a failure here just leaves the
+                # stale dirs (same as before) and never blocks the retry.
+                for _stale in sorted(slot.glob("benchmark_*")):
+                    try:
+                        shutil.rmtree(_stale, ignore_errors=True)
+                    except OSError as _rm_exc:  # noqa: BLE001 - best-effort cleanup
+                        log.warning("grid_runner: could not clear stale %s before retry: %r", _stale, _rm_exc)
                 await _mn_prebench_regate()
                 variant_started_unix = time.time()
                 rc, stdout, stderr = await asyncio.to_thread(_run_magpie, **_measure_kwargs)
