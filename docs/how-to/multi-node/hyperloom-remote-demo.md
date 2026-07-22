@@ -116,6 +116,23 @@ of letting SaFE provision it. Unset the SaFE creds, set
 `HYPERLOOM_MN_EXT_SERVICE_URL`, and Hyperloom skips provisioning and benchmarks
 that URL directly. The same FLAGS / Environment blocks apply.
 
+### Bring your own cluster
+
+Path B does **not** call SaFE `create-rayjob` / `create-infera` — you must
+provision the cluster yourself first, then point Hyperloom at it.
+
+**rayjob** — Start a multi-node RayJob (Ray head + workers). Image tips:
+
+- Base on an sglang or vllm image, then install Ray:
+  `python -m pip install ray[default]==2.44.1 click==8.1.8`
+- Ready-made example:
+  `docker.io/primussafe/sglang:v0.5.11-rocm722-mi30x-ray2.44.1-lmeval2`
+- Entrypoint must keep pods alive for the whole session (e.g. `sleep infinity`).
+
+**infera** — Alternatively, deploy idle GPU pods with sshd; Hyperloom SSHes in
+each round to (re)launch sglang (supports PD disaggregation). Set the SSH / IP
+vars below.
+
 | Variable | Backend | Required | Meaning |
 |----------|---------|----------|---------|
 | `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`) |
