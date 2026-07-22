@@ -328,11 +328,78 @@ jobs:
           pattern: covdata-py${{ matrix.python-version }}-shard*
           merge-multiple: true
 
+      # Fail-closed completeness gate: a sharded run is only trustworthy if
+      # EVERY shard reported back. Missing shards (a run cancelled mid-flight by
+      # ``cancel-in-progress``, an OOM/kill before artifact upload, or a failed
+      # upload) would otherwise let the remaining green shards pass the 90% gate
+      # while part of the suite silently never ran. ``total_shards`` is read
+      # from pyproject.toml (single source of truth) so this stays correct if
+      # the shard count changes without touching the matrix. Checks BOTH the
+      # coverage-data files and the per-shard outcome markers so neither a
+      # missing ``.coverage.shardN`` nor a missing ``.outcome`` slips through.
+      - name: Verify shard completeness
+        run: |
+          python3 <<'PY'
+          import glob
+          import pathlib
+          import re
+          import sys
+
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
+
+          cfg = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          total = int(cfg["tool"]["hyperloom"]["tests_coverage"].get("total_shards", 4))
+          expected = set(range(1, total + 1))
+
+          def present(pattern: str, rx: str) -> set[int]:
+              found: set[int] = set()
+              for name in glob.glob(pattern):
+                  m = re.search(rx, name)
+                  if m:
+                      found.add(int(m.group(1)))
+              return found
+
+          cov = present(".coverage.shard*", r"\.coverage\.shard(\d+)$")
+          outcomes = present("shard-status/*.outcome", r"shard(\d+)\.outcome$")
+
+          errors = []
+          for label, seen in (("coverage-data", cov), ("outcome", outcomes)):
+              missing = sorted(expected - seen)
+              if missing:
+                  errors.append((label, missing))
+
+          summary_path = pathlib.Path(__import__("os").environ.get("GITHUB_STEP_SUMMARY", ""))
+          if errors:
+              lines = [f"### Shard completeness FAILED (expected {total} shard(s))", ""]
+              for label, missing in errors:
+                  joined = ", ".join(str(n) for n in missing)
+                  print(f"::error title=missing-shards::Missing {label} for shard(s): {joined}")
+                  lines.append(f"- Missing **{label}** for shard(s): {joined}")
+              lines.append(
+                  "\n> A shard did not report back (run cancelled, OOM/kill, or "
+                  "artifact upload failure). The coverage gate is intentionally "
+                  "NOT evaluated on a partial suite."
+              )
+              if summary_path.name:
+                  with open(summary_path, "a", encoding="utf-8") as fh:
+                      fh.write("\n".join(lines) + "\n")
+              sys.exit(1)
+
+          print(f"All {total} shard(s) present (coverage-data + outcome).")
+          PY
+
       - name: Combine shard coverage
         run: |
           set -euo pipefail
           shopt -s nullglob
           files=(.coverage.shard*)
+          # ``Verify shard completeness`` (above) already fail-closes on a
+          # missing shard; this is a defensive floor for the "zero files" case
+          # (e.g. that gate step was skipped/edited out) so ``coverage combine``
+          # never runs against an empty set.
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::No shard coverage data files downloaded."
             exit 1
