@@ -1431,6 +1431,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         await self._replay_resume_if_needed()
         for _ in range(n):
             self.shared_state.increment_tick()
+            # A phase-entry hook may have finished by setting a pending phase
+            # hint (for example current GEAK returning no_gain -> skip_to_sweep).
+            # Consume that before prompting agents again so stale phase prompts
+            # cannot enqueue legacy work.
+            await self._advance_phase_if_needed()
+            if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
+                await self._advance_phase_if_needed()
             for name in self._tick_roles:
                 await self._reactor_pass(name)
             await self._pump_dispatcher_once()
@@ -1553,6 +1560,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 try:
                     # Bump the persistent tick counter — drives phase/plateau math.
                     self.shared_state.increment_tick()
+                    try:
+                        await self._advance_phase_if_needed()
+                        if str(getattr(self.shared_state, "pending_escalate_hint", "") or "").strip():
+                            await self._advance_phase_if_needed()
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception("phase advance before reactors (run) failed")
+                        self._record_coordinator_exception(
+                            stage="advance_phase_pre_reactor",
+                            exc=exc,
+                            tick=tick_n,
+                        )
                     in_closing = self.shared_state.closing_phase
                     # One reactor + dispatcher pass; during closing skip LLM passes.
                     if not in_closing:

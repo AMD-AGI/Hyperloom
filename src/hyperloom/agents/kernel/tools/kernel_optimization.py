@@ -479,7 +479,7 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
 
     Per-kernel Forge is opt-in only. The default KERNEL_AGENT path is the
     coordinator-owned GEAK phase delegate, so the CLI returns ``[]`` unless
-    ``--backends forge`` or ``KERNEL_OPT_BACKEND_ORDER=forge`` is explicit.
+    exact ``KERNEL_OPT_BACKEND_ORDER=forge`` is set.
 
     Args:
         args (argparse.Namespace): Parsed CLI args carrying ``backends`` and
@@ -491,15 +491,10 @@ def choose_backends(args: argparse.Namespace, candidate: dict[str, Any]) -> tupl
         tuple[list[str], dict[str, Any]]: The selected backend ladder and a
             notes dict describing the selection (benchmark availability, etc.).
     """
-    user_backends = parse_backends(args.backends)
-    # Honor the coordinator's env backend order when no --backends was passed.
-    if not user_backends:
-        env_order = (os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").strip()
-        if env_order:
-            # 'geak' is the coordinator-owned e2e delegate, not per-kernel; drop it here.
-            env_tokens = ",".join(t.strip() for t in env_order.split(",") if t.strip() and t.strip().lower() != "geak")
-            if env_tokens:
-                user_backends = parse_backends(env_tokens)
+    forge_enabled = str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
+    user_backends = parse_backends(args.backends) if forge_enabled else []
+    if forge_enabled and not user_backends:
+        user_backends = ["forge"]
     benchmark_available = has_benchmark(args, candidate)
     source_type = str(candidate.get("source_type") or "unknown")
     notes: dict[str, Any] = {

@@ -3290,8 +3290,9 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
 
 
 @pytest.mark.asyncio
-async def test_backend_ladder_breaks_on_first_keep(session_dir):
+async def test_backend_ladder_breaks_on_first_keep(session_dir, monkeypatch):
     """When forge already KEEPs, the ladder short-circuits."""
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     calls: list[str] = []
 
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
@@ -3323,13 +3324,14 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_backend_sequence_forge_keep_short_circuits(session_dir):
+async def test_backend_sequence_forge_keep_short_circuits(session_dir, monkeypatch):
     """Forge runs first and a KEEP short-circuits before GEAK fallback.
 
     Regression coverage for Bugbot: _kernel_result_rank() returns a tuple, so
     the short-circuit must inspect the KEEP slot instead of comparing the tuple
     directly to int 0.
     """
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     calls: list[str] = []
 
     async def fake_single(child, *, session_dir, timeout_override_sec=None):
@@ -3365,6 +3367,7 @@ async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
     Even when GPU-rich mode says parallel backends are available, multiple
     kernels must not race forge against other backends in the same live repo.
     """
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     active = 0
     max_active = 0
     seen_flags: list[bool] = []

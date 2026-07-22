@@ -1517,6 +1517,24 @@ def _kernel_opt_max_failures() -> int:
     return resolve_kernel_opt_max_failures()
 
 
+def _geak_phase_terminal(state: Any) -> bool:
+    """Return true once the GEAK-owned KERNEL phase has produced a terminal result."""
+    if str(getattr(state, "kernel_optimizer", "") or "").strip().lower() != "geak":
+        return False
+    result = getattr(state, "geak_result", None) or {}
+    if not isinstance(result, dict):
+        return False
+    status = str(result.get("status") or "").strip().lower()
+    return status in {
+        "ok",
+        "no_gain",
+        "error",
+        "failed",
+        "skipped",
+        "baseline_reproduction_failed",
+    }
+
+
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain.
 
@@ -1526,6 +1544,9 @@ def kernel_work_pending(state: Any) -> bool:
     hot reusable kernels that have not received a kernel_opt attempt. Hard
     time/budget exits are still handled by :func:`exit_normal_kernel`.
     """
+    if _geak_phase_terminal(state):
+        return False
+
     try:
         if bool(getattr(state, "has_keep_pending_integrate", False)):
             return True

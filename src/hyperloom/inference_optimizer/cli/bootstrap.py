@@ -211,17 +211,13 @@ def _seed_shared_state(
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
-    # Derive the persisted ``kernel_optimizer`` record from the resolved kernel
-    # backend order env (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``)
-    # so resume/breakdown stay correct in a fresh shell.
-    _resolved_kernel_order = [
-        t.strip().lower()
-        for t in str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").split(
-            ","
-        )
-        if t.strip()
-    ]
-    _kernel_optimizer_record = "geak" if "geak" in _resolved_kernel_order else "native"
+    # Persist the kernel optimizer under the same hard rule used by the runtime:
+    # only exact KERNEL_OPT_BACKEND_ORDER=forge opts into per-kernel forge.
+    _kernel_optimizer_record = (
+        "native"
+        if str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
+        else "geak"
+    )
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority
     # base for the baseline server args.

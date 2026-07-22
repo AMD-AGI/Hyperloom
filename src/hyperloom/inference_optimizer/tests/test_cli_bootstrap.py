@@ -132,6 +132,20 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
 
+def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+
+    state = cb._seed_shared_state(tmp_path, _args(), session_id="session-forge")
+
+    assert state.kernel_optimizer == "native"
+
+
 def test_seed_shared_state_loads_model_arch_from_session_dir(
     tmp_path: Path,
     monkeypatch,

@@ -187,23 +187,21 @@ def test_gate_orchestration_propose_kernel_owned_rejected():
         assert exc.value.rule == "kernel_owned_by_kernel_agent", action
 
 
-def test_gate_run_gemm_tuning_request_rejected_for_non_fp8_geak(monkeypatch):
-    """GEAK GEMM tuning remains FP8-only on the REQUEST channel."""
+def test_gate_run_gemm_tuning_request_allowed_for_bf16_geak(monkeypatch):
+    """Hyperloom does not pre-filter GEAK applicability by precision."""
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
-            ),
-        )
-    assert exc.value.rule == "fp8_only_action"
+    gate.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.REQUEST,
+            payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
+        ),
+    )
 
 
-def test_gate_run_gemm_tuning_request_allowed_for_fp8(monkeypatch):
+def test_gate_run_gemm_tuning_request_allowed_for_fp8_geak(monkeypatch):
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     state = SharedState(phase="KERNEL", precision="fp8", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
@@ -217,7 +215,8 @@ def test_gate_run_gemm_tuning_request_allowed_for_fp8(monkeypatch):
 
 
 def test_gate_run_gemm_tuning_request_allowed_for_bf16_forge(monkeypatch):
-    monkeypatch.setenv("GEMM_TUNING_BACKEND", "forge")
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     state = SharedState(phase="KERNEL", precision="bf16", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     gate.validate_intent(

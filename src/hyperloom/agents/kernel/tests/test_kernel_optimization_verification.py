@@ -76,14 +76,14 @@ def test_choose_backends_forge_env_is_explicit_opt_in(monkeypatch):
     assert notes["user_specified_backends"] is True
 
 
-def test_choose_backends_forge_cli_is_explicit_opt_in(monkeypatch):
+def test_choose_backends_forge_cli_does_not_enable_without_env(monkeypatch):
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
 
     selected, notes = ko.choose_backends(_args(backends="forge"), _candidate())
 
-    assert selected == ["forge"]
-    assert notes["user_specified_backends"] is True
+    assert selected == []
+    assert notes["user_specified_backends"] is False
 
 
 def _attempt(report: Path | None = None, artifact: Path | None = None):
