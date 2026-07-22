@@ -213,3 +213,7 @@ jobs:
           curl -sS -k -o /dev/null -w 'DELETE HTTP=%{http_code}\n' \
             -X DELETE -H "Authorization: Bearer ${E2E_API_KEY}" \
             "${E2E_API_BASE%/}/api/v1/orchestration/workloads/${uid}"
+
+# --- docs: quick reference -------------------------------------------------
+# Triggers:  PR (base main/v1.0-dev) · `retest` label · `/retest` comment · manual dispatch
+# Opt out:   add the `skip-e2e-test` label (PRs that don't touch runtime code).
