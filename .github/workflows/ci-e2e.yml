@@ -7,7 +7,7 @@ name: CI E2E (single-GPU smoke run)
 
 on:
   pull_request:
-    branches: [main]          # only PRs whose BASE branch is main
+    branches: [main, v1.0-dev]   # PRs whose BASE branch is main or v1.0-dev
     # opened/synchronize/reopened = run on create + new commits + reopen.
     # labeled/unlabeled = re-evaluate when `skip-e2e-test` is added/removed.
     types: [opened, synchronize, reopened, labeled, unlabeled]
