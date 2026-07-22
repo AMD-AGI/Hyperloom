@@ -630,9 +630,49 @@ _FATAL_LOG_PATTERNS: tuple[str, ...] = (
     "HSA_STATUS_ERROR",
     "abort()",
     "Segmentation fault",
+    # argparse rejections (unsupported / malformed server flags): the server
+    # exits in seconds but the lingering nohup wrapper PID hides it, so without
+    # these the driver waits the full health timeout. Fail fast instead.
+    "error: unrecognized arguments",
+    "error: the following arguments are required",
+    "error: argument ",
+    "error: invalid choice",
 )
 # How far back from EOF we scan (covers a full traceback, bounded for cost).
 _FATAL_SCAN_TAIL_BYTES = 256 * 1024
+
+
+def _unsupported_extra_arg_flags(framework: str, extra_args: list[str]) -> list[str]:
+    """Return ``--`` flags in ``extra_args`` not accepted by this server build.
+
+    Best-effort preflight run on the head node (where the framework is
+    installed): introspects the framework's argparse help so an unsupported
+    flag fails in seconds here, before the expensive cluster kill + launch.
+    Flag names vary across framework versions, so this validates against the
+    ACTUAL build rather than any hard-coded list. Returns ``[]`` when the check
+    cannot run (missing parser, unknown framework, import error) so a preflight
+    infra problem never blocks a launch.
+
+    Args:
+        framework: Active server framework (only ``sglang`` is introspected).
+        extra_args: Tokenized extra server args (e.g. ``["--flag", "val"]``).
+
+    Returns:
+        list[str]: Flag tokens not present in the build's help text, or ``[]``.
+    """
+    flags = [t for t in extra_args if t.startswith("--")]
+    if not flags:
+        return []
+    try:
+        if framework == "sglang":
+            from sglang.launch_server import parser as _sgl_parser
+
+            help_text = _sgl_parser.format_help()
+        else:
+            return []
+    except Exception:  # noqa: BLE001 - preflight must never block on its own failure
+        return []
+    return [f for f in flags if f.split("=", 1)[0] not in help_text]
 
 
 def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
@@ -888,6 +928,18 @@ def main() -> int:
     denied = _denied_extra_args(args.extra_args)
     if denied:
         _log(f"ERROR denied server flags in --extra-args: {denied}")
+        return 2
+
+    # Preflight: reject flags this framework build does not accept, before the
+    # expensive cluster kill + launch (an unsupported flag would otherwise die
+    # in argparse ~seconds in but stall the driver until the health timeout).
+    unsupported = _unsupported_extra_arg_flags(args.framework, extra_args)
+    if unsupported:
+        _log(
+            f"ERROR unsupported server flags for {args.framework} build: "
+            f"{unsupported} — not accepted by this version's argparse; "
+            f"failing fast before cluster launch (flag names vary by version)."
+        )
         return 2
 
     _log(f"framework={args.framework} model={args.model} tp={args.tp} nnodes={args.nnodes}")
