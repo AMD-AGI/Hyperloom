@@ -216,6 +216,32 @@ def test_framework_batch_plateau_ignores_prior_macro_cycle():
     assert evidence["batch_max_gains"] == []
 
 
+def test_framework_batch_plateau_counts_current_cycle_audit_skips():
+    n = phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+    batches = [
+        {
+            "batch_id": f"b{i}",
+            "cycle": 1,
+            "max_gain_pct_observed_in_batch": 0.0,
+            "candidates": [{"id": f"c{i}"}],
+        }
+        for i in range(n)
+    ]
+    progress = [
+        {
+            "batch_id": f"b{i}",
+            "candidate_id": f"c{i}",
+            "status": "not_applicable",
+            "cycle": 1,
+        }
+        for i in range(n)
+    ]
+    state = _State(framework_agent_batches=batches, framework_agent_phase_progress=progress)
+    state.macro_cycle = 1
+    triggered, _ = phase_state.compute_plateau_framework_agent(state)
+    assert triggered is True
+
+
 def test_exit_normal_framework_agent_force_exit_evidence_carries_pending_count():
     """Regression: force-exit evidence surfaces ``pending_candidate_count``."""
     batches = [

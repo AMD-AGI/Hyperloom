@@ -582,6 +582,7 @@ class FrameworkPhase(PhaseHandler):
                 "confidence": float((audit or {}).get("confidence") or 0.0),
                 "batch_id": batch_id,
                 "ts": datetime.now(timezone.utc).isoformat(),
+                "cycle": int(getattr(state, "macro_cycle", 0) or 0),
             }
         )
         try:

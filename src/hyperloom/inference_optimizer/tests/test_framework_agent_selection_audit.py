@@ -213,10 +213,11 @@ async def test_record_audit_skip_already_present(coord: Coordinator, monkeypatch
 
     monkeypatch.setattr(kb_mod, "write_framework_record", _kb)
     coord.shared_state.framework_agent_phase_progress = None  # exercise the list-init branch
+    coord.shared_state.macro_cycle = 2
     cand = {"candidate_id": "c1", "pr_url": "http://x/1", "batch_id": "b1", "head_sha": "deadbeef"}
     await coord._record_framework_agent_audit_skip(cand, {"semantic_status": "already_merged", "confidence": 0.95})
     prog = coord.shared_state.framework_agent_phase_progress
-    assert any(p.get("status") == "already_present" for p in prog)
+    assert any(p.get("status") == "already_present" and p.get("cycle") == 2 for p in prog)
     assert seen  # KB writeback fired for already_present
 
 
