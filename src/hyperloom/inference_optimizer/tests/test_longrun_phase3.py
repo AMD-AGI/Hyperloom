@@ -286,6 +286,84 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
 
 
 @pytest.mark.asyncio
+async def test_geak_revalidation_blocks_sweep_transition_while_queued(cyclic_coordinator):
+    c = cyclic_coordinator
+    await _noop_phase_side_effects(c)
+    now = datetime.now(timezone.utc)
+    st = c.shared_state
+    st.phase = ps.PHASE_KERNEL_AGENT
+    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
+    st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
+    st.start_ts = (now - timedelta(minutes=10)).isoformat()
+    st.max_minutes = 96 * 60
+    st.kernel_optimizer = "geak"
+    st.geak_result = {"status": "ok"}
+    st.geak_pending = {
+        "status": "awaiting_rebench",
+        "revalidation_task_id": "geak-revalidate-1",
+    }
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+
+    queued = await c.tasks.create(
+        kind="explore",
+        params={
+            "source": "resume_stack_revalidate",
+            "geak_fallback": True,
+        },
+        idempotency_key="geak-revalidate",
+        task_id="geak-revalidate-1",
+    )
+
+    await c._advance_phase_if_needed()
+
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+    assert (await c.tasks.get(queued.task_id)).state == "queued"
+
+
+@pytest.mark.asyncio
+async def test_failed_geak_revalidation_releases_sweep_transition(cyclic_coordinator):
+    c = cyclic_coordinator
+    await _noop_phase_side_effects(c)
+    now = datetime.now(timezone.utc)
+    st = c.shared_state
+    st.phase = ps.PHASE_KERNEL_AGENT
+    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
+    st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
+    st.start_ts = (now - timedelta(minutes=10)).isoformat()
+    st.max_minutes = 96 * 60
+    st.kernel_optimizer = "geak"
+    st.geak_result = {"status": "ok"}
+    st.geak_pending = {
+        "status": "awaiting_rebench",
+        "revalidation_task_id": "geak-revalidate-failed",
+    }
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_SWEEP)
+
+    task = await c.tasks.create(
+        kind="explore",
+        params={
+            "source": "resume_stack_revalidate",
+            "geak_fallback": True,
+        },
+        idempotency_key="geak-revalidate-failed",
+        task_id="geak-revalidate-failed",
+    )
+
+    await c._handle_unpromotable_result(
+        task,
+        {
+            "status": "failed",
+            "error_class": "subprocess_nonzero",
+            "error": "revalidation failed",
+        },
+    )
+    await c._advance_phase_if_needed()
+
+    assert not st.geak_pending
+    assert st.phase == ps.PHASE_SWEEP
+
+
+@pytest.mark.asyncio
 async def test_phase_transition_does_not_cancel_running_specialist(cyclic_coordinator):
     c = cyclic_coordinator
     await _noop_phase_side_effects(c)
