@@ -1149,6 +1149,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     server_args=str(cb.get("extra_server_args") or ""),
                     envs=dict(cb.get("extra_envs") or {}),
                     model=self.reference_model or os.environ.get("MODEL_PATH"),
+                    tp=int(self.tp or 0) or None,
+                    max_model_len=int(self.max_model_len or 0) or None,
+                    gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
                 )
                 (Path(session_dir) / "current_setting.sh").write_text(
                     text,

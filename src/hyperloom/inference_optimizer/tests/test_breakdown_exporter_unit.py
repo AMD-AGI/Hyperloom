@@ -257,3 +257,102 @@ def test_patch_breakdown_langfuse_success(tmp_path):
     bd = json.loads((tmp_path / ex.BREAKDOWN_FILENAME).read_text())
     assert bd["langfuse"]["enabled"] is True
     assert ex.patch_breakdown_langfuse(tmp_path) is False
+
+
+# ---- recorder fragment / collector final merge ----
+
+
+def test_final_fragment_keeps_collector_invocation(tmp_path):
+    """When a recorder fragment exists for final, collector invocation must be preserved."""
+    import json
+
+    sd = tmp_path
+    (sd / "state.json").write_text(
+        json.dumps(
+            {
+                "current_best": {"tput": 123.0, "extra_server_args": "", "extra_envs": {}},
+                "optimization_stack": [],
+                "cumulative_gain_validated": 0.0,
+                "framework": "sglang",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (sd / "manifest.json").write_text(
+        json.dumps({"schema_version": 3, "session_id": "s", "model_name": "m", "framework": "sglang"}),
+        encoding="utf-8",
+    )
+    parts = sd / "runtime" / "breakdown" / "parts"
+    parts.mkdir(parents=True)
+    # Partial fragment with live scalar but no invocation.
+    (parts / "final__coordinator.json").write_text(
+        json.dumps(
+            {
+                "kind": "singleton",
+                "section": "final",
+                "producer": "coordinator",
+                "seq": 1,
+                "ts": "2026-01-01T00:00:00Z",
+                "payload": {"throughput_tok_s_per_gpu": 123.0, "extra_server_args": "", "extra_envs": {}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bd = ex.build(sd)
+    final_sec = bd.get("final", {})
+    assert final_sec.get("throughput_tok_s_per_gpu") == pytest.approx(123.0), "fragment scalar lost"
+    invocation = final_sec.get("invocation")
+    assert invocation is not None, "collector invocation must not be silenced by fragment"
+
+
+def test_final_source_layers_populated_from_stack(tmp_path):
+    """source_layers in final.invocation reflects source_patch entries."""
+    import json
+
+    sd = tmp_path
+    (sd / "state.json").write_text(
+        json.dumps(
+            {
+                "current_best": {
+                    "tput": 200.0,
+                    "extra_server_args": "",
+                    "extra_envs": {},
+                    "optimization_stack": [
+                        {
+                            "action": "integrate_patch",
+                            "scope": "source_patch",
+                            "variant_name": "patch-abc",
+                            "source_snapshot": "/session/opt/src/abc",
+                            "framework_root": "/opt/sglang",
+                            "base_sha": "cafebabe",
+                        }
+                    ],
+                },
+                "optimization_stack": [
+                    {
+                        "action": "integrate_patch",
+                        "scope": "source_patch",
+                        "variant_name": "patch-abc",
+                        "source_snapshot": "/session/opt/src/abc",
+                        "framework_root": "/opt/sglang",
+                        "base_sha": "cafebabe",
+                    }
+                ],
+                "cumulative_gain_validated": 0.0,
+                "framework": "sglang",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (sd / "manifest.json").write_text(
+        json.dumps({"schema_version": 3, "session_id": "s", "model_name": "m", "framework": "sglang"}),
+        encoding="utf-8",
+    )
+
+    bd = ex.build(sd)
+    invocation = bd.get("final", {}).get("invocation", {})
+    layers = invocation.get("source_layers", [])
+    assert len(layers) == 1, f"expected 1 source_layer, got {layers}"
+    assert layers[0]["snapshot_dir"] == "/session/opt/src/abc"
+    assert layers[0]["reproducible"] is True
