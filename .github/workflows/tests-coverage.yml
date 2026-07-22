@@ -313,7 +313,7 @@ jobs:
           PY
 
       - name: Upload shard coverage data
-        if: always()
+        if: always() && matrix.shard != 1
         uses: actions/upload-artifact@v7
         with:
           name: covdata-py${{ matrix.python-version }}-shard${{ matrix.shard }}
