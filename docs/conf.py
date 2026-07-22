@@ -1,73 +1,67 @@
-# Copyright Advanced Micro Devices, Inc. or its affiliates.
-# SPDX-License-Identifier: MIT
-
 # Configuration file for the Sphinx documentation builder.
+#
+# This file only contains a selection of the most common options. For a full
+# list see the documentation:
+# https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 import os
-import re
 import shutil
 import sys
 from pathlib import Path
 from subprocess import run
 
-# -- Path setup --------------------------------------------------------------
-# Add repo root and ``src`` for autodoc.
-_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-for _path in (_repo_root, os.path.join(_repo_root, "src")):
-    if os.path.isdir(_path):
-        sys.path.insert(0, _path)
+ROCM_VERSION = "7.14.0"
+GA_DATE = "2026-07-15"
 
+DOCS_DIR = Path(__file__).parent.resolve()
+ROOT_DIR = DOCS_DIR.parent
+
+
+def copy_rtd_file(src_path: Path, dest_path: Path):
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_path, dest_path)
+    print(f"Copied {src_path} -> {dest_path}")
+
+
+gh_changelog_path = ROOT_DIR / "CHANGELOG.md"
+rtd_changelog_path = DOCS_DIR / "release" / "changelog.md"
+copy_rtd_file(gh_changelog_path, rtd_changelog_path)
+
+# Mark the consolidated changelog as orphan to prevent Sphinx from warning about missing toctree entries
+with open(rtd_changelog_path, "r+", encoding="utf-8") as file:
+    content = file.read()
+    file.seek(0)
+    file.write(":orphan:\n" + content)
+
+latex_engine = "xelatex"
+latex_elements = {
+    "fontpkg": r"""
+\usepackage{tgtermes}
+\usepackage{tgheros}
+\renewcommand\ttdefault{txtt}
 """
-html_theme is usually unchanged (rocm_docs_theme).
-flavor defines the site header display, select the flavor for the corresponding portals
-flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-developer-hub, local, generic
-"""
+}
 
 # Keep in sync with pyproject.toml [project].version.
 version_number = "1.0.0a1"
 
-# Article info display
-setting_all_article_info = True
+# configurations for PDF output by Read the Docs
+project = "Hyperloom documentation"
+author = "Advanced Micro Devices, Inc."
+copyright = "Copyright (c) %Y Advanced Micro Devices, Inc. All rights reserved."
+version = version_number
+
+setting_all_article_info = False
 all_article_info_os = ["linux"]
 all_article_info_author = ""
 
-# for PDF output on Read the Docs
-project = "Hyperloom"
-author = "Advanced Micro Devices, Inc."
-copyright = "2026 Advanced Micro Devices, Inc."
-version = version_number
-release = version_number
+external_toc_path = "./sphinx/_toc.yml"
 
-external_toc_path = "./sphinx/_toc.yml"  # Defines Table of Content structure definition path
-
-exclude_patterns = [
-    "_build",
-    "_templates",
-]
-
-suppress_warnings = [
-    # Autosummary API pages contain toctrees that external-toc warns about.
-    "etoc.toctree",
-]
-
-# Register Sphinx extensions and static assets
-sys.path.append(str(DOCS_DIR / "extension"))
 extensions = [
     "rocm_docs",
-    "rocm_docs_custom.selector",
-    "rocm_docs_custom.matrix",
-    "rocm_docs_custom.icon",
-    "rocm_docs_custom.csv_list_to_table",
-    "rocm_docs_custom.remote_content",
-    "rocm_docs_custom.remote_yaml",
-    "rocm_docs_custom.version_ref",
-    "rocm_docs_custom.merge_components",
-    "sphinxcontrib.datatemplates",
-    "sphinx_substitution_extensions",
-    # "sphinx_reredirects",
-    # "sphinx_sitemap",
+    "sphinx.ext.autosummary",
+    "sphinx.ext.autodoc",
 ]
-templates_path = ["extension/rocm_docs_custom/selector/templates"]
 
 external_projects_current_project = "rocm"
 html_theme = "rocm_docs_theme"
@@ -77,31 +71,30 @@ html_theme_options = {
     "repository_url": "https://github.com/AMD-AGI/Hyperloom",
     "use_repository_button": True,
     "use_issues_button": True,
-    # "secondary_sidebar_items": {
-        # "training/Primus**": ["framework-version-toc2"],
-        # "**": ["framework-version-toc2"],
-    # },
 }
+html_title = f"Hyperloom {version_number}"
 
-"""
-Doxygen Settings
-Ensure Doxyfile is located at docs/doxygen.
-If the component does not need doxygen, delete this section for optimal build time
-"""
-# doxygen_root = "doxygen"
-# doxysphinx_enabled = True
-# doxygen_project = {
-#    "name": "doxygen",
-#    "path": "doxygen/xml",
-# }
+html_baseurl = os.environ.get("READTHEDOCS_CANONICAL_URL", "rocm.docs.amd.com")
+html_context = {}
+if os.environ.get("READTHEDOCS", "") == "True":
+    html_context["READTHEDOCS"] = True
 
-# Add more addtional package accordingly
-extensions = [
-    "rocm_docs",
-    "sphinx.ext.autosummary",
-    "sphinx.ext.autodoc",
+# For substitutions in MyST Markdown and rST files.
+# Usage:
+#   ```md              | ```rst
+#   {{ ROCM_VERSION }} | |ROCM_VERSION|
+#   ```                | ```
+myst_substitutions = {"ROCM_VERSION": ROCM_VERSION}
+rst_prolog = "\n".join(
+    f".. |{key}| replace:: {val}" for key, val in myst_substitutions.items()
+)
+
+numfig = False
+
+exclude_patterns = [
+    "_build",
+    "_templates",
+    "exclude/**",
+    "**/include/**",
+    "**/images/**",
 ]
-
-html_title = f"{project} {version_number} documentation"
-
-external_projects_current_project = "Hyperloom"
