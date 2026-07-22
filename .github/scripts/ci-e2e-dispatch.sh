@@ -104,6 +104,29 @@ REPORT_MARKER="<!-- ci-e2e-report:${STATUS_CONTEXT} -->"
 gh_report_on() { [ -n "${GH_STATUS_TOKEN:-}" ] && [ -n "${GH_STATUS_REPO:-}" ] && [[ "${PR_NUMBER:-}" =~ ^[0-9]+$ ]]; }
 _epoch() { date -d "$1" +%s 2>/dev/null || true; }
 _hdur() { local s="${1:-}"; [ -z "$s" ] && { echo "–"; return; }; if [ "$s" -lt 60 ]; then echo "${s}s"; else echo "$((s/60))m $((s%60))s"; fi; }
+
+# Turn a raw platform error into a one-line, plain-language reason a reviewer can act on.
+humanize_reason() {
+  case "$1" in
+    *JobHoldMaxRequeue*)
+      echo "Slurm kept holding & requeuing the job until it gave up — usually a flaky node; just re-run." ;;
+    *baseline_accuracy*|*accuracy_failed*)
+      echo "Baseline accuracy gate failed — the model server ran but the baseline benchmark didn't pass; check the baseline logs." ;;
+    *NonZeroExitCode*|*"exhausted retries"*)
+      echo "The run crashed on the compute node (non-zero exit) — usually a node/env hiccup (e.g. a leftover process holding a port) or a runtime error; often transient, re-run first." ;;
+    *"not terminal"*|*[Tt]imeout*)
+      echo "Timed out — the run never reached a terminal state in time (task stuck, or the GPU stayed queued too long)." ;;
+    *"not associated"*|*user_name*)
+      echo "Dispatch identity rejected — CI_E2E_USER_NAME must be a member of the amd-hyperloom Slurm account." ;;
+    *128*|*Authentication*|*"could not read Username"*)
+      echo "Could not clone the PR code on the compute node — GitHub auth/permission issue." ;;
+    "")
+      echo "Unknown failure — the platform reported no error detail." ;;
+    *)
+      echo "$1" ;;
+  esac
+}
+
 report_upsert() { # result_md (e.g. "✅ Succeeded")
   gh_report_on || return 0
   local result="$1" q d qe de nows qd="" rt="" tot="" pulse="" actions="" reason_row="" body cid
@@ -115,8 +138,11 @@ report_upsert() { # result_md (e.g. "✅ Succeeded")
   [ -n "$qe" ] && tot="$(_hdur $((nows - qe)))"
   [ -n "${PULSE_SESSION_BASE:-}" ] && pulse="· [Pulse session](${PULSE_SESSION_BASE%/}/${UID_})"
   [ -n "${GH_STATUS_DETAILS_URL:-}" ] && actions="[details](${GH_STATUS_DETAILS_URL})"
-  [ -n "${err:-}" ] && reason_row="| reason | ${err} |
+  if [ -n "${err:-}" ]; then
+    reason_row="| reason | $(humanize_reason "$err") |
+| detail | \`${err}\` |
 "
+  fi
   body="${REPORT_MARKER}
 ## CI E2E report — ${result}
 
@@ -216,7 +242,7 @@ while [ "$i" -lt "$POLL_MAX" ]; do
       err="$(printf '%s' "$detail" | jq -r '.orchestration.last_error // (.orchestration.conditions[-1].message) // "unknown"' 2>/dev/null)"
       summary "❌ **FAIL** — claw_session_id=\`$UID_\` spur_job=\`$spur\` node=\`$node\`"
       summary "reason: $err"
-      post_status "failure" "FAIL — ${err}; uid=${UID_}; spur_job=${spur}"
+      post_status "failure" "$(humanize_reason "$err")"
       report_upsert "❌ Failed"
       exit 1 ;;
   esac
