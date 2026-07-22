@@ -2480,13 +2480,35 @@ class WritebackCollaborator:
                         got_hash,
                         (task.params or {}).get("expected_cfg_hash"),
                     )
+                    fallback_result: dict[str, Any]
                     try:
                         # Routed via ``_coord`` so a test / caller that overrides
                         # ``coordinator._validate_geak_via_geak_harness`` still wins
                         # (bare-name delegation resolves it back onto this class).
-                        await self._coord._validate_geak_via_geak_harness(reason="2b_inconclusive")
-                    except Exception:  # noqa: BLE001 - defensive
+                        fallback_result = await self._coord._validate_geak_via_geak_harness(
+                            reason="2b_inconclusive"
+                        )
+                    except Exception as exc:  # noqa: BLE001 - defensive
                         log.exception("geak 2a GEAK-harness fallback failed")
+                        fallback_result = {
+                            "validated": False,
+                            "reason": repr(exc),
+                        }
+                    if not bool(fallback_result.get("validated")):
+                        geak_result = (
+                            dict(self.shared_state.geak_result)
+                            if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+                            else {}
+                        )
+                        geak_result["revalidation_status"] = "fallback_failed"
+                        geak_result["revalidation_error"] = str(
+                            fallback_result.get("reason")
+                            or fallback_result.get("status")
+                            or "GEAK harness fallback did not validate"
+                        )[:500]
+                        self.shared_state.geak_result = geak_result
+                        self.shared_state.geak_pending = {}
+                        self.shared_state.resume_pending_revalidation = False
                 changed = True
             else:
                 if measured_ok and self.shared_state.baseline_tput > 0:
