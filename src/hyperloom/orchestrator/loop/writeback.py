@@ -1909,6 +1909,11 @@ class WritebackCollaborator:
                 _stack_scope = str(bv.get("scope") or "").strip() if isinstance(bv, dict) else ""
                 if _stack_scope:
                     stack_entry["scope"] = _stack_scope
+                if isinstance(bv, dict):
+                    for _src_key in ("source_snapshot", "framework_root", "base_sha"):
+                        val = bv.get(_src_key)
+                        if val:
+                            stack_entry[_src_key] = str(val)
                 self.shared_state.optimization_stack.append(stack_entry)
                 # Mirror append into gain_per_stack_entry so the two lists stay index-aligned.
                 self.shared_state.append_stack_gain_entry(
@@ -1918,12 +1923,17 @@ class WritebackCollaborator:
                     extra_server_args=full_args,
                 )
 
+        # Merge envs: start from previous stack top envs so source-layer KEEPs
+        # (config_changes_applied={}) do not clear prior explore/env layers.
+        _prev_envs = dict((previous.get("extra_envs") or {}) if isinstance(previous, dict) else {})
+        _new_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
+        _merged_envs = {**_prev_envs, **_new_envs}
         current_best = {
             "action": task_kind,
             "tput": float(best_tput),
             "variant_name": variant_name,
             "extra_server_args": full_args,
-            "extra_envs": (dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}),
+            "extra_envs": _merged_envs,
             "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
