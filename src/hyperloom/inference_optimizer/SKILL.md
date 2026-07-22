@@ -860,6 +860,23 @@ and ROCm/TileLang envs (`SGLANG_OPT_USE_MULTI_STREAM_OVERLAP`,
 (`SGLANG_ENABLE_SPEC_V2` / `--speculative-*`) is model-specific — only
 where a draft/MTP path exists, benchmarked with chat-formatted prompts.
 
+For **multi-node / communication-bound** runs (a single exposed
+collective such as an `ncclDevKernel`/RCCL all-reduce dominates GPU time
+while compute is a small slice), compute/cache knobs above cannot move
+the run — the bottleneck is a cross-rank wait, usually EP/TP load
+imbalance. The `comm_specialist` owns this direction; useful candidate
+families it may surface: hide the collective
+(`--enable-two-batch-overlap`, `--enable-overlap-schedule`,
+`SGLANG_OPT_USE_MULTI_STREAM_OVERLAP`); shrink / rebalance it
+(`--enable-dp-attention`, `--ep-size` / `--moe-dense-tp-size`
+re-partition, quantized quick-reduce `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION`
+/ aiter quick-reduce INT8/FP8); and collective-library env sweeps
+(`NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS`, `NCCL_PROTO`,
+`RCCL_MSCCL_ENABLE`). Aggressive overlap flags can crash during CUDA-graph
+capture on MI325X + ROCm — a crash means step down the specialist's
+degradation ladder (drop quick-reduce, keep TBO; then overlap-schedule;
+then dp-attention; then env-only sweeps), not abandon the direction.
+
 ### Per-Run Asset Override (advanced)
 
 To override shipped configs without editing them, materialize a per-run asset
