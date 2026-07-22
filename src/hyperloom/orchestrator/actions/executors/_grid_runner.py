@@ -1307,6 +1307,18 @@ async def run_grid(
             except OSError as _sld_exc:  # noqa: BLE001 - best-effort diagnostics
                 log.warning("grid_runner: could not create per-variant server_logs dir: %r", _sld_exc)
 
+        # Infera backend restarts via SSH fan-out (cmd_restart_server routes to
+        # _infera_restart_server before the RayJob log_file path), so it ignores
+        # the server_log_dir arg and instead reads HYPERLOOM_MN_SERVER_LOG_DIR to
+        # place each pod's mn_infera_server_*.log. Point that at this variant's
+        # slot for the restart so infera logs land under server_logs too (empty
+        # snapshot otherwise). Absolute path required by the infera forwarder;
+        # set/restore is scoped to this restart so no other backend or round is
+        # affected. sglang/vllm (RayJob) keep using the server_log_dir arg.
+        _prev_infera_slog = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR")
+        _slog_scoped = bool(_mn_server_log_dir) and str(_mn_server_log_dir).startswith("/")
+        if _slog_scoped:
+            os.environ["HYPERLOOM_MN_SERVER_LOG_DIR"] = str(_mn_server_log_dir)
         try:
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
@@ -1351,6 +1363,15 @@ async def run_grid(
             if not keep_going_on_failure:
                 break
             continue
+        finally:
+            # Restore the pre-restart infera log-dir env (runs before the
+            # except-branch break/continue too), so the per-variant scoping never
+            # leaks into another backend or a later round.
+            if _slog_scoped:
+                if _prev_infera_slog is None:
+                    os.environ.pop("HYPERLOOM_MN_SERVER_LOG_DIR", None)
+                else:
+                    os.environ["HYPERLOOM_MN_SERVER_LOG_DIR"] = _prev_infera_slog
 
         # Multi-node client warmup: one discarded benchmark pass against the
         # just-restarted, persistent remote server to warm JIT / steady-state
@@ -1890,22 +1911,46 @@ _SERVER_DEATH_MARKERS = (
 _SERVER_LOG_TAIL_BYTES = 16_384
 
 
+# Server rank-log filename globs across launch layouts, so the snapshot also
+# captures PD (``prefill_*``/``decode_*``), router, and infera worker logs — not
+# just the aggregated ``rank_*`` case. See launch_multinode.py (rank/prefill/
+# decode), cli.py (router), and launch_infera_node.py (mn_infera_server_*).
+_SERVER_LOG_GLOBS = (
+    "rank_*.log",
+    "prefill_*.log",
+    "decode_*.log",
+    "router*.log",
+    "mn_infera_server_*.log",
+)
+
+
 def _snapshot_variant_server_logs(slot: Path) -> None:
     """Fold preserved per-variant server rank-log tails into one snapshot file.
 
-    ``restart_server_for_round`` writes each round's ``rank_*.log`` under
+    ``restart_server_for_round`` writes each round's server logs under
     ``slot/server_logs`` (shared wekafs), so a mid-benchmark server death
-    survives the next round's restart. This reads a bounded tail of each and
-    writes ``slot/server_death_snapshot.txt`` (prefixed with any matched
-    death markers) so a crash is visible without hunting pod-local ``/tmp``.
-    Best-effort; never raises.
+    survives the next round's restart. This reads a bounded tail of each
+    (aggregated ``rank_*``, PD ``prefill_*``/``decode_*``, ``router*``, and
+    infera ``mn_infera_server_*`` layouts) and writes
+    ``slot/server_death_snapshot.txt`` (prefixed with any matched death markers)
+    so a crash is visible without hunting pod-local ``/tmp``. Best-effort; never
+    raises.
 
     Args:
         slot (Path): Variant slot directory (contains ``server_logs``).
     """
     try:
         src = slot / "server_logs"
-        logs = sorted(src.glob("rank_*.log")) if src.is_dir() else []
+        if not src.is_dir():
+            return
+        seen: set[Path] = set()
+        logs: list[Path] = []
+        for _pat in _SERVER_LOG_GLOBS:
+            for _p in src.glob(_pat):
+                if _p not in seen:
+                    seen.add(_p)
+                    logs.append(_p)
+        logs = sorted(logs)
         if not logs:
             return
         sections: list[str] = []
