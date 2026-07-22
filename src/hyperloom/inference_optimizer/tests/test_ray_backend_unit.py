@@ -43,15 +43,15 @@ def test_ray_exec_enabled_explicit_off(monkeypatch: pytest.MonkeyPatch, val: str
     assert rb.ray_exec_enabled() is False
 
 
-def test_ray_exec_forced_on_single_node_by_default(
+def test_ray_exec_off_by_default_on_single_node(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    """Decision 2+4: unset env -> ON for single-node."""
+    """Unset env -> local subprocess path; Ray is opt-in."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rb.ray_exec_enabled() is True
+    assert rb.ray_exec_enabled() is False
 
 
 def test_ray_exec_off_on_multi_node_by_default(
@@ -312,6 +312,7 @@ class _LeaseFakeRay:
 
     def __init__(self):
         self.killed: list = []
+        self.shutdown_called = 0
 
     def cluster_resources(self) -> dict:
         return {"CPU": 64.0, "GPU": 8.0, "serving_slot": 1.0}
@@ -326,6 +327,9 @@ class _LeaseFakeRay:
 
     def kill(self, actor):
         self.killed.append(actor)
+
+    def shutdown(self):
+        self.shutdown_called += 1
 
 
 def test_serving_lease_run_session_kill_success(monkeypatch: pytest.MonkeyPatch):
@@ -375,6 +379,26 @@ def test_serving_lease_run_session_kill_actor_death_self_heals(monkeypatch: pyte
     assert "ray_actor_error" in err
     # Handle dropped so the next run re-creates the actor.
     assert lease._actor is None
+
+
+def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pytest.MonkeyPatch):
+    """Actor death should disconnect the stale driver before Ray's GCS fatal path."""
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    backend = rb.RayExecutionBackend()
+    backend._ensured = True
+    backend._started = True
+    monkeypatch.setattr(rb, "_BACKEND", backend)
+
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor(fake.exceptions.RayActorError("socket closed"))
+    rc, _out, err = lease.run_session_kill(["x"], timeout=5)
+
+    assert rc == 1
+    assert "ray_actor_error" in err
+    assert fake.shutdown_called == 1
+    assert backend._ensured is False
+    assert backend._started is False
 
 
 def test_serving_lease_close_idempotent(monkeypatch: pytest.MonkeyPatch):
@@ -1235,13 +1259,13 @@ def test_gpu_specialist_lease_close_kills_live_actor(monkeypatch: pytest.MonkeyP
     assert lease._actor is None
 
 
-def test_should_use_ray_backend_unset_single_node_true(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Env unset + not-under-pytest + single-node -> True (production default)."""
+def test_should_use_ray_backend_unset_single_node_false(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Env unset + not-under-pytest + single-node -> False (Ray is opt-in)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)  # bypass the pytest gate
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rb._should_use_ray_backend() is True  # 80-82
+    assert rb._should_use_ray_backend() is False
 
 
 def test_strip_visible_devices_write_error_returns_src(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

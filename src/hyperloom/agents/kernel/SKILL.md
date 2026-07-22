@@ -361,15 +361,14 @@ canonical upstream path returned in `analysis_report_path` from
 
 ## Backend Selection
 
-User-specified backends win, subject to feasibility checks. If user does not
-specify backends:
+Current GEAK owns the default KERNEL phase. Per-kernel Forge is disabled unless
+the operator set exactly `KERNEL_OPT_BACKEND_ORDER=forge`.
 
-- **Default (all rewritable kernels)**: `forge` — the sole per-kernel
-  backend (Kernel-Forge autonomous loop). An explicit `--backends` or the
-  `KERNEL_OPT_BACKEND_ORDER` / `KERNEL_OPT_BACKENDS` env still overrides this
-  default as-is. The kernel type (Triton / HIP-C++ / FlyDSL / Python /
-  unknown) does NOT change the choice; capability differences are
-  backend-side, not Hyperloom-side, so we let Forge decide what to handle.
+- **Default (all rewritable kernels)**: no per-kernel backend. GEAK receives the
+  workload and decides the kernel strategy internally.
+- **Forge opt-in**: only exact `KERNEL_OPT_BACKEND_ORDER=forge` enables the
+  private per-kernel Forge backend. `--backends`, `KERNEL_OPT_BACKENDS`, payload
+  backend hints, and `GEMM_TUNING_BACKEND` do not enable Forge.
 - **Vendor binary / hipBLASLt**: do not rewrite; return reason and
   `NEEDS_REVIEW`. Only case that yields an empty backend list upstream.
 

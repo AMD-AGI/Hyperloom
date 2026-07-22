@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Shared single-node ``server_lifecycle`` helpers.
@@ -24,6 +24,18 @@ from ._subprocess_kill import _process_group_alive, _signal_group
 
 
 log = logging.getLogger(__name__)
+
+# Substrings that identify a Hyperloom-spawned serving process in
+# ``/proc/<pid>/cmdline``. A pidfile is only acted on when the live pid's
+# cmdline matches one of these, so a recycled pid running an unrelated program
+# is never signalled.
+_SERVER_CMDLINE_MARKERS: tuple[str, ...] = (
+    "sglang.launch_server",
+    "sglang serve",
+    "vllm.entrypoints",
+    "vllm serve",
+    "launch_server",
+)
 
 
 # Magpie built-in benchmark scripts that support the server_lifecycle reuse
@@ -281,3 +293,186 @@ def teardown_lifecycle_server(
         except OSError:
             # Already gone or unremovable; teardown must not raise.
             pass
+
+
+def _pid_cmdline(pid: int) -> str:
+    """Return ``/proc/<pid>/cmdline`` as a space-joined string, or ``""``.
+
+    Args:
+        pid: The process id to read.
+
+    Returns:
+        The process command line with NULs turned into spaces, or ``""`` when
+        the process is gone or ``/proc`` is unreadable.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+
+
+def _looks_like_server_process(pid: int) -> bool:
+    """Return whether ``pid``'s cmdline matches a Hyperloom serving process.
+
+    Guards against pid reuse: only a live pid whose cmdline contains a known
+    serving marker is treated as a reapable orphan.
+
+    Args:
+        pid: The candidate process id.
+
+    Returns:
+        ``True`` when the pid's cmdline names a Hyperloom-spawned server.
+    """
+    cmdline = _pid_cmdline(pid)
+    if not cmdline:
+        return False
+    return any(marker in cmdline for marker in _SERVER_CMDLINE_MARKERS)
+
+
+def _process_group_looks_like_server(pgid: int) -> bool:
+    """Return whether any process in ``pgid`` still looks like a serving process."""
+    proc_root = Path("/proc")
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return False
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            pid = int(entry.name)
+            stat = (entry / "stat").read_text(encoding="utf-8")
+            after_comm = stat.rsplit(")", 1)[1].split()
+            entry_pgid = int(after_comm[2])
+        except (IndexError, OSError, ValueError):
+            continue
+        if entry_pgid == pgid and _looks_like_server_process(pid):
+            return True
+    return False
+
+
+def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
+    """Reap serving processes orphaned by a prior monitor-process death.
+
+    A crash that takes the optimizer down (e.g. a raylet death) leaves the
+    setsid'd SGLang/vLLM server tree alive with its ``{framework}_{port}.pid``
+    file still on disk, polluting the next benchmark on the shared port. On
+    startup/resume this scans **only the current session's** ``runs/`` pidfiles
+    and reaps each pid whose cmdline still matches a serving process (SIGTERM →
+    grace → SIGKILL on the whole group). Scoped strictly to this session's own
+    pidfiles and gated on a cmdline match, so a co-located session's server and
+    a recycled pid are both left untouched. Best-effort and never raises (safe
+    to call unconditionally at boot); a no-op for a fresh session.
+
+    A pidfile pointing at a dead pid is removed only after its process group is
+    also gone; if the leader exited but server children still occupy the group,
+    the group is reaped. A pidfile pointing at a live pid whose cmdline does NOT
+    match is left in place so a later pass can re-evaluate it.
+
+    Args:
+        session_dir: The current session directory whose ``runs/`` subtree is
+            scanned for orphaned server pidfiles.
+
+    Returns:
+        The list of pids that were signalled for reaping.
+    """
+    if os.name != "posix":
+        return []
+    runs_dir = Path(session_dir) / "runs"
+    if not runs_dir.is_dir():
+        return []
+
+    reaped: list[int] = []
+    for pid_file in sorted(runs_dir.rglob("*.pid")):
+        try:
+            parts = pid_file.read_text(encoding="utf-8").split()
+        except OSError:
+            continue
+        if not parts:
+            _unlink_quietly(pid_file)
+            continue
+        try:
+            server_pid = int(parts[0])
+            recorded_pgid = int(parts[1]) if len(parts) > 1 else server_pid
+        except ValueError:
+            _unlink_quietly(pid_file)
+            continue
+
+        pid_alive = _pid_alive_simple(server_pid)
+        if pid_alive:
+            try:
+                server_pgid = os.getpgid(server_pid)
+            except OSError:
+                server_pgid = recorded_pgid
+        else:
+            server_pgid = recorded_pgid
+
+        if pid_alive and not _looks_like_server_process(server_pid):
+            # Live pid but not one of our servers (pid reuse): do not touch the
+            # process; leave the pidfile for a later re-evaluation.
+            log.info(
+                "orphan-reaper: pid=%d from %s no longer looks like a server "
+                "(cmdline mismatch); leaving it untouched",
+                server_pid,
+                pid_file,
+            )
+            continue
+        if not pid_alive and not _process_group_alive(server_pgid):
+            # Stale pidfile from a fully-exited server tree; just clean it up.
+            _unlink_quietly(pid_file)
+            _unlink_quietly(pid_file.with_suffix(".json"))
+            continue
+        if not pid_alive and not _process_group_looks_like_server(server_pgid):
+            # The original leader is gone, and the remaining/reused pgid has no
+            # server-looking member; do not risk signalling an unrelated group.
+            log.info(
+                "orphan-reaper: pid=%d from %s is gone and pgid=%d has no "
+                "server-looking member; leaving it untouched",
+                server_pid,
+                pid_file,
+                server_pgid,
+            )
+            continue
+
+        _signal_group(server_pgid, signal.SIGTERM)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if not _process_group_alive(server_pgid):
+                break
+            time.sleep(0.1)
+        if _process_group_alive(server_pgid):
+            _signal_group(server_pgid, signal.SIGKILL)
+        reaped.append(server_pid)
+        log.warning(
+            "orphan-reaper: reaped leftover server pid=%d pgid=%d from %s "
+            "(likely orphaned by a prior monitor-process crash)",
+            server_pid,
+            server_pgid,
+            pid_file,
+        )
+        _unlink_quietly(pid_file)
+        _unlink_quietly(pid_file.with_suffix(".json"))
+
+    return reaped
+
+
+def _pid_alive_simple(pid: int) -> bool:
+    """Return whether ``pid`` currently exists (``kill(pid, 0)`` probe)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _unlink_quietly(path: Path) -> None:
+    """Best-effort ``unlink`` that never raises."""
+    try:
+        path.unlink()
+    except OSError:
+        pass

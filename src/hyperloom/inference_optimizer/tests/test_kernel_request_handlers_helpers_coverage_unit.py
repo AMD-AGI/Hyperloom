@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Supplemental coverage for kernel_request_handlers pure helpers: precision /
@@ -76,20 +76,22 @@ def test_optimization_wrapper_timeout_adds_grace() -> None:
 
 
 # -- _backend_order --------------------------------------------------------
-def test_backend_order_explicit_payload(monkeypatch) -> None:
+def test_backend_order_ignores_payload_forge_without_explicit_env(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    # Unknown backends are filtered out of the ladder.
-    assert krh._backend_order({"backend_order": "FORGE,foo,unknown"}) == ["forge"]
+    assert krh._backend_order({"backend_order": "FORGE,foo,unknown"}) == []
 
 
-def test_backend_order_removed_oob_raises(monkeypatch) -> None:
+def test_backend_order_legacy_alias_cannot_enable_forge(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    # Removed OOB backends (claude/codex/cursor) must fail loudly rather than
-    # being silently substituted with forge.
-    monkeypatch.setenv("KERNEL_OPT_BACKENDS", "codex,claude")
-    with pytest.raises(ValueError, match="no longer available"):
-        krh._backend_order({})
+    monkeypatch.setenv("KERNEL_OPT_BACKENDS", "forge")
+    assert krh._backend_order({}) == []
+
+
+def test_backend_order_exact_env_forge_opt_in(monkeypatch) -> None:
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    monkeypatch.setenv("KERNEL_OPT_BACKENDS", "geak")
+    assert krh._backend_order({}) == ["forge"]
 
 
 def test_backend_order_unknown_backends_yield_empty(monkeypatch) -> None:
@@ -110,7 +112,7 @@ def test_backend_order_drops_geak_from_per_kernel_ladder(monkeypatch) -> None:
     # geak is a phase-level delegate, never a per-kernel backend.
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    assert krh._backend_order({"backend_order": "geak,forge"}) == ["forge"]
+    assert krh._backend_order({"backend_order": "geak,forge"}) == []
     assert krh._backend_order({"backend_order": "geak"}) == []
 
 
@@ -122,7 +124,7 @@ def test_geak_selected_from_env_order(monkeypatch) -> None:
 
 
 def test_geak_selected_owns_phase_when_mixed(monkeypatch) -> None:
-    # geak owns the phase when it appears anywhere in the order.
+    # Mixed values are not the exact forge opt-in, so GEAK remains the owner.
     monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge,GEAK")
     assert krh.geak_selected() is True
@@ -134,15 +136,15 @@ def test_geak_selected_true_by_default(monkeypatch) -> None:
     assert krh.geak_selected() is True
 
 
-def test_geak_selected_false_for_explicit_native_order(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
-    assert krh.geak_selected({"backend_order": "forge,claude"}) is False
-
-
-def test_geak_selected_payload_overrides_env(monkeypatch) -> None:
+def test_geak_selected_false_only_for_exact_env_forge(monkeypatch) -> None:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    assert krh.geak_selected({"backend_order": "geak"}) is True
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+    assert krh.geak_selected({"backend_order": "geak"}) is False
+
+
+def test_geak_selected_payload_cannot_override_exact_env_forge(monkeypatch) -> None:
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    assert krh.geak_selected({"backend_order": "geak"}) is False
 
 
 # -- _artifact_paths_from_payload -----------------------------------------

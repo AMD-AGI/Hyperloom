@@ -383,14 +383,14 @@ already handles the read-only-source case.
 
 ### Step 1.5 — Write the advisory `model_arch` profile (best-effort)
 
-Before launching, produce an **advisory** architecture profile so the
-orchestration + specialist prompts carry richer model context than the
-coarse `--model-class` tag. This is **best-effort and non-fatal**: a
-missing / invalid file simply causes Hyperloom to omit the section — it
-never blocks launch, never replaces `--model-class` (still required), and
-is always **subordinate to live TraceLens evidence** at runtime (it drives
-no deterministic gating — atom seed grid, framework gap token, recipe key,
-and prompt label all stay on `model_class`).
+After the CLI creates the session directory, produce an **advisory**
+architecture profile so the orchestration + specialist prompts carry richer
+model context than the coarse `--model-class` tag. This is **best-effort
+and non-fatal**: a missing / invalid file simply causes Hyperloom to omit
+the section — it never blocks launch, never replaces `--model-class`
+(still required), and is always **subordinate to live TraceLens evidence**
+at runtime (it drives no deterministic gating — atom seed grid, framework
+gap token, recipe key, and prompt label all stay on `model_class`).
 
 Steps for the launching agent:
 
@@ -401,12 +401,13 @@ Steps for the launching agent:
    lightweight classify from the model's local `config.json` (decoder
    type, attention variant, expert counts, MTP, SWA window) and set
    `"source": "config_classify"`.
-3. **Write the convention file** — write the profile to
-   exactly `$USER_DATA_PATH/model_arch.json`: the file named
-   `model_arch.json` at the workspace root. Do not create a subdirectory
-   such as `model_arch_advisory/`; the CLI only reads the root-level
-   convention file. Include `model_name` (required for the stale-file
-   guard). Set it to the **clean model name** (e.g. `Qwen2.5-7B-Instruct`);
+3. **Write the convention file** — once `session_dir` exists, write the
+   profile to exactly `<session_dir>/model_arch.json`: the file named
+   `model_arch.json` in the current session directory. Do not write it to
+   `$USER_DATA_PATH/model_arch.json`; that path is shared by concurrent
+   sessions and can be overwritten by another launch. Include `model_name`
+   (required for the stale-file guard). Set it to the **clean model name**
+   (e.g. `Qwen2.5-7B-Instruct`);
    the guard normalizes launch forms — flat dirs, HF repo ids, and HF hub
    cache `models--org--repo/snapshots/<hash>` paths — so do NOT use the
    snapshot commit hash. All other fields are optional; renderers drop

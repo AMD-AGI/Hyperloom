@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
@@ -14,7 +14,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shlex
 import sys
 import time
@@ -104,16 +103,6 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
-_HF_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
-_DEFAULT_MODEL_PATH_ROOTS: tuple[str, ...] = (
-    "/models",
-    "/path/models",
-    "/mnt/models",
-    "/shared_nfs",
-    "/wekafs",
-    "/hyperloom/models",
-)
-
 from .parser import (
     _build_parser as _build_parser,
     _positive_int_arg as _positive_int_arg,
@@ -174,60 +163,6 @@ def _enforce_expected_framework(
             file=sys.stderr,
         )
         raise SystemExit(2)
-
-
-def _path_is_under(path: Path, root: Path) -> bool:
-    try:
-        return path == root or path.is_relative_to(root)
-    except AttributeError:  # pragma: no cover - Python <3.9
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            return False
-
-
-def _resume_model_path_roots() -> tuple[Path, ...]:
-    raw = os.environ.get("INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS", "").strip()
-    configured = [p for p in raw.split(os.pathsep) if p.strip()] if raw else []
-    roots = configured + list(_DEFAULT_MODEL_PATH_ROOTS)
-    out: list[Path] = []
-    seen: set[str] = set()
-    for root in roots:
-        p = Path(root).expanduser().resolve()
-        marker = str(p)
-        if marker not in seen:
-            out.append(p)
-            seen.add(marker)
-    return tuple(out)
-
-
-def _validate_resume_model_path(model_path: str) -> str:
-    """Validate persisted ``state.model_path`` before re-exporting MODEL_PATH.
-
-    Resume trusts state.json for continuity, but state.json is writable session
-    data. Keep local model paths under known model roots; still allow
-    HuggingFace-style repo IDs because fresh launches support them too.
-    """
-    raw = str(model_path or "").strip()
-    if not raw:
-        return ""
-    if any(ch in raw for ch in ("\x00", "\n", "\r")):
-        raise ValueError("model_path contains control characters")
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        if _HF_MODEL_ID_RE.fullmatch(raw) and ".." not in raw.split("/"):
-            return raw
-        raise ValueError(
-            "model_path must be a HuggingFace repo id or an absolute path under INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS"
-        )
-    resolved = path.resolve()
-    roots = _resume_model_path_roots()
-    if any(_path_is_under(resolved, root) for root in roots):
-        return str(resolved)
-    raise ValueError(
-        "model_path is outside allowed model roots; set INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS to opt into this root"
-    )
 
 
 def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | str | None]:
@@ -1502,11 +1437,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
         # Re-export session-level env from persisted state so a fresh-shell resume doesn't fall back to YAML defaults.
         if state.model_path:
-            try:
-                resume_model_path = _validate_resume_model_path(state.model_path)
-            except ValueError as exc:
-                print(f"ERROR: --resume refused persisted model_path: {exc}", file=sys.stderr)
-                sys.exit(2)
+            resume_model_path = str(state.model_path)
             os.environ["MODEL_PATH"] = resume_model_path
             print(f"  re-exported MODEL_PATH: {resume_model_path}")
             # Backfill model_info for sessions created before the field existed
