@@ -1390,23 +1390,28 @@ async def run_grid(
                     exc,
                 )
 
-        # B-class guard: after a restart the MN server can transiently refuse
-        # connections even though it is otherwise healthy (e.g. /health flips
+        # B-class guard + retry: after a restart the MN server can transiently
+        # refuse connections even though otherwise healthy (e.g. /health flips
         # 200 but the frontend is briefly unavailable during cuda-graph
-        # capture), which invalidates an otherwise-good variant with a spurious
-        # ConnectionRefused. Re-confirm the benchmark target is reachable right
-        # before the measured pass so the load only starts once the server is
-        # actually accepting requests. Best-effort + gated
-        # (HYPERLOOM_MN_PREBENCH_HEALTH_REGATE=0 disables); a genuinely dead
-        # server (A-class) just times out fast here and the benchmark then
+        # capture), invalidating an otherwise-good variant with a spurious
+        # ConnectionRefused. (1) Re-confirm the target is reachable right before
+        # the measured pass; (2) if the measure still hits a connection-rooted
+        # failure, re-gate and re-run the measure ONCE. Both best-effort + gated;
+        # a genuinely dead server (A-class) times out fast and the benchmark
         # surfaces the real death via the per-variant snapshot.
         from ._multi_node_env import is_multi_node as _mn_is_mn
-        if _mn_is_mn() and os.environ.get("HYPERLOOM_MN_PREBENCH_HEALTH_REGATE", "1").strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        ):
+
+        async def _mn_prebench_regate() -> None:
+            """Wait until the MN benchmark target is /health-reachable (best-effort)."""
+            if not _mn_is_mn():
+                return
+            if os.environ.get("HYPERLOOM_MN_PREBENCH_HEALTH_REGATE", "1").strip().lower() in (
+                "0",
+                "false",
+                "no",
+                "off",
+            ):
+                return
             try:
                 from ._multi_node_server_lifecycle import _wait_for_server_health_async as _mn_health_wait
 
@@ -1415,28 +1420,50 @@ async def run_grid(
                 )
             except Exception as _regate_exc:  # noqa: BLE001 - best-effort readiness re-gate
                 log.warning(
-                    "grid_runner: pre-benchmark health re-gate did not confirm readiness "
+                    "grid_runner: health re-gate did not confirm readiness "
                     "(proceeding; benchmark will surface any real death): %r",
                     _regate_exc,
                 )
+
+        _measure_kwargs = dict(
+            magpie_python=magpie_python,
+            config_path=cfg_path,
+            output_dir=slot,
+            timeout_sec=variant_timeout_sec,
+            cwd=cwd,
+            result_dir=result_dir,
+            soft_deadline_sec=soft_deadline_sec,
+            preclean=(False if auto_warmup else preclean_before_run),
+            server_already_ready=(server_already_ready or auto_warmup),
+            serving_lease=serving_lease,
+        )
 
         # Snapshot wall-clock before launch so the salvage path can mtime-gate
         # leak destinations per-variant.
         variant_started_unix = time.time()
         try:
-            rc, stdout, stderr = await asyncio.to_thread(
-                _run_magpie,
-                magpie_python=magpie_python,
-                config_path=cfg_path,
-                output_dir=slot,
-                timeout_sec=variant_timeout_sec,
-                cwd=cwd,
-                result_dir=result_dir,
-                soft_deadline_sec=soft_deadline_sec,
-                preclean=(False if auto_warmup else preclean_before_run),
-                server_already_ready=(server_already_ready or auto_warmup),
-                serving_lease=serving_lease,
-            )
+            await _mn_prebench_regate()
+            rc, stdout, stderr = await asyncio.to_thread(_run_magpie, **_measure_kwargs)
+            # One connection-rooted retry (multi-node): a server that briefly
+            # refused mid-benchmark despite the pre-gate is re-gated and the
+            # measure re-run once. Opt out with HYPERLOOM_MN_MEASURE_CONN_RETRY=0.
+            if (
+                _mn_is_mn()
+                and rc != 0
+                and _text_has_conn_refused(stderr, stdout)
+                and os.environ.get("HYPERLOOM_MN_MEASURE_CONN_RETRY", "1").strip().lower()
+                not in ("0", "false", "no", "off")
+            ):
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s measured pass hit "
+                    "connection-refused; re-gating /health and retrying once",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                )
+                await _mn_prebench_regate()
+                variant_started_unix = time.time()
+                rc, stdout, stderr = await asyncio.to_thread(_run_magpie, **_measure_kwargs)
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks.
             to_candidates = sorted(slot.glob("benchmark_*"))
@@ -1815,6 +1842,24 @@ def _safe(name: str) -> str:
         ``-_.`` replaced by ``_``, truncated to 60 characters.
     """
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
+
+
+# Connection-rooted benchmark failure signatures: a healthy MN server that
+# briefly refused connections (B-class timing), distinct from a real crash.
+_CONN_REFUSED_MARKERS = (
+    "Connect call failed",
+    "Connection refused",
+    "ClientConnectorError",
+    "ConnectionRefusedError",
+)
+
+
+def _text_has_conn_refused(*texts: str | None) -> bool:
+    """True when any text carries a connection-refused signature."""
+    for t in texts:
+        if t and any(m in t for m in _CONN_REFUSED_MARKERS):
+            return True
+    return False
 
 
 # Known server-death signatures scanned in the preserved rank logs so a
