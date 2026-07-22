@@ -167,16 +167,21 @@ jobs:
           # shard's slice of the ``--splits`` partition (from PARGS).
           # ``--store-durations`` records THIS shard's per-test timings into a
           # shard-scoped file for the update-durations merge job.
-          # ``-rf`` prints a "short test summary info" block with one
-          # ``FAILED <nodeid> - <reason>`` line per failing test (stable pytest
-          # output contract, unaffected by ``-n``/xdist since the summary is
-          # rendered by the controller process after workers report back).
-          # Captured below (not just left in the raw log) so a shard's actual
-          # failures surface without opening the shard job's full log.
+          # ``--junitxml`` writes a machine-readable result file that the
+          # "Report shard failures" step parses to extract this shard's real
+          # failures. JUnit XML is the authoritative source (not a text grep):
+          # it separates test ``<failure>`` (assertion) from ``<error>``
+          # (collection / fixture setup+teardown) at the ``<testcase>`` nodeid
+          # level, and is unaffected by ``-n``/xdist (the controller merges all
+          # workers into one document). ``-rf`` is kept only so the raw log
+          # remains human-readable; failure EXTRACTION no longer greps the log
+          # (that mis-fired on test stdout beginning with "FAILED" and missed
+          # fixture/collection ERRORs).
           export COVERAGE_FILE=".coverage.shard${SHARD}"
           set +e
           pytest "${PARGS[@]}" --group "${SHARD}" "${SPLIT_ARGS[@]}" \
             --store-durations --durations-path ".test_durations.shard${SHARD}" \
+            --junitxml="pytest-junit.shard${SHARD}.xml" \
             --cov-fail-under=0 -rf "${EXTRA[@]}" 2>&1 | tee pytest-output.log
           # ``${PIPESTATUS[0]}`` is pytest's own exit code (not tee's); read it
           # immediately after the pipeline. The shard's pass/fail is driven
@@ -192,61 +197,120 @@ jobs:
           echo "${{ steps.pytest.outcome }}" > "shard-status/py${{ matrix.python-version }}-shard${{ matrix.shard }}.outcome"
 
       # Surface failures on the shard job itself, not just in the aggregate
-      # gate: extract the "FAILED <nodeid> - <reason>" lines, write them where
-      # this shard's failed count / list is picked up by the coverage job, and
-      # annotate the run so failures show up without opening this job's log.
+      # gate: parse this shard's JUnit XML for the real failing/erroring test
+      # nodeids, write them where the coverage job picks up this shard's failed
+      # list, and annotate the run so failures show up without opening the log.
+      # JUnit XML (not a log grep) is authoritative: it distinguishes test
+      # <failure> (assertion) from <error> (collection / fixture setup+teardown)
+      # by nodeid, so fixture/collection ERRORs -- which ``-rf`` never lists --
+      # are captured, and test stdout that happens to start with "FAILED" can no
+      # longer be mis-reported.
       - name: Report shard failures
         if: always() && steps.pytest.outcome != 'success'
+        env:
+          PYVER: ${{ matrix.python-version }}
+          SHARD: ${{ matrix.shard }}
         run: |
           mkdir -p shard-status
-          FAILED_FILE="shard-status/py${{ matrix.python-version }}-shard${{ matrix.shard }}.failed"
-          TITLE="py${{ matrix.python-version }}-shard${{ matrix.shard }}-failed"
-          if [ ! -f pytest-output.log ]; then
-            # The previous step's pipeline was killed (OOM/cancellation) before
-            # tee could write anything. Say so explicitly rather than silently
-            # falling into the "no FAILED lines" branch below with no reason.
-            echo "::error title=${TITLE}::Shard failed and pytest-output.log is missing (pipeline likely killed before tee wrote it); see this job's raw Actions log."
-            exit 0
-          fi
-          # Section is bounded by pytest's own summary headers; grep the
-          # ``FAILED <nodeid> - ...`` lines pytest -rf prints between them.
-          grep -E '^FAILED ' pytest-output.log > "$FAILED_FILE" || true
-          if [ -s "$FAILED_FILE" ]; then
-            COUNT=$(wc -l < "$FAILED_FILE")
-            echo "::error title=${TITLE}::${COUNT} test(s) failed in this shard"
-            # The full list always goes to the job Summary (and the uploaded
-            # .failed artifact). Per-test ::error:: annotations are capped: a
-            # mass failure (e.g. an import error failing hundreds of tests)
-            # would otherwise flood the run's annotation panel, which GitHub
-            # truncates anyway. Show the first ANNOTATION_CAP, then point at the
-            # Summary for the rest.
-            {
-              echo "### Failed tests"
-              echo '```'
-              cat "$FAILED_FILE"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            ANNOTATION_CAP=20
-            n=0
-            while IFS= read -r line; do
-              # ``: $(( ))`` (the leading ':' no-op) avoids the ``set -e`` pitfall
-              # where a bare ``n=$((n+1))`` would exit non-zero if the result were 0.
-              : $(( n += 1 ))
-              if [ "$n" -le "$ANNOTATION_CAP" ]; then
-                echo "::error::${line}"
-              fi
-            done < "$FAILED_FILE"
-            if [ "$COUNT" -gt "$ANNOTATION_CAP" ]; then
-              echo "::error title=${TITLE}::Showing first ${ANNOTATION_CAP} of ${COUNT} failures as annotations; see the full list in this job's Summary or the .failed artifact."
-            fi
-          else
-            # pytest failed (non-zero exit) but no "FAILED " summary line was
-            # captured -- e.g. a collection error or worker crash. Say so
-            # explicitly, and keep pytest-output.log as an artifact (below) so
-            # "this job's full log" in the message below is actually
-            # retrievable after the run's own log retention expires.
-            echo "::error title=${TITLE}::Shard failed but no per-test FAILED lines were found (collection error or crash); see the uploaded pytest-output.log artifact or this job's full log."
-          fi
+          python3 <<'PY'
+          import os
+          import pathlib
+          import sys
+          import xml.etree.ElementTree as ET
+
+          pyver = os.environ["PYVER"]
+          shard = os.environ["SHARD"]
+          title = f"py{pyver}-shard{shard}-failed"
+          failed_file = pathlib.Path(f"shard-status/py{pyver}-shard{shard}.failed")
+          xml_path = pathlib.Path(f"pytest-junit.shard{shard}.xml")
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          ANNOTATION_CAP = 20
+
+          def emit_summary(text: str) -> None:
+              if summary_path:
+                  with open(summary_path, "a", encoding="utf-8") as fh:
+                      fh.write(text + "\n")
+
+          if not xml_path.exists():
+              # The pytest pipeline was killed (OOM/cancellation) before the
+              # JUnit XML was written. Say so explicitly rather than silently
+              # reporting "no failures".
+              print(
+                  f"::error title={title}::Shard failed and {xml_path} is missing "
+                  "(pipeline likely killed before pytest wrote it); see the uploaded "
+                  "pytest-output.log artifact or this job's raw Actions log."
+              )
+              sys.exit(0)
+
+          try:
+              root = ET.parse(xml_path).getroot()
+          except ET.ParseError as exc:
+              print(
+                  f"::error title={title}::Shard failed and {xml_path} is unparseable "
+                  f"({exc}); see the uploaded pytest-output.log artifact or this job's log."
+              )
+              sys.exit(0)
+
+          # Collect one entry per failing/erroring testcase. ``<failure>`` =
+          # assertion failure (pytest FAILED); ``<error>`` = collection or
+          # fixture setup/teardown error (pytest ERROR, which -rf omits).
+          entries: list[str] = []
+          for tc in root.iter("testcase"):
+              kind = None
+              msg = ""
+              child = tc.find("failure")
+              if child is not None:
+                  kind = "FAILED"
+              else:
+                  child = tc.find("error")
+                  if child is not None:
+                      kind = "ERROR"
+              if kind is None:
+                  continue
+              msg = (child.get("message") or "").strip().splitlines()
+              msg = msg[0] if msg else ""
+              classname = tc.get("classname") or ""
+              name = tc.get("name") or ""
+              # Reconstruct a pytest-style nodeid: classname is the dotted path
+              # (module[.Class]); render module path with "/" and "::" separators
+              # where possible, else fall back to the raw classname.
+              nodeid = f"{classname}::{name}" if classname else name
+              line = f"{kind} {nodeid}"
+              if msg:
+                  line += f" - {msg}"
+              entries.append(line)
+
+          if not entries:
+              # pytest exited non-zero but the XML held no failure/error cases
+              # (e.g. an internal crash, or a worker died without recording a
+              # case). Say so explicitly and point at the retained log.
+              print(
+                  f"::error title={title}::Shard failed but no per-test FAILED/ERROR "
+                  "cases were found in the JUnit XML (internal crash or worker death); "
+                  "see the uploaded pytest-output.log artifact or this job's full log."
+              )
+              sys.exit(0)
+
+          failed_file.write_text("\n".join(entries) + "\n", encoding="utf-8")
+          count = len(entries)
+          print(f"::error title={title}::{count} test(s) failed/errored in this shard")
+
+          # Full list -> Job Summary (and the uploaded .failed artifact).
+          block = ["### Failed tests", "```"] + entries + ["```"]
+          emit_summary("\n".join(block))
+
+          # Per-test ::error:: annotations are capped so a mass failure (e.g. an
+          # import error failing hundreds of tests) can't flood the annotation
+          # panel (which GitHub truncates anyway); the rest live in the Summary.
+          for line in entries[:ANNOTATION_CAP]:
+              print(f"::error::{line}")
+          if count > ANNOTATION_CAP:
+              print(
+                  f"::error title={title}::Showing first {ANNOTATION_CAP} of {count} "
+                  "failures as annotations; see the full list in this job's Summary "
+                  "or the .failed artifact."
+              )
+          PY
 
       - name: Upload shard coverage data
         if: always()
@@ -261,16 +325,18 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
-      # Keep the raw pytest log retrievable past the run's own log retention,
-      # so the "Report shard failures" fallback message (collection
-      # error/crash, no per-test FAILED lines) points somewhere real. Only
-      # uploaded on failure to avoid an artifact per green shard.
+      # Keep the raw pytest log + JUnit XML retrievable past the run's own log
+      # retention, so the "Report shard failures" fallback messages (missing /
+      # unparseable XML, internal crash, no per-test cases) point somewhere
+      # real. Only uploaded on failure to avoid an artifact per green shard.
       - name: Upload pytest output log
         if: always() && steps.pytest.outcome != 'success'
         uses: actions/upload-artifact@v7
         with:
           name: pytest-log-py${{ matrix.python-version }}-shard${{ matrix.shard }}
-          path: pytest-output.log
+          path: |
+            pytest-output.log
+            pytest-junit.shard${{ matrix.shard }}.xml
           retention-days: 7
           if-no-files-found: ignore
 
@@ -343,28 +409,43 @@ jobs:
           pattern: covdata-py${{ matrix.python-version }}-shard*
           merge-multiple: true
 
-      # Fail-closed completeness gate: a sharded run is only trustworthy if
-      # EVERY shard reported back. Missing shards (a run cancelled mid-flight by
-      # ``cancel-in-progress``, an OOM/kill before artifact upload, or a failed
-      # upload) would otherwise let the remaining green shards pass the 90% gate
-      # while part of the suite silently never ran. ``total_shards`` is read
-      # from pyproject.toml (single source of truth) so this stays correct if
-      # the shard count changes without touching the matrix. Checks BOTH the
-      # coverage-data files and the per-shard outcome markers so neither a
-      # missing ``.coverage.shardN`` nor a missing ``.outcome`` slips through.
-      - name: Verify shard completeness
+      # Aggregate shard results FIRST (before the completeness gate can fail):
+      # render the Shard-results table, fold in each shard's failed-test list,
+      # and compute BOTH failed shards (from .outcome) and MISSING shards (a
+      # run cancelled by ``cancel-in-progress``, an OOM/kill before upload, or a
+      # failed upload -- checked against BOTH .coverage.shardN and .outcome so
+      # neither kind of gap slips through). ``total_shards`` is read from
+      # pyproject.toml (single source of truth) so this stays correct if the
+      # shard count changes without touching the matrix.
+      #
+      # This step ALWAYS writes the Summary table + sets outputs on every branch
+      # (tests_ok / complete / failed_shards / missing_shards). It does NOT fail
+      # itself -- the single ``Enforce shard results`` gate below turns a failed
+      # OR incomplete run red. That ordering is deliberate: the earlier design
+      # let the completeness gate ``exit 1`` before this table/outputs existed,
+      # so a missing shard produced an empty "Failed shard(s):" annotation and
+      # no Summary table. Combine + fail_under are gated on complete && tests_ok
+      # so coverage is never computed on a partial/failed suite.
+      #
+      # NOTE on $GITHUB_STEP_SUMMARY ordering: this step's "Shard results" /
+      # "Failed tests" sections are appended before the "Coverage summary"
+      # step's "## Coverage (UT)" section (steps run in file order, both use
+      # ``>>``), so failures show above the coverage table. Keep that order.
+      - name: Aggregate shard results
+        id: outcomes
         run: |
           python3 <<'PY'
           import glob
+          import os
           import pathlib
           import re
-          import sys
 
           try:
               import tomllib
           except ModuleNotFoundError:
               import tomli as tomllib
 
+          pyver = "${{ matrix.python-version }}"
           cfg = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
           total = int(cfg["tool"]["hyperloom"]["tests_coverage"].get("total_shards", 4))
           expected = set(range(1, total + 1))
@@ -378,43 +459,93 @@ jobs:
               return found
 
           cov = present(".coverage.shard*", r"\.coverage\.shard(\d+)$")
-          outcomes = present("shard-status/*.outcome", r"shard(\d+)\.outcome$")
+          outcome_shards = present("shard-status/*.outcome", r"shard(\d+)\.outcome$")
+          # A shard is "present" only if BOTH its coverage data and its outcome
+          # marker arrived; missing either means the shard did not fully report.
+          missing = sorted(expected - (cov & outcome_shards))
 
-          errors = []
-          for label, seen in (("coverage-data", cov), ("outcome", outcomes)):
-              missing = sorted(expected - seen)
-              if missing:
-                  errors.append((label, missing))
+          # Read each present shard's recorded outcome ("success" / other).
+          outcomes: dict[int, str] = {}
+          for name in sorted(glob.glob("shard-status/*.outcome")):
+              m = re.search(r"shard(\d+)\.outcome$", name)
+              if not m:
+                  continue
+              outcomes[int(m.group(1))] = pathlib.Path(name).read_text(encoding="utf-8").strip()
 
-          summary_path = pathlib.Path(__import__("os").environ.get("GITHUB_STEP_SUMMARY", ""))
-          if errors:
-              lines = [f"### Shard completeness FAILED (expected {total} shard(s))", ""]
-              for label, missing in errors:
-                  joined = ", ".join(str(n) for n in missing)
-                  print(f"::error title=missing-shards::Missing {label} for shard(s): {joined}")
-                  lines.append(f"- Missing **{label}** for shard(s): {joined}")
-              lines.append(
-                  "\n> A shard did not report back (run cancelled, OOM/kill, or "
-                  "artifact upload failure). The coverage gate is intentionally "
-                  "NOT evaluated on a partial suite."
-              )
-              if summary_path.name:
-                  with open(summary_path, "a", encoding="utf-8") as fh:
-                      fh.write("\n".join(lines) + "\n")
-              sys.exit(1)
+          failed_shards = sorted(n for n, v in outcomes.items() if v != "success")
 
-          print(f"All {total} shard(s) present (coverage-data + outcome).")
+          summary_lines = [
+              f"### Shard results (Python {pyver})",
+              "| Shard | Result |",
+              "|-------|--------|",
+          ]
+          for n in sorted(expected):
+              if n in missing:
+                  summary_lines.append(f"| shard{n} | ⚠️ MISSING (did not report) |")
+              else:
+                  val = outcomes.get(n, "unknown")
+                  icon = "✅" if val == "success" else "❌"
+                  summary_lines.append(f"| shard{n} | {icon} {val} |")
+
+          # Fold each shard's captured FAILED/ERROR nodeids into the Summary.
+          failed_files = sorted(
+              f for f in glob.glob("shard-status/*.failed") if os.path.getsize(f) > 0
+          )
+          if failed_files:
+              summary_lines += ["", f"### Failed tests (Python {pyver})"]
+              for f in failed_files:
+                  label = pathlib.Path(f).stem
+                  body = pathlib.Path(f).read_text(encoding="utf-8").rstrip("\n")
+                  summary_lines += [
+                      f"<details><summary>{label}</summary>",
+                      "",
+                      "```",
+                      body,
+                      "```",
+                      "</details>",
+                  ]
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write("\n".join(summary_lines) + "\n")
+
+          tests_ok = "false" if failed_shards else "true"
+          complete = "false" if missing else "true"
+          # shard labels are matrix-derived ("shardN"), never free-form, so a
+          # comma join is safe for the compact single-line annotations below.
+          failed_join = ",".join(f"shard{n}" for n in failed_shards)
+          missing_join = ",".join(f"shard{n}" for n in missing)
+
+          # ALWAYS set every output on every branch (this was the bug: missing
+          # shards previously left these unset -> empty "Failed shard(s):").
+          out = os.environ.get("GITHUB_OUTPUT", "")
+          if out:
+              with open(out, "a", encoding="utf-8") as fh:
+                  fh.write(f"tests_ok={tests_ok}\n")
+                  fh.write(f"complete={complete}\n")
+                  fh.write(f"failed_shards={failed_join}\n")
+                  fh.write(f"missing_shards={missing_join}\n")
+
+          print(
+              f"aggregate: total={total} present={sorted(cov & outcome_shards)} "
+              f"missing={missing} failed={failed_shards} "
+              f"tests_ok={tests_ok} complete={complete}"
+          )
           PY
 
       - name: Combine shard coverage
+        # Only combine a COMPLETE, all-passing set: computing coverage on a
+        # partial/failed suite would produce a misleading total (and could let
+        # it pass fail_under). The dedicated gate below turns the job red.
+        if: steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
         run: |
           set -euo pipefail
           shopt -s nullglob
           files=(.coverage.shard*)
-          # ``Verify shard completeness`` (above) already fail-closes on a
-          # missing shard; this is a defensive floor for the "zero files" case
-          # (e.g. that gate step was skipped/edited out) so ``coverage combine``
-          # never runs against an empty set.
+          # Defensive floor: the aggregate step above already gates on complete
+          # && tests_ok, but keep a zero-files guard so ``coverage combine``
+          # never runs against an empty set even if this step is reached.
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::No shard coverage data files downloaded."
             exit 1
@@ -424,80 +555,13 @@ jobs:
           coverage combine "${files[@]}"
           test -f .coverage || { echo "::error::coverage combine produced no .coverage"; exit 1; }
 
-      # NOTE on $GITHUB_STEP_SUMMARY ordering: this step's "Shard results" /
-      # "Failed tests" sections are appended before the "Coverage summary"
-      # step's "## Coverage (UT)" section runs (steps execute in file order,
-      # and both use ``>>``), so failures show up above the coverage table in
-      # the rendered Summary. Keep that relative order if adding more steps
-      # that also write to $GITHUB_STEP_SUMMARY between here and there.
-      - name: Aggregate shard test outcomes
-        id: outcomes
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          failed=0
-          failed_shards=()
-          {
-            echo "### Shard results (Python ${{ matrix.python-version }})"
-            echo "| Shard | Result |"
-            echo "|-------|--------|"
-          } >> "$GITHUB_STEP_SUMMARY"
-          for f in shard-status/*.outcome; do
-            val="$(cat "$f")"
-            # filenames are "py<version>-shard<N>.outcome"
-            shard_label="$(basename "$f" .outcome)"
-            echo "$shard_label: $val"
-            icon="✅"
-            if [ "$val" != "success" ]; then
-              failed=1
-              failed_shards+=("$shard_label")
-              icon="❌"
-            fi
-            echo "| $shard_label | $icon $val |" >> "$GITHUB_STEP_SUMMARY"
-          done
-          if [ "$failed" -eq 1 ]; then
-            echo "tests_ok=false" >> "$GITHUB_OUTPUT"
-            # Comma-separated for a compact single-line ::error:: annotation;
-            # each shard's own failed-test list was already annotated by that
-            # shard job's "Report shard failures" step. Joined in a subshell
-            # so the IFS change doesn't leak into the rest of this step. Safe
-            # to join on ',': shard_label is always "py<version>-shard<N>"
-            # (derived from the matrix, not from free-form input), so it can
-            # never itself contain a comma.
-            joined="$(IFS=,; echo "${failed_shards[*]}")"
-            echo "failed_shards=${joined}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tests_ok=true" >> "$GITHUB_OUTPUT"
-            echo "failed_shards=" >> "$GITHUB_OUTPUT"
-          fi
-
-          # Fold every shard's captured "FAILED <nodeid> - reason" lines (if
-          # any were uploaded) into this job's own Summary, so the full list of
-          # failing tests for this Python version is visible in ONE place
-          # without opening any shard job's log.
-          if compgen -G "shard-status/*.failed" > /dev/null; then
-            {
-              echo ""
-              echo "### Failed tests (Python ${{ matrix.python-version }})"
-            } >> "$GITHUB_STEP_SUMMARY"
-            for f in shard-status/*.failed; do
-              [ -s "$f" ] || continue
-              shard_label="$(basename "$f" .failed)"
-              {
-                echo "<details><summary>${shard_label}</summary>"
-                echo ""
-                echo '```'
-                cat "$f"
-                echo '```'
-                echo "</details>"
-              } >> "$GITHUB_STEP_SUMMARY"
-            done
-          fi
-
       - name: Coverage summary
         if: always()
         env:
-          PYTEST_OUTCOME: ${{ steps.outcomes.outputs.tests_ok == 'true' && 'success' || 'failure' }}
+          # "success" only when the suite BOTH passed and was complete; a
+          # missing shard (complete=false) makes any coverage number partial,
+          # so the summary's "partial or misleading" caveat must show then too.
+          PYTEST_OUTCOME: ${{ steps.outcomes.outputs.tests_ok == 'true' && steps.outcomes.outputs.complete == 'true' && 'success' || 'failure' }}
         run: |
           python3 <<'PY'
           from __future__ import annotations
@@ -637,7 +701,11 @@ jobs:
           PY
 
       - name: Enforce coverage fail_under (strict mode)
-        if: always() && steps.outcomes.outputs.tests_ok == 'true'
+        # Only enforce on a COMPLETE, all-passing suite -- otherwise .coverage
+        # is partial (combine was skipped) and fail_under would be meaningless.
+        # The "Enforce shard results" gate below reds the job for the
+        # failed/incomplete case instead.
+        if: always() && steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
         run: |
           python3 <<'PY'
           import os
@@ -664,10 +732,28 @@ jobs:
           )
           PY
 
-      - name: Enforce test success
-        if: always() && steps.outcomes.outputs.tests_ok != 'true'
+      # Single fail-closed gate for BOTH failure modes: a shard's tests failed
+      # (tests_ok != true) OR a shard never fully reported (complete != true).
+      # Runs on always() and reads the aggregate outputs (which are set on every
+      # branch), so the annotation always names the real failed AND/OR missing
+      # shards -- never the empty "Failed shard(s):" the old split gate produced
+      # when the completeness check exited before outcomes were aggregated.
+      - name: Enforce shard results
+        if: always() && (steps.outcomes.outputs.complete != 'true' || steps.outcomes.outputs.tests_ok != 'true')
+        env:
+          PYVER: ${{ matrix.python-version }}
+          FAILED_SHARDS: ${{ steps.outcomes.outputs.failed_shards }}
+          MISSING_SHARDS: ${{ steps.outcomes.outputs.missing_shards }}
+          COMPLETE: ${{ steps.outcomes.outputs.complete }}
+          TESTS_OK: ${{ steps.outcomes.outputs.tests_ok }}
         run: |
-          echo "::error title=test-shards-failed::Failed shard(s) for Python ${{ matrix.python-version }}: ${{ steps.outcomes.outputs.failed_shards }} -- see the 'Failed tests' section in this job's Summary, or the shard jobs' own 'Report shard failures' annotations."
+          set -euo pipefail
+          if [ "${TESTS_OK}" != "true" ]; then
+            echo "::error title=test-shards-failed::Failed shard(s) for Python ${PYVER}: ${FAILED_SHARDS:-<none recorded>} -- see the 'Failed tests' section in this job's Summary, or the shard jobs' own 'Report shard failures' annotations."
+          fi
+          if [ "${COMPLETE}" != "true" ]; then
+            echo "::error title=missing-shards::Missing shard(s) for Python ${PYVER}: ${MISSING_SHARDS:-<none recorded>} (a shard did not report back -- run cancelled, OOM/kill, or artifact upload failure). Coverage was intentionally NOT evaluated on a partial suite."
+          fi
           exit 1
 
   # ---------------------------------------------------------------------------
