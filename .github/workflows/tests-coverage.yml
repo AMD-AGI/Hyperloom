@@ -287,6 +287,21 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
+      # ``continue-on-error`` on the pytest step (above) lets the always()
+      # reporting/upload steps run even when tests fail; this final step then
+      # re-surfaces the shard's real result as the job's exit code, so a failing
+      # shard turns the job (and thus its matrix cell) red instead of a
+      # deceptive green. Placed LAST so every always() step (outcome record,
+      # failure report, coverage + log + durations uploads) has already
+      # completed and the coverage job still has this shard's data to aggregate.
+      # No ``always()``: it only runs on a non-success pytest outcome, so a
+      # green shard skips it and the job stays green.
+      - name: Fail job if this shard's tests failed
+        if: steps.pytest.outcome != 'success'
+        run: |
+          echo "::error title=shard-failed::This shard's tests did not pass (see 'Report shard failures' above)."
+          exit 1
+
   # ---------------------------------------------------------------------------
   # Combine + gate: one job per Python version. Downloads all shard artifacts
   # for its version, ``coverage combine``-s them, renders the Job Summary, and
