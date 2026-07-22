@@ -524,7 +524,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Resume an existing session. Without --resume-from, "
         "auto-picks the latest per-session subdir under "
         "$USER_DATA_PATH/<model>/<UTC ts>/ (N17 layout) or "
-        "falls back to $USER_DATA_PATH (legacy flat layout). "
+        "falls back to $USER_DATA_PATH. "
         "USER_DATA_PATH MUST stay at workspace level "
         "(/shared/hyperloom-sessions, not the per-session subdir) "
         "so runtime/ resolution works. Skips the SharedState "
@@ -1228,26 +1228,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "main session wall-clock deadline since conc_sweep runs as "
         "a SWEEP-phase action.",
     )
-    # Retired flags: hard-fail at argparse with a migration hint, not a silent alias.
-    _retired_hint = (
-        "Use ``--enable-roofline`` (default on) / ``--no-enable-roofline`` "
-        "instead. The PRELUDE-initial analysis task is unconditional and "
-        "the composite/direct-profile bifurcation has been removed."
-    )
-    for _retired in (
-        "--use-roofline-composite",
-        "--no-use-roofline-composite",
-        "--deny-direct-profile",
-        "--no-deny-direct-profile",
-        "--force-roofline-after-baseline",
-        "--no-force-roofline-after-baseline",
-    ):
-        opt.add_argument(
-            _retired,
-            action=_RetiredFlag,
-            hint=_retired_hint,
-        )
-
     # Per-variant explore overtime kill ratio (mirrored to
     # SharedState.explore_overtime_kill_ratio). 0 disables.
     opt.add_argument(

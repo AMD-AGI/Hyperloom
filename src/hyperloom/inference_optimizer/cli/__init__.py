@@ -1456,12 +1456,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 session_dir = picked
                 print("  --resume: auto-picked latest per-session subdir")
             else:
-                # Legacy flat layout — workspace_root itself is the session_dir.
+                # No per-session subdir found — workspace_root itself is the
+                # session_dir (e.g. resuming a pre-existing single-dir session).
                 session_dir = ws
                 print(
                     f"  --resume: no per-session subdir found under "
-                    f"{ws}/<model>/<ts>/; falling back to flat layout "
-                    f"({ws})"
+                    f"{ws}/<model>/<ts>/; falling back to {ws}"
                 )
         # Pin before Coordinator/SharedState load so paths/subprocesses inherit the resolved location.
         os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
@@ -1783,7 +1783,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
         )
 
-        # session_dir defaults to <workspace_root>/<model>/<UTC ts>/ (INFERENCE_OPTIMIZER_SESSION_LAYOUT=flat for legacy).
+        # session_dir defaults to <workspace_root>/<model>/<UTC ts>/.
         # Use the resolved identity so a quantized run is named after the source
         # model (e.g. "<model>-quantized") instead of the generic export-dir
         # basename "quantized".

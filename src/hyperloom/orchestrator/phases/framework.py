@@ -2414,9 +2414,12 @@ class FrameworkPhase(PhaseHandler):
     def _framework_agent_ranker_client(self) -> Any:
         """Return an OpenAI-compatible async client for ranking, or ``None``.
 
-        Reuses the ProposalScorer's client when present (same gateway/auth);
-        otherwise builds one from ``SAFE_API_KEY``/``OPENAI_API_KEY`` +
-        ``OPENAI_BASE_URL``. Cached on first successful build.
+        Reuses the ProposalScorer's client when present (same gateway/auth),
+        then the orchestration backend's own client (so the LLM ranker is on by
+        default whenever orchestration has LLM credentials); otherwise builds
+        one from the orchestration backend's configured key/URL env (falling
+        back to ``SAFE_API_KEY``/``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``).
+        Cached on first successful build.
         """
         import os
 
@@ -2433,14 +2436,35 @@ class FrameworkPhase(PhaseHandler):
                     return client
             except Exception:  # noqa: BLE001 — fall through to direct build
                 log.debug("FRAMEWORK: scorer client unavailable for ranker", exc_info=True)
+        # Reuse the orchestration backend's own OpenAI-compatible client when it
+        # exposes one (e.g. CodexBackend): same gateway + auth as the running
+        # session, so the ranker is default-on without extra configuration.
+        backend = self.backends.get("orchestration")
+        backend_client = getattr(backend, "_client", None)
+        if backend_client is not None and hasattr(backend_client, "chat"):
+            self._coord._fa_ranker_client = backend_client
+            return backend_client
         try:
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
         except ImportError:
             return None
-        api_key = os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        # Resolve credentials from the orchestration backend's configured env
+        # names first (so a split-gateway orchestration key is reused), then the
+        # shared gateway defaults.
+        api_key_env = getattr(backend, "api_key_env", "OPENAI_API_KEY")
+        base_url_env = getattr(backend, "base_url_env", "OPENAI_BASE_URL")
+        api_key = (
+            os.environ.get(api_key_env)
+            or os.environ.get("SAFE_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+        )
         if not api_key:
             return None
-        base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+        base_url = (
+            os.environ.get(base_url_env)
+            or os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("ANTHROPIC_BASE_URL")
+        )
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url.strip()

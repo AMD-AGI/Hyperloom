@@ -1134,20 +1134,13 @@ def _stamp_framework_kb_provenance(
 
 def _enforce_critic_gate(
     shared_state: Any,
-    params: dict[str, Any],
     specialist_task_id: str,
 ) -> "dict[str, Any] | None":
     """Enforce a permissive Critic verdict before any side effect; returns a
-    ``rejected_by_critic`` dict on failure, else ``None`` (no-op if bypassed)."""
-    if shared_state is None or os.environ.get("HYPERLOOM_BYPASS_CRITIC") == "1":
+    ``rejected_by_critic`` dict on failure, else ``None`` when no SharedState
+    is available or the verdict is permissive."""
+    if shared_state is None:
         return None
-    if params.get("bypass_critic"):
-        log.warning(
-            "integrate_patch executor: in-band bypass_critic ignored; "
-            "enforcing Critic verdict for specialist_task_id=%r (operator "
-            "override is HYPERLOOM_BYPASS_CRITIC=1, out-of-band only).",
-            specialist_task_id,
-        )
     try:
         from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS as _PERMISSIVE
     except Exception:  # noqa: BLE001 - avoid a hard import-cycle dependency
@@ -1168,8 +1161,7 @@ def _enforce_critic_gate(
             "reason": (
                 f"integrate_patch requires a permissive Critic verdict "
                 f"(approve/advise) for specialist task "
-                f"{specialist_task_id!r}; {_detail}. Refusing to run. "
-                f"Set HYPERLOOM_BYPASS_CRITIC=1 out-of-band to force."
+                f"{specialist_task_id!r}; {_detail}. Refusing to run."
             ),
         }
     return None
@@ -1283,10 +1275,8 @@ class IntegratePatchExecutor:
         # CORE_STATE_FIELD an LLM/forged row cannot write, and a legitimate
         # integrate_patch always has its verdict persisted before the queued task
         # is created (see intent_router._handle_single_verdict), so a genuine
-        # task is unaffected. No-op when SharedState is absent. Override is
-        # out-of-band only (HYPERLOOM_BYPASS_CRITIC=1); an in-band
-        # params.bypass_critic is ignored so an LLM cannot self-approve.
-        critic_reject = _enforce_critic_gate(shared_state, params, specialist_task_id)
+        # task is unaffected. No-op when SharedState is absent.
+        critic_reject = _enforce_critic_gate(shared_state, specialist_task_id)
         if critic_reject is not None:
             return critic_reject
 

@@ -33,8 +33,11 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-# Exports we are willing to carry from a recipe. An explicit list, not a
-# ``VLLM_*`` glob (which would drag in path-valued vars absent in our sandbox).
+# Import allowlist for parsing an UNTRUSTED external reference recipe: an
+# explicit list, not a ``VLLM_*`` glob (which would drag in path-valued vars
+# absent in our sandbox). This gates ``parse_reference_script`` only; rendering
+# ``current_setting.sh`` emits optimizer-authored envs verbatim (see
+# ``render_reference_script``), so validated envs never need to be added here.
 _ENV_WHITELIST = frozenset(
     {
         "VLLM_USE_BREAKABLE_CUDAGRAPH",
@@ -317,7 +320,10 @@ def render_reference_script(
     if model:
         lines.append(f"# model: {model}")
     for k, v in (envs or {}).items():
-        if k in _ENV_WHITELIST:
+        # current_best envs are optimizer-authored and trusted, so emit them all
+        # (skip empty/dynamic values). The whitelist only sanitizes the untrusted
+        # import path (parse_reference_script), not this render path.
+        if str(k).strip() and not _has_var(str(v)):
             lines.append(f"export {k}={v}")
     args = str(server_args or "").strip()
     if "atom" in fw:

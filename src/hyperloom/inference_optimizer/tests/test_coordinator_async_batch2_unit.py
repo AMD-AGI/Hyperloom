@@ -1772,6 +1772,26 @@ async def test_materialize_sweep_stamps_base(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
+async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator) -> None:
+    # Regression: explore must inherit current_best.extra_envs as its env base,
+    # else the accepted stack's envs collapse to the last variant's delta.
+    coord.shared_state.baseline_tput = 800.0
+    coord.shared_state.current_best = {
+        "tput": 900.0,
+        "extra_server_args": "--kv-cache-dtype fp8",
+        "extra_envs": {"VLLM_ROCM_USE_AITER_MHA": "1", "HIP_FORCE_DEV_KERNARG": "1"},
+    }
+    pending = _pending("explore", {"params": {"grid": [{"name": "v0"}]}}, msg_id="prop-env")
+    await coord._materialize_approved_proposal(pending)
+    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
+    assert task.params["base_extra_args"] == "--kv-cache-dtype fp8"
+    assert task.params["base_extra_envs"] == {
+        "VLLM_ROCM_USE_AITER_MHA": "1",
+        "HIP_FORCE_DEV_KERNARG": "1",
+    }
+
+
+@pytest.mark.asyncio
 async def test_materialize_duplicate_idempotency_skips(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     pending = _pending("profile", {"params": {}}, msg_id="prop-dup")

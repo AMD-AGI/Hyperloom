@@ -301,6 +301,25 @@ def test_ranker_client_from_scorer(coord: Coordinator) -> None:
     assert coord._framework_agent_ranker_client() is fake_client
 
 
+def test_ranker_client_reuses_orchestration_backend_client(coord: Coordinator) -> None:
+    """When orchestration exposes an OpenAI-compatible client, the ranker reuses
+    it (default-on without extra credentials)."""
+    coord._fa_ranker_client = None  # type: ignore[attr-defined]
+    coord._proposal_scorer = None  # type: ignore[attr-defined]
+
+    class _FakeChat:
+        pass
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    fake = _FakeClient()
+    coord.backends["orchestration"]._client = fake  # type: ignore[attr-defined]
+    assert coord._framework_agent_ranker_client() is fake
+    # Cached after first resolution.
+    assert coord._framework_agent_ranker_client() is fake
+
+
 def test_ranker_client_none_without_key(coord: Coordinator, monkeypatch) -> None:
     coord._fa_ranker_client = None  # type: ignore[attr-defined]
 

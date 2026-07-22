@@ -1524,17 +1524,6 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        try:
-            self.shared_state.bump_specialist_domain_empty_streak(
-                domain,
-                empty=is_empty,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "specialist bookkeeping: bump_specialist_domain_empty_streak failed for task=%s",
-                task.task_id,
-            )
-
         # Per-anchor coverage ledger: every specialist completion is
         # one "round" — tick all anchors, then zero the one that just ran so a
         # long-idle domain's counter climbs until the hard-trigger forces it.
@@ -1897,7 +1886,9 @@ class WritebackCollaborator:
                         if bv.get(_ctrl_key):
                             stack_entry[_ctrl_key] = bv.get(_ctrl_key)
                     if bv.get("effective_extra_server_args"):
-                        stack_entry["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+                        stack_entry["effective_extra_server_args"] = _dedupe_extra_server_args(
+                            str(bv.get("effective_extra_server_args") or "")
+                        )
                 # Stable filter label for "what kind of optimization" (backend /
                 # param / env), so the stack can be sliced like the timeline.
                 _stack_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
@@ -1937,7 +1928,9 @@ class WritebackCollaborator:
                 if bv.get(_ctrl_key):
                     current_best[_ctrl_key] = bv.get(_ctrl_key)
             if bv.get("effective_extra_server_args"):
-                current_best["effective_extra_server_args"] = bv.get("effective_extra_server_args")
+                current_best["effective_extra_server_args"] = _dedupe_extra_server_args(
+                    str(bv.get("effective_extra_server_args") or "")
+                )
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
