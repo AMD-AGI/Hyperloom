@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Idempotent run-time patcher for vLLM and SGLang server installs.
@@ -438,6 +438,51 @@ def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
     return None
 
 
+def _probe_isolated_vllm() -> tuple[str, Path] | None:
+    """Resolve version and site-packages for an isolated-venv vLLM install."""
+    venv_root = os.environ.get("VLLM_VENV_ROOT", "").strip()
+    if not venv_root:
+        return None
+    lib = Path(venv_root) / "lib"
+    if not lib.is_dir():
+        return None
+
+    site: Path | None = None
+    for match in sorted(lib.glob("python*/site-packages/vllm")):
+        if match.is_dir():
+            site = match.parent
+            break
+    if site is None:
+        return None
+
+    version = ""
+    vllm_python = os.environ.get("VLLM_PYTHON", "").strip()
+    if vllm_python and Path(vllm_python).exists():
+        try:
+            proc = subprocess.run(
+                [vllm_python, "-c", "import vllm; print(vllm.__version__)"],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            if proc.returncode == 0:
+                version = proc.stdout.strip()
+        except (OSError, subprocess.SubprocessError) as e:
+            log.info("_server_patcher: VLLM_PYTHON version probe failed (%s)", e)
+
+    if not version:
+        for dist in sorted(site.glob("vllm-*.dist-info")):
+            name = dist.name
+            if name.endswith(".dist-info"):
+                version = name.removeprefix("vllm-").removesuffix(".dist-info")
+                break
+    if not version:
+        return None
+    return version, site
+
+
 def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
     """Build the vLLM patch plan for the installed vLLM version.
 
@@ -459,13 +504,30 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
         log.info("_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch")
         return None
 
+    version = ""
+    install_root: Path | None = None
     try:
         import vllm  # type: ignore  # noqa: I001 - runtime probe
-    except Exception as e:  # noqa: BLE001 - any import failure → fail-soft
-        log.info("_server_patcher: vllm not importable (%s); skip patch", e)
-        return None
 
-    version = (getattr(vllm, "__version__", "") or "").strip()
+        version = (getattr(vllm, "__version__", "") or "").strip()
+        install_root = Path(vllm.__file__).resolve().parent.parent
+    except Exception as e:  # noqa: BLE001 - any import failure → isolated-venv fallback
+        probed = _probe_isolated_vllm()
+        if probed is None:
+            log.info(
+                "_server_patcher: vllm not importable (%s) and no isolated "
+                "$VLLM_VENV_ROOT vllm; skip patch",
+                e,
+            )
+            return None
+        version, install_root = probed
+        log.info(
+            "_server_patcher: main-process vllm unimportable; using isolated "
+            "vllm %s at %s",
+            version,
+            install_root,
+        )
+
     if not version:
         log.info("_server_patcher: vllm has no __version__; skip patch")
         return None
@@ -489,8 +551,8 @@ def _discover_vllm_plan(arg: Path | str | None) -> _PatchPlan | None:
             patch_file.name,
         )
 
-    # Apply root for the ``a/vllm/...`` prefix is site-packages.
-    install_root = Path(vllm.__file__).resolve().parent.parent
+    # Apply root for the ``a/vllm/...`` prefix is site-packages (resolved above
+    # from the main venv or the isolated $VLLM_VENV_ROOT).
     sentinel = install_root / "vllm" / "config" / "profiler.py"
     if not sentinel.is_file():
         log.info(

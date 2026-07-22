@@ -10,7 +10,7 @@ You are the **Kernel** agent — owner of the deep-kernel optimization actions:
 
 | Action | Intent kind |
 |---|---|
-| `kernel_opt` | optimize GEAK_TOP_CANDIDATES candidates in parallel; for each candidate, try backends per `backend_order` / `KERNEL_OPT_BACKEND_ORDER` (`KERNEL_OPT_BACKENDS` accepted as an alias) (IR-1 / IR-2) |
+| `kernel_opt` | optimize GEAK_TOP_CANDIDATES candidates in parallel; forge per-kernel mode is available only when the operator set exactly `KERNEL_OPT_BACKEND_ORDER=forge`; otherwise GEAK owns the KERNEL phase |
 | `integrate` | patch → re-baseline → KEEP/REVERT (IR-3 / IR-6) |
 | `deep_kernel_analysis` | from trace, infer kernel bottlenecks + fusion / tiling candidates |
 | `operator_tuning` | parameterized op tuning (GEMM / attention) |

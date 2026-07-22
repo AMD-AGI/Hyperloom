@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Tests pinning ``orchestrator.conc_sweep._build_roofline_ceiling`` (MoE/dense ceiling + MBU + safe-degrade)."""

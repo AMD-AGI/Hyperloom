@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -19,6 +19,9 @@ import kernel_optimization as ko  # noqa: E402
 
 def _args(**overrides):
     base = {
+        "backends": "",
+        "benchmark_file": "",
+        "test_harness_path": "",
         "micro_speedup": None,
         "e2e_gain_pct": None,
         "accuracy_passed": None,
@@ -30,6 +33,57 @@ def _args(**overrides):
     }
     base.update(overrides)
     return Namespace(**base)
+
+
+def _candidate(**overrides):
+    base = {
+        "kernel_id": "k001",
+        "name": "kernel",
+        "source_type": "triton",
+        "source_file": "/tmp/kernel.py",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_choose_backends_default_does_not_select_forge(monkeypatch):
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+
+    selected, notes = ko.choose_backends(_args(), _candidate())
+
+    assert selected == []
+    assert notes["user_specified_backends"] is False
+
+
+def test_choose_backends_geak_env_does_not_select_per_kernel_backend(monkeypatch):
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak")
+
+    selected, notes = ko.choose_backends(_args(), _candidate())
+
+    assert selected == []
+    assert notes["user_specified_backends"] is False
+
+
+def test_choose_backends_forge_env_is_explicit_opt_in(monkeypatch):
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+
+    selected, notes = ko.choose_backends(_args(), _candidate())
+
+    assert selected == ["forge"]
+    assert notes["user_specified_backends"] is True
+
+
+def test_choose_backends_forge_cli_does_not_enable_without_env(monkeypatch):
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+    monkeypatch.delenv("KERNEL_OPT_BACKENDS", raising=False)
+
+    selected, notes = ko.choose_backends(_args(backends="forge"), _candidate())
+
+    assert selected == []
+    assert notes["user_specified_backends"] is False
 
 
 def _attempt(report: Path | None = None, artifact: Path | None = None):

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Session bootstrap + summary helpers for the CLI.
@@ -27,7 +27,7 @@ from .parser import (
     DEFAULT_EP,
     DEFAULT_PRECISION,
 )
-from ..session.paths import _SESSION_SKELETON, workspace_root as _workspace_root_resolve
+from ..session.paths import _SESSION_SKELETON
 from ..session.session_paths import agent_prompt_snapshot
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
@@ -211,17 +211,13 @@ def _seed_shared_state(
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
-    # Derive the persisted ``kernel_optimizer`` record from the resolved kernel
-    # backend order env (``KERNEL_OPT_BACKEND_ORDER`` / ``KERNEL_OPT_BACKENDS``)
-    # so resume/breakdown stay correct in a fresh shell.
-    _resolved_kernel_order = [
-        t.strip().lower()
-        for t in str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or os.environ.get("KERNEL_OPT_BACKENDS") or "").split(
-            ","
-        )
-        if t.strip()
-    ]
-    _kernel_optimizer_record = "geak" if "geak" in _resolved_kernel_order else "native"
+    # Persist the kernel optimizer under the same hard rule used by the runtime:
+    # only exact KERNEL_OPT_BACKEND_ORDER=forge opts into per-kernel forge.
+    _kernel_optimizer_record = (
+        "native"
+        if str(os.environ.get("KERNEL_OPT_BACKEND_ORDER") or "").strip().lower() == "forge"
+        else "geak"
+    )
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority
     # base for the baseline server args.
@@ -238,7 +234,7 @@ def _seed_shared_state(
         model_class=args.model_class or "",
         # Advisory architecture profile; fresh-launch only. Soft-degrade to {}.
         model_arch=_load_model_arch(
-            _workspace_root_resolve(),
+            session_dir,
             _model_identity,
             str(args.model),
         ),

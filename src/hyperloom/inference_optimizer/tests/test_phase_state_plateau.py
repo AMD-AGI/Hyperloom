@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """plateau pure functions + escalate hints + stop_reason ENUM."""
@@ -411,6 +411,20 @@ def test_kernel_skip_to_sweep_waits_for_untried_hot_kernel():
     assert kernel_work_pending(state) is True
     assert exit_normal_kernel(state) is None
     assert compute_next_phase(state, kernel_enabled=True) is None
+
+
+def test_geak_terminal_skip_to_sweep_ignores_per_kernel_pending_work():
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.kernel_optimizer = "geak"
+    state.geak_result = {"status": "no_gain"}
+    state.untried_hot_reusable_kernels = lambda: ["k017"]
+
+    assert kernel_work_pending(state) is False
+    out = compute_next_phase(state, kernel_enabled=True)
+    assert out is not None
+    target, reason, _ = out
+    assert target == PHASE_SWEEP
+    assert reason == "kernel_no_more_leverage"
 
 
 def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
