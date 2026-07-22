@@ -12,26 +12,40 @@ and old DFS demo mechanics; the live action catalog, phase allowlist,
 PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
+```{image} ../images/Hyperloom_optimization_loop.png
+:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
+:class: hl-lightbox-trigger
+```
+
 ```{raw} html
 <style>
-  .hl-lightbox-thumb { cursor: zoom-in; max-width: 100%; display: block; }
-  dialog.hl-lightbox {
+  img.hl-lightbox-trigger { cursor: zoom-in; }
+  dialog.hl-lightbox-overlay {
     max-width: 90vw; max-height: 90vh; padding: 0; border: none;
     background: transparent; overflow: visible;
   }
-  dialog.hl-lightbox::backdrop { background: rgba(0,0,0,0.75); }
-  dialog.hl-lightbox img { max-width: 90vw; max-height: 90vh; display: block; cursor: zoom-out; }
+  dialog.hl-lightbox-overlay::backdrop { background: rgba(0,0,0,0.75); }
+  dialog.hl-lightbox-overlay img { max-width: 90vw; max-height: 90vh; display: block; cursor: zoom-out; }
 </style>
-<figure>
-  <img class="hl-lightbox-thumb"
-       src="../_images/Hyperloom_optimization_loop.png"
-       alt="Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state."
-       onclick="document.getElementById('hl-dialog-loop').showModal()" />
-</figure>
-<dialog id="hl-dialog-loop" class="hl-lightbox" onclick="this.close()">
-  <img src="../_images/Hyperloom_optimization_loop.png"
-       alt="Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state." />
-</dialog>
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    if (window._hlLightboxInit) return;
+    window._hlLightboxInit = true;
+    document.querySelectorAll('img.hl-lightbox-trigger').forEach(function(img) {
+      img.addEventListener('click', function() {
+        var dialog = document.createElement('dialog');
+        dialog.className = 'hl-lightbox-overlay';
+        var clone = new Image();
+        clone.src = img.src;
+        clone.alt = img.alt;
+        dialog.appendChild(clone);
+        dialog.addEventListener('click', function() { dialog.close(); dialog.remove(); });
+        document.body.appendChild(dialog);
+        dialog.showModal();
+      });
+    });
+  });
+</script>
 ```
 
 ## Runtime contract

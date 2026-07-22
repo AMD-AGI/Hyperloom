@@ -28,26 +28,40 @@ AMD GPUs.
 
 The following diagram describes how Hyperloom processes a workload from submission to validated delivery.
 
+```{image} images/Hyperloom_architecture.png
+:alt: Hyperloom architecture diagram showing the multi-stage optimization pipeline from workload profiling through kernel optimization to validated delivery.
+:class: hl-lightbox-trigger
+```
+
 ```{raw} html
 <style>
-  .hl-lightbox-thumb { cursor: zoom-in; max-width: 100%; display: block; }
-  dialog.hl-lightbox {
+  img.hl-lightbox-trigger { cursor: zoom-in; }
+  dialog.hl-lightbox-overlay {
     max-width: 90vw; max-height: 90vh; padding: 0; border: none;
     background: transparent; overflow: visible;
   }
-  dialog.hl-lightbox::backdrop { background: rgba(0,0,0,0.75); }
-  dialog.hl-lightbox img { max-width: 90vw; max-height: 90vh; display: block; cursor: zoom-out; }
+  dialog.hl-lightbox-overlay::backdrop { background: rgba(0,0,0,0.75); }
+  dialog.hl-lightbox-overlay img { max-width: 90vw; max-height: 90vh; display: block; cursor: zoom-out; }
 </style>
-<figure>
-  <img class="hl-lightbox-thumb"
-       src="_images/Hyperloom_architecture.png"
-       alt="Hyperloom architecture diagram showing the multi-stage optimization pipeline from workload profiling through kernel optimization to validated delivery."
-       onclick="document.getElementById('hl-dialog-arch').showModal()" />
-</figure>
-<dialog id="hl-dialog-arch" class="hl-lightbox" onclick="this.close()">
-  <img src="_images/Hyperloom_architecture.png"
-       alt="Hyperloom architecture diagram showing the multi-stage optimization pipeline from workload profiling through kernel optimization to validated delivery." />
-</dialog>
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    if (window._hlLightboxInit) return;
+    window._hlLightboxInit = true;
+    document.querySelectorAll('img.hl-lightbox-trigger').forEach(function(img) {
+      img.addEventListener('click', function() {
+        var dialog = document.createElement('dialog');
+        dialog.className = 'hl-lightbox-overlay';
+        var clone = new Image();
+        clone.src = img.src;
+        clone.alt = img.alt;
+        dialog.appendChild(clone);
+        dialog.addEventListener('click', function() { dialog.close(); dialog.remove(); });
+        document.body.appendChild(dialog);
+        dialog.showModal();
+      });
+    });
+  });
+</script>
 ```
 
 
