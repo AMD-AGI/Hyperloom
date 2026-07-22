@@ -273,7 +273,19 @@ def build(
     baseline = _pick(
         "baseline", _safe_collect("baseline", lambda: collectors.collect_baseline(sd, state, warnings), warnings)
     )
-    final = _pick("final", _safe_collect("final", lambda: collectors.collect_final(sd, state, warnings), warnings))
+    final_collector = _safe_collect("final", lambda: collectors.collect_final(sd, state, warnings), warnings)
+    final_frag = assembled.get("final")
+    # Merge: fragment live-scalars win, but collector structural fields (invocation,
+    # action_path, source_layers) are preserved when absent from the fragment.
+    if isinstance(final_frag, dict) and final_frag:
+        merged_final = dict(final_collector or {})
+        merged_final.update(final_frag)
+        for _structural in ("invocation", "action_path", "source_layers"):
+            if _structural in (final_collector or {}):
+                merged_final[_structural] = (final_collector or {})[_structural]
+        final = merged_final
+    else:
+        final = final_collector
     # Merge (not _pick replace): the recorder fragment only carries audit-action
     # attempts, while the collector also folds in optimization_journal KEEP/REVERT
     # and the kernel lanes; union + dedupe instead of fragment-wins.

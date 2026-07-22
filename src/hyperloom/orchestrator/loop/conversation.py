@@ -389,17 +389,12 @@ class ConversationCollaborator:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
             try:
-                from ..knowledge import research_hints as _research_hints
-
-                hints_block = _research_hints.summarise_for_prompt(
-                    self.session_dir,
-                )
+                research_block = self._research_scout_seed_block()
             except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: research_hints summary failed")
-                hints_block = ""
-            if hints_block:
-                sections.append("=== Research hints (advisory) ===")
-                sections.append(hints_block)
+                log.exception("Coordinator: research scout seed render failed")
+                research_block = ""
+            if research_block:
+                sections.append(research_block)
             try:
                 gap_block = self._target_gap_advisory_block()
             except Exception:  # noqa: BLE001 — defensive
@@ -1005,6 +1000,63 @@ class ConversationCollaborator:
                     seen.add(name)
                     out.append(variant)
         return out
+
+    def _research_scout_seed_block(self) -> str:
+        """Render all persisted research-scout findings for an Orchestration SEED."""
+        from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+        from ..knowledge import research_hints as _research_hints
+
+        hints = _research_hints.load_hints(self.session_dir)
+        rounds = [
+            row
+            for row in (getattr(self.shared_state, "specialist_rounds", []) or [])
+            if isinstance(row, dict) and row.get("domain") == "research_scout_specialist"
+        ]
+        if not hints and not rounds:
+            return ""
+
+        lines = ["=== Research Scout ==="]
+        if hints:
+            lines.append("Findings:")
+            for hint in hints:
+                lines.append(json.dumps(hint, sort_keys=True))
+
+        proposals: list[dict[str, Any]] = []
+        proposal_names: set[str] = set()
+        proposal_fingerprints: set[str] = set()
+        questions: list[str] = []
+        seen_questions: set[str] = set()
+        for row in rounds:
+            for proposal in row.get("proposal_set") or []:
+                if not isinstance(proposal, dict):
+                    continue
+                name = str(proposal.get("name") or "").strip()
+                fingerprint = canonical_fingerprint(
+                    str(proposal.get("extra_args") or proposal.get("extra_server_args") or ""),
+                    proposal.get("extra_envs") if isinstance(proposal.get("extra_envs"), dict) else {},
+                    remove_args=proposal.get("remove_args"),
+                    unset_envs=proposal.get("unset_envs"),
+                    args_mode=str(proposal.get("args_mode") or "append"),
+                )
+                if (name and name in proposal_names) or fingerprint in proposal_fingerprints:
+                    continue
+                if name:
+                    proposal_names.add(name)
+                proposal_fingerprints.add(fingerprint)
+                proposals.append(proposal)
+            for question in row.get("residual_questions") or []:
+                text = str(question).strip()
+                if text and text not in seen_questions:
+                    seen_questions.add(text)
+                    questions.append(text)
+
+        if proposals:
+            lines.append("Untested executable proposals:")
+            lines.extend(json.dumps(proposal, sort_keys=True) for proposal in proposals)
+        if questions:
+            lines.append("Residual questions:")
+            lines.extend(f"- {question}" for question in questions)
+        return "\n".join(lines)
 
     def _priors_match_advisory_block(self) -> str:
         """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft).
