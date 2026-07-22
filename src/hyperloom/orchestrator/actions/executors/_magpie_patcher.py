@@ -111,6 +111,32 @@ _REMOTE_DIRECT_PATCHED_BLOCK = (
     "    fi\n"
 )
 
+# Magpie's SGLang MI355X local-client path calls ``run_benchmark_serving``
+# directly. Unlike the vLLM MI355X script, it does not pass
+# ``--trust-remote-code``, so custom tokenizer models (for example Kimi) fail
+# before issuing a request. Build an optional argv array from the same env gate
+# used by the remote-direct path, then splice it into the local client command.
+_LOCAL_TRUST_SENTINEL = "HYPERLOOM_SGLANG_LOCAL_TRUST"
+_LOCAL_TRUST_ARGS_LEGACY_BLOCK = 'SERVER_MONITOR_ARGS=()\nif [[ -n "${SERVER_PID:-}" ]]; then\n'
+_LOCAL_TRUST_ARGS_PATCHED_BLOCK = (
+    "SERVER_MONITOR_ARGS=()\n"
+    f"# {_LOCAL_TRUST_SENTINEL}: custom-tokenizer client argv\n"
+    "CLIENT_TRUST_ARGS=()\n"
+    'if [[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]; then\n'
+    "  CLIENT_TRUST_ARGS+=(--trust-remote-code)\n"
+    "fi\n"
+    'if [[ -n "${SERVER_PID:-}" ]]; then\n'
+)
+_LOCAL_CLIENT_LEGACY_BLOCK = (
+    '        "${SERVER_MONITOR_ARGS[@]}" \\\n'
+    "        --result-dir ${RESULT_DIR:-/workspace/} || exit $?\n"
+)
+_LOCAL_CLIENT_PATCHED_BLOCK = (
+    '        "${SERVER_MONITOR_ARGS[@]}" \\\n'
+    '        "${CLIENT_TRUST_ARGS[@]}" \\\n'
+    "        --result-dir ${RESULT_DIR:-/workspace/} || exit $?\n"
+)
+
 # Strip the redundant, fatal ``--concurrent-requests <CONC>`` flag from Magpie's
 # generic benchmark scripts: InferenceX's ``run_lm_eval`` rejects it as an
 # unknown flag, aborting the whole script; concurrency still flows via the
@@ -216,6 +242,32 @@ def _resolve_sglang_mi300x_script_path(
     if root is None:
         return None
     candidate = root / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh"
+    return candidate if candidate.is_file() else None
+
+
+def _resolve_sglang_mi355x_script_path(
+    magpie_dir: Path | str | None,
+) -> Path | None:
+    """Resolve Magpie's SGLang MI355X benchmark script when present.
+
+    Args:
+        magpie_dir: Magpie root override; falls back to ``$MAGPIE_PATH`` when
+            falsy.
+
+    Returns:
+        The resolved ``sglang_mi355x.sh`` path, or ``None`` when unconfigured
+        or absent on disk.
+    """
+    root: Path | None = None
+    if magpie_dir:
+        root = Path(magpie_dir)
+    else:
+        env = os.environ.get("MAGPIE_PATH", "").strip()
+        if env:
+            root = Path(env)
+    if root is None:
+        return None
+    candidate = root / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh"
     return candidate if candidate.is_file() else None
 
 
@@ -774,6 +826,79 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
     return True
 
 
+def _is_mi355x_client_trust_patched(src: Path) -> bool:
+    """Return whether both MI355X SGLang client paths carry trust gating."""
+    try:
+        text = src.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return (
+        _LOCAL_TRUST_SENTINEL in text
+        and "magpie_run_benchmark_serving_remote_direct trust" in text
+        and '"${CLIENT_TRUST_ARGS[@]}"' in text
+    )
+
+
+def _apply_mi355x_client_trust_patch_atomic(src: Path) -> bool:
+    """Patch SGLang MI355X remote and local benchmark clients for custom code."""
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
+        return False
+
+    patched = original
+    if "magpie_run_benchmark_serving_remote_direct trust" not in patched:
+        if _REMOTE_DIRECT_LEGACY_BLOCK not in patched:
+            log.warning(
+                "_magpie_patcher: MI355X remote benchmark direct-call block "
+                "not found in %s; custom-tokenizer trust patch could not be applied",
+                src,
+            )
+            return False
+        patched = patched.replace(
+            _REMOTE_DIRECT_LEGACY_BLOCK,
+            _REMOTE_DIRECT_PATCHED_BLOCK,
+            1,
+        )
+
+    if _LOCAL_TRUST_SENTINEL not in patched:
+        if _LOCAL_TRUST_ARGS_LEGACY_BLOCK not in patched or _LOCAL_CLIENT_LEGACY_BLOCK not in patched:
+            log.warning(
+                "_magpie_patcher: MI355X local benchmark client block not found "
+                "in %s; custom-tokenizer trust patch could not be applied",
+                src,
+            )
+            return False
+        patched = patched.replace(
+            _LOCAL_TRUST_ARGS_LEGACY_BLOCK,
+            _LOCAL_TRUST_ARGS_PATCHED_BLOCK,
+            1,
+        )
+        patched = patched.replace(
+            _LOCAL_CLIENT_LEGACY_BLOCK,
+            _LOCAL_CLIENT_PATCHED_BLOCK,
+            1,
+        )
+
+    if patched == original:
+        return True
+
+    if not atomic_write_text(
+        src,
+        patched,
+        tmp_prefix=".sglang_mi355x.sh.hyperloom_",
+        log_prefix="_magpie_patcher",
+    ):
+        return False
+
+    log.info(
+        "_magpie_patcher: applied SGLang MI355X client trust patches to %s",
+        src,
+    )
+    return True
+
+
 @dataclass(frozen=True)
 class MagpiePatchStatus:
     atomic_ok: bool
@@ -864,21 +989,34 @@ def magpie_scripts_patch_status(
 
         atomic_reason = _apply_patch_atomic_reason(src)
         atomic_ok = atomic_reason not in _ATOMIC_REASONS_GENUINE_FAILURE
-        sglang_script = _resolve_sglang_mi300x_script_path(magpie_dir)
-        if sglang_script is None:
+        sglang_mi300x_script = _resolve_sglang_mi300x_script_path(magpie_dir)
+        sglang_mi355x_script = _resolve_sglang_mi355x_script_path(magpie_dir)
+        trust_results: list[bool] = []
+        if sglang_mi300x_script is not None:
+            trust_results.append(
+                _is_remote_trust_patched(sglang_mi300x_script)
+                or _apply_remote_trust_patch_atomic(sglang_mi300x_script)
+            )
+        if sglang_mi355x_script is not None:
+            trust_results.append(
+                _is_mi355x_client_trust_patched(sglang_mi355x_script)
+                or _apply_mi355x_client_trust_patch_atomic(sglang_mi355x_script)
+            )
+        if not trust_results:
             log.info(
-                "_magpie_patcher: sglang_mi300x.sh missing — skipping "
-                "remote trust patch (fine for reduced tests / non-SGLang "
-                "Magpie layouts)",
+                "_magpie_patcher: SGLang MI300X/MI355X scripts missing — "
+                "skipping client trust patches (fine for reduced tests / "
+                "non-SGLang Magpie layouts)",
             )
             remote_trust_ok = True
         else:
-            remote_trust_ok = _is_remote_trust_patched(sglang_script) or _apply_remote_trust_patch_atomic(sglang_script)
+            remote_trust_ok = all(trust_results)
         if not remote_trust_ok:
             log.warning(
-                "_magpie_patcher: SGLang remote trust patch did not apply; "
-                "MAGPIE_TRUST_REMOTE_CODE=1 will not reach remote "
-                "benchmark_serving.py for custom-code models",
+                "_magpie_patcher: SGLang remote trust patch did not apply "
+                "for one or more remote/local client paths; "
+                "MAGPIE_TRUST_REMOTE_CODE=1 will not reach one or more "
+                "benchmark_serving.py paths for custom-code models",
             )
         # Eval-concurrency fixes run LAST so the remote-trust patch on
         # sglang_mi300x.sh still finds its (flagged) legacy run_eval block
