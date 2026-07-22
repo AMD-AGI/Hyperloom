@@ -1993,32 +1993,48 @@ def submit(
 
         # Driver: use the Hyperloom harness when present; otherwise auto-generate
         # a Forge-native driver from the candidate's operation + input_shapes.
+        # If neither path can produce a usable file, still invoke forge-loop with
+        # a missing driver path. Its task-preparer owns the final driver-authoring
+        # fallback and will either create a conforming driver or fail explicitly.
+        driver_from_adapter = False
         if test_command:
-            driver = _build_driver_adapter(test_command, workspace, output_dir)
-            log.info("forge driver: harness adapter from test_command")
+            try:
+                driver = _build_driver_adapter(test_command, workspace, output_dir)
+                driver_from_adapter = True
+                log.info("forge driver: harness adapter from test_command")
+            except (OSError, ValueError) as exc:
+                log.warning(
+                    "forge driver: harness adapter failed (%s); trying autogen before task-preparer",
+                    exc,
+                )
+                driver = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
+                if driver is not None:
+                    log.info("forge driver: autogen fallback -> %s", driver)
+                else:
+                    driver = str(output_dir / "forge_task_driver.py")
+                    log.warning(
+                        "forge driver: adapter and autogen unavailable; delegating missing driver %s "
+                        "to forge-loop task-preparer",
+                        driver,
+                    )
         else:
             driver = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
             if driver is None:
                 log.warning(
-                    "forge driver: autogen failed for op=%r kernel=%s", candidate.get("operation"), worktree_kernel
+                    "forge driver: autogen failed for op=%r kernel=%s; delegating missing "
+                    "driver to forge-loop task-preparer",
+                    candidate.get("operation"),
+                    worktree_kernel,
                 )
-                return _normalized(
-                    2,
-                    "",
-                    "forge: no test_command and could not auto-generate a driver for "
-                    f"operation={candidate.get('operation')!r} kernel={worktree_kernel!r} "
-                    f"(auto-gen supports gemm/matmul/activation/attention and HIP C++ "
-                    "compile-only; other ops need a benchmark/test_command)",
-                    time.time() - started,
-                    skipped=True,
-                )
-            log.info("forge driver: autogen -> %s", driver)
+                driver = str(output_dir / "forge_task_driver.py")
+            else:
+                log.info("forge driver: autogen -> %s", driver)
         gpu_target = _resolve_gpu_target(candidate)
         # Baseline-correctness gate: verify the unmodified kernel passes up
         # front and skip forge cleanly otherwise, instead of spinning the whole
         # budget reverting. Only gates the harness-adapter path (test_command
         # present); disable via FORGE_BASELINE_GATE=0.
-        if test_command and os.environ.get("FORGE_BASELINE_GATE", "1") != "0":
+        if driver_from_adapter and os.environ.get("FORGE_BASELINE_GATE", "1") != "0":
             gate_ok, gate_detail = _baseline_correctness_ok(driver, workspace, gpu_target, timeout_s)
             if not gate_ok:
                 autogen_fallback = _autogen_forge_driver(candidate, worktree_kernel, output_dir, inplace=inplace)
@@ -2030,42 +2046,22 @@ def submit(
                     )
                     driver = autogen_fallback
                 else:
-                    return _normalized(
-                        2,
-                        "",
-                        f"forge skipped: harness baseline correctness invalid "
-                        f"({gate_detail}); not spinning the agent on an "
-                        "unverifiable harness",
-                        time.time() - started,
-                        skipped=True,
+                    log.warning(
+                        "forge driver: harness baseline gate failed (%s) and autogen is "
+                        "unavailable; delegating adapter repair to forge-loop task-preparer",
+                        gate_detail,
                     )
-        # Compile-only drivers cannot produce a real correctness/timing signal,
-        # so any KEEP they yield rests on synthesized metrics. Skip forge for
-        # such kernels unless FORGE_ALLOW_COMPILE_ONLY=1.
-        if os.environ.get("FORGE_ALLOW_COMPILE_ONLY", "0").strip().lower() not in (
-            "1",
-            "true",
-            "yes",
-        ) and _driver_is_compile_only(driver):
-            # Log the skip so session stats / RCA can see why forge attempt
-            # counts dropped.
+        # Compile-only drivers are deliberately non-conforming: forge-loop's
+        # task-preparer must replace them with a real correctness/performance
+        # driver before the optimization loop can start.
+        if _driver_is_compile_only(driver):
             log.warning(
-                "forge skipped (compile-only, no real harness): source_file=%s "
-                "source_type=%s kernel_kind=%s op=%s -- falling through to next "
-                "backend (set FORGE_ALLOW_COMPILE_ONLY=1 to override)",
+                "forge driver is compile-only: source_file=%s source_type=%s "
+                "kernel_kind=%s op=%s; delegating to forge-loop task-preparer",
                 source_file,
                 source_type,
                 kernel_kind or "-",
                 (candidate or {}).get("operation", ""),
-            )
-            return _normalized(
-                2,
-                "",
-                "forge skipped: only a compile-only driver is available (no real "
-                "correctness/timing harness); not driving a KEEP decision off "
-                "synthesized metrics (set FORGE_ALLOW_COMPILE_ONLY=1 to override)",
-                time.time() - started,
-                skipped=True,
             )
         # GPU_TARGET is passed via the forge-loop child env (not the parent
         # os.environ, which would leak to sibling ladder backends).
