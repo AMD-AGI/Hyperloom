@@ -35,8 +35,7 @@ Hyperloom is validated against.
 
 .. note::
 
-   This matrix tracks the currently validated combinations. Other ROCm versions
-   or framework builds might work but, are not regularly tested.
+  ROCm versions or framework builds not listed in this matrix might work, but are not regularly tested.
 
 Hyperloom support matrix
 ========================
@@ -67,14 +66,14 @@ The following table lists the validated Hyperloom version and component combinat
 .. role:: version-start
 
 .. table::
-   :widths: 6 27 10 15 14 25 3
+   :widths: 6 27 10 10 14 30 3
    :align: left
    :class: compat-matrix format-big-table
 
 +-------------------+---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
 | Hyperloom version | Component                 | GPU                    | ROCm version               | Ubuntu        | Python      | GitHub                      |
 +===================+===========================+========================+============================+===============+=============+=============================+
-| 0.9.0             | `TraceLens 0.1.0`_        | Hardware-agnostic      | No dependency              | OS-independent| >= 3.6      | |tracelens-github|          |
+| 1.0.0a1           | `TraceLens 0.1.0`_        | Hardware-agnostic      | No dependency              | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
 |                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
 +                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
@@ -82,7 +81,7 @@ The following table lists the validated Hyperloom version and component combinat
 +                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
 |                   | `AgentKernelArena 0.2.0`_ | MI300X, MI325X, MI355X | 7.2.x                      | 22.04, 24.04  | >= 3.10     | |agent-kernel-arena-github| |
 +                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
-|                   | `Magpie 0.1.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x        | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
+|                   | `Magpie 0.2.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x        | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
 +-------------------+---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
 
 .. _TraceLens 0.1.0: https://rocm.docs.amd.com/projects/tracelens/en/docs-0.1.0/
@@ -119,13 +118,13 @@ The following inference frameworks are supported:
    * - Framework
      - ROCm version
      - Notes
-   * - SGLang (ROCm)
+   * - SGLang
      - 7.2.0
      - Default framework
-   * - vLLM (ROCm)
+   * - vLLM
      - 7.2.0
      - Do not mix frameworks within one session
-   * - Atom (ROCm)
+   * - Atom
      - 7.2.0
      - Single-node only (multi-node rejected by the IR-8 guard)
    * - xDiT (diffusion)
@@ -170,7 +169,7 @@ Hyperloom does not install ROCm or torch itself.
      - Recommended
      - Notes
    * - ROCm
-     - 7.2.0
+     - 7.2.2
      - Matches the validated framework stacks above.
    * - Python
      - 3.12
