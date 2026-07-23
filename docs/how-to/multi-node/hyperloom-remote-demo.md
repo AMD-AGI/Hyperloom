@@ -65,7 +65,7 @@ from the environment (platform-injected under SaFE).
 Give the agent the pinned skill:
 
 ```text
-Use the skill at docs/install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md
+Use the skill at docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md
 ```
 
 It contains two ready-to-run blocks — **Workload A (infera + PD)** and
@@ -153,8 +153,8 @@ of the SSH/IPs vars.
 ## Further reading
 
 - **Workload skill (copy-paste flags/env):**
-  `docs/install/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md`
+  `docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md`
 - **Primus-SaFE:** [github.com/AMD-AGI/Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE)
 - **Multi-node CLI, SSH & external-mode semantics:**
   `src/hyperloom/inference_optimizer/multi_node/SKILL.md`
-- **Local single-node counterpart:** `examples/hyperloom-local-demo.md`
+- **Local single-node counterpart:** `examples/README.md`
