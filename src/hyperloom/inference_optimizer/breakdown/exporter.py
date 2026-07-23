@@ -22,7 +22,7 @@ from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import iso_z
 
 from . import collectors
-from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3
+from .schema import SCHEMA_VERSION, SCHEMA_VERSION_V3, SCHEMA_VERSION_V4
 from ..session.session_paths import manifest_path, state_path
 
 log = logging.getLogger(__name__)
@@ -595,6 +595,1194 @@ def build(
     return breakdown
 
 
+_V4_CANONICAL_STREAMS: dict[str, tuple[str, str | None]] = {
+    "run": ("run_snapshot", "run"),
+    "workload": ("run_snapshot", "workload"),
+    "model": ("run_snapshot", "model"),
+    "versions": ("run_snapshot", "versions"),
+    "phases": ("phase_transitions", None),
+    "subjects": ("subjects", None),
+    "operations": ("operations", None),
+    "measurements": ("measurements", None),
+    "adoptions": ("adoptions", None),
+    "outcome": ("run_snapshot", "outcome"),
+    "artifacts": ("artifacts", None),
+    "trace": ("trace_events", None),
+}
+
+
+def _v4_value_available(value: Any) -> bool:
+    """Return whether an assembled canonical value contains authored facts."""
+    return bool(value) if isinstance(value, (dict, list)) else value is not None
+
+
+def _v4_integrity(
+    assembled: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Validate canonical streams and references without fallback reads."""
+    fields: dict[str, Any] = {}
+    available_count = 0
+    conflicts: list[dict[str, Any]] = []
+    conflict_fields: set[str] = set()
+
+    def add_conflict(field: str, code: str, **evidence: Any) -> None:
+        conflict_fields.add(field)
+        conflicts.append({"field": field, "code": code, **evidence})
+
+    entity_specs = {
+        "phases": ("phase_transitions", ("transition_id", "event_id")),
+        "subjects": ("subjects", ("subject_id",)),
+        "operations": ("operations", ("operation_id",)),
+        "measurements": ("measurements", ("measurement_id",)),
+        "adoptions": ("adoptions", ("adoption_id",)),
+        "artifacts": ("artifacts", ("artifact_id",)),
+        "trace": ("trace_events", ("trace_event_id", "event_id", "span_id")),
+    }
+    rows_by_field: dict[str, list[dict[str, Any]]] = {}
+    for field, (stream, id_fields) in entity_specs.items():
+        rows = [
+            row
+            for row in assembled.get(stream, [])
+            if isinstance(row, dict)
+        ] if isinstance(assembled.get(stream), list) else []
+        rows_by_field[field] = rows
+        for index, row in enumerate(rows):
+            if not any(str(row.get(id_field) or "").strip() for id_field in id_fields):
+                add_conflict(field, "missing_stable_id", record_index=index)
+
+    operations = rows_by_field["operations"]
+    subjects = rows_by_field["subjects"]
+    measurements = rows_by_field["measurements"]
+    adoptions = rows_by_field["adoptions"]
+    artifacts = rows_by_field["artifacts"]
+    operation_ids = {str(row.get("operation_id")) for row in operations if row.get("operation_id")}
+    measurement_ids = {
+        str(row.get("measurement_id")) for row in measurements if row.get("measurement_id")
+    }
+    adoption_ids = {str(row.get("adoption_id")) for row in adoptions if row.get("adoption_id")}
+    artifact_ids = {str(row.get("artifact_id")) for row in artifacts if row.get("artifact_id")}
+    subject_ids = {str(row.get("subject_id")) for row in subjects if row.get("subject_id")}
+
+    def validate_subject_refs(field: str, entity_id: str, row: dict[str, Any]) -> None:
+        subject_refs = []
+        if isinstance(row.get("subject"), dict):
+            subject_refs.append(row["subject"])
+        subject_refs.extend(
+            reference
+            for reference in row.get("subjects") or []
+            if isinstance(reference, dict)
+        )
+        for reference in subject_refs:
+            subject_id = str(reference.get("subject_id") or "")
+            if subject_id and subject_id not in subject_ids:
+                add_conflict(
+                    field,
+                    "dangling_subject_reference",
+                    entity_id=entity_id,
+                    subject_id=subject_id,
+                )
+
+    allowed_executors = {"llm_agent", "llm_tool", "deterministic"}
+
+    def nested_reference_ids(raw: Any, id_field: str) -> list[str]:
+        values = raw if isinstance(raw, list) else [raw] if raw else []
+        references: list[str] = []
+        for value in values:
+            if isinstance(value, dict):
+                reference = str(value.get(id_field) or "")
+            else:
+                reference = str(value or "")
+            if reference:
+                references.append(reference)
+        return references
+
+    def validate_nested_operation_item(
+        operation_id: str,
+        container: str,
+        item_index: int,
+        item: dict[str, Any],
+    ) -> None:
+        reference_specs = (
+            ("measurements", "measurement_id", measurement_ids),
+            ("measurement_refs", "measurement_id", measurement_ids),
+            ("artifacts", "artifact_id", artifact_ids),
+            ("artifact_refs", "artifact_id", artifact_ids),
+            ("adoptions", "adoption_id", adoption_ids),
+            ("adoption_refs", "adoption_id", adoption_ids),
+            ("subjects", "subject_id", subject_ids),
+            ("subject_refs", "subject_id", subject_ids),
+            ("operations", "operation_id", operation_ids),
+            ("operation_refs", "operation_id", operation_ids),
+        )
+        for ref_field, id_field, known_ids in reference_specs:
+            for reference in nested_reference_ids(item.get(ref_field), id_field):
+                if reference not in known_ids:
+                    add_conflict(
+                        "operations",
+                        "dangling_nested_reference",
+                        operation_id=operation_id,
+                        container=container,
+                        item_index=item_index,
+                        reference_field=ref_field,
+                        reference_id=reference,
+                    )
+        for ref_field, id_field, known_ids in (
+            ("measurement_id", "measurement_id", measurement_ids),
+            ("artifact_id", "artifact_id", artifact_ids),
+            ("adoption_id", "adoption_id", adoption_ids),
+            ("subject_id", "subject_id", subject_ids),
+        ):
+            reference = str(item.get(ref_field) or "")
+            if reference and reference not in known_ids:
+                add_conflict(
+                    "operations",
+                    "dangling_nested_reference",
+                    operation_id=operation_id,
+                    container=container,
+                    item_index=item_index,
+                    reference_field=ref_field,
+                    reference_id=reference,
+                )
+        if isinstance(item.get("subject"), dict):
+            subject_id = str(item["subject"].get("subject_id") or "")
+            if subject_id and subject_id not in subject_ids:
+                add_conflict(
+                    "operations",
+                    "dangling_nested_reference",
+                    operation_id=operation_id,
+                    container=container,
+                    item_index=item_index,
+                    reference_field="subject",
+                    reference_id=subject_id,
+                )
+        for ref_field, id_field, known_ids in (
+            ("measurement", "measurement_id", measurement_ids),
+            ("artifact", "artifact_id", artifact_ids),
+            ("adoption", "adoption_id", adoption_ids),
+            ("operation", "operation_id", operation_ids),
+        ):
+            reference_value = item.get(ref_field)
+            reference = (
+                str(reference_value.get(id_field) or "")
+                if isinstance(reference_value, dict)
+                else str(reference_value or "")
+            )
+            if reference and reference not in known_ids:
+                add_conflict(
+                    "operations",
+                    "dangling_nested_reference",
+                    operation_id=operation_id,
+                    container=container,
+                    item_index=item_index,
+                    reference_field=ref_field,
+                    reference_id=reference,
+                )
+        for ref_field in (
+            "operation_id",
+            "target_operation_id",
+            "parent_operation_id",
+            "root_operation_id",
+        ):
+            reference = str(item.get(ref_field) or "")
+            if reference and reference not in operation_ids:
+                add_conflict(
+                    "operations",
+                    "dangling_nested_reference",
+                    operation_id=operation_id,
+                    container=container,
+                    item_index=item_index,
+                    reference_field=ref_field,
+                    reference_id=reference,
+                )
+
+    for transition in rows_by_field["phases"]:
+        operation_id = str(transition.get("operation_id") or "")
+        if operation_id and operation_id not in operation_ids:
+            add_conflict(
+                "phases",
+                "dangling_operation_reference",
+                transition_id=transition.get("transition_id") or transition.get("event_id"),
+                reference_field="operation_id",
+                reference_id=operation_id,
+            )
+
+    for event in rows_by_field["trace"]:
+        event_id = event.get("trace_event_id") or event.get("event_id") or event.get("span_id")
+        for ref_field in ("operation_id", "parent_operation_id"):
+            operation_id = str(event.get(ref_field) or "")
+            if operation_id and operation_id not in operation_ids:
+                add_conflict(
+                    "trace",
+                    "dangling_operation_reference",
+                    event_id=event_id,
+                    reference_field=ref_field,
+                    reference_id=operation_id,
+                )
+
+    for operation in operations:
+        operation_id = str(operation.get("operation_id") or "")
+        validate_subject_refs("operations", operation_id, operation)
+        executor = operation.get("executor_class")
+        if executor and executor not in allowed_executors:
+            add_conflict(
+                "operations",
+                "invalid_executor_class",
+                operation_id=operation_id,
+                executor_class=executor,
+            )
+        for ref_field, known_ids, target_field in (
+            ("measurement_refs", measurement_ids, "measurements"),
+            ("artifact_refs", artifact_ids, "artifacts"),
+            ("adoption_refs", adoption_ids, "adoptions"),
+        ):
+            for reference in operation.get(ref_field) or []:
+                if str(reference) not in known_ids:
+                    add_conflict(
+                        "operations",
+                        "dangling_reference",
+                        operation_id=operation_id,
+                        reference_field=ref_field,
+                        reference_id=str(reference),
+                        target_field=target_field,
+                    )
+        for ref_field in ("parent_operation_id", "root_operation_id"):
+            reference = str(operation.get(ref_field) or "")
+            if reference and reference not in operation_ids:
+                add_conflict(
+                    "operations",
+                    "dangling_operation_reference",
+                    operation_id=operation_id,
+                    reference_field=ref_field,
+                    reference_id=reference,
+                )
+        for container in ("relations", "attempts", "substeps"):
+            for item_index, item in enumerate(operation.get(container) or []):
+                if isinstance(item, dict):
+                    validate_nested_operation_item(
+                        operation_id,
+                        container,
+                        item_index,
+                        item,
+                    )
+
+    for field, rows, ref_specs in (
+        (
+            "measurements",
+            measurements,
+            (("operation_id", operation_ids, "operations"),),
+        ),
+        (
+            "artifacts",
+            artifacts,
+            (
+                ("operation_id", operation_ids, "operations"),
+                ("producer_operation_id", operation_ids, "operations"),
+            ),
+        ),
+        (
+            "adoptions",
+            adoptions,
+            (
+                ("operation_id", operation_ids, "operations"),
+                ("measurement_ids", measurement_ids, "measurements"),
+                ("artifact_ids", artifact_ids, "artifacts"),
+            ),
+        ),
+    ):
+        for row in rows:
+            row_id = str(
+                row.get(
+                    {
+                        "measurements": "measurement_id",
+                        "artifacts": "artifact_id",
+                        "adoptions": "adoption_id",
+                    }[field]
+                )
+                or ""
+            )
+            validate_subject_refs(field, row_id, row)
+            has_business_association = (
+                field == "adoptions"
+                or (
+                    field == "measurements"
+                    and any(
+                        row.get(key) not in (None, "", {}, [])
+                        for key in ("kind", "name", "source", "subject")
+                    )
+                )
+                or (
+                    field == "artifacts"
+                    and any(
+                        row.get(key) not in (None, "", {}, [])
+                        for key in ("kind", "name", "path", "uri", "digest", "subject")
+                    )
+                )
+            )
+            if has_business_association and not row.get("operation_id"):
+                add_conflict(
+                    field,
+                    "missing_operation_reference",
+                    entity_id=row_id,
+                )
+            for ref_field, known_ids, target_field in ref_specs:
+                raw = row.get(ref_field)
+                references = raw if isinstance(raw, list) else [raw] if raw else []
+                for reference in references:
+                    if str(reference) not in known_ids:
+                        add_conflict(
+                            field,
+                            "dangling_reference",
+                            entity_id=row_id,
+                            reference_field=ref_field,
+                            reference_id=str(reference),
+                            target_field=target_field,
+                        )
+
+    for adoption in adoptions:
+        status = str(adoption.get("status") or "").lower()
+        decision = str(adoption.get("decision") or "").upper()
+        validated = adoption.get("validated")
+        if (
+            (status == "adopted" and (decision != "KEEP" or validated is not True))
+            or (status in {"revoked", "reverted"} and (decision != "REVERT" or validated is not False))
+        ):
+            add_conflict(
+                "adoptions",
+                "invalid_adoption_state",
+                adoption_id=adoption.get("adoption_id"),
+                status=status,
+                decision=decision,
+                validated=validated,
+            )
+
+    selections = [
+        operation
+        for operation in operations
+        if operation.get("kind") == "strategy_selection"
+        and operation.get("strategy_group") == "kernel_optimizer"
+    ]
+    active_selections = [
+        selection
+        for selection in selections
+        if str(selection.get("status") or "").lower()
+        not in {"revoked", "reverted", "superseded", "skipped"}
+    ]
+    routes = [
+        operation
+        for operation in operations
+        if operation.get("kind") == "kernel_optimizer_run"
+        and operation.get("status") != "skipped"
+    ]
+    selection_ids = {
+        str(selection.get("operation_id") or "") for selection in selections
+    }
+    selections_by_cycle: dict[str, set[str]] = {}
+    for selection in active_selections:
+        if selection.get("macro_cycle") is None:
+            continue
+        cycle_key = str(selection.get("macro_cycle"))
+        selections_by_cycle.setdefault(cycle_key, set()).add(
+            str(selection.get("operation_id") or "")
+        )
+    for cycle_key, cycle_selection_ids in selections_by_cycle.items():
+        if len(cycle_selection_ids) > 1:
+            add_conflict(
+                "operations",
+                "multiple_active_selections_in_cycle",
+                macro_cycle=cycle_key,
+                selection_operation_ids=sorted(cycle_selection_ids),
+            )
+    for selection in active_selections:
+        selection_id = str(selection.get("operation_id") or "")
+        selection_outputs = selection.get("outputs") or {}
+        selected = str(selection_outputs.get("selected_strategy") or "")
+        candidates = {
+            str(candidate)
+            for candidate in selection_outputs.get("candidates") or []
+        }
+        if not {"geak", "kernel_agent_forge"} <= candidates:
+            add_conflict(
+                "operations",
+                "kernel_route_candidates_incomplete",
+                selection_id=selection_id,
+                candidates=sorted(candidates),
+            )
+        active_executed = [
+            route
+            for route in routes
+            if str(route.get("parent_operation_id") or "") == selection_id
+            and str(route.get("strategy") or "") == selected
+            and str(route.get("status") or "").lower()
+            not in {"revoked", "reverted", "superseded", "skipped"}
+            and (
+                ((route.get("extensions") or {}).get("route_competition") or {}).get("active")
+                is not False
+            )
+        ]
+        if len(active_executed) != 1:
+            add_conflict(
+                "operations",
+                "kernel_route_xor_violation",
+                selection_id=selection_id,
+                macro_cycle=selection.get("macro_cycle"),
+                executed_route_count=len(active_executed),
+            )
+    for route in routes:
+        parent = str(route.get("parent_operation_id") or "")
+        if parent not in selection_ids:
+            add_conflict(
+                "operations",
+                "kernel_route_without_selection",
+                route_operation_id=route.get("operation_id"),
+                parent_operation_id=parent,
+            )
+
+    for field, (stream, nested_key) in _V4_CANONICAL_STREAMS.items():
+        stream_value = assembled.get(stream)
+        value = stream_value.get(nested_key) if nested_key and isinstance(stream_value, dict) else stream_value
+        available = _v4_value_available(value)
+        if available:
+            available_count += 1
+        record_count = len(value) if isinstance(value, list) else (1 if available else 0)
+        fields[field] = {
+            "status": (
+                "partial"
+                if available and field in conflict_fields
+                else "exact"
+                if available
+                else "unavailable"
+            ),
+            "source": f"recorder:{stream}",
+            "reason": "" if available else f"author-time stream {stream!r} did not provide {field!r}",
+            "record_count": record_count,
+            "warnings": [],
+        }
+
+    if available_count == len(fields) and not warnings and not conflicts:
+        status = "exact"
+    elif available_count == 0:
+        status = "unavailable"
+    else:
+        status = "partial"
+    return {
+        "status": status,
+        "canonical_source": "author_time_recorder_fragments",
+        "fields": fields,
+        "warnings": list(warnings),
+        "conflicts": conflicts,
+    }
+
+
+def _v4_compat_projection(
+    *,
+    run: dict[str, Any],
+    workload: dict[str, Any],
+    model: dict[str, Any],
+    versions: dict[str, Any],
+    transitions: list[dict[str, Any]],
+    operations: list[dict[str, Any]],
+    measurements: list[dict[str, Any]],
+    adoptions: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    trace_events: list[dict[str, Any]],
+    outcome: dict[str, Any],
+    integrity: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a conservative legacy shadow from canonical author-time facts."""
+    operation_by_id = {
+        str(operation.get("operation_id")): operation
+        for operation in operations
+        if operation.get("operation_id")
+    }
+    measurement_by_id = {
+        str(measurement.get("measurement_id")): measurement
+        for measurement in measurements
+        if measurement.get("measurement_id")
+    }
+    artifact_by_id = {
+        str(artifact.get("artifact_id")): artifact
+        for artifact in artifacts
+        if artifact.get("artifact_id")
+    }
+    validated_adoptions = [
+        adoption
+        for adoption in adoptions
+        if adoption.get("validated") is True
+        and str(adoption.get("status") or "").lower() == "adopted"
+        and str(adoption.get("decision") or "").upper() in {"KEEP", "ADOPTED"}
+    ]
+    selections = [
+        operation
+        for operation in operations
+        if operation.get("kind") == "strategy_selection"
+        and operation.get("strategy_group") == "kernel_optimizer"
+    ]
+    active_selections = [
+        candidate_selection
+        for candidate_selection in selections
+        if str(candidate_selection.get("status") or "").lower()
+        not in {"revoked", "reverted", "superseded", "skipped"}
+    ]
+    selection = active_selections[-1] if active_selections else {}
+    selected_strategy = str((selection.get("outputs") or {}).get("selected_strategy") or "")
+    route_operations = [
+        operation
+        for operation in operations
+        if operation.get("kind") == "kernel_optimizer_run"
+        and operation.get("status") != "skipped"
+    ]
+    selection_by_id = {
+        str(candidate_selection.get("operation_id") or ""): candidate_selection
+        for candidate_selection in selections
+    }
+    routes = []
+    for operation in route_operations:
+        parent_id = str(operation.get("parent_operation_id") or "")
+        parent_selection = selection_by_id.get(parent_id, {})
+        parent_selected_strategy = str(
+            (parent_selection.get("outputs") or {}).get("selected_strategy") or ""
+        )
+        competition = (operation.get("extensions") or {}).get("route_competition") or {}
+        active = (
+            parent_selection in active_selections
+            and str(operation.get("strategy") or "") == parent_selected_strategy
+            and str(operation.get("status") or "").lower()
+            not in {"revoked", "reverted", "superseded", "skipped"}
+            and competition.get("active") is not False
+        )
+        routes.append(
+            {
+                "operation_id": operation.get("operation_id"),
+                "strategy": operation.get("strategy"),
+                "status": operation.get("status"),
+                "selected": active,
+                "active": active,
+                "historical": not active,
+                "superseded_by": competition.get("superseded_by"),
+                "selection_version": competition.get("selection_version"),
+                "parent_operation_id": operation.get("parent_operation_id"),
+                "macro_cycle": operation.get("macro_cycle"),
+                "subject": operation.get("subject"),
+            }
+        )
+    route_cycles = []
+    for candidate_selection in active_selections:
+        selection_id = str(candidate_selection.get("operation_id") or "")
+        selected_for_cycle = str(
+            (candidate_selection.get("outputs") or {}).get("selected_strategy") or ""
+        )
+        cycle_routes = [
+            route
+            for route in routes
+            if str(route.get("parent_operation_id") or "") == selection_id
+        ]
+        executed = [
+            route
+            for route in cycle_routes
+            if route.get("active") is True
+            and str(route.get("strategy") or "") == selected_for_cycle
+        ]
+        route_cycles.append(
+            {
+                "selection_operation_id": selection_id,
+                "macro_cycle": candidate_selection.get("macro_cycle"),
+                "candidates": (candidate_selection.get("outputs") or {}).get("candidates") or [],
+                "selected_strategy": (candidate_selection.get("outputs") or {}).get("selected_strategy"),
+                "routes": cycle_routes,
+                "executed_route": executed[0] if len(executed) == 1 else None,
+                "xor": len(executed) == 1,
+            }
+        )
+    latest_cycle = route_cycles[-1] if route_cycles else {}
+    active_selection_ids_by_cycle: dict[str, set[str]] = {}
+    for candidate_selection in active_selections:
+        if candidate_selection.get("macro_cycle") is None:
+            continue
+        active_selection_ids_by_cycle.setdefault(
+            str(candidate_selection.get("macro_cycle")),
+            set(),
+        ).add(str(candidate_selection.get("operation_id") or ""))
+    selection_cycles_unique = all(
+        len(selection_ids) == 1
+        for selection_ids in active_selection_ids_by_cycle.values()
+    )
+    kernel_operations = [
+        operation
+        for operation in operations
+        if operation.get("kind") == "kernel_optimization"
+        and operation.get("scope") == "kernel"
+    ]
+    kernel_journey = {
+        "route_operation_id": next(
+            (
+                operation.get("operation_id")
+                for operation in reversed(route_operations)
+                if operation.get("strategy") == "kernel_agent_forge"
+            ),
+            None,
+        ),
+        "kernels": [
+            {
+                "kernel_id": ((operation.get("subject") or {}).get("name") or operation.get("name")),
+                "subject": operation.get("subject"),
+                "operation_id": operation.get("operation_id"),
+                "status": operation.get("status"),
+                "backend_attempts": operation.get("attempts") or [],
+                "gates": operation.get("gates") or [],
+                "decision": (operation.get("outputs") or {}).get("decision"),
+                "measurement_refs": operation.get("measurement_refs") or [],
+                "artifact_refs": operation.get("artifact_refs") or [],
+                "adoption_refs": operation.get("adoption_refs") or [],
+                "outcome": (
+                    "adopted"
+                    if any(
+                        adoption.get("operation_id") == operation.get("operation_id")
+                        for adoption in validated_adoptions
+                    )
+                    else operation.get("status")
+                ),
+            }
+            for operation in kernel_operations
+        ],
+        "final_validation_precedence": "validated_adoption_then_operation_status",
+    }
+    geak_operation = next(
+        (operation for operation in reversed(route_operations) if operation.get("strategy") == "geak"),
+        {},
+    )
+    forge_invocations = [
+        {
+            **attempt,
+            "operation_id": operation.get("operation_id"),
+            "kernel_id": ((operation.get("subject") or {}).get("name") or operation.get("name")),
+            "gates": operation.get("gates") or [],
+        }
+        for operation in kernel_operations
+        for attempt in operation.get("attempts") or []
+        if isinstance(attempt, dict) and str(attempt.get("backend") or "").lower() == "forge"
+    ]
+    optimization_stack = [
+        {
+            "adoption_id": adoption.get("adoption_id"),
+            "operation_id": adoption.get("operation_id"),
+            "kind": adoption.get("kind"),
+            "decision": adoption.get("decision"),
+            "validated": True,
+            "gain_pct": adoption.get("gain_pct"),
+            "configuration": adoption.get("configuration") or {},
+            "strategy": (operation_by_id.get(str(adoption.get("operation_id"))) or {}).get("strategy"),
+            "measurement_ids": adoption.get("measurement_ids") or [],
+            "artifact_ids": adoption.get("artifact_ids") or [],
+        }
+        for adoption in validated_adoptions
+    ]
+    attribution_by_strategy: dict[str, dict[str, Any]] = {}
+    for entry in optimization_stack:
+        strategy = str(entry.get("strategy") or entry.get("kind") or "unknown")
+        bucket = attribution_by_strategy.setdefault(
+            strategy,
+            {"adoption_count": 0, "validated_gain_pct": 0.0, "partial_gain_count": 0},
+        )
+        bucket["adoption_count"] += 1
+        gain = entry.get("gain_pct")
+        if isinstance(gain, (int, float)):
+            bucket["validated_gain_pct"] += float(gain)
+        else:
+            bucket["partial_gain_count"] += 1
+    geak_measurements = [
+        measurement_by_id[measurement_id]
+        for measurement_id in geak_operation.get("measurement_refs") or []
+        if measurement_id in measurement_by_id
+    ]
+    geak_artifacts = [
+        artifact_by_id[artifact_id]
+        for artifact_id in geak_operation.get("artifact_refs") or []
+        if artifact_id in artifact_by_id
+    ]
+    gemm_operations = [
+        operation for operation in operations if operation.get("kind") == "gemm_tuning"
+    ]
+
+    def matching_operations(*names: str) -> list[dict[str, Any]]:
+        wanted = {name.lower() for name in names}
+        return [
+            operation
+            for operation in operations
+            if str(operation.get("kind") or "").lower() in wanted
+            or str(operation.get("name") or "").lower() in wanted
+            or str(operation.get("strategy_group") or "").lower() in wanted
+        ]
+
+    def latest_outputs(*names: str) -> dict[str, Any]:
+        matches = matching_operations(*names)
+        return dict(matches[-1].get("outputs") or {}) if matches else {}
+
+    baseline = latest_outputs("baseline")
+    explore_operations = matching_operations("explore")
+    explore_search = {
+        "operations": [
+            {
+                "operation_id": operation.get("operation_id"),
+                "status": operation.get("status"),
+                "decision": (operation.get("outputs") or {}).get("decision"),
+                "outputs": operation.get("outputs") or {},
+                "measurement_refs": operation.get("measurement_refs") or [],
+            }
+            for operation in explore_operations
+        ]
+    } if explore_operations else {}
+    sweep = latest_outputs("sweep", "conc_sweep")
+    capability_summary = latest_outputs("capability", "capability_summary")
+    critic_operations = matching_operations("critic", "robustness")
+    critic_robustness = {
+        "operations": critic_operations,
+    } if critic_operations else {}
+    specialist_operations = matching_operations("specialist")
+    specialist_runs = [
+        {
+            "operation_id": operation.get("operation_id"),
+            "status": operation.get("status"),
+            "outputs": operation.get("outputs") or {},
+            "extensions": operation.get("extensions") or {},
+        }
+        for operation in specialist_operations
+    ]
+    roofline_operations = matching_operations("roofline")
+    roofline = [
+        {
+            "operation_id": operation.get("operation_id"),
+            "status": operation.get("status"),
+            "outputs": operation.get("outputs") or {},
+            "measurement_refs": operation.get("measurement_refs") or [],
+            "artifact_refs": operation.get("artifact_refs") or [],
+        }
+        for operation in roofline_operations
+    ]
+    roofline_progress = roofline[-1] if roofline else {}
+    phase_segments = [
+        {
+            "transition_id": transition.get("transition_id") or transition.get("event_id"),
+            "phase": transition.get("phase") or transition.get("to_phase"),
+            "from_phase": transition.get("from_phase"),
+            "status": transition.get("status"),
+            "started_at": transition.get("started_at") or transition.get("ts"),
+            "ended_at": transition.get("ended_at") or transition.get("ts"),
+            "macro_cycle": transition.get("macro_cycle"),
+        }
+        for transition in transitions
+    ]
+    decisions = [
+        {
+            **decision,
+            "operation_id": operation.get("operation_id"),
+            "phase": operation.get("phase"),
+        }
+        for operation in operations
+        for decision in operation.get("decisions") or []
+        if isinstance(decision, dict)
+    ]
+    decision_trace = {
+        "decisions": decisions,
+        "events": [
+            event
+            for event in trace_events
+            if str(event.get("kind") or "").lower()
+            in {"decision", "operation_finalized", "operation_adopted"}
+        ],
+    } if decisions or trace_events else {}
+    token_usage_rows = [
+        {
+            "operation_id": operation.get("operation_id"),
+            **token_usage,
+        }
+        for operation in operations
+        for token_usage in [
+            (operation.get("outputs") or {}).get("token_usage")
+            or (operation.get("extensions") or {}).get("token_usage")
+        ]
+        if isinstance(token_usage, dict)
+    ]
+    token_usage = {"operations": token_usage_rows} if token_usage_rows else {}
+    telemetry = {"events": trace_events} if trace_events else {}
+    source_files = {
+        str(artifact.get("artifact_id")): {
+            "path": artifact.get("path"),
+            "kind": artifact.get("kind"),
+            "operation_id": artifact.get("operation_id"),
+        }
+        for artifact in artifacts
+        if artifact.get("path")
+        and str(artifact.get("kind") or "").lower()
+        in {"source", "source_file", "target_file", "patch", "tuned_file"}
+    }
+    kb_operations = matching_operations("kb_write", "knowledge")
+    kb_provenance = {
+        "operations": [
+            {
+                "operation_id": operation.get("operation_id"),
+                "status": operation.get("status"),
+                "outputs": operation.get("outputs") or {},
+                "artifact_refs": operation.get("artifact_refs") or [],
+            }
+            for operation in kb_operations
+        ]
+    } if kb_operations else {}
+    final = dict(outcome)
+    if optimization_stack:
+        final.setdefault("latest_adoption", optimization_stack[-1])
+
+    adopted_operation_ids = {
+        str(adoption.get("operation_id") or "")
+        for adoption in validated_adoptions
+    }
+    detected_kernels: list[dict[str, Any]] = []
+    optimized_kernels: list[dict[str, Any]] = []
+    adopted_kernels: list[dict[str, Any]] = []
+    rejected_kernels: list[dict[str, Any]] = []
+    for operation in kernel_operations:
+        kernel_id = str(
+            (operation.get("subject") or {}).get("name")
+            or operation.get("name")
+            or operation.get("operation_id")
+            or ""
+        )
+        base_entry = {
+            "kernel_id": kernel_id,
+            "name": kernel_id,
+            "operation_id": operation.get("operation_id"),
+            "status": operation.get("status"),
+            "strategy": operation.get("strategy"),
+        }
+        detected_kernels.append(base_entry)
+        if operation.get("attempts") or operation.get("outputs"):
+            optimized_kernels.append(
+                {
+                    **base_entry,
+                    "backend_attempts": operation.get("attempts") or [],
+                    "outputs": operation.get("outputs") or {},
+                }
+            )
+        if str(operation.get("operation_id") or "") in adopted_operation_ids:
+            adopted_kernels.append(base_entry)
+        elif str(operation.get("status") or "").lower() in {
+            "failed",
+            "rejected",
+            "reverted",
+            "revoked",
+            "needs_review",
+        }:
+            rejected_kernels.append(base_entry)
+    kernel_lifecycle = {
+        "detected": detected_kernels,
+        "recommended": detected_kernels,
+        "optimized": optimized_kernels,
+        "adopted": adopted_kernels,
+        "rejected": rejected_kernels,
+        "reverted": [
+            entry
+            for entry in rejected_kernels
+            if str(entry.get("status") or "").lower() in {"reverted", "revoked"}
+        ],
+    } if kernel_operations else {}
+
+    kernel_operation_ids = {
+        str(operation.get("operation_id") or "") for operation in kernel_operations
+    }
+    kernel_metric_rows: dict[str, dict[str, Any]] = {}
+    for measurement in measurements:
+        operation_id = str(measurement.get("operation_id") or "")
+        dimensions = measurement.get("dimensions") or {}
+        kernel_id = str(
+            dimensions.get("kernel_id")
+            or (
+                (operation_by_id.get(operation_id, {}).get("subject") or {}).get("name")
+                if operation_id in kernel_operation_ids
+                else ""
+            )
+            or ""
+        )
+        if not kernel_id:
+            continue
+        entry = kernel_metric_rows.setdefault(
+            kernel_id,
+            {"kernel_id": kernel_id, "operation_id": operation_id},
+        )
+        name = str(measurement.get("name") or measurement.get("kind") or "measurement")
+        entry[name] = measurement.get("value")
+        entry.setdefault("measurements", []).append(measurement)
+    kernel_roofline_operations = matching_operations("kernel_roofline")
+    for operation in kernel_roofline_operations:
+        outputs = operation.get("outputs") or {}
+        rows = outputs.get("kernels") if isinstance(outputs.get("kernels"), list) else []
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            kernel_id = str(row.get("kernel_id") or row.get("name") or index)
+            kernel_metric_rows.setdefault(kernel_id, {"kernel_id": kernel_id}).update(row)
+    kernel_roofline = {
+        "source": "canonical_operations_measurements",
+        "kernels": list(kernel_metric_rows.values()),
+        "operation_ids": [
+            operation.get("operation_id") for operation in kernel_roofline_operations
+        ],
+        "artifact_ids": [
+            artifact.get("artifact_id")
+            for artifact in artifacts
+            if str(artifact.get("kind") or "").lower()
+            in {"kernel_roofline", "kernel_roofline_path", "analysis_md"}
+        ],
+    } if kernel_metric_rows or kernel_roofline_operations else {}
+
+    attempted_count = sum(bool(operation.get("attempts")) for operation in kernel_operations)
+    kernel_optimization_summary = {
+        "schema_version": 1,
+        "session_id": run.get("session_id"),
+        "model_name": model.get("name") or workload.get("model_name"),
+        "cumulative_gain_validated_pct": outcome.get("cumulative_gain_validated_pct"),
+        "totals": {
+            "top_candidates": len(kernel_operations),
+            "attempted": attempted_count,
+            "integrated": len(adopted_kernels),
+            "keep_pending": sum(
+                str(operation.get("status") or "").lower() == "needs_review"
+                for operation in kernel_operations
+            ),
+            "rejected": len(rejected_kernels),
+            "in_flight": sum(
+                str(operation.get("status") or "").lower() == "running"
+                for operation in kernel_operations
+            ),
+            "unattempted": max(len(kernel_operations) - attempted_count, 0),
+        },
+        "by_kernel": optimized_kernels or detected_kernels,
+    } if kernel_operations else {}
+
+    conc_sweep_operations = matching_operations("conc_sweep", "concurrency_sweep")
+    conc_sweep_summary: dict[str, Any] = {}
+    if conc_sweep_operations:
+        conc_operation = conc_sweep_operations[-1]
+        conc_sweep_summary = dict(conc_operation.get("outputs") or {})
+        conc_sweep_summary.setdefault("status", conc_operation.get("status"))
+        conc_sweep_summary.setdefault("operation_id", conc_operation.get("operation_id"))
+        conc_sweep_summary.setdefault(
+            "measurements",
+            [
+                measurement
+                for measurement in measurements
+                if measurement.get("operation_id") == conc_operation.get("operation_id")
+            ],
+        )
+        conc_sweep_summary.setdefault(
+            "artifacts",
+            [
+                artifact
+                for artifact in artifacts
+                if artifact.get("operation_id") == conc_operation.get("operation_id")
+            ],
+        )
+
+    langfuse_operations = matching_operations("langfuse")
+    langfuse_events = [
+        event
+        for event in trace_events
+        if "langfuse" in str(event.get("kind") or event.get("component") or "").lower()
+    ]
+    langfuse: dict[str, Any] = {}
+    if langfuse_operations:
+        langfuse.update(langfuse_operations[-1].get("outputs") or {})
+        langfuse.setdefault("operation_id", langfuse_operations[-1].get("operation_id"))
+    if langfuse_events:
+        latest_langfuse_event = langfuse_events[-1]
+        for key in (
+            "enabled",
+            "disabled_reason",
+            "config",
+            "trace_id",
+            "session_id",
+            "correlated_on",
+            "counts",
+            "counts_final",
+            "receipt_source",
+        ):
+            if latest_langfuse_event.get(key) is not None:
+                langfuse[key] = latest_langfuse_event.get(key)
+        langfuse["events"] = langfuse_events
+
+    projection: dict[str, Any] = {
+        "session": run,
+        "session_meta": {},
+        "workload": workload,
+        "model_info": model,
+        "baseline": baseline,
+        "final": final,
+        "phase_timeline": transitions,
+        "phase_segments": phase_segments,
+        "action_timeline": transitions,
+        "capability_summary": capability_summary,
+        "kernel_route": {
+            "strategy_group": "kernel_optimizer",
+            "candidates": (selection.get("outputs") or {}).get("candidates") or [],
+            "selected_strategy": selected_strategy or None,
+            "actual_path": (selection.get("outputs") or {}).get("actual_path"),
+            "xor": (
+                bool(route_cycles)
+                and selection_cycles_unique
+                and all(cycle["xor"] for cycle in route_cycles)
+            ),
+            "routes": routes,
+            "executed_routes": [
+                cycle["executed_route"]
+                for cycle in route_cycles
+                if cycle.get("executed_route")
+            ],
+            "executed_route": latest_cycle.get("executed_route"),
+            "cycles": route_cycles,
+            "final_validation_precedence": [
+                "orchestrator_final_validation",
+                "same_harness_validated_adoption",
+                "provisional_internal_result",
+            ],
+        },
+        "geak_invocations": geak_operation.get("substeps") or [],
+        "forge_invocations": forge_invocations,
+        "kernel_lifecycle": kernel_lifecycle,
+        "param_search": explore_search,
+        "explore_search": explore_search,
+        "sweep": sweep,
+        "geak": {
+            "operation_id": geak_operation.get("operation_id"),
+            "status": geak_operation.get("status"),
+            "route": geak_operation.get("strategy"),
+            "substeps": geak_operation.get("substeps") or [],
+            "gates": geak_operation.get("gates") or [],
+            "measurements": geak_measurements,
+            "artifacts": geak_artifacts,
+            "extensions": geak_operation.get("extensions") or {},
+            "adoption_refs": geak_operation.get("adoption_refs") or [],
+            "final_validation_precedence": "orchestrator_final_validation",
+        },
+        "critic_robustness": critic_robustness,
+        "telemetry": telemetry,
+        "attribution": {
+            "basis": "validated_canonical_adoptions",
+            "by_strategy": attribution_by_strategy,
+        },
+        "kb_provenance": kb_provenance,
+        "specialist_runs": specialist_runs,
+        "optimization_stack": optimization_stack,
+        "gemm_tuning": {
+            "operations": gemm_operations,
+            "keep_only_adoptions": [
+                adoption
+                for adoption in validated_adoptions
+                if adoption.get("kind") == "gemm_tuning"
+            ],
+        },
+        "kernel_roofline": kernel_roofline,
+        "kernel_optimization_summary": kernel_optimization_summary,
+        "conc_sweep_summary": conc_sweep_summary,
+        "roofline": roofline,
+        "roofline_progress": roofline_progress,
+        "decision_trace": decision_trace,
+        "token_usage": token_usage,
+        "langfuse": langfuse,
+        "kernel_journey": kernel_journey,
+        "versions": versions,
+        "warnings": list(integrity.get("warnings") or []),
+        "source_files": source_files,
+    }
+    return projection
+
+
+def build_v4_live(session_dir: Path | str) -> dict[str, Any]:
+    """Build v4 exclusively from live recorder fragments.
+
+    The only filesystem reads performed by this path are reads of recorder
+    fragment envelopes under the breakdown parts directory. Missing streams
+    remain empty and are declared unavailable in ``integrity``.
+    """
+    from datetime import datetime, timezone
+
+    sd = Path(session_dir).resolve()
+    warnings: list[str] = []
+    assembled = _load_assembled_v4(sd, warnings)
+    snapshot = assembled.get("run_snapshot")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+
+    run = dict(snapshot.get("run") or {}) if isinstance(snapshot.get("run"), dict) else {}
+    workload = dict(snapshot.get("workload") or {}) if isinstance(snapshot.get("workload"), dict) else {}
+    model = dict(snapshot.get("model") or {}) if isinstance(snapshot.get("model"), dict) else {}
+    versions = dict(snapshot.get("versions") or {}) if isinstance(snapshot.get("versions"), dict) else {}
+    outcome = dict(snapshot.get("outcome") or {}) if isinstance(snapshot.get("outcome"), dict) else {}
+
+    def _rows(name: str) -> list[dict[str, Any]]:
+        """Return only mapping payloads from one assembled item stream."""
+        value = assembled.get(name)
+        return [dict(row) for row in value if isinstance(row, dict)] if isinstance(value, list) else []
+
+    transitions = _rows("phase_transitions")
+    subjects = _rows("subjects")
+    operations = _rows("operations")
+    measurements = _rows("measurements")
+    adoptions = _rows("adoptions")
+    artifacts = _rows("artifacts")
+    trace_events = _rows("trace_events")
+    integrity = _v4_integrity(assembled, warnings)
+    compat = _v4_compat_projection(
+        run=run,
+        workload=workload,
+        model=model,
+        versions=versions,
+        transitions=transitions,
+        operations=operations,
+        measurements=measurements,
+        adoptions=adoptions,
+        artifacts=artifacts,
+        trace_events=trace_events,
+        outcome=outcome,
+        integrity=integrity,
+    )
+    breakdown: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION_V4,
+        "exported_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "exporter_version": EXPORTER_VERSION,
+        "run": run,
+        "workload": workload,
+        "model": model,
+        "versions": versions,
+        "phases": {"transitions": transitions},
+        "subjects": subjects,
+        "operations": operations,
+        "measurements": measurements,
+        "adoptions": adoptions,
+        "outcome": outcome,
+        "artifacts": artifacts,
+        "trace": {"events": trace_events},
+        "integrity": integrity,
+        "projections": compat,
+        "compat": compat,
+    }
+    breakdown.update(compat)
+    return breakdown
+
+
+def _load_assembled_v4(
+    session_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Load only v4 recorder streams; never invoke collector fallback."""
+    try:
+        from .recorder.assembler import assemble_v4_parts
+
+        out = assemble_v4_parts(session_dir, warnings=warnings)
+        return out if isinstance(out, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("recorder: assemble_v4_parts failed")
+        warnings.append(f"recorder: assemble_v4_parts failed: {type(exc).__name__}: {exc}")
+        return {}
+
+
 def _load_assembled(
     session_dir: Path,
     warnings: list[str],
@@ -682,7 +1870,15 @@ def write_breakdown_json(
     target = Path(output_path).resolve() if output_path else sd / BREAKDOWN_FILENAME
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    breakdown = build(sd, include_transcripts=include_transcripts)
+    v4_enabled = os.environ.get(
+        "INFERENCE_OPTIMIZER_BREAKDOWN_V4",
+        "",
+    ).strip().lower() in ("1", "true", "yes", "on")
+    breakdown = (
+        build_v4_live(sd)
+        if v4_enabled
+        else build(sd, include_transcripts=include_transcripts)
+    )
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
 
     fd, tmp = tempfile.mkstemp(
@@ -1009,6 +2205,7 @@ __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "build",
+    "build_v4_live",
     "write_breakdown_json",
     "write_minimal_final_json",
     "write_minimal_final_report",
