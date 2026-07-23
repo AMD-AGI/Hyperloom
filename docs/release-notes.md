@@ -377,7 +377,7 @@ The first public release of Hyperloom (1.0.0a1) combines features from the follo
 
 ### Hyperloom components
 
-The following table lists the components included in the Hyperloom 1.0.0a1 release
+The following table lists the components included in the Hyperloom 1.0.0a1 release.
 
 | Component | Version | Supported platforms | |
 |-----------|---------|---------------------|---|
