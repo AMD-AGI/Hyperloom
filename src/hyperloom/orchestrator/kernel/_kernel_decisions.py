@@ -596,7 +596,31 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             )
         )
 
+    task_group_id = str(result.get("task_group_id") or "")
+    task_group_kernel_ids = [
+        str(item)
+        for item in (result.get("task_group_kernel_ids") or [])
+        if str(item)
+    ]
+    if task_group_id:
+        entry["task_group_id"] = task_group_id
+        entry["task_group_primary_kernel_id"] = str(
+            result.get("task_group_primary_kernel_id") or kernel_id
+        )
+        entry["task_group_kernel_ids"] = task_group_kernel_ids
     state.kernel_opt_attempts[kernel_id] = entry
+
+    # A grouped Forge dispatch validates one source function across every member
+    # shape. Mirror its terminal accounting to all siblings so the scheduler
+    # cannot rotate through k001/k002/... and repeat the same task-preparer run.
+    for sibling_id in task_group_kernel_ids:
+        if not sibling_id or sibling_id == kernel_id:
+            continue
+        sibling_entry = dict(entry)
+        sibling_entry["task_group_member_kernel_id"] = sibling_id
+        state.kernel_opt_attempts[sibling_id] = sibling_entry
+        if should_reject and sibling_id not in state.rejected_kernel_ids:
+            state.rejected_kernel_ids.append(sibling_id)
 
 
 def record_gemm_tuning(state, result: dict[str, Any]) -> None:
