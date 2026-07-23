@@ -804,23 +804,12 @@ def _build_kill_single_entrypoint(pid_file: str) -> str:
     )
 
 
-# Sentinel the restart kill job's pod-side preflight prints on a positive reject
-# (see scripts/_server_args_preflight.py). Grepped from the kill job logs so a
-# rejected variant maps to EXIT_CONFIG_ERROR without tearing the cluster down.
-_MN_PREFLIGHT_REJECT_SENTINEL = "MN_PREFLIGHT_REJECT:"
-
-
-class _MultiNodePreflightRejected(Exception):
-    """Kill-phase server-args preflight rejected the variant before any kill ran."""
-
-
 def _exec_kill_submission(
     state: dict[str, Any],
     entrypoint: str,
     *,
     label: str,
     args: argparse.Namespace,
-    reject_sentinel: str | None = None,
 ) -> str:
     """Submit a kill entrypoint via Ray Dashboard and poll to SUCCEEDED.
 
@@ -830,19 +819,9 @@ def _exec_kill_submission(
         label (str): Human-readable label used in log lines and polling.
         args (argparse.Namespace): Parsed CLI args (poll interval/timeout,
             print_logs).
-        reject_sentinel: When set (restart flow), a terminal-failed kill job
-            whose logs contain this marker means the pod-side preflight rejected
-            the variant BEFORE any kill ran; raise
-            :class:`_MultiNodePreflightRejected` so the caller can return
-            ``EXIT_CONFIG_ERROR`` with the existing server left intact. A failure
-            without the marker is a genuine kill failure and re-raises unchanged.
 
     Returns:
         str: The Ray Dashboard submission id of the kill job.
-
-    Raises:
-        _MultiNodePreflightRejected: When ``reject_sentinel`` is found in the
-            terminal-failed kill job's logs.
     """
     with _ray_dashboard_client(state) as ray:
         kill_sub = ray.submit_job(entrypoint)
@@ -857,82 +836,33 @@ def _exec_kill_submission(
             j = ray.get_job(kill_sub)
             return j, f"kill status={j.get('status', '?')}"
 
-        try:
-            _short_poll(
-                label=f"{label} {kill_sub}",
-                fetch=_fetch_kill,
-                is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-                is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
-                interval_s=args.poll_interval,
-                timeout_s=_poll_timeout_from_args(args),
-            )
-        except RuntimeError as exc:
-            # A rejected variant aborts the kill entrypoint BEFORE it kills; the
-            # preflight step prints the sentinel. Distinguish that from a real
-            # kill failure so only the latter tears down / retries.
-            if reject_sentinel:
-                try:
-                    logs = ray.get_job_logs(kill_sub)
-                except Exception:  # noqa: BLE001 - best-effort log fetch
-                    logs = ""
-                if reject_sentinel in (logs or ""):
-                    print(logs)
-                    raise _MultiNodePreflightRejected(
-                        f"{label}: variant rejected by pod-side preflight before kill; "
-                        "existing multi-node server left running"
-                    ) from exc
-            raise
+        _short_poll(
+            label=f"{label} {kill_sub}",
+            fetch=_fetch_kill,
+            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
+            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
+            interval_s=args.poll_interval,
+            timeout_s=_poll_timeout_from_args(args),
+        )
         if getattr(args, "print_logs", False):
             logs = ray.get_job_logs(kill_sub)
             print(logs)
     return kill_sub
 
 
-def _build_multinode_kill_entrypoint(
-    pid_dir: str,
-    grace_sec: int = 5,
-    *,
-    validate_framework: str | None = None,
-    validate_extra_args: str | None = None,
-) -> str:
+def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
     """Compose the head-pod entrypoint that kills every rank's server via heredoc-embedded kill_multinode.py (fans out via ray actors).
 
     Args:
         pid_dir (str): Directory of per-rank PID files.
         grace_sec (int): Grace period before a hard kill. Defaults to ``5``.
-        validate_framework: When set (restart flow), run
-            ``_server_args_preflight.py`` for this framework BEFORE the kill. On
-            a positive reject it prints ``MN_PREFLIGHT_REJECT`` and ``exit 3``,
-            so the kill never runs and the existing server stays up. Standalone
-            kill-inference passes ``None`` (unconditional teardown, unchanged).
-        validate_extra_args: The variant's raw extra server-args string to
-            validate (only used when ``validate_framework`` is set).
 
     Returns:
         str: The composed Ray Dashboard entrypoint shell command.
     """
     py = _read_pod_script("kill_multinode.py")
-    validate_prefix = ""
-    if validate_framework:
-        preflight_py = _read_pod_script("_server_args_preflight.py")
-        # Validate the variant's server args BEFORE any kill. ``|| exit 3`` makes
-        # the whole kill job fail (kill_multinode.py never runs) so the running
-        # server is preserved; the controller greps the printed sentinel to map
-        # this to EXIT_CONFIG_ERROR (vs a real kill failure). Fail-open: the
-        # preflight only exits non-zero on a concrete reject.
-        validate_prefix = (
-            f"cat > \"$WORK_DIR/_server_args_preflight.py\" <<'__MN_PREFLIGHT_PY_EOF__'\n"
-            f"{preflight_py}__MN_PREFLIGHT_PY_EOF__\n"
-            # ``--extra-args=`` (not space-separated): an extra-args value that
-            # itself starts with ``--`` (e.g. ``--enable-two-batch-overlap``)
-            # would otherwise be parsed by argparse as a separate flag.
-            f'python3 "$WORK_DIR/_server_args_preflight.py" '
-            f"--framework {shlex.quote(str(validate_framework))} "
-            f"--extra-args={shlex.quote(str(validate_extra_args or ''))} || exit 3\n"
-        )
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f"{validate_prefix}"
         f"cat > \"$WORK_DIR/kill_multinode.py\" <<'__MN_KILL_PY_EOF__'\n"
         f"{py}__MN_KILL_PY_EOF__\n"
         f'python3 "$WORK_DIR/kill_multinode.py" '
@@ -1110,7 +1040,6 @@ def _build_multinode_launch_entrypoint(
     pid_dir: str,
     log_dir: str,
     unset_env: list[str] | None = None,
-    preflight_only: bool = False,
 ) -> str:
     """Compose the head-pod entrypoint that spawns one rank per node via heredoc-embedded launch_multinode.py.
 
@@ -1123,8 +1052,6 @@ def _build_multinode_launch_entrypoint(
         pid_dir (str): Directory for per-rank PID files.
         log_dir (str): Directory for per-rank logs.
         unset_env: Inherited pod/raylet env keys removed on every rank.
-        preflight_only: Validate pod-side args/capabilities, then exit before
-            ``ray.init`` or spawning ranks.
 
     Returns:
         str: The composed Ray Dashboard entrypoint shell command.
@@ -1155,7 +1082,6 @@ def _build_multinode_launch_entrypoint(
             info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
     profiler_arg = f"--torch-profiler-dir {shlex.quote(str(profiler_dir))} " if profiler_dir else ""
     unset_arg = f"--unset-env-json {shlex.quote(json.dumps(sorted(unset_env or [])))} "
-    preflight_arg = "--preflight-only " if preflight_only else ""
     # Expert-parallel size; ep <= 1 emits no flag.
     try:
         ep_val = int(getattr(args, "ep", 1) or 1)
@@ -1203,7 +1129,7 @@ def _build_multinode_launch_entrypoint(
         # shell metacharacters, which would otherwise split the argv or open a
         # command-injection surface in the heredoc-embedded launch command.
         f"--pid-dir {shlex.quote(str(pid_dir))} --log-dir {shlex.quote(str(log_dir))} "
-        f"{preflight_arg}{unset_arg}{ep_arg}{profiler_arg}{pd_args}{wait_flag} "
+        f"{unset_arg}{ep_arg}{profiler_arg}{pd_args}{wait_flag} "
         f"--extra-args {shlex.quote(str(extra_args))}"
     )
 
@@ -1832,14 +1758,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
         _fwd_env, _unset_env = _rayjob_forward_env_spec()
         _cur_env_fp = _variant_env_fingerprint(_fwd_env, _unset_env)
-        # The kill entrypoint self-validates the variant's server args BEFORE it
-        # kills anything (folded in so no separate preflight job is submitted per
-        # restart). A rejected variant aborts the kill and leaves the server up.
-        kill_ep = _build_multinode_kill_entrypoint(
-            pid_dir,
-            validate_framework=str(args.framework),
-            validate_extra_args=getattr(args, "extra_args", "") or "",
-        )
+        kill_ep = _build_multinode_kill_entrypoint(pid_dir)
         launch_ep = _build_multinode_launch_entrypoint(
             args,
             nnodes,
@@ -1901,22 +1820,12 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
         kill_sub = ""
         if not launch_sub:
-            # Pod-side parser/capability validation runs inside the kill job,
-            # BEFORE it kills anything. A rejected variant aborts the kill (the
-            # preflight prints the sentinel + exits non-zero) and therefore
-            # leaves the existing multi-node server running instead of tearing
-            # the cluster down.
-            try:
-                kill_sub = _exec_kill_submission(
-                    state,
-                    kill_ep,
-                    label="restart kill",
-                    args=args,
-                    reject_sentinel=_MN_PREFLIGHT_REJECT_SENTINEL,
-                )
-            except _MultiNodePreflightRejected as exc:
-                info(f"{exc}; returning config-error (no reclaim, no relaunch)")
-                return EXIT_CONFIG_ERROR
+            kill_sub = _exec_kill_submission(
+                state,
+                kill_ep,
+                label="restart kill",
+                args=args,
+            )
 
         with _ray_dashboard_client(state) as ray:
             # Phase B: launch new (skipped when resuming a RUNNING launch).
