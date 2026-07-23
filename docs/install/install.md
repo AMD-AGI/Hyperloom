@@ -22,22 +22,16 @@ or Codex before running the install command.
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
-- `curl` to download the published GitHub release wheel.
 - Access to the Anthropic LLM provider.
 - A dedicated workspace directory opened in the user's agent.
 
 ### Install Hyperloom
 
-From the agent terminal in that workspace, download the latest release wheel from
-GitHub Releases, then install Hyperloom using the following command:
+From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-curl -fsSL https://api.github.com/repos/AMD-AGI/Hyperloom/releases/latest \
-  | grep -o 'https://[^"]*-py3-none-any\.whl' \
-  | xargs curl -fL -O
-
 python3 -m pip install \
-  ./hyperloom_inference_optimizer-*-py3-none-any.whl \
+  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a1/hyperloom_inference_optimizer-1.0.0a1-py3-none-any.whl \
   --target .
 ```
 
