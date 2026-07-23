@@ -7,7 +7,7 @@ myst:
 
 # Hyperloom release notes
 
-The current packaged version is `1.0.0a1` (`pyproject.toml`). For the
+The current packaged version is 1.0.0a1 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
@@ -16,7 +16,7 @@ summarizes the headline capabilities.
 
 ## Hyperloom 1.0.0a1 public release
 
-The first public release of Hyperloom (`1.0.0a1`) combines features from the following versions:
+The first public release of Hyperloom (1.0.0a1) combines features from the following versions:
 
 ### 1.0.0a1 highlights
 
@@ -374,3 +374,15 @@ The first public release of Hyperloom (`1.0.0a1`) combines features from the fol
   pass-or-discard and become constrained retries. The **Pending Cause Agent** does the analogous thing on the queue
   side: when a user's run is waiting, it surfaces a concrete reason why. Together they replace two previously opaque
   states — "something failed" and "still waiting" — with explainable, user-controllable answers.
+
+### Hyperloom components
+
+The following table lists the components included in the Hyperloom 1.0.0a1 release
+
+| Component | Version | Supported platforms | |
+|-----------|---------|---------------------|---|
+| [TraceLens](https://rocm.docs.amd.com/projects/tracelens/en/docs-0.1.0/) | [0.1.0](https://rocm.docs.amd.com/projects/tracelens/en/docs-0.1.0/about/release-notes.html) | Hardware-agnostic · OS-independent · Python >= 3.6 | [![GitHub](https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png){w=20px}](https://github.com/AMD-AGI/TraceLens) |
+| [GEAK](https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/) | [4.0.0](https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/release-notes.html) | MI300X, MI325X, MI355X · ROCm 6.4.x, 7.0.x, 7.1.x, 7.2.x · Ubuntu 22.04, 24.04 · Python 3.8, 3.12 | [![GitHub](https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png){w=20px}](https://github.com/AMD-AGI/GEAK) |
+| [IntelliKit](https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.0/) | [0.1.0](https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.0/release-notes.html) | MI300X, MI325X, MI355X · ROCm 7.2.x · Ubuntu 22.04, 24.04 · Python >= 3.10 | [![GitHub](https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png){w=20px}](https://github.com/AMDResearch/intellikit) |
+| [AgentKernelArena](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/) | [0.2.0](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/) | MI300X, MI325X, MI355X · ROCm 7.2.x · Ubuntu 22.04, 24.04 · Python >= 3.10 | [![GitHub](https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png){w=20px}](https://github.com/AMD-AGI/AgentKernelArena) |
+| [Magpie](https://rocm.docs.amd.com/projects/magpie/en/docs-0.2.0/) | [0.2.0](https://rocm.docs.amd.com/projects/magpie/en/docs-0.2.0/reference/release-notes.html) | MI300X, MI325X, MI355X · ROCm 7.0.x, 7.1.x, 7.2.x · Ubuntu 22.04, 24.04 · Python >= 3.10 | [![GitHub](https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png){w=20px}](https://github.com/AMD-AGI/Magpie) |
