@@ -2287,6 +2287,13 @@ def run_attempt(
             )
             if invocation_spec_path:
                 backend_paths["invocation_spec"] = str(invocation_spec_path)
+            checkpoint_path = (
+                result.get("checkpoint_path") or ""
+                if isinstance(result, dict)
+                else ""
+            )
+            if checkpoint_path:
+                backend_paths["forge_checkpoint"] = str(checkpoint_path)
             cli_workspace = (result.get("cli_workspace") or "") if isinstance(result, dict) else ""
             session_id_oob = (result.get("session_id") or "") if isinstance(result, dict) else ""
             cli_log = ""
@@ -2345,6 +2352,11 @@ def run_attempt(
                 "partial_latest_optimized",
                 "partial_report",
             )
+            unrecoverable_timeout = bool(
+                isinstance(result, dict)
+                and result.get("timed_out")
+                and not result.get("salvaged")
+            )
             auth_loop_hits = _count_auth_failures(full_stdout)
             if auth_loop_hits >= _AUTH_RETRY_THRESHOLD:
                 backend_paths["auth_failure_count"] = str(auth_loop_hits)
@@ -2352,7 +2364,11 @@ def run_attempt(
                 # Force a non-partial terminal state so make_proposal REVERTs.
                 if status == "timeout":
                     status = "failed"
-            elif status in {"timeout", "failed"} and any(k in backend_paths for k in partial_evidence_keys):
+            elif (
+                not unrecoverable_timeout
+                and status in {"timeout", "failed"}
+                and any(k in backend_paths for k in partial_evidence_keys)
+            ):
                 status = "partial"
 
     return {
@@ -2364,6 +2380,9 @@ def run_attempt(
         # Structured backend self-skip marker so the classifier labels the
         # kernel ``skip`` instead of a failure without parsing free-text stdout.
         "skipped": bool(result.get("skipped")) if isinstance(result, dict) else False,
+        "timed_out": bool(result.get("timed_out")) if isinstance(result, dict) else False,
+        "salvaged": bool(result.get("salvaged")) if isinstance(result, dict) else False,
+        "best_commit": str(result.get("best_commit") or "") if isinstance(result, dict) else "",
         "elapsed_s": elapsed,
         "prompt_path": str(prompt_file),
         "optimized_path": str(optimized_path) if optimized_path.exists() else "",

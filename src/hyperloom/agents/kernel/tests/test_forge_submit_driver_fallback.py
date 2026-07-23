@@ -58,7 +58,15 @@ def _submit_with_stubbed_loop(
 
     def fake_run_loop(**kwargs):
         captured.update(kwargs)
-        return 1.0, 0.9, True, "loop completed", None
+        return forge_submit.ForgeLoopOutcome(
+            baseline_ms=1.0,
+            best_ms=0.9,
+            improved=True,
+            output="loop completed",
+            error=None,
+            timed_out=False,
+            checkpoint=None,
+        )
 
     monkeypatch.setattr(forge_submit, "_run_loop_via_cli", fake_run_loop)
 

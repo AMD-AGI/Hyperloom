@@ -287,17 +287,23 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
     spec_path.write_text('{"schema_version": 1}\n', encoding="utf-8")
     captured: dict = {}
 
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return SimpleNamespace(
-            returncode=0,
-            stdout='__FORGE_RESULT__{"baseline_ms": 1.0, "best_ms": 0.9, "improved": true}',
-            stderr="",
-        )
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["popen_kwargs"] = kwargs
+            self.returncode = 0
+            self.pid = 123
+
+        def communicate(self, timeout=None):
+            return (
+                '__FORGE_RESULT__{"baseline_ms": 1.0, '
+                '"best_ms": 0.9, "improved": true}',
+                "",
+            )
 
     monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
-    monkeypatch.setattr(forge_submit.subprocess, "run", fake_run)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", FakePopen)
 
     result = forge_submit._run_loop_via_cli(
         worktree_kernel=str(kernel),
@@ -320,7 +326,83 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
     cmd = captured["cmd"]
     option_index = cmd.index("--invocation-spec-file")
     assert cmd[option_index + 1] == str(spec_path.resolve())
+    assert cmd[cmd.index("--experiment-id") + 1] == "hyperloom"
+    assert captured["popen_kwargs"]["start_new_session"] is True
     assert (result[0], result[1], result[2], result[4]) == (1.0, 0.9, True, None)
+
+
+def test_forge_loop_timeout_returns_persisted_checkpoint(tmp_path, monkeypatch):
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("def kernel(x):\n    return x\n", encoding="utf-8")
+    driver = tmp_path / "driver.py"
+    driver.write_text("# driver\n", encoding="utf-8")
+    experiments_dir = tmp_path / "experiments"
+    experiments_dir.mkdir()
+    checkpoint = {
+        "state": "best_committed",
+        "baseline_ms": 1.0,
+        "best_ms": 0.8,
+        "improved": True,
+    }
+    (experiments_dir / "hyperloom.json").write_text(
+        json.dumps({"experiment_id": "hyperloom", "checkpoint": checkpoint})
+    )
+
+    class TimeoutPopen:
+        def __init__(self, *_args, **_kwargs):
+            self.returncode = None
+            self.pid = 123
+
+        def communicate(self, timeout=None):
+            raise forge_submit.subprocess.TimeoutExpired(
+                cmd=["forge-loop"],
+                timeout=timeout,
+            )
+
+    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", TimeoutPopen)
+
+    def terminate_with_checkpoint(_proc):
+        (experiments_dir / "hyperloom.json").write_text(
+            json.dumps(
+                {
+                    "experiment_id": "hyperloom",
+                    "checkpoint": checkpoint,
+                }
+            )
+        )
+        return "partial stdout", ""
+
+    monkeypatch.setattr(
+        forge_submit,
+        "_terminate_forge_process",
+        terminate_with_checkpoint,
+    )
+
+    result = forge_submit._run_loop_via_cli(
+        worktree_kernel=str(kernel),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        shapes={"primary": {"M": 64}},
+        snr_threshold=30.0,
+        max_iters=8,
+        max_hours=1.0,
+        branch="forge/session/scaled_gemm",
+        gpu_target="gfx942",
+        fellow="triton-fellow",
+        program_md_file="",
+        invocation_spec_file="",
+        experiments_dir=experiments_dir,
+        forge_log=tmp_path / "forge.log",
+        timeout_s=60,
+    )
+
+    assert result.timed_out is True
+    assert result.checkpoint == checkpoint
+    assert result.baseline_ms is None
+    assert result.best_ms is None
+    assert isinstance(result.error, RuntimeError)
 
 
 def test_serialized_candidate_preserves_task_group(tmp_path):
