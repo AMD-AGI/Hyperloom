@@ -14,19 +14,19 @@ independently installable packages (Kerncap, Metrix, Linex, Nexus, Accordo, plus
 the `rocm_mcp` and `uprof_mcp` server bundles).
 
 Within Hyperloom, IntelliKit is not called directly. It sits underneath
-[Magpie](magpie.md), which relies on IntelliKit for some of its low-level GPU
-profiling primitives. Hyperloom therefore depends on IntelliKit transitively,
-through Magpie.
+[GEAK](geak.md), which depends on IntelliKit's Metrix for low-level GPU
+profiling. Hyperloom therefore depends on IntelliKit transitively, through
+GEAK.
 
 - **Source**: <https://github.com/AMDResearch/intellikit>
 - **License**: MIT
 
 ## Role in Hyperloom
 
-Hyperloom doesn't reference IntelliKit directly. Kernel profiling and
-validation in Hyperloom is powered by [Magpie](magpie.md), which in turn relies
-on IntelliKit for some of its low-level GPU profiling primitives. IntelliKit is
-an indirect, transitive dependency reached through Magpie.
+Hyperloom doesn't reference IntelliKit directly. It is a runtime dependency of
+[GEAK](geak.md), which pins IntelliKit's Metrix (`metrix`) for low-level GPU
+profiling. IntelliKit is an indirect, transitive dependency reached through
+GEAK.
 
 ## IntelliKit documentation
 
