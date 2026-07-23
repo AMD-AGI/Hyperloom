@@ -1,0 +1,298 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Shared provenance builder (P0-A / WP-0).
+
+Single source of truth for the provenance block that pins *exactly which run*
+produced an artifact -- model revision, framework/stack commits, GPU arch,
+parallelism, graph mode, dtype/quant, workload, and full server args. A tuned
+CSV or a TraceShapeManifest is only valid under the conditions it was made
+under, so both the session manifest (WP-7) and the TraceShapeManifest producer
+(WP-1) consume this one builder to avoid drift.
+
+Design:
+
+* **env-first, args-override-aware, degrade-to-null**: values come from parsed
+  CLI args when present, else the environment, else ``None`` -- building
+  provenance never raises on missing inputs.
+* **injectable ``env``**: callers/tests pass a mapping; defaults to
+  ``os.environ``. Subprocess probes (gfx arch, git SHA, image) are gated by
+  ``probe`` so unit tests stay hermetic.
+* **stdlib-only**: any package may import it without an import cycle.
+
+This module owns the detection helpers going forward; ``session/manifest.py``
+will delegate to it (WP-7), replacing its local ``_detect_*`` copies.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import subprocess  # nosec B404 - best-effort, guarded provenance probes only.
+from pathlib import Path
+from typing import Any, Mapping
+
+PROVENANCE_VERSION = 1
+#: Tags a full shared provenance block apart from a placeholder stub.
+PROVENANCE_SOURCE = "shared_v1"
+
+# Env var priority per stack component (operator pins beat auto-detect). Mirrors
+# session/manifest.py so the two agree; that module will delegate here (WP-7).
+_STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
+    "rocm": ("ROCM_VERSION", "HIP_VERSION"),
+    "aiter": ("AITER_COMMIT", "AITER_VERSION"),
+    "sglang": ("SGLANG_VERSION", "SGL_VERSION"),
+    "vllm": ("VLLM_VERSION",),
+}
+
+_GFX_ENVS = ("HYPERLOOM_GFX_ARCH", "GFX_ARCH", "PYTORCH_ROCM_ARCH")
+_GRAPH_MODE_ENVS = ("HYPERLOOM_GRAPH_MODE", "GRAPH_MODE")
+_SERVER_ARGS_ENVS = ("HYPERLOOM_SERVER_ARGS", "SERVER_ARGS")
+_IMAGE_ENVS = ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE")
+_CODE_REV_ENVS = ("HYPERLOOM_CODE_REVISION", "HYPERLOOM_GIT_SHA")
+
+_GFX_RE = re.compile(r"gfx\d+[a-z0-9]*", re.IGNORECASE)
+
+
+def _env_first(env: Mapping[str, str], *names: str) -> str | None:
+    """Return the first set, non-empty (stripped) env value among ``names``."""
+    for n in names:
+        v = (env.get(n) or "").strip()
+        if v:
+            return v
+    return None
+
+
+def _arg_first(args: Any, *names: str) -> Any:
+    """Return the first present, non-empty attribute of ``args`` among ``names``."""
+    if args is None:
+        return None
+    for n in names:
+        v = getattr(args, n, None)
+        if v is not None and v != "":
+            return v
+    return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    """Coerce to int, or ``None`` when unset/blank/non-numeric."""
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def detect_gfx_arch(env: Mapping[str, str], *, probe: bool = True) -> str | None:
+    """Detect the ROCm gfx arch (e.g. ``gfx950``).
+
+    env override first; else, when ``probe`` is set, a guarded ``rocminfo``
+    invocation. Returns ``None`` when neither resolves (never raises).
+    """
+    raw = _env_first(env, *_GFX_ENVS)
+    if raw:
+        m = _GFX_RE.search(raw)
+        return m.group(0).lower() if m else raw
+    if not probe:
+        return None
+    try:
+        out = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=3)  # nosec B603 B607
+        if out.returncode == 0:
+            m = _GFX_RE.search(out.stdout or "")
+            if m:
+                return m.group(0).lower()
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def detect_graph_mode(env: Mapping[str, str]) -> str | None:
+    """Return the graph-execution mode hint (``graph_capture``/``eager``/...)."""
+    return _env_first(env, *_GRAPH_MODE_ENVS)
+
+
+def _read_first_line(path: Path) -> str:
+    """First non-empty stripped line of a file, or ``""`` when unreadable."""
+    try:
+        if not path.exists():
+            return ""
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            s = line.strip()
+            if s:
+                return s
+    except OSError:
+        return ""
+    return ""
+
+
+def detect_stack_fingerprint(env: Mapping[str, str], *, probe: bool = True) -> dict[str, str]:
+    """Best-effort stack fingerprint: env -> rocm marker -> installed pkg.
+
+    Each component resolves to a version/commit string, or ``"unknown"``. Package
+    imports and marker reads are attempted only when ``probe`` is set.
+    """
+    out: dict[str, str] = {}
+    for component, env_vars in _STACK_FINGERPRINT_ENVS.items():
+        val = _env_first(env, *env_vars) or ""
+        if not val and probe and component == "rocm":
+            for marker in ("/opt/rocm/.info/version", "/opt/rocm/.info/version-utils"):
+                v = _read_first_line(Path(marker))
+                if v:
+                    val = v
+                    break
+        if not val and probe:
+            val = _probe_pkg_version(component)
+        out[component] = val or "unknown"
+    return out
+
+
+def _probe_pkg_version(component: str) -> str:
+    """Best-effort installed-package version/commit for a stack component."""
+    try:
+        if component == "sglang":
+            import sglang as _mod  # type: ignore
+
+            return str(getattr(_mod, "__version__", "")).strip()
+        if component == "vllm":
+            import vllm as _mod  # type: ignore
+
+            return str(getattr(_mod, "__version__", "")).strip()
+        if component == "aiter":
+            import aiter as _mod  # type: ignore
+
+            return str(getattr(_mod, "__commit__", None) or getattr(_mod, "__version__", "")).strip()
+    except Exception:  # noqa: BLE001 — a missing package is normal.
+        return ""
+    return ""
+
+
+def detect_code_revision(env: Mapping[str, str], *, probe: bool = True) -> str:
+    """Short git SHA of the repo containing this file, else a baked env rev.
+
+    Live ``git rev-parse`` (dev checkouts) is attempted only when ``probe`` is
+    set; falls back to ``HYPERLOOM_CODE_REVISION`` / ``HYPERLOOM_GIT_SHA``.
+    """
+    if probe:
+        try:
+            here = Path(__file__).resolve().parent
+            out = subprocess.run(  # nosec B603 B607
+                ["git", "-C", str(here), "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+            pass
+    return _env_first(env, *_CODE_REV_ENVS) or ""
+
+
+def detect_image(env: Mapping[str, str]) -> str | None:
+    """Container image from env vars or known marker files; ``None`` otherwise."""
+    val = _env_first(env, *_IMAGE_ENVS)
+    if val:
+        return val
+    for marker in ("/etc/podinfo/image", "/etc/hyperloom-image"):
+        v = _read_first_line(Path(marker))
+        if v:
+            return v
+    return None
+
+
+def _server_args_list(args: Any, env: Mapping[str, str]) -> list[str]:
+    """Normalize server args (from args attr or env) into a list of tokens."""
+    raw = _arg_first(args, "server_args", "extra_server_args")
+    if raw is None:
+        raw = _env_first(env, *_SERVER_ARGS_ENVS)
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw]
+    return str(raw).split()
+
+
+def server_args_hash(server_args: list[str]) -> str:
+    """Stable sha256 over the ordered server-arg tokens (``""`` when empty)."""
+    if not server_args:
+        return ""
+    joined = "\n".join(str(x) for x in server_args)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def build_provenance(
+    args: Any = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    probe: bool = True,
+    source: str = PROVENANCE_SOURCE,
+) -> dict[str, Any]:
+    """Assemble the shared provenance block.
+
+    Args:
+        args: Parsed CLI args (argparse.Namespace) overriding env, or ``None``.
+        env: Environment mapping; defaults to ``os.environ`` (injectable for
+            tests).
+        probe: When False, skip all subprocess/package/marker probes so the
+            result is derived purely from ``args`` + ``env`` (hermetic).
+        source: Tag stored under ``_provenance_source`` (defaults to the shared
+            marker; pass a custom value to flag a partial/stub block).
+
+    Returns:
+        A JSON-serializable provenance dict. Missing fields degrade to ``None``
+        (or ``""`` / ``"unknown"`` where a string is contractually expected).
+    """
+    env = os.environ if env is None else env
+
+    model_path = _arg_first(args, "model_path", "model")
+    model_path = str(model_path) if model_path else None
+    model_name = _arg_first(args, "model_display_name", "model_name")
+    if not model_name and model_path:
+        model_name = Path(model_path).name
+    model_name = str(model_name) if model_name else None
+
+    server_args = _server_args_list(args, env)
+
+    return {
+        "_provenance_source": source,
+        "provenance_version": PROVENANCE_VERSION,
+        # model identity
+        "model_name": model_name,
+        "model_path": model_path,
+        "model_revision": _arg_first(args, "model_revision") or _env_first(env, "MODEL_REVISION"),
+        # framework / stack
+        "framework": (_arg_first(args, "framework") or _env_first(env, "FRAMEWORK")),
+        "code_revision": detect_code_revision(env, probe=probe),
+        "stack_fingerprint": detect_stack_fingerprint(env, probe=probe),
+        "image": detect_image(env),
+        # hardware / parallelism / graph
+        "gpu_type": (_arg_first(args, "gpu_type") or _env_first(env, "GPU_TYPE")),
+        "gfx_arch": detect_gfx_arch(env, probe=probe),
+        "tp": _int_or_none(_arg_first(args, "tp") or _env_first(env, "TP")),
+        "ep": _int_or_none(_arg_first(args, "ep") or _env_first(env, "EP")),
+        "graph_mode": (_arg_first(args, "graph_mode") or detect_graph_mode(env)),
+        # dtype / workload
+        "dtype": (_arg_first(args, "precision", "dtype") or _env_first(env, "PRECISION")),
+        "concurrency": _int_or_none(_arg_first(args, "conc", "concurrency") or _env_first(env, "CONC", "CONCURRENCY")),
+        "isl": _int_or_none(_arg_first(args, "isl") or _env_first(env, "ISL")),
+        "osl": _int_or_none(_arg_first(args, "osl") or _env_first(env, "OSL")),
+        "max_model_len": _int_or_none(_arg_first(args, "max_model_len") or _env_first(env, "MAX_MODEL_LEN")),
+        # full server args + fingerprint
+        "server_args": server_args,
+        "server_args_hash": server_args_hash(server_args),
+    }
+
+
+__all__ = [
+    "PROVENANCE_VERSION",
+    "PROVENANCE_SOURCE",
+    "build_provenance",
+    "server_args_hash",
+    "detect_gfx_arch",
+    "detect_graph_mode",
+    "detect_stack_fingerprint",
+    "detect_code_revision",
+    "detect_image",
+]
