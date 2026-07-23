@@ -533,6 +533,34 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     assert result["patches_applied"] == []
 
 
+@pytest.mark.asyncio
+async def test_executor_accepts_explicit_server_args_and_envs(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    workspace = session_dir / "runs" / "specialist" / "t-spec-explicit"
+    workspace.mkdir(parents=True)
+    (workspace / "specialist_done.json").write_text(
+        json.dumps({"proposal_set": [], "patches_written": []}),
+        encoding="utf-8",
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    extra_args = '--kv-cache-dtype fp8 --compilation-config \'{"mode": "max-autotune"}\''
+    result = await executor(
+        _make_ctx(
+            "t-int-explicit",
+            {
+                "specialist_task_id": "t-spec-explicit",
+                "extra_server_args": extra_args,
+                "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+                "apply_only": True,
+            },
+        )
+    )
+
+    assert result["status"] == "applied_no_bench"
+    assert result["extra_server_args_applied"] == extra_args
+    assert result["extra_envs_applied"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
 # Enablement runnable gate: the bench is the launch probe; positive throughput
 # means the server booted -> KEEP; else -> REVERT. The perf/accuracy KEEP gate is
 # bypassed for enablement-tagged integrations.
@@ -1010,3 +1038,55 @@ async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
 
     assert captured["serving_lease"] is lease
     lease.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Path):
+    from unittest.mock import patch
+
+    from hyperloom.orchestrator.actions.executors import _ray_serving
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
+
+    config_path = tmp_path / "baseline.yaml"
+    config_path.write_text("benchmark: {}\n", encoding="utf-8")
+    executor = IntegratePatchExecutor(session_dir=tmp_path)
+    captured: dict[str, Any] = {}
+    extra_args = '--kv-cache-dtype fp8 --compilation-config \'{"mode": "max-autotune"}\''
+
+    async def fake_run_grid(**kwargs):
+        captured.update(kwargs)
+        variant = kwargs["grid"][0]
+        return [
+            VariantResult(
+                name=variant.name,
+                extra_server_args=variant.extra_server_args,
+                extra_envs=variant.extra_envs,
+                status="succeeded",
+            )
+        ]
+
+    with (
+        patch.object(ip_mod, "run_grid", new=fake_run_grid),
+        patch.object(ip_mod, "materialize_config_with_envs", return_value=config_path),
+        patch.object(_ray_serving, "maybe_serving_lease", return_value=None),
+    ):
+        await executor._bench_patch(
+            params={
+                "config_path": str(config_path),
+                "base_extra_args": "--base-flag value",
+                "base_extra_envs": {"BASE_ENV": "1"},
+            },
+            output_root=tmp_path / "out",
+            extra_server_args_applied=extra_args,
+            extra_envs_applied={"VLLM_ROCM_USE_AITER": "1"},
+            specialist_task_id="task-explicit",
+        )
+
+    variant = captured["grid"][0]
+    assert captured["base_extra_args"] == "--base-flag value"
+    assert variant.extra_server_args == extra_args
+    assert variant.extra_envs == {
+        "BASE_ENV": "1",
+        "VLLM_ROCM_USE_AITER": "1",
+    }
