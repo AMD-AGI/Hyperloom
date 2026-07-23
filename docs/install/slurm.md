@@ -14,8 +14,8 @@ and suits teams whose AMD GPU fleet is managed by Slurm rather than Kubernetes.
 
 The submission scripts wrap the full flow: resolve the model row → build the
 sbatch command → start the container → set the gateway host alias → mount the CA
-bundle → install the optimizer → launch the backend. **They never start
-optimization on the login node; work only runs inside the scheduled job.**
+bundle → install the optimizer → launch the backend. They never start
+optimization on the login node; work only runs inside the scheduled job.
 
 The ready-to-use scripts ship under
 `src/hyperloom/inference_optimizer/assets/slurm/`:
@@ -46,7 +46,7 @@ The following table lists the prerequisites and their implications for running H
 
 ---
 
-## 1. Get the scripts
+## Step 1: Get the scripts
 
 For a full source checkout, the scripts are already present under the assets
 directory:
@@ -60,7 +60,7 @@ For a standalone setup on a login node, copy that `slurm/` directory to a shared
 location the scheduler can read (for example `/mnt/vast/hyperloom-slurm`) and run
 `submit.sh` from there.
 
-## 2. Configure LLM credentials
+## Step 2: Configure LLM credentials
 
 Hyperloom is an LLM-driven agent: the orchestrator and kernel agent call the
 gateway throughout the run, so a working key and a reachable endpoint are hard
@@ -91,7 +91,7 @@ list** — they are needed in [LLM model-name constraints](#llm-model-name-const
 See [Authentication and credentials](../reference/authentication.md) for the full
 credential model, including the split Anthropic-/OpenAI-compatible provider setup.
 
-## 3. Prepare cluster access
+## Step 3: Prepare cluster access
 
 ### Build a combined CA bundle
 
@@ -129,7 +129,7 @@ missing `src/hyperloom/inference_optimizer/cli/` causes `ModuleNotFoundError`
 (see [Troubleshooting](#troubleshooting)). If `--source-dir` is omitted, the job
 clones `main` from GitHub at runtime, which requires GitHub egress on the node.
 
-## 4. Submit a job
+## Step 4: Submit a job
 
 ```bash
 # Generic (pyxis/enroot or docker auto-detected; requests TP GPUs by default)
@@ -177,7 +177,7 @@ The container still receives every GPU through `--device=/dev/kfd
 --device=/dev/dri`, so TP=8 works. If your GPUs **are** registered as gres
 (`Gres=gpu:...:8`), use the standard `--gpus 8` and skip `-g 0`.
 
-## 5. Monitor and read artifacts
+## Step 5: Monitor and read artifacts
 
 ```bash
 squeue -p <partition>                                 # queue
@@ -213,7 +213,7 @@ hard-allowlisted:
 | Kernel agent (GEAKv4 Claude Code workflow) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-4-8` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different Claude Code model. |
 | Codex / external | `CODEX_MODEL` | for example `gpt-5.4` | Use a gpt/codex-family model. |
 
-- Do **not** use suffixed variants (for example `claude-opus-4-7-thinking-xhigh`);
+- Do *not* use suffixed variants (for example `claude-opus-4-7-thinking-xhigh`);
   the gateway returns `Invalid model name` (which can surface misleadingly as
   `401 missing subscription key`).
 - To use an orchestration model outside the allowlist, set

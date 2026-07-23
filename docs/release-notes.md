@@ -7,19 +7,18 @@ myst:
 
 # Hyperloom release notes
 
-The current packaged version is `1.0.0a1` (`pyproject.toml`). For the
+The current packaged version is 1.0.0a1 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
 
-## Hyperloom public snapshot
+## Hyperloom public release
 
-The first public snapshot of Hyperloom combines features from the following
-per-release versions:
+The first public release of Hyperloom (1.0.0a1) combines features from the following versions:
 
-### 1.0.0a1
+### 1.0.0a1 highlights
 
 - **Unified macro-cycle orchestration and budget accounting**: Short and long
   sessions now share the same cyclic optimization model. Phase budgets use
@@ -80,17 +79,14 @@ per-release versions:
   cleanup. When unset, single-node serving uses the local subprocess path.
   Multi-node is unchanged (gated off).
 
-- **Accuracy-gate & eval-result integrity**: lm-eval output is wired to a
+- **Accuracy-gate and eval-result integrity**: `lm-eval` output is wired to a
   session-scoped `EVAL_RESULT_DIR`; a baseline that produces no accuracy
   verdict now hard-stops instead of optimizing an unvalidated baseline; leaked
   eval results are salvaged back from the InferenceX checkout / local-disk
   mirror; and session-breakdown attribution no longer fabricates credit from a
   seeded stack.
 
-- **Provider-direct LLM configuration**: Hyperloom runs against Anthropic
-  directly (provider-only paths), with env-driven, consistent gateway
-  auth/endpoint resolution and case-insensitive Anthropic-endpoint handling;
-  the Critic can run over the native provider endpoint.
+- **Provider-direct LLM configuration**: Hyperloom connects directly to Anthropic (provider-only paths), with env-driven gateway auth/endpoint resolution, case-insensitive Anthropic-endpoint handling, and support for running the Critic over the native provider endpoint.
 
 - **Model-path & workload-default consistency**: A single `--model` value (local
   path or HF repo id) resolves identically across baseline, roofline, and the
@@ -117,7 +113,7 @@ per-release versions:
   pool cap is decoupled from the dispatch budget.
 
 - **Profiling / roofline / TraceLens**: GPU information is restored in
-  profiler traces (torch-trace `"kernel"` category), and a stale TRACELENS_ROOT
+  profiler traces (torch-trace `"kernel"` category), and a stale `TRACELENS_ROOT`
   inherited from the kernel-agent env file no longer breaks TraceLens discovery.
 
 - **Orchestrator reliability & long-run durability**: `reports/final.json` is
@@ -378,3 +374,15 @@ per-release versions:
   pass-or-discard and become constrained retries. The **Pending Cause Agent** does the analogous thing on the queue
   side: when a user's run is waiting, it surfaces a concrete reason why. Together they replace two previously opaque
   states — "something failed" and "still waiting" — with explainable, user-controllable answers.
+
+### Hyperloom components
+
+The following table lists the components included in the Hyperloom 1.0.0a1 release.
+
+| Component | Version | Supported platforms | |
+|-----------|---------|---------------------|---|
+| [TraceLens](https://rocm.docs.amd.com/projects/tracelens/en/docs-0.1.0/) | [0.1.0](https://rocm.docs.amd.com/projects/tracelens/en/docs-0.1.0/about/release-notes.html) | **GPU:** Hardware-agnostic<br>OS-independent<br>**Python:** >= 3.6 | [<i class="fab fa-github"></i>](https://github.com/AMD-AGI/TraceLens) |
+| [GEAK](https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/) | [4.0.0](https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/release-notes.html) | **GPU:** MI300X, MI325X, MI355X<br>**ROCm:** 6.4.x, 7.0.x, 7.1.x, 7.2.x<br>**Ubuntu:** 22.04, 24.04<br>**Python:** 3.8, 3.12 | [<i class="fab fa-github"></i>](https://github.com/AMD-AGI/GEAK) |
+| [IntelliKit](https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.0/) | [0.1.0](https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.0/release-notes.html) | **GPU:** MI300X, MI325X, MI355X<br>**ROCm:** 7.2.x<br>**Ubuntu:** 22.04, 24.04<br>**Python:** >= 3.10 | [<i class="fab fa-github"></i>](https://github.com/AMDResearch/intellikit) |
+| [AgentKernelArena](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/) | [0.2.0](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/) | **GPU:** MI300X, MI325X, MI355X<br>**ROCm:** 7.2.x<br>**Ubuntu:** 22.04, 24.04<br>**Python:** >= 3.10 | [<i class="fab fa-github"></i>](https://github.com/AMD-AGI/AgentKernelArena) |
+| [Magpie](https://rocm.docs.amd.com/projects/magpie/en/docs-0.2.0/) | [0.2.0](https://rocm.docs.amd.com/projects/magpie/en/docs-0.2.0/reference/release-notes.html) | **GPU:** MI300X, MI325X, MI355X<br>**ROCm:** 7.0.x, 7.1.x, 7.2.x<br>**Ubuntu:** 22.04, 24.04<br>**Python:** >= 3.10 | [<i class="fab fa-github"></i>](https://github.com/AMD-AGI/Magpie) |
