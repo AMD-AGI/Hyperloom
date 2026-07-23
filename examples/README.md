@@ -22,12 +22,15 @@ running the install command.
   Hyperloom wheel.
 - A dedicated workspace directory opened in the user's agent.
 
-From the agent terminal in that workspace, install the latest release wheel into
-the current directory:
+From the agent terminal in that workspace, download the latest release wheel and
+install it into the current directory:
 
 ```bash
+curl -fL -O \
+  https://github.com/AMD-AGI/Hyperloom/releases/latest/download/hyperloom_inference_optimizer-py3-none-any.whl
+
 python3 -m pip install \
-  https://github.com/AMD-AGI/Hyperloom/releases/latest/download/hyperloom_inference_optimizer-py3-none-any.whl \
+  ./hyperloom_inference_optimizer-py3-none-any.whl \
   --target .
 ```
 
