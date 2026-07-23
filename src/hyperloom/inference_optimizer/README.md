@@ -89,4 +89,5 @@ The Coordinator + agent roles + action executors live in the sibling
 * **Distribution:** built from `pyproject.toml` (at the repo root) as the
   `hyperloom-inference_optimizer` wheel and attached to GitHub Releases; it is
   not published to PyPI. Install the release wheel directly (see
-  `examples/README.md` for the `curl` download + `pip install` flow).
+  `examples/README.md` for the fixed GitHub Release wheel URL + `pip install`
+  flow).
