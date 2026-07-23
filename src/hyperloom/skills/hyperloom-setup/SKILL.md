@@ -126,13 +126,8 @@ value.
    modify the host environment.
 
    - `docker (Recommended)`: record `docker` as the run mode; the example
-     (workload) skill will generate a ROCm container later. Choose this when
-     the host does not have the framework installed but Docker with GPU access
-     is available.
-   - `baremetal`: run the setup backend directly on this host. Choose this when
-     the host provides ROCm, or when Hyperloom is already installed inside a
-     Docker container and setup should run directly in that current container
-     environment.
+     (workload) skill generates a ROCm container later.
+   - `baremetal`: run the setup backend directly on this host.
 
 6. Only when the user chose `docker`, resolve the Docker target host
    (`HYPERLOOM_DOCKER_TARGET_HOST`). This is where the example skill will run
