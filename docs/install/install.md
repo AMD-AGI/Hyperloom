@@ -34,16 +34,11 @@ or Codex before running the install command.
 
 ### Install Hyperloom
 
-From the agent terminal in that workspace, download the latest release wheel
-from GitHub Releases, then install Hyperloom using the following command:
+From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-gh release download \
-  -R AMD-AGI/Hyperloom \
-  -p 'hyperloom_inference_optimizer-*-py3-none-any.whl'
-
 python3 -m pip install \
-  ./hyperloom_inference_optimizer-*-py3-none-any.whl \
+  https://github.com/AMD-AGI/Hyperloom/releases/download/v1.0.0a1/hyperloom_inference_optimizer-1.0.0a1-py3-none-any.whl \
   --target .
 ```
 
