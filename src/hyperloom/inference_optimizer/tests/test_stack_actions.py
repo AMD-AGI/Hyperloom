@@ -55,6 +55,12 @@ def test_stack_action_from_state_none():
     assert b.packages == ()
 
 
+def test_stack_action_from_state_non_numeric_pr_number_coerced_to_zero():
+    """A garbage ``pr_number`` (non-int) is defensively coerced to 0."""
+    b = EnablementStackAction.from_state({"framework": "vllm", "pr_number": "not-a-number"})
+    assert b.pr_number == 0
+
+
 # ---------------------------------------------------------------------------
 # FrameworkRuntime.to_runtime_override
 # ---------------------------------------------------------------------------

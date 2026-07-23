@@ -13,8 +13,29 @@ from hyperloom.common.coerce import (
     optional_positive_int,
     to_float,
     to_int,
+    to_str_list,
     to_unix,
 )
+
+
+class TestToStrList:
+    def test_none_is_empty(self):
+        assert to_str_list(None) == []
+
+    def test_string_stripped(self):
+        assert to_str_list("  a  ") == ["a"]
+
+    def test_blank_string_dropped(self):
+        assert to_str_list("   ") == []
+
+    def test_iterable_stripped_and_filtered(self):
+        assert to_str_list(["a ", " ", "b"]) == ["a", "b"]
+
+    def test_scalar_coerced(self):
+        assert to_str_list(42) == ["42"]
+
+    def test_scalar_blank_dropped(self):
+        assert to_str_list(False) == ["False"]
 
 
 class TestToFloat:

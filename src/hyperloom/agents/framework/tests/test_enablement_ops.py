@@ -80,6 +80,21 @@ def test_task_description_lists_candidate_refs() -> None:
     assert mandate.candidate_refs == ("PR:123", "PR:456")
 
 
+def test_task_description_lists_secondary_failure_classes() -> None:
+    """A signature with secondary_kinds renders the SECONDARY FAILURE CLASSES line."""
+    sig = FailureSignature(
+        kind=MISSING_MODEL_ARCH,
+        confidence=0.9,
+        offending_file="model.py",
+        secondary_kinds=("import_error", "not_implemented"),
+    )
+    td = build_mandate(_req(), signature=sig).task_description
+    assert "SECONDARY FAILURE CLASSES" in td
+    assert "import_error" in td
+    assert "not_implemented" in td
+    assert "OFFENDING FILE" in td
+
+
 def test_mandate_authorizes_and_requires_recording_env_setup() -> None:
     """Q3: the mandate authorizes installs AND tells the specialist to record them."""
     td = build_mandate(_req()).task_description

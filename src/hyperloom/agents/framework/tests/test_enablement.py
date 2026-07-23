@@ -27,6 +27,8 @@ from hyperloom.agents.framework.enablement import (
     CapabilityGap,
     EnablementRequest,
     FailureSignature,
+    _extract_offending_file,
+    _failure_identity,
     classify_failure,
     enablement_made_progress,
     is_targeted_build_candidate,
@@ -577,3 +579,31 @@ def test_targeted_build_candidate_framework_python_gap_rejected() -> None:
 
 def test_targeted_build_candidate_none_signature() -> None:
     assert is_targeted_build_candidate(None) is False  # type: ignore[arg-type]
+
+
+# --- _extract_offending_file / _failure_identity ---------------------------
+
+
+def test_extract_offending_file_falls_back_to_last_traceback_frame() -> None:
+    """With no ``near`` offset, the last traceback ``File "..."`` frame wins."""
+    text = (
+        'Traceback (most recent call last):\n'
+        '  File "/opt/vllm/first.py", line 10, in boot\n'
+        '  File "/opt/vllm/last.py", line 42, in load_model\n'
+        "RuntimeError: boom"
+    )
+    assert _extract_offending_file(text) == "/opt/vllm/last.py"
+
+
+def test_failure_identity_none_signature_is_empty_triple() -> None:
+    """A ``None`` signature yields three empty strings (dedup key for no-sig)."""
+    assert _failure_identity(None) == ("", "", "")
+
+
+def test_failure_signature_to_dict_round_trips_fields() -> None:
+    """``FailureSignature.to_dict`` serializes all dataclass fields."""
+    sig = FailureSignature(kind=MISSING_MODEL_ARCH, confidence=0.9, offending_file="m.py")
+    d = sig.to_dict()
+    assert d["kind"] == MISSING_MODEL_ARCH
+    assert d["offending_file"] == "m.py"
+    assert d["confidence"] == 0.9

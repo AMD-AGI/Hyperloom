@@ -53,6 +53,12 @@ def test_targeted_build_action_invalid_component_coerced():
     assert b.component == "aiter"
 
 
+def test_targeted_build_action_invalid_torch_constraint_mode_coerced():
+    """An unknown torch_constraint_mode falls back to the constraint_file default."""
+    b = TargetedBuildAction.from_state({"framework": "vllm", "torch_constraint_mode": "bogus_mode"})
+    assert b.torch_constraint_mode == "constraint_file"
+
+
 def test_targeted_build_action_invalid_ints_coerced():
     b = TargetedBuildAction.from_state({"framework": "vllm", "max_jobs": "x", "build_budget_sec": None})
     assert b.max_jobs == 0
