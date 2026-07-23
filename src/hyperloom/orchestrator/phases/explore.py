@@ -1507,8 +1507,8 @@ class ExplorePhase(PhaseHandler):
         patches = done_payload.get("patches_written") or []
         if isinstance(patches, list) and patches:
             return
-        config_changes = _framework_config_levers_from_done(done_payload)
-        if not config_changes:
+        config_levers = _framework_config_levers_from_done(done_payload)
+        if not config_levers:
             return
         sid = str(task.task_id or "").strip()
         if not sid:
@@ -1537,7 +1537,8 @@ class ExplorePhase(PhaseHandler):
             "specialist_task_id": sid,
             "provenance": "specialist",
             "patch_name": patch_name,
-            "config_changes": dict(config_changes),
+            "extra_server_args": str(config_levers.get("extra_server_args") or ""),
+            "extra_envs": dict(config_levers.get("extra_envs") or {}),
         }
         # FRAMEWORK authoring provenance passthrough for the authored-outcome bridge.
         fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
@@ -1576,13 +1577,15 @@ class ExplorePhase(PhaseHandler):
                 "specialist_task_id": sid,
                 "proposal_msg_id": msg.msg_id,
                 "candidate_id": fa_cand,
-                "config_changes": dict(config_changes),
+                "extra_server_args": integrate_params["extra_server_args"],
+                "extra_envs": dict(integrate_params["extra_envs"]),
             },
         )
         log.info(
-            "FRAMEWORK: config-lever deliverable routed to integrate_patch candidate=%s keys=%s",
+            "FRAMEWORK: config-lever deliverable routed to integrate_patch candidate=%s args=%s env_keys=%s",
             fa_cand or sid,
-            sorted(config_changes.keys()),
+            integrate_params["extra_server_args"],
+            sorted(integrate_params["extra_envs"]),
         )
         try:
             self.shared_state.save(self.session_dir)

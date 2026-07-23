@@ -843,7 +843,8 @@ async def test_bench_patch_no_accuracy(tmp_path, monkeypatch):
     bench, gate = await ex._bench_patch(
         params={"config_path": str(cfg)},
         output_root=tmp_path,
-        config_changes_applied={"E": "1"},
+        extra_server_args_applied="",
+        extra_envs_applied={"E": "1"},
         specialist_task_id="abcdef123456",
     )
     assert bench["output_throughput"] == 200.0
@@ -865,7 +866,8 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
     bench, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.8},
         output_root=tmp_path,
-        config_changes_applied={},
+        extra_server_args_applied="",
+        extra_envs_applied={},
         specialist_task_id="abcdef123456",
     )
     assert gate["accuracy_pass"] is True
@@ -886,7 +888,8 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
     _, gate = await ex._bench_patch(
         params={"config_path": str(cfg), "accuracy_baseline": 0.95},
         output_root=tmp_path,
-        config_changes_applied={},
+        extra_server_args_applied="",
+        extra_envs_applied={},
         specialist_task_id="abcdef123456",
     )
     assert gate["accuracy_pass"] is False
@@ -908,7 +911,8 @@ async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeyp
         _, gate = await ex._bench_patch(
             params={"config_path": str(cfg)},
             output_root=tmp_path,
-            config_changes_applied={},
+            extra_server_args_applied="",
+            extra_envs_applied={},
             specialist_task_id="abcdef123456",
         )
     assert gate["accuracy_pass"] is None
@@ -922,7 +926,8 @@ async def test_bench_patch_config_not_found(tmp_path):
         await ex._bench_patch(
             params={"config_path": str(tmp_path / "missing.yaml")},
             output_root=tmp_path,
-            config_changes_applied={},
+            extra_server_args_applied="",
+            extra_envs_applied={},
             specialist_task_id="abc",
         )
 

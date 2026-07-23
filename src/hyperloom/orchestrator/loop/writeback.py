@@ -2621,8 +2621,12 @@ class WritebackCollaborator:
             specialist_task_id = str(result.get("specialist_task_id") or "")
             lift = {
                 "name": specialist_task_id or "integrate_patch_keep",
-                "candidate_extra_server_args": "",
-                "extra_envs": dict(result.get("config_changes_applied") or {}),
+                "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
+                "extra_envs": dict(
+                    result.get("extra_envs_applied")
+                    or result.get("config_changes_applied")
+                    or {}
+                ),
                 "tput": float(new_tput),
                 "workspace": result.get("workspace"),
                 "provenance": "integrate_patch",
@@ -3174,8 +3178,12 @@ class WritebackCollaborator:
                 return False
             bv = {
                 "name": sid,
-                "candidate_extra_server_args": "",
-                "extra_envs": dict(result.get("config_changes_applied") or {}),
+                "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
+                "extra_envs": dict(
+                    result.get("extra_envs_applied")
+                    or result.get("config_changes_applied")
+                    or {}
+                ),
                 "tput": float(tput),
                 "workspace": result.get("workspace"),
                 "provenance": "integrate_patch",

@@ -573,8 +573,7 @@ def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
 
 
 def test_config_levers_helper_extracts_from_proposal_set():
-    """A proposal_set entry carrying extra_args / extra_envs is flattened into
-    a config_changes dict; patches take precedence (returns {})."""
+    """Proposal args and envs retain separate channels; patches take precedence."""
     from hyperloom.orchestrator.loop.coordinator import (
         _framework_config_levers_from_done,
     )
@@ -590,9 +589,10 @@ def test_config_levers_helper_extracts_from_proposal_set():
         ],
     }
     levers = _framework_config_levers_from_done(done)
-    assert levers["VLLM_USE_MTP"] == "1"
-    assert levers["--speculative-num-steps"] == "3"
-    assert levers["--enable-mtp"] == ""
+    assert levers == {
+        "extra_server_args": "--speculative-num-steps 3 --enable-mtp",
+        "extra_envs": {"VLLM_USE_MTP": "1"},
+    }
 
     # A patch deliverable is NOT a config-only outcome.
     assert (
@@ -606,7 +606,7 @@ def test_config_levers_helper_extracts_from_proposal_set():
 
 def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
     """A config-lever deliverable (proposal_set with extra_args/extra_envs and no
-    patch) is routed to integrate_patch's config_changes channel, so the
+    patch) is routed to integrate_patch, so the
     empty-outcome bridge must NOT stamp an authored_empty row for it."""
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(

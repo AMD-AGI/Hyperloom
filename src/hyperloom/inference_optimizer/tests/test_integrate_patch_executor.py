@@ -1003,7 +1003,8 @@ async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
         await executor._bench_patch(
             params={"config_path": str(config_path)},
             output_root=tmp_path / "out",
-            config_changes_applied={},
+            extra_server_args_applied="",
+            extra_envs_applied={},
             specialist_task_id="task-abcd1234",
         )
 
