@@ -7,7 +7,7 @@ myst:
 
 # Hyperloom release notes
 
-The current packaged version is `1.0.0a1` (`pyproject.toml`). For the
+The current packaged version is 1.0.0a1 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
@@ -16,7 +16,56 @@ summarizes the headline capabilities.
 
 ## Hyperloom 1.0.0a1 public release
 
-The first public release of Hyperloom (`1.0.0a1`) combines features from the following versions:
+The first public release of Hyperloom (1.0.0a1) combines features from the following versions:
+
+### 1.0.0a1 highlights
+
+- **Unified macro-cycle orchestration and budget accounting**: Short and long
+  sessions now share the same cyclic optimization model. Phase budgets use
+  consistent charge-back accounting, short runs stop dispatching after their
+  phase budget is exhausted, and new macro-cycles only start when at least
+  three hours remain. This removes legacy cyclic-mode branches and makes phase
+  progression more predictable across bounded and long-horizon runs.
+
+- **Opt-in Ray serving and GPU execution**: The opt-in Ray path now places all
+  serving and GPU-specialist operations under the whole-machine `serving_slot`
+  mutex, including framework-agent benchmarks, `integrate_patch`, and concurrency
+  sweeps. GPU specialists can queue without blocking the Coordinator, serving
+  receives scheduling priority, and stale AITER JIT locks are cleaned before
+  server launch. Local subprocess execution remains the default; multi-node
+  behavior is unchanged.
+
+- **vLLM and serving-environment reliability**: Hyperloom now isolates co-located
+  Ray heads, uses per-session free ports for persistent serving processes, and
+  reaps orphaned vLLM/SGLang process groups safely. Package-root `MAGPIE_PATH`
+  entries are kept out of `PYTHONPATH`, preventing main-environment Torch packages
+  from shadowing isolated vLLM environments. TraceLens patching and dependency
+  discovery also support isolated vLLM/AITER installations more reliably.
+
+- **GEAK-first kernel optimization**: GEAK is now the default owner of the complete
+  KERNEL phase. Forge remains an explicit opt-in and runs only when
+  `KERNEL_OPT_BACKEND_ORDER=forge` is set. GEAK candidates remain provisional until
+  Hyperloom revalidates them with its benchmark harness; successful revalidation can
+  now complete before SWEEP begins, while failed or inconclusive validation exits
+  cleanly without blocking the session.
+
+- **Baseline, evaluation, and reporting integrity**: Relative evaluation-result paths
+  are resolved against the benchmark output directory, preventing false baseline-accuracy
+  failures. Persistent servers use unique ports across retries, framework-phase gains
+  are attributed correctly in session breakdowns, and concurrency-sweep internal tasks
+  are no longer rejected by their own singleton policy.
+
+- **Security and policy hardening**: Multi-node restart arguments are validated and
+  shell-quoted before execution. Explicit framework source roots must remain inside the
+  configured allowlist, and queued tasks are revalidated by PolicyGate before dispatch
+  to prevent forged task rows from bypassing normal authorization and Critic gates.
+
+- **CI and release engineering**: Every PR targeting `main` now runs a single-GPU
+  Qwen3 smoke test on the dedicated Hyperloom E2E runner. The sharded Python 3.10/3.11 test
+  suite has stronger failure visibility and completeness checks. Release version reporting
+  now comes from installed package metadata, keeping
+  `hyperloom.inference_optimizer.__version__`, wheel metadata, and the release version
+  aligned.
 
 ### 0.9.0 highlights
 
@@ -30,17 +79,14 @@ The first public release of Hyperloom (`1.0.0a1`) combines features from the fol
   cleanup. When unset, single-node serving uses the local subprocess path.
   Multi-node is unchanged (gated off).
 
-- **Accuracy-gate and eval-result integrity**: lm-eval output is wired to a
+- **Accuracy-gate and eval-result integrity**: `lm-eval` output is wired to a
   session-scoped `EVAL_RESULT_DIR`; a baseline that produces no accuracy
   verdict now hard-stops instead of optimizing an unvalidated baseline; leaked
   eval results are salvaged back from the InferenceX checkout / local-disk
   mirror; and session-breakdown attribution no longer fabricates credit from a
   seeded stack.
 
-- **Provider-direct LLM configuration**: Hyperloom runs against Anthropic
-  directly (provider-only paths), with env-driven, consistent gateway
-  auth/endpoint resolution and case-insensitive Anthropic-endpoint handling;
-  the Critic can run over the native provider endpoint.
+- **Provider-direct LLM configuration**: Hyperloom connects directly to Anthropic (provider-only paths), with env-driven gateway auth/endpoint resolution, case-insensitive Anthropic-endpoint handling, and support for running the Critic over the native provider endpoint.
 
 - **Model-path and workload-default consistency**: A single `--model` value (local
   path or HF repo id) resolves identically across baseline, roofline, and the
@@ -67,7 +113,7 @@ The first public release of Hyperloom (`1.0.0a1`) combines features from the fol
   pool cap is decoupled from the dispatch budget.
 
 - **Profiling / roofline / TraceLens**: GPU information is restored in
-  profiler traces (torch-trace `"kernel"` category), and a stale TRACELENS_ROOT
+  profiler traces (torch-trace `"kernel"` category), and a stale `TRACELENS_ROOT`
   inherited from the kernel-agent env file no longer breaks TraceLens discovery.
 
 - **Orchestrator reliability and long-run durability**: `reports/final.json` is
@@ -328,3 +374,15 @@ The first public release of Hyperloom (`1.0.0a1`) combines features from the fol
   pass-or-discard and become constrained retries. The **Pending Cause Agent** does the analogous thing on the queue
   side: when a user's run is waiting, it surfaces a concrete reason why. Together they replace two previously opaque
   states — "something failed" and "still waiting" — with explainable, user-controllable answers.
+
+### Hyperloom components
+
+The following table lists the components included in the Hyperloom 1.0.0a1 release.
+
+| Component | Version | Supported platforms | |
+|-----------|---------|---------------------|---|
+| [TraceLens](https://rocm.docs.amd.com/projects/tracelens/en/docs-0.1.0/) | [0.1.0](https://rocm.docs.amd.com/projects/tracelens/en/docs-0.1.0/about/release-notes.html) | **GPU:** Hardware-agnostic<br>OS-independent<br>**Python:** >= 3.6 | [<i class="fab fa-github"></i>](https://github.com/AMD-AGI/TraceLens) |
+| [GEAK](https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/) | [4.0.0](https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/release-notes.html) | **GPU:** MI300X, MI325X, MI355X<br>**ROCm:** 6.4.x, 7.0.x, 7.1.x, 7.2.x<br>**Ubuntu:** 22.04, 24.04<br>**Python:** 3.8, 3.12 | [<i class="fab fa-github"></i>](https://github.com/AMD-AGI/GEAK) |
+| [IntelliKit](https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.0/) | [0.1.0](https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.0/release-notes.html) | **GPU:** MI300X, MI325X, MI355X<br>**ROCm:** 7.2.x<br>**Ubuntu:** 22.04, 24.04<br>**Python:** >= 3.10 | [<i class="fab fa-github"></i>](https://github.com/AMDResearch/intellikit) |
+| [AgentKernelArena](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/) | [0.2.0](https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/) | **GPU:** MI300X, MI325X, MI355X<br>**ROCm:** 7.2.x<br>**Ubuntu:** 22.04, 24.04<br>**Python:** >= 3.10 | [<i class="fab fa-github"></i>](https://github.com/AMD-AGI/AgentKernelArena) |
+| [Magpie](https://rocm.docs.amd.com/projects/magpie/en/docs-0.2.0/) | [0.2.0](https://rocm.docs.amd.com/projects/magpie/en/docs-0.2.0/reference/release-notes.html) | **GPU:** MI300X, MI325X, MI355X<br>**ROCm:** 7.0.x, 7.1.x, 7.2.x<br>**Ubuntu:** 22.04, 24.04<br>**Python:** >= 3.10 | [<i class="fab fa-github"></i>](https://github.com/AMD-AGI/Magpie) |
