@@ -41,6 +41,7 @@ latex_elements = {
 # Keep in sync with pyproject.toml [project].version.
 version_number = "1.0.0a1"
 
+external_projects_current_project = "rocm"
 html_theme = "rocm_docs_theme"
 html_theme_options = {
     "flavor": "generic",
@@ -56,7 +57,11 @@ html_theme_options = {
         "Support": "https://github.com/AMD-AGI/Hyperloom/issues/new/choose",
     },
     "link_main_doc": False,
+    "repository_url": "https://github.com/AMD-AGI/Hyperloom",
+    "use_repository_button": True,
+    "use_issues_button": True,
 }
+html_title = f"Hyperloom {version_number}"
 
 setting_all_article_info = False
 all_article_info_os = ["linux"]
@@ -70,16 +75,7 @@ extensions = [
     "sphinx.ext.autodoc",
 ]
 
-external_projects_current_project = "rocm"
-html_theme = "rocm_docs_theme"
-html_theme_options = {
-    "flavor": "rocm",
-    "link_main_doc": False,
-    "repository_url": "https://github.com/AMD-AGI/Hyperloom",
-    "use_repository_button": True,
-    "use_issues_button": True,
-}
-html_title = f"Hyperloom {version_number}"
+
 
 html_baseurl = os.environ.get("READTHEDOCS_CANONICAL_URL", "rocm.docs.amd.com")
 html_context = {}
