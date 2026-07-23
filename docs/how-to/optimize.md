@@ -6,7 +6,7 @@ myst:
 ---
 # Run a Hyperloom optimization
 
-This topic assumes you have already completed installation. If you haven't, go through the [Hyperloom Quickstart](../install/install.md) then return here to launch your first run.
+This topic assumes you have already completed installation. If you haven't, go through [Hyperloom Quickstart](../install/install.md) then return here to launch your first run.
 
 ## Launch from Cursor
 
