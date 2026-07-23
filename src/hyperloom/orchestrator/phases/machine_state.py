@@ -2412,6 +2412,39 @@ def record_phase_transition(
     state.phase = row["to_phase"]
     state.phase_started_ts = now_ts
     state.phase_started_unix = now_unix
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        transition_id = (
+            f"phase:{int(getattr(state, 'macro_cycle', 0) or 0)}:"
+            f"tick:{int(getattr(state, 'tick', 0) or 0)}:"
+            f"event:{len(history)}:"
+            f"{row.get('from_phase') or 'START'}:{row.get('to_phase') or ''}:"
+            f"{now_unix:.9f}"
+        )
+        instrument.record_phase_transition(
+            getattr(state, "_session_dir", None),
+            transition_id=transition_id,
+            from_phase=str(row.get("from_phase") or ""),
+            phase=str(row.get("to_phase") or ""),
+            reason=str(row.get("reason") or ""),
+            evidence=dict(row.get("evidence") or {}),
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            tick=int(getattr(state, "tick", 0) or 0),
+            event_sequence=len(history),
+            ts=str(row.get("ts") or ""),
+        )
+        instrument.record_trace_event(
+            getattr(state, "_session_dir", None),
+            trace_event_id=f"trace:{transition_id}",
+            kind="phase_transition",
+            from_phase=str(row.get("from_phase") or ""),
+            phase=str(row.get("to_phase") or ""),
+            reason=str(row.get("reason") or ""),
+            ts=str(row.get("ts") or ""),
+        )
+    except Exception:  # noqa: BLE001 -- telemetry must never block phase changes
+        pass
     return row
 
 

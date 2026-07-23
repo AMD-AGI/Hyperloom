@@ -2827,6 +2827,7 @@ async def _run_geak_gemm_tuning(
         "isl": isl,
         "osl": osl,
         "baseline_tput": float(baseline_tput or 0.0),
+        "env": {"E2E_METRIC": "output"},
     }
     if geak_config:
         input_payload["config"] = geak_config
@@ -2852,6 +2853,8 @@ async def _run_geak_gemm_tuning(
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
 
     cmd = [
+        "env",
+        "E2E_METRIC=output",
         "python3",
         str(_kernel_agent_tool_path("gemm_tuning.py")),
         "--input-json",
@@ -2899,12 +2902,33 @@ async def run_gemm_tuning_handler(
     """
     backend = _resolve_gemm_tuning_backend(payload)
     log.info("run_gemm_tuning: backend=%s", backend)
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_gemm_tuning_operation(
+            session_dir,
+            payload={**payload, "gemm_tuning_backend": backend},
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("gemm v4 start recording failed", exc_info=True)
 
     if backend == "forge":
         result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
     else:
         result = await _run_geak_gemm_tuning(payload, session_dir=session_dir)
+    result.setdefault("task_id", payload.get("task_id"))
+    result.setdefault("macro_cycle", payload.get("macro_cycle"))
     _trace_gemm_tuning_run(result, session_dir=session_dir)
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_gemm_tuning_operation(
+            session_dir,
+            payload={**payload, "gemm_tuning_backend": backend},
+            result=result,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("gemm v4 result recording failed", exc_info=True)
     return result
 
 
@@ -4456,6 +4480,12 @@ async def _run_optimization_batch(
     out["max_parallel"] = max_parallel
     out["parallel_backends"] = parallel_backends
     out["batch_results"] = results
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_native_kernel_run_result(session_dir, result=out)
+    except Exception:  # noqa: BLE001
+        log.debug("native kernel v4 batch-result recording failed", exc_info=True)
     return out
 
 
@@ -4589,6 +4619,29 @@ async def _run_optimization_single(
         await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
 
     try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_native_kernel_run_start(
+            session_dir,
+            payload={
+                "kernel_id": str(kernel_id),
+                "backend": backends_arg,
+                "source_file": payload.get("source_file"),
+            },
+        )
+        instrument.record_kernel_dispatch(
+            session_dir,
+            kernel_id=str(kernel_id),
+            dispatched=True,
+            backends=[value for value in backends_arg.split(",") if value],
+            task_group=(payload.get("candidate") or {}).get("task_group")
+            if isinstance(payload.get("candidate"), dict)
+            else None,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("native kernel v4 start recording failed", exc_info=True)
+
+    try:
         rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec)
         result = _shape_tool_result(rc, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
@@ -4624,6 +4677,17 @@ async def _run_optimization_single(
     # Full-trace: record each forge attempt's key-step timeline as a forge_steps
     # audit. Best-effort; no-op without a step marker.
     _trace_kernel_attempt_steps(result, session_dir=session_dir)
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_kernel_backend_result(
+            session_dir,
+            result,
+            route_strategy="kernel_agent_forge",
+        )
+        instrument.record_native_kernel_run_result(session_dir, result=result)
+    except Exception:  # noqa: BLE001
+        log.debug("native kernel v4 result recording failed", exc_info=True)
     return result
 
 
@@ -5285,6 +5349,24 @@ async def integrate_handler(
         result["paired_ab"] = paired_ab
         if paired_ab.get("confirmed") is False:
             result["decision_reason"] = "paired_ab_disconfirmed"
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+        instrument.record_kernel_e2e(
+            session_dir,
+            kernel_id=str(kernel_id or ""),
+            integrated=decision == "KEEP",
+            e2e_gain_pct=gain_pct,
+            validated=True if decision == "KEEP" else False,
+            decision=decision,
+            patch_path=str(patch_path or "") or None,
+            target_file=str(payload.get("target_file") or payload.get("source_file") or "") or None,
+            extra_server_args=extra_args,
+            result=result,
+            validation_tier="integrate_e2e",
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("kernel integrate v4 result recording failed", exc_info=True)
     return result
 
 

@@ -1899,10 +1899,29 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
+            capture_result = dict(result)
+            capture_result.setdefault(
+                "workload",
+                {
+                    "framework": str(getattr(self, "framework", "") or ""),
+                    "model_name": str(getattr(self, "model_name", "") or ""),
+                    "gpu_type": str(getattr(self, "gpu_type", "") or ""),
+                    "precision": str(getattr(self, "precision", "") or ""),
+                    "tp": int(getattr(self, "tp", 0) or 0),
+                    "ep": int(getattr(self, "ep", 0) or 0),
+                    "conc": int(getattr(self, "conc", 0) or 0),
+                    "isl": int(getattr(self, "isl", 0) or 0),
+                    "osl": int(getattr(self, "osl", 0) or 0),
+                },
+            )
             instrument.record_phase_event(
                 getattr(self, "_session_dir", None),
                 action=action,
                 entry=entry,
+                result=capture_result,
+                phase=str(getattr(self, "phase", "") or ""),
+                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+                tick=int(getattr(self, "tick", 0) or 0),
             )
         except Exception:  # noqa: BLE001 — author-time capture must never block record
             log.debug("record_phase_event capture failed", exc_info=True)
