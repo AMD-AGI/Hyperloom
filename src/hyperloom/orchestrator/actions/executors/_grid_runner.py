@@ -1544,6 +1544,14 @@ async def run_grid(
         # mtime gate.
         variant_started_unix = time.time()
         variant_first_started_unix = variant_started_unix
+        # Multi-node only: a reused output_root (action resume / re-explore) can
+        # leave a prior run's benchmark_* dirs in this slot. Snapshot them now so
+        # measurement selection + the no-workspace check consider ONLY dirs THIS
+        # round produces; otherwise a stale (possibly higher-tput) prior result
+        # could shadow this round's outcome and be wrongly KEEP'd. A conn-refused
+        # retry appends a NEW dir, which is correctly still eligible. Single-node
+        # keeps the empty set, so its behavior is byte-for-byte unchanged.
+        _preexisting_benchmark_dirs: set[Path] = set(slot.glob("benchmark_*")) if _mn_is_mn() else set()
         try:
             await _mn_prebench_regate()
             rc, stdout, stderr = await asyncio.to_thread(_run_magpie, **_measure_kwargs)
@@ -1566,7 +1574,7 @@ async def run_grid(
                 # to it. The retry appends a newer benchmark_* which the
                 # downstream sorted(...)[-1] then prefers.
                 _first_valid = False
-                _first_cands = sorted(slot.glob("benchmark_*"))
+                _first_cands = [c for c in sorted(slot.glob("benchmark_*")) if c not in _preexisting_benchmark_dirs]
                 if _first_cands:
                     try:
                         _first_m = extract_benchmark_measurement(
@@ -1808,8 +1816,10 @@ async def run_grid(
                 break
             continue
 
-        # Locate workspace inside slot.
-        candidates = sorted(slot.glob("benchmark_*"))
+        # Locate workspace inside slot. Exclude any benchmark_* that pre-dated
+        # this round (multi-node reused output_root) so a stale prior result
+        # cannot be selected/KEEP'd; single-node's set is empty (unchanged).
+        candidates = [c for c in sorted(slot.glob("benchmark_*")) if c not in _preexisting_benchmark_dirs]
         # Always-on artifact harvest so each slot keeps its server.log /
         # gpu_metrics / profile relay for Robustness RCA.
         harvest_destination = candidates[-1] if candidates else slot

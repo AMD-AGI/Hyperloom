@@ -267,6 +267,40 @@ def test_infera_validation_runs_before_kill(monkeypatch):
     assert killed["v"] is False  # rejected BEFORE _kill_prior tore down the server
 
 
+def _install_fake_sglang_serverargs(monkeypatch, *, default_backend="deepep"):
+    """Fake sglang graph: launch_server has no `parser`; ServerArgs.add_cli_args works."""
+    import types
+
+    sglang_mod = types.ModuleType("sglang")
+    launch_mod = types.ModuleType("sglang.launch_server")  # deliberately no `parser`
+    srt_mod = types.ModuleType("sglang.srt")
+    server_args_mod = types.ModuleType("sglang.srt.server_args")
+
+    class _FakeServerArgs:
+        @staticmethod
+        def add_cli_args(parser):
+            parser.add_argument("--tp", type=int, default=1)
+            parser.add_argument("--moe-a2a-backend", default=default_backend)
+            return parser
+
+    server_args_mod.ServerArgs = _FakeServerArgs
+    monkeypatch.setitem(sys.modules, "sglang", sglang_mod)
+    monkeypatch.setitem(sys.modules, "sglang.launch_server", launch_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt", srt_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt.server_args", server_args_mod)
+
+
+def test_infera_sglang_parser_falls_back_to_serverargs(monkeypatch):
+    """Infera preflight uses ServerArgs.add_cli_args when launch_server has no parser."""
+    mod = _load_module()
+    _install_fake_sglang_serverargs(monkeypatch, default_backend="mori")
+
+    parser = mod._sglang_cli_parser()
+    assert parser is not None and "--moe-a2a-backend" in parser._option_string_actions
+    assert mod._unsupported_extra_arg_flags("sglang", ["--tp", "--bogus"]) == ["--bogus"]
+    assert mod._resolve_default_moe_a2a_backend("sglang") == "mori"
+
+
 def test_infera_unsupported_flag_preflight(monkeypatch):
     """Infera fails fast on an argparse-unknown server flag (parity with RayJob)."""
     mod = _load_module()

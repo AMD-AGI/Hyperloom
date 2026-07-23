@@ -650,6 +650,34 @@ _FATAL_LOG_PATTERNS: tuple[str, ...] = (
 _FATAL_SCAN_TAIL_BYTES = 256 * 1024
 
 
+def _sglang_cli_parser():
+    """Return an argparse parser exposing this build's sglang server CLI flags.
+
+    Tries the legacy ``sglang.launch_server.parser`` export first, then falls
+    back to ``ServerArgs.add_cli_args`` (current sglang releases). Returns
+    ``None`` when neither path is available so callers can fail open.
+    """
+    try:
+        from sglang.launch_server import parser as _legacy_parser
+
+        if getattr(_legacy_parser, "_option_string_actions", None):
+            return _legacy_parser
+    except Exception:  # noqa: BLE001 - probe must not block launch
+        pass
+    try:
+        import argparse
+
+        from sglang.srt.server_args import ServerArgs
+
+        parser = argparse.ArgumentParser(add_help=False)
+        ServerArgs.add_cli_args(parser)
+        if getattr(parser, "_option_string_actions", None):
+            return parser
+    except Exception:  # noqa: BLE001 - probe must not block launch
+        pass
+    return None
+
+
 def _unsupported_extra_arg_flags(framework: str, extra_args: list[str]) -> list[str]:
     """Return ``--`` flags in ``extra_args`` not accepted by this server build.
 
@@ -671,19 +699,15 @@ def _unsupported_extra_arg_flags(framework: str, extra_args: list[str]) -> list[
     flags = [t for t in extra_args if t.startswith("--")]
     if not flags:
         return []
-    try:
-        if framework == "sglang":
-            from sglang.launch_server import parser as _sgl_parser
-
-            # Exact option-string set from the actual parser. Matching flag
-            # tokens by argparse registration (not a help-text substring) avoids
-            # false negatives where a short flag like ``--tp`` is a substring of
-            # an unrelated option (``--tp-size``) and slips through the preflight.
-            known = set(getattr(_sgl_parser, "_option_string_actions", {}).keys())
-        else:
-            return []
-    except Exception:  # noqa: BLE001 - preflight must never block on its own failure
+    if framework != "sglang":
         return []
+    # Exact option-string set from the actual parser (legacy export or the
+    # ServerArgs fallback). Matching flag tokens by argparse registration (not a
+    # help-text substring) avoids false negatives where a short flag like
+    # ``--tp`` is a substring of an unrelated option (``--tp-size``) and slips
+    # through the preflight.
+    parser = _sglang_cli_parser()
+    known = set(getattr(parser, "_option_string_actions", {}).keys()) if parser is not None else set()
     if not known:
         return []
     return [f for f in flags if f.split("=", 1)[0] not in known]
@@ -727,14 +751,16 @@ def _resolve_default_moe_a2a_backend(framework: str) -> str | None:
     Returns:
         str | None: The lowercased default backend, or ``None`` when unknown.
     """
+    if framework != "sglang":
+        return None
     try:
-        if framework == "sglang":
-            from sglang.launch_server import parser as _sgl_parser
-
-            act = getattr(_sgl_parser, "_option_string_actions", {}).get("--moe-a2a-backend")
-            default = getattr(act, "default", None) if act is not None else None
-            if default is not None:
-                return str(default).strip().lower()
+        parser = _sglang_cli_parser()
+        if parser is None:
+            return None
+        act = getattr(parser, "_option_string_actions", {}).get("--moe-a2a-backend")
+        default = getattr(act, "default", None) if act is not None else None
+        if default is not None:
+            return str(default).strip().lower()
     except Exception:  # noqa: BLE001 - preflight must never block on its own failure
         return None
     return None

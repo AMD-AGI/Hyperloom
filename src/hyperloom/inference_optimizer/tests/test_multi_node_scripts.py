@@ -593,27 +593,43 @@ def test_launch_multinode_preflight_only_returns_before_ray_init(monkeypatch):
     assert lm.main() == 0
 
 
-def test_rayjob_preflight_failure_does_not_submit_kill(monkeypatch):
-    """Controller order is preflight → kill; a rejected variant preserves server."""
+def test_rayjob_preflight_reject_returns_config_error_without_launch(monkeypatch):
+    """The kill job self-validates first; a reject → EXIT_CONFIG_ERROR, no launch."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     state = {"backend": "rayjob", "nodes": 2, "head_pod_ip": "10.0.0.1"}
     monkeypatch.setattr(mn_cli, "_load_state", lambda: dict(state))
     monkeypatch.setattr(mn_cli, "_require_state", lambda *_keys: dict(state))
-    monkeypatch.setattr(mn_cli, "_exec_preflight_submission", lambda *_a, **_kw: False)
-    killed = {"value": False}
 
-    def _unexpected_kill(*_a, **_kw):
-        killed["value"] = True
-        raise AssertionError("kill submitted after failed preflight")
+    def _kill_rejects(*_a, **kw):
+        # Only the restart flow passes the reject sentinel; simulate the pod-side
+        # preflight aborting the kill before it tears down the server.
+        assert kw.get("reject_sentinel") == mn_cli._MN_PREFLIGHT_REJECT_SENTINEL
+        raise mn_cli._MultiNodePreflightRejected("restart kill: rejected before kill")
 
-    monkeypatch.setattr(mn_cli, "_exec_kill_submission", _unexpected_kill)
+    monkeypatch.setattr(mn_cli, "_exec_kill_submission", _kill_rejects)
+
+    launched = {"value": False}
+
+    class _NoLaunchClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def submit_job(self, *_a, **_kw):
+            launched["value"] = True
+            raise AssertionError("launch submitted after preflight reject")
+
+    monkeypatch.setattr(mn_cli, "_ray_dashboard_client", lambda *_a, **_kw: _NoLaunchClient())
+
     args = argparse.Namespace(
         framework="sglang",
         model="/m",
         tp=16,
         ep=1,
-        extra_args="",
+        extra_args="--bogus-flag",
         pid_file=None,
         log_file=None,
         no_wait_health=False,
@@ -623,8 +639,99 @@ def test_rayjob_preflight_failure_does_not_submit_kill(monkeypatch):
         print_logs=False,
     )
 
-    assert mn_cli.cmd_restart_server(args) == 1
+    assert mn_cli.cmd_restart_server(args) == mn_cli.EXIT_CONFIG_ERROR
+    assert launched["value"] is False
+
+
+def test_kill_entrypoint_embeds_preflight_only_when_validating():
+    """Restart kill entrypoint runs the preflight before kill; standalone does not."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    plain = mn_cli._build_multinode_kill_entrypoint("/pids")
+    assert "_server_args_preflight.py" not in plain
+    assert "kill_multinode.py" in plain
+
+    validating = mn_cli._build_multinode_kill_entrypoint(
+        "/pids",
+        validate_framework="sglang",
+        validate_extra_args="--enable-two-batch-overlap",
+    )
+    # Preflight is cat+run BEFORE the kill script, and aborts the job on reject.
+    assert "_server_args_preflight.py" in validating
+    assert "|| exit 3" in validating
+    assert validating.index("_server_args_preflight.py") < validating.index("kill_multinode.py")
+
+
+@pytest.mark.asyncio
+async def test_restart_server_config_error_skips_reclaim_kill(monkeypatch):
+    """Orchestrator must not kill the cluster when preflight rejects a variant."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnsl
+
+    monkeypatch.setattr(mnsl, "is_multi_node", lambda: True)
+    monkeypatch.setattr(
+        mnsl,
+        "_resolve_round_args",
+        lambda *a, **k: ("sglang", "/models/m", 8, 1),
+    )
+    monkeypatch.setattr(mnsl, "_resolve_pd_args", lambda *a, **k: {"pd_mode": "aggregated"})
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.multi_node._internal.external_state.external_service_url",
+        lambda: "",
+    )
+    monkeypatch.setattr(mn_cli, "cmd_restart_server", lambda _ns: mn_cli.EXIT_CONFIG_ERROR)
+
+    killed = {"value": False}
+
+    def _unexpected_kill() -> None:
+        killed["value"] = True
+        raise AssertionError("kill_inference must not run on config/preflight reject")
+
+    monkeypatch.setattr(mn_cli, "kill_inference_for_kernel_agent_best_effort", _unexpected_kill)
+
+    with pytest.raises(mnsl.ServerRestartConfigError):
+        await mnsl.restart_server_for_round(extra_server_args="--enable-two-batch-overlap")
+
     assert killed["value"] is False
+
+
+@pytest.mark.asyncio
+async def test_restart_server_transient_failure_still_reclaims(monkeypatch):
+    """Operational restart failures still use the reclaim-kill-retry path."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnsl
+
+    monkeypatch.setattr(mnsl, "is_multi_node", lambda: True)
+    monkeypatch.setattr(
+        mnsl,
+        "_resolve_round_args",
+        lambda *a, **k: ("sglang", "/models/m", 8, 1),
+    )
+    monkeypatch.setattr(mnsl, "_resolve_pd_args", lambda *a, **k: {"pd_mode": "aggregated"})
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.multi_node._internal.external_state.external_service_url",
+        lambda: "",
+    )
+
+    calls = {"n": 0}
+
+    def _restart_twice(_ns):
+        calls["n"] += 1
+        return mn_cli.EXIT_TRANSIENT if calls["n"] == 1 else mn_cli.EXIT_OK
+
+    monkeypatch.setattr(mnsl, "_merge_sglang_defaults", lambda args: args)
+    monkeypatch.setattr(mn_cli, "cmd_restart_server", _restart_twice)
+    monkeypatch.setattr(mn_cli, "kill_inference_for_kernel_agent_best_effort", lambda: None)
+
+    async def _noop_health(**_kwargs):
+        return None
+
+    monkeypatch.setattr(mnsl, "_wait_for_workers_ready_async", _noop_health)
+    monkeypatch.setattr(mnsl, "_wait_for_server_health_async", _noop_health)
+
+    await mnsl.restart_server_for_round(extra_server_args="")
+
+    assert calls["n"] == 2
 
 
 def test_capability_preflight_deepep_backend_blocks(monkeypatch):
@@ -673,6 +780,88 @@ def test_capability_preflight_tbo_default_backend_resolution(monkeypatch):
     assert lm._missing_capability_reason("sglang", ["--enable-two-batch-overlap"]) is None
 
 
+def _install_fake_sglang_serverargs(monkeypatch, *, default_backend="deepep"):
+    """Fake sglang graph: launch_server has no `parser`; ServerArgs.add_cli_args works."""
+    sglang_mod = types.ModuleType("sglang")
+    launch_mod = types.ModuleType("sglang.launch_server")  # deliberately no `parser`
+    srt_mod = types.ModuleType("sglang.srt")
+    server_args_mod = types.ModuleType("sglang.srt.server_args")
+
+    class _FakeServerArgs:
+        @staticmethod
+        def add_cli_args(parser):
+            parser.add_argument("--tp", type=int, default=1)
+            parser.add_argument("--moe-a2a-backend", default=default_backend)
+            return parser
+
+    server_args_mod.ServerArgs = _FakeServerArgs
+    monkeypatch.setitem(sys.modules, "sglang", sglang_mod)
+    monkeypatch.setitem(sys.modules, "sglang.launch_server", launch_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt", srt_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt.server_args", server_args_mod)
+
+
+def test_sglang_cli_parser_falls_back_to_serverargs(monkeypatch):
+    """When launch_server exposes no `parser`, fall back to ServerArgs.add_cli_args."""
+    lm = _load_script_module("lm_test_parser_fallback", "launch_multinode.py")
+    _install_fake_sglang_serverargs(monkeypatch, default_backend="deepep")
+
+    parser = lm._sglang_cli_parser()
+    assert parser is not None
+    assert "--moe-a2a-backend" in parser._option_string_actions
+    # Unknown-flag preflight now works via the fallback parser (no longer a no-op).
+    assert lm._unsupported_extra_arg_flags("sglang", ["--tp", "--bogus"]) == ["--bogus"]
+    # TBO default-backend resolution reads the fallback parser's default.
+    assert lm._resolve_default_moe_a2a_backend("sglang") == "deepep"
+
+
+def test_sglang_cli_parser_fail_open_when_absent(monkeypatch):
+    """No importable sglang → parser None, preflight stays fail-open (never blocks)."""
+    lm = _load_script_module("lm_test_parser_absent", "launch_multinode.py")
+    for _m in ("sglang", "sglang.launch_server", "sglang.srt", "sglang.srt.server_args"):
+        monkeypatch.setitem(sys.modules, _m, None)  # force ImportError on import
+    assert lm._sglang_cli_parser() is None
+    assert lm._unsupported_extra_arg_flags("sglang", ["--anything"]) == []
+    assert lm._resolve_default_moe_a2a_backend("sglang") is None
+
+
+def test_server_args_preflight_rejects_denied_flag(capsys):
+    """A denied server flag is rejected with the machine-readable sentinel."""
+    pf = _load_script_module("pf_denied", "_server_args_preflight.py")
+    rc = pf.main(["--framework", "sglang", "--extra-args=--model /evil"])
+    assert rc == 3
+    assert pf.REJECT_SENTINEL in capsys.readouterr().out
+
+
+def test_server_args_preflight_rejects_unsupported_and_capability(monkeypatch, capsys):
+    """Unsupported flag + effective-deepep without deep_ep are both rejected."""
+    pf = _load_script_module("pf_unsupported", "_server_args_preflight.py")
+    _install_fake_sglang_serverargs(monkeypatch, default_backend="deepep")
+
+    assert pf.main(["--framework", "sglang", "--extra-args=--bogus-flag"]) == 3
+    assert pf.REJECT_SENTINEL in capsys.readouterr().out
+
+    import importlib.util as _ilu
+
+    monkeypatch.setattr(_ilu, "find_spec", lambda name: None)  # deep_ep absent
+    assert pf.main(["--framework", "sglang", "--extra-args=--moe-a2a-backend deepep"]) == 3
+    assert pf.REJECT_SENTINEL in capsys.readouterr().out
+
+
+def test_server_args_preflight_passes_clean_and_fails_open(monkeypatch, capsys):
+    """Clean args pass; with no importable parser the check is fail-open (0)."""
+    pf = _load_script_module("pf_clean", "_server_args_preflight.py")
+
+    _install_fake_sglang_serverargs(monkeypatch, default_backend="mori")
+    assert pf.main(["--framework", "sglang", "--extra-args=--tp 8"]) == 0
+
+    # No sglang parser importable → unsupported/capability checks no-op → pass.
+    for _m in ("sglang", "sglang.launch_server", "sglang.srt", "sglang.srt.server_args"):
+        monkeypatch.setitem(sys.modules, _m, None)
+    assert pf.main(["--framework", "sglang", "--extra-args=--maybe-unknown 1"]) == 0
+    assert pf.REJECT_SENTINEL not in capsys.readouterr().out
+
+
 def test_variant_env_control_spec_protects_control_plane_prefixes(monkeypatch):
     """A variant may not set/unset rendezvous/discovery/control-plane env."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
@@ -682,8 +871,8 @@ def test_variant_env_control_spec_protects_control_plane_prefixes(monkeypatch):
         if _k.startswith(("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")):
             monkeypatch.delenv(_k, raising=False)
 
-    # Variant tries to override RAY/RAYJOB control vars + trusted operational
-    # POD/HYPERLOOM_MN values + a legit tuning knob.
+    # Variant tries to override RAY/RAYJOB control vars + the system-owned POD_IP
+    # topology var + a trusted operational HYPERLOOM_MN value + a legit tuning knob.
     monkeypatch.setenv(
         "HYPERLOOM_MN_EXTRA_FWD_ENV",
         json.dumps(
@@ -710,8 +899,11 @@ def test_variant_env_control_spec_protects_control_plane_prefixes(monkeypatch):
     assert "RAYJOB_DIST_INIT_PORT" not in forwarded
     assert "RAYJOB_DIST_INIT_PORT" not in explicit
     assert "LWS_WORKER_INDEX" not in effective_unsets
-    # Product requirement: POD_ and HYPERLOOM_MN_ remain explicitly allowed.
-    assert forwarded.get("POD_IP") == "10.0.0.8"
+    # POD_ is system-owned topology (recovered from pid1); a variant must NOT be
+    # able to override it or PD rendezvous / advertise-host / log attribution break.
+    assert "POD_IP" not in forwarded
+    assert "POD_IP" not in explicit
+    # HYPERLOOM_MN_ operational values remain allowed.
     assert forwarded.get("HYPERLOOM_MN_SERVER_LOG_DIR") == "/shared/logs"
     # Legit tuning env still flows through both channels.
     assert forwarded.get("NCCL_PROTO") == "LL"

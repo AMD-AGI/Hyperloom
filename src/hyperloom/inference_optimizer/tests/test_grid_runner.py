@@ -899,6 +899,82 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
     assert captured_restart["extra_env"] == {"SGLANG_KEEP_ME": "1"}
 
 
+@pytest.mark.asyncio
+async def test_run_grid_multi_node_ignores_stale_prior_benchmark_dir(tmp_path, monkeypatch):
+    """MN reused output_root: a stale prior benchmark_* must NOT shadow this round.
+
+    Reproduces the KEEP-selection bug: a prior run left a high-throughput
+    benchmark_* in the slot; this round produces a fresh (lower-tput) one. The
+    result must reflect the fresh dir, never the stale one.
+    """
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: True)
+    # Keep the MN path lightweight + deterministic.
+    monkeypatch.setenv("HYPERLOOM_MN_PREBENCH_HEALTH_REGATE", "0")
+    monkeypatch.setenv("HYPERLOOM_MN_MEASURE_CONN_RETRY", "0")
+
+    async def fake_restart_server_for_round(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._multi_node_server_lifecycle.restart_server_for_round",
+        fake_restart_server_for_round,
+    )
+
+    output_root = tmp_path / "out"
+    slot = output_root / "variant_00_stale_probe"
+    # Stale prior-run result (higher tput) already in the slot.
+    stale_ws = slot / "benchmark_sglang_20250101_000000"
+    stale_ws.mkdir(parents=True)
+    (stale_ws / "benchmark_report.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "framework": "sglang",
+                "model": "/path/models/Qwen-Qwen3-8B",
+                "throughput": {
+                    "request_throughput": 9999.0 / 256,
+                    "output_throughput": 9999.0,
+                    "total_token_throughput": 9999.0 * 2,
+                    "completed_requests": 80,
+                    "duration_seconds": 25.0,
+                },
+                "latency": {
+                    "ttft": {"mean_ms": 140.0, "p99_ms": 160.0},
+                    "e2el": {"mean_ms": 2500.0, "p99_ms": 2800.0},
+                },
+            }
+        )
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        run_slot = Path(cmd[out_idx + 1])
+        _fake_workspace(run_slot, tput=800.0)  # fresh, lower-tput this round
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("stale_probe")],
+            output_root=output_root,
+            variant_timeout_sec=5,
+        )
+
+    assert len(results) == 1
+    chosen = str(results[0].workspace or "")
+    assert "benchmark_sglang_20260513_001122" in chosen  # fresh dir selected
+    assert "20250101" not in chosen  # stale prior dir excluded
+
+
 # Framework-aware help-text probe (atom + multi-framework cache)
 
 

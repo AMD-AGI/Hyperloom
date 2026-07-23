@@ -125,6 +125,15 @@ class ServerRestartFailed(RuntimeError):
     """Raised when the per-round multi-node server restart did not succeed."""
 
 
+class ServerRestartConfigError(ServerRestartFailed):
+    """Restart rejected before or without touching the cluster (preflight / args).
+
+    Callers treat this like :class:`ServerRestartFailed`, but the reclaim-kill
+    retry path must not run: the existing multi-node server was intentionally
+    left running.
+    """
+
+
 def _resolve_pd_args(
     pd_mode: str | None,
     pd_prefill_nodes: int | None,
@@ -509,7 +518,7 @@ async def restart_server_for_round(
     try:
         validate_server_args(extra_server_args, context="restart_server_for_round")
     except ServerArgsRejected as exc:
-        raise ServerRestartFailed(str(exc)) from exc
+        raise ServerRestartConfigError(str(exc)) from exc
 
     async with _get_restart_lock():
         saved_trace_env = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR")
@@ -592,7 +601,11 @@ async def restart_server_for_round(
 
         try:
             # Local import to keep httpx out of the single-node import path.
-            from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
+            from hyperloom.inference_optimizer.multi_node.cli import (
+                EXIT_CONFIG_ERROR,
+                cmd_restart_server,
+                _resolve_poll_timeout_s,
+            )
 
             poll_timeout_s = int(
                 os.environ.get(
@@ -711,7 +724,9 @@ async def restart_server_for_round(
                         running server.
 
                 Raises:
-                    ServerRestartFailed: On driver raise, non-zero rc, or a
+                    ServerRestartConfigError: When ``cmd_restart_server`` rejects
+                        the variant before touching the cluster.
+                    ServerRestartFailed: On driver raise, other non-zero rc, or a
                         post-launch /health failure.
                 """
                 prev_resume = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING")
@@ -728,6 +743,12 @@ async def restart_server_for_round(
                         else:
                             os.environ["MULTI_NODE_RESTART_RESUME_RUNNING"] = prev_resume
 
+                if rc == EXIT_CONFIG_ERROR:
+                    raise ServerRestartConfigError(
+                        f"cmd_restart_server rejected variant (rc={rc}); "
+                        f"existing multi-node server left running "
+                        f"(framework={fw} tp={tp_int} extra_args={extra_server_args!r})"
+                    )
                 if rc != 0:
                     raise ServerRestartFailed(
                         f"cmd_restart_server returned non-zero rc={rc} "
@@ -760,6 +781,10 @@ async def restart_server_for_round(
             try:
                 await _restart_and_wait(force_full_restart)
             except ServerRestartFailed as first_exc:
+                # Preflight / arg validation failures must preserve the running
+                # cluster — never run reclaim-kill-retry for them.
+                if isinstance(first_exc, ServerRestartConfigError):
+                    raise
                 # C — multi-node VRAM reclaim before exactly one retry. A crashed
                 # prior server can leave VRAM pinned to dead PIDs so the relaunch
                 # aborts on insufficient free memory; a best-effort remote
@@ -1492,6 +1517,7 @@ async def _wait_for_server_health_async(
 
 __all__ = [
     "DEFAULT_HEALTH_TIMEOUT_S",
+    "ServerRestartConfigError",
     "ServerRestartFailed",
     "_merge_sglang_defaults",
     "restart_server_for_round",

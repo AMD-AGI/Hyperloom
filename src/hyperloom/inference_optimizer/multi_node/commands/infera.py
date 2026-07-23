@@ -909,6 +909,30 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         )
         all_results["worker"] = results
 
+    print(
+        json.dumps(
+            {"backend": "infera", "pd_mode": pd_mode, "rc": rc_total, "results": all_results},
+            indent=2,
+        )
+    )
+    if rc_total != 0:
+        info("infera restart: at least one launcher failed; see results")
+        failed_rcs = [
+            int(rec["rc"])
+            for role_results in all_results.values()
+            if isinstance(role_results, list)
+            for rec in role_results
+            if rec.get("rc") not in (None, 0)
+        ]
+        # launch_infera_node.py uses rc=2 for preflight/arg rejects before kill.
+        if failed_rcs and all(rc == 2 for rc in failed_rcs):
+            return EXIT_CONFIG_ERROR
+        return 1
+
+    # Persist successful launch identity only after every pod spawned OK. A
+    # preflight/launch failure leaves the prior server alive; writing new
+    # last_restart_* here would make the resume fast-path treat stale config as
+    # current on the next identical request.
     state["last_restart_framework"] = framework
     state["last_restart_model"] = args.model
     state["last_restart_tp"] = int(args.tp)
@@ -930,15 +954,6 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         state["last_restart_pd_decode_extra_args"] = getattr(args, "pd_decode_extra_args", "") or ""
     state["last_restart_results"] = all_results
     _mn_cli._save_state(state)
-    print(
-        json.dumps(
-            {"backend": "infera", "pd_mode": pd_mode, "rc": rc_total, "results": all_results},
-            indent=2,
-        )
-    )
-    if rc_total != 0:
-        info("infera restart: at least one launcher failed; see results")
-        return 1
     info("infera servers launched; benchmark via $service_url (frontend :8000)")
     return 0
 
