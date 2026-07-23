@@ -10,8 +10,10 @@ measurement spread/significance helper (_spread).
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 _TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 
@@ -82,3 +84,37 @@ def test_spread_edge_cases():
     assert ab._spread([])["median"] is None
     one = ab._spread([5.0])
     assert one["median"] == 5.0 and one["stdev"] == 0.0 and one["n"] == 1
+
+
+# WP-6: P99 tail-latency parsing + peak-VRAM probe (additive to the ABBA result)
+
+
+def test_bench_once_parses_p99(tmp_path, monkeypatch):
+    monkeypatch.setattr(ab.subprocess, "run", lambda *a, **k: None)
+    (tmp_path / "baseline_rep1.json").write_text(json.dumps({
+        "output_throughput": 1700.0, "median_tpot_ms": 12.0,
+        "p99_tpot_ms": 30.0, "p99_e2el_ms": 900.0, "p99_itl_ms": 15.0,
+    }))
+    out = ab._bench_once("bs.py", "m", 8888, 1024, 1024, 64, 320, "baseline", 1, tmp_path, 0)
+    assert out["output_throughput"] == 1700.0
+    assert out["p99_tpot_ms"] == 30.0
+    assert out["p99_e2el_ms"] == 900.0
+    assert out["p99_itl_ms"] == 15.0
+
+
+def test_gpu_vram_used_mb_sums_wanted(monkeypatch):
+    fake = json.dumps({
+        "card0": {"VRAM Total Used Memory (B)": str(2 * 1024 * 1024 * 1024)},  # 2048 MiB
+        "card1": {"VRAM Total Used Memory (B)": str(1 * 1024 * 1024 * 1024)},  # 1024 MiB
+    })
+    monkeypatch.setattr(ab.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=fake))
+    assert ab._gpu_vram_used_mb("0") == 2048.0
+    assert ab._gpu_vram_used_mb("0,1") == 3072.0
+
+
+def test_gpu_vram_used_mb_failure_returns_none(monkeypatch):
+    def _raise(*a, **k):
+        raise OSError("no rocm-smi")
+
+    monkeypatch.setattr(ab.subprocess, "run", _raise)
+    assert ab._gpu_vram_used_mb("0") is None

@@ -298,7 +298,12 @@ def _bench_once(
         d = json.loads(res.read_text())
         # output_throughput is the headline; tpot/itl are decode-latency signals (lower=better).
         out: dict[str, float] = {"output_throughput": float(d["output_throughput"])}
-        for k in ("median_tpot_ms", "mean_tpot_ms", "median_itl_ms", "mean_itl_ms"):
+        # P99 tail latencies (the --percentile-metrics request already emits them)
+        # alongside the median/mean decode-latency signals.
+        for k in (
+            "median_tpot_ms", "mean_tpot_ms", "median_itl_ms", "mean_itl_ms",
+            "p99_tpot_ms", "p99_itl_ms", "p99_e2el_ms", "p99_ttft_ms",
+        ):
             if d.get(k) is not None:
                 out[k] = float(d[k])
         return out
@@ -373,6 +378,46 @@ def _spread(xs: list[float]) -> dict[str, float | None]:
     }
 
 
+def _gpu_vram_used_mb(gpu_ids: str) -> float | None:
+    """Best-effort used VRAM (MiB) summed over the arm's GPUs, via rocm-smi.
+
+    Sampled while the server is up (weights + KV cache resident) as a proxy for
+    peak serving VRAM. Returns ``None`` on any probe/parse failure (never raises)
+    so the ABBA result degrades gracefully when rocm-smi is unavailable.
+    """
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showmeminfo", "vram", "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            return None
+        data = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    wanted = {g.strip() for g in (gpu_ids or "").split(",") if g.strip()}
+    total = 0.0
+    found = False
+    for key, info in data.items():
+        idx = "".join(ch for ch in str(key) if ch.isdigit())
+        if wanted and idx not in wanted:
+            continue
+        if not isinstance(info, dict):
+            continue
+        used = next(
+            (v for k, v in info.items() if "used" in k.lower() and ("vram" in k.lower() or "memory" in k.lower())),
+            None,
+        )
+        if used is None:
+            continue
+        try:
+            total += float(str(used).strip()) / (1024.0 * 1024.0)  # bytes -> MiB
+            found = True
+        except ValueError:
+            continue
+    return round(total, 1) if found else None
+
+
 def _serve_and_bench(
     arm: str,
     backend: str,
@@ -400,6 +445,7 @@ def _serve_and_bench(
     _log(out_dir, f"{arm} warmup pass done (discarded)")
     reps_out: list[float] = []  # output_throughput per timed rep
     tpot_out: list[float] = []  # median_tpot_ms per timed rep (decode latency)
+    p99_tpot_out: list[float] = []  # p99_tpot_ms per timed rep (tail decode latency)
     for r in range(1, reps + 1):
         m = _bench_once(bs, model, port, isl, osl, conc, num_prompts, arm, r, out_dir, seed)
         tput = m.get("output_throughput") if m else None
@@ -408,6 +454,10 @@ def _serve_and_bench(
             reps_out.append(tput)
             if m.get("median_tpot_ms") is not None:
                 tpot_out.append(m["median_tpot_ms"])
+            if m.get("p99_tpot_ms") is not None:
+                p99_tpot_out.append(m["p99_tpot_ms"])
+    # Peak serving VRAM (weights + KV cache), sampled before teardown.
+    vram_used_mb = _gpu_vram_used_mb(gpu)
     _kill_servers(proc, backend)
     tput_spread = _spread(reps_out)
     return {
@@ -418,6 +468,9 @@ def _serve_and_bench(
         "tput_spread": tput_spread,
         "tpot_reps_ms": tpot_out,
         "tpot_spread_ms": _spread(tpot_out),
+        "p99_tpot_reps_ms": p99_tpot_out,
+        "p99_tpot_spread_ms": _spread(p99_tpot_out),
+        "vram_used_mb": vram_used_mb,
     }
 
 
@@ -614,6 +667,12 @@ def apply_and_bench(
     b_tpot = base.get("tpot_spread_ms", {}).get("median")
     p_tpot = patched.get("tpot_spread_ms", {}).get("median")
     tpot_delta_pct = (p_tpot - b_tpot) / b_tpot * 100.0 if (b_tpot and p_tpot) else None
+    # P99 tail decode latency (lower=better) and peak VRAM footprint.
+    b_p99 = (base.get("p99_tpot_spread_ms") or {}).get("median")
+    p_p99 = (patched.get("p99_tpot_spread_ms") or {}).get("median")
+    p99_tpot_delta_pct = (p_p99 - b_p99) / b_p99 * 100.0 if (b_p99 and p_p99) else None
+    b_vram, p_vram = base.get("vram_used_mb"), patched.get("vram_used_mb")
+    vram_delta_mb = (p_vram - b_vram) if (b_vram is not None and p_vram is not None) else None
     result = {
         "status": "ok" if (b_med and p_med) else "patched_failed",
         "gate": "none (straightforward apply + remeasure; KEEP/REVERT/NEEDS_REVIEW bypassed; policy is the caller's job)",
@@ -630,6 +689,12 @@ def apply_and_bench(
         "tpot_delta_pct": tpot_delta_pct,  # negative = faster decode (good)
         "baseline_tpot_spread_ms": base.get("tpot_spread_ms"),
         "patched_tpot_spread_ms": patched.get("tpot_spread_ms"),
+        "p99_tpot_delta_pct": p99_tpot_delta_pct,  # negative = better tail decode
+        "baseline_p99_tpot_spread_ms": base.get("p99_tpot_spread_ms"),
+        "patched_p99_tpot_spread_ms": patched.get("p99_tpot_spread_ms"),
+        "baseline_vram_used_mb": b_vram,
+        "patched_vram_used_mb": p_vram,
+        "vram_delta_mb": vram_delta_mb,
         "baseline_reps": base.get("reps"),
         "patched_reps": patched.get("reps"),
         "removed_prebuilt_so": removed_so,
