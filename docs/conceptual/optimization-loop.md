@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Understand the Hyperloom optimization loop: runtime contracts, phase order (PRELUDE through CLOSE), orchestration model, feedback loops, and session artifacts."
-        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate"
+        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate"
 ---
 # Hyperloom optimization loop
 
@@ -13,7 +13,7 @@ PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
 ```{image} ../images/Hyperloom_optimization_loop.png
-:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_PR, EXPLORE, KERNEL Phase, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_PR while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
+:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
 :class: hl-lightbox-trigger
 ```
 
@@ -68,11 +68,11 @@ observable session artifacts and subprocess JSON bridges are.
 The Coordinator advances through the live phase chain:
 
 ```text
-PRELUDE -> FRAMEWORK_PR -> EXPLORE -> KERNEL Phase -> SWEEP -> CLOSE
+PRELUDE -> FRAMEWORK_AGENT -> EXPLORE -> KERNEL_AGENT -> SWEEP -> CLOSE
 ```
 
 Cyclic macro-cycling is always enabled. After SWEEP, the Coordinator can
-`cycle_reloop` back to `FRAMEWORK_PR` / `EXPLORE` for another pass while
+`cycle_reloop` back to `FRAMEWORK_AGENT` / `EXPLORE` for another pass while
 budget and leverage remain, regardless of whether the session is shorter than
 24 hours. The 24-hour threshold now only selects long-run budget accounting:
 short bounded runs keep charge-back phase budgeting, while long / unbounded
@@ -99,9 +99,9 @@ PRELUDE establishes the session baseline:
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
 
-## FRAMEWORK_PR
+## FRAMEWORK_AGENT
 
-When enabled, the `FRAMEWORK_PR` phase (framework-PR enablement) is managed
+When enabled, the `FRAMEWORK_AGENT` phase (framework enablement) is managed
 by the Coordinator. It covers discovery/ranking/audit through `fa phase-discover`,
 plus authoring-specialist dispatch (`framework_agent_authoring_enabled` is on by
 default), enablement repair, and Critic review of each candidate — discovery is
@@ -111,7 +111,7 @@ For each candidate:
 
 1. The framework-agent returns candidate metadata and diff information,
 2. The Critic reviews the candidate before apply,
-3. The framework PR executor applies, benchmarks, and either keeps or
+3. The framework-agent executor applies, benchmarks, and either keeps or
    reverts the candidate,
 4. Progress is recorded in `SharedState` and later surfaced in
    `session_breakdown.json`.
@@ -138,9 +138,9 @@ for archived reporting only. New sessions write the merged
 After each KEEP, the runtime revalidates the full stack end to end so
 the reported cumulative gain is not just a sum of per-round deltas.
 
-## KERNEL Phase
+## KERNEL_AGENT
 
-The `KERNEL Phase` is the bridge to kernel-agent work. Orchestration may
+The `KERNEL_AGENT` phase is the bridge to kernel-agent work. Orchestration may
 send kernel requests, but the Coordinator owns the request handlers and safety
 gates.
 
@@ -230,7 +230,7 @@ stateless per tick.
 The loop adapts through facts, not through retired score tables:
 
 - `SharedState` carries current best, stack entries, phase history,
-  action attempts, kernel attempts, framework PR progress, and warnings.
+  action attempts, kernel attempts, framework-agent progress, and warnings.
 - `RecipeKB` records durable lessons and pitfalls for future sessions.
 - Critic verdicts gate risky patches and framework candidates.
 - Robustness watches stalls, crashes, config-only loops, specialist
