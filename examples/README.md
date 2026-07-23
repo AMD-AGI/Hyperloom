@@ -17,19 +17,18 @@ running the install command.
 
 - Python 3.10+ and `pip`.
 - Access to the Anthropic LLM provider.
-- `gh` (GitHub CLI), authenticated, to download the published GitHub release
-  asset (the wheel is distributed as a Release asset, not via PyPI), or a
-  locally downloaded Hyperloom wheel.
+- `curl` to download the published GitHub release asset (the wheel is
+  distributed as a public Release asset, not via PyPI), or a locally downloaded
+  Hyperloom wheel.
 - A dedicated workspace directory opened in the user's agent.
 
 From the agent terminal in that workspace, download the latest release wheel and
 install it into the current directory:
 
 ```bash
-gh auth login
-gh release download \
-  -R AMD-AGI/Hyperloom \
-  -p 'hyperloom_inference_optimizer-*-py3-none-any.whl'
+WHEEL_URL="$(curl -fsSL https://api.github.com/repos/AMD-AGI/Hyperloom/releases/latest \
+  | grep -o 'https://[^"]*hyperloom_inference_optimizer-[^"]*-py3-none-any\.whl')"
+curl -fSL -O "$WHEEL_URL"
 
 python3 -m pip install \
   ./hyperloom_inference_optimizer-*-py3-none-any.whl \
