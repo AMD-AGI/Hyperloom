@@ -201,8 +201,12 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
 _SHAPE_MANIFEST_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST"
 #: Optional gfx-arch provenance override (WP-1 stub; superseded by WP-0/WP-7).
 _GFX_ENV = "HYPERLOOM_GFX_ARCH"
-#: sglang capture shard -> ``bs_<batch>`` variant label.
+#: sglang capture shard filename -> ``bs_<batch>`` variant. vLLM instead emits
+#: ``graph_capture_rank_*`` files whose batch/mode live in execution_details.json.
 _VARIANT_RE = re.compile(r"^(bs_\d+)", re.IGNORECASE)
+_CAPTURE_FILE_RE = re.compile(r"^(bs_\d+_rank\d+|graph_capture)", re.IGNORECASE)
+#: Optional cap on how many capture files to index (0 = all). Logged when hit.
+_MAX_CAPTURES_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES"
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -217,12 +221,33 @@ def _sha256_file(path: str | Path) -> str:
         return ""
 
 
-def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[Path]:
-    """Return sglang CUDA-graph capture shards (``bs_*_rank*``) to index.
+def _load_execution_details(capdir: Path) -> dict[str, dict[str, Any]]:
+    """Map ``capture filename -> {batch_size, mode}`` from vLLM's
+    ``execution_details.json`` (a list of ``{file, batch_size, mode}``).
 
-    Looks in ``capture_folder`` when given, else under the trace input tree.
-    Reuses the reader's shard detector so the definition of "capture shard"
-    stays single-sourced.
+    Returns an empty map when absent/unreadable (sglang shards or older
+    captures), so callers fall back to filename-derived labels.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        data = json.loads((capdir / "execution_details.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return out
+    for e in data if isinstance(data, list) else []:
+        if isinstance(e, dict) and e.get("file"):
+            out[str(e["file"])] = {"batch_size": e.get("batch_size"), "mode": e.get("mode")}
+    return out
+
+
+def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tuple[Path, str, str | None]]:
+    """Return ``(file, variant_label, mode)`` for each CUDA-graph capture shard.
+
+    Handles both capture layouts:
+      * sglang ``bs_<batch>_rank<n>`` shards -> variant from the filename;
+      * vLLM ``graph_capture_rank_*`` files -> variant (``bs_<batch>``) and mode
+        from the sibling ``execution_details.json`` batch mapping.
+
+    Looks in ``capture_folder`` when given, else under the trace-input tree.
     """
     roots: list[Path] = []
     if capture_folder:
@@ -230,23 +255,38 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[Path
     ti = Path(trace_input)
     roots.append(ti if ti.is_dir() else ti.parent)
     seen: set[str] = set()
-    shards: list[Path] = []
+    exec_cache: dict[Path, dict[str, dict[str, Any]]] = {}
+    out: list[tuple[Path, str, str | None]] = []
     for root in roots:
         if not root.exists():
             continue
         for cand in _reader._trace_candidates(root):
-            if _reader._is_capture_fragment(cand, root) and _VARIANT_RE.match(cand.name):
-                key = str(cand.resolve())
-                if key not in seen:
-                    seen.add(key)
-                    shards.append(cand)
-    return shards
-
-
-def _variant_label(path: Path) -> str:
-    """Map a capture shard filename to its ``bs_<batch>`` variant label."""
-    m = _VARIANT_RE.match(path.name)
-    return m.group(1).lower() if m else path.stem
+            name = cand.name
+            if not _CAPTURE_FILE_RE.match(name):
+                continue
+            key = str(cand.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            pdir = cand.parent
+            if pdir not in exec_cache:
+                exec_cache[pdir] = _load_execution_details(pdir)
+            if name.lower().startswith("graph_capture"):
+                meta = exec_cache[pdir].get(name, {})
+                bs = meta.get("batch_size")
+                mode = meta.get("mode")
+                # vLLM captures each batch in >1 graph mode (PIECEWISE + FULL);
+                # mode is part of the variant identity or they collide.
+                if bs not in (None, ""):
+                    label = f"bs_{bs}_{str(mode).lower()}" if mode else f"bs_{bs}"
+                else:
+                    label = cand.stem
+            else:  # sglang bs_<batch>_rank<n>
+                m = _VARIANT_RE.match(name)
+                label = m.group(1).lower() if m else cand.stem
+                mode = None
+            out.append((cand, label, mode))
+    return out
 
 
 def _build_manifest_provenance(args: argparse.Namespace) -> dict[str, Any]:
@@ -311,15 +351,31 @@ def _maybe_build_shape_manifest(
         main_trace = analyze.get("trace_file", "") or ""
         main_hash = _sha256_file(main_trace) if main_trace else ""
         shards = _discover_capture_shards(args.trace_input, args.capture_folder or "")
+        try:
+            max_caps = int(os.environ.get(_MAX_CAPTURES_ENV, "0") or 0)
+        except ValueError:
+            max_caps = 0
+        if max_caps > 0 and len(shards) > max_caps:
+            print(
+                f"[trace_shape_manifest] capping capture files {len(shards)}->{max_caps} "
+                f"(set {_MAX_CAPTURES_ENV}=0 to index all)",
+                file=sys.stderr,
+            )
+            shards = shards[:max_caps]
         capture_variants: list[tuple[str, dict[str, Any]]] = []
         capture_hashes: dict[str, str] = {}
-        for shard in shards:
-            shard_an = _reader.analyze_trace(shard, top_k=0, steady_state=False, emit_launches=True)
+        variant_meta: dict[str, dict[str, Any]] = {}
+        for path, label, mode in shards:
+            shard_an = _reader.analyze_trace(path, top_k=0, steady_state=False, emit_launches=True)
             if shard_an.get("status") != "ok":
                 continue
-            label = _variant_label(shard)
             capture_variants.append((label, shard_an))
-            capture_hashes[label] = _sha256_file(shard)
+            capture_hashes[label] = _sha256_file(path)
+            variant_meta[label] = {
+                "batch_size": label.split("_")[1] if label.startswith("bs_") else None,
+                "mode": mode,
+                "file": path.name,
+            }
 
         # phase hint from the analysis mode the coordinator forwards.
         phase_hint = (args.analysis_mode or "mixed").lower() or "mixed"
@@ -329,6 +385,7 @@ def _maybe_build_shape_manifest(
             provenance=_build_manifest_provenance(args),
             main_trace_hash=main_hash,
             capture_trace_hashes=capture_hashes,
+            variant_meta=variant_meta,
             analysis_route="bypass",
             generated_at=generated_at,
             phase_hint=phase_hint,

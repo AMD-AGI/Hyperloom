@@ -116,21 +116,33 @@ def _tuner_addressable(dtypes: Any) -> bool:
 def _canon_dims(shapes: Any) -> dict[str, Any]:
     """Best-effort extraction of GEMM dims from Kineto ``Input Dims``.
 
-    Assumes the common ``A[M,K] x B[K,N]`` convention when two 2-D operands are
-    present; otherwise leaves fields ``None`` and preserves the raw shapes so a
-    consumer can reinterpret. Never raises on malformed input.
+    The first 2-D operand is the activation ``A = [M, K]``. The second 2-D
+    operand is the weight, which may be stored either ``[N, K]`` (inference
+    layout, e.g. ``aiter::gemm_a8w8_blockscale_ck``) or ``[K, N]`` (plain
+    ``torch.mm``). We pick ``N`` as the weight dim that is *not* ``K`` (verified
+    against ``A``), which is correct for both conventions; a square weight is
+    unambiguous. Scale operands (``[M, K/128]``, ``[N/128, K/128]``) follow the
+    weight in the operand list, so taking the first two 2-D operands avoids them.
+
+    Leaves fields ``None`` and preserves the raw shapes on anything unexpected.
+    Never raises.
     """
     dims: dict[str, Any] = {"M": None, "N": None, "K": None, "batch": None, "groups": None, "raw": shapes or []}
     try:
         mats = [s for s in (shapes or []) if isinstance(s, (list, tuple)) and len(s) >= 2]
         two_d = [s for s in mats if len(s) == 2]
-        if len(two_d) >= 2:
-            a, b = two_d[0], two_d[1]
-            dims["M"], dims["K"] = int(a[0]), int(a[1])
-            dims["N"] = int(b[1])
-        elif len(two_d) == 1:
+        if two_d:
             a = two_d[0]
             dims["M"], dims["K"] = int(a[0]), int(a[1])
+            k = dims["K"]
+            if len(two_d) >= 2:
+                b = [int(b0) for b0 in two_d[1][:2]]
+                if b[1] == k:            # weight [N, K] (inference layout)
+                    dims["N"] = b[0]
+                elif b[0] == k:          # weight [K, N] (plain torch.mm)
+                    dims["N"] = b[1]
+                else:                    # unknown layout: generic [K, N] fallback
+                    dims["N"] = b[1]
         batched = [s for s in mats if len(s) >= 3]
         if batched:
             dims["batch"] = int(batched[0][0])
@@ -347,6 +359,7 @@ def build_shape_manifest(
     provenance: dict[str, Any] | None,
     main_trace_hash: str,
     capture_trace_hashes: dict[str, str] | None = None,
+    variant_meta: dict[str, dict[str, Any]] | None = None,
     tracelens_revision: str | None = None,
     analysis_route: str = "bypass",
     generated_at: str = "",
@@ -421,6 +434,7 @@ def build_shape_manifest(
         **totals,
         "variant_steady_replay": variant_steady_replay,
         "total_graph_replays": total_graph_replays,
+        "variant_meta": variant_meta or {},
     }
 
     manifest: dict[str, Any] = {

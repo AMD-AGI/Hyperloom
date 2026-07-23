@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import _bypass_trace_reader as reader  # noqa: E402
 import _trace_shape_manifest as tsm  # noqa: E402
+import bypass_trace_analysis as bta  # noqa: E402
 
 
 def _launch(name, *, op_name="", ts=0.0, dur=100.0, shapes=None, dtypes=None, backend="", kfile=""):
@@ -93,6 +94,75 @@ def test_dims_extraction_from_shapes():
 
 
 # --- signature discrimination -------------------------------------------------
+
+
+def test_dims_extraction_aiter_blockscale_weight_nk_layout():
+    """Real aiter::gemm_a8w8_blockscale_ck operand order:
+    [A[M,K], B(weight)[N,K], x_scale[M,K/128], w_scale[N/128,K/128], out[M,N], scalar].
+    N must be the weight dim that is not K (Qwen3-14B qkv/o/gate_up/down)."""
+    cases = [
+        ([[8192, 5120], [5120, 5120], [8192, 40], [40, 40], [8192, 5120]], 5120),      # o_proj/attn
+        ([[8192, 5120], [34816, 5120], [8192, 40], [272, 40], [8192, 34816]], 34816),  # gate_up
+        ([[8192, 17408], [5120, 17408], [8192, 136], [40, 136], [8192, 5120]], 5120),  # down
+        ([[8192, 5120], [7168, 5120], [8192, 40], [56, 40], [8192, 7168]], 7168),      # qkv
+    ]
+    for shapes, expect_n in cases:
+        r = tsm.build_row(
+            _launch("gemm", op_name="aiter::gemm_a8w8_blockscale_ck", shapes=shapes, dtypes=["fp8", "fp8"]),
+            graph_variant="bs_512", node_ordinal=0, phase="decode", bucket="bs_512", capture_only=True,
+        )
+        assert r["dims"]["M"] == shapes[0][0], (shapes, r["dims"])
+        assert r["dims"]["K"] == shapes[0][1], (shapes, r["dims"])
+        assert r["dims"]["N"] == expect_n, (shapes, r["dims"])
+
+
+def test_variant_meta_recorded_in_workload():
+    m = tsm.build_shape_manifest(
+        main_analysis=_analysis([]), capture_variants=[("bs_512", _analysis([]))],
+        provenance={}, main_trace_hash="h",
+        variant_meta={"bs_512": {"batch_size": "512", "mode": "PIECEWISE"}},
+    )
+    assert m["workload"]["variant_meta"]["bs_512"]["mode"] == "PIECEWISE"
+    assert m["workload"]["variant_meta"]["bs_512"]["batch_size"] == "512"
+
+
+def test_load_execution_details(tmp_path):
+    (tmp_path / "execution_details.json").write_text(json.dumps([
+        {"file": "graph_capture_rank_0.1.pt.trace.json.gz", "batch_size": "512", "mode": "PIECEWISE"},
+        {"file": "graph_capture_rank_0.2.pt.trace.json.gz", "batch_size": "256", "mode": "PIECEWISE"},
+    ]))
+    m = bta._load_execution_details(tmp_path)
+    assert m["graph_capture_rank_0.1.pt.trace.json.gz"]["batch_size"] == "512"
+    assert m["graph_capture_rank_0.2.pt.trace.json.gz"]["mode"] == "PIECEWISE"
+    # missing file -> empty map, never raises.
+    assert bta._load_execution_details(tmp_path / "nope") == {}
+
+
+def test_discover_capture_shards_vllm_graph_capture(tmp_path):
+    cap = tmp_path / "capture_traces"
+    cap.mkdir()
+    for i in (1, 2, 3):
+        (cap / f"graph_capture_rank_0.{i}.pt.trace.json.gz").write_bytes(b"x")
+    (cap / "execution_details.json").write_text(json.dumps([
+        {"file": "graph_capture_rank_0.1.pt.trace.json.gz", "batch_size": "512", "mode": "PIECEWISE"},
+        {"file": "graph_capture_rank_0.2.pt.trace.json.gz", "batch_size": "256", "mode": "PIECEWISE"},
+        {"file": "graph_capture_rank_0.3.pt.trace.json.gz", "batch_size": "512", "mode": "FULL"},
+    ]))
+    out = bta._discover_capture_shards(str(cap), "")
+    labels = sorted(lbl for _, lbl, _ in out)
+    # Same batch, different graph mode -> distinct variants (no collision).
+    assert labels == ["bs_256_piecewise", "bs_512_full", "bs_512_piecewise"]
+    modes = {lbl: mode for _, lbl, mode in out}
+    assert modes["bs_512_full"] == "FULL"
+
+
+def test_discover_capture_shards_sglang_bs_shards(tmp_path):
+    cap = tmp_path / "capture_traces"
+    cap.mkdir()
+    (cap / "bs_16_rank0.json.gz").write_bytes(b"x")
+    (cap / "bs_32_rank0.json.gz").write_bytes(b"x")
+    out = bta._discover_capture_shards(str(cap), "")
+    assert sorted(lbl for _, lbl, _ in out) == ["bs_16", "bs_32"]
 
 
 def test_signature_discriminates_variant():
