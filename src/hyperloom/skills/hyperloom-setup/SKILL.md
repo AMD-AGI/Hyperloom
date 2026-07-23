@@ -133,10 +133,6 @@ value.
      the host provides ROCm, or when Hyperloom is already installed inside a
      Docker container and setup should run directly in that current container
      environment.
-   - Default to `docker`: it ships a validated ROCm + framework stack and keeps
-     the host untouched. Recommend `baremetal` only when the user is already
-     inside a container or shell with a working framework; if the user is
-     unsure, recommend `docker`.
 
 6. Only when the user chose `docker`, resolve the Docker target host
    (`HYPERLOOM_DOCKER_TARGET_HOST`). This is where the example skill will run
