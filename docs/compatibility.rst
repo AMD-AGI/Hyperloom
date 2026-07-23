@@ -76,7 +76,7 @@ The following table lists the validated Hyperloom version and component combinat
 +===================+===========================+========================+============================+===============+=============+=============================+
 | 1.0.0a1           | `TraceLens 0.1.0`_        | Hardware-agnostic      | No dependency              | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
-|                   | `GEAK (main)`_            | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
+|                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
 +                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
 |                   | `IntelliKit 0.1.0`_       | MI300X, MI325X, MI355X | 7.2.x                      | 22.04, 24.04  | >= 3.10     | |intellikit-github|         |
 +                   +---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
@@ -85,11 +85,11 @@ The following table lists the validated Hyperloom version and component combinat
 |                   | `Magpie 0.1.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x        | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
 +-------------------+---------------------------+------------------------+----------------------------+---------------+-------------+-----------------------------+
 
-.. _TraceLens 0.1.0: https://rocm.docs.amd.com/projects/tracelens/en/latest/
-.. _GEAK (main): https://rocm.docs.amd.com/projects/geak/en/latest/
-.. _IntelliKit 0.1.0: https://rocm.docs.amd.com/projects/intellikit/en/latest/
-.. _AgentKernelArena 0.2.0: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/
-.. _Magpie 0.1.0: https://rocm.docs.amd.com/projects/magpie/en/latest
+.. _TraceLens 0.1.0: https://rocm.docs.amd.com/projects/tracelens/en/docs-0.1.0/
+.. _GEAK 4.0.0: https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/
+.. _IntelliKit 0.1.0: https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.0/
+.. _AgentKernelArena 0.2.0: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/
+.. _Magpie 0.2.0: https://rocm.docs.amd.com/projects/magpie/en/docs-0.2.0/
 
 .. note::
 
