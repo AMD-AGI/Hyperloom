@@ -54,6 +54,8 @@ html_theme_options = {
     "header_title": f"Hyperloom {version_number}",
     "header_link": False,
     "version_list_link": False,
+    "use_repository_button": True,
+    "use_issues_button": True,
     "nav_secondary_items": {
         "GitHub": "https://github.com/AMD-AGI/Hyperloom",
         "Community": False,
