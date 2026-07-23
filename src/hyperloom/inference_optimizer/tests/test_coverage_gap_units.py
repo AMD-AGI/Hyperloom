@@ -403,10 +403,13 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert inf._collect_forward_env()["MORI_FOO"] == "1"
 
     calls: list[tuple[str, str]] = []
+    interpreters: list[str] = []
     monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
+    monkeypatch.setenv("HYPERLOOM_MN_POD_PYTHON", "/custom/venv/bin/python")
 
     def _run(state, ip, script, python, launch_args, **kw):
         calls.append((ip, launch_args))
+        interpreters.append(python)
         if ip == "10.0.0.2":
             raise subprocess.TimeoutExpired(cmd=["ssh"], timeout=kw["timeout"])
         return _Completed(returncode=1 if ip == "10.0.0.3" else 0, stdout='noise {"status":"ok"}\n', stderr="bad")
@@ -429,6 +432,7 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [r["podIP"] for r in results] == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
     assert results[1]["rc"] == 124
     assert calls[0] == ("10.0.0.1", "--model /m")
+    assert interpreters == ["/custom/venv/bin/python"] * 3
 
 
 def _restart_args(**overrides) -> argparse.Namespace:

@@ -709,6 +709,27 @@ def _read_bundled_pod_python_script(
     return "from __future__ import annotations\n\n" + "\n\n".join(chunks) + "\n\n" + main_body + "\n"
 
 
+def _prepare_shell_safe_extra_args(raw: str, *, context: str) -> str:
+    """Validate and quote server args before embedding them in a shell command.
+
+    Args:
+        raw: Shell-style framework server arguments.
+        context: Error context included in rejection messages.
+
+    Returns:
+        str: Every parsed argv token individually shell-quoted.
+
+    Raises:
+        ServerArgsRejected: If a denied flag or malformed quoting is present.
+    """
+    validate_server_args(raw, context=context)
+    try:
+        tokens = shlex.split(raw or "")
+    except ValueError as exc:
+        raise ServerArgsRejected(f"unparseable server args ({context}): {exc}") from exc
+    return " ".join(shlex.quote(token) for token in tokens)
+
+
 def _build_restart_entrypoint(
     args: argparse.Namespace,
     pid_file: str,
@@ -731,6 +752,14 @@ def _build_restart_entrypoint(
     if framework not in ("sglang", "vllm"):
         raise RuntimeError(f"unsupported framework: {args.framework!r} (use sglang or vllm)")
 
+    try:
+        safe_extra_args = _prepare_shell_safe_extra_args(
+            args.extra_args or "",
+            context="restart-server --extra-args",
+        )
+    except ServerArgsRejected as exc:
+        raise RuntimeError(str(exc)) from exc
+
     kill_sh = _read_pod_script("kill_server.sh")
     launch_sh = _read_pod_script("launch_server.sh")
 
@@ -750,7 +779,7 @@ def _build_restart_entrypoint(
         f'"$WORK_DIR/launch_server.sh" {shlex.quote(str(framework))} '
         f"{shlex.quote(str(args.model))} {shlex.quote(str(args.tp))} "
         f"{shlex.quote(str(pid_file))} {shlex.quote(str(log_file))} "
-        f"{wait_flag} -- {args.extra_args}"
+        f"{wait_flag} -- {safe_extra_args}"
     )
     return entrypoint
 
@@ -784,8 +813,56 @@ def _build_kill_single_entrypoint(pid_file: str) -> str:
         f"cat > \"$WORK_DIR/kill_server.sh\" <<'__MN_KILL_EOF__'\n"
         f"{kill_sh}__MN_KILL_EOF__\n"
         'chmod +x "$WORK_DIR/kill_server.sh"; '
-        f'"$WORK_DIR/kill_server.sh" {pid_file!s}'
+        f'"$WORK_DIR/kill_server.sh" {shlex.quote(str(pid_file))}'
     )
+
+
+def _exec_preflight_submission(
+    state: dict[str, Any],
+    entrypoint: str,
+    *,
+    args: argparse.Namespace,
+    runtime_env: dict[str, Any] | None = None,
+) -> bool:
+    """Run pod-side launch validation before any cluster kill.
+
+    Args:
+        state: Multi-node state (head IP + dashboard token).
+        entrypoint: ``launch_multinode.py --preflight-only`` entrypoint.
+        args: Parsed CLI args (poll interval/timeout, print_logs).
+        runtime_env: Optional Ray runtime env matching the eventual launch.
+
+    Returns:
+        bool: ``True`` only when the preflight job reaches a successful terminal
+        status; ``False`` leaves the existing server untouched.
+    """
+    with _ray_dashboard_client(state) as ray:
+        sub_id = ray.submit_job(entrypoint, runtime_env=runtime_env)
+        info(f"restart preflight submission_id={sub_id}")
+
+        def _fetch():
+            """Fetch preflight status for the poll loop."""
+            job = ray.get_job(sub_id)
+            return job, f"preflight status={job.get('status', '?')}"
+
+        result = _short_poll(
+            label=f"restart preflight {sub_id}",
+            fetch=_fetch,
+            is_ok=lambda job: str(job.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
+            is_fail=lambda job: str(job.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
+            interval_s=args.poll_interval,
+            timeout_s=_poll_timeout_from_args(args),
+        )
+        status = str(result.get("status", "")).upper()
+        if args.print_logs or status in _TERMINAL_FAIL_STATUSES:
+            print(ray.get_job_logs(sub_id))
+        if status not in _TERMINAL_OK_STATUSES:
+            info(
+                f"ERROR restart preflight terminal status={status}; "
+                "leaving the existing multi-node server running"
+            )
+            return False
+        return True
 
 
 def _exec_kill_submission(
@@ -896,7 +973,7 @@ def _extract_launcher_summary(launch_logs: str) -> dict:
 # can point the RayJob driver at the wrong cluster. Variants may only control
 # tuning env (NCCL_/RCCL_/MORI_/SGLANG_* ...). Enforced on the control side
 # (_variant_env_control_spec) so BOTH the RayJob and Infera paths inherit it.
-_PROTECTED_CONTROL_ENV_PREFIXES = ("LWS_", "RAY_", "KUBERNETES_", "NATS_", "INFERA_")
+_PROTECTED_CONTROL_ENV_PREFIXES = ("LWS_", "RAY_", "RAYJOB_", "KUBERNETES_", "NATS_", "INFERA_")
 
 
 def _is_protected_control_env_key(key: str) -> bool:
@@ -1024,6 +1101,7 @@ def _build_multinode_launch_entrypoint(
     pid_dir: str,
     log_dir: str,
     unset_env: list[str] | None = None,
+    preflight_only: bool = False,
 ) -> str:
     """Compose the head-pod entrypoint that spawns one rank per node via heredoc-embedded launch_multinode.py.
 
@@ -1036,6 +1114,8 @@ def _build_multinode_launch_entrypoint(
         pid_dir (str): Directory for per-rank PID files.
         log_dir (str): Directory for per-rank logs.
         unset_env: Inherited pod/raylet env keys removed on every rank.
+        preflight_only: Validate pod-side args/capabilities, then exit before
+            ``ray.init`` or spawning ranks.
 
     Returns:
         str: The composed Ray Dashboard entrypoint shell command.
@@ -1064,6 +1144,7 @@ def _build_multinode_launch_entrypoint(
             info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
     profiler_arg = f"--torch-profiler-dir {shlex.quote(str(profiler_dir))} " if profiler_dir else ""
     unset_arg = f"--unset-env-json {shlex.quote(json.dumps(sorted(unset_env or [])))} "
+    preflight_arg = "--preflight-only " if preflight_only else ""
     # Expert-parallel size; ep <= 1 emits no flag.
     try:
         ep_val = int(getattr(args, "ep", 1) or 1)
@@ -1111,7 +1192,8 @@ def _build_multinode_launch_entrypoint(
         # shell metacharacters, which would otherwise split the argv or open a
         # command-injection surface in the heredoc-embedded launch command.
         f"--pid-dir {shlex.quote(str(pid_dir))} --log-dir {shlex.quote(str(log_dir))} "
-        f"{unset_arg}{ep_arg}{profiler_arg}{pd_args}{wait_flag} --extra-args {shlex.quote(str(extra_args))}"
+        f"{preflight_arg}{unset_arg}{ep_arg}{profiler_arg}{pd_args}{wait_flag} "
+        f"--extra-args {shlex.quote(str(extra_args))}"
     )
 
 
@@ -1747,6 +1829,15 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             log_dir,
             unset_env=_unset_env,
         )
+        preflight_ep = _build_multinode_launch_entrypoint(
+            args,
+            nnodes,
+            pid_dir,
+            log_dir,
+            unset_env=_unset_env,
+            preflight_only=True,
+        )
+        _runtime_env = {"env_vars": _fwd_env} if _fwd_env else None
 
         # Resume fast path: if the prior launch had identical
         # framework/model/tp/ep/pd_mode and is still RUNNING, skip KILL+LAUNCH
@@ -1800,6 +1891,16 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
         kill_sub = ""
         if not launch_sub:
+            # Pod-side parser/capability validation must complete BEFORE the
+            # kill job. A rejected variant therefore leaves the existing
+            # multi-node server running instead of tearing the cluster down.
+            if not _exec_preflight_submission(
+                state,
+                preflight_ep,
+                args=args,
+                runtime_env=_runtime_env,
+            ):
+                return 1
             kill_sub = _exec_kill_submission(
                 state,
                 kill_ep,
@@ -1815,7 +1916,6 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                 # the rank actors via runtime_env; without this the RayJob path
                 # silently ignores env-only variants (actors inherit only their
                 # node env). Omit an empty payload so normal rounds are unchanged.
-                _runtime_env = {"env_vars": _fwd_env} if _fwd_env else None
                 if _fwd_env:
                     info(f"launch forwarding {len(_fwd_env)} tuning env var(s) via runtime_env: {sorted(_fwd_env)}")
                 launch_sub = ray.submit_job(launch_ep, runtime_env=_runtime_env)

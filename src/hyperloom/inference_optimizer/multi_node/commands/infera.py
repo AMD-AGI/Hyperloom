@@ -511,6 +511,11 @@ def _infera_fanout_launch(
     """
     script = _mn_cli._read_pod_script("launch_infera_node.py")
     forward_env = _collect_forward_env()
+    # Run the launcher (including argparse/DeepEP preflight) with the same
+    # framework Python used by the eventual server child. Plain SSH ``python3``
+    # can resolve to a system interpreter whose site-packages differ from
+    # /opt/venv, causing false "deep_ep missing" rejects.
+    pod_python = os.environ.get("HYPERLOOM_MN_POD_PYTHON", "/opt/venv/bin/python")
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
     results: list[dict] = []
@@ -526,7 +531,7 @@ def _infera_fanout_launch(
                 state,
                 ip,
                 script,
-                "python3",
+                pod_python,
                 launch_args,
                 timeout=poll_timeout,
                 env=forward_env,

@@ -939,6 +939,11 @@ def main() -> int:
         help=f"sglang collective rendezvous port (default {_DEFAULT_DIST_INIT_PORT}, "
         f"resolution: --dist-init-port > $RAYJOB_DIST_INIT_PORT > {_DEFAULT_DIST_INIT_PORT})",
     )
+    p.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="validate args/capabilities and exit before ray.init or rank spawn",
+    )
     p.add_argument("--no-wait-health", action="store_true", help="don't poll /health on rank 0 before returning")
     p.add_argument("--extra-args", default="", help="extra args appended verbatim to the framework launcher")
     p.add_argument(
@@ -1086,6 +1091,10 @@ def main() -> int:
             f"cluster launch (add the backend to the image to enable)."
         )
         return 2
+
+    if args.preflight_only:
+        print(json.dumps({"status": "ok", "preflight": True, "framework": args.framework}))
+        return 0
 
     _log(f"framework={args.framework} model={args.model} tp={args.tp} nnodes={args.nnodes}")
 

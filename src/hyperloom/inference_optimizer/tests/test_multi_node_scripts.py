@@ -541,6 +541,92 @@ def test_rayjob_launch_entrypoint_forwards_unset_json():
     assert json.dumps(["NCCL_PROTO"]) in entrypoint
 
 
+def test_rayjob_launch_entrypoint_supports_preflight_only():
+    """Controller can submit pod-side validation before killing the cluster."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    args = argparse.Namespace(
+        framework="sglang",
+        model="/m",
+        tp=16,
+        no_wait_health=False,
+        extra_args="",
+        ep=1,
+        pd_mode="colocated",
+    )
+    entrypoint = mn_cli._build_multinode_launch_entrypoint(
+        args,
+        nnodes=2,
+        pid_dir="/tmp/pids",
+        log_dir="/tmp/logs",
+        preflight_only=True,
+    )
+
+    assert "--preflight-only" in entrypoint
+
+
+def test_launch_multinode_preflight_only_returns_before_ray_init(monkeypatch):
+    """Pod-side preflight validates then exits without spawning/killing ranks."""
+    lm = _load_script_module("lm_test_preflight_only", "launch_multinode.py")
+    monkeypatch.setattr(lm.ray, "init", lambda **_kw: (_ for _ in ()).throw(AssertionError("ray.init called")))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "launch_multinode.py",
+            "--framework",
+            "sglang",
+            "--model",
+            "/m",
+            "--tp",
+            "16",
+            "--nnodes",
+            "2",
+            "--pid-dir",
+            "/tmp/pids",
+            "--log-dir",
+            "/tmp/logs",
+            "--preflight-only",
+        ],
+    )
+
+    assert lm.main() == 0
+
+
+def test_rayjob_preflight_failure_does_not_submit_kill(monkeypatch):
+    """Controller order is preflight → kill; a rejected variant preserves server."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    state = {"backend": "rayjob", "nodes": 2, "head_pod_ip": "10.0.0.1"}
+    monkeypatch.setattr(mn_cli, "_load_state", lambda: dict(state))
+    monkeypatch.setattr(mn_cli, "_require_state", lambda *_keys: dict(state))
+    monkeypatch.setattr(mn_cli, "_exec_preflight_submission", lambda *_a, **_kw: False)
+    killed = {"value": False}
+
+    def _unexpected_kill(*_a, **_kw):
+        killed["value"] = True
+        raise AssertionError("kill submitted after failed preflight")
+
+    monkeypatch.setattr(mn_cli, "_exec_kill_submission", _unexpected_kill)
+    args = argparse.Namespace(
+        framework="sglang",
+        model="/m",
+        tp=16,
+        ep=1,
+        extra_args="",
+        pid_file=None,
+        log_file=None,
+        no_wait_health=False,
+        pd_mode="colocated",
+        poll_interval=1,
+        poll_timeout=10,
+        print_logs=False,
+    )
+
+    assert mn_cli.cmd_restart_server(args) == 1
+    assert killed["value"] is False
+
+
 def test_capability_preflight_deepep_backend_blocks(monkeypatch):
     """Explicit --moe-a2a-backend deepep on a deep_ep-less image fails fast."""
     import importlib.util as _ilu
@@ -596,10 +682,19 @@ def test_variant_env_control_spec_protects_control_plane_prefixes(monkeypatch):
         if _k.startswith(("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")):
             monkeypatch.delenv(_k, raising=False)
 
-    # Variant tries to override RAY_ADDRESS (wrong-cluster risk) + a legit knob.
+    # Variant tries to override RAY/RAYJOB control vars + trusted operational
+    # POD/HYPERLOOM_MN values + a legit tuning knob.
     monkeypatch.setenv(
         "HYPERLOOM_MN_EXTRA_FWD_ENV",
-        json.dumps({"RAY_ADDRESS": "evil:6379", "NCCL_PROTO": "LL"}),
+        json.dumps(
+            {
+                "RAY_ADDRESS": "evil:6379",
+                "RAYJOB_DIST_INIT_PORT": "1",
+                "POD_IP": "10.0.0.8",
+                "HYPERLOOM_MN_SERVER_LOG_DIR": "/shared/logs",
+                "NCCL_PROTO": "LL",
+            }
+        ),
     )
     # Variant tries to unset LWS_WORKER_INDEX (would make every pod rank 0).
     monkeypatch.setenv(
@@ -612,7 +707,12 @@ def test_variant_env_control_spec_protects_control_plane_prefixes(monkeypatch):
     # Protected control-plane keys are dropped from both set and unset.
     assert "RAY_ADDRESS" not in forwarded
     assert "RAY_ADDRESS" not in explicit
+    assert "RAYJOB_DIST_INIT_PORT" not in forwarded
+    assert "RAYJOB_DIST_INIT_PORT" not in explicit
     assert "LWS_WORKER_INDEX" not in effective_unsets
+    # Product requirement: POD_ and HYPERLOOM_MN_ remain explicitly allowed.
+    assert forwarded.get("POD_IP") == "10.0.0.8"
+    assert forwarded.get("HYPERLOOM_MN_SERVER_LOG_DIR") == "/shared/logs"
     # Legit tuning env still flows through both channels.
     assert forwarded.get("NCCL_PROTO") == "LL"
     assert "NCCL_DEBUG" in effective_unsets
@@ -1652,6 +1752,46 @@ def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
     assert shlex.quote(evil) in ep
     # The raw unquoted metacharacter model must NOT appear as a bare token.
     assert f"launch_server.sh sglang {evil}" not in ep
+
+
+def test_restart_entrypoint_shlex_quotes_extra_args(monkeypatch):
+    """Single-node extra args preserve argv boundaries without shell injection."""
+    import shlex
+
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    raw = '--foo "value with spaces" --bar "1; touch /tmp/pwned"'
+    ns = argparse.Namespace(
+        framework="sglang",
+        model="/m",
+        tp=8,
+        no_wait_health=False,
+        extra_args=raw,
+    )
+
+    ep = mn_cli._build_restart_entrypoint(ns, "/tmp/x.pid", "/tmp/x.log")
+
+    # Values are re-quoted as single argv tokens; the original unsafe shell
+    # fragment is not embedded verbatim.
+    assert shlex.quote("value with spaces") in ep
+    assert shlex.quote("1; touch /tmp/pwned") in ep
+    assert raw not in ep
+
+
+def test_kill_single_entrypoint_quotes_pid_file(monkeypatch):
+    """A custom single-node pid path cannot split argv or inject shell syntax."""
+    import shlex
+
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
+    pid_file = "/tmp/pid dir/x; touch /tmp/pwned"
+
+    ep = mn_cli._build_kill_single_entrypoint(pid_file)
+
+    assert shlex.quote(pid_file) in ep
+    assert f"kill_server.sh {pid_file}" not in ep
 
 
 def test_multinode_op_args_shlex_quotes_malicious_value():
