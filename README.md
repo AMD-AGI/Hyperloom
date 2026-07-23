@@ -12,8 +12,9 @@ Hyperloom analyzes your workload, identifies performance bottlenecks, implements
 and validates the performance and correctness of the optimizations without requiring manual intervention.
  
 The system operates through a sophisticated multi-stage pipeline. First TraceLens, the profiling brain of
-the workload understanding stage, consumes traces collected by Magpie, captures bottlenecks, and derives
-the roofline targets that seed the optimization search tree.
+the workload understanding stage, consumes traces collected by Magpie (which in turn relies on IntelliKit
+for some low-level GPU profiling tools), captures bottlenecks, and derives the roofline targets that seed
+the optimization search tree.
 
 Next, Hyperloom employs a self-evolving code optimization engine following an iterative agentic loop (Think
 → Decide → Implement → Benchmark). Arbor intelligently explores the optimization space using a Dynamic
@@ -29,10 +30,10 @@ Hyperloom combines:
 
 - Trace analysis, identifying bottleneck kernels and bridge planning through
   [TraceLens](https://github.com/AMD-AGI/TraceLens) Agent (backend support
-   from [Magpie](https://github.com/AMD-AGI/Magpie))
+   from [Magpie](https://github.com/AMD-AGI/Magpie) and
+   [Intellikit](https://github.com/AMDResearch/intellikit))
 - Kernel optimization through the
-  [GEAK](https://github.com/AMD-AGI/GEAK) backend, which uses
-  [IntelliKit](https://github.com/AMDResearch/intellikit) for low-level GPU profiling.
+  [GEAK](https://github.com/AMD-AGI/GEAK) backend.
 - Agentic search space exploration through
   [Arbor](https://arxiv.org/abs/2606.12563), a tree-based cognition layer
   with dynamic agents, long-horizon campaigns, and self-evolving optimization

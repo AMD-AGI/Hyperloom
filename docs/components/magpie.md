@@ -14,7 +14,8 @@ three evaluation modes — Analyze, Compare, and Benchmark — plus framework-le
 Within Hyperloom, Magpie is the benchmark engine. The kernel agent and the
 optimization loop drive Magpie to spin up a serving framework, run the workload,
 collect traces, and emit a structured `benchmark_report.json` file; those traces are
-the input that [TraceLens](tracelens.md) then analyzes.
+the input that [TraceLens](tracelens.md) then analyzes. Magpie relies on
+[IntelliKit](intellikit.md) for some low-level GPU profiling tools.
 
 - **Source**: <https://github.com/AMD-AGI/Magpie>
 - **License**: MIT
