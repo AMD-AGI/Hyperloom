@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 from collections import Counter, defaultdict
 from typing import Any
@@ -32,6 +33,11 @@ from _kernel_category import canonical_category
 from _bypass_source_resolver import editable_trace_source, resolve_source
 from _idle_gate import resolve_idle_pct_threshold
 from _roofline_source import PLACEHOLDER as _RL_PLACEHOLDER
+from _task_group_contract import (
+    build_task_group_shape_cases,
+    native_operation_key,
+    normalize_operation_key,
+)
 
 # Category-appropriate optimization guidance (structured, not LLM prose).
 _ACTION_BY_CATEGORY: dict[str, str] = {
@@ -161,7 +167,18 @@ def _source_type_for_op(op_name: str) -> str:
 
 
 # Native device-code extensions.
-_NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
+_NATIVE_SOURCE_EXTS = (
+    ".cu",
+    ".cuh",
+    ".hip",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".hpp",
+    ".hh",
+    ".h",
+    ".c",
+)
 
 
 def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -169,10 +186,10 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
 
     Only candidates that are both ``reusable_native_kernel`` and carry a resolved
     ``source_file`` participate: an unresolved (empty) source is not a shared
-    function, so those stay standalone (per-kernel dispatch, unchanged). Native
-    ``.cu`` sources key on the source file alone (collapsing template/shape
-    variants of one ``__global__`` into one job); python/Triton sources also key
-    on the operation, since one launcher frame can host distinct kernels.
+    function, so those stay standalone (per-kernel dispatch, unchanged). Every
+    group is keyed by operation plus source: repeated shapes of one operator
+    share a task, while different operators in one translation unit stay
+    independent.
 
     Each group carries compact ``rows``:
     ``kernel_id`` / ``name`` / ``device_kernel_name`` / ``shapes`` / ``call_count``
@@ -194,17 +211,24 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
         if not src:
             continue
         operation = str(c.get("name") or "")
-        if src.lower().endswith(_NATIVE_SOURCE_EXTS):
-            key: tuple = ("native", src)
-        else:
-            key = ("py", src, operation)
+        source_kind = "native" if src.lower().endswith(_NATIVE_SOURCE_EXTS) else "py"
+        operation_key = (
+            native_operation_key(operation)
+            if source_kind == "native"
+            else normalize_operation_key(operation)
+        )
+        key: tuple = (source_kind, src, operation_key)
         shapes = c.get("input_shapes") or []
         row = {
             "kernel_id": c.get("kernel_id", ""),
             "name": c.get("name", ""),
             "device_kernel_name": c.get("device_kernel_name", ""),
-            # One representative call's per-arg dims (harness-consumable).
-            "shapes": shapes[0] if shapes else [],
+            "shapes": shapes,
+            "input_shapes": shapes,
+            "input_dtypes": c.get("input_dtypes") or [],
+            "output_shapes": c.get("output_shapes") or [],
+            "output_dtypes": c.get("output_dtypes") or [],
+            "raw_arg_spec": c.get("raw_arg_spec") or {},
             "call_count": c.get("call_count", 0),
             "duration_us": c.get("duration_us", 0.0),
             "percent_of_total": c.get("percent_of_total", 0.0),
@@ -215,7 +239,13 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
         if bucket is None:
             bucket = buckets[key] = {
                 "task_group_id": "",
+                "task_group_key": json.dumps(
+                    key,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 "operation": operation,
+                "operation_key": operation_key,
                 "source_path": src,
                 "kernel_ids": [],
                 "primary_kernel_id": "",
@@ -240,6 +270,7 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
             group["primary_kernel_id"] = group["rows"][0]["kernel_id"]
         group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
         group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
+        group["shape_cases"] = build_task_group_shape_cases(group)
     return ordered
 
 
@@ -395,8 +426,8 @@ def build_candidates(
         cand["recommended_actions"] = [suggestion]
         hot_kernels.append(cand)
 
-    # Group routable candidates sharing an editable source (one job per source
-    # function, not per device-kernel variant); stamp the group onto each member.
+    # Group repeated shapes of one operator and editable source into one task;
+    # stamp that shared contract onto each member.
     task_groups = _build_task_groups(hot_kernels)
     kid_to_group = {kid: g for g in task_groups for kid in g["kernel_ids"]}
     for c in hot_kernels:
@@ -966,7 +997,7 @@ def _render_bypass_extra_sections(
         L.append("## Task Groups")
         L.append("")
         L.append(
-            "_Rewritable candidates sharing one editable source collapse into a single dispatch (all observed shapes)._"
+            "_Repeated shapes of one rewritable operator collapse into a single dispatch with all observed cases._"
         )
         L.append("")
         L.append("| Group | Source | Kernels | GPU % | Time (ms) |")

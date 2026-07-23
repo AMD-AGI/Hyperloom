@@ -232,6 +232,13 @@ def record_kernel_integrate_result(
     if not key:
         return None
     kernel_id, patch_path, target_file, extra_args = _resolve_kernel_patch_identity(state, result)
+    task_group_key = str(
+        result.get("task_group_key")
+        or ((state.kernel_opt_attempts or {}).get(kernel_id) or {}).get(
+            "task_group_key"
+        )
+        or ""
+    )
     is_fault = state._is_integrate_fault(result)
     entry = dict(state.kernel_integrate_attempts.get(key) or {})
     attempts = list(entry.get("attempts") or [])
@@ -262,6 +269,7 @@ def record_kernel_integrate_result(
         {
             "key": key,
             "kernel_id": kernel_id,
+            "task_group_key": task_group_key,
             "patch_path": patch_path,
             "target_file": target_file,
             "extra_server_args": extra_args,
@@ -326,6 +334,7 @@ def record_kernel_integrate_result(
     rejected = {
         "key": key,
         "kernel_id": kernel_id,
+        "task_group_key": task_group_key,
         "patch_path": patch_path,
         "target_file": target_file,
         "extra_server_args": extra_args,
@@ -441,6 +450,13 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     deploy_repo_root = str(verification.get("deploy_repo_root", "") or "")
     best_artifact_bundle = dict(verification.get("best_artifact_bundle") or {})
     source_file = str(result.get("source_file") or (result.get("candidate") or {}).get("source_file") or "")
+    task_group_id = str(result.get("task_group_id") or "")
+    task_group_key = str(result.get("task_group_key") or "")
+    task_group_kernel_ids = [
+        str(item)
+        for item in (result.get("task_group_kernel_ids") or [])
+        if str(item)
+    ]
     # Extract test_command from the first attempt that recorded one so
     # after_kernel_opt rocprof can reuse it.
     test_command = ""
@@ -467,7 +483,71 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     )
     ts = _now_iso()
 
-    entry = dict(state.kernel_opt_attempts.get(kernel_id) or {})
+    prior_ledger_id = kernel_id
+    prior_entry = dict(state.kernel_opt_attempts.get(kernel_id) or {})
+    if task_group_key:
+        matching_ledger = next(
+            (
+                (ledger_id, ledger_entry)
+                for ledger_id, ledger_entry in (
+                    state.kernel_opt_attempts or {}
+                ).items()
+                if isinstance(ledger_entry, dict)
+                and str(ledger_entry.get("task_group_key") or "")
+                == task_group_key
+            ),
+            None,
+        )
+        if matching_ledger is not None:
+            prior_ledger_id, matching_entry = matching_ledger
+            prior_entry = dict(matching_entry)
+            if prior_ledger_id != kernel_id:
+                displaced_entry = state.kernel_opt_attempts.get(kernel_id)
+                state.kernel_opt_attempts.pop(prior_ledger_id, None)
+                if (
+                    isinstance(displaced_entry, dict)
+                    and str(displaced_entry.get("task_group_key") or "")
+                    != task_group_key
+                ):
+                    # Preserve a task currently occupying the new ordinal slot.
+                    # Reranking commonly swaps two IDs; the vacated prior slot is
+                    # collision-free and remains discoverable by task_group_key.
+                    state.kernel_opt_attempts[prior_ledger_id] = displaced_entry
+                state.rejected_kernel_ids = [
+                    rejected_id
+                    for rejected_id in (state.rejected_kernel_ids or [])
+                    if rejected_id != prior_ledger_id
+                ]
+    prior_task_group_key = str(prior_entry.get("task_group_key") or "")
+    task_identity_changed = bool(
+        task_group_key
+        and prior_task_group_key
+        and task_group_key != prior_task_group_key
+    )
+    if task_identity_changed:
+        stale_member_ids = {
+            member_id
+            for member_id in [
+                kernel_id,
+                prior_ledger_id,
+                *task_group_kernel_ids,
+            ]
+            if str(
+                (state.kernel_opt_attempts.get(member_id) or {}).get(
+                    "task_group_key"
+                )
+                or ""
+            )
+            not in {"", task_group_key}
+        }
+        state.rejected_kernel_ids = [
+            member_id
+            for member_id in (state.rejected_kernel_ids or [])
+            if member_id not in stale_member_ids
+        ]
+        entry = {}
+    else:
+        entry = prior_entry
     history = list(entry.get("history") or [])
     history.append(
         {
@@ -503,6 +583,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     entry["last_deploy_patch_path"] = deploy_patch_path
     entry["last_deploy_repo_root"] = deploy_repo_root
     entry["last_source_file"] = source_file
+    entry["kernel_id"] = kernel_id
     # Record backend + correctness so the GEAK-only verified-NEEDS_REVIEW
     # promotion gate can identify a correctness-verified GEAK win (consumed only
     # when HL_PROMOTE_VERIFIED_MICRO_NEEDS_REVIEW is enabled).
@@ -539,6 +620,7 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             "deploy_patch_path": deploy_patch_path,
             "deploy_repo_root": deploy_repo_root,
             "source_file": source_file,
+            "task_group_key": task_group_key,
             "ts": ts,
         }
 
@@ -596,31 +678,27 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             )
         )
 
-    task_group_id = str(result.get("task_group_id") or "")
-    task_group_kernel_ids = [
-        str(item)
-        for item in (result.get("task_group_kernel_ids") or [])
-        if str(item)
-    ]
     if task_group_id:
         entry["task_group_id"] = task_group_id
+        entry["task_group_key"] = task_group_key
         entry["task_group_primary_kernel_id"] = str(
             result.get("task_group_primary_kernel_id") or kernel_id
         )
         entry["task_group_kernel_ids"] = task_group_kernel_ids
+        entry["task_group_shape_case_ids"] = [
+            str(item)
+            for item in (result.get("task_group_shape_case_ids") or [])
+            if str(item)
+        ]
+        entry["task_group_shape_case_count"] = int(
+            result.get("task_group_shape_case_count") or 0
+        )
     state.kernel_opt_attempts[kernel_id] = entry
 
-    # A grouped Forge dispatch validates one source function across every member
-    # shape. Mirror its terminal accounting to all siblings so the scheduler
-    # cannot rotate through k001/k002/... and repeat the same task-preparer run.
-    for sibling_id in task_group_kernel_ids:
-        if not sibling_id or sibling_id == kernel_id:
-            continue
-        sibling_entry = dict(entry)
-        sibling_entry["task_group_member_kernel_id"] = sibling_id
-        state.kernel_opt_attempts[sibling_id] = sibling_entry
-        if should_reject and sibling_id not in state.rejected_kernel_ids:
-            state.rejected_kernel_ids.append(sibling_id)
+    # One grouped result owns one keyed optimization ledger entry. Neither KEEP
+    # nor REVERT is copied to sibling ordinal IDs: the group key and member list
+    # prevent redispatch without leaving unscoped rejection tombstones that
+    # could suppress a different task after the next trace reranks kernel IDs.
 
 
 def record_gemm_tuning(state, result: dict[str, Any]) -> None:
@@ -673,6 +751,27 @@ def _source_files_in_optimization_stack(state) -> set[str]:
         if src:
             sources.add(src)
     return sources
+
+
+def _record_matches_task(
+    record: dict[str, Any],
+    *,
+    kernel_id: str,
+    task_group_key: str,
+    source_file: str,
+) -> bool:
+    """Match persisted integration state to the current stable task identity."""
+    recorded_key = str(record.get("task_group_key") or "")
+    if task_group_key and recorded_key:
+        return task_group_key == recorded_key
+    if str(record.get("kernel_id") or "") != kernel_id:
+        return False
+    recorded_source = str(
+        record.get("target_file") or record.get("source_file") or ""
+    )
+    if source_file and recorded_source:
+        return source_file == recorded_source
+    return True
 
 
 def _kernel_ids_with_integrate_attempts(state) -> set[str]:
@@ -789,10 +888,19 @@ def pending_keep_kernel_ids(state) -> list[str]:
         list[str]: Pending KEEP ``kernel_id`` values sorted impact-first
             (trace ``gpu_pct``, then micro speedup), one per source file.
     """
-    integrated_ids = _kernel_ids_in_optimization_stack(state)
     integrated_sources = _source_files_in_optimization_stack(state)
-    attempted_ids = _kernel_ids_with_integrate_attempts(state)
     rejected = set(state.rejected_kernel_ids or [])
+    integrated_entries = [
+        entry
+        for entry in (state.optimization_stack or [])
+        if isinstance(entry, dict) and entry.get("action") == "integrate"
+    ]
+    attempted_entries = [
+        entry
+        for entry in (state.kernel_integrate_attempts or {}).values()
+        if isinstance(entry, dict)
+        and not (entry.get("retryable") and not entry.get("rejected"))
+    ]
     # Mirror next_pending_keep_kernel_id same-file guard: only the strongest
     # KEEP per source_file is queueable.
     claimed_sources: set[str] = set()
@@ -822,9 +930,32 @@ def pending_keep_kernel_ids(state) -> list[str]:
         )
         if _dec != "KEEP" and not _geak_nr:
             continue
-        if kid in integrated_ids or kid in attempted_ids or kid in rejected:
-            continue
+        task_group_key = str(entry.get("task_group_key") or "")
         src = str(entry.get("last_source_file") or "")
+        if any(
+            _record_matches_task(
+                integrated,
+                kernel_id=kid,
+                task_group_key=task_group_key,
+                source_file=src,
+            )
+            for integrated in integrated_entries
+        ):
+            continue
+        if any(
+            _record_matches_task(
+                attempted,
+                kernel_id=kid,
+                task_group_key=task_group_key,
+                source_file=src,
+            )
+            for attempted in attempted_entries
+        ):
+            continue
+        if kid in rejected and (
+            not task_group_key or bool(entry.get("rejected_reason"))
+        ):
+            continue
         if src and src in integrated_sources:
             continue
         try:
@@ -908,22 +1039,27 @@ def untried_hot_reusable_kernels(
             top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
     top_n = max(1, int(top_n))
 
-    kid_to_group: dict[str, list[str]] = {}
+    kid_to_group: dict[str, tuple[list[str], str]] = {}
     for g in task_groups:
         if not isinstance(g, dict):
             continue
         members = [str(m) for m in (g.get("kernel_ids") or []) if m]
+        group_key = str(g.get("task_group_key") or "")
         for m in members:
-            kid_to_group[m] = members
+            kid_to_group[m] = (members, group_key)
 
-    integrated_ids = _kernel_ids_in_optimization_stack(state)
     integrated_sources = _source_files_in_optimization_stack(state)
+    integrated_entries = [
+        entry
+        for entry in (state.optimization_stack or [])
+        if isinstance(entry, dict) and entry.get("action") == "integrate"
+    ]
     rejected = set(state.rejected_kernel_ids or [])
     attempts = state.kernel_opt_attempts or {}
 
     # Sort by gpu_pct desc so dedup picks the strongest member of each
     # task_group.
-    rows: list[tuple[float, str, str, list[str]]] = []
+    rows: list[tuple[float, str, str, list[str], str]] = []
     for k in hot:
         if not isinstance(k, dict):
             continue
@@ -939,29 +1075,79 @@ def untried_hot_reusable_kernels(
         if not kid:
             continue
         src = str(k.get("source_file") or "")
-        members = sorted(kid_to_group.get(kid, [kid]))
-        rows.append((gpu_pct, kid, src, members))
+        group_info = kid_to_group.get(kid)
+        members = sorted(group_info[0]) if group_info else [kid]
+        group_key = group_info[1] if group_info else ""
+        rows.append((gpu_pct, kid, src, members, group_key))
     rows.sort(key=lambda x: x[0], reverse=True)
 
-    ranked: list[tuple[float, str, str, list[str]]] = []
-    seen_groups: set[tuple[str, ...]] = set()
+    ranked: list[tuple[float, str, str, list[str], str]] = []
+    seen_groups: set[str | tuple[str, ...]] = set()
     for row in rows:
-        group_key = tuple(row[3])
-        if group_key in seen_groups:
+        dedup_key: str | tuple[str, ...] = row[4] or tuple(row[3])
+        if dedup_key in seen_groups:
             continue
-        seen_groups.add(group_key)
+        seen_groups.add(dedup_key)
         ranked.append(row)
     ranked = ranked[:top_n]
 
     untried: list[str] = []
-    for _pct, kid, src, members in ranked:
-        if members and all(m in rejected for m in members):
+
+    def _matches_current_task(member_id: str, group_key: str, source: str) -> bool:
+        if group_key:
+            return any(
+                isinstance(attempt, dict)
+                and str(attempt.get("task_group_key") or "") == group_key
+                for attempt in attempts.values()
+            )
+        attempt = attempts.get(member_id) or {}
+        if not isinstance(attempt, dict) or not attempt:
+            return False
+        recorded_key = str(attempt.get("task_group_key") or "")
+        if group_key and recorded_key:
+            return group_key == recorded_key
+        recorded_source = str(attempt.get("last_source_file") or "")
+        return not source or not recorded_source or source == recorded_source
+
+    for _pct, kid, src, members, group_key in ranked:
+        if members and all(
+            member in rejected
+            and _matches_current_task(member, group_key, src)
+            for member in members
+        ):
             continue
-        if any(m in integrated_ids for m in members):
+        if any(
+            _record_matches_task(
+                integrated,
+                kernel_id=member,
+                task_group_key=group_key,
+                source_file=src,
+            )
+            for member in members
+            for integrated in integrated_entries
+        ):
             continue
         if src and src in integrated_sources:
             continue
-        if any(int((attempts.get(m) or {}).get("attempts", 0)) > 0 for m in members):
+        stable_attempt = next(
+            (
+                attempt
+                for attempt in attempts.values()
+                if group_key
+                and isinstance(attempt, dict)
+                and str(attempt.get("task_group_key") or "") == group_key
+            ),
+            None,
+        )
+        if stable_attempt is not None and int(
+            stable_attempt.get("attempts", 0)
+        ) > 0:
+            continue
+        if not group_key and any(
+            _matches_current_task(member, group_key, src)
+            and int((attempts.get(member) or {}).get("attempts", 0)) > 0
+            for member in members
+        ):
             continue
         untried.append(kid)
     return untried

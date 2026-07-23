@@ -62,6 +62,9 @@ class KernelStackPhase(PhaseHandler):
                     state.rejected_kernel_ids = []
                 if kid not in state.rejected_kernel_ids:
                     state.rejected_kernel_ids.append(kid)
+                attempt = (state.kernel_opt_attempts or {}).get(kid)
+                if isinstance(attempt, dict):
+                    attempt["rejected_reason"] = "integrate_dispatch_exception"
                 state.save(self.session_dir)
             drained += 1
         if drained >= max_drain:

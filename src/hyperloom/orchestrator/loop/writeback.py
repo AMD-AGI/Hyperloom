@@ -270,6 +270,7 @@ class WritebackCollaborator:
         entry = {
             "action": "integrate",
             "kernel_id": result.get("kernel_id"),
+            "task_group_key": result.get("task_group_key"),
             "patch_path": result.get("patch_path"),
             "target_file": result.get("target_file"),
             "backup_manifest": backup_manifest,

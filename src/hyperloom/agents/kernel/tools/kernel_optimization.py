@@ -37,6 +37,7 @@ from _invocation_spec import (  # noqa: E402
     write_invocation_spec,
 )
 from _paths import workspace_root  # noqa: E402
+from _task_group_contract import task_group_shape_cases  # noqa: E402
 
 sys.path.pop(0)
 
@@ -153,6 +154,24 @@ def load_candidate_input(path: str, kernel_id: str) -> dict[str, Any] | None:
     if candidate_id and candidate_id != str(kernel_id):
         return None
     return payload
+
+
+def task_group_result_metadata(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Return stable task-group identity and shape-contract metadata."""
+    group = candidate.get("task_group")
+    if not isinstance(group, dict):
+        return {}
+    cases = task_group_shape_cases(candidate)
+    return {
+        "task_group_id": str(group.get("task_group_id") or ""),
+        "task_group_key": str(group.get("task_group_key") or ""),
+        "task_group_kernel_ids": [str(item) for item in (group.get("kernel_ids") or []) if str(item)],
+        "task_group_primary_kernel_id": str(group.get("primary_kernel_id") or candidate.get("kernel_id") or ""),
+        "task_group_shape_case_ids": [
+            str(case.get("case_id") or "") for case in cases if str(case.get("case_id") or "")
+        ],
+        "task_group_shape_case_count": len(cases),
+    }
 
 
 def _normalize_kernel_id(value: str) -> str:
@@ -814,10 +833,30 @@ def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, An
     """
     group = candidate.get("task_group")
     rows = group.get("rows") if isinstance(group, dict) else None
+    grouped_shape_cases = group.get("shape_cases") if isinstance(group, dict) else None
     cases: list[dict[str, Any]] = []
     input_shapes = candidate.get("input_shapes")
     is_synthetic = bool(candidate.get("_input_shapes_synthetic"))
-    if isinstance(rows, list) and rows:
+    if isinstance(grouped_shape_cases, list) and grouped_shape_cases:
+        for index, grouped_case in enumerate(grouped_shape_cases):
+            if not isinstance(grouped_case, dict):
+                continue
+            case = _shape_case_from_value(
+                grouped_case.get("input_shapes"),
+                call_count=grouped_case.get("call_count"),
+                primary=index == 0,
+            )
+            case.update(
+                {
+                    "case_id": str(grouped_case.get("case_id") or ""),
+                    "selector": dict(grouped_case.get("selector") or {}),
+                    "operation": str(grouped_case.get("operation") or ""),
+                    "source": "task_group_shape_cases",
+                }
+            )
+            if case["raw"] or case["args"]:
+                cases.append(case)
+    elif isinstance(rows, list) and rows:
         # Prefer task_group rows so the prompt keeps supplementary shapes.
         for idx, row in enumerate(rows):
             if not isinstance(row, dict):
@@ -3433,6 +3472,7 @@ def main() -> int:
                 "status_path": str(status_path),
             },
         }
+        result.update(task_group_result_metadata(candidate))
         atomic_write_json(result_path, result)
         artifacts.update(result["artifact_paths"])
         update_status(
