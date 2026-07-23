@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bypass_report as _report  # noqa: E402
 import _bypass_trace_reader as _reader  # noqa: E402
+import _trace_shape_manifest as _tsm  # noqa: E402
 from _idle_gate import (  # noqa: E402
     build_high_idle_warning,
     resolve_idle_pct_threshold,
@@ -184,6 +187,156 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
                 ),
             }
         )
+
+
+#: Opt-in env gate for the variant-discriminating TraceShapeManifest (P0-A/WP-1).
+_SHAPE_MANIFEST_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST"
+#: Optional gfx-arch provenance override (WP-1 stub; superseded by WP-0/WP-7).
+_GFX_ENV = "HYPERLOOM_GFX_ARCH"
+#: sglang capture shard -> ``bs_<batch>`` variant label.
+_VARIANT_RE = re.compile(r"^(bs_\d+)", re.IGNORECASE)
+
+
+def _sha256_file(path: str | Path) -> str:
+    """Return the sha256 hex of a file, or ``""`` on any I/O error."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[Path]:
+    """Return sglang CUDA-graph capture shards (``bs_*_rank*``) to index.
+
+    Looks in ``capture_folder`` when given, else under the trace input tree.
+    Reuses the reader's shard detector so the definition of "capture shard"
+    stays single-sourced.
+    """
+    roots: list[Path] = []
+    if capture_folder:
+        roots.append(Path(capture_folder))
+    ti = Path(trace_input)
+    roots.append(ti if ti.is_dir() else ti.parent)
+    seen: set[str] = set()
+    shards: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        for cand in _reader._trace_candidates(root):
+            if _reader._is_capture_fragment(cand, root) and _VARIANT_RE.match(cand.name):
+                key = str(cand.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    shards.append(cand)
+    return shards
+
+
+def _variant_label(path: Path) -> str:
+    """Map a capture shard filename to its ``bs_<batch>`` variant label."""
+    m = _VARIANT_RE.match(path.name)
+    return m.group(1).lower() if m else path.stem
+
+
+def _wp1_provenance_stub(args: argparse.Namespace) -> dict[str, Any]:
+    """Minimal provenance block for WP-1 (replaced by the shared WP-0 builder).
+
+    Sources model/framework/platform from CLI args and the standard serving env
+    vars; unknown fields default to ``None`` (the manifest never fails to write
+    on missing provenance). Flagged so a later stage can tell a stub apart from
+    a full provenance block.
+    """
+
+    def _env(*names: str) -> Any:
+        for n in names:
+            v = os.environ.get(n)
+            if v:
+                return v
+        return None
+
+    return {
+        "_provenance_source": "wp1_stub",
+        "model_name": args.model_name or None,
+        "model_path": getattr(args, "model_path", "") or None,
+        "framework": args.framework or None,
+        "target_platform": args.target_platform or None,
+        "gfx_arch": _env(_GFX_ENV),
+        "dtype": args.precision or _env("PRECISION"),
+        "tp": _env("TP"),
+        "ep": _env("EP"),
+        "concurrency": _env("CONC", "CONCURRENCY"),
+        "isl": _env("ISL"),
+        "osl": _env("OSL"),
+        "graph_mode": _env("HYPERLOOM_GRAPH_MODE"),
+    }
+
+
+def _maybe_build_shape_manifest(
+    args: argparse.Namespace,
+    analyze: dict[str, Any],
+    bypass_dir: Path,
+    *,
+    generated_at: str,
+) -> dict[str, Any]:
+    """Optionally build + write the variant-discriminating TraceShapeManifest.
+
+    Opt-in via ``HYPERLOOM_TRACE_SHAPE_MANIFEST`` (off by default -> returns
+    ``{"status": "disabled"}`` and writes nothing, so a run without the flag is
+    byte-for-byte unchanged). When enabled, capture shards are indexed per
+    ``bs_<batch>`` variant; with no capture shards it falls back to an eager
+    manifest built from the main analysis. Never raises -- any failure degrades
+    to ``{"status": "error: ..."}`` and is logged to stderr.
+    """
+    flag = os.environ.get(_SHAPE_MANIFEST_ENV, "0").strip().lower()
+    if flag not in {"1", "true", "yes", "on"}:
+        return {"status": "disabled"}
+    try:
+        main_trace = analyze.get("trace_file", "") or ""
+        main_hash = _sha256_file(main_trace) if main_trace else ""
+        shards = _discover_capture_shards(args.trace_input, args.capture_folder or "")
+        capture_variants: list[tuple[str, dict[str, Any]]] = []
+        capture_hashes: dict[str, str] = {}
+        for shard in shards:
+            shard_an = _reader.analyze_trace(shard, top_k=0, steady_state=False, emit_launches=True)
+            if shard_an.get("status") != "ok":
+                continue
+            label = _variant_label(shard)
+            capture_variants.append((label, shard_an))
+            capture_hashes[label] = _sha256_file(shard)
+
+        # phase hint from the analysis mode the coordinator forwards.
+        phase_hint = (args.analysis_mode or "mixed").lower() or "mixed"
+        manifest = _tsm.build_shape_manifest(
+            main_analysis=analyze,
+            capture_variants=capture_variants,
+            provenance=_wp1_provenance_stub(args),
+            main_trace_hash=main_hash,
+            capture_trace_hashes=capture_hashes,
+            analysis_route="bypass",
+            generated_at=generated_at,
+            phase_hint=phase_hint,
+        )
+        out_path = bypass_dir / "trace_shape_manifest.json"
+        atomic_write_json(out_path, manifest, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+        print(
+            f"[trace_shape_manifest] variants={len(capture_variants) or 'eager'} "
+            f"rows={len(manifest.get('rows', []))} path={out_path}",
+            file=sys.stderr,
+        )
+        return {
+            "status": "ok",
+            "path": str(out_path),
+            "variant_count": len(capture_variants),
+            "row_count": len(manifest.get("rows", [])),
+            "warnings": manifest.get("warnings", []),
+        }
+    except Exception as exc:  # noqa: BLE001 — manifest must never break bypass
+        msg = f"error: {type(exc).__name__}: {exc}"
+        print(f"[trace_shape_manifest] skipped: {msg}", file=sys.stderr)
+        return {"status": msg}
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -540,6 +693,12 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
             diffusion_roofline_path = None
 
+    # Optional variant-discriminating TraceShapeManifest (P0-A / WP-1; opt-in via
+    # HYPERLOOM_TRACE_SHAPE_MANIFEST). Off by default -> disabled, writes nothing.
+    shape_manifest = _maybe_build_shape_manifest(
+        args, analyze, bypass_dir, generated_at=utc_now(timespec="seconds")
+    )
+
     hot_kernels = candidates.get("hot_kernels", [])
     result: dict[str, Any] = {
         "status": "ok",
@@ -585,6 +744,11 @@ def main(argv: list[str] | None = None) -> int:
             "trace_input_manifest": str(manifest_path),
         },
     }
+    # Surfaced only when the opt-in manifest was produced (P0-A / WP-1).
+    result["trace_shape_manifest"] = shape_manifest
+    if shape_manifest.get("status") == "ok" and shape_manifest.get("path"):
+        result["artifact_paths"]["trace_shape_manifest"] = shape_manifest["path"]
+
     # Surfaced only when produced (xDiT/scriptable).
     if diffusion_roofline_path:
         result["diffusion_roofline_path"] = diffusion_roofline_path
