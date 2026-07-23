@@ -19,6 +19,13 @@ current directory is both the install target and the agent workspace. Prepare a
 dedicated clean directory first, then open that directory in Cursor, Claude Code,
 or Codex before running the install command.
 
+> **Recommended run mode: Docker.** Running the demos in the provided ROCm
+> container ships a validated ROCm + framework stack, gives reproducible results,
+> and keeps your host untouched. Bare-metal mode is for advanced users: it
+> depends on your host's existing ROCm/torch and installs framework components
+> into your environment, which can cause environment-specific issues or
+> conflicts. Prefer Docker for a validated, reproducible stack.
+
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
@@ -78,9 +85,6 @@ It asks for these values with a fixed option order:
 5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
    - `docker`
    - `baremetal`
-
-If Hyperloom is already installed inside a Docker container, choose `baremetal`
-to enable setup to run directly in the current container environment.
 
 ## Setup scenarios
 
