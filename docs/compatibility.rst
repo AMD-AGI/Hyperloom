@@ -136,11 +136,11 @@ accordingly.
 
    * - Image
      - GPU
-   * - ``primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix``
+   * - `primussafe/sglang:v0.5.12-rocm720-mi30x-profilerfix <https://hub.docker.com/layers/primussafe/sglang/v0.5.12-rocm720-mi30x-profilerfix/images/sha256-eb0c1f0470c4f8448e7a10985291fcdb6a295db375ffc0f6a94cb14fe59a1c56>`_
      - MI300X / MI325X
-   * - ``primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix``
+   * - `primussafe/sglang:v0.5.12-rocm720-mi35x-profilerfix <https://hub.docker.com/layers/primussafe/sglang/v0.5.12-rocm720-mi35x-profilerfix/images/sha256-2710f13f0c2a75e682c13d914a510529f47b930371936cd3b09fb2b79f831732>`_
      - MI355X
-   * - ``primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix``
+   * - `primussafe/vllm-openai-rocm:v0.21.0-rocm720-profilerfix <https://hub.docker.com/layers/primussafe/vllm-openai-rocm/v0.21.0-rocm720-profilerfix/images/sha256-fa8e2057c4df4205f7050acb2155db63a6e2d1ec49eb4a71dd28857f8a2e3b64>`_
      - MI300X / MI325X / MI355X
 
 Browse all available SGLang tags at
