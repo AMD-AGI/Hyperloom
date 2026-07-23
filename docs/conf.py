@@ -26,14 +26,13 @@ html_theme = "rocm_docs_theme"
 html_theme_options = {
     "flavor": "generic",
     "header_title": f"Hyperloom {version_number}",
-    "header_link": False,
+    "header_link": "https://rocm.docs.amd.com/projects/hyperloom/en/latest/",
     "version_list_link": False,
     "nav_secondary_items": {
         "GitHub": "https://github.com/AMD-AGI/Hyperloom",
         "Community": False,
         "Blogs": "https://rocm.blogs.amd.com/",
         "ROCm Developer Hub": "https://www.amd.com/en/developer/resources/rocm-hub.html",
-        "Instinct™ Docs": "https://instinct.docs.amd.com/",
         "Infinity Hub": "https://www.amd.com/en/developer/resources/infinity-hub.html",
         "Support": "https://github.com/AMD-AGI/Hyperloom/issues/new/choose",
     },
