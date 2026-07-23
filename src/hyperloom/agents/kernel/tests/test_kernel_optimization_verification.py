@@ -1064,6 +1064,58 @@ def test_run_attempt_dry_run_emits_optimized_suffix_file(tmp_path):
     assert optimized_path.parent.name == "optimized"
 
 
+def test_unrecoverable_forge_timeout_is_not_promoted_to_partial(
+    tmp_path,
+    monkeypatch,
+):
+    run_dir = tmp_path / "runs" / "sess001"
+    output_dir = tmp_path / "forge-output"
+    output_dir.mkdir()
+    (output_dir / "optimization_report.md").write_text(
+        "micro_speedup: N/A (no validated improvement kept)\n"
+        "[correctness] fail\n"
+    )
+    source = tmp_path / "kernel.py"
+    source.write_text("def kernel(x):\n    return x\n")
+    args = _args(source_file=str(source), target_platform="MI300X")
+    args.session_id = "sess001"
+    args.budget_minutes = 60
+    args.num_gpus = 1
+    args.test_command = ""
+    log_path = tmp_path / "run.log"
+    log_path.write_text("")
+
+    monkeypatch.setattr(
+        ko,
+        "invoke_backend",
+        lambda *_args, **_kwargs: {
+            "returncode": 1,
+            "stdout": "",
+            "stdout_tail": "",
+            "stderr_tail": "timeout",
+            "output_dir": str(output_dir),
+            "timed_out": True,
+            "salvaged": False,
+        },
+    )
+
+    attempt = ko.run_attempt(
+        "forge",
+        args=args,
+        candidate={
+            "kernel_id": "k001",
+            "name": "kernel",
+            "source_file": str(source),
+        },
+        run_dir=run_dir,
+        log_path=log_path,
+    )
+
+    assert attempt["status"] == "failed"
+    assert attempt["timed_out"] is True
+    assert attempt["salvaged"] is False
+
+
 def _metadata_from_prompt(prompt: str) -> dict:
     marker = "Kernel runtime metadata"
     start = prompt.index("```json", prompt.index(marker)) + len("```json")

@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shlex
 import shutil
 import site
@@ -21,6 +22,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 _TOOLS_DIR = str(Path(__file__).resolve().parent.parent)
 _TOOLS_DIR_INSERTED = _TOOLS_DIR not in sys.path
@@ -35,6 +37,21 @@ if _TOOLS_DIR_INSERTED:
     sys.path.remove(_TOOLS_DIR)
 
 log = logging.getLogger(__name__)
+
+_FORGE_EXPERIMENT_ID = "hyperloom"
+_FORGE_SHUTDOWN_GRACE_SEC = 30
+
+
+class ForgeLoopOutcome(NamedTuple):
+    """Result and recovery evidence from one forge-loop subprocess."""
+
+    baseline_ms: float | None
+    best_ms: float | None
+    improved: bool
+    output: str
+    error: Exception | None
+    timed_out: bool
+    checkpoint: dict | None
 
 
 def _ensure_forge_on_path() -> str:
@@ -1373,7 +1390,12 @@ def _write_report(output_dir: Path, baseline_ms: float | None, best_ms: float | 
 
 
 def _export_best_artifacts(
-    workspace: str, base_commit: str, worktree_kernel_file: str, source_file: str, output_dir: Path
+    workspace: str,
+    base_commit: str,
+    worktree_kernel_file: str,
+    source_file: str,
+    output_dir: Path,
+    best_commit: str = "",
 ) -> tuple[str, list[str]]:
     """Export the best-kept state — ALL files the agent changed, not just the kernel.
 
@@ -1397,39 +1419,94 @@ def _export_best_artifacts(
     dst_dir = output_dir / "optimized_versions"
     dst_dir.mkdir(parents=True, exist_ok=True)
 
+    def _blob_at_commit(commit: str, relative_path: str) -> bytes | None:
+        proc = subprocess.run(
+            ["git", "-C", workspace, "show", f"{commit}:{relative_path}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return proc.stdout if proc.returncode == 0 else None
+
     # Primary kernel artifact (drop-in replacement contract).
     ext = Path(source_file).suffix or ".py"
     primary = dst_dir / f"v1_forge{ext}"
-    try:
-        shutil.copy2(worktree_kernel_file, primary)
-    except OSError:
-        pass
+    if best_commit:
+        try:
+            primary_rel = str(
+                Path(worktree_kernel_file).resolve().relative_to(
+                    Path(workspace).resolve()
+                )
+            )
+        except ValueError:
+            primary_rel = ""
+        primary_bytes = (
+            _blob_at_commit(best_commit, primary_rel)
+            if primary_rel
+            else None
+        )
+        if primary_bytes is None:
+            raise RuntimeError(
+                f"validated best commit does not contain primary source: "
+                f"{primary_rel or worktree_kernel_file}"
+            )
+        primary.write_bytes(primary_bytes)
+    else:
+        try:
+            shutil.copy2(worktree_kernel_file, primary)
+        except OSError:
+            pass
 
-    # Every file changed vs the pre-forge baseline. Compare base_commit to the
-    # working tree so both committed and residual uncommitted edits are captured.
+    # A recovered run exports only the validated commit. A normally completed
+    # run without checkpoint evidence retains the legacy working-tree export.
     changed: list[str] = []
-    diff = _run(["git", "-C", workspace, "diff", "--name-only", base_commit], timeout=60)
+    diff_cmd = ["git", "-C", workspace, "diff", "--name-only", base_commit]
+    if best_commit:
+        diff_cmd.append(best_commit)
+    diff = _run(diff_cmd, timeout=60)
+    if best_commit and diff.returncode != 0:
+        raise RuntimeError(
+            f"could not list files changed by validated best {best_commit}"
+        )
     for rel in (diff.stdout or "").splitlines():
         rel = rel.strip()
         if not rel:
             continue
         changed.append(rel)
-        srcp = Path(workspace) / rel
-        if not srcp.is_file():
-            continue
         dstp = dst_dir / "files" / rel
         dstp.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.copy2(srcp, dstp)
-        except OSError:
-            pass
+        if best_commit:
+            blob = _blob_at_commit(best_commit, rel)
+            if blob is not None:
+                dstp.write_bytes(blob)
+        else:
+            srcp = Path(workspace) / rel
+            if not srcp.is_file():
+                continue
+            try:
+                shutil.copy2(srcp, dstp)
+            except OSError:
+                pass
 
     # Full multi-file patch (excludes pre-existing dirty).
-    patch = _run(["git", "-C", workspace, "diff", base_commit], timeout=60)
-    try:
-        (dst_dir / "forge.patch").write_text(patch.stdout or "")
-    except OSError:
-        pass
+    patch_cmd = ["git", "-C", workspace, "diff", base_commit]
+    if best_commit:
+        patch_cmd.append(best_commit)
+    patch = _run(patch_cmd, timeout=60)
+    if best_commit and patch.returncode != 0:
+        raise RuntimeError(
+            f"could not export validated best patch {best_commit}"
+        )
+    patch_text = patch.stdout or ""
+    if best_commit and (not changed or not patch_text.strip()):
+        raise RuntimeError(
+            f"validated best commit {best_commit} has no exportable source diff"
+        )
+    (dst_dir / "forge.patch").write_text(patch_text)
+
+    if best_commit and not primary.is_file():
+        raise RuntimeError(
+            f"validated best primary artifact was not written: {primary}"
+        )
 
     return str(primary), changed
 
@@ -1646,6 +1723,185 @@ def _baseline_correctness_ok(driver: str, workspace: str, gpu_target: str, timeo
     return False, f"baseline correctness not confirmed (rc={proc.returncode})"
 
 
+def _read_forge_checkpoint(experiments_dir: Path) -> dict | None:
+    """Read the caller-owned experiment checkpoint written after each KEEP."""
+    path = experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    checkpoint = payload.get("checkpoint") if isinstance(payload, dict) else None
+    return checkpoint if isinstance(checkpoint, dict) else None
+
+
+def _proc_identity(pid: int) -> tuple[int, int] | None:
+    """Return ``(parent_pid, start_time_ticks)`` from Linux procfs."""
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text()
+        closing_paren = stat_text.rfind(")")
+        fields_after_name = stat_text[closing_paren + 2 :].split()
+        return int(fields_after_name[1]), int(fields_after_name[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _descendant_processes(root_pid: int) -> list[tuple[int, int]]:
+    """Return ``(pid, start_time)`` descendants, deepest first."""
+    children: dict[int, list[tuple[int, int]]] = {}
+    try:
+        proc_entries = list(Path("/proc").iterdir())
+    except OSError:
+        return []
+    for entry in proc_entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        identity = _proc_identity(pid)
+        if identity is None:
+            continue
+        parent_pid, start_time = identity
+        children.setdefault(parent_pid, []).append((pid, start_time))
+
+    descendants: list[tuple[int, int]] = []
+
+    def _walk(parent_pid: int) -> None:
+        for child_pid, start_time in children.get(parent_pid, []):
+            _walk(child_pid)
+            descendants.append((child_pid, start_time))
+
+    _walk(root_pid)
+    return descendants
+
+
+def _signal_processes(processes: list[tuple[int, int]], sig: int) -> None:
+    """Signal captured processes only while their procfs identity still matches."""
+    for pid, expected_start_time in processes:
+        identity = _proc_identity(pid)
+        if identity is None or identity[1] != expected_start_time:
+            continue
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            continue
+
+
+def _terminate_forge_process(
+    proc: subprocess.Popen,
+    *,
+    grace_sec: int = _FORGE_SHUTDOWN_GRACE_SEC,
+) -> tuple[str, str]:
+    """Terminate the forge-loop process group, escalating after a grace period."""
+    descendants = _descendant_processes(proc.pid)
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except (PermissionError, OSError):
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    try:
+        stdout, stderr = proc.communicate(timeout=grace_sec)
+        _signal_processes(descendants, signal.SIGKILL)
+        return stdout or "", stderr or ""
+    except subprocess.TimeoutExpired:
+        descendants = list(
+            dict.fromkeys(
+                [
+                    *descendants,
+                    *_descendant_processes(proc.pid),
+                ]
+            )
+        )
+        _signal_processes(descendants, signal.SIGKILL)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except (PermissionError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+            return stdout or "", stderr or ""
+        except subprocess.TimeoutExpired:
+            return "", ""
+
+
+def _validated_forge_checkpoint(
+    checkpoint: dict | None,
+    *,
+    workspace: str,
+    base_commit: str,
+    shapes: dict,
+) -> dict | None:
+    """Return normalized recovery evidence only for a validated improved commit."""
+    if not isinstance(checkpoint, dict):
+        return None
+    if checkpoint.get("schema_version") != 1:
+        return None
+    if checkpoint.get("experiment_id") != _FORGE_EXPERIMENT_ID:
+        return None
+    if checkpoint.get("state") != "best_committed":
+        return None
+    if checkpoint.get("validation_passed") is not True:
+        return None
+    best_commit = str(checkpoint.get("best_commit") or "").strip()
+    checkpoint_base = str(checkpoint.get("base_commit") or "").strip()
+    if checkpoint_base != base_commit:
+        return None
+    if not best_commit or best_commit == base_commit:
+        return None
+    exists = _run(
+        ["git", "-C", workspace, "cat-file", "-e", f"{best_commit}^{{commit}}"],
+        timeout=30,
+    )
+    if exists.returncode != 0:
+        return None
+    ancestor = _run(
+        [
+            "git",
+            "-C",
+            workspace,
+            "merge-base",
+            "--is-ancestor",
+            base_commit,
+            best_commit,
+        ],
+        timeout=30,
+    )
+    if ancestor.returncode != 0:
+        return None
+    try:
+        baseline_ms = float(checkpoint.get("baseline_ms"))
+        best_ms = float(checkpoint.get("best_ms"))
+    except (TypeError, ValueError):
+        return None
+    if baseline_ms <= 0 or best_ms <= 0 or best_ms >= baseline_ms:
+        return None
+    expected_coverage = list(shapes.get("validation") or [])
+    if not expected_coverage:
+        for shape in (shapes.get("minimal"), shapes.get("primary")):
+            if (
+                isinstance(shape, dict)
+                and shape
+                and shape not in expected_coverage
+            ):
+                expected_coverage.append(shape)
+    actual_coverage = checkpoint.get("case_coverage")
+    if expected_coverage and actual_coverage != expected_coverage:
+        return None
+    normalized = dict(checkpoint)
+    normalized["best_commit"] = best_commit
+    normalized["baseline_ms"] = baseline_ms
+    normalized["best_ms"] = best_ms
+    normalized["improved"] = True
+    return normalized
+
+
 def _run_loop_via_cli(
     *,
     worktree_kernel: str,
@@ -1663,14 +1919,14 @@ def _run_loop_via_cli(
     experiments_dir: Path,
     forge_log: Path,
     timeout_s: int,
-) -> tuple:
+) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
     Shells out to ``kernel-agents forge-loop`` (like the GEAK backend shells
     out to its CLI) so the LLM-driven loop runs in a hard-killable child
-    process. A hung fellow can no longer freeze the orchestrator: the
-    ``subprocess timeout`` kills the whole tree. Returns
-    (baseline_ms, best_ms, improved, loop_output, loop_exc).
+    process. A hung fellow can no longer freeze the orchestrator: the timeout
+    terminates the whole process group, then returns any persisted best
+    checkpoint for recovery.
 
     The subprocess resolves ``kernel_agents`` from $FORGE_PATH (prepended to
     PYTHONPATH) and runs ``python -m kernel_agents.cli forge-loop``.
@@ -1678,6 +1934,19 @@ def _run_loop_via_cli(
     import json as _json
 
     result_json = experiments_dir.parent / "forge_cli_result.json"
+    checkpoint_json = experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
+    for stale_path in (result_json, checkpoint_json):
+        try:
+            stale_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not clear stale Forge recovery artifact {stale_path}: "
+                f"{exc}"
+            ) from exc
+        if stale_path.exists():
+            raise RuntimeError(
+                f"stale Forge recovery artifact still exists: {stale_path}"
+            )
     forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
     if forge_root:
@@ -1720,6 +1989,8 @@ def _run_loop_via_cli(
         fellow,
         "--experiments-dir",
         str(experiments_dir),
+        "--experiment-id",
+        _FORGE_EXPERIMENT_ID,
         "--result-json",
         str(result_json),
     ]
@@ -1730,14 +2001,30 @@ def _run_loop_via_cli(
 
     loop_exc = None
     out = ""
+    timed_out = False
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=env, cwd=workspace)
-        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=workspace,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stdout, stderr = _terminate_forge_process(proc)
+        out = (stdout or "") + "\n" + (stderr or "")
+        if timed_out:
+            loop_exc = RuntimeError(f"forge-loop timed out after {timeout_s}s")
         if proc.returncode != 0:
-            loop_exc = RuntimeError(f"forge-loop exited rc={proc.returncode}")
-    except subprocess.TimeoutExpired as exc:
-        out = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-        loop_exc = RuntimeError(f"forge-loop timed out after {timeout_s}s")
+            if loop_exc is None:
+                loop_exc = RuntimeError(
+                    f"forge-loop exited rc={proc.returncode}"
+                )
     except Exception as exc:  # noqa: BLE001
         loop_exc = exc
 
@@ -1769,7 +2056,16 @@ def _run_loop_via_cli(
         baseline_ms = parsed.get("baseline_ms")
         best_ms = parsed.get("best_ms")
         improved = bool(parsed.get("improved"))
-    return baseline_ms, best_ms, improved, out, loop_exc
+    checkpoint = _read_forge_checkpoint(experiments_dir)
+    return ForgeLoopOutcome(
+        baseline_ms=baseline_ms,
+        best_ms=best_ms,
+        improved=improved,
+        output=out,
+        error=loop_exc,
+        timed_out=timed_out,
+        checkpoint=checkpoint,
+    )
 
 
 # Canonical claude/usage token counters (mirrors parse_usage.normalize_usage).
@@ -2075,7 +2371,7 @@ def submit(
         # Run the loop in an isolated, hard-killable subprocess so a hung fellow
         # can never freeze the orchestrator. Fellow stability env defaults are
         # applied inside _run_loop_via_cli, scoped to the child env only.
-        baseline_ms, best_ms, improved, loop_output, loop_exc = _run_loop_via_cli(
+        loop_outcome = _run_loop_via_cli(
             worktree_kernel=worktree_kernel,
             driver=driver,
             workspace=workspace,
@@ -2092,23 +2388,73 @@ def submit(
             forge_log=forge_log,
             timeout_s=timeout_s,
         )
-        _, changed_files = _export_best_artifacts(workspace, base_commit, worktree_kernel, source_file, output_dir)
+        recovery = _validated_forge_checkpoint(
+            loop_outcome.checkpoint,
+            workspace=workspace,
+            base_commit=base_commit,
+            shapes=shapes,
+        )
+        baseline_ms = loop_outcome.baseline_ms
+        best_ms = loop_outcome.best_ms
+        improved = loop_outcome.improved
+        best_commit = ""
+        if recovery is not None:
+            baseline_ms = recovery["baseline_ms"]
+            best_ms = recovery["best_ms"]
+            improved = True
+            best_commit = recovery["best_commit"]
+        salvaged = bool(loop_outcome.error and recovery is not None)
+        if loop_outcome.timed_out and recovery is None:
+            # A final-result sidecar is not sufficient after forced termination:
+            # only a validated commit checkpoint may produce a passing report.
+            baseline_ms = None
+            best_ms = None
+            improved = False
+
+        changed_files: list[str] = []
+        if not loop_outcome.timed_out or recovery is not None:
+            _, changed_files = _export_best_artifacts(
+                workspace,
+                base_commit,
+                worktree_kernel,
+                source_file,
+                output_dir,
+                best_commit=best_commit,
+            )
         if changed_files:
             try:
                 (output_dir / "optimized_versions" / "changed_files.txt").write_text("\n".join(changed_files) + "\n")
             except OSError:
                 pass
         _write_report(output_dir, baseline_ms, best_ms, improved)
-        if loop_exc and baseline_ms is None:
+        if loop_outcome.timed_out and recovery is None:
+            failed = _normalized(
+                1,
+                "",
+                f"forge cli loop timed out without recoverable checkpoint: "
+                f"{loop_outcome.error}",
+                time.time() - started,
+            )
+            failed["timed_out"] = True
+            failed["salvaged"] = False
+            failed["output_dir"] = str(output_dir)
+            return failed
+        if loop_outcome.error and recovery is None and baseline_ms is None:
             # Hard failure with no measurement -> surface as forge failure.
-            return _normalized(1, "", f"forge cli loop failed: {loop_exc}", time.time() - started)
+            return _normalized(
+                1,
+                "",
+                f"forge cli loop failed: {loop_outcome.error}",
+                time.time() - started,
+            )
         gbrain_active = bool(
             os.environ.get("GBRAIN_BASE_URL", "").strip() and os.environ.get("GBRAIN_TOKEN", "").strip()
         )
         msg = (
             f"forge done (cli): baseline={baseline_ms} best={best_ms} "
             f"improved={improved} fellow={fellow} gpu={gpu_target} "
-            f"gbrain={'on' if gbrain_active else 'off'}"
+            f"gbrain={'on' if gbrain_active else 'off'} "
+            f"salvaged={'yes' if salvaged else 'no'}"
         )
         # Surface the run's LLM token spend + key-step timeline from the CLI
         # sidecar as the canonical markers (FORGE_LLM_USAGE / FORGE_STEPS) so
@@ -2122,13 +2468,25 @@ def submit(
             import json as _json_steps
 
             msg += "\nFORGE_STEPS " + _json_steps.dumps(forge_steps, sort_keys=True)
-        res = _normalized(0, msg + "\n" + (loop_output or "")[-3000:], "", time.time() - started)
+        res = _normalized(
+            0,
+            msg + "\n" + (loop_outcome.output or "")[-3000:],
+            "",
+            time.time() - started,
+        )
         if forge_usage:
             res["llm_usage"] = forge_usage
         if forge_steps:
             res["steps"] = forge_steps
         res["cli_workspace"] = str(output_dir)
         res["output_dir"] = str(output_dir)
+        res["timed_out"] = loop_outcome.timed_out
+        res["salvaged"] = salvaged
+        if recovery is not None:
+            res["best_commit"] = recovery["best_commit"]
+            res["checkpoint_path"] = str(
+                experiments_dir / f"{_FORGE_EXPERIMENT_ID}.json"
+            )
         return res
     except Exception as exc:  # noqa: BLE001
         return _normalized(1, "", f"forge submit failed: {type(exc).__name__}: {exc}", time.time() - started)
