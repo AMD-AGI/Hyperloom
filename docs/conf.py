@@ -43,7 +43,7 @@ version_number = "1.0.0a1"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {
-    "flavor": "generic",
+    "flavor": "hyperloom",
     "header_title": f"Hyperloom {version_number}",
     "header_link": False,
     "version_list_link": False,
