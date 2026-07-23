@@ -599,6 +599,7 @@ class SpecialistRunner:
                 arch_notes=str(params.get("arch_notes") or ""),
                 target_gap_notes=str(params.get("target_gap_notes") or ""),
                 already_proven=[p for p in (params.get("already_proven") or []) if isinstance(p, dict)],
+                recipe_sites=tuple(str(s).strip() for s in (params.get("recipe_sites") or ()) if str(s).strip()),
                 research_hints=str(params.get("research_hints") or ""),
                 # Workload context warmed from SharedState.
                 precision=str(params.get("precision") or ""),
