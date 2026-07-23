@@ -37,21 +37,41 @@ _DENIED_FLAG_SUFFIXES: tuple[str, ...] = (
     "-path",
 )
 
+# Legitimate serving flags that end in a denied suffix but are NOT injection
+# vectors in the optimizer context — exempted from the suffix catch-all so a
+# valid user/LLM param is not rejected (the explicit ``_DENIED_CLI_FLAGS`` deny
+# still wins over this allowlist). Keep this list tight: only add flags that are
+# real serving/tuning knobs whose value is expected to be a benign path. Extend
+# here when a new legitimate ``--*-path/-dir/-file`` flag is needed.
+_ALLOWED_PATH_FLAGS: frozenset[str] = frozenset(
+    {
+        # Draft/EAGLE speculative decoding needs a draft model path; without this
+        # the suffix rule would block draft-model spec-decode variants entirely.
+        "--speculative-draft-model-path",
+    }
+)
+
 
 def is_denied_server_flag(flag: str) -> bool:
     """Return whether a single CLI flag token is denied at the fan-out boundary.
+
+    Precedence: explicit deny wins, then the known-safe allowlist exempts a flag
+    from the suffix catch-all, then the ``-dir/-file/-path`` suffix rule applies.
 
     Args:
         flag: A ``--flag`` token (``flag=value`` callers must split first).
 
     Returns:
-        bool: True when the flag is an explicit deny or matches a denied suffix.
+        bool: True when the flag is an explicit deny or matches a denied suffix
+        and is not on the known-safe allowlist.
     """
     name = (flag or "").strip()
     if not name.startswith("--"):
         return False
     if name in _DENIED_CLI_FLAGS:
         return True
+    if name in _ALLOWED_PATH_FLAGS:
+        return False
     return any(name.endswith(suffix) for suffix in _DENIED_FLAG_SUFFIXES)
 
 
