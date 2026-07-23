@@ -22,6 +22,7 @@ or Codex before running the install command.
 ### Prerequisites
 
 - Python 3.10+ and `pip`.
+- `curl` to download the published GitHub release wheel.
 - Access to the Anthropic LLM provider.
 - A dedicated workspace directory opened in the user's agent.
 
