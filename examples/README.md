@@ -26,8 +26,9 @@ From the agent terminal in that workspace, download the latest release wheel and
 install it into the current directory:
 
 ```bash
-curl -fL -O \
-  https://github.com/AMD-AGI/Hyperloom/releases/latest/download/hyperloom_inference_optimizer-py3-none-any.whl
+curl -fsSL https://api.github.com/repos/AMD-AGI/Hyperloom/releases/latest \
+  | grep -o 'https://[^"]*-py3-none-any\.whl' \
+  | xargs curl -fL -O
 
 python3 -m pip install \
   ./hyperloom_inference_optimizer*-py3-none-any.whl \
