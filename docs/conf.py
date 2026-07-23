@@ -41,7 +41,11 @@ latex_elements = {
 # Keep in sync with pyproject.toml [project].version.
 version_number = "1.0.0a1"
 
-external_projects_current_project = "rocm"
+project = "Hyperloom"
+author = "Advanced Micro Devices, Inc."
+version = version_number
+release = version_number
+
 html_theme = "rocm_docs_theme"
 html_theme_options = {
     "flavor": "hyperloom",
