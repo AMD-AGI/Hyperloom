@@ -7,6 +7,7 @@ trajectory-reviewer auto-enqueue helpers used across multiple phases."""
 from __future__ import annotations
 import logging as _logging
 import os
+import re
 from typing import Any
 from ..state.task_registry import Task
 from .base import PhaseHandler
@@ -60,6 +61,9 @@ class InternalTasksPhase(PhaseHandler):
         proven = self._warm_recipe_proven_items()
         if proven:
             params["already_proven"] = proven
+        recipe_sites = [s.strip() for s in re.split(r"[,\s]+", os.environ.get("HYPERLOOM_RECIPE_SITES", "")) if s.strip()]
+        if recipe_sites:
+            params["recipe_sites"] = recipe_sites
         await self._warm_specialist_params(params)
         try:
             task, was_existing = await self.tasks.create_or_return_existing(
