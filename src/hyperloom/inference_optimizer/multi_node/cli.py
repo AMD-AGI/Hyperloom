@@ -849,7 +849,9 @@ def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
         f"cat > \"$WORK_DIR/kill_multinode.py\" <<'__MN_KILL_PY_EOF__'\n"
         f"{py}__MN_KILL_PY_EOF__\n"
         f'python3 "$WORK_DIR/kill_multinode.py" '
-        f"--pid-dir {pid_dir!s} --grace-sec {grace_sec}"
+        # quote pid_dir (shares the task output_dir root with launch): a space
+        # or shell metacharacter would otherwise split argv / inject.
+        f"--pid-dir {shlex.quote(str(pid_dir))} --grace-sec {grace_sec}"
     )
 
 
@@ -885,6 +887,63 @@ def _extract_launcher_summary(launch_logs: str) -> dict:
                     pass
                 end_idx = -1
     return {}
+
+
+def _rayjob_forward_env_vars() -> dict[str, str]:
+    """Collect per-variant tuning env for the RayJob launch runtime_env.
+
+    The RayJob rank actors run on remote raylets and inherit only their node's
+    environment, so the controller's prompt-provided tuning vars never reach the
+    framework unless forwarded explicitly. This mirrors the infera SSH path's
+    _collect_forward_env: prefix-matched tuning vars (NCCL/RCCL sweeps arrive as
+    explicit overrides), minus HYPERLOOM_MN_UNSET_FWD_ENV, plus the verbatim
+    HYPERLOOM_MN_EXTRA_FWD_ENV overrides (which win on key collision). Passed as
+    runtime_env={"env_vars": ...} so Ray sets them on the driver AND every actor,
+    where _subprocess_env()'s dict(os.environ) then hands them to the server.
+
+    profiler-dir / server-log-dir are NOT added here: the RayJob path already
+    pins those via --torch-profiler-dir / --log-dir on the launch command.
+
+    Returns:
+        dict[str, str]: The filtered env-var map (possibly empty).
+    """
+    from ._internal.env_safety import filter_forward_env
+    from .commands.infera import _FORWARD_ENV_PREFIXES
+
+    fwd = {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in _FORWARD_ENV_PREFIXES)}
+    unset_fwd = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
+    if unset_fwd:
+        try:
+            parsed_unset = json.loads(unset_fwd)
+            if isinstance(parsed_unset, list):
+                for key in parsed_unset:
+                    fwd.pop(str(key), None)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets (rayjob)")
+    extra_fwd = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
+    if extra_fwd:
+        try:
+            parsed = json.loads(extra_fwd)
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    fwd[str(k)] = str(v)
+        except (ValueError, TypeError):
+            warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding (rayjob)")
+    return filter_forward_env(fwd, warn_on_drop=True)
+
+
+def _rayjob_env_fingerprint() -> str:
+    """Stable fingerprint of the forwarded env for the resume identity check.
+
+    Two variants that differ ONLY by env (e.g. an NCCL/RCCL sweep with identical
+    server args) must NOT resume the same running server, or the second variant
+    silently measures the first one's config. Folding this fingerprint into the
+    resume identity forces a KILL+LAUNCH when the env changes.
+
+    Returns:
+        str: A canonical JSON string of the sorted forwarded env-var map.
+    """
+    return json.dumps(_rayjob_forward_env_vars(), sort_keys=True)
 
 
 def _build_multinode_launch_entrypoint(
@@ -973,7 +1032,10 @@ def _build_multinode_launch_entrypoint(
         f"--framework {shlex.quote(str(args.framework))} "
         f"--model {shlex.quote(str(args.model))} "
         f"--tp {args.tp!s} --nnodes {nnodes!s} "
-        f"--pid-dir {pid_dir!s} --log-dir {log_dir!s} "
+        # quote pid/log dirs: they can carry a task output_dir with spaces or
+        # shell metacharacters, which would otherwise split the argv or open a
+        # command-injection surface in the heredoc-embedded launch command.
+        f"--pid-dir {shlex.quote(str(pid_dir))} --log-dir {shlex.quote(str(log_dir))} "
         f"{ep_arg}{profiler_arg}{pd_args}{wait_flag} --extra-args {shlex.quote(str(extra_args))}"
     )
 
@@ -1593,7 +1655,10 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         # Normalize live args to match the stored (normalized) extra_args so
         # whitespace differences don't miss the resume fast path. extra_args must
         # be compared: it carries every variant flag, and ignoring it would
-        # resume sglang with the previous variant's args.
+        # resume sglang with the previous variant's args. The env fingerprint is
+        # also compared: an env-only variant (same args, different NCCL/RCCL
+        # tuning) must force a KILL+LAUNCH, not silently reuse the old server.
+        _cur_env_fp = _rayjob_env_fingerprint()
         prev_match = bool(prev_sub) and (
             str(state.get("last_restart_framework") or "") == str(args.framework)
             and str(state.get("last_restart_model") or "") == str(args.model)
@@ -1603,6 +1668,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             == (getattr(args, "pd_mode", "") or "colocated").lower()
             and _normalize_extra_args(state.get("last_restart_extra_args"))
             == _normalize_extra_args(getattr(args, "extra_args", ""))
+            and str(state.get("last_restart_env_fingerprint") or "") == _cur_env_fp
         )
         if resume_enabled and prev_match:
             _prev_status = ""
@@ -1639,7 +1705,15 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             # Phase B: launch new (skipped when resuming a RUNNING launch).
             # Driver returns once every rank spawned its launcher.
             if not launch_sub:
-                launch_sub = ray.submit_job(launch_ep)
+                # Forward prompt-provided tuning env (NCCL/RCCL sweeps etc.) to
+                # the rank actors via runtime_env; without this the RayJob path
+                # silently ignores env-only variants (actors inherit only their
+                # node env). Omit an empty payload so normal rounds are unchanged.
+                _fwd_env = _rayjob_forward_env_vars()
+                _runtime_env = {"env_vars": _fwd_env} if _fwd_env else None
+                if _fwd_env:
+                    info(f"launch forwarding {len(_fwd_env)} tuning env var(s) via runtime_env: {sorted(_fwd_env)}")
+                launch_sub = ray.submit_job(launch_ep, runtime_env=_runtime_env)
                 info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
             # Early checkpoint: persist the launch identity + config before the
@@ -1656,6 +1730,9 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
             state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "colocated").lower()
             state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
+            # Persist the forwarded-env fingerprint so a later env-only variant
+            # (same args) is detected as different and does not resume this run.
+            state["last_restart_env_fingerprint"] = _cur_env_fp
             _save_state(state)
 
             def _fetch_launch():

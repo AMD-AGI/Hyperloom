@@ -1293,6 +1293,15 @@ async def run_grid(
         # round's restart, which otherwise overwrites the pod-local /tmp default
         # before the crash site can be inspected. Opt out with
         # HYPERLOOM_MN_PRESERVE_SERVER_LOGS=0.
+        #
+        # NOTE: this is forwarded as the RayJob launcher's --log-dir only
+        # (sglang/vllm). The Infera backend does NOT use it: its logs/sampler/
+        # metrics are keyed off the run-level HYPERLOOM_MN_SERVER_LOG_DIR (host-
+        # suffixed, run-scoped) and captured into the session server_logs by
+        # _collect_worker_server_logs on a failed restart. Do NOT repoint that
+        # env per-variant — it also anchors the GPU sampler PID and the post-
+        # benchmark metrics-CSV lookup, so switching it per variant leaks the
+        # sampler and misdirects metrics harvest.
         _mn_server_log_dir: str | None = None
         if os.environ.get("HYPERLOOM_MN_PRESERVE_SERVER_LOGS", "1").strip().lower() not in (
             "0",
@@ -1307,18 +1316,6 @@ async def run_grid(
             except OSError as _sld_exc:  # noqa: BLE001 - best-effort diagnostics
                 log.warning("grid_runner: could not create per-variant server_logs dir: %r", _sld_exc)
 
-        # Infera backend restarts via SSH fan-out (cmd_restart_server routes to
-        # _infera_restart_server before the RayJob log_file path), so it ignores
-        # the server_log_dir arg and instead reads HYPERLOOM_MN_SERVER_LOG_DIR to
-        # place each pod's mn_infera_server_*.log. Point that at this variant's
-        # slot for the restart so infera logs land under server_logs too (empty
-        # snapshot otherwise). Absolute path required by the infera forwarder;
-        # set/restore is scoped to this restart so no other backend or round is
-        # affected. sglang/vllm (RayJob) keep using the server_log_dir arg.
-        _prev_infera_slog = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR")
-        _slog_scoped = bool(_mn_server_log_dir) and str(_mn_server_log_dir).startswith("/")
-        if _slog_scoped:
-            os.environ["HYPERLOOM_MN_SERVER_LOG_DIR"] = str(_mn_server_log_dir)
         try:
             # PD knobs auto-resolved from $PD_* env; PD config stays constant
             # across variants within one run.
@@ -1363,15 +1360,6 @@ async def run_grid(
             if not keep_going_on_failure:
                 break
             continue
-        finally:
-            # Restore the pre-restart infera log-dir env (runs before the
-            # except-branch break/continue too), so the per-variant scoping never
-            # leaks into another backend or a later round.
-            if _slog_scoped:
-                if _prev_infera_slog is None:
-                    os.environ.pop("HYPERLOOM_MN_SERVER_LOG_DIR", None)
-                else:
-                    os.environ["HYPERLOOM_MN_SERVER_LOG_DIR"] = _prev_infera_slog
 
         # Multi-node client warmup: one discarded benchmark pass against the
         # just-restarted, persistent remote server to warm JIT / steady-state
@@ -1475,26 +1463,46 @@ async def run_grid(
                 and os.environ.get("HYPERLOOM_MN_MEASURE_CONN_RETRY", "1").strip().lower()
                 not in ("0", "false", "no", "off")
             ):
-                log.warning(
-                    "grid_runner: variant %d/%d name=%s measured pass hit "
-                    "connection-refused; re-gating /health and retrying once",
-                    i + 1,
-                    len(grid),
-                    variant.name,
-                )
-                # Clear the first (conn-refused) pass's partial benchmark_*
-                # outputs so the retry produces the sole result in this slot and
-                # the downstream sorted(slot.glob("benchmark_*")) selection cannot
-                # mix the two passes. Best-effort; a failure here just leaves the
-                # stale dirs (same as before) and never blocks the retry.
-                for _stale in sorted(slot.glob("benchmark_*")):
+                # Do NOT delete the first pass's outputs: downstream accepts a
+                # valid measurement even with rc != 0 (only tags
+                # magpie_nonzero_after_valid_measurement), so a partially-
+                # completed first pass may already carry a usable result. Parse
+                # it first; only retry when it produced no valid measurement, and
+                # keep the first pass's benchmark_* so a failed retry falls back
+                # to it. The retry appends a newer benchmark_* which the
+                # downstream sorted(...)[-1] then prefers.
+                _first_valid = False
+                _first_cands = sorted(slot.glob("benchmark_*"))
+                if _first_cands:
                     try:
-                        shutil.rmtree(_stale, ignore_errors=True)
-                    except OSError as _rm_exc:  # noqa: BLE001 - best-effort cleanup
-                        log.warning("grid_runner: could not clear stale %s before retry: %r", _stale, _rm_exc)
-                await _mn_prebench_regate()
-                variant_started_unix = time.time()
-                rc, stdout, stderr = await asyncio.to_thread(_run_magpie, **_measure_kwargs)
+                        _first_m = extract_benchmark_measurement(
+                            _parse_report(_first_cands[-1]),
+                            workspace=_first_cands[-1],
+                            subprocess_started_unix=variant_started_unix,
+                        )
+                        _first_valid = bool(_first_m.get("valid_measurement"))
+                    except Exception as _pm_exc:  # noqa: BLE001 - probe must not break the run
+                        log.warning("grid_runner: first-pass validity probe failed (will retry): %r", _pm_exc)
+                if _first_valid:
+                    log.warning(
+                        "grid_runner: variant %d/%d name=%s hit connection-refused "
+                        "but the first pass has a valid measurement; keeping it, skipping retry",
+                        i + 1,
+                        len(grid),
+                        variant.name,
+                    )
+                else:
+                    log.warning(
+                        "grid_runner: variant %d/%d name=%s measured pass hit "
+                        "connection-refused with no valid measurement; re-gating "
+                        "/health and retrying once (first pass preserved)",
+                        i + 1,
+                        len(grid),
+                        variant.name,
+                    )
+                    await _mn_prebench_regate()
+                    variant_started_unix = time.time()
+                    rc, stdout, stderr = await asyncio.to_thread(_run_magpie, **_measure_kwargs)
         except subprocess.TimeoutExpired as exc:
             # Harvest pre-timeout leaks.
             to_candidates = sorted(slot.glob("benchmark_*"))
