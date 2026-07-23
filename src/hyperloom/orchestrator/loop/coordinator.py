@@ -1040,6 +1040,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_pump_framework_agent_phase_safely": "phase_framework",
         "_pump_enablement_safely": "phase_framework",
         "_record_framework_agent_authored_outcome": "phase_framework",
+        "_recover_framework_agent_authoring_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
         "_framework_agent_repo_url_origin_framework": "phase_framework",
         "_build_framework_config_grid": "phase_framework",

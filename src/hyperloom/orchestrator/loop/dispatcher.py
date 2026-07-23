@@ -810,14 +810,7 @@ class DispatcherCollaborator:
             # integrate_patch completion handling.
             if task.kind == "integrate_patch":
                 # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT.
-                if (
-                    getattr(
-                        self.shared_state,
-                        "framework_agent_authoring_enabled",
-                        False,
-                    )
-                    and (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT
-                ):
+                if bool((getattr(task, "params", None) or {}).get("framework_agent_authoring")):
                     try:
                         self._record_framework_agent_authored_outcome(
                             task=task,
