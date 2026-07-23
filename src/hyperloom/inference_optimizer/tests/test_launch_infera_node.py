@@ -215,3 +215,28 @@ def test_infera_resume_identity_includes_variant_env(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_MN_EXTRA_FWD_ENV")
     monkeypatch.setenv("HYPERLOOM_MN_UNSET_FWD_ENV", json.dumps(["NCCL_PROTO"]))
     assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is False
+
+
+def test_infera_capability_preflight_only_blocks_effective_deepep(monkeypatch):
+    """Infera preflight: only an effective deepep backend requires deep_ep."""
+    mod = _load_module()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+
+    # Explicit deepep on a deep_ep-less node → block.
+    assert mod._missing_capability_reason("sglang", "--moe-a2a-backend deepep") is not None
+    # =-form deepep → block too.
+    assert mod._missing_capability_reason("sglang", "--moe-a2a-backend=deepep") is not None
+
+    # TBO + non-deepep backend must NOT be blocked (would leave a dead pod).
+    assert mod._missing_capability_reason(
+        "sglang", "--enable-two-batch-overlap --moe-a2a-backend mori"
+    ) is None
+    assert mod._missing_capability_reason("sglang", "--moe-a2a-backend nixl") is None
+
+    # TBO with no explicit backend defers to the resolved build default.
+    monkeypatch.setattr(mod, "_resolve_default_moe_a2a_backend", lambda fw: "deepep")
+    assert mod._missing_capability_reason("sglang", "--enable-two-batch-overlap") is not None
+    monkeypatch.setattr(mod, "_resolve_default_moe_a2a_backend", lambda fw: "mori")
+    assert mod._missing_capability_reason("sglang", "--enable-two-batch-overlap") is None
+    monkeypatch.setattr(mod, "_resolve_default_moe_a2a_backend", lambda fw: None)
+    assert mod._missing_capability_reason("sglang", "--enable-two-batch-overlap") is None

@@ -890,6 +890,20 @@ def _extract_launcher_summary(launch_logs: str) -> dict:
     return {}
 
 
+# Rendezvous / discovery / control-plane env prefixes a per-variant override or
+# unset must never touch: mutating them breaks multi-node bring-up. E.g. unset
+# LWS_WORKER_INDEX makes every Infera pod start as rank 0; overriding RAY_ADDRESS
+# can point the RayJob driver at the wrong cluster. Variants may only control
+# tuning env (NCCL_/RCCL_/MORI_/SGLANG_* ...). Enforced on the control side
+# (_variant_env_control_spec) so BOTH the RayJob and Infera paths inherit it.
+_PROTECTED_CONTROL_ENV_PREFIXES = ("LWS_", "RAY_", "KUBERNETES_", "NATS_", "INFERA_")
+
+
+def _is_protected_control_env_key(key: str) -> bool:
+    """True when ``key`` is a rendezvous/discovery/control-plane var (variant-off-limits)."""
+    return any(key.startswith(p) for p in _PROTECTED_CONTROL_ENV_PREFIXES)
+
+
 def _variant_env_control_spec() -> tuple[dict[str, str], list[str], dict[str, str]]:
     """Resolve safe per-variant env overrides and effective unsets.
 
@@ -898,6 +912,11 @@ def _variant_env_control_spec() -> tuple[dict[str, str], list[str], dict[str, st
     The effective unset list excludes keys explicitly re-set by the variant and
     is forwarded separately because Ray ``runtime_env.env_vars`` can set but
     cannot remove variables inherited from the pod/raylet.
+
+    Rendezvous/discovery/control-plane keys (see
+    ``_PROTECTED_CONTROL_ENV_PREFIXES``) are warn+dropped from BOTH the set and
+    unset channels so a tuning variant cannot break multi-node bring-up (e.g.
+    unset ``LWS_WORKER_INDEX`` or override ``RAY_ADDRESS``).
 
     Returns:
         tuple[dict[str, str], list[str], dict[str, str]]: Final forwarded env,
@@ -915,9 +934,13 @@ def _variant_env_control_spec() -> tuple[dict[str, str], list[str], dict[str, st
             if isinstance(parsed_unset, list):
                 for raw_key in parsed_unset:
                     key = str(raw_key).strip()
-                    if key and is_forward_env_key_allowed(key) and key not in unset_keys:
+                    if not key or key in unset_keys:
+                        continue
+                    if _is_protected_control_env_key(key):
+                        warn(f"dropping protected control-plane unset env key {key!r} (variant may not unset it)")
+                    elif is_forward_env_key_allowed(key):
                         unset_keys.append(key)
-                    elif key and not is_forward_env_key_allowed(key):
+                    else:
                         warn(f"dropping disallowed multi-node unset env key {key!r}")
         except (ValueError, TypeError):
             warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
@@ -930,10 +953,14 @@ def _variant_env_control_spec() -> tuple[dict[str, str], list[str], dict[str, st
         try:
             parsed_extra = json.loads(raw_extra)
             if isinstance(parsed_extra, dict):
-                explicit = filter_forward_env(
-                    {str(k): str(v) for k, v in parsed_extra.items()},
-                    warn_on_drop=True,
-                )
+                safe_extra: dict[str, str] = {}
+                for k, v in parsed_extra.items():
+                    key = str(k)
+                    if _is_protected_control_env_key(key):
+                        warn(f"dropping protected control-plane override env key {key!r} (variant may not set it)")
+                        continue
+                    safe_extra[key] = str(v)
+                explicit = filter_forward_env(safe_extra, warn_on_drop=True)
         except (ValueError, TypeError):
             warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
     forwarded.update(explicit)
@@ -1635,6 +1662,32 @@ def cmd_kernel_bench(args: argparse.Namespace) -> int:
     return rc
 
 
+def _resolve_multinode_log_dir(args_log_file: str | None, state: dict[str, Any]) -> tuple[str, bool]:
+    """Resolve the multi-node per-rank log dir and whether it is a one-time override.
+
+    A per-variant ``--log-file`` (grid explore ``slot/server_logs``) is a
+    ONE-TIME override for this launch only. It must NOT be persisted as
+    ``last_server_log_dir``: a later baseline/profile restart that passes no
+    ``--log-file`` would otherwise reuse the variant slot, and the launcher's
+    ``: > rank_*.log`` truncation would clobber that variant's captured logs and
+    cross-attribute phases. The grid re-supplies ``--log-file`` on every call,
+    so a redelivery/resume of the same variant restart still gets the right dir
+    without persisting it here.
+
+    Args:
+        args_log_file: The explicit ``--log-file`` (per-variant slot) or ``None``.
+        state: The multi-node state dict (read for the persisted fallback).
+
+    Returns:
+        tuple[str, bool]: ``(log_dir, is_one_time_override)``.
+    """
+    override = str(args_log_file or "").strip()
+    if override:
+        return override, True
+    fallback = state.get("last_server_log_dir") or str(Path(tempfile.gettempdir()) / "multi_node_logs")
+    return str(fallback), False
+
+
 def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one.
 
@@ -1681,9 +1734,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
         pid_dir = (
             args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
         )
-        log_dir = (
-            args.log_file or state.get("last_server_log_dir") or str(Path(tempfile.gettempdir()) / "multi_node_logs")
-        )
+        log_dir, _log_dir_one_time = _resolve_multinode_log_dir(args.log_file, state)
         info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
 
         _fwd_env, _unset_env = _rayjob_forward_env_spec()
@@ -1774,7 +1825,12 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
             # (potentially long) _short_poll, so a poll-timeout retry can hit the
             # resume fast path instead of restarting the bootstrap from zero.
             state["last_server_pid_dir"] = pid_dir
-            state["last_server_log_dir"] = log_dir
+            # Persist the log dir as the session default ONLY when it was the
+            # fallback, not a per-variant one-time --log-file override (see
+            # _resolve_multinode_log_dir): persisting the variant slot would make
+            # a later baseline/profile restart reuse it and truncate its logs.
+            if not _log_dir_one_time:
+                state["last_server_log_dir"] = log_dir
             if kill_sub:
                 state["last_kill_submission_id"] = kill_sub
             state["last_restart_submission_id"] = launch_sub
@@ -1876,7 +1932,10 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
                     return 1
 
         state["last_server_pid_dir"] = pid_dir
-        state["last_server_log_dir"] = log_dir
+        # One-time per-variant --log-file override is not persisted as the
+        # session default (see _resolve_multinode_log_dir).
+        if not _log_dir_one_time:
+            state["last_server_log_dir"] = log_dir
         state["last_kill_submission_id"] = kill_sub
         state["last_restart_submission_id"] = launch_sub
         state["last_restart_framework"] = args.framework

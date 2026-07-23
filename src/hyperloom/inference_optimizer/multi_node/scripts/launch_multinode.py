@@ -707,20 +707,56 @@ def _extra_arg_value(extra_args: list[str], flag: str) -> str | None:
     return None
 
 
-def _missing_capability_reason(extra_args: list[str]) -> str | None:
+def _resolve_default_moe_a2a_backend(framework: str) -> str | None:
+    """Best-effort default ``--moe-a2a-backend`` for the installed build.
+
+    Two-batch overlap does not name a dispatcher; the build's own
+    ``--moe-a2a-backend`` default decides it. Read that default from the
+    framework's argparse registration (not a hard-coded version assumption) so
+    a TBO run with no explicit backend can be classified. Returns ``None`` when
+    it cannot be resolved (unknown framework / no parser / no default), in which
+    case the caller must NOT block the launch.
+
+    Args:
+        framework: Active server framework (only ``sglang`` is introspected).
+
+    Returns:
+        str | None: The lowercased default backend, or ``None`` when unknown.
+    """
+    try:
+        if framework == "sglang":
+            from sglang.launch_server import parser as _sgl_parser
+
+            act = getattr(_sgl_parser, "_option_string_actions", {}).get("--moe-a2a-backend")
+            default = getattr(act, "default", None) if act is not None else None
+            if default is not None:
+                return str(default).strip().lower()
+    except Exception:  # noqa: BLE001 - preflight must never block on its own failure
+        return None
+    return None
+
+
+def _missing_capability_reason(framework: str, extra_args: list[str]) -> str | None:
     """Return a reason string if a requested flag needs an absent runtime backend.
 
     Head-node capability preflight (complements the argparse-name preflight):
     some server flags are *accepted* by argparse but route work through an
-    optional backend package that only import-errors deep in model init. E.g.
-    sglang two-batch overlap / ``--moe-a2a-backend deepep`` both drive the
-    DeepEP dispatcher, which raises ``ImportError: DeepEP is not installed`` far
-    into server startup. Detect the missing package here so the variant fails in
-    seconds before the expensive cluster restart, instead of after a full launch
-    + health wait. Best-effort: returns ``None`` when nothing needs checking or
-    the probe itself cannot run, so it never blocks a launch spuriously.
+    optional backend package that only import-errors deep in model init. The
+    DeepEP dispatcher (`deep_ep`) is the case handled here: on stacks without a
+    ROCm DeepEP build it is absent and the server dies in MoE init.
+
+    DeepEP is required ONLY when the *effective* MoE a2a backend is ``deepep``.
+    ``--enable-two-batch-overlap`` alone does NOT imply DeepEP: SGLang selects
+    the TBO dispatcher from ``--moe-a2a-backend`` (deepep / mori / mooncake /
+    nixl), so ``--enable-two-batch-overlap --moe-a2a-backend mori`` is valid on
+    a ROCm image without ``deep_ep``. Resolve the effective backend — explicit
+    flag wins; a TBO run with no explicit backend falls back to the build's
+    parser default — and only fail fast when it is positively ``deepep``. This
+    preflight runs AFTER the old server is torn down, so a false positive would
+    leave a non-serving cluster; when in doubt, do not block.
 
     Args:
+        framework: Active server framework (used to resolve the default backend).
         extra_args: Tokenized extra server args.
 
     Returns:
@@ -730,17 +766,13 @@ def _missing_capability_reason(extra_args: list[str]) -> str | None:
     try:
         import importlib.util
 
-        # two-batch overlap and moe-a2a-backend=deepep both require the DeepEP
-        # dispatcher package (`deep_ep`); on stacks without a ROCm DeepEP build
-        # it is absent and the server dies in MoE init.
-        needs_deepep = "--enable-two-batch-overlap" in extra_args or (
-            (_extra_arg_value(extra_args, "--moe-a2a-backend") or "").strip().lower() == "deepep"
-        )
-        if needs_deepep and importlib.util.find_spec("deep_ep") is None:
+        backend = (_extra_arg_value(extra_args, "--moe-a2a-backend") or "").strip().lower()
+        if not backend and "--enable-two-batch-overlap" in extra_args:
+            backend = _resolve_default_moe_a2a_backend(framework) or ""
+        if backend == "deepep" and importlib.util.find_spec("deep_ep") is None:
             return (
                 "requires the DeepEP a2a backend, but the `deep_ep` package is "
-                "not installed in this image (needed by two-batch-overlap / "
-                "--moe-a2a-backend deepep)"
+                "not installed in this image (--moe-a2a-backend deepep)"
             )
     except Exception:  # noqa: BLE001 - preflight must never block on its own failure
         return None
@@ -1037,7 +1069,7 @@ def main() -> int:
     # Capability preflight: a flag may be argparse-valid but need an optional
     # backend package (e.g. DeepEP) that only import-errors deep in model init.
     # Skip the variant fast here instead of after a full cluster restart.
-    cap_reason = _missing_capability_reason(extra_args)
+    cap_reason = _missing_capability_reason(args.framework, extra_args)
     if cap_reason:
         _log(
             f"ERROR server flags {extra_args} {cap_reason}; failing fast before "

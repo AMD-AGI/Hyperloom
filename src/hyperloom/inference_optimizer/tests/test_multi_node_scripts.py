@@ -541,6 +541,105 @@ def test_rayjob_launch_entrypoint_forwards_unset_json():
     assert json.dumps(["NCCL_PROTO"]) in entrypoint
 
 
+def test_capability_preflight_deepep_backend_blocks(monkeypatch):
+    """Explicit --moe-a2a-backend deepep on a deep_ep-less image fails fast."""
+    import importlib.util as _ilu
+
+    lm = _load_script_module("lm_test_cap_deepep", "launch_multinode.py")
+    monkeypatch.setattr(_ilu, "find_spec", lambda name: None)
+
+    reason = lm._missing_capability_reason("sglang", ["--moe-a2a-backend", "deepep"])
+    assert reason is not None and "deep_ep" in reason
+
+
+def test_capability_preflight_tbo_with_non_deepep_backend_allowed(monkeypatch):
+    """TBO + a non-deepep backend (mori) must NOT be blocked (kills cluster)."""
+    import importlib.util as _ilu
+
+    lm = _load_script_module("lm_test_cap_tbo_mori", "launch_multinode.py")
+    # deep_ep absent, but the run does not need it — mori uses MoriEPDispatcher.
+    monkeypatch.setattr(_ilu, "find_spec", lambda name: None)
+
+    assert lm._missing_capability_reason(
+        "sglang", ["--enable-two-batch-overlap", "--moe-a2a-backend", "mori"]
+    ) is None
+    # Bare non-deepep backend is also fine.
+    assert lm._missing_capability_reason("sglang", ["--moe-a2a-backend", "mooncake"]) is None
+
+
+def test_capability_preflight_tbo_default_backend_resolution(monkeypatch):
+    """TBO without an explicit backend defers to the build's default backend."""
+    lm = _load_script_module("lm_test_cap_tbo_default", "launch_multinode.py")
+    import importlib.util as _ilu
+
+    monkeypatch.setattr(_ilu, "find_spec", lambda name: None)
+
+    # Default resolves to deepep → block.
+    monkeypatch.setattr(lm, "_resolve_default_moe_a2a_backend", lambda fw: "deepep")
+    assert lm._missing_capability_reason("sglang", ["--enable-two-batch-overlap"]) is not None
+
+    # Default resolves to mori → do not block.
+    monkeypatch.setattr(lm, "_resolve_default_moe_a2a_backend", lambda fw: "mori")
+    assert lm._missing_capability_reason("sglang", ["--enable-two-batch-overlap"]) is None
+
+    # Default unknown (parser unavailable) → best-effort, do not block.
+    monkeypatch.setattr(lm, "_resolve_default_moe_a2a_backend", lambda fw: None)
+    assert lm._missing_capability_reason("sglang", ["--enable-two-batch-overlap"]) is None
+
+
+def test_variant_env_control_spec_protects_control_plane_prefixes(monkeypatch):
+    """A variant may not set/unset rendezvous/discovery/control-plane env."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    # Clear any prefix-matched tuning env so assertions are deterministic.
+    for _k in list(os.environ):
+        if _k.startswith(("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")):
+            monkeypatch.delenv(_k, raising=False)
+
+    # Variant tries to override RAY_ADDRESS (wrong-cluster risk) + a legit knob.
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_EXTRA_FWD_ENV",
+        json.dumps({"RAY_ADDRESS": "evil:6379", "NCCL_PROTO": "LL"}),
+    )
+    # Variant tries to unset LWS_WORKER_INDEX (would make every pod rank 0).
+    monkeypatch.setenv(
+        "HYPERLOOM_MN_UNSET_FWD_ENV",
+        json.dumps(["LWS_WORKER_INDEX", "NCCL_DEBUG"]),
+    )
+
+    forwarded, effective_unsets, explicit = mn_cli._variant_env_control_spec()
+
+    # Protected control-plane keys are dropped from both set and unset.
+    assert "RAY_ADDRESS" not in forwarded
+    assert "RAY_ADDRESS" not in explicit
+    assert "LWS_WORKER_INDEX" not in effective_unsets
+    # Legit tuning env still flows through both channels.
+    assert forwarded.get("NCCL_PROTO") == "LL"
+    assert "NCCL_DEBUG" in effective_unsets
+
+
+def test_resolve_multinode_log_dir_one_time_override_not_persisted():
+    """A per-variant --log-file is a one-time override, never the persisted default."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    # Explicit per-variant slot → returned for this launch, flagged one-time.
+    log_dir, one_time = mn_cli._resolve_multinode_log_dir("/slot/v3/server_logs", {})
+    assert log_dir == "/slot/v3/server_logs"
+    assert one_time is True
+
+    # No override + stored default → reuse default, not one-time.
+    log_dir, one_time = mn_cli._resolve_multinode_log_dir(
+        None, {"last_server_log_dir": "/persist/logs"}
+    )
+    assert log_dir == "/persist/logs"
+    assert one_time is False
+
+    # No override + no stored default → tmp fallback, not one-time.
+    log_dir, one_time = mn_cli._resolve_multinode_log_dir("", {})
+    assert log_dir.endswith("multi_node_logs")
+    assert one_time is False
+
+
 def test_detach_framework_launch_starts_sleep(tmp_path):
     lm = _load_script_module("lm_test_detach_sleep", "launch_multinode.py")
     log_f = tmp_path / "r0.log"
