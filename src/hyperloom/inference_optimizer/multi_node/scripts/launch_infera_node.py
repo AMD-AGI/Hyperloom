@@ -1010,6 +1010,45 @@ def main() -> int:
         _samp_csv = str(Path(_samp_dir) / f"gpu_metrics_{_samp_host}.csv")
         _samp_pid_file = str(Path(_samp_dir) / f"gpu_sampler_{_samp_host}.pid")
 
+    # Validate launch args BEFORE killing the prior server, so a rejected
+    # variant leaves the running server intact instead of a torn-down,
+    # non-serving pod. Skipped for --kill-only (it needs no model/flags). Order
+    # matters: none of these checks need the server killed.
+    if not args.kill_only:
+        if not args.model or args.tp <= 0:
+            _log("ERROR --model and --tp are required unless --kill-only")
+            return 2
+
+        denied = _denied_extra_args(args.extra_args)
+        if denied:
+            _log(f"ERROR denied server flags in --extra-args: {denied}")
+            return 2
+
+        # Preflight: reject flags this framework build's argparse does not accept
+        # (parity with the RayJob path).
+        try:
+            _extra_tokens = shlex.split(args.extra_args or "")
+        except ValueError:
+            _extra_tokens = (args.extra_args or "").split()
+        unsupported = _unsupported_extra_arg_flags(args.framework, _extra_tokens)
+        if unsupported:
+            _log(
+                f"ERROR unsupported server flags for {args.framework} build: "
+                f"{unsupported}; failing fast before kill + (re)launch (flag names vary by version)."
+            )
+            return 2
+
+        # Capability preflight: a flag may be argparse-valid but need an optional
+        # backend package (e.g. DeepEP) absent on this node. Reject before the
+        # kill so a bad variant does not leave the pod without a server.
+        cap_reason = _missing_capability_reason(args.framework, args.extra_args)
+        if cap_reason:
+            _log(
+                f"ERROR server flags [{args.extra_args}] {cap_reason}; failing fast "
+                f"before kill + (re)launch (add the backend to the image to enable)."
+            )
+            return 2
+
     try:
         _kill_prior(pid_file)
         if _samp_pid_file:
@@ -1026,40 +1065,6 @@ def main() -> int:
             )
         print(json.dumps({"status": "ok", "action": "kill", "node_rank": node_rank}))
         return 0
-
-    if not args.model or args.tp <= 0:
-        _log("ERROR --model and --tp are required unless --kill-only")
-        return 2
-
-    denied = _denied_extra_args(args.extra_args)
-    if denied:
-        _log(f"ERROR denied server flags in --extra-args: {denied}")
-        return 2
-
-    # Preflight: reject flags this framework build's argparse does not accept,
-    # before the expensive kill + (re)launch (parity with the RayJob path).
-    try:
-        _extra_tokens = shlex.split(args.extra_args or "")
-    except ValueError:
-        _extra_tokens = (args.extra_args or "").split()
-    unsupported = _unsupported_extra_arg_flags(args.framework, _extra_tokens)
-    if unsupported:
-        _log(
-            f"ERROR unsupported server flags for {args.framework} build: "
-            f"{unsupported}; failing fast before (re)launch (flag names vary by version)."
-        )
-        return 2
-
-    # Capability preflight: a flag may be argparse-valid but need an optional
-    # backend package (e.g. DeepEP) absent on this node. Skip fast here instead
-    # of dying deep in MoE init after a full server (re)launch.
-    cap_reason = _missing_capability_reason(args.framework, args.extra_args)
-    if cap_reason:
-        _log(
-            f"ERROR server flags [{args.extra_args}] {cap_reason}; failing fast "
-            f"before (re)launch (add the backend to the image to enable)."
-        )
-        return 2
 
     _log(
         f"framework={args.framework} model={args.model} tp={args.tp} "

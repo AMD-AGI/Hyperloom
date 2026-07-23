@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 
@@ -236,6 +237,34 @@ def test_infera_old_state_without_fingerprint_never_resumes(monkeypatch):
     args = argparse.Namespace(model="/m", tp=8, ep=8, extra_args="--foo 1")
     # Even a no-env baseline must NOT resume onto the (possibly stale-env) server.
     assert infera._infera_restart_config_matches(state, args, "sglang", "aggregated") is False
+
+
+def test_infera_validation_runs_before_kill(monkeypatch):
+    """M-1: a rejected variant must NOT tear down the prior server first."""
+    mod = _load_module()
+    killed = {"v": False}
+    monkeypatch.setattr(mod, "_kill_prior", lambda pid_file: killed.__setitem__("v", True))
+    monkeypatch.setattr(mod, "_recover_container_env", lambda: {"LWS_WORKER_INDEX": "0"})
+    monkeypatch.setattr(mod, "_resolve_pod_ip", lambda env: "10.0.0.1")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "launch_infera_node.py",
+            "--framework",
+            "sglang",
+            "--model",
+            "/m",
+            "--tp",
+            "8",
+            # --tokenizer is on the pod-side denylist → rejected.
+            "--extra-args",
+            "--tokenizer /x",
+        ],
+    )
+
+    assert mod.main() == 2
+    assert killed["v"] is False  # rejected BEFORE _kill_prior tore down the server
 
 
 def test_infera_unsupported_flag_preflight(monkeypatch):
