@@ -12,6 +12,8 @@ from pathlib import Path
 DOCS_DIR = Path(__file__).parent.resolve()
 ROOT_DIR = DOCS_DIR.parent
 
+sys.path.insert(0, str(ROOT_DIR / "src"))
+
 
 def copy_rtd_file(src_path: Path, dest_path: Path):
     dest_path.parent.mkdir(parents=True, exist_ok=True)
